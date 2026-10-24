@@ -122,6 +122,8 @@ describe('Windows shadow reader is portable and decides nothing', () => {
       'WindowProcessPath',
       'CoreWindowProcessPath',
       'ItemPath',
+      'ProcessId',
+      'FrameworkId',
     ];
     for (const name of settled) {
       const uses = [...outside.matchAll(new RegExp(`(?<![\\w.])${name}\\(`, 'gu'))];
@@ -200,6 +202,8 @@ describe('Windows UI Automation source only reads', () => {
       'get_CurrentHelpText',
       'get_CurrentIsPassword',
       'get_CurrentProcessId',
+      // S5-c-3 PR-5: who provides an element of a v2 session's chain (read only).
+      'get_CurrentFrameworkId',
       'get_CurrentNativeWindowHandle',
       // the shell: windows and views are asked for (read-only), never navigated or invoked
       'get_Count',
@@ -405,6 +409,7 @@ describe('Windows UI Automation source only reads', () => {
       'DocumentUrl',
       'FindHandle',
       'FirstChild',
+      'FrameworkId',
       'Focused',
       'Get',
       'IsPassword',
@@ -413,6 +418,7 @@ describe('Windows UI Automation source only reads', () => {
       'NextSibling',
       'NowNs',
       'Parent',
+      'ProcessId',
       'ProcessPathOf',
       'Receive',
       'Reset',

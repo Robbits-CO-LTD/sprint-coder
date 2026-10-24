@@ -184,6 +184,13 @@ struct WindowsSession {
   // (S5-c-3 PR-3). It selects the interlocks' policy: kDeferToV1 for v1, kTakeover for v2.
   sprint_coder::computer_use::EligibilityBasis eligibility_basis =
       sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
+  // A v2 session only (S5-c-3 PR-5): the System32 notepad file the explicit "not web" table matched
+  // when the session started, or nothing. A file that changes later is not taken up again.
+  std::optional<sprint_coder::computer_use::WindowsFileKey> not_web_file;
+  // The table's answer of the last input judgement (ValidateWindowsDispatchBinding writes it, the
+  // interlock of the same frame reads it; the helper serves one frame at a time). Reset before every
+  // judgement, so a frame that did not judge never reads an older answer.
+  mutable std::optional<bool> v2_input_not_web;
   std::uint64_t cancel_epoch = 0;
   std::uint64_t observation_revision = 0;
   bool has_observation = false;
@@ -709,7 +716,10 @@ bool ReadFileDigest(HANDLE file, std::string *digest) {
     BCryptCloseAlgorithmProvider(algorithm, 0);
     return false;
   }
-  std::array<std::uint8_t, 1 << 20> chunk{};
+  // On the heap (S5-c-3 PR-5): a 1 MiB array here took the whole default 1 MiB stack, so a caller one
+  // level deeper than V1's (the v2 judgement inside a start, or list_targets) overflowed it
+  // (0xC00000FD, found by the v2 targets live seam). The bytes hashed and the digest are the same.
+  std::vector<std::uint8_t> chunk(1 << 20);
   bool succeeded = true;
   for (;;) {
     DWORD read = 0;
@@ -1699,14 +1709,16 @@ bool WindowsHeldImageDisagreesWithKernel(HANDLE file, const WindowsTargetKernelI
       sprint_coder::computer_use::ParsePeImageSummary(header);
   if (!summary.has_value() || summary->subsystem_code != kernel.subsystem)
     return true;
-  // An AnyCPU IL-only image is converted from PE32 to PE32+ by the 64-bit loader, so the kernel's
-  // machine, entry point, sizes, checksum and characteristics differ from the file header. These
-  // fields are skipped for such an image; the subsystem (above) is unaffected, and the anchor (the
-  // kernel name re-read and file id) is the real defense, so skipping them does not weaken it.
-  const bool convertible =
-      summary->clr_bitness_convertible == std::optional<bool>(true);
-  if (convertible)
-    return false;
+  // No field is skipped for an IL-only (.NET) image (S5-c-3 PR-5, measured on Windows 11 26200). PR-2
+  // skipped the fields of a PE32 AnyCPU image on the expectation that the loader's PE32 -> PE32+
+  // conversion shows in SECTION_IMAGE_INFORMATION. It does not: for a PE32 AnyCPU image (AddInUtil,
+  // EdmGen, dfsvc, and a csc /platform:anycpu build), a 32BITPREFERRED one and a PE32+ IL-only one
+  // (Framework64 InstallUtil, csc /platform:x64), suspended and running, every header value the kernel
+  // records equals the file's (machine 0x14c stays 0x14c), and its TransferAddress is the image's
+  // preferred ImageBase + AddressOfEntryPoint, which lies in no MEM_IMAGE region of the process, so
+  // WindowsTargetKernelImageInfo already answers nothing and the image is unresolvable (W-UR) before
+  // this check is reached. Keeping the skip would only relax the check for an image whose kernel
+  // record differs from its header, which no measured image does.
   if (summary->entry_rva != kernel.entry_rva || summary->machine != kernel.machine ||
       summary->check_sum != kernel.check_sum)
     return true;
@@ -1787,6 +1799,21 @@ bool WindowsTargetRunningImageMatches(bool held_matches, std::optional<bool> rem
 bool WindowsTargetStableIdVolume(HANDLE file) {
   const std::optional<WindowsTargetVolume> volume = WindowsTargetReadVolume(file);
   return volume.has_value() && WindowsTargetFileSystemHasStableId(volume->file_system);
+}
+
+// Whether the process's running image is known to be local, from the kernel's name of it
+// (PROCESS_NAME_NATIVE), before the file is opened (S5-c-3 PR-5): an image on a network redirector,
+// or one whose name cannot be read, is never opened or read, since an unresponsive share would hold
+// the helper's one request lane. Such a target stays unmeasured (unresolvable).
+bool WindowsTargetImageKnownLocal(HANDLE process) {
+  std::vector<wchar_t> name(32'768, L'\0');
+  DWORD length = static_cast<DWORD>(name.size());
+  if (QueryFullProcessImageNameW(process, PROCESS_NAME_NATIVE, name.data(), &length) != TRUE ||
+      length == 0 || length >= name.size())
+    return false;
+  const std::optional<std::string> native =
+      WindowsTargetUtf8(std::wstring_view(name.data(), length));
+  return native.has_value() && !sprint_coder::computer_use::WindowsNativeImageIsRemote(*native);
 }
 
 bool HoldWindowsTargetRunningImage(HANDLE process,
@@ -2601,7 +2628,8 @@ InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessN
           ? std::optional<std::wstring>(std::move(recorded_path))
           : std::nullopt;
   WindowsTargetHeldImage held;
-  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held) ||
+  if (!WindowsTargetImageKnownLocal(process.value) ||
+      !HoldWindowsTargetRunningImage(process.value, recorded, &held) ||
       !WindowsTargetRunningImageMatches(held.matches, held.remote, held.volume,
                                         rename_probe))
     return result;
@@ -2685,37 +2713,28 @@ std::optional<std::string> WindowsTargetWindowClass(HWND window, std::uint32_t p
   return WindowsTargetUtf8(std::wstring_view(name.data(), static_cast<std::size_t>(length)));
 }
 
-// Measures one target process (and the window it is asked about, which may be null). The result
-// is only facts: judging them is the core's, and nothing here calls it.
-WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
-    std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context) {
+// The facts read from the held running image (S5-c-3 PR-5 split this out of
+// MeasureWindowsTargetFacts so the seam can give it a held image whose volume it substitutes: a
+// remote volume, another file system than the probe's, or no probe). Every fact it sets is reset
+// first, so a measurement is never left with a value from another hold.
+void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
+                                   const WindowsTargetFactsContext &context,
+                                   WindowsTargetFactsMeasurement *out) {
   using namespace sprint_coder::computer_use;
-  WindowsTargetFactsMeasurement measured;
-  measured.pid = pid;
-  measured.facts.platform = TargetPlatform::kWin32;
-  ScopedKernelHandle process(
-      OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
-  if (process.value == nullptr || GetProcessId(process.value) != pid)
-    return measured;
-  measured.creation = WindowsTargetCreationTime(process.value);
-  if (!measured.creation.has_value())
-    return measured;
+  WindowsTargetFactsMeasurement &measured = *out;
   TargetFacts &facts = measured.facts;
-  MeasureWindowsTargetToken(process.value, &facts);
-  MeasureWindowsTargetPackage(process.value, &measured);
-  facts.window_class = WindowsTargetWindowClass(window, pid);
-  MeasureWindowsTargetLineage(context, &measured);
-
-  // The recorded path first, as V1 reads it, then the running image: a rename in between leaves
-  // the recorded path naming another file, which is a mismatch.
-  std::wstring recorded_path;
-  const std::optional<std::wstring> recorded =
-      ReadProcessPath(process.value, &recorded_path)
-          ? std::optional<std::wstring>(std::move(recorded_path))
-          : std::nullopt;
-  WindowsTargetHeldImage held;
-  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held))
-    return measured;
+  for (std::optional<std::string> *reset :
+       {&facts.image_root, &facts.image_relative_path, &facts.image_leaf, &facts.image_volume,
+        &facts.signature, &facts.signer_organization, &facts.pe_subsystem, &facts.original_filename})
+    reset->reset();
+  for (std::optional<bool> *reset : {&facts.running_image_matches, &facts.signer_microsoft_root,
+                                     &facts.signer_is_self, &facts.acceptance_fixture,
+                                     &facts.requires_administrator})
+    reset->reset();
+  measured.image_path.clear();
+  measured.file_identity.reset();
+  measured.signature_source = WindowsTargetSignatureSource::kNone;
+  measured.signer_thumbprint.clear();
   // The running-image anchor rests on QueryFullProcessImageNameW following a rename. The one-time
   // probe confirms that only for the file system it ran on (the temp volume), so the target matches
   // only when the probe followed and the target's own file system is the same. A target on another
@@ -2762,7 +2781,7 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
   // which makes the verdict unresolvable (incomplete facts are judged before any rule), and a
   // remote share's owner could otherwise make each read fail or stall.
   if (held.remote != std::optional<bool>(false))
-    return measured;
+    return;
 
   const WindowsTargetSignature signature =
       VerifyWindowsTargetSignature(held.file.value, held.canonical_path);
@@ -2783,6 +2802,41 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
     ReadWindowsTargetResources(held.file.value, verified, &facts);
   }
   facts.pe_subsystem = WindowsTargetPeSubsystem(held.file.value);
+}
+
+// Measures one target process (and the window it is asked about, which may be null). The result
+// is only facts: judging them is the core's, and nothing here calls it.
+WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
+    std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context) {
+  using namespace sprint_coder::computer_use;
+  WindowsTargetFactsMeasurement measured;
+  measured.pid = pid;
+  measured.facts.platform = TargetPlatform::kWin32;
+  ScopedKernelHandle process(
+      OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
+  if (process.value == nullptr || GetProcessId(process.value) != pid)
+    return measured;
+  measured.creation = WindowsTargetCreationTime(process.value);
+  if (!measured.creation.has_value())
+    return measured;
+  TargetFacts &facts = measured.facts;
+  MeasureWindowsTargetToken(process.value, &facts);
+  MeasureWindowsTargetPackage(process.value, &measured);
+  facts.window_class = WindowsTargetWindowClass(window, pid);
+  MeasureWindowsTargetLineage(context, &measured);
+
+  // The recorded path first, as V1 reads it, then the running image: a rename in between leaves
+  // the recorded path naming another file, which is a mismatch.
+  std::wstring recorded_path;
+  const std::optional<std::wstring> recorded =
+      ReadProcessPath(process.value, &recorded_path)
+          ? std::optional<std::wstring>(std::move(recorded_path))
+          : std::nullopt;
+  WindowsTargetHeldImage held;
+  if (!WindowsTargetImageKnownLocal(process.value) ||
+      !HoldWindowsTargetRunningImage(process.value, recorded, &held))
+    return measured;
+  MeasureWindowsTargetHeldFacts(held, context, &measured);
   return measured;
 }
 // END windows target facts
@@ -3668,6 +3722,497 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
   return true;
 }
 
+// BEGIN windows v2 targets (#500 S5-c-3 PR-5)
+// The v2 target eligibility, wired: list_targets, and the v2 start, resume and per-input judgement.
+// Every one of them measures the target from its running image (MeasureWindowsTargetFacts), judges
+// it with the shared core (ClassifyTarget) and takes the mode from the core alone: the policy
+// language (the app's own MUI claim) is not a ground for the mode on this path. The V1 deny-side
+// checks (the leaf table, the proxy table, elevation) are applied on top, so either refuses (ADR v2
+// section 3.2.1-5). v2 builds only: a v1 build answers list_targets with unsupported_operation and
+// admits no v2 session (EligibilityBasisAdmitted), so nothing here runs in the build that ships.
+//
+// What crosses to Main: a selectable row carries the identity Main binds a grant and a token to
+// (with the path and the pid, which Main keeps to itself: ADR section 3.2.2); a refused row carries
+// its kind and nothing else, no title, class, leaf, pid or identity (ADR section 3.2.1-4).
+
+inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;
+// The time one list_targets may spend measuring. A process whose measurement starts after it, or
+// ends after it, is listed as unresolvable. The budget is judged after the fact: it does not stop a
+// call already in progress. Two known limits (ADR section 10, residual risk):
+//   * an image on a network redirector is told from the kernel's name and never opened
+//     (WindowsTargetImageKnownLocal), but that list of redirectors is not exhaustive (a virtual
+//     machine's shared folder or a cloud sync placeholder can be served by another driver);
+//   * a local device that stops answering (a failing disk, a hung filter driver) can still hold a
+//     CreateFileW or a read of the image, and with it the helper's one request lane: no measurement
+//     runs on a thread of its own with a deadline yet.
+inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
+
+// Main's pid (the lineage root for W8), set by ServeMain before the first request.
+std::uint32_t windows_v2_main_pid = 0;
+// Advanced by every list_targets: a new session must name the latest list it was offered from.
+std::uint64_t windows_v2_list_generation = 0;
+
+sprint_coder::computer_use::WindowsFileKey
+WindowsFileKeyOf(const WindowsFileIdentity &identity) {
+  sprint_coder::computer_use::WindowsFileKey key;
+  key.volume_serial = identity.volume_serial;
+  static_assert(sizeof(identity.file_id.Identifier) == 16, "FILE_ID_128 is 16 bytes");
+  std::memcpy(key.file_id.data(), identity.file_id.Identifier, key.file_id.size());
+  return key;
+}
+
+// This helper's own leaf thumbprint, for signerIsSelf (W8): "" when it is not validly signed (a
+// development build), which leaves W8 to its other rules.
+std::string WindowsV2SelfSignerThumbprint() {
+  std::vector<wchar_t> module(32'768, L'\0');
+  const DWORD length =
+      GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+  if (length == 0 || length >= module.size())
+    return {};
+  const std::wstring path(module.data(), length);
+  ScopedKernelHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (file.value == INVALID_HANDLE_VALUE)
+    return {};
+  const WindowsTargetSignature signature = VerifyWindowsTargetSignature(file.value, path);
+  return signature.state == std::optional<std::string>("valid") ? signature.thumbprint
+                                                                 : std::string{};
+}
+
+// Measured once per helper: the roots, the lineage root and the rename-follow probe (which starts a
+// suspended copy of this helper, so it is not repeated per request).
+// Without Main's pid nothing can say what is Sprint Coder's own (W8): an empty context, whose facts
+// are unmeasured (unresolvable), and nothing is cached, so the real context is measured once the pid
+// is known (fail closed).
+const WindowsTargetFactsContext &WindowsV2FactsContext() {
+  static const WindowsTargetFactsContext unknown_root;
+  static std::optional<WindowsTargetFactsContext> context;
+  if (windows_v2_main_pid == 0)
+    return unknown_root;
+  if (!context.has_value())
+    context = CurrentWindowsTargetFactsContext(windows_v2_main_pid, WindowsV2SelfSignerThumbprint(),
+                                               /*acceptance_mode=*/false);
+  return *context;
+}
+
+// The file %SystemRoot%\System32\notepad.exe names now (the explicit "not web" table), or nothing.
+std::optional<sprint_coder::computer_use::WindowsFileKey> WindowsV2SystemNotepadKey() {
+  std::vector<wchar_t> buffer(32'768, L'\0');
+  const UINT length = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+  if (length == 0 || length >= buffer.size())
+    return std::nullopt;
+  std::wstring path(buffer.data(), length);
+  if (path.back() != L'\\')
+    path.push_back(L'\\');
+  path += L"note" L"pad.exe";
+  const std::optional<WindowsPathIdentity> opened = WindowsTargetOpenPathIdentity(path);
+  if (!opened.has_value())
+    return std::nullopt;
+  return WindowsFileKeyOf(opened->identity);
+}
+
+struct WindowsV2Judgement {
+  sprint_coder::computer_use::TargetVerdict verdict;
+  // The process's facts. Measured without a window: the window class is a fact of each window and
+  // is put in by WindowsV2VerdictForWindowClass (the judgement of one window), never cached.
+  WindowsTargetFactsMeasurement measured;
+  LockedWindowsExecutable executable;
+  std::optional<WindowsPackageIdentity> package;
+  std::string app_identity;
+  std::string process_start;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> held_key;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> table_key;
+  // The identity above is read once, the first time a window of the process is selectable.
+  bool identity_read = false;
+  bool identity_ok = false;
+
+  [[nodiscard]] bool Selectable() const {
+    using sprint_coder::computer_use::TargetVerdictKind;
+    return verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper;
+  }
+};
+
+// The core's verdict for these facts, with the V1 deny-side tables on top. Refusals never become
+// eligible here; a missing piece is unresolvable.
+sprint_coder::computer_use::TargetVerdict
+WindowsV2VerdictFor(const WindowsTargetFactsMeasurement &measured) {
+  using namespace sprint_coder::computer_use;
+  TargetVerdict verdict = ClassifyTarget(measured.facts);
+  if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
+      (measured.image_path.empty() || IsKnownProxyExecutable(measured.image_path) ||
+       IsDisallowedTargetExecutable(measured.image_path) || IsProcessElevated(measured.pid)))
+    verdict = TargetVerdict{TargetVerdictKind::kDenied, {}};
+  return verdict;
+}
+
+// The process half of a judgement: its facts, measured once (list_targets keeps one per process).
+void MeasureWindowsV2Process(std::uint32_t pid, const WindowsTargetFactsContext &context,
+                             WindowsV2Judgement *out) {
+  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);
+  out->verdict = sprint_coder::computer_use::TargetVerdict{};
+}
+
+// The identity a selectable window is bound with: the V1 identity of the very file the facts were
+// read from (same file id and path), the package identity when the core took the package route,
+// and the process start identity. Read once per process; false when any of it cannot be had.
+bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
+  if (out->identity_read)
+    return out->identity_ok;
+  out->identity_read = true;
+  const std::uint32_t pid = out->measured.pid;
+  if (!out->measured.file_identity.has_value() ||
+      !OpenLockedProcessExecutable(pid, &out->executable) ||
+      !SameWindowsFileIdentity(out->executable.identity.file_identity,
+                               *out->measured.file_identity) ||
+      !SameWindowsTargetName(out->executable.identity.path, out->measured.image_path) ||
+      !ReadProcessStartIdentity(pid, &out->process_start))
+    return false;
+  out->package = WindowsTargetPackageIdentity(out->measured, out->executable.identity);
+  // The core admitted a package; without the package identity there is nothing to bind it to.
+  if (out->measured.facts.packaged == std::optional<bool>(true) && !out->package.has_value())
+    return false;
+  out->app_identity =
+      out->package.has_value() ? out->package->identity_digest : out->executable.identity.identity_digest;
+  out->held_key = WindowsFileKeyOf(*out->measured.file_identity);
+  out->table_key = WindowsV2SystemNotepadKey();
+  out->identity_ok = true;
+  return true;
+}
+
+// The judgement of one window of the process: the process's facts with this window's own class.
+// Each window is judged by itself, so neither the order the windows are listed in nor another
+// window of the process (a console it allocated, a window gone between listing and measuring)
+// changes its answer. A class that cannot be read leaves the facts incomplete: unresolvable.
+sprint_coder::computer_use::TargetVerdict
+WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
+                               const std::optional<std::string> &window_class) {
+  using namespace sprint_coder::computer_use;
+  WindowsTargetFactsMeasurement for_window = process->measured;
+  for_window.facts.window_class = window_class;
+  TargetVerdict verdict = WindowsV2VerdictFor(for_window);
+  if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
+      !EnsureWindowsV2Identity(process))
+    verdict = TargetVerdict{TargetVerdictKind::kUnresolvable, {}};
+  return verdict;
+}
+
+// Judges one window of one process (the start, the resume and every input of a v2 session).
+void JudgeWindowsV2Target(std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context,
+                          WindowsV2Judgement *out) {
+  MeasureWindowsV2Process(pid, context, out);
+  const std::optional<std::string> window_class = WindowsTargetWindowClass(window, pid);
+  out->verdict = WindowsV2VerdictForWindowClass(out, window_class);
+  out->measured.facts.window_class = window_class;
+}
+
+// The identity JSON of a v2 row: the V1 fields with the mode of the window the row is for, or the
+// package's.
+std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_view window_mode) {
+  const WindowsExecutableIdentity &identity = judged.executable.identity;
+  const std::string mode(window_mode);
+  if (judged.package.has_value())
+    return WindowsPackageIdentityJson(identity, *judged.package, mode);
+  return "{\"platform\":\"win32\",\"identityDigest\":\"" + identity.identity_digest +
+         "\",\"executablePath\":\"" + JsonEscape(identity.path_utf8) +
+         "\",\"executableDigest\":\"" + identity.executable_digest + "\",\"signerDigest\":" +
+         (identity.signer_digest.empty() ? "null" : "\"" + identity.signer_digest + "\"") +
+         ",\"packageFamilyName\":null,\"appUserModelId\":null,\"displayName\":\"" +
+         JsonEscape(identity.display_name) + "\",\"policyLanguage\":\"" +
+         identity.policy_language + "\",\"maximumMode\":\"" + JsonEscape(mode) + "\"}";
+}
+
+// The refused rows: the kind only.
+constexpr std::string_view kWindowsV2DeniedRow = "{\"kind\":\"denied\"}";
+constexpr std::string_view kWindowsV2UnresolvableRow = "{\"kind\":\"unresolvable\"}";
+
+std::string WindowsV2RefusedRow(sprint_coder::computer_use::TargetVerdictKind kind) {
+  return std::string(kind == sprint_coder::computer_use::TargetVerdictKind::kDenied
+                         ? kWindowsV2DeniedRow
+                         : kWindowsV2UnresolvableRow);
+}
+
+BOOL CALLBACK CollectWindowsV2TopLevel(HWND window, LPARAM parameter) {
+  auto *windows = reinterpret_cast<std::vector<HWND> *>(parameter);
+  // An owned window (a dialog) is reached through its owner's session, never listed on its own.
+  if (windows != nullptr && IsWindowVisible(window) && GetWindow(window, GW_OWNER) == nullptr &&
+      IsApplicationWindow(window))
+    windows->push_back(window);
+  return TRUE;
+}
+
+// Each row is counted whole, as it is sent: its key names, quotes, commas, numbers, the escaped
+// title and every field of its identity.
+// The bytes the list_targets envelope around its rows takes ({"generation":N,"rulesetVersion":N,
+// "truncated":false,"targets":[ and ]}), with room to spare: the rows get the rest of one frame's
+// metadata. A response over kMaxMetadataBytes could not be framed (EncodeFrame answers nothing), the
+// write would fail and the pipe would close, ending every session of this helper with the list.
+inline constexpr std::size_t kWindowsListTargetsEnvelopeBytes = 256;
+inline constexpr std::size_t kWindowsListTargetsRowBytes =
+    kMaxMetadataBytes - kWindowsListTargetsEnvelopeBytes;
+
+// The rows of one list_targets, bounded by count (kWindowsListTargetsRowLimit) and by bytes (the
+// joined rows, commas included, within the byte limit). A row is counted as it is sent: already
+// escaped (JsonEscape writes a control character as six bytes, \u00XX), so the bound is of the
+// bytes on the wire, not of the raw title or path. A row that does not fit is not added, and
+// no row after it is either: the list is truncated there. A single row larger than the limit (an
+// executable path of tens of kilobytes) is never sent.
+class WindowsV2ListRows {
+public:
+  explicit WindowsV2ListRows(std::size_t byte_limit) : byte_limit_(byte_limit) {}
+
+  void push_back(const std::string &row) {
+    if (Full())
+      return;
+    const std::size_t added = row.size() + (count_ == 0 ? 0 : 1);
+    if (joined_.size() + added > byte_limit_) {
+      truncated_ = true;
+      return;
+    }
+    if (count_ != 0)
+      joined_.push_back(',');
+    joined_ += row;
+    ++count_;
+  }
+  [[nodiscard]] bool Full() const {
+    return truncated_ || count_ >= kWindowsListTargetsRowLimit;
+  }
+  [[nodiscard]] bool Truncated() const { return truncated_; }
+  [[nodiscard]] std::size_t size() const { return count_; }
+  [[nodiscard]] const std::string &Joined() const { return joined_; }
+
+private:
+  std::size_t byte_limit_;
+  std::string joined_;
+  std::size_t count_ = 0;
+  bool truncated_ = false;
+};
+
+std::string WindowsV2ListResponse(std::uint64_t generation, std::uint32_t ruleset_version,
+                                  bool truncated, const WindowsV2ListRows &rows) {
+  return "{\"generation\":" + std::to_string(generation) +
+         ",\"rulesetVersion\":" + std::to_string(ruleset_version) +
+         ",\"truncated\":" + (truncated ? "true" : "false") + ",\"targets\":[" + rows.Joined() +
+         "]}";
+}
+
+// The last check of a list_targets answer (the rows are bounded above; this is the belt). An answer
+// that could not be framed is never handed on: false, with a reason, so HandlePipeRequest answers with
+// its small error frame (ErrorPayload) and the pipe and every session on it stay up.
+// The generation advances only with an answer that is sent: a refused list leaves the previous one
+// the latest, so a token minted from it can still start. The reason is a fixed short code.
+bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
+                                 std::string *response, std::string *reason) {
+  if (built.empty() || built.size() > kMaxMetadataBytes) {
+    response->clear();
+    *reason = "list_targets_unavailable";
+    return false;
+  }
+  *response = std::move(built);
+  // Taken here, after the size check, as the answer is handed to the dispatcher. If its WriteFrame
+  // then fails, the pipe is lost and Main restarts the helper (a new helper starts from generation
+  // 0 and no session); on this helper, a new session named from the list before this one is
+  // refused as stale (targetGeneration), and Main must list again. A resume does not read it.
+  windows_v2_list_generation = generation;
+  return true;
+}
+
+// list_targets (ADR v2 section 5.2): every top-level application window, judged per process, at most
+// kWindowsListTargetsRowLimit rows and kWindowsListTargetsRowBytes bytes of rows, within
+// kWindowsListTargetsBudgetMs.
+bool ListWindowsTargets(std::string *response, std::string *reason) {
+  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
+    (void)response;
+    *reason = "unsupported_operation";
+    return false;
+  } else {
+    using namespace sprint_coder::computer_use;
+    // Without Main's pid there is no lineage root: nothing is enumerated or measured.
+    const WindowsTargetFactsContext &context = WindowsV2FactsContext();
+    if (context.lineage_root_pid == 0) {
+      *reason = "list_targets_unavailable";
+      return false;
+    }
+    std::vector<HWND> windows;
+    if (EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows)) != TRUE) {
+      *reason = "process_enumeration_unavailable";
+      return false;
+    }
+    const ULONGLONG deadline = GetTickCount64() + kWindowsListTargetsBudgetMs;
+    // The generation this list would be; it is taken only when the answer is sent.
+    const std::uint64_t generation = windows_v2_list_generation + 1;
+    // One judgement per process; std::nullopt for a process whose measurement ran past the budget.
+    std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
+    WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
+    bool truncated = false;
+    for (const HWND window : windows) {
+      if (rows.Full()) {
+        truncated = true;
+        break;
+      }
+      DWORD owner = 0;
+      if (GetWindowThreadProcessId(window, &owner) == 0 || owner == 0 ||
+          owner == GetCurrentProcessId())
+        continue;
+      // The process's facts are measured once, without a window (the first window listed decides
+      // nothing about the others); each window is then judged with its own class.
+      auto found = judged.find(owner);
+      if (found == judged.end()) {
+        std::optional<std::shared_ptr<WindowsV2Judgement>> entry;
+        if (GetTickCount64() <= deadline) {
+          auto judgement = std::make_shared<WindowsV2Judgement>();
+          MeasureWindowsV2Process(owner, context, judgement.get());
+          if (GetTickCount64() <= deadline)
+            entry = std::move(judgement);
+        }
+        found = judged.emplace(owner, std::move(entry)).first;
+      }
+      if (!found->second.has_value()) {
+        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
+        continue;
+      }
+      WindowsV2Judgement &judgement = **found->second;
+      // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
+      // after it was listed) is unresolvable on its own; it does not touch its process's others.
+      const TargetVerdict verdict =
+          WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner));
+      RECT client{};
+      RECT screen{};
+      if (!(verdict.kind == TargetVerdictKind::kEligible ||
+            verdict.kind == TargetVerdictKind::kUpper)) {
+        rows.push_back(WindowsV2RefusedRow(verdict.kind == TargetVerdictKind::kUnresolvable
+                                               ? TargetVerdictKind::kUnresolvable
+                                               : TargetVerdictKind::kDenied));
+        continue;
+      }
+      if (IsWindowEnabled(window) != TRUE || !ClientBoundsPhysical(window, &client) ||
+          !ScreenBoundsPhysicalForWindow(window, &screen)) {
+        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
+        continue;
+      }
+      std::vector<wchar_t> title(513, L'\0');
+      const int title_length = GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
+      std::string title_utf8 = BoundedUtf8(
+          title_length > 0 ? Utf8FromWide(std::wstring_view(title.data(), title_length))
+                           : "Application window",
+          256);
+      if (title_utf8.empty())
+        title_utf8 = "Application window";
+      const auto handle_value = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window));
+      const std::string window_identity =
+          Sha256String("computer-window-identity-v1\n" + judgement.app_identity + "\n" +
+                       judgement.process_start + "\n" + std::to_string(handle_value));
+      rows.push_back(
+          "{\"kind\":\"" + std::string(TargetVerdictKindName(verdict.kind)) +
+          "\",\"windowId\":\"" + std::to_string(handle_value) + "\",\"pid\":" +
+          std::to_string(owner) + ",\"appIdentityDigest\":\"" + judgement.app_identity +
+          "\",\"windowIdentityDigest\":\"" + window_identity + "\",\"executableDigest\":\"" +
+          judgement.executable.identity.executable_digest + "\",\"title\":\"" +
+          JsonEscape(title_utf8) + "\",\"bounds\":{\"x\":" + std::to_string(client.left) +
+          ",\"y\":" + std::to_string(client.top) +
+          ",\"width\":" + std::to_string(client.right - client.left) +
+          ",\"height\":" + std::to_string(client.bottom - client.top) +
+          "},\"screenBounds\":" + RectJson(screen) +
+          ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
+          std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
+          "}");
+    }
+    return FinishWindowsV2ListResponse(
+        WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
+                              truncated || rows.Truncated(), rows),
+        generation, response, reason);
+  }
+}
+
+// What a v2 session's start (or resume) and every input re-judge: the target is still selectable,
+// with the mode, the application identity (the package digest for a package), the process start and
+// the held running image the session was bound to. `not_web` is the explicit table's answer for this
+// judgement: the session's recorded System32 notepad file, still the very file it was.
+bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> *not_web,
+                             std::string *reason) {
+  // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
+  if (WindowsV2FactsContext().lineage_root_pid == 0) {
+    *reason = "session_identity_changed";
+    return false;
+  }
+  WindowsV2Judgement judged;
+  JudgeWindowsV2Target(session.pid, session.window, WindowsV2FactsContext(), &judged);
+  WindowsFileIdentity held{};
+  if (!judged.Selectable() || std::string(judged.verdict.maximum_mode) != session.maximum_mode ||
+      judged.app_identity != session.app_identity ||
+      judged.process_start != session.process_start ||
+      !ReadWindowsFileIdentity(session.executable_file, &held) ||
+      !judged.measured.file_identity.has_value() ||
+      !SameWindowsFileIdentity(held, *judged.measured.file_identity)) {
+    *reason = "session_identity_changed";
+    return false;
+  }
+  if (not_web != nullptr)
+    *not_web = sprint_coder::computer_use::WindowsTargetIsNotWebByTable(
+        judged.measured.facts, judged.held_key, judged.table_key, session.not_web_file,
+        /*session_recorded=*/true);
+  return true;
+}
+
+// Before every input (ValidateWindowsDispatchBinding: the preflight that issues the ticket and the
+// dispatch that spends it): a v2 session's target is judged again and the explicit table answers for
+// the interlock of the same frame. A v1 session: nothing, as before.
+bool JudgeWindowsV2Input(const WindowsSession &session, std::string *reason) {
+  session.v2_input_not_web.reset();
+  if (session.eligibility_basis != sprint_coder::computer_use::EligibilityBasis::kV2Denylist)
+    return true;
+  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
+    *reason = "eligibility_basis_unsupported";
+    return false;
+  } else {
+    return RejudgeWindowsV2Session(session, &session.v2_input_not_web, reason);
+  }
+}
+
+// The v2 admission of a start or resume (in place of the V1 allow-list): the ruleset version the
+// token was minted under is this build's, a new session names the latest list, and the target is
+// judged again now and is the one the token named (identity, executable and, outside a package, the
+// signer, and the very file `locked` holds). The mode is the core's. `not_web_file` is the System32
+// notepad file the explicit table matched, recorded for the session's life.
+bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExecutable &locked,
+                         const std::string &metadata, bool new_session,
+                         std::string_view app_identity, std::string_view executable_digest,
+                         std::string_view signer_digest, std::string *maximum_mode,
+                         std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file) {
+  using namespace sprint_coder::computer_use;
+  // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
+  if (WindowsV2FactsContext().lineage_root_pid == 0)
+    return false;
+  std::uint64_t ruleset_version = 0;
+  std::uint64_t generation = 0;
+  if (!ReadJsonUint64(metadata, "denyRulesetVersion", &ruleset_version) ||
+      ruleset_version == 0 || ruleset_version != DenyRulesetVersion(TargetPlatform::kWin32))
+    return false;
+  if (new_session && (!ReadJsonUint64(metadata, "targetGeneration", &generation) ||
+                      generation == 0 || generation != windows_v2_list_generation))
+    return false;
+  WindowsV2Judgement judged;
+  JudgeWindowsV2Target(pid, window, WindowsV2FactsContext(), &judged);
+  if (!judged.Selectable() || judged.app_identity != app_identity ||
+      judged.executable.identity.executable_digest != executable_digest ||
+      !SameWindowsFileIdentity(judged.executable.identity.file_identity,
+                               locked.identity.file_identity) ||
+      !SameWindowsTargetName(judged.executable.identity.path, locked.identity.path))
+    return false;
+  // A package's identity rests on the package, not on an embedded signer (its JSON says null).
+  if (!judged.package.has_value() &&
+      (signer_digest.empty() ? !judged.executable.identity.signer_digest.empty()
+                             : judged.executable.identity.signer_digest != signer_digest))
+    return false;
+  *maximum_mode = std::string(judged.verdict.maximum_mode);
+  *not_web_file = WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key,
+                                               judged.table_key, std::nullopt,
+                                               /*session_recorded=*/false)
+                      ? judged.held_key
+                      : std::nullopt;
+  return true;
+}
+// END windows v2 targets
+
 bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
                             std::string *reason) {
   std::string canonical_path_utf8;
@@ -3864,14 +4409,33 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   LockedWindowsExecutable process_executable;
   std::string process_start;
   RECT bounds{};
+  // S5-c-3 PR-5: a v2 session is admitted by the v2 judgement, with the core's mode; a v1 session by
+  // the V1 allow-list, with the V1 mode, exactly as before. Only a v2 build admits the v2 basis.
+  const bool v2_basis =
+      eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+  std::string v2_maximum_mode;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> v2_not_web_file;
+  const auto target_admitted = [&]() {
+    if (!v2_basis)
+      return WindowsExecutableIdentityMatches(process_executable.identity, app_identity,
+                                              expected_executable_digest,
+                                              expected_signer_digest) &&
+             IsSupportedWindowsV1Target(process_executable.identity);
+    if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
+      return false;
+    } else {
+      return AdmitWindowsV2Start(
+          pid, window, process_executable, metadata,
+          !sessions.contains(FrameIdKey(request.header.session_id)), app_identity,
+          expected_executable_digest, expected_signer_digest, &v2_maximum_mode,
+          &v2_not_web_file);
+    }
+  };
   if (target_process.value == nullptr ||
       !OpenLockedProcessExecutable(target_process.value,
                                    &process_executable) ||
       !SameWindowsPath(process_executable.identity.path, canonical_path) ||
-      !WindowsExecutableIdentityMatches(
-          process_executable.identity, app_identity,
-          expected_executable_digest, expected_signer_digest) ||
-      !IsSupportedWindowsV1Target(process_executable.identity) ||
+      !target_admitted() ||
       (IsKnownProxyExecutable(process_executable.identity.path) ||
        IsDisallowedTargetExecutable(process_executable.identity.path)) ||
       IsProcessElevated(pid) ||
@@ -3882,7 +4446,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     return false;
   }
   const std::string maximum_mode =
-      MaximumModeForWindowsExecutable(process_executable.identity);
+      v2_basis ? v2_maximum_mode
+               : MaximumModeForWindowsExecutable(process_executable.identity);
   const std::string actual_window_identity =
       Sha256String("computer-window-identity-v1\n" + app_identity + "\n" +
                    process_start + "\n" + std::to_string(window_value));
@@ -4069,6 +4634,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     session.policy_language = process_executable.identity.policy_language;
     session.maximum_mode = maximum_mode;
     session.eligibility_basis = eligibility_basis;
+    session.not_web_file = v2_not_web_file;
     session.cancel_epoch = effective_cancel_epoch;
     sessions.emplace(session_key, std::move(session));
   }
@@ -6305,6 +6871,10 @@ bool ValidateWindowsDispatchBinding(const WindowsSession &session,
   RECT current_bounds{};
   if (!ValidateWindowsSession(session, &current_bounds, reason))
     return false;
+  // S5-c-3 PR-5: a v2 session judges its target again before every input (the preflight that issues
+  // the ticket and the dispatch that spends it), and the explicit "not web" table is answered here.
+  if (!JudgeWindowsV2Input(session, reason))
+    return false;
   const RECT observed = session.observation_bounds;
   if (current_bounds.left != observed.left ||
       current_bounds.top != observed.top ||
@@ -7213,6 +7783,12 @@ sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     (void)ReadJsonString(metadata, "key", &key);
     (void)ReadJsonString(metadata, "targetId", &target_id);
     const EffectRuleset ruleset_copy = ruleset;
+    // A v2 session's capture also reads who provides each element, and carries the explicit table's
+    // "not web" answer of this frame's judgement (S5-c-3 PR-5). Every other session: not asked.
+    WindowsStrictCaptureIdentity strict;
+    strict.asked = session.eligibility_basis == EligibilityBasis::kV2Denylist;
+    strict.process_id = strict.asked ? session.pid : 0;
+    strict.target_not_web = strict.asked ? session.v2_input_not_web : std::nullopt;
     // Single-flight: a worker still stuck from an earlier evaluation means no second one.
     std::atomic<bool> &running = InterlockWorkerRunning();
     if (running.exchange(true)) {
@@ -7221,7 +7797,8 @@ sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     }
     try {
       std::thread([pending, window, point, maximum_mode, policy_language, kind_copy, key,
-                   target_id, ruleset_copy, expected_epoch, click_tracked, click_opens, &running]() {
+                   target_id, ruleset_copy, strict, expected_epoch, click_tracked, click_opens,
+                   &running]() {
         InterlockEvaluation answer;
         answer.no_verdict = InterlockNoVerdict::kIncomplete;
         try {
@@ -7249,7 +7826,7 @@ sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
               info.click_tracked = click_tracked;
               info.click_opens = click_opens;
               answer = EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info,
-                                                        ruleset_copy);
+                                                        ruleset_copy, strict);
             }
           }
         } catch (...) {
@@ -7792,6 +8369,9 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       succeeded = PickWindowsExecutable(&response, &reason);
     } else if (operation == "list_windows") {
       succeeded = ListWindowsForIdentity(metadata, &response, &reason);
+    } else if (operation == "list_targets") {
+      // S5-c-3 PR-5: unsupported_operation in a v1 build.
+      succeeded = ListWindowsTargets(&response, &reason);
     } else if (operation == "start_session") {
       succeeded = StartWindowsSession(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
@@ -8165,6 +8745,9 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   std::atomic<bool> serving{authenticated_client};
   std::thread parent_watcher;
   if (authenticated_client) {
+    // The lineage root of the v2 facts (W8): Main, the parent this helper verified and the one client
+    // its pipe accepted, fixed before the first request (the facts context reads it once, then).
+    windows_v2_main_pid = static_cast<std::uint32_t>(client_pid);
     parent_watcher = std::thread([parent, pipe, &serving]() {
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {

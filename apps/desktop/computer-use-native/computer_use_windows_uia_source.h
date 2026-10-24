@@ -921,6 +921,26 @@ public:
     return ShadowReadResult::kOk;
   }
 
+  // S5-c-3 PR-5: who provides the element. A process id of 0 or below is not one.
+  ShadowReadResult ProcessId(Element element, std::uint32_t *process_id) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    int id = 0;
+    if (FAILED(current->get_CurrentProcessId(&id))) return ShadowReadResult::kFailed;
+    if (id <= 0) return ShadowReadResult::kAbsent;
+    *process_id = static_cast<std::uint32_t>(id);
+    return ShadowReadResult::kOk;
+  }
+
+  ShadowReadResult FrameworkId(Element element, std::size_t maximum_bytes,
+                               std::string *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::BstrHolder text;
+    if (FAILED(current->get_CurrentFrameworkId(text.Receive()))) return ShadowReadResult::kFailed;
+    return windows_uia_source_detail::ShadowTextFromUtf16(text.View(), true, maximum_bytes, output);
+  }
+
   // The value of a Document is the address of the page in the browsers that publish it. Reading a
   // value is a read; nothing is set.
   ShadowReadResult DocumentUrl(Element document, std::size_t maximum_bytes,

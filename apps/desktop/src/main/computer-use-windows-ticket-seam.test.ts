@@ -249,6 +249,8 @@ bool ValidateWindowsSession(const WindowsSession &session, RECT *bounds, std::st
 bool RevalidateWindowsTarget(const WindowsSession &, const RECT &, std::uint64_t) {
   return g_revalidate_ok;
 }
+// The v2 input judgement (S5-c-3 PR-5) answers nothing for a v1 session, which every session here is.
+bool JudgeWindowsV2Input(const WindowsSession &, std::string *) { return true; }
 bool WindowsFocusedElementSignature(std::uint32_t, const RECT &, std::string *signature) {
   if (!g_focus_ok) return false;
   *signature = "focus-signature";

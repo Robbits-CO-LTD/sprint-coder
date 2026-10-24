@@ -152,6 +152,9 @@ struct WindowsSession {
   std::uint64_t cancel_epoch = 0;
   sprint_coder::computer_use::EligibilityBasis eligibility_basis =
       sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
+  // S5-c-3 PR-5: what a v2 session's capture is asked with.
+  std::uint32_t pid = 0;
+  mutable std::optional<bool> v2_input_not_web;
 };
 
 bool ReadJsonString(std::string_view json, std::string_view key, std::string *output) {
@@ -202,11 +205,12 @@ std::atomic<int> g_worker_no_verdict{-1};
 std::atomic<bool> lane_returned{false};
 sprint_coder::computer_use::InterlockEvaluation StallingEvaluate(
     sprint_coder::computer_use::ShadowUiaSource &source, std::string_view kind, std::string_view target_id,
-    const sprint_coder::computer_use::ShadowRequestInfo &info, const sprint_coder::computer_use::EffectRuleset &rules) {
+    const sprint_coder::computer_use::ShadowRequestInfo &info, const sprint_coder::computer_use::EffectRuleset &rules,
+    const sprint_coder::computer_use::WindowsStrictCaptureIdentity &strict = {}) {
   const int stall = g_stall_ms.load();
   if (stall > 0) Sleep(stall);
   sprint_coder::computer_use::InterlockEvaluation answer =
-      sprint_coder::computer_use::EvaluateWindowsInterlockOnSource(source, kind, target_id, info, rules);
+      sprint_coder::computer_use::EvaluateWindowsInterlockOnSource(source, kind, target_id, info, rules, strict);
   if (g_hold_after.load()) {
     g_worker_no_verdict.store(static_cast<int>(answer.no_verdict));
     g_eval_done.store(true);

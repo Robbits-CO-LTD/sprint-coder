@@ -53,6 +53,14 @@ struct ShadowUiaNode {
   bool oversize = false;
   // A property failed to read for a reason other than "no value" / "unsupported".
   bool read_failed = false;
+  // S5-c-3 PR-5: who provides the element, read only for the chain of a v2 session's capture
+  // (WindowsShadowReader::ReadChainIdentity). Not read: process_id 0 and framework_read false.
+  // The strict interlock takes over when an element of the chain belongs to another process or its
+  // process cannot be read, and FrameworkId only ever adds a takeover (a web framework, or a
+  // Document that does not say): never a confirmation that the target is not web.
+  std::uint32_t process_id = 0;
+  bool framework_read = false;
+  std::string framework_id;
 };
 
 enum class ShadowItemKind : std::uint8_t { kNone, kFile, kFolder };

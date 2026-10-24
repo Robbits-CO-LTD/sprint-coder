@@ -41,6 +41,10 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     const allowed = new Set([
       '"computer_use_native_interlock_capture.h"',
       '"computer_use_windows_shadow_reader.h"',
+      // S5-c-3 PR-5: the v2 session's capture identity (a process id and an optional answer).
+      '<cstdint>',
+      '<optional>',
+      '<string>',
       '<string_view>',
     ]);
     for (const match of header.matchAll(/^\s*#\s*include\s+(\S+)/gmu))
@@ -271,7 +275,7 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     const body = code(entry);
     expect(body).toContain('const sprint_coder::computer_use::EffectRuleset &ruleset');
     expect(body.replace(/\s+/gu, ' ')).toContain(
-      'EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info, ruleset_copy)',
+      'EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info, ruleset_copy, strict)',
     );
     expect(body).toContain('unavailable.no_verdict = InterlockNoVerdict::kIncomplete;');
     expect(body).toContain('catch (...) {');
