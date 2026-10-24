@@ -184,6 +184,9 @@ function installFakePreload() {
     },
     models: {
       query: async () => ({
+        revision: 1,
+        total: 1,
+        nextCursor: null,
         items: [
           {
             connectionId: 'connection-1',

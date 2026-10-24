@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { COMPUTER_USE_SETTING_CHANGED_EVENT } from '../lib/computer-use-setting-event';
+import {
+  MODEL_CATALOG_CONNECTION_FILTER_MAX,
+  queryAllModelCatalogPages,
+} from '../lib/model-catalog-pages';
 import type {
   ComputerAppGrantView,
   ComputerAppProfile,
@@ -242,21 +246,10 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     void refreshGrants().catch((cause: unknown) => {
       setGrantError(messageOf(cause, '許可済みアプリを読み込めませんでした。'));
     });
-    const [currentProfiles, policy, connections, catalog] = await Promise.all([
+    const [currentProfiles, policy, connections] = await Promise.all([
       refreshProfiles(),
       permissions.get(taskId),
       providersApi.listConnections(),
-      modelsApi.query({
-        taskId,
-        text: '',
-        connectionIds: [],
-        providerIds: [],
-        accessTypes: [],
-        capabilities: [],
-        availableOnly: true,
-        cursor: null,
-        limit: 100,
-      }),
     ]);
     setPolicyEpoch(policy.policyEpoch);
     const compatibleConnections = new Map(
@@ -269,7 +262,25 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
         )
         .map((connection) => [connection.id, connection]),
     );
-    const catalogOptions = catalog.items.flatMap((model) => {
+    // Issue #906: every page, not only the first — an image-capable model can sit anywhere in the
+    // catalog. The query is narrowed to the compatible Connections when the contract allows that
+    // many ids; the capability filter is not used because a model whose image support is still
+    // unknown remains a candidate (it is checked by a preflight at start).
+    const compatibleIds = [...compatibleConnections.keys()];
+    const catalogItems =
+      compatibleIds.length === 0
+        ? []
+        : await queryAllModelCatalogPages((input) => modelsApi.query(input), {
+            taskId,
+            text: '',
+            connectionIds:
+              compatibleIds.length <= MODEL_CATALOG_CONNECTION_FILTER_MAX ? compatibleIds : [],
+            providerIds: [],
+            accessTypes: [],
+            capabilities: [],
+            availableOnly: true,
+          });
+    const catalogOptions = catalogItems.flatMap((model) => {
       const connection = compatibleConnections.get(model.connectionId);
       if (connection === undefined || model.multimodalInput.value === false) return [];
       return [
