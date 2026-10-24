@@ -141,6 +141,34 @@ afterEach(() => {
 });
 
 describe.each(['canvas', 'list'] as const)('%s work phase projection', (view) => {
+  it('keeps direct work visible when the only persisted execution is terminal history', () => {
+    const row = execution('completed');
+    row.state = 'completed';
+    useAppStore.setState({ teamByTask: { [task.id]: detail(row) } });
+    act(() =>
+      root.render(
+        view === 'list' ? (
+          <TeamListView task={task} onBack={() => {}} onSwitchToCanvasView={() => {}} />
+        ) : (
+          <TeamCanvas
+            task={task}
+            leaderRef={createRef()}
+            leaderAnchorRef={createRef()}
+            onRequestExit={() => {}}
+            onSwitchToListView={() => {}}
+          />
+        ),
+      ),
+    );
+    const card = container.querySelector('[data-testid="team-worker"]')!;
+    expect(card.querySelector('.team-status')?.textContent).toBe('作業中');
+    if (view === 'canvas')
+      expect(card.querySelector('.w-glance-state')?.textContent).toBe('思考中');
+    expect(container.querySelector('[data-testid="team-work-counts"]')?.textContent).toContain(
+      '作業中 1人',
+    );
+    expect(row.state).toBe('completed');
+  });
   it('keeps manual-resume attention visible without an active work indicator', () => {
     const row = execution('waiting_integration');
     row.state = 'waiting_resume';
@@ -162,6 +190,8 @@ describe.each(['canvas', 'list'] as const)('%s work phase projection', (view) =>
     );
     const card = container.querySelector('[data-testid="team-worker"]')!;
     expect(card.querySelector('.team-status')?.textContent).toBe('再開待ち');
+    if (view === 'canvas')
+      expect(card.querySelector('.w-glance-state')?.textContent).toBe('再開待ち');
     expect(card.querySelector('[data-testid="team-integration-resume"]')).not.toBeNull();
     expect(card.textContent).toContain('既存変更を確認してから再開');
     expect(card.querySelector('.w-run-title')).toBeNull();
@@ -194,6 +224,12 @@ describe.each(['canvas', 'list'] as const)('%s work phase projection', (view) =>
       const card = container.querySelector('[data-testid="team-worker"]')!;
       expect(card.getAttribute('aria-label')).toBe(`Worker 担当 · ${label}`);
       expect(card.querySelector('.team-status')?.textContent).toBe(label);
+      if (view === 'canvas') {
+        expect(card.querySelector('.w-glance-state')?.textContent).toBe(
+          phase === 'running' ? '思考中' : label,
+        );
+        if (phase !== 'running') expect(card.querySelector('.w-glance-line')).toBeNull();
+      }
       expect(container.querySelector('[data-testid="team-work-counts"]')?.textContent).toBe(counts);
       if (phase !== 'running') {
         expect(
@@ -282,6 +318,10 @@ it('does not show an outdated thinking indicator outside an active work phase', 
     ),
   );
   expect(container.querySelector('[data-testid="team-worker"] .w-run-title')).toBeNull();
+  expect(
+    container.querySelector('[data-testid="team-worker"] .w-glance-state')?.textContent,
+  ).not.toBe('思考中');
+  expect(container.querySelector('[data-testid="team-worker"] .w-glance-line')).toBeNull();
   expect(container.querySelector('[data-testid="team-work-counts"]')).toBeNull();
   expect(row.state).toBe('running');
 });

@@ -25,14 +25,15 @@ MCPサーバー \`team\` の実結果だけを使う。ツール名を文章へ�
 
 1. \`team_list_models\`で現在availableなConnection／modelとsource付き能力を確認する。能力filterが0件ならcapabilitiesを空にして再検索し、unknownをfalseや0と解釈せず、名前から能力を推測しない。呼び出せなければ「Sprint Coder Team MCPを利用できない」と報告して終了する。
 Claudeを選ぶ場合、利用可能な\`builtin:claude-cli\`候補があるならOpenRouter上のClaudeよりClaude CLIを優先する。ユーザーがOpenRouterを明示指定した場合を除き、同じClaudeをAPI経由で採用しない。
-2. \`team_hire_worker\`で重複しない役割を必要人数だけ採用する。workspace-write予定なら最初から\`writeCapable: true\`。leafは\`agentKind: "worker"\`かつmanagerPolicyなし。再委譲するManagerだけ\`agentKind: "manager"\`とmanagerPolicyを使う。直属Workerだけなら\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`。実際に選んだconnection／provider／modelと根拠をmodelSelection／modelSelectionReasonへ入れる。
-3. Taskフローは\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡し、execution IDを記録する。scope、nonGoals、targetPaths、constraintsは追加フィールドにせず\`objective\`本文へ含める。accessはread-onlyかworkspace-write。workspace-writeはファイルを変えることが完了条件の作業だけに付ける（ファイルが1つも変わらなければ失敗になる）。「確認して必要なら直す」作業は、まずread-onlyで確認し、変更が必要と分かってからworkspace-writeで割り当て直す。queuedは失敗ではない。複数Workerへ割り当てるときは\`team_assign_tasks\`の\`assignments\`へ全件を入れて1回で出し、results[].okが偽の要素だけを出し直す。
+2. \`team_hire_worker\`で重複しない役割を必要人数だけ採用する。自身で編集するWorkerと、子に編集を委譲するManagerは、どちらも雇用時に\`writeCapable: true\`。調査だけのManagerは省略時falseのままでよい。leafは\`agentKind: "worker"\`かつmanagerPolicyなし。再委譲するManagerだけ\`agentKind: "manager"\`とmanagerPolicyを使う。直属Workerだけなら\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`。実際に選んだconnection／provider／modelと根拠をmodelSelection／modelSelectionReasonへ入れる。
+3. Taskフローは\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡し、execution IDを記録する。scope、nonGoals、targetPaths、constraintsは追加フィールドにせず\`objective\`本文へ含める。accessはread-onlyかworkspace-write。workspace-writeはファイルを変えることが完了条件の作業に付ける。子に編集を委譲するManager自身への割当も\`access: "workspace-write"\`が必要。leafは自身の変更が必要だが、Managerはその実行で割り当てた子のworkspace-write作業がcompletedなら、自身の変更なしでもこの条件を満たせる。自身も子もファイルを変えなければ失敗になる。「確認して必要なら直す」作業は、まずread-onlyで確認し、変更が必要と分かってからworkspace-writeで割り当て直す。queuedは失敗ではない。複数Workerへ割り当てるときは\`team_assign_tasks\`の\`assignments\`へ全件を入れて1回で出し、results[].okが偽の要素は原因を解消してから出し直す。
 4. Missionフローは\`team_assign_mission\`へ全体のobjective、doneCriteria、2〜12工程のstepsを渡す。各工程へworkerId、objective、doneCriteria、accessを明示し、accessは3と同じ基準で選び、workspace-writeはwriteCapableなWorkerだけに割り当てる。
 5. 実行中は\`team_get_status\`でcurrentActivity、liveOutput、階層、待機理由を確認する。逸脱、誤実装、重複作業には\`team_steer_execution\`をexecutionId付きで呼ぶ。runningへのsteerは同じexecution IDの新attemptになる。不要なら\`team_cancel_execution\`をexecutionId付きで呼ぶ。Agent間共有は認証済み送信元identityで\`team_send_message\`、受信は\`team_read_messages\`。Team Policyを迂回しない。
 6. 記録した全execution IDについて\`team_wait_reports\`を繰り返し、終端reportを集める。
 
 # 復旧
 
+- \`execution_access_ceiling\`は現在の実行のread-only上限による拒否。子に編集を任せるにはManagerの雇用時\`writeCapable: true\`と自身への割当\`access: "workspace-write"\`が必要だと親Agentへ報告し、同じ設定で再試行しない。終端済みManagerへ再割当できるとは判断しない。
 - Connection/modelが利用不能なら同じ候補を再採用せず、\`team_list_models\`を更新して別候補を選ぶ。候補0件なら採用せず報告する。
 - Missionがwaiting_resumeなら部分成果を確認し、重複操作を避けられる場合だけ\`team_resume_mission\`をmissionId付きで呼ぶ。
 - 後続Turnで「Team must be active」なら\`team_get_status\`を確認する。completedでは終端済みの旧Workerは再利用できない。モデル再確認後に必要な新Workerを採用し、新しいWorkerの採用によって完了済みTeamは安全に再形成される。採用失敗だけを理由に「新しいTeamが必要」と判断してはならない。Team状態がfailedなどcompleted以外なら再形成できると判断せず、状態とエラーを報告する。
