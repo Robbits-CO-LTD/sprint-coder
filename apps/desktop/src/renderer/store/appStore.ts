@@ -183,6 +183,15 @@ type AppState = {
   attachmentCapabilityByTask: Record<string, ImageAttachmentCapability | undefined>;
   attachmentRequestRevisionByTask: Record<string, number | undefined>;
   attachmentBusyByTask: Record<string, boolean | undefined>;
+  attachmentReconciliationByTask: Record<
+    string,
+    | {
+        minimumRequestRevision: number;
+        status: 'loading' | 'error';
+        mutationError?: string;
+      }
+    | undefined
+  >;
   attachmentErrorByTask: Record<string, string | undefined>;
   attachmentAnnouncementByTask: Record<string, string | undefined>;
   skillCatalog: SkillCatalogItem[];
@@ -394,6 +403,16 @@ const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export const PERMISSION_CHANGE_PENDING_MESSAGE =
   '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。';
+
+export function attachmentDraftIsUnresolved(
+  state: Pick<AppState, 'attachmentBusyByTask' | 'attachmentReconciliationByTask'>,
+  taskId: string,
+): boolean {
+  return (
+    state.attachmentBusyByTask[taskId] === true ||
+    state.attachmentReconciliationByTask[taskId] !== undefined
+  );
+}
 
 function notifyPendingPermissionChange(state: AppState, taskId: string): boolean {
   if (state.permissionChangeByTask[taskId] === undefined) return false;
@@ -1183,6 +1202,27 @@ export const useAppStore = create<AppState>((set, get) => {
     };
   };
 
+  async function reconcileAttachmentMutation(
+    taskId: string,
+    mutationError?: string,
+  ): Promise<void> {
+    set((state) => ({
+      attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+      attachmentReconciliationByTask: {
+        ...state.attachmentReconciliationByTask,
+        // Mutations are single-flight until reconciliation finishes, so this monotonically
+        // increasing boundary also identifies the mutation across superseding Task hydrations.
+        [taskId]: {
+          minimumRequestRevision: (state.attachmentRequestRevisionByTask[taskId] ?? 0) + 1,
+          status: 'loading',
+          ...(mutationError === undefined ? {} : { mutationError }),
+        },
+      },
+      attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: mutationError },
+    }));
+    await get().refreshDraftAttachments(taskId);
+  }
+
   return {
     sprintCoderAvailable: typeof window !== 'undefined' && !!window.sprintCoder,
     initialized: false,
@@ -1211,6 +1251,7 @@ export const useAppStore = create<AppState>((set, get) => {
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
     attachmentBusyByTask: {},
+    attachmentReconciliationByTask: {},
     attachmentErrorByTask: {},
     attachmentAnnouncementByTask: {},
     skillCatalog: [],
@@ -2132,6 +2173,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
+      if (attachmentDraftIsUnresolved(get(), taskId)) return false;
       if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
@@ -2444,53 +2486,80 @@ export const useAppStore = create<AppState>((set, get) => {
       const api = window.sprintCoder?.attachments;
       if (!api) return;
       const revision = (get().attachmentRequestRevisionByTask[taskId] ?? 0) + 1;
-      set((state) => ({
-        attachmentRequestRevisionByTask: {
-          ...state.attachmentRequestRevisionByTask,
-          [taskId]: revision,
-        },
-      }));
+      const mutationRevision = get().attachmentReconciliationByTask[taskId]?.minimumRequestRevision;
+      set((state) => {
+        const recovery = state.attachmentReconciliationByTask[taskId];
+        return {
+          attachmentRequestRevisionByTask: {
+            ...state.attachmentRequestRevisionByTask,
+            [taskId]: revision,
+          },
+          attachmentReconciliationByTask:
+            recovery === undefined
+              ? state.attachmentReconciliationByTask
+              : {
+                  ...state.attachmentReconciliationByTask,
+                  [taskId]: { ...recovery, status: 'loading' },
+                },
+        };
+      });
       try {
         const [capability, attachments] = await Promise.all([
           api.capability(taskId),
           api.listDraft(taskId),
         ]);
         if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
-        set((state) => ({
-          attachmentCapabilityByTask: {
-            ...state.attachmentCapabilityByTask,
-            [taskId]: capability,
-          },
-          draftAttachmentsByTask: {
-            ...state.draftAttachmentsByTask,
-            [taskId]: attachments,
-          },
-          attachmentErrorByTask: {
-            ...state.attachmentErrorByTask,
-            [taskId]: undefined,
-          },
-        }));
+        set((state) => {
+          const recovery = state.attachmentReconciliationByTask[taskId];
+          const reconciled =
+            recovery !== undefined &&
+            recovery.minimumRequestRevision === mutationRevision &&
+            revision >= recovery.minimumRequestRevision;
+          return {
+            attachmentCapabilityByTask: {
+              ...state.attachmentCapabilityByTask,
+              [taskId]: capability,
+            },
+            draftAttachmentsByTask: { ...state.draftAttachmentsByTask, [taskId]: attachments },
+            attachmentReconciliationByTask: reconciled
+              ? { ...state.attachmentReconciliationByTask, [taskId]: undefined }
+              : state.attachmentReconciliationByTask,
+            attachmentErrorByTask: {
+              ...state.attachmentErrorByTask,
+              [taskId]: reconciled ? recovery.mutationError : undefined,
+            },
+          };
+        });
       } catch (error) {
         if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
-        set((state) => ({
-          attachmentErrorByTask: {
-            ...state.attachmentErrorByTask,
-            [taskId]: describeError(error),
-          },
-        }));
+        set((state) => {
+          const recovery = state.attachmentReconciliationByTask[taskId];
+          return {
+            attachmentErrorByTask: {
+              ...state.attachmentErrorByTask,
+              [taskId]: describeError(error),
+            },
+            attachmentReconciliationByTask:
+              recovery?.minimumRequestRevision === mutationRevision && recovery !== undefined
+                ? {
+                    ...state.attachmentReconciliationByTask,
+                    [taskId]: { ...recovery, status: 'error' },
+                  }
+                : state.attachmentReconciliationByTask,
+          };
+        });
       }
     },
 
     async pickDraftAttachment(taskId: string) {
       const api = window.sprintCoder?.attachments;
-      if (!api || get().attachmentBusyByTask[taskId]) return;
+      if (!api || attachmentDraftIsUnresolved(get(), taskId)) return;
       set((state) => ({
         attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
         attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
       }));
       try {
         const picked = await api.pick(taskId);
-        await get().refreshDraftAttachments(taskId);
         set((state) => ({
           attachmentAnnouncementByTask: {
             ...state.attachmentAnnouncementByTask,
@@ -2500,17 +2569,13 @@ export const useAppStore = create<AppState>((set, get) => {
                 : `${picked.fileName}を追加しました`,
           },
         }));
+        if (picked !== null) await reconcileAttachmentMutation(taskId);
+        else
+          set((state) => ({
+            attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+          }));
       } catch (error) {
-        set((state) => ({
-          attachmentErrorByTask: {
-            ...state.attachmentErrorByTask,
-            [taskId]: describeError(error),
-          },
-        }));
-      } finally {
-        set((state) => ({
-          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
-        }));
+        await reconcileAttachmentMutation(taskId, describeError(error));
       }
     },
 
@@ -2522,16 +2587,13 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async pasteDraftAttachment(taskId: string) {
       const api = window.sprintCoder?.attachments;
-      if (typeof api?.paste !== 'function' || get().attachmentBusyByTask[taskId]) return;
+      if (typeof api?.paste !== 'function' || attachmentDraftIsUnresolved(get(), taskId)) return;
       set((state) => ({
         attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
         attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
       }));
       try {
         const pasted = await api.paste(taskId);
-        // A null result means the OS clipboard held no image by the time Main looked. Nothing was
-        // added and nothing failed, so the draft list is left exactly as it was.
-        if (pasted !== null) await get().refreshDraftAttachments(taskId);
         set((state) => ({
           attachmentAnnouncementByTask: {
             ...state.attachmentAnnouncementByTask,
@@ -2541,23 +2603,19 @@ export const useAppStore = create<AppState>((set, get) => {
                 : `${pasted.fileName}を貼り付けました`,
           },
         }));
+        if (pasted !== null) await reconcileAttachmentMutation(taskId);
+        else
+          set((state) => ({
+            attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+          }));
       } catch (error) {
-        set((state) => ({
-          attachmentErrorByTask: {
-            ...state.attachmentErrorByTask,
-            [taskId]: describeError(error),
-          },
-        }));
-      } finally {
-        set((state) => ({
-          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
-        }));
+        await reconcileAttachmentMutation(taskId, describeError(error));
       }
     },
 
     async removeDraftAttachment(taskId: string, attachmentId: string) {
       const api = window.sprintCoder?.attachments;
-      if (!api || get().attachmentBusyByTask[taskId]) return false;
+      if (!api || attachmentDraftIsUnresolved(get(), taskId)) return false;
       set((state) => ({
         attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
         attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
@@ -2567,26 +2625,17 @@ export const useAppStore = create<AppState>((set, get) => {
           ({ id }) => id === attachmentId,
         )?.fileName;
         await api.remove({ taskId, attachmentId });
-        await get().refreshDraftAttachments(taskId);
         set((state) => ({
           attachmentAnnouncementByTask: {
             ...state.attachmentAnnouncementByTask,
             [taskId]: `${fileName ?? '画像'}を削除しました`,
           },
         }));
+        await reconcileAttachmentMutation(taskId);
         return true;
       } catch (error) {
-        set((state) => ({
-          attachmentErrorByTask: {
-            ...state.attachmentErrorByTask,
-            [taskId]: describeError(error),
-          },
-        }));
+        await reconcileAttachmentMutation(taskId, describeError(error));
         return false;
-      } finally {
-        set((state) => ({
-          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
-        }));
       }
     },
 
@@ -2672,6 +2721,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
       if (!text.trim() || !window.sprintCoder) return null;
+      if (attachmentDraftIsUnresolved(get(), taskId))
+        return '画像の準備が完了してから送信してください';
       if (notifyPendingPermissionChange(get(), taskId)) return null;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const selectedAttachmentIds = [...attachmentIds];

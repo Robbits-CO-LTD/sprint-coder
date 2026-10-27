@@ -24,6 +24,7 @@ beforeEach(() => {
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
     attachmentBusyByTask: {},
+    attachmentReconciliationByTask: {},
     attachmentErrorByTask: {},
     attachmentAnnouncementByTask: {},
   });

@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
-import { PERMISSION_CHANGE_PENDING_MESSAGE, useAppStore } from '../../store/appStore';
+import {
+  attachmentDraftIsUnresolved,
+  PERMISSION_CHANGE_PENDING_MESSAGE,
+  useAppStore,
+} from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
 import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X } from '../icons';
@@ -260,6 +264,9 @@ export function Composer({ taskId }: { taskId: string }) {
   const draftAttachments = useAppStore((s) => s.draftAttachmentsByTask[taskId]) ?? [];
   const attachmentCapability = useAppStore((s) => s.attachmentCapabilityByTask[taskId]);
   const attachmentBusy = useAppStore((s) => s.attachmentBusyByTask[taskId]) ?? false;
+  const attachmentReconciliation = useAppStore((s) => s.attachmentReconciliationByTask[taskId]);
+  const attachmentBlocked = attachmentBusy || attachmentReconciliation !== undefined;
+  const refreshDraftAttachments = useAppStore((s) => s.refreshDraftAttachments);
   const attachmentError = useAppStore((s) => s.attachmentErrorByTask[taskId]);
   const attachmentAnnouncement = useAppStore((s) => s.attachmentAnnouncementByTask[taskId]);
   const pickDraftAttachment = useAppStore((s) => s.pickDraftAttachment);
@@ -375,9 +382,11 @@ export function Composer({ taskId }: { taskId: string }) {
     () => ({
       ...(!goalSupported
         ? { goal: 'Goal設定に対応していません' }
-        : attachmentPolicy.goalBlocked
-          ? { goal: '画像を削除してからGoalを設定してください' }
-          : {}),
+        : attachmentBlocked
+          ? { goal: '画像の準備が完了してからGoalを設定してください' }
+          : attachmentPolicy.goalBlocked
+            ? { goal: '画像を削除してからGoalを設定してください' }
+            : {}),
       ...(!teamSupported ? { team: 'Teamビューに対応していません' } : {}),
       ...(runtime.kind === 'codex' && runtime.codexReadiness === 'ready'
         ? {}
@@ -390,6 +399,7 @@ export function Composer({ taskId }: { taskId: string }) {
     }),
     [
       attachmentPolicy.goalBlocked,
+      attachmentBlocked,
       goalSupported,
       runtime.codexReadiness,
       runtime.kind,
@@ -490,6 +500,7 @@ export function Composer({ taskId }: { taskId: string }) {
     actionPending: sending || turnActionPending !== null,
     sendBlocked:
       permissionChanging ||
+      attachmentBlocked ||
       goalControlPending ||
       projectSwitching ||
       attachmentPolicy.sendBlocked ||
@@ -534,7 +545,8 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleSend() {
-    if (goalStartPendingRef.current) return;
+    if (goalStartPendingRef.current || attachmentDraftIsUnresolved(useAppStore.getState(), taskId))
+      return;
     const raw = draft;
     if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
       return;
@@ -635,6 +647,7 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleInterrupt(): void {
+    if (attachmentDraftIsUnresolved(useAppStore.getState(), taskId)) return;
     const raw = draft;
     if (!raw.trim() || actionPolicy.interrupt.disabled) return;
     const text = composerMessageText(raw, imageRequested);
@@ -866,7 +879,7 @@ export function Composer({ taskId }: { taskId: string }) {
               <AttachmentDraftList
                 taskId={taskId}
                 attachments={draftAttachments}
-                busy={attachmentBusy}
+                busy={attachmentBlocked}
                 removeRefs={attachmentRemoveRefs}
                 onRemove={(attachmentId) => void handleRemoveAttachment(attachmentId)}
                 errorId={attachmentErrorId}
@@ -885,6 +898,23 @@ export function Composer({ taskId }: { taskId: string }) {
             {attachmentError && (
               <div id={attachmentErrorId} className="composer-attachment-error" role="alert">
                 {attachmentError}
+              </div>
+            )}
+            {attachmentBlocked && (
+              <div className="composer-attachment-error" role="status">
+                {attachmentBusy || attachmentReconciliation?.status === 'loading'
+                  ? '画像を準備しています。完了してから送信できます。'
+                  : '画像の状態を確認できません。再読み込みしてから送信してください。'}
+                {attachmentReconciliation && (
+                  <button
+                    type="button"
+                    className="cmp-chip"
+                    disabled={attachmentReconciliation.status === 'loading'}
+                    onClick={() => void refreshDraftAttachments(taskId)}
+                  >
+                    画像の状態を再読み込み
+                  </button>
+                )}
               </div>
             )}
             {operationError && (
@@ -939,8 +969,12 @@ export function Composer({ taskId }: { taskId: string }) {
             />
             <div className="composer-row">
               <PlusMenu
-                capabilityReason={attachmentPolicy.attachUnavailableReason ?? ''}
-                attachmentSupported={attachmentPolicy.attachSupported}
+                capabilityReason={
+                  attachmentBlocked
+                    ? '画像の準備が完了してから追加してください'
+                    : (attachmentPolicy.attachUnavailableReason ?? '')
+                }
+                attachmentSupported={attachmentPolicy.attachSupported && !attachmentBlocked}
                 errorId={attachmentErrorId}
                 triggerRef={plusTriggerRef}
                 onRequestAttachment={() => void pickDraftAttachment(taskId)}
@@ -965,9 +999,15 @@ export function Composer({ taskId }: { taskId: string }) {
                 <button
                   type="button"
                   className="cmp-chip"
-                  disabled={goalControlPending || attachmentPolicy.goalBlocked || turnActive}
+                  disabled={
+                    goalControlPending ||
+                    attachmentBlocked ||
+                    attachmentPolicy.goalBlocked ||
+                    turnActive
+                  }
                   title="この入力をGoalに戻します。開始するには送信してください"
                   onClick={() => {
+                    if (attachmentDraftIsUnresolved(useAppStore.getState(), taskId)) return;
                     goalModeRevisionRef.current += 1;
                     setDraft(taskId, draft);
                     updateImageRequested(false);
