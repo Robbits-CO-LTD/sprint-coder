@@ -910,6 +910,14 @@ std::string PolicyLanguageForWindowsExecutable(const std::wstring &path) {
   return "unknown";
 }
 
+std::string WindowsV2LabelTrimmed(std::string_view text);
+
+// Main rejects labels whose JavaScript trim is empty. Preserve all nonblank V1 bytes, including
+// surrounding whitespace, and share the V2 whitespace set only to detect the fallback (#947).
+std::string WindowsV1DisplayName(std::string_view display_name) {
+  return WindowsV2LabelTrimmed(display_name).empty() ? "Application" : std::string(display_name);
+}
+
 bool BuildLockedWindowsExecutableIdentity(HANDLE file,
                                           WindowsExecutableIdentity *output) {
   if (file == INVALID_HANDLE_VALUE || output == nullptr)
@@ -959,7 +967,7 @@ bool BuildLockedWindowsExecutableIdentity(HANDLE file,
              executable_digest,
              signer_digest,
              identity_digest,
-             display_name.empty() ? "Application" : display_name,
+             WindowsV1DisplayName(display_name),
              policy_language,
              microsoft_signer,
              file_identity};
@@ -4047,8 +4055,8 @@ std::string WindowsV2LabelTrimmed(std::string_view text) {
 }
 
 // The display name a v2 row carries: the V1 one trimmed as Main trims it, "Application" when nothing
-// is left (an executable named "<U+3000>.exe" or " .exe"). Only the v2 row; the V1 identity JSON is
-// unchanged.
+// is left (an executable named "<U+3000>.exe" or " .exe"). V1 keeps nonblank names byte for byte;
+// V2 trims their ends as well.
 std::string WindowsV2DisplayName(std::string_view display_name) {
   std::string trimmed = WindowsV2LabelTrimmed(display_name);
   return trimmed.empty() ? std::string("Application") : trimmed;
