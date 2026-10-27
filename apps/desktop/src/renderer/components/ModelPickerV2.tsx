@@ -548,6 +548,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLElement>) {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       close(true);

@@ -209,6 +209,81 @@ describe('ModelPickerV2 trigger name after a remount', () => {
   });
 });
 
+describe('ModelPickerV2 IME keyboard boundary', () => {
+  async function openChoices() {
+    const setModelSelection = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection });
+    query.mockResolvedValue(
+      catalogResult([
+        model({ modelId: 'sonnet', displayName: 'Sonnet' }),
+        model({ modelId: 'opus', displayName: 'Opus' }),
+      ]),
+    );
+    await renderPicker('ime');
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-trigger"]',
+    )!;
+    await act(async () => trigger.click());
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-testid="model-picker-v2-search"]',
+    )!;
+    return { trigger, input, setModelSelection };
+  }
+
+  it.each(['Enter', 'Escape', 'ArrowDown', 'ArrowUp', 'Home', 'End'])(
+    'leaves composing %s to the IME without selecting, moving or closing',
+    async (key) => {
+      const { input, setModelSelection } = await openChoices();
+      const active = input.getAttribute('aria-activedescendant');
+      const event = new KeyboardEvent('keydown', {
+        key,
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(event, 'keyCode', { value: 229 });
+      await act(async () => input.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(setModelSelection).not.toHaveBeenCalled();
+      expect(container.contains(input)).toBe(true);
+      expect(input.getAttribute('aria-activedescendant')).toBe(active);
+      expect(document.activeElement).toBe(input);
+    },
+  );
+
+  it('selects once with normal Arrow/Enter after composition and returns focus', async () => {
+    const { input, trigger, setModelSelection } = await openChoices();
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }),
+      ),
+    );
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })),
+    );
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith('task-a', {
+      connectionId: 'builtin:claude-cli',
+      requestedProvider: 'anthropic',
+      requestedModel: 'opus',
+    });
+    expect(container.contains(input)).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('closes without selecting on normal Escape', async () => {
+    const { input, trigger, setModelSelection } = await openChoices();
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(setModelSelection).not.toHaveBeenCalled();
+    expect(container.contains(input)).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+});
+
 describe('local catalog Provider-settings destination', () => {
   async function showLocalCatalog() {
     const trigger = container.querySelector<HTMLButtonElement>(
