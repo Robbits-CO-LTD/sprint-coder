@@ -54,6 +54,29 @@ function findBuild(): Build | null {
 
 // No target application is started. The real pipe's V1 start is held before OS I/O, then canceled.
 // The remaining reads name this process with a deliberately wrong identity and cannot reach focus.
+const nativeSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+
+function instrumentPendingHost(source: string): string {
+  const legacyOpen =
+    /OpenLockedProcessExecutable\(target_process\.value,\s*&process_executable\)/gu;
+  const workerOpen = /OpenLockedProcessExecutable\(target_process->value,\s*process_executable\)/gu;
+  expect([...source.matchAll(legacyOpen)]).toHaveLength(1);
+  expect([...source.matchAll(workerOpen)]).toHaveLength(1);
+  const conflictMarker = 'if (found != ledger.entries.end() && found->second->digest != digest) {';
+  expect(source.split(conflictMarker)).toHaveLength(2);
+  return source
+    .replace(legacyOpen, 'HoldStartOpen(target_process.value, &process_executable)')
+    .replace(workerOpen, 'HoldStartOpen(target_process->value, process_executable)')
+    .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();')
+    .replaceAll('CloseHandle(', 'TrackHandleClose(');
+}
+
+it('instruments both identity-read paths without depending on source line wrapping', () => {
+  const source = instrumentPendingHost(nativeSource);
+  expect(source).toContain('HoldStartOpen(target_process.value, &process_executable)');
+  expect(source).toContain('HoldStartOpen(target_process->value, process_executable)');
+});
+
 describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start terminal pipe', () => {
   it('closes only admitted owners and prevents queued V1 adoption without GUI input', ({
     skip,
@@ -66,22 +89,7 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
     }
     const root = mkdtempSync(join(tmpdir(), 'sc-pending-start-'));
     try {
-      const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
-      const legacyOpen = 'OpenLockedProcessExecutable(target_process.value, &process_executable)';
-      const workerOpen = 'OpenLockedProcessExecutable(target_process->value, process_executable)';
-      expect(source.split(legacyOpen)).toHaveLength(2);
-      expect(source.split(workerOpen)).toHaveLength(2);
-      const conflictMarker =
-        'if (found != ledger.entries.end() && found->second->digest != digest) {';
-      expect(source.split(conflictMarker)).toHaveLength(2);
-      writeFileSync(
-        join(root, 'pending-host.cc'),
-        source
-          .replace(legacyOpen, 'HoldStartOpen(target_process.value, &process_executable)')
-          .replace(workerOpen, 'HoldStartOpen(target_process->value, process_executable)')
-          .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();')
-          .replaceAll('CloseHandle(', 'TrackHandleClose('),
-      );
+      writeFileSync(join(root, 'pending-host.cc'), instrumentPendingHost(nativeSource));
       const file = join(root, 'seam.cc'),
         binary = join(root, 'seam.exe');
       writeFileSync(file, program);
