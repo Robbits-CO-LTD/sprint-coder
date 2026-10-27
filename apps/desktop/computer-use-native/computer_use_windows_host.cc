@@ -5224,7 +5224,7 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
   }
   WindowsV2StartLease lease{pending};
   try {
-    std::thread([pending, input] {
+    std::thread([pending, input]() mutable {
       bool adopted = false;
       {
         ScopedKernelHandle target_process;
@@ -5290,6 +5290,7 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
         return;
       }
       // Rejected candidates are closed on this worker before another measurement can begin.
+      input.start_lease.reset();
       {
         std::lock_guard lock(pending->mutex);
         pending->ready = true;

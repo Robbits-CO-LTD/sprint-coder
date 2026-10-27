@@ -101,8 +101,8 @@ function instrumentedHost(): string {
   );
   newStart = replaceOnce(
     newStart,
-    '    std::thread([pending, input] {',
-    '    Sc940StartWorkerAttempt();\n    std::thread([pending, input] {',
+    '    std::thread([pending, input]() mutable {',
+    '    Sc940StartWorkerAttempt();\n    std::thread([pending, input]() mutable {',
   );
   newStart = replaceOnce(
     newStart,

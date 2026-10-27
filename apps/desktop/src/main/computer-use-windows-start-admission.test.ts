@@ -94,6 +94,12 @@ describe('Windows native start ownership table', () => {
             'struct WindowsStartRegistry {',
             'std::atomic<bool> &WindowsTargetListWorkerRunning() {',
           ) +
+          retirementPreamble +
+          cut(
+            '// Rejected candidates are closed on this worker before another measurement can begin.',
+            '    }).detach();',
+          ) +
+          '\n}\n' +
           driver,
       );
       const compiled = spawnSync(build.file, build.args, {
@@ -123,6 +129,7 @@ const preamble = String.raw`
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 constexpr std::size_t kMaximumCachedResponses=256;
@@ -132,6 +139,18 @@ struct WindowsTargetListState {
   std::shared_ptr<int> context_candidate;
 };
 WindowsTargetListState& WindowsTargetListControl(){static auto* state=new WindowsTargetListState;return *state;}
+`;
+// Execute the production rejection-publication tail with its real start lease. The notifier
+// parks the worker after idle publication but before the captured/argument lease can destruct.
+const retirementPreamble = String.raw`
+std::atomic<bool>& WindowsTargetListWorkerRunning(){static std::atomic<bool> running{true};return running;}
+struct RetirementNotification {
+  std::atomic<bool> entered{false}, release{false};
+  void notify_one(){entered.store(true,std::memory_order_release);while(!release.load(std::memory_order_acquire))std::this_thread::yield();}
+};
+struct RetirementPending { std::mutex mutex; bool ready=false; RetirementNotification changed; };
+struct RetirementInput { std::shared_ptr<WindowsStartLease> start_lease; };
+void PublishRejectedStart(RetirementInput input,std::shared_ptr<RetirementPending> pending) {
 `;
 const driver = String.raw`
 void Check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
@@ -191,6 +210,21 @@ int main(){
   Check(!LatchWindowsPendingStop(keyA,"a"),"old SID cannot stop replacement");
   {auto late=std::make_shared<WindowsStartLease>(old);Check(!ClaimWindowsStartInput(late),"late old owner cannot adopt");}
   Check(registry.input_owner==fresh->owner,"late lease cannot clear replacement");
+  // Isolate the retirement phase only after every earlier attempt has released its lease.
+  fresh.reset();b.reset();rest.clear();
+  for(const auto& entry:registry.owners)Check(entry.second->pending_requests.load()==0,"prior leases released");
+  registry.owners.clear();registry.keys_by_id.clear();registry.order.clear();registry.last_input_owner.reset();
+  auto retiring=AdmitWindowsStart(std::string(16,'q'),"retiring","r",digest,&reason);
+  Check(retiring&&ClaimWindowsStartInput(retiring),"retiring owner claimed");
+  auto pending=std::make_shared<RetirementPending>();
+  std::thread worker([lease=std::move(retiring),pending]() mutable {PublishRejectedStart({std::move(lease)},pending);});
+  while(!pending->changed.entered.load(std::memory_order_acquire))std::this_thread::yield();
+  const bool idle=!WindowsTargetListWorkerRunning().load(std::memory_order_acquire);
+  bool released=false;{std::lock_guard lock(WindowsTargetListControl().stop_mutex);released=registry.input_owner==nullptr;}
+  auto next=AdmitWindowsStart(std::string(16,'r'),"next","r",digest,&reason);
+  const bool claimed=next&&ClaimWindowsStartInput(next);
+  pending->changed.release.store(true,std::memory_order_release);worker.join();
+  Check(idle&&released&&claimed,"idle publication must release the last input lease first");
   std::cout<<"PASS: opaque binding, replay, owner stop, capacity, late lease\n";
 }
 `;
