@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#F4A261"/>
+<g stroke="#264653" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+<polygon points="120,185 140,125 170,175" fill="#E76F51"/>
+<polygon points="160,165 190,95 225,160" fill="#E76F51"/>
+<polygon points="215,160 250,90 280,165" fill="#E76F51"/>
+<polygon points="268,172 300,112 325,185" fill="#E76F51"/>
+<path d="M300 200 Q350 215 375 190 Q365 250 305 275 Z" fill="#6BAA75"/>
+<polygon points="352,205 372,160 382,200" fill="#FFFFFF"/>
+<polygon points="335,225 365,235 345,260" fill="#FFFFFF"/>
+<rect x="125" y="270" width="40" height="70" rx="16" fill="#6BAA75"/>
+<rect x="245" y="270" width="40" height="70" rx="16" fill="#6BAA75"/>
+<ellipse cx="205" cy="240" rx="110" ry="65" fill="#6BAA75"/>
+<path d="M120 255 Q205 295 290 255 Q280 285 205 292 Q130 285 120 255 Z" fill="#CDE8C5" stroke="none"/>
+<path d="M115 215 Q70 205 50 235 Q45 265 85 270 Q115 270 125 250 Z" fill="#6BAA75"/>
+<circle cx="80" cy="232" r="9" fill="#FFFFFF"/>
+<circle cx="78" cy="233" r="3" fill="#264653" stroke="none"/>
+<path d="M62 255 Q80 262 98 254" fill="none"/>
+</g>
+</svg>

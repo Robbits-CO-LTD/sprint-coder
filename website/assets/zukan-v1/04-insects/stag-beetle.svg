@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#C1E1A6"/>
+<ellipse cx="200" cy="220" rx="77" ry="112" fill="#263D35" stroke="#172923" stroke-width="7"/>
+<ellipse cx="200" cy="233" rx="59" ry="88" fill="#3E6B4E" stroke="#172923" stroke-width="6"/>
+<path d="M200 153v162" fill="none" stroke="#A6C979" stroke-width="5"/>
+<ellipse cx="200" cy="127" rx="47" ry="40" fill="#263D35" stroke="#172923" stroke-width="7"/>
+<path d="M168 133 C145 119 137 91 148 74 C157 62 167 77 166 91 C165 106 176 108 184 117" fill="none" stroke="#172923" stroke-width="12" stroke-linecap="round"/>
+<path d="M232 133 C255 119 263 91 252 74 C243 62 233 77 234 91 C235 106 224 108 216 117" fill="none" stroke="#172923" stroke-width="12" stroke-linecap="round"/>
+<path d="M168 133 C150 119 146 98 151 83 M232 133 C250 119 254 98 249 83" fill="none" stroke="#A6C979" stroke-width="5" stroke-linecap="round"/>
+<circle cx="183" cy="126" r="6" fill="#F4D35E" stroke="#172923" stroke-width="3"/>
+<circle cx="217" cy="126" r="6" fill="#F4D35E" stroke="#172923" stroke-width="3"/>
+<path d="M135 190l-40-25-22 8 42 47 M265 190l40-25 22 8-42 47 M132 246l-46 12-14 24 58-1 M268 246l46 12 14 24-58-1 M151 293l-26 38 5 20 42-45 M249 293l26 38-5 20-42-45" fill="#3E6B4E" stroke="#172923" stroke-width="8" stroke-linejoin="round" stroke-linecap="round"/>
+<ellipse cx="179" cy="204" rx="17" ry="27" fill="#A6C979" opacity=".8"/>
+</svg>

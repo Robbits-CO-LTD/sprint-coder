@@ -637,8 +637,16 @@ describe('CommandRunner', () => {
             `const net=require('node:net'); const socket=net.connect(${address.port},'127.0.0.1'); socket.once('connect',()=>process.exit(42)); socket.once('error',()=>process.exit(7)); setTimeout(()=>process.exit(8),2000).unref();`,
           ],
         });
-        const result = await new CommandRunner({ sandboxed: true }).run(spec);
-        expect(result.exitCode).toBe(7);
+        let stderr = '';
+        const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+          onChunk: (chunk) => {
+            if (chunk.stream === 'stderr') stderr = (stderr + chunk.text).slice(-4096);
+          },
+        });
+        const failure = /(landlocked|sandbox) exec failed:.*\(os error (\d+)\)/u.exec(stderr);
+        expect(result.exitCode, JSON.stringify({ stage: failure?.[1], errno: failure?.[2] })).toBe(
+          7,
+        );
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
@@ -1544,6 +1552,60 @@ describe('CommandRunner', () => {
       expect(startedImage).toEqual({
         digest: createHash('sha256').update(approvedBytes).digest('hex'),
         identity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'linux').each([false, true])(
+    'runs sealed mutable Node and descendants inside the PID namespace (shebang=%s)',
+    async (script) => {
+      expect((await probeSandboxRunner()).available).toBe(true);
+      const root = await workspace();
+      const node = join(root, 'node');
+      await copyFile(process.execPath, node);
+      await chmod(node, 0o700);
+      const scriptPath = join(root, 'command.js');
+      const body = `
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const child = cp.spawnSync(process.execPath, ['-e', 'process.stdout.write("approved-child")'], { encoding: 'utf8' });
+const denied = [];
+for (const action of [() => fs.chmodSync(process.execPath, 0o700), () => fs.writeFileSync(process.execPath, 'changed'), () => fs.unlinkSync(process.execPath)]) {
+  try { action(); denied.push(false); } catch { denied.push(true); }
+}
+const mount = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\\n').find(line => line.split(' ')[4] === '/dev/sprint-coder-execution');
+const leaked = fs.readdirSync('/proc/self/fd').some(fd => { try { return fs.readlinkSync('/proc/self/fd/' + fd).includes('memfd:sprint-coder-execution'); } catch { return false; } });
+console.log(JSON.stringify({ childExit: child.status, child: child.stdout, denied, ro: mount?.split(' ')[5].split(',').includes('ro'), leaked, args: process.argv.slice(${script ? 2 : 1}) }));
+`;
+      if (script) {
+        await writeFile(scriptPath, `#!${node}\n${body}`);
+        await chmod(scriptPath, 0o700);
+      }
+      const args = ['--sealed-images', '--', '/proc/123/fd/9'];
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: script ? scriptPath : node,
+        argv: script ? args : ['-e', body, '--', ...args],
+      });
+      let output = '';
+      const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+        beforeSpawn: () => {
+          renameSync(node, `${node}.original`);
+          writeFileSync(node, 'unapproved replacement', { mode: 0o700 });
+          if (script) writeFileSync(scriptPath, '#!/bin/sh\necho unapproved replacement\n');
+        },
+        onChunk: (chunk) => {
+          if (chunk.stream === 'stdout') output += chunk.text;
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(output.trim())).toEqual({
+        childExit: 0,
+        child: 'approved-child',
+        denied: [true, true, true],
+        ro: true,
+        leaked: false,
+        args,
       });
     },
   );

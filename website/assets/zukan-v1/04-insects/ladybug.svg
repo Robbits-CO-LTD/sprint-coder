@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#C1E1A6"/>
+<path d="M40 350 Q200 300 360 350" fill="none" stroke="#5E9B3C" stroke-width="6" stroke-linecap="round"/>
+<line x1="150" y1="95" x2="125" y2="55" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="250" y1="95" x2="275" y2="55" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<circle cx="123" cy="52" r="9" fill="#222222" stroke="#222222" stroke-width="6"/>
+<circle cx="277" cy="52" r="9" fill="#222222" stroke="#222222" stroke-width="6"/>
+<line x1="95" y1="230" x2="55" y2="250" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="305" y1="230" x2="345" y2="250" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="105" y1="290" x2="65" y2="325" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="295" y1="290" x2="335" y2="325" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="100" y1="170" x2="60" y2="160" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<line x1="300" y1="170" x2="340" y2="160" stroke="#222222" stroke-width="6" stroke-linecap="round"/>
+<ellipse cx="200" cy="235" rx="110" ry="115" fill="#E53935" stroke="#222222" stroke-width="6"/>
+<path d="M200 120 L200 350" fill="none" stroke="#222222" stroke-width="6"/>
+<path d="M115 110 Q200 55 285 110 Q285 150 255 150 Q200 130 145 150 Q115 150 115 110 Z" fill="#222222" stroke="#222222" stroke-width="6" stroke-linejoin="round"/>
+<circle cx="172" cy="108" r="14" fill="#FFFFFF" stroke="#222222" stroke-width="4"/>
+<circle cx="228" cy="108" r="14" fill="#FFFFFF" stroke="#222222" stroke-width="4"/>
+<circle cx="175" cy="110" r="6" fill="#222222"/>
+<circle cx="225" cy="110" r="6" fill="#222222"/>
+<circle cx="150" cy="215" r="20" fill="#222222"/>
+<circle cx="250" cy="215" r="20" fill="#222222"/>
+<circle cx="140" cy="285" r="16" fill="#222222"/>
+<circle cx="260" cy="285" r="16" fill="#222222"/>
+<circle cx="170" cy="325" r="11" fill="#222222"/>
+<circle cx="230" cy="325" r="11" fill="#222222"/>
+<path d="M150 180 Q135 160 120 175" fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+</svg>

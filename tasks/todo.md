@@ -1,3 +1,31 @@
+## Issue #940 — 既存V2 sessionのresume/refocus測定隔離（2026-10-25）
+
+成果: 既存V2 sessionの再開・承認後refocusで、focus前後の本人性I/Oが停止してもCancel/Closeを待たせない。baseはmain `1405f753`。Windows実機はMSIPCのCodexへ依頼し、OS設定を変更しない。以下は実装計画であり、実行結果はIssue/PRと検証記録で更新する。
+
+原因確認: 診断`5705ac4d`で、実owned sibling・実list・実HANDLEのidentity/Admit baselineを確認後、同一sessionへの実resume要求のlegacy exe openを保留。MSIPCではreaderは進んでも1,000ms後にCancel receipt未着で、解除後16msでreal openとsession_start_canceled、Cancel/Closeが回復。resolver/focus/input試行0。正常resume/grant/foreground受入ではない。
+
+変更の境界:
+
+- 既存V2 sessionだけ専用経路へ分ける。入力の構文、ruleset、既存sessionへのbinding、最新一覧generationを既存resumeに要求しない条件を維持する。V1と新規V2 startは既存経路のままとする。
+- 測定はfocus前とfocus後の2段階。前段は実process/exe open、path、署名・core admission、作成時刻、Sessionとのprocess/FileId/digest/signer/language比較を行う。後段も実process生存・PID・作成時刻と保持FileIdを再読し、前段identityのdigest/signer/languageと比較する。後段の再読を前段へまとめず、旧後段に無いpath再読も追加しない。
+- workerへは値snapshotと所有するprocess/exe HANDLE複製だけを渡す。前段の候補HANDLEは実Session FileIdとの照合完了後にworker内で閉じ、pure identityを返す。元SessionのexeはGENERIC_READ/FILE_SHARE_READで引き続き保持され、resolverはHANDLEを書き換えず、Closeは同じconsumerのframe終了後に処理されるため、同じfileのwrite/delete拒否がfocus中も継続する。後段でも実Session HANDLEを複製して再読する。無効HANDLEを有効扱いするLockedWindowsExecutableを作らない。
+- 各phaseはjob専用threadを使い、既存の共有測定slotは同時1件に保つ。再開1回につき最大2 measurement jobsとし、入力scalarごとの処理には追加しない。COM・一時/複製HANDLE・取消し用thread aliasを片付けてからslotを戻し、pure結果を公開する。中断不能なjobはslotを保持し、追加測定を拒否する。
+- pendingがjob固有のthread HANDLEを所有・保護し、取消しとalias撤去を同じpending mutexで順序付ける。取消しはbest effortとし、終了解放の証明にはしない。consumerの結果採用はpending→stop mutex下でsession/epoch/frame enqueue serial/Mainを照合する。readerはstop mutexだけを取る。
+- cold context・署名取得も前段worker内へ置く。完成context候補はconsumerだけが同じStop確認区間で空cacheへ採用する。判定結果を別requestへcacheせず、遅い結果・未完成contextは採用しない。
+- geometry、explicit resumeのdialog選択・revision/observation更新、refocus対象、ticket、入力counterはconsumerが所有する。既存sessionが見つかった再開要求は測定前にticketを失効させ、epoch/Stopの早期拒否でも残さない。同じsession epochとenqueue serialを両phaseへ束縛し、各focus API単位の開始と最終応答をreaderのStopと同じstop mutexで順序付ける。Close-onlyとconsumer開始前のqueued Stopも対象にする。OS API呼出し中はmutexを保持しない。
+
+検証条件:
+
+- 元の実resume/実open gateでCancel単独、Close-only、prequeued Stopが1秒未満で応答し、遅い成功をfocus/最終成功へ採用しない。
+- 元SessionをCloseした後もworkerのdupによる実測が成立し、cleanup後の明示retryだけが通る。古いpendingの取消しが後続jobへ作用しない。
+- 後段の実FileId gateでも、保留中のCancel/Close receiptが1秒未満で返り、解除後の遅い成功を最終resume成功へ採用しないことを要求する。不一致/実read失敗と、前後の両方が毎回実行されることも確認する。MSIPCはforeground不要のcomponent経路、Windows CIは実resume全体の後段gateを検証し、証拠範囲を区別する。MSIPCのforeground未達を成功へ置換しない。
+- Windows CIでは所有fixtureの正常resumeとrefocusを実経路で確認し、foreg前提を満たせない実機のcomponent証拠と区別する。focus後の本人性不一致、単位間Stop、cold context取消しも検証する。
+- 既存31ケース、V1/新V2の境界test、type/lint、独立review、固定headのMSIPC/CI/ReviewBOT、merge後main CIを確認する。
+
+非対象: V1 picker/list_windows/start、window/dialog/UIA呼出そのものの期限、Controller開始中Stop、公開V2有効化、新期限・helper再起動・実Provider・OS設定変更。#940全体は残件を維持する。
+
+---
+
 ## Issue #940 — V2対象再判定の同期I/O隔離（2026-10-25）
 
 成果: `RejudgeWindowsV2Session`の測定が止まっても、後続のCancel/Closeが1秒の応答予算内に返る。本人性・許可範囲の再判定は毎回行い、結果をキャッシュしない。baseはmain `e73e0314`、Windows実機検証はMSIPCのCodexへ依頼する。

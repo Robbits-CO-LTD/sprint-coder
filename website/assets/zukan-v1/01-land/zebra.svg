@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#F6D365"/>
+<!-- flowing tail -->
+<path d="M272 221 Q324 236 340 276 Q347 293 334 301 Q321 307 316 290 Q308 269 277 267" fill="#171717" stroke="#171717" stroke-width="6" stroke-linecap="round"/>
+<path d="M336 286 Q354 295 359 310 Q343 306 332 300" fill="#171717"/>
+<!-- legs -->
+<path d="M139 247 L132 329 Q130 347 147 347 L159 346 L169 253 M222 251 L226 329 Q226 347 244 347 L257 345 L253 244 M274 237 L293 319 Q298 338 314 331 L325 326 L298 226" fill="#fffdf7" stroke="#171717" stroke-width="7" stroke-linejoin="round"/>
+<!-- leg stripes -->
+<path d="M135 289 L163 286 M132 310 L160 307 M132 330 L158 328 M226 285 L259 282 M226 307 L260 304 M230 329 L258 326 M285 270 L307 267 M292 292 L314 288 M299 314 L321 310" fill="none" stroke="#171717" stroke-width="8" stroke-linecap="round"/>
+<!-- body -->
+<ellipse cx="205" cy="212" rx="103" ry="71" fill="#fffdf7" stroke="#171717" stroke-width="8"/>
+<!-- bold body stripes -->
+<path d="M128 160 Q143 171 157 183 L145 267 Q132 260 121 249 Z M166 147 Q181 157 194 169 L183 282 Q169 280 156 274 Z M207 141 Q221 151 236 163 L230 283 Q214 284 198 282 Z M249 151 Q264 160 279 173 L288 253 Q276 266 260 275 L266 182 Z" fill="#171717"/>
+<!-- neck -->
+<path d="M245 190 Q261 137 270 103 Q276 81 297 83 L326 98 Q340 106 332 122 L292 202" fill="#fffdf7" stroke="#171717" stroke-width="8" stroke-linejoin="round"/>
+<path d="M263 153 L299 169 L291 189 L254 177 Z M273 124 L313 142 L305 163 L267 147 Z M282 96 L321 115 L314 135 L278 118 Z" fill="#171717"/>
+<!-- head and muzzle -->
+<path d="M292 91 Q297 57 326 53 Q350 50 360 72 L374 102 Q379 115 365 121 L337 130 L315 116 Z" fill="#fffdf7" stroke="#171717" stroke-width="8" stroke-linejoin="round"/>
+<path d="M334 61 L350 83 L335 98 L321 75 Z M354 83 L371 104 L349 111 L339 95 Z" fill="#171717"/>
+<ellipse cx="367" cy="112" rx="17" ry="12" fill="#171717"/>
+<circle cx="348" cy="75" r="5" fill="#171717"/>
+<!-- ears and mane -->
+<path d="M305 59 L293 35 Q310 40 322 58 M327 54 L333 29 Q344 42 342 61" fill="#fffdf7" stroke="#171717" stroke-width="6" stroke-linejoin="round"/>
+<path d="M270 105 Q270 78 291 65 L300 83 Q284 92 280 111 Z" fill="#171717" stroke="#171717" stroke-width="5"/>
+<!-- cheerful cheek -->
+<circle cx="342" cy="103" r="5" fill="#F27B54"/>
+</svg>

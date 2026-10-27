@@ -178,11 +178,15 @@ describe('managed command policy changes (issue #885)', () => {
           executable:
             process.platform === 'win32'
               ? join(getTrustedWindowsSystemDirectory(), 'cmd.exe')
-              : '/bin/echo',
+              : process.platform === 'linux'
+                ? '/bin/sh'
+                : '/bin/echo',
           argv:
             process.platform === 'win32'
               ? ['/d', '/s', '/c', 'echo policy-command-ok']
-              : ['policy-command-ok'],
+              : process.platform === 'linux'
+                ? ['-c', "printf 'policy-command-ok\\n'"]
+                : ['policy-command-ok'],
           purpose: 'verify command execution after a policy change',
         },
       });
