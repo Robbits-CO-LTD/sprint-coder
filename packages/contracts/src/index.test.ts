@@ -1023,22 +1023,29 @@ describe('public contracts', () => {
       discardable: true,
       blockedReason: null,
     } as const;
-    expect(teamRetainedWorktreeListSchema.parse({ worktrees: [worktree], total: 1 })).toEqual({
+    expect(
+      teamRetainedWorktreeListSchema.parse({ worktrees: [worktree], total: 1, nextCursor: null }),
+    ).toEqual({
       worktrees: [worktree],
       total: 1,
+      nextCursor: null,
     });
     const blocked = {
       ...worktree,
       discardable: false,
       blockedReason: '実行がまだ終わっていません',
     };
-    expect(teamRetainedWorktreeListSchema.parse({ worktrees: [blocked], total: 3 }).total).toBe(3);
+    expect(
+      teamRetainedWorktreeListSchema.parse({ worktrees: [blocked], total: 3, nextCursor: null })
+        .total,
+    ).toBe(3);
     const integrated = { ...worktree, integratedHead: 'b'.repeat(40) };
     for (const integration of ['confirmed', 'unconfirmed'] as const)
       expect(
         teamRetainedWorktreeListSchema.safeParse({
           worktrees: [{ ...integrated, integration }],
           total: 1,
+          nextCursor: null,
         }).success,
       ).toBe(true);
     // A discardable row never carries a reason, and a blocked one always does; an integration is
@@ -1049,16 +1056,22 @@ describe('public contracts', () => {
       { ...worktree, integration: 'confirmed' },
       { ...integrated, integration: 'none' },
     ])
-      expect(teamRetainedWorktreeListSchema.safeParse({ worktrees: [row], total: 1 }).success).toBe(
-        false,
-      );
+      expect(
+        teamRetainedWorktreeListSchema.safeParse({ worktrees: [row], total: 1, nextCursor: null })
+          .success,
+      ).toBe(false);
     expect(
-      teamRetainedWorktreeListSchema.safeParse({ worktrees: [worktree], total: 0 }).success,
+      teamRetainedWorktreeListSchema.safeParse({
+        worktrees: [worktree],
+        total: 0,
+        nextCursor: null,
+      }).success,
     ).toBe(false);
     expect(
       teamRetainedWorktreeListSchema.safeParse({
         worktrees: Array.from({ length: TEAM_RETAINED_WORKTREE_LIST_LIMIT + 1 }, () => worktree),
         total: TEAM_RETAINED_WORKTREE_LIST_LIMIT + 1,
+        nextCursor: null,
       }).success,
     ).toBe(false);
 

@@ -62,6 +62,7 @@ export type {
   TeamExecutionIsolation,
   TeamMissionSummary,
   TeamRetainedWorktree,
+  TeamRetainedWorktreeCursor,
   TeamRetainedWorktreeList,
   TeamRetainedWorktreeInspection,
   TeamRetainedWorktreeRef,
