@@ -220,6 +220,34 @@ describe('ModelPickerV2 next-page recovery', () => {
     expect(count()).toBe('100件中100件を読み込み済み');
   });
 
+  it('keeps loading distinct from empty during first-page search debounce', async () => {
+    vi.useFakeTimers();
+    showSelection(null);
+    query.mockReturnValue(new Promise(() => {}));
+    await renderPicker('debounce');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    await changeSearch('pending');
+    expect(count()).toBe('検索中');
+    expect(container.textContent).not.toContain('一致するモデルがありません');
+    expect(container.textContent).not.toContain('プロバイダー接続を追加');
+  });
+
+  it('dismisses the popup with Escape from the retry button and restores focus', async () => {
+    await failNext();
+    retry()!.focus();
+    await act(async () =>
+      retry()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="model-picker-v2-trigger"]'),
+    );
+  });
+
   it('retains the same retry after a repeated failure and replaces changed catalog revisions', async () => {
     await failNext();
     query.mockRejectedValueOnce(new Error('still unavailable'));
@@ -229,6 +257,7 @@ describe('ModelPickerV2 next-page recovery', () => {
     await act(async () => button.click());
     expect(count()).toBe('100件中50件を読み込み済み');
     expect(document.activeElement).toBe(button);
+    query.mockResolvedValueOnce({ ...catalogResult([]), revision: 2, total: 2 });
     query.mockResolvedValueOnce({
       ...catalogResult([
         model({ connectionId: 'connection-one', modelId: 'same', displayName: 'Fresh one' }),
@@ -238,6 +267,7 @@ describe('ModelPickerV2 next-page recovery', () => {
     });
     await act(async () => button.click());
     expect(count()).toBe('2件中2件を読み込み済み');
+    expect(query.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ cursor: null }));
     expect(container.textContent).toContain('Fresh one');
     expect(container.textContent).toContain('Fresh two');
     expect(retry()).toBeNull();
@@ -253,7 +283,7 @@ describe('ModelPickerV2 next-page recovery', () => {
   }
 
   it.each(['search', 'access', 'reopen', 'unmount'] as const)(
-    'ignores stale retry success and failure after %s',
+    'ignores stale retry success after %s',
     async (change) => {
       vi.useFakeTimers();
       await failNext();
@@ -372,7 +402,8 @@ describe('ModelPickerV2 active option after manual scroll', () => {
     const row = document.getElementById(id!);
     expect(row).not.toBeNull();
     expect(row?.classList.contains('active')).toBe(true);
-    expect(container.querySelectorAll('[role="option"]').length).toBeLessThanOrEqual(10);
+    // Fractional scrolling can mount two partial edge rows plus the fixed overscan.
+    expect(container.querySelectorAll('[role="option"]').length).toBeLessThanOrEqual(11);
     return row;
   }
   it('keeps the visible active row, ARIA reference and Enter selection aligned without pulling scroll back', async () => {
@@ -390,6 +421,19 @@ describe('ModelPickerV2 active option after manual scroll', () => {
     );
     expect(document.activeElement).toBe(trigger);
   });
+  it('selects a fully visible row when scrolling leaves only one pixel of the old row', async () => {
+    const { input, list, setModelSelection } = await openMany();
+    await scrollTo(list, 44 + 45 / 46);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-45');
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith(
+      'task-a',
+      expect.objectContaining({ requestedModel: 'model-45' }),
+    );
+  });
+
   it('continues Arrow/Home/End navigation from the visible row through both scroll directions', async () => {
     const { input, list } = await openMany();
     await scrollTo(list, 44);

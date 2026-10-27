@@ -362,17 +362,17 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   });
   // Manual scrolling can unmount the preferred row. Derive one visible active index for
   // highlighting, ARIA and keyboard actions, without moving the user's scroll position.
-  const visible = virtualRange({
-    itemCount: page.items.length,
-    scrollTop,
-    viewportHeightPx: MODEL_LIST_VIEWPORT_PX,
-    rowHeightPx: MODEL_ROW_HEIGHT_PX,
-    overscanRows: 0,
-  });
-  const activeIndex = Math.max(
-    visible.startIndex,
-    Math.min(preferredActiveIndex, visible.endIndex - 1),
+  const visibleOffset = Math.max(
+    0,
+    Math.min(scrollTop, page.items.length * MODEL_ROW_HEIGHT_PX - MODEL_LIST_VIEWPORT_PX),
   );
+  const firstVisible = Math.ceil(visibleOffset / MODEL_ROW_HEIGHT_PX);
+  const lastVisible =
+    Math.min(
+      page.items.length,
+      Math.floor((visibleOffset + MODEL_LIST_VIEWPORT_PX) / MODEL_ROW_HEIGHT_PX),
+    ) - 1;
+  const activeIndex = Math.max(firstVisible, Math.min(preferredActiveIndex, lastVisible));
   const active = page.items[activeIndex];
   // Which provider band the scrollport is on. Derived from `scrollTop` rather than stored, so it
   // follows both wheel scrolling and keyboard movement (which scrolls through the same state)
@@ -418,15 +418,24 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       try {
         const models = window.sprintCoder?.models;
         if (typeof models?.query !== 'function') throw new Error('Model catalog unavailable');
-        const result: ModelCatalogQueryResult = await models.query(
+        let result: ModelCatalogQueryResult = await models.query(
           catalogQuery({ taskId, text: searchText, accessType: access, cursor }),
         );
         if (queryRef.current !== request) return;
+        // Main's cursor is an offset, not a snapshot. If the catalog changed, its old offset can
+        // omit the new first page (or falsely look empty), so restart the same query at the top.
+        const restarted = cursor !== null && result.revision !== revisionRef.current;
+        if (restarted) {
+          result = await models.query(
+            catalogQuery({ taskId, text: searchText, accessType: access, cursor: null }),
+          );
+          if (queryRef.current !== request) return;
+        }
         // Appending is only meaningful inside one catalog revision: a catalog that changed under
         // the cursor makes the offsets the cursor encodes meaningless, so the honest move is to
         // take the new page as the whole list rather than splice two revisions into one that never
         // existed.
-        const replace = cursor === null || result.revision !== revisionRef.current;
+        const replace = cursor === null || restarted;
         revisionRef.current = result.revision;
         nextCursorRef.current = result.nextCursor;
         setPage((current) => ({
@@ -687,11 +696,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // The first page of a search (typing, or switching API/サブスク/ローカル) has nothing to show
   // yet, so the wait is drawn as a spinner in the middle of the empty list. The count line keeps
   // saying 検索中 for screen readers only — on screen the spinner already says it.
-  const searching = !failed && loading && page.items.length === 0;
-  const countMessage = failed
-    ? 'モデル一覧を取得できませんでした'
-    : searching
-      ? '検索中'
+  const searching = (loading || text !== query) && page.items.length === 0;
+  const countMessage = searching
+    ? '検索中'
+    : failed
+      ? 'モデル一覧を取得できませんでした'
       : `${page.total}件中${page.items.length}件を読み込み済み`;
 
   return (
@@ -848,7 +857,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               </div>
             )}
           </div>
-          {page.items.length === 0 && !loading && (
+          {page.items.length === 0 && !loading && text === query && (
             <div className="mpv2-empty">
               {failed ? (
                 'モデル一覧を取得できませんでした'
@@ -878,6 +887,12 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                 data-testid="model-picker-v2-next-retry"
                 aria-disabled={loading}
                 onClick={retryNextPage}
+                onKeyDown={(e) => {
+                  if (!e.nativeEvent.isComposing && e.key === 'Escape') {
+                    e.preventDefault();
+                    close(true);
+                  }
+                }}
               >
                 {loading ? '再読み込み中…' : '続きを再読み込み'}
               </button>
