@@ -166,21 +166,30 @@ std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"oper
 int wmain(){
  std::thread([]{Sleep(15000);if(!finished.load())TerminateProcess(GetCurrentProcess(),42);}).detach();
  const auto name=L"\\\\.\\pipe\\sc-pending-start-"+std::to_wstring(GetCurrentProcessId());
- ScopedKernelHandle server(CreateNamedPipeW(name.c_str(),PIPE_ACCESS_DUPLEX,PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT,1,65536,65536,0,nullptr));
- Require(server.value!=INVALID_HANDLE_VALUE,"create pipe");
+ SECURITY_ATTRIBUTES security{}; PSECURITY_DESCRIPTOR descriptor=nullptr;
+ Require(BuildCurrentUserPipeSecurity(&security,&descriptor),"pipe security");
+ ScopedKernelHandle server(CreateNamedPipeW(name.c_str(),PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED,PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,65536,65536,0,&security));
+ LocalFree(descriptor);Require(server.value!=INVALID_HANDLE_VALUE,"create pipe");
+ ScopedKernelHandle connected_event(CreateEventW(nullptr,TRUE,FALSE,nullptr));Require(connected_event.value!=nullptr,"connect event");
+ OVERLAPPED connecting{};connecting.hEvent=connected_event.value;
+ const BOOL immediate=ConnectNamedPipe(server.value,&connecting);const DWORD connect_error=immediate?ERROR_SUCCESS:GetLastError();
+ Require(immediate||connect_error==ERROR_IO_PENDING||connect_error==ERROR_PIPE_CONNECTED,"listen pipe");
+ ScopedKernelHandle client(CreateFileW(name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr));Require(client.value!=INVALID_HANDLE_VALUE,"open pipe");
+ if(!immediate&&connect_error==ERROR_IO_PENDING){DWORD transferred=0;Require(WaitForSingleObject(connected_event.value,5000)==WAIT_OBJECT_0&&GetOverlappedResult(server.value,&connecting,&transferred,FALSE),"connect pipe");}
+ ULONG peer=0;Require(GetNamedPipeClientProcessId(server.value,&peer)&&peer==GetCurrentProcessId(),"owned peer");
+ std::cerr<<"phase=connected\n"<<std::flush;
  bool served=false;
- std::thread serve([&]{Require(ConnectNamedPipe(server.value,nullptr)||GetLastError()==ERROR_PIPE_CONNECTED,"connect pipe");BackendProbe probe;served=ServePipe(server.value,probe);DisconnectNamedPipe(server.value);});
- ScopedKernelHandle client(CreateFileW(name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr));Require(client.value!=INVALID_HANDLE_VALUE,"open pipe");
- Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);
+ std::thread serve([&]{const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
+ Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
  Send(client.value,2,7,Start("pending"));
- for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");
+ for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");std::cerr<<"phase=start-gate\n"<<std::flush;
  Send(client.value,3,7,Stop("pending"));
  bool latched=false;
  for(int i=0;i<3000&&!latched;i++){{std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto found=WindowsStarts().owners.find(FrameIdKey(Id(7)));latched=found!=WindowsStarts().owners.end()&&found->second->stopped.load();}if(!latched)Sleep(1);}
- Require(latched,"reader stop latch");DWORD bytes=0;Require(PeekNamedPipe(client.value,nullptr,0,nullptr,&bytes,nullptr)&&bytes==0,"no terminal before consumer drain");
- hold_start.store(false);
+ std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");DWORD bytes=0;Require(PeekNamedPipe(client.value,nullptr,0,nullptr,&bytes,nullptr)&&bytes==0,"no terminal before consumer drain");
+ hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
  Read(client.value,2,MessageType::kError);
- auto first=Read(client.value,3,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(first)<<"\n";
+ auto first=Read(client.value,3,MessageType::kProbeResult);std::cerr<<"phase=terminal\n"<<std::flush;std::cout<<"RECEIPT:"<<Payload(first)<<"\n";
  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(sessions.empty(),"no late adoption");}
  const auto serial=WindowsTargetListControl().stop_serial.load(), epoch=cancellation_epoch.load();
  Send(client.value,4,8,Stop("pending"));Read(client.value,4,MessageType::kError);
@@ -194,7 +203,7 @@ int wmain(){
  Send(client.value,8,10,Start("failed"));Read(client.value,8,MessageType::kError);
  Send(client.value,9,10,Stop("failed"));auto failed=Read(client.value,9,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(failed)<<"\n";
  Send(client.value,10,10,"{\"sessionId\":\"failed\",\"operation\":\"stop_pending_start\",\"action\":\"click\"}");Read(client.value,10,MessageType::kError);
- CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
+ std::cerr<<"phase=cleanup\n"<<std::flush;CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
  Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: pending pipe, no input, no late adoption\n";return 0;
 }
 `;
