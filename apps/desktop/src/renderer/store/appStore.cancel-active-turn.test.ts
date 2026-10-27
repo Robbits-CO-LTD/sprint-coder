@@ -144,4 +144,68 @@ describe('stopAllTeamWorkers leader cancellation', () => {
     expect(useAppStore.getState().error).toBe('leader cancel failed');
     expect(useAppStore.getState().teamBusy).toBe(false);
   });
+
+  // issue #962: a Team whose Leader has not hired anyone yet is stopped through the same path.
+  describe('with no Workers hired yet', () => {
+    const queued = [{ ordinal: 1, text: 'next request' }];
+
+    beforeEach(() => {
+      useAppStore.setState({
+        selectedTaskId: taskId,
+        teamByTask: {
+          [taskId]: { team: { id: 'team-1', state: 'active' }, workers: [] } as never,
+        },
+        teamBusyByTask: {},
+        queuedByTask: { [taskId]: queued },
+      });
+    });
+
+    it('waits for the Leader cancel before stopping workers and leaves the queue alone', async () => {
+      let resolveCancel!: () => void;
+      const cancel = vi.fn().mockReturnValue(
+        new Promise<void>((resolve) => {
+          resolveCancel = resolve;
+        }),
+      );
+      const stopAll = vi.fn().mockResolvedValue({ team: { id: 'team-1' }, workers: [] });
+      vi.stubGlobal('window', {
+        sprintCoder: { turns: { cancel }, teams: { stopAll } },
+      });
+
+      const first = useAppStore.getState().stopAllTeamWorkers(taskId);
+      const second = useAppStore.getState().stopAllTeamWorkers(taskId);
+      expect(useAppStore.getState().teamBusy).toBe(true);
+      expect(useAppStore.getState().turnByTask[taskId]?.status).toBe('canceling');
+      await Promise.resolve();
+      expect(stopAll).not.toHaveBeenCalled();
+
+      resolveCancel();
+      await Promise.all([first, second]);
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalledWith({ taskId, turnId: 'turn-1', startNextQueued: false });
+      expect(stopAll).toHaveBeenCalledTimes(1);
+      expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(stopAll.mock.invocationCallOrder[0]!);
+      expect(useAppStore.getState().queuedByTask[taskId]).toBe(queued);
+      expect(useAppStore.getState().error).toBeNull();
+      expect(useAppStore.getState().teamBusy).toBe(false);
+    });
+
+    it('keeps the Leader running and reports the failure when its cancel fails', async () => {
+      const cancel = vi.fn().mockRejectedValue(new Error('leader cancel failed'));
+      const stopAll = vi.fn();
+      vi.stubGlobal('window', {
+        sprintCoder: { turns: { cancel }, teams: { stopAll } },
+      });
+
+      await useAppStore.getState().stopAllTeamWorkers(taskId);
+
+      expect(cancel).toHaveBeenCalledWith({ taskId, turnId: 'turn-1', startNextQueued: false });
+      expect(stopAll).not.toHaveBeenCalled();
+      expect(useAppStore.getState().turnByTask[taskId]?.status).toBe('running');
+      expect(useAppStore.getState().error).toBe('leader cancel failed');
+      expect(useAppStore.getState().queuedByTask[taskId]).toBe(queued);
+      expect(useAppStore.getState().teamBusy).toBe(false);
+    });
+  });
 });

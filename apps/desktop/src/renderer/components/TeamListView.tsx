@@ -12,7 +12,11 @@ import {
   workerStatusLabel,
   workerWorkPhase,
 } from '../lib/team-execution-display';
-import { currentTeamWorkerCount, teamWorkPhaseSummary } from '../lib/team-progress';
+import {
+  canStopAllTeamWork,
+  currentTeamWorkerCount,
+  teamWorkPhaseSummary,
+} from '../lib/team-progress';
 import { retainedWorktreeCount } from '../lib/team-retained-worktrees';
 import {
   describeMessagePeer,
@@ -53,6 +57,7 @@ export function TeamListView({
   const detail = useAppStore((state) => state.teamByTask[task.id]);
   const loadFailed = useAppStore((state) => state.teamLoadFailedByTask[task.id]);
   const teamBusy = useAppStore((state) => state.teamBusy);
+  const leaderTurnStatus = useAppStore((state) => state.turnByTask[task.id]?.status);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const resumeTeamMission = useAppStore((state) => state.resumeTeamMission);
   const resumeTeamExecutionIntegration = useAppStore(
@@ -174,7 +179,7 @@ export function TeamListView({
             type="button"
             className="team-stop-all-btn"
             data-testid="team-stop-all"
-            disabled={teamBusy || currentWorkerCount === 0 || detail.team.state === 'completed'}
+            disabled={!canStopAllTeamWork({ detail, leaderTurnStatus, teamBusy })}
             onClick={() => void stopAllTeamWorkers(task.id)}
           >
             すべて停止

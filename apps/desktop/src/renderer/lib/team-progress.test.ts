@@ -7,6 +7,7 @@ import type {
   TeamExecutionIsolation,
 } from '../types/sprint-coder';
 import {
+  canStopAllTeamWork,
   currentTeamWorkerCount,
   teamRunProgress,
   teamWorkPhaseCounts,
@@ -239,6 +240,40 @@ describe('teamRunProgress', () => {
         ]),
       ),
     ).toEqual({ label: 'Team実行中', detail: '3人のWorkerへ依頼中' });
+  });
+});
+
+describe('canStopAllTeamWork', () => {
+  const withState = (team: TeamDetail, state: TeamDetail['team']['state']): TeamDetail => ({
+    ...team,
+    team: { ...team.team, state },
+  });
+
+  it.each([
+    // issue #962: the Leader can still be stopped before it has hired anyone.
+    ['running Leader, no Workers', 'running', [], 'active', false, true],
+    ['running Leader, only stopped Workers', 'running', ['stopped'], 'active', false, true],
+    ['running Leader, completed Team', 'running', [], 'completed', false, true],
+    ['running Leader, busy Worker', 'running', ['busy'], 'active', false, true],
+    ['no Leader Turn, ready Worker', undefined, ['ready'], 'active', false, true],
+    ['finished Leader, busy Worker', 'completed', ['busy'], 'active', false, true],
+    ['interrupted Leader, waiting Worker', 'interrupted', ['waiting'], 'active', false, true],
+    ['finished Leader, done Worker', 'completed', ['done'], 'active', false, true],
+    ['failed Leader, failed Worker', 'failed', ['failed'], 'active', false, true],
+    ['no Leader Turn, no Workers', undefined, [], 'active', false, false],
+    ['canceled Leader, no Workers', 'canceled', [], 'active', false, false],
+    ['canceled Leader, only stopped Workers', 'canceled', ['stopped'], 'active', false, false],
+    ['finished Leader, completed Team', 'completed', ['done'], 'completed', false, false],
+    ['canceling Leader, no Workers', 'canceling', [], 'active', false, false],
+    ['canceling Leader, busy Worker', 'canceling', ['busy'], 'active', false, false],
+    ['Team operation in flight, running Leader', 'running', [], 'active', true, false],
+    ['Team operation in flight, busy Worker', undefined, ['busy'], 'active', true, false],
+  ] as const)('%s', (_name, leaderTurnStatus, states, teamState, teamBusy, expected) => {
+    const team = withState(
+      detail(states.map((state, index) => worker(`w${index + 1}`, `role-${index + 1}`, state))),
+      teamState,
+    );
+    expect(canStopAllTeamWork({ detail: team, leaderTurnStatus, teamBusy })).toBe(expected);
   });
 });
 

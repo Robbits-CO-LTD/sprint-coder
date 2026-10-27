@@ -29,7 +29,11 @@ import {
   TeamRetainedWorktreesTrigger,
 } from '../TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
-import { currentTeamWorkerCount, teamWorkPhaseSummary } from '../../lib/team-progress';
+import {
+  canStopAllTeamWork,
+  currentTeamWorkerCount,
+  teamWorkPhaseSummary,
+} from '../../lib/team-progress';
 import { retainedWorktreeCount } from '../../lib/team-retained-worktrees';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
@@ -107,6 +111,7 @@ export function TeamCanvas({
   const detail = useAppStore((s) => s.teamByTask[task.id]);
   const loadFailed = useAppStore((s) => s.teamLoadFailedByTask[task.id]);
   const teamBusy = useAppStore((s) => s.teamBusy);
+  const leaderTurnStatus = useAppStore((s) => s.turnByTask[task.id]?.status);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const resumeTeamMission = useAppStore((s) => s.resumeTeamMission);
   const resumeTeamExecutionIntegration = useAppStore((s) => s.resumeTeamExecutionIntegration);
@@ -1055,7 +1060,7 @@ export function TeamCanvas({
             task={task}
             detail={detail}
             workerCount={workerCount}
-            teamBusy={teamBusy}
+            canStopAll={canStopAllTeamWork({ detail, leaderTurnStatus, teamBusy })}
             onBack={onRequestExit}
             onStopAll={() => void stopAllTeamWorkers(task.id)}
             onSwitchToListView={onSwitchToListView}
@@ -1133,7 +1138,7 @@ function TeamHeaderOverlay({
   task,
   detail,
   workerCount,
-  teamBusy,
+  canStopAll,
   onBack,
   onStopAll,
   onSwitchToListView,
@@ -1145,7 +1150,7 @@ function TeamHeaderOverlay({
   task: TaskSummary;
   detail: TeamDetail;
   workerCount: number;
-  teamBusy: boolean;
+  canStopAll: boolean;
   onBack: () => void;
   onStopAll: () => void;
   onSwitchToListView: () => void;
@@ -1191,7 +1196,7 @@ function TeamHeaderOverlay({
         type="button"
         className="team-stop-all-btn"
         data-testid="team-stop-all"
-        disabled={teamBusy || workerCount === 0 || detail.team.state === 'completed'}
+        disabled={!canStopAll}
         onClick={onStopAll}
       >
         すべて停止
