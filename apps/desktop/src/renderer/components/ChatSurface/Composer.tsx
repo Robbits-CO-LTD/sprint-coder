@@ -234,6 +234,12 @@ export function Composer({ taskId }: { taskId: string }) {
   const draft = useAppStore((s) => s.draftByTask[taskId]) ?? '';
   const setDraft = useAppStore((s) => s.setDraft);
   const startGoal = useAppStore((s) => s.startGoal);
+  const restoreFailedGoalDraft = useAppStore((s) => s.restoreFailedGoalDraft);
+  const goalDraftRecovered = useAppStore(
+    (s) =>
+      s.goalDraftRecoveryRevisionByTask[taskId] !== undefined &&
+      s.goalDraftRecoveryRevisionByTask[taskId] === s.draftRevisionByTask[taskId],
+  );
   const pauseGoal = useAppStore((s) => s.pauseGoal);
   const resumeGoal = useAppStore((s) => s.resumeGoal);
   const clearGoal = useAppStore((s) => s.clearGoal);
@@ -286,6 +292,16 @@ export function Composer({ taskId }: { taskId: string }) {
   const [goalRequested, setGoalRequested] = useState(false);
   const [goalEditDraftBackup, setGoalEditDraftBackup] = useState<string | null>(null);
   const [goalControlPending, setGoalControlPending] = useState(false);
+  const goalStartPendingRef = useRef(false);
+  const goalModeRevisionRef = useRef(0);
+  const goalMountRef = useRef<object | null>(null);
+  useEffect(() => {
+    const mount = {};
+    goalMountRef.current = mount;
+    return () => {
+      goalMountRef.current = null;
+    };
+  }, [taskId]);
   // Armed by the plus menu, consumed by the next send. One-shot rather than a mode, so a user who
   // opens the menu and changes their mind is not stuck generating images.
   const [imageRequested, setImageRequested] = useState(false);
@@ -518,6 +534,7 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleSend() {
+    if (goalStartPendingRef.current) return;
     const raw = draft;
     if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
       return;
@@ -531,19 +548,29 @@ export function Composer({ taskId }: { taskId: string }) {
       return;
     }
     if (goalRequested) {
+      goalStartPendingRef.current = true;
+      const mount = goalMountRef.current;
+      const modeRevision = goalModeRevisionRef.current;
+      const ownsLocalMode = () =>
+        goalMountRef.current === mount && goalModeRevisionRef.current === modeRevision;
       setGoalRequested(false);
       setDraft(taskId, '');
+      const draftRevision = useAppStore.getState().draftRevisionByTask[taskId] ?? 0;
       setGoalControlPending(true);
       void (async () => {
         try {
           if (!(await startGoal(taskId, raw))) {
-            setGoalRequested(true);
-            setDraft(taskId, raw);
-          } else {
+            const restored = restoreFailedGoalDraft(taskId, draftRevision, raw);
+            if (ownsLocalMode()) {
+              if (restored) setGoalRequested(true);
+              else setGoalEditDraftBackup(null);
+            }
+          } else if (ownsLocalMode()) {
             setGoalEditDraftBackup(null);
           }
         } finally {
-          setGoalControlPending(false);
+          goalStartPendingRef.current = false;
+          if (goalMountRef.current === mount) setGoalControlPending(false);
         }
       })();
       return;
@@ -640,7 +667,12 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function cancelGoalRequest(): void {
-    if (goalEditDraftBackup !== null) setDraft(taskId, goalEditDraftBackup);
+    goalModeRevisionRef.current += 1;
+    const currentDraft = useAppStore.getState().draftByTask[taskId] ?? '';
+    setDraft(
+      taskId,
+      goalStartPendingRef.current ? currentDraft : (goalEditDraftBackup ?? currentDraft),
+    );
     setGoalEditDraftBackup(null);
     setGoalRequested(false);
   }
@@ -667,6 +699,7 @@ export function Composer({ taskId }: { taskId: string }) {
         break;
       case 'goal':
         if (attachmentPolicy.goalBlocked) break;
+        goalModeRevisionRef.current += 1;
         updateImageRequested(false);
         setGoalEditDraftBackup(null);
         setGoalRequested(true);
@@ -683,6 +716,7 @@ export function Composer({ taskId }: { taskId: string }) {
 
   function editGoal() {
     if (goal === null || goal.status === 'active') return;
+    goalModeRevisionRef.current += 1;
     updateImageRequested(false);
     setGoalEditDraftBackup(draft);
     setGoalRequested(true);
@@ -925,6 +959,24 @@ export function Composer({ taskId }: { taskId: string }) {
                   onClick={cancelGoalRequest}
                 >
                   <Target size={13} /> Goal <X size={12} />
+                </button>
+              )}
+              {!goalRequested && goalDraftRecovered && (
+                <button
+                  type="button"
+                  className="cmp-chip"
+                  disabled={goalControlPending || attachmentPolicy.goalBlocked || turnActive}
+                  title="この入力をGoalに戻します。開始するには送信してください"
+                  onClick={() => {
+                    goalModeRevisionRef.current += 1;
+                    setDraft(taskId, draft);
+                    updateImageRequested(false);
+                    setGoalEditDraftBackup(null);
+                    setGoalRequested(true);
+                    textareaRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  Goalとして再試行
                 </button>
               )}
               {imageRequested && (

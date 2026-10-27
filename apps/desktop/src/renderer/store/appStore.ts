@@ -178,6 +178,7 @@ type AppState = {
   // Optimistic send recovery owns a value only while its captured revision is still current.
   // Every user mutation and recovery advances the revision, so value-level ABA cannot roll back it.
   draftRevisionByTask: Record<string, number | undefined>;
+  goalDraftRecoveryRevisionByTask: Record<string, number | undefined>;
   draftAttachmentsByTask: Record<string, ImageAttachmentMetadata[] | undefined>;
   attachmentCapabilityByTask: Record<string, ImageAttachmentCapability | undefined>;
   attachmentRequestRevisionByTask: Record<string, number | undefined>;
@@ -311,6 +312,7 @@ type AppState = {
   setArchived(taskId: string, archived: boolean): Promise<void>;
   setGoal(taskId: string, goal: string): Promise<void>;
   startGoal(taskId: string, objective: string): Promise<boolean>;
+  restoreFailedGoalDraft(taskId: string, expectedRevision: number, text: string): boolean;
   pauseGoal(taskId: string): Promise<void>;
   resumeGoal(taskId: string): Promise<void>;
   clearGoal(taskId: string): Promise<void>;
@@ -1204,6 +1206,7 @@ export const useAppStore = create<AppState>((set, get) => {
     sendingByTask: {},
     draftByTask: {},
     draftRevisionByTask: {},
+    goalDraftRecoveryRevisionByTask: {},
     draftAttachmentsByTask: {},
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
@@ -2410,8 +2413,31 @@ export const useAppStore = create<AppState>((set, get) => {
           ...state.draftRevisionByTask,
           [taskId]: (state.draftRevisionByTask[taskId] ?? 0) + 1,
         },
+        goalDraftRecoveryRevisionByTask: {
+          ...state.goalDraftRecoveryRevisionByTask,
+          [taskId]: undefined,
+        },
       }));
       persistDraftDebounced(taskId, text);
+    },
+
+    restoreFailedGoalDraft(taskId, expectedRevision, text) {
+      let restored = false;
+      set((state) => {
+        if (state.draftRevisionByTask[taskId] !== expectedRevision) return state;
+        restored = true;
+        const revision = expectedRevision + 1;
+        return {
+          draftByTask: { ...state.draftByTask, [taskId]: text },
+          draftRevisionByTask: { ...state.draftRevisionByTask, [taskId]: revision },
+          goalDraftRecoveryRevisionByTask: {
+            ...state.goalDraftRecoveryRevisionByTask,
+            [taskId]: revision,
+          },
+        };
+      });
+      if (restored) persistDraftDebounced(taskId, text);
+      return restored;
     },
 
     async refreshDraftAttachments(taskId: string) {
@@ -2680,6 +2706,14 @@ export const useAppStore = create<AppState>((set, get) => {
         pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: optimisticId },
         sendingByTask: { ...state.sendingByTask, [taskId]: true },
         draftByTask: { ...state.draftByTask, [taskId]: '' },
+        draftRevisionByTask: {
+          ...state.draftRevisionByTask,
+          [taskId]: (state.draftRevisionByTask[taskId] ?? 0) + 1,
+        },
+        goalDraftRecoveryRevisionByTask: {
+          ...state.goalDraftRecoveryRevisionByTask,
+          [taskId]: undefined,
+        },
         skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
       }));
       persistDraftDebounced(taskId, '');
@@ -2767,6 +2801,10 @@ export const useAppStore = create<AppState>((set, get) => {
         return {
           draftByTask: { ...state.draftByTask, [taskId]: '' },
           draftRevisionByTask: { ...state.draftRevisionByTask, [taskId]: draftRevision },
+          goalDraftRecoveryRevisionByTask: {
+            ...state.goalDraftRecoveryRevisionByTask,
+            [taskId]: undefined,
+          },
           skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
           skillSelectionRevisionByTask: {
             ...state.skillSelectionRevisionByTask,
@@ -2820,7 +2858,17 @@ export const useAppStore = create<AppState>((set, get) => {
       )
         return;
       if (notifyPendingPermissionChange(get(), taskId)) return;
-      set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
+      set((state) => ({
+        draftByTask: { ...state.draftByTask, [taskId]: '' },
+        draftRevisionByTask: {
+          ...state.draftRevisionByTask,
+          [taskId]: (state.draftRevisionByTask[taskId] ?? 0) + 1,
+        },
+        goalDraftRecoveryRevisionByTask: {
+          ...state.goalDraftRecoveryRevisionByTask,
+          [taskId]: undefined,
+        },
+      }));
       persistDraftDebounced(taskId, '');
       try {
         await window.sprintCoder.turns.steer({ taskId, text, expectedTurnId });
@@ -2869,6 +2917,10 @@ export const useAppStore = create<AppState>((set, get) => {
         return {
           draftByTask: { ...state.draftByTask, [taskId]: '' },
           draftRevisionByTask: { ...state.draftRevisionByTask, [taskId]: draftRevision },
+          goalDraftRecoveryRevisionByTask: {
+            ...state.goalDraftRecoveryRevisionByTask,
+            [taskId]: undefined,
+          },
           skillSelectionByTask: { ...state.skillSelectionByTask, [taskId]: [] },
           skillSelectionRevisionByTask: {
             ...state.skillSelectionRevisionByTask,
