@@ -322,7 +322,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [nextPageFailure, setNextPageFailure] = useState<NextPageFailure | null>(null);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [preferredActiveIndex, setActiveIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   // Display name for the canonical selection. A click fills it immediately; a remount recovers it
   // from the catalog (Issue #530). Identity stays with the name so a selection that moves elsewhere
@@ -357,6 +357,19 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     rowHeightPx: MODEL_ROW_HEIGHT_PX,
     overscanRows: MODEL_LIST_OVERSCAN_ROWS,
   });
+  // Manual scrolling can unmount the preferred row. Derive one visible active index for
+  // highlighting, ARIA and keyboard actions, without moving the user's scroll position.
+  const visible = virtualRange({
+    itemCount: page.items.length,
+    scrollTop,
+    viewportHeightPx: MODEL_LIST_VIEWPORT_PX,
+    rowHeightPx: MODEL_ROW_HEIGHT_PX,
+    overscanRows: 0,
+  });
+  const activeIndex = Math.max(
+    visible.startIndex,
+    Math.min(preferredActiveIndex, visible.endIndex - 1),
+  );
   const active = page.items[activeIndex];
   // Which provider band the scrollport is on. Derived from `scrollTop` rather than stored, so it
   // follows both wheel scrolling and keyboard movement (which scrolls through the same state)

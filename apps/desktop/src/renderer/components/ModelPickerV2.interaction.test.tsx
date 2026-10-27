@@ -288,6 +288,80 @@ describe('ModelPickerV2 next-page recovery', () => {
   });
 });
 
+describe('ModelPickerV2 active option after manual scroll', () => {
+  async function openMany() {
+    showSelection(null);
+    const setModelSelection = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection });
+    const items = Array.from({ length: 1200 }, (_, i) =>
+      model({ modelId: `model-${i}`, displayName: `Model ${i}` }),
+    );
+    query.mockResolvedValue(catalogResult(items));
+    await renderPicker('large');
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-trigger"]',
+    )!;
+    await act(async () => trigger.click());
+    const input = container.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    return { input, list, trigger, setModelSelection };
+  }
+  async function scrollTo(list: HTMLElement, row: number) {
+    await act(async () => {
+      list.scrollTop = row * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+  function activeRow(input: HTMLInputElement) {
+    const id = input.getAttribute('aria-activedescendant');
+    expect(id).not.toBeNull();
+    const row = document.getElementById(id!);
+    expect(row).not.toBeNull();
+    expect(row?.classList.contains('active')).toBe(true);
+    expect(container.querySelectorAll('[role="option"]').length).toBeLessThanOrEqual(10);
+    return row;
+  }
+  it('keeps the visible active row, ARIA reference and Enter selection aligned without pulling scroll back', async () => {
+    const { input, list, trigger, setModelSelection } = await openMany();
+    await scrollTo(list, 44);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-44');
+    expect(list.scrollTop).toBe(44 * 46);
+    expect(document.activeElement).toBe(input);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith(
+      'task-a',
+      expect.objectContaining({ requestedModel: 'model-44' }),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+  it('continues Arrow/Home/End navigation from the visible row through both scroll directions', async () => {
+    const { input, list } = await openMany();
+    await scrollTo(list, 44);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-45');
+    await scrollTo(list, 10);
+    const row = activeRow(input)!;
+    const index = Number(row.dataset.testid?.split('-').at(-1));
+    expect(index).toBeGreaterThanOrEqual(10);
+    expect(index).toBeLessThan(16);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
+    await act(async () => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-0');
+    expect(list.scrollTop).toBe(0);
+  });
+});
+
 describe('ModelPickerV2 trigger name after a remount', () => {
   it('preserves a retired local selection when its catalog row is absent', async () => {
     const selection: ModelSelection = {
