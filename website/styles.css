@@ -2743,7 +2743,8 @@ html:not(.js) .swap > * + * {
     font-size: 11px;
     line-height: 1.5;
   }
-  .split .screen-stack {
+  /* 画面の高さから決める寸法は、舞台に固定して見せている間だけ（縦並び・JS なしでは普通の幅に戻す） */
+  .js:not(.fit-off) .split .screen-stack {
     max-height: calc(100svh - var(--header) - var(--player) - 60px);
   }
   .mix3 {
@@ -2766,14 +2767,16 @@ html:not(.js) .swap > * + * {
     font-size: 20px;
   }
   .org100 {
+    padding: 10px 12px 12px;
+  }
+  .js:not(.fit-off) .org100 {
     width: min(100%, calc((100svh - var(--header) - var(--player) - 150px) * 1.95));
     justify-self: center;
-    padding: 10px 12px 12px;
   }
   .o-top {
     margin-bottom: 8px;
   }
-  .mosaic-wrap {
+  .js:not(.fit-off) .mosaic-wrap {
     width: min(100%, calc((100svh - var(--header) - var(--player) - 190px) * 2.5));
   }
   .gallery-beat .title {
@@ -2860,13 +2863,14 @@ html:not(.js) .swap > * + * {
     grid-template-columns: repeat(18, minmax(0, 1fr));
   }
 }
-/* 横長の画面では、組織図とモザイクの高さを画面に合わせる（幅いっぱいだと縦に収まらない） */
+/* 横長の画面では、組織図とモザイクの高さを画面に合わせる（幅いっぱいだと縦に収まらない）。
+ * 舞台に固定して見せている間だけ。縦並び・JS なしでは、背の低い画面で幅が 0 近くまで縮まないよう普通の幅に戻す */
 @media (min-aspect-ratio: 16 / 10) and (min-width: 961px) {
-  .org100 {
+  .js:not(.fit-off) .org100 {
     width: min(100%, calc((100svh - var(--header) - var(--player) - 210px) * 1.95));
     justify-self: center;
   }
-  .mosaic {
+  .js:not(.fit-off) .mosaic {
     width: min(100%, calc((100svh - var(--header) - var(--player) - 260px) * 2.6));
   }
 }
