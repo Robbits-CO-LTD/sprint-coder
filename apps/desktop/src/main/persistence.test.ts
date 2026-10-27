@@ -19,7 +19,7 @@ import {
 import { execFileSync } from 'node:child_process';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   goalStartInputSchema,
@@ -10081,8 +10081,7 @@ if (runsWithElectronAbi)
           workspaceId: 'workspace-1',
           policyEpoch: 0,
         });
-        const executable = '/usr/bin/printf';
-        const argv = ['command-ok\\n'];
+        const { executable, argv } = commandOutputFixture();
         let result: { exitCode: number; outputBytes: number };
         try {
           result = (await broker.dispatch({
@@ -10125,6 +10124,7 @@ if (runsWithElectronAbi)
     commandExecutionIt(
       'refuses a command whose argv repeats the executable without asking for approval',
       async () => {
+        const { executable, argv } = commandOutputFixture();
         const { persistence, path } = createPersistence();
         const task = persistence.createTask();
         persistence.setWorkspace(task.id, join(path, '..'));
@@ -10154,8 +10154,8 @@ if (runsWithElectronAbi)
               callId: 'command-repeated-executable',
               providerName: 'run_command',
               input: {
-                executable: '/usr/bin/printf',
-                argv: ['printf', 'command-ok\\n'],
+                executable,
+                argv: [basename(executable), ...argv],
                 cwd: '.',
                 purpose: '実行ファイル名の重複を確認します',
               },
@@ -10179,8 +10179,8 @@ if (runsWithElectronAbi)
             callId: 'command-resent-executable',
             providerName: 'run_command',
             input: {
-              executable: '/usr/bin/printf',
-              argv: ['command-ok\\n'],
+              executable,
+              argv,
               cwd: '.',
               purpose: '実行ファイル名の重複を確認します',
             },
@@ -10189,8 +10189,8 @@ if (runsWithElectronAbi)
           expect(persistence.listCommands(task.id)).toEqual([
             expect.objectContaining({
               callId: 'command-resent-executable',
-              executable: '/usr/bin/printf',
-              argv: ['command-ok\\n'],
+              executable,
+              argv,
               state: 'exited',
             }),
           ]);
@@ -10235,7 +10235,7 @@ if (runsWithElectronAbi)
             callId: 'sealed-root-command',
             providerName: 'run_command',
             input: {
-              executable: '/usr/bin/printf',
+              executable: commandOutputFixture().executable,
               argv: ['unused'],
               cwd: '.',
               purpose: 'Turn snapshot test',
@@ -10320,7 +10320,9 @@ if (runsWithElectronAbi)
           providerName: 'run_command',
           input: {
             executable:
-              process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : '/usr/bin/printf',
+              process.platform === 'win32'
+                ? 'C:\\Windows\\System32\\where.exe'
+                : commandOutputFixture().executable,
             argv: ['denied'],
             cwd: '.',
             purpose: '拒否時の挙動を確認します',
@@ -11258,6 +11260,15 @@ function persistenceBridgeGapSummary(gapFile: string | undefined): string {
   } catch {
     return 'gap=unreadable';
   }
+}
+
+function commandOutputFixture(): { executable: string; argv: string[] } {
+  // Some Linux runner images expose printf through a hardlinked multicall binary. Exercise the
+  // supported sealed-command contract with a canonical shell and its builtin, keeping the
+  // production hardlink refusal intact.
+  return process.platform === 'linux'
+    ? { executable: realpathSync('/bin/sh'), argv: ['-c', "printf 'command-ok\\n'"] }
+    : { executable: '/usr/bin/printf', argv: ['command-ok\\n'] };
 }
 
 function persistenceBridgeFailure(error: unknown, reportFile: string, gapFile?: string): Error {
