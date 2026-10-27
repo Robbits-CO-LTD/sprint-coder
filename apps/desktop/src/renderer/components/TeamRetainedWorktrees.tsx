@@ -8,6 +8,7 @@ import {
 import type {
   TeamDetail,
   TeamRetainedWorktree,
+  TeamRetainedWorktreeCursor,
   TeamRetainedWorktreeInspection,
   TeamRetainedWorktreeList,
 } from '../types/sprint-coder';
@@ -115,22 +116,31 @@ type InspectionState =
   | { status: 'ready'; value: TeamRetainedWorktreeInspection }
   | { status: 'error'; message: string };
 
-export function TeamRetainedWorktreesDialog({
-  taskId,
-  detail,
-  onClose,
-}: {
+type RetainedDialogProps = {
   taskId: string;
-  /** Current canonical Team detail. The list is fetched again whenever what Main's discard rule
-   * reads from it changes. */
+  /** Current canonical Team detail. Refetch when Main's discard-rule inputs change. */
   detail: TeamDetail;
   onClose: () => void;
-}) {
+};
+
+export function TeamRetainedWorktreesDialog(props: RetainedDialogProps) {
+  // An in-flight discard and its confirmation belong to one Task, just like the list and reads.
+  return <RetainedWorktreesDialogContent key={props.taskId} {...props} />;
+}
+
+function RetainedWorktreesDialogContent({ taskId, detail, onClose }: RetainedDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const refreshRef = useRef<HTMLButtonElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef<string | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const closingRef = useRef(false);
   const requestRef = useRef(0);
+  const listRef = useRef<TeamRetainedWorktreeList | null>(null);
+  const inFlightRef = useRef<number | null>(null);
+  const inspectRequestRef = useRef(0);
+  /** The inspect request each open inspection is waiting for, by worktree key. */
+  const inspectTokensRef = useRef(new Map<string, number>());
   const baseId = useId();
   const [list, setList] = useState<TeamRetainedWorktreeList | null>(null);
   const [loading, setLoading] = useState(false);
@@ -149,26 +159,83 @@ export function TeamRetainedWorktreesDialog({
     dialog.showModal();
   }, []);
 
-  const load = useCallback(async () => {
-    const api = window.sprintCoder?.teams;
-    if (typeof api?.listRetainedWorktrees !== 'function') {
-      setError('この環境では残っているworktreeを確認できません。');
-      return;
+  const retainInspections = useCallback((rows: readonly TeamRetainedWorktree[]) => {
+    const keys = new Set(rows.map(worktreeKey));
+    for (const key of inspectTokensRef.current.keys()) {
+      if (!keys.has(key)) inspectTokensRef.current.delete(key);
     }
-    const request = ++requestRef.current;
-    setLoading(true);
-    try {
-      const next = await api.listRetainedWorktrees(taskId);
-      if (request !== requestRef.current) return;
-      setList(next);
-      setError(null);
-    } catch (err) {
-      if (request === requestRef.current)
-        setError(`一覧を読み込めませんでした: ${describeError(err)}`);
-    } finally {
-      if (request === requestRef.current) setLoading(false);
+    setInspections((current) =>
+      Object.fromEntries(Object.entries(current).filter(([key]) => keys.has(key))),
+    );
+  }, []);
+
+  const load = useCallback(
+    async (cursor?: TeamRetainedWorktreeCursor) => {
+      if (
+        cursor !== undefined &&
+        (inFlightRef.current !== null || cursor !== listRef.current?.nextCursor)
+      )
+        return;
+      const api = window.sprintCoder?.teams;
+      if (typeof api?.listRetainedWorktrees !== 'function') {
+        setError('この環境では残っているworktreeを確認できません。');
+        return;
+      }
+      const request = cursor === undefined ? ++requestRef.current : requestRef.current;
+      inFlightRef.current = request;
+      setLoading(true);
+      try {
+        const next = await api.listRetainedWorktrees(
+          taskId,
+          ...(cursor === undefined ? [] : [cursor]),
+        );
+        if (request !== requestRef.current) return;
+        const rows =
+          cursor === undefined
+            ? next.worktrees
+            : [
+                ...new Map([
+                  ...(listRef.current?.worktrees ?? []).map(
+                    (row) => [worktreeKey(row), row] as const,
+                  ),
+                  ...next.worktrees.map((row) => [worktreeKey(row), row] as const),
+                ]).values(),
+              ];
+        if (
+          cursor !== undefined &&
+          next.nextCursor === null &&
+          moreRef.current === document.activeElement
+        ) {
+          const known = new Set((listRef.current?.worktrees ?? []).map(worktreeKey));
+          const added = rows.find((row) => !known.has(worktreeKey(row)));
+          if (added)
+            pendingFocusRef.current = `${baseId}-${added.executionId}-${added.repositoryOrdinal}-heading`;
+          else pendingFocusRef.current = `${baseId}-refresh`;
+        }
+        const loaded = { ...next, worktrees: rows };
+        listRef.current = loaded;
+        setList(loaded);
+        if (cursor === undefined) retainInspections(rows);
+        setError(null);
+      } catch (err) {
+        if (request === requestRef.current)
+          setError(`一覧を読み込めませんでした: ${describeError(err)}`);
+      } finally {
+        if (inFlightRef.current === request) inFlightRef.current = null;
+        if (request === requestRef.current) setLoading(false);
+      }
+    },
+    [taskId, retainInspections, baseId],
+  );
+
+  useEffect(() => {
+    const id = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (id !== null) {
+      const heading = document.getElementById(id);
+      if (heading && dialogRef.current?.contains(heading)) heading.focus({ preventScroll: true });
     }
-  }, [taskId]);
+  }, [list]);
 
   // `retainedKey` is what makes this refetch: an execution finishing, an isolation changing phase,
   // or a repository being cleaned elsewhere. Streamed Worker output leaves it unchanged.
@@ -176,11 +243,28 @@ export function TeamRetainedWorktreesDialog({
     void load();
   }, [load, retainedKey]);
 
+  // An inspection belongs to the Task it was asked for: a Task change or closing the dialog voids
+  // every request still in flight.
+  useEffect(() => {
+    const tokens = inspectTokensRef.current;
+    return () => {
+      tokens.clear();
+      requestRef.current += 1;
+      inFlightRef.current = null;
+      listRef.current = null;
+      setList(null);
+      setInspections({});
+    };
+  }, [taskId]);
+
   function closeAndRestoreFocus(): void {
     if (closingRef.current || busy) return;
     closingRef.current = true;
+    requestRef.current += 1;
+    inFlightRef.current = null;
+    inspectTokensRef.current.clear();
     const opener = openerRef.current;
-    const openerTestId = opener?.dataset.testid;
+    const openerTestId = opener?.dataset.testid ?? 'team-retained-worktrees-open';
     openerRef.current = null;
     dialogRef.current?.close();
     onClose();
@@ -201,24 +285,29 @@ export function TeamRetainedWorktreesDialog({
 
   async function toggleInspection(worktree: TeamRetainedWorktree): Promise<void> {
     const key = worktreeKey(worktree);
+    const tokens = inspectTokensRef.current;
     if (inspections[key] !== undefined) {
+      tokens.delete(key);
       setInspections(({ [key]: _closed, ...rest }) => rest);
       return;
     }
     const api = window.sprintCoder?.teams;
     if (typeof api?.inspectRetainedWorktree !== 'function') return;
+    // Closing and opening again restores the same key, so only the answer to this opening may
+    // fill it: one to an earlier opening would put back what the worktree held back then.
+    const token = ++inspectRequestRef.current;
+    tokens.set(key, token);
     setInspections((current) => ({ ...current, [key]: { status: 'loading' } }));
     try {
       const value = await api.inspectRetainedWorktree(worktreeRef(taskId, worktree));
-      setInspections((current) =>
-        current[key] === undefined ? current : { ...current, [key]: { status: 'ready', value } },
-      );
+      if (tokens.get(key) !== token) return;
+      setInspections((current) => ({ ...current, [key]: { status: 'ready', value } }));
     } catch (err) {
-      setInspections((current) =>
-        current[key] === undefined
-          ? current
-          : { ...current, [key]: { status: 'error', message: describeError(err) } },
-      );
+      if (tokens.get(key) !== token) return;
+      setInspections((current) => ({
+        ...current,
+        [key]: { status: 'error', message: describeError(err) },
+      }));
     }
   }
 
@@ -242,9 +331,13 @@ export function TeamRetainedWorktreesDialog({
       const next = await api.discardRetainedWorktree(worktreeRef(taskId, worktree));
       // Any list still in flight was read before this discard.
       requestRef.current += 1;
+      inFlightRef.current = null;
       setLoading(false);
+      listRef.current = next;
       setList(next);
+      retainInspections(next.worktrees);
       setError(null);
+      inspectTokensRef.current.delete(worktreeKey(worktree));
       setInspections(({ [worktreeKey(worktree)]: _gone, ...rest }) => rest);
       setNotice(`${worktree.role}のRepo ${worktree.repositoryOrdinal}のworktreeを破棄しました。`);
       return null;
@@ -256,7 +349,7 @@ export function TeamRetainedWorktreesDialog({
   }
 
   const worktrees = list?.worktrees ?? [];
-  const hidden = list === null ? 0 : list.total - list.worktrees.length;
+  const hidden = list === null ? 0 : Math.max(0, list.total - list.worktrees.length);
 
   return (
     <dialog
@@ -283,6 +376,7 @@ export function TeamRetainedWorktreesDialog({
           <h2 id={`${baseId}-title`}>{`残っているworktree（${list?.total ?? 0}件）`}</h2>
           <button
             ref={refreshRef}
+            id={`${baseId}-refresh`}
             type="button"
             className="settings-secondary-button team-retained-refresh"
             data-testid="team-retained-refresh"
@@ -335,7 +429,7 @@ export function TeamRetainedWorktreesDialog({
                   data-testid="team-retained-worktree"
                   aria-labelledby={`${itemId}-heading`}
                 >
-                  <h3 id={`${itemId}-heading`} className="team-retained-heading">
+                  <h3 id={`${itemId}-heading`} className="team-retained-heading" tabIndex={-1}>
                     {`${worktree.role} · Repo ${worktree.repositoryOrdinal}`}
                   </h3>
                   <dl className="team-retained-facts">
@@ -423,8 +517,21 @@ export function TeamRetainedWorktreesDialog({
             })}
           </ul>
         )}
-        {hidden > 0 && (
-          <p className="settings-hint">{`ほかに${hidden}件あります。破棄すると続きが表示されます。`}</p>
+        {hidden > 0 && <p className="settings-hint">{`ほかに${hidden}件あります。`}</p>}
+        {list?.nextCursor != null && (
+          <button
+            type="button"
+            className="settings-secondary-button"
+            data-testid="team-retained-load-more"
+            ref={moreRef}
+            aria-disabled={loading || busy}
+            disabled={busy}
+            onClick={() => {
+              if (list.nextCursor !== null) void load(list.nextCursor);
+            }}
+          >
+            {loading ? '読み込み中…' : error !== null ? '続きを再読み込み' : 'さらに表示'}
+          </button>
         )}
       </div>
       {confirming !== null && (

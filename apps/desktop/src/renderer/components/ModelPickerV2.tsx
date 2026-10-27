@@ -76,6 +76,14 @@ type CatalogPage = {
   nextCursor: string | null;
 };
 
+type NextPageFailure = {
+  cursor: string;
+  request: number;
+  searchText: string;
+  access: ModelCatalogAccessType;
+  revision: number;
+};
+
 const EMPTY_PAGE: CatalogPage = { revision: -1, total: 0, items: [], nextCursor: null };
 
 /** Identity of a catalog row. Connection-scoped, because the same `modelId` can legitimately exist
@@ -313,7 +321,8 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const [page, setPage] = useState<CatalogPage>(EMPTY_PAGE);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [nextPageFailure, setNextPageFailure] = useState<NextPageFailure | null>(null);
+  const [preferredActiveIndex, setActiveIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   // Display name for the canonical selection. A click fills it immediately; a remount recovers it
   // from the catalog (Issue #530). Identity stays with the name so a selection that moves elsewhere
@@ -324,6 +333,8 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
+  const nextPageFailureRef = useRef<NextPageFailure | null>(null);
   // Monotonic query id: a slow first page for "gpt" must not land on top of a newer "claude", and a
   // cursor page fetched under the old query must not be appended to the new one's rows.
   const queryRef = useRef(0);
@@ -335,6 +346,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // Mirrors the loaded page's catalog revision, so a response can tell "append" from "replace"
   // before `setPage`'s updater runs — the scroll/active reset has to happen outside it.
   const revisionRef = useRef(EMPTY_PAGE.revision);
+  // Advance synchronously when a page lands: a native scroll event can arrive before React
+  // commits the new nextCursor, after inFlightRef has already been released.
+  const nextCursorRef = useRef<string | null>(null);
 
   const baseId = useId();
   const listboxId = `${baseId}-listbox`;
@@ -347,6 +361,22 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     rowHeightPx: MODEL_ROW_HEIGHT_PX,
     overscanRows: MODEL_LIST_OVERSCAN_ROWS,
   });
+  // Manual scrolling can unmount the preferred row. Derive one visible active index for
+  // highlighting, ARIA and keyboard actions, without moving the user's scroll position.
+  const visibleOffset = Math.max(
+    0,
+    Math.min(
+      Math.round(scrollTop),
+      page.items.length * MODEL_ROW_HEIGHT_PX - MODEL_LIST_VIEWPORT_PX,
+    ),
+  );
+  const firstVisible = Math.ceil(visibleOffset / MODEL_ROW_HEIGHT_PX);
+  const lastVisible =
+    Math.min(
+      page.items.length,
+      Math.floor((visibleOffset + MODEL_LIST_VIEWPORT_PX) / MODEL_ROW_HEIGHT_PX),
+    ) - 1;
+  const activeIndex = Math.max(firstVisible, Math.min(preferredActiveIndex, lastVisible));
   const active = page.items[activeIndex];
   // Which provider band the scrollport is on. Derived from `scrollTop` rather than stored, so it
   // follows both wheel scrolling and keyboard movement (which scrolls through the same state)
@@ -359,6 +389,8 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   });
 
   function close(restoreFocus: boolean) {
+    queryRef.current += 1;
+    inFlightRef.current = null;
     setOpen(false);
     if (restoreFocus) triggerRef.current?.focus({ preventScroll: true });
   }
@@ -377,25 +409,40 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       searchText: string,
       access: ModelCatalogAccessType,
     ): Promise<void> => {
-      const models = window.sprintCoder?.models;
-      if (typeof models?.query !== 'function') {
-        setFailed(true);
+      if (cursor !== null && (inFlightRef.current !== null || cursor !== nextCursorRef.current))
         return;
-      }
       const request = cursor === null ? (queryRef.current += 1) : queryRef.current;
+      const revision = revisionRef.current;
+      if (cursor === null) {
+        nextCursorRef.current = null;
+        nextPageFailureRef.current = null;
+        setNextPageFailure(null);
+      }
       inFlightRef.current = request;
       setLoading(true);
       try {
-        const result: ModelCatalogQueryResult = await models.query(
+        const models = window.sprintCoder?.models;
+        if (typeof models?.query !== 'function') throw new Error('Model catalog unavailable');
+        let result: ModelCatalogQueryResult = await models.query(
           catalogQuery({ taskId, text: searchText, accessType: access, cursor }),
         );
         if (queryRef.current !== request) return;
+        // Main's cursor is an offset, not a snapshot. If the catalog changed, its old offset can
+        // omit the new first page (or falsely look empty), so restart the same query at the top.
+        const restarted = cursor !== null && result.revision !== revisionRef.current;
+        if (restarted) {
+          result = await models.query(
+            catalogQuery({ taskId, text: searchText, accessType: access, cursor: null }),
+          );
+          if (queryRef.current !== request) return;
+        }
         // Appending is only meaningful inside one catalog revision: a catalog that changed under
         // the cursor makes the offsets the cursor encodes meaningless, so the honest move is to
         // take the new page as the whole list rather than splice two revisions into one that never
         // existed.
-        const replace = cursor === null || result.revision !== revisionRef.current;
+        const replace = cursor === null || restarted;
         revisionRef.current = result.revision;
+        nextCursorRef.current = result.nextCursor;
         setPage((current) => ({
           revision: result.revision,
           total: result.total,
@@ -403,6 +450,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           nextCursor: result.nextCursor,
         }));
         setFailed(false);
+        if (retryRef.current === document.activeElement) {
+          inputRef.current?.focus({ preventScroll: true });
+        }
+        nextPageFailureRef.current = null;
+        setNextPageFailure(null);
         if (replace) {
           setActiveIndex(0);
           setScrollTop(0);
@@ -415,8 +467,12 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           setPage(EMPTY_PAGE);
           setFailed(true);
         } else {
-          // Keep what is already loaded and stop paging; the user can still pick from it.
-          setPage((current) => ({ ...current, nextCursor: null }));
+          // Preserve both the rows and the exact cursor. Only an explicit retry may continue
+          // after a failure; ordinary scrolling must not create an automatic retry loop.
+          nextCursorRef.current = null;
+          const failure = { cursor, request, searchText, access, revision };
+          nextPageFailureRef.current = failure;
+          setNextPageFailure(failure);
         }
       } finally {
         if (inFlightRef.current === request) inFlightRef.current = null;
@@ -425,6 +481,32 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     },
     [taskId],
   );
+
+  useEffect(
+    () => () => {
+      queryRef.current += 1;
+      inFlightRef.current = null;
+    },
+    [],
+  );
+
+  function retryNextPage() {
+    const failure = nextPageFailure;
+    if (
+      failure === null ||
+      failure !== nextPageFailureRef.current ||
+      inFlightRef.current !== null ||
+      failure.request !== queryRef.current ||
+      failure.revision !== revisionRef.current ||
+      failure.cursor !== page.nextCursor ||
+      failure.searchText !== text ||
+      failure.searchText !== inputRef.current?.value ||
+      failure.access !== accessType
+    )
+      return;
+    nextCursorRef.current = failure.cursor;
+    void fetchPage(failure.cursor, failure.searchText, failure.access);
+  }
 
   // Debounce the typed text into a *new query to Main*, not into a local filter: the loaded rows
   // are one page of a catalog, so narrowing them here would hide every match that lives on a page
@@ -492,7 +574,14 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
    * because a query is something the user's action causes, not state React has to synchronize. */
   function maybeLoadNextPage(atScrollTop: number, atActiveIndex: number) {
     const cursor = page.nextCursor;
-    if (cursor === null || inFlightRef.current !== null || failed) return;
+    if (
+      cursor === null ||
+      inFlightRef.current !== null ||
+      failed ||
+      nextPageFailure !== null ||
+      text !== query
+    )
+      return;
     const at = virtualRange({
       itemCount: page.items.length,
       scrollTop: atScrollTop,
@@ -548,6 +637,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLElement>) {
+    if (e.nativeEvent.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       close(true);
@@ -555,6 +645,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (e.repeat) return;
       if (active) choose(active);
       return;
     }
@@ -615,11 +706,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // The first page of a search (typing, or switching API/サブスク/ローカル) has nothing to show
   // yet, so the wait is drawn as a spinner in the middle of the empty list. The count line keeps
   // saying 検索中 for screen readers only — on screen the spinner already says it.
-  const searching = !failed && loading && page.items.length === 0;
-  const countMessage = failed
-    ? 'モデル一覧を取得できませんでした'
-    : searching
-      ? '検索中'
+  const searching = (loading || text !== query) && page.items.length === 0;
+  const countMessage = searching
+    ? '検索中'
+    : failed
+      ? 'モデル一覧を取得できませんでした'
       : `${page.total}件中${page.items.length}件を読み込み済み`;
 
   return (
@@ -645,7 +736,17 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             type="text"
             role="combobox"
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              // Invalidate old page callbacks immediately, including the debounce interval.
+              queryRef.current += 1;
+              inFlightRef.current = null;
+              nextPageFailureRef.current = null;
+              setNextPageFailure(null);
+              setLoading(false);
+              const next = e.target.value;
+              setText(next);
+              if (next === query) void fetchPage(null, next, accessType);
+            }}
             onKeyDown={handleKeyDown}
             placeholder="モデルを検索"
             aria-label="モデルを検索"
@@ -767,7 +868,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               </div>
             )}
           </div>
-          {page.items.length === 0 && !loading && (
+          {page.items.length === 0 && !loading && text === query && (
             <div className="mpv2-empty">
               {failed ? (
                 'モデル一覧を取得できませんでした'
@@ -787,7 +888,30 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               )}
             </div>
           )}
-          {loading && page.items.length > 0 && <div className="mpv2-more">読み込み中…</div>}
+          {nextPageFailure !== null && (
+            <div className="mpv2-more">
+              <span role="status">続きを読み込めませんでした</span>{' '}
+              <button
+                ref={retryRef}
+                type="button"
+                className="settings-secondary-button"
+                data-testid="model-picker-v2-next-retry"
+                aria-disabled={loading}
+                onClick={retryNextPage}
+                onKeyDown={(e) => {
+                  if (!e.nativeEvent.isComposing && e.key === 'Escape') {
+                    e.preventDefault();
+                    close(true);
+                  }
+                }}
+              >
+                {loading ? '再読み込み中…' : '続きを再読み込み'}
+              </button>
+            </div>
+          )}
+          {loading && page.items.length > 0 && nextPageFailure === null && (
+            <div className="mpv2-more">読み込み中…</div>
+          )}
         </div>
       )}
     </div>

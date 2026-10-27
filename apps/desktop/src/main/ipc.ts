@@ -234,6 +234,7 @@ import {
   teamResumeExecutionIntegrationInputSchema,
   teamRetainedWorktreeInspectionSchema,
   teamRetainedWorktreeListSchema,
+  teamRetainedWorktreeListInputSchema,
   teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
@@ -4220,9 +4221,9 @@ export class IpcRouter {
     // manager, or discard one the user confirmed. The coordinator checks every path it touches.
     this.handle(
       IPC_CHANNELS.teamsListRetainedWorktrees,
-      taskIdPayloadSchema,
+      teamRetainedWorktreeListInputSchema,
       teamRetainedWorktreeListSchema,
-      (input) => this.teamCoordinator.listRetainedWorktrees(input.taskId),
+      (input) => this.teamCoordinator.listRetainedWorktrees(input.taskId, input.cursor),
     );
     this.handle(
       IPC_CHANNELS.teamsInspectRetainedWorktree,

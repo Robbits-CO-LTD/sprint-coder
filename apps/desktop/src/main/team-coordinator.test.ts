@@ -1638,6 +1638,151 @@ describe('Mission workspace fingerprint', () => {
 
 if (runsWithElectronAbi)
   describe('TeamCoordinator', () => {
+    it('pages 401 retained worktrees through typed Task-owned cursors without discarding (#966)', async () => {
+      const persistence = createPersistence();
+      try {
+        const task = persistence.createTask('retained paging');
+        const team = persistence.promoteTaskToTeam(task.id);
+        persistence.transitionTeamState(team.id, 'forming');
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role: 'retained writer',
+          objective: 'fixture',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        for (let i = 0; i < 401; i++) {
+          const now = new Date(Date.UTC(2026, 9, 27, 0, 0, i)).toISOString();
+          const execution = persistence.createTeamExecution({
+            teamId: team.id,
+            assigneeAgentId: worker.id,
+            createdByAgentId: team.leaderAgentId,
+            instruction: 'retained fixture',
+            accessMode: 'workspace-write',
+            now,
+          });
+          const isolation = persistence.createTeamExecutionIsolation({
+            executionId: execution.id,
+            now,
+            repositories: [
+              {
+                ordinal: 1,
+                repoPath: '/synthetic/repo',
+                worktreePath: `/synthetic/worktree/${i}`,
+                baseHead: 'a'.repeat(40),
+                workerHead: null,
+                integratedHead: null,
+                state: 'active',
+                changedFiles: [],
+              },
+            ],
+            roots: [
+              {
+                rootId: 'root',
+                rootLabel: 'fixture',
+                role: 'primary',
+                repositoryOrdinal: 1,
+                sourcePath: '/synthetic/repo',
+                isolatedPath: `/synthetic/worktree/${i}`,
+                identity: 'a'.repeat(64),
+                mutationKey: 'b'.repeat(64),
+                isolatedIdentity: null,
+                isolatedMutationKey: null,
+              },
+            ],
+          });
+          persistence.updateTeamExecutionIsolation({
+            executionId: execution.id,
+            phase: 'quarantined',
+            repositories: isolation.repositories.map((row) => ({
+              ...row,
+              state: 'quarantined' as const,
+            })),
+            now,
+          });
+        }
+        const managerRoot = mkdtempSync(join(tmpdir(), 'retained-paging-'));
+        cleanup.push(managerRoot);
+        const manager = new WorkerWorktreeManager({ worktreesRoot: managerRoot });
+        const submodules = vi.spyOn(manager, 'hasSubmodules').mockResolvedValue(false);
+        const locks = vi.spyOn(manager, 'observeRetainedWorktreeLocks').mockResolvedValue([]);
+        const coordinator = coordinatorWithWorktrees(persistence, new TestWorkerRuntime(), manager);
+        const first = await coordinator.listRetainedWorktrees(task.id);
+        expect(first.worktrees).toHaveLength(200);
+        expect(submodules).toHaveBeenCalledTimes(200);
+        expect(first.worktrees.every((row) => !row.discardable)).toBe(true);
+        expect(first.total).toBe(401);
+        expect(first.nextCursor).not.toBeNull();
+        const boundary = first.nextCursor!;
+        const isolation = persistence.getTeamExecutionIsolation(boundary.executionId)!;
+        persistence.updateTeamExecutionIsolation({
+          executionId: boundary.executionId,
+          phase: 'quarantined',
+          repositories: isolation.repositories.map((row) => ({
+            ...row,
+            state: 'cleaned' as const,
+          })),
+          now: new Date().toISOString(),
+        });
+        const second = await coordinator.listRetainedWorktrees(task.id, boundary);
+        expect(second.worktrees).toHaveLength(200);
+        expect(submodules).toHaveBeenCalledTimes(400);
+        const last = await coordinator.listRetainedWorktrees(task.id, second.nextCursor!);
+        expect(last.worktrees).toHaveLength(1);
+        expect(submodules).toHaveBeenCalledTimes(401);
+        expect(last.nextCursor).toBeNull();
+        expect(
+          new Set(
+            [...first.worktrees, ...second.worktrees, ...last.worktrees].map(
+              (row) => row.executionId,
+            ),
+          ).size,
+        ).toBe(401);
+        expect(persistence.listTeamExecutions(team.id)).toHaveLength(401);
+        await expect(
+          coordinator.listRetainedWorktrees(task.id, { ...boundary, taskId: 'other' }),
+        ).rejects.toThrow('無効');
+        await expect(
+          coordinator.listRetainedWorktrees(task.id, { ...boundary, teamId: 'other' }),
+        ).rejects.toThrow('別のTeam');
+        const toDisappear = persistence
+          .listTeamExecutions(team.id)
+          .filter(
+            (row) =>
+              persistence.getTeamExecutionIsolation(row.id)?.repositories[0]?.state ===
+              'quarantined',
+          )
+          .slice(0, 200);
+        locks.mockImplementationOnce(async () => {
+          for (const row of toDisappear) {
+            const current = persistence.getTeamExecutionIsolation(row.id)!;
+            persistence.updateTeamExecutionIsolation({
+              executionId: row.id,
+              phase: 'quarantined',
+              repositories: current.repositories.map((repo) => ({
+                ...repo,
+                state: 'cleaned' as const,
+              })),
+              now: new Date().toISOString(),
+            });
+          }
+          return [];
+        });
+        const vanished = await coordinator.listRetainedWorktrees(task.id);
+        expect(vanished.worktrees).toHaveLength(0);
+        expect(vanished.nextCursor).not.toBeNull();
+        const afterVanished = await coordinator.listRetainedWorktrees(
+          task.id,
+          vanished.nextCursor!,
+        );
+        expect(afterVanished.worktrees).toHaveLength(200);
+        expect(afterVanished.nextCursor).toBeNull();
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('emits metadata-only lifecycle diagnostics for Team work', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Diagnostic Team');
@@ -3926,6 +4071,7 @@ if (runsWithElectronAbi)
       await expect(recovered.discardRetainedWorktree(task.id, executionId, 1)).resolves.toEqual({
         worktrees: [],
         total: 0,
+        nextCursor: null,
       });
       expect(existsSync(store)).toBe(false);
       expect(registered()).toBe(1);
@@ -4032,6 +4178,7 @@ if (runsWithElectronAbi)
         await expect(coordinator.discardRetainedWorktree(taskId, executionId, 1)).resolves.toEqual({
           worktrees: [],
           total: 0,
+          nextCursor: null,
         });
         expect(existsSync(first.worktreePath)).toBe(false);
         expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
@@ -4107,7 +4254,7 @@ if (runsWithElectronAbi)
           await holders.pop()!.release();
           await expect(
             coordinator.discardRetainedWorktree(taskId, executionId, 1),
-          ).resolves.toEqual({ worktrees: [], total: 0 });
+          ).resolves.toEqual({ worktrees: [], total: 0, nextCursor: null });
           expect(existsSync(first.worktreePath)).toBe(false);
           persistence.close();
         } finally {
@@ -8273,7 +8420,7 @@ if (runsWithElectronAbi)
       ).resolves.toMatchObject({ head: primary.workerHead, commitsSinceBase: 1 });
       await expect(
         coordinator.discardRetainedWorktree(taskId, submission.executionId, primaryOrdinal),
-      ).resolves.toEqual({ worktrees: [], total: 0 });
+      ).resolves.toEqual({ worktrees: [], total: 0, nextCursor: null });
       expect(existsSync(primary.worktreePath)).toBe(false);
       persistence.close();
     }, 45_000);
@@ -9083,6 +9230,7 @@ if (runsWithElectronAbi)
       expect(repository.state).toBe('quarantined');
 
       await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toEqual({
+        nextCursor: null,
         total: 1,
         worktrees: [
           {
@@ -9108,7 +9256,7 @@ if (runsWithElectronAbi)
       });
       await expect(
         coordinator.listRetainedWorktrees(persistence.createTask('No Team').id),
-      ).resolves.toEqual({ worktrees: [], total: 0 });
+      ).resolves.toEqual({ worktrees: [], total: 0, nextCursor: null });
 
       await expect(
         coordinator.inspectRetainedWorktree(task.id, failed.executionId, 1),
@@ -9196,7 +9344,7 @@ if (runsWithElectronAbi)
       published.length = 0;
       await expect(
         coordinator.discardRetainedWorktree(task.id, failed.executionId, 1),
-      ).resolves.toEqual({ worktrees: [], total: 0 });
+      ).resolves.toEqual({ worktrees: [], total: 0, nextCursor: null });
 
       expect(existsSync(repository.worktreePath)).toBe(false);
       const after = persistence.getTeamExecutionIsolation(failed.executionId)!;
@@ -9417,6 +9565,7 @@ if (runsWithElectronAbi)
       await expect(coordinator.discardRetainedWorktree(task.id, second, 1)).resolves.toEqual({
         worktrees: [],
         total: 0,
+        nextCursor: null,
       });
       expect(persistence.getTeamExecutionIsolation(second)!.repositories[0]!.state).toBe('cleaned');
       persistence.close();
