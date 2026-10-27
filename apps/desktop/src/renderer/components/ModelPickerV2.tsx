@@ -345,6 +345,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // Mirrors the loaded page's catalog revision, so a response can tell "append" from "replace"
   // before `setPage`'s updater runs — the scroll/active reset has to happen outside it.
   const revisionRef = useRef(EMPTY_PAGE.revision);
+  // Advance synchronously when a page lands: a native scroll event can arrive before React
+  // commits the new nextCursor, after inFlightRef has already been released.
+  const nextCursorRef = useRef<string | null>(null);
 
   const baseId = useId();
   const listboxId = `${baseId}-listbox`;
@@ -402,10 +405,14 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       searchText: string,
       access: ModelCatalogAccessType,
     ): Promise<void> => {
-      if (cursor !== null && inFlightRef.current !== null) return;
+      if (cursor !== null && (inFlightRef.current !== null || cursor !== nextCursorRef.current))
+        return;
       const request = cursor === null ? (queryRef.current += 1) : queryRef.current;
       const revision = revisionRef.current;
-      if (cursor === null) setNextPageFailure(null);
+      if (cursor === null) {
+        nextCursorRef.current = null;
+        setNextPageFailure(null);
+      }
       inFlightRef.current = request;
       setLoading(true);
       try {
@@ -421,6 +428,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
         // existed.
         const replace = cursor === null || result.revision !== revisionRef.current;
         revisionRef.current = result.revision;
+        nextCursorRef.current = result.nextCursor;
         setPage((current) => ({
           revision: result.revision,
           total: result.total,
@@ -446,6 +454,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
         } else {
           // Preserve both the rows and the exact cursor. Only an explicit retry may continue
           // after a failure; ordinary scrolling must not create an automatic retry loop.
+          nextCursorRef.current = null;
           setNextPageFailure({ cursor, request, searchText, access, revision });
         }
       } finally {
@@ -477,6 +486,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       failure.access !== accessType
     )
       return;
+    nextCursorRef.current = failure.cursor;
     void fetchPage(failure.cursor, failure.searchText, failure.access);
   }
 

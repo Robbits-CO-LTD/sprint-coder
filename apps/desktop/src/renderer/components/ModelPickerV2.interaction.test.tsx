@@ -166,6 +166,60 @@ describe('ModelPickerV2 next-page recovery', () => {
     );
   });
 
+  it('does not fetch a consumed cursor from a scroll event before the success render commits', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      retry()!.click();
+      // IPC resolves while React still exposes the previous page's handlers.
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
+  it('does not automatically retry a failed cursor before its error render commits', async () => {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockRejectedValue(new Error('page unavailable'));
+    await renderPicker('automatic-failure');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(retry()).not.toBeNull();
+  });
+
+  it('does not append a successful automatic next page twice before React commits', async () => {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockResolvedValue(lastPage);
+    await renderPicker('automatic-page');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
   it('retains the same retry after a repeated failure and replaces changed catalog revisions', async () => {
     await failNext();
     query.mockRejectedValueOnce(new Error('still unavailable'));
