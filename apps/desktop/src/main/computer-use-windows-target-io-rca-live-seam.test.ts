@@ -1559,7 +1559,14 @@ void AssertBusyRefusals(RcaRun &run) {
   const unsigned measured = measurement_calls.load();
   run.Send(MessageType::kProbe, 5, "{\"operation\":\"list_targets\"}");
   Require(run.Wait(5, 1000) && run.Error(5, "list_targets_unavailable"), "busy_list_refused");
-  run.Send(MessageType::kProbe, 6, "{\"operation\":\"start_session\"}");
+  // API 3 parses/adopts the start owner before the busy check. Supply a syntactically valid
+  // request so this still proves the occupied worker refuses target I/O, not just malformed input.
+  const std::string busy_start = "{\"operation\":\"start_session\",\"sessionId\":\"sc940-control\","
+      "\"pid\":1,\"windowId\":\"1\",\"cancelEpoch\":0,\"appIdentityDigest\":\"" + std::string(64, 'a') +
+      "\",\"windowIdentityDigest\":\"" + std::string(64, 'b') + "\",\"canonicalPath\":\"C:/unread-fixture.exe\","
+      "\"executableDigest\":\"" + std::string(64, 'c') + "\",\"expectedBoundsX\":0,\"expectedBoundsY\":0,"
+      "\"expectedBoundsWidth\":1,\"expectedBoundsHeight\":1}";
+  run.Send(MessageType::kProbe, 6, busy_start);
   Require(run.Wait(6, 1000) && run.Error(6, "session_target_rejected"), "busy_start_refused");
   WindowsSession unmeasured;
   RECT bounds{};
@@ -2170,16 +2177,18 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       Require(id != std::string::npos, "resume_binding_negative_field");
       mismatch.replace(id, std::string("\"sessionId\":\"sc940-new\"").size(), "\"sessionId\":\"different\"");
       run.Send(MessageType::kProbe, 23, mismatch);
-      Require(run.Wait(23, 15'000) && run.Error(23, "session_refocus_stale") && WaitAllResumeThreads() &&
-                  resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
-              "resume_identified_refusal_still_invalidates_ticket");
+      // The header/metadata ID pair is immutable in API 3. A different owner is rejected
+      // before the existing session's tickets or measurement state can be touched.
+      Require(run.Wait(23, 15'000) && run.Error(23, "session_id_reuse") && WaitAllResumeThreads() &&
+                  resume_ticket_invalidations.load() == 4 && resume_after_jobs.load() == 2,
+              "resume_sid_alias_refused_without_ticket_mutation");
       mismatch = ResumeMetadata(listed, 1);
       const auto digest = mismatch.find(listed.app);
       Require(digest != std::string::npos, "resume_app_negative_field");
       mismatch.replace(digest, listed.app.size(), std::string(64, '0'));
       run.Send(MessageType::kProbe, 24, mismatch);
       Require(run.Wait(24, 15'000) && run.Error(24, "session_target_rejected") && WaitAllResumeThreads() &&
-                  resume_ticket_invalidations.load() == 6 && resume_after_jobs.load() == 2,
+                  resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
               "resume_refused_attempt_also_invalidates_ticket");
     } else if (repeat) {
       SendResumeComponent(run, listed, 21, "repeat");
