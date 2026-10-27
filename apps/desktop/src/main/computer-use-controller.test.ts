@@ -5296,6 +5296,32 @@ describe('ComputerUseController', () => {
     });
   });
 
+  it('waits for close and publishes terminal status when broker startup fails', async () => {
+    let finish!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const fixture = createFixture({ closeGate });
+    const internals = fixture.controller as unknown as { broker: { startTurn: () => unknown } };
+    vi.spyOn(internals.broker, 'startTurn').mockImplementation(() => {
+      throw new Error('broker startup failed');
+    });
+    let settled = false;
+    const result = start(fixture).catch((error: Error) => {
+      settled = true;
+      return error.message;
+    });
+    await vi.waitFor(() => expect(fixture.nativeCloseCount()).toBe(1));
+    expect(settled).toBe(false);
+    expect(fixture.statuses.at(-1)?.state).toBe('stopping');
+    finish();
+    expect(await result).toBe('broker startup failed');
+    expect(fixture.statuses.at(-1)).toMatchObject({ state: 'stopped', stopReason: 'error' });
+    expect(fixture.nativeCancelCount()).toBe(1);
+    expect(fixture.nativeCloseCount()).toBe(1);
+    await fixture.controller.dispose();
+  });
+
   it('stops a permanently pending planner and settles start without awaiting the planner', async () => {
     let sessionId = '';
     let entered = false;

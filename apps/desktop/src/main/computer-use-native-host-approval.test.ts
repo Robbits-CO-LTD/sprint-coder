@@ -157,7 +157,13 @@ function build(
     })),
   };
   // A test may replace how the fake native starts or closes a session.
-  for (const name of ['startSession', 'close', 'stopPendingStart', 'listWindows'] as const) {
+  for (const name of [
+    'startSession',
+    'close',
+    'cancel',
+    'stopPendingStart',
+    'listWindows',
+  ] as const) {
     const replacement = overrides[name];
     if (replacement !== undefined) methods[name] = fn(name, replacement);
   }
@@ -946,6 +952,38 @@ describe('API 3 pending-start ownership', () => {
     await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unconfirmed/u);
     expect(built.host.availability().control).toBe(false);
   });
+
+  it.each(['resolve', 'reject'] as const)(
+    'does not start a second cleanup when resume %s loses to active Cancel and Close',
+    async (completion) => {
+      const cancelGate = deferred<unknown>();
+      const built = build({}, { cancel: () => cancelGate.promise });
+      const active = await built.host.startSession(input());
+      const native = deferred<unknown>();
+      const response = built.calls['startSession']!(input());
+      built.calls['startSession']!.mockClear().mockImplementationOnce(() => native.promise);
+      const resume = built.host.startSession({ ...input(), resume: true });
+      const rejected = expect(resume).rejects.toThrow();
+      await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledOnce());
+      const cancel = built.host.cancel(active, 1);
+      const canceled = expect(cancel).resolves.toMatchObject({ cancelEpoch: 1 });
+      if (completion === 'resolve') native.resolve(response);
+      else native.reject(new Error('resume failed'));
+      await rejected;
+      expect(built.calls['stopPendingStart']).not.toHaveBeenCalled();
+      cancelGate.resolve({
+        result: 'canceled',
+        drained: true,
+        sessionId: 'pending',
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      });
+      await canceled;
+      await built.host.close(active);
+      expect(built.host.availability().control).toBe(true);
+      expect(built.calls['close']).toHaveBeenCalledOnce();
+    },
+  );
 
   it('times out twice without accepting a late receipt or clearing quarantine', async () => {
     vi.useFakeTimers();

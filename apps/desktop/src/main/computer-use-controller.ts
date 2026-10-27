@@ -2671,7 +2671,18 @@ export class ComputerUseController {
         (entry) => entry.controller === controller,
       );
       if (starting === undefined) {
-        rejectCanceled(controller.signal.reason);
+        const active = [...this.sessions.values()].find((entry) => entry.controller === controller);
+        if (active === undefined) rejectCanceled(controller.signal.reason);
+        else
+          void this.stop(active.status.sessionId, 'user_stop').then(
+            () =>
+              rejectCanceled(
+                active.status.stopReason === 'native_unavailable'
+                  ? new Error('Computer Use native_stop_unconfirmed')
+                  : controller.signal.reason,
+              ),
+            rejectCanceled,
+          );
         return;
       }
       void this.stop(starting.status.sessionId, starting.reason ?? 'user_stop').then(() => {
@@ -3102,6 +3113,17 @@ export class ComputerUseController {
         stopPromise: null,
         artifactGeneration,
       };
+      // Keep pending ownership until the synchronous broker binding succeeds.
+      this.broker.startTurn(
+        {
+          taskId: input.taskId,
+          turnId,
+          workspaceId: null,
+          policyEpoch,
+        },
+        'computer-controller',
+        [COMPUTER_OBSERVE_TOOL.toolId, COMPUTER_ACT_TOOL.toolId],
+      );
       this.sessions.set(sessionId, record);
       this.startingSessions.delete(sessionId);
       // Bound before any round can start. Digest of the limits only; no policy body or identifier.
@@ -3125,26 +3147,6 @@ export class ComputerUseController {
         Math.max(1, Date.parse(status.expiresAt) - this.now()),
       );
       record.expiryTimer.unref?.();
-      try {
-        this.broker.startTurn(
-          {
-            taskId: input.taskId,
-            turnId,
-            workspaceId: null,
-            policyEpoch,
-          },
-          'computer-controller',
-          [COMPUTER_OBSERVE_TOOL.toolId, COMPUTER_ACT_TOOL.toolId],
-        );
-      } catch (error) {
-        this.sessions.delete(sessionId);
-        if (record.expiryTimer !== null) clearTimeout(record.expiryTimer);
-        record.expiryTimer = null;
-        controller.abort(error);
-        await this.deps.native.close(native).catch(() => undefined);
-        await this.deps.disarmEmergencyStop?.(sessionId);
-        throw error;
-      }
       // After startTurn, so a failed start leaves no attachment behind. No await before run().
       this.attachCarriedArtifacts(record, input.agent?.carry);
       this.emit(status);

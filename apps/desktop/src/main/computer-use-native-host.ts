@@ -804,7 +804,10 @@ export function createComputerUseNativeHost(
           owner,
         );
       } catch (error) {
-        if (owner.stopped || (owner.attempts.size === 1 && !sessions.has(input.sessionId)))
+        // An active Cancel/Close owns its cleanup. A late resume must not create a second
+        // terminal operation that removes the session before Cancel validates its receipt.
+        if (owner.stopPromise !== null) await owner.stopPromise.catch(() => undefined);
+        else if (!owner.stopped && owner.attempts.size === 1 && !sessions.has(input.sessionId))
           await stopStartOwner(owner).catch(() => undefined);
         throw error;
       } finally {
