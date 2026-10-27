@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES,
   computerWindowsNativeTargetListSchema,
+  computerWindowsAppIdentitySchema,
   computerWindowsTargetFactsSchema,
 } from '@sprint-coder/contracts';
 import { TARGET_FACT_MAX_BYTES } from './computer-use-target-eligibility';
@@ -31,6 +32,19 @@ function cut(start: string, end: string): string {
 }
 
 const v2Block = cut('// BEGIN windows v2 targets', '// END windows v2 targets');
+
+describe('Windows v1 display name contract (#947)', () => {
+  it('normalizes blank display names at identity construction without changing the wire serializer', () => {
+    const build = cut(
+      'bool BuildLockedWindowsExecutableIdentity(',
+      'bool OpenLockedWindowsExecutable(',
+    );
+    expect(build).toContain('WindowsV1DisplayName(display_name),');
+    expect(host).toContain(
+      'WindowsV2LabelTrimmed(display_name).empty() ? "Application" : std::string(display_name)',
+    );
+  });
+});
 
 describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
   it('answers list_targets with unsupported_operation in a v1 build, before anything is read', () => {
@@ -440,6 +454,25 @@ int wmain(int argc, wchar_t **argv) {
   std::cout << "runner elevated=" << (elevated ? "yes" : "no") << " targets started "
             << (g_child_token != nullptr ? "with the restricted LUA token" : "with this program's token")
             << "\n";
+
+  // #947: read real renamed copies without launching or focusing them. The V1 identity writer
+  // is used by picker/list_windows in both builds, and Main parses these exact JSON results.
+  const std::wstring fixture_parent = fixture.substr(0, fixture.find_last_of(L"\\/"));
+  for (const auto &[leaf, expected] : {
+       std::pair<std::wstring, std::string>{L" .exe", "Application"},
+       std::pair<std::wstring, std::string>{L"\u3000.exe", "Application"},
+       std::pair<std::wstring, std::string>{L" leading.exe", " leading"},
+       std::pair<std::wstring, std::string>{L"ordinary.exe", "ordinary"}}) {
+    const std::wstring copy = fixture_parent + L"\\" + leaf;
+    Check(CopyFileW(fixture.c_str(), copy.c_str(), TRUE) == TRUE, "v1_name_copy_created");
+    {
+      LockedWindowsExecutable locked;
+      Check(OpenLockedWindowsExecutable(copy, &locked), "v1_named_identity_read");
+      Check(locked.identity.display_name == expected, "v1_name_only_blank_is_replaced");
+      std::cout << "V1_IDENTITY_JSON:" << WindowsIdentityJson(locked.identity) << "\n";
+    }
+    Check(DeleteFileW(copy.c_str()) == TRUE, "v1_name_copy_released");
+  }
 
 #if SPRINT_CODER_ELIGIBILITY_V2 == 0
   (void)fixture;
@@ -1099,6 +1132,19 @@ ${fixtureBuild.stdout}`,
           console.log(executed.stdout);
           expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
           expect(executed.stdout).toContain('OK');
+          const v1Identities = executed.stdout
+            .split(/\r?\n/u)
+            .filter((line) => line.startsWith('V1_IDENTITY_JSON:'));
+          expect(v1Identities).toHaveLength(4);
+          expect(
+            v1Identities.map(
+              (line) =>
+                computerWindowsAppIdentitySchema.parse(
+                  JSON.parse(line.slice('V1_IDENTITY_JSON:'.length)),
+                ).displayName,
+            ),
+          ).toEqual(['Application', 'Application', 'leading', 'ordinary']);
+
           // A v2 build also prints rows written by the production row builder (with display names
           // that are white space at an end): Main's own schema must take the whole answer.
           const listed = executed.stdout

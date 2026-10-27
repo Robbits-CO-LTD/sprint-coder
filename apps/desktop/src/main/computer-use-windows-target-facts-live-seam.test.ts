@@ -1155,7 +1155,8 @@ describe('Windows target facts seam source', () => {
 
 // S5-c-3 PR-4 (#500): the v2 package identity is added beside the V1 identity, never in it. The V1
 // identity JSON and the V1 digest formula are pinned here as text, so a v1 build writes byte for
-// byte what it wrote before, and the package identity is answered only by a v2 build.
+// byte what it wrote before for nonblank names, and the package identity is answered only by a v2 build.
+// #947 intentionally maps a blank-only display name to Application before this unchanged serializer.
 const v1IdentityJson = String.raw`std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
                                 std::uint32_t pid = 0) {
   return "{\"platform\":\"win32\",\"identityDigest\":\"" +
@@ -1183,7 +1184,7 @@ const v1IdentityDigest = String.raw`  const std::string identity_digest =
                          "\n" + signer_digest);`;
 
 describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
-  it('leaves the V1 identity byte for byte, and answers a package identity only in a v2 build', () => {
+  it('preserves the V1 serializer and digest, and answers a package identity only in a v2 build', () => {
     expect(cut('std::string WindowsIdentityJson(', 'bool PickWindowsExecutable(')).toBe(
       v1IdentityJson,
     );
