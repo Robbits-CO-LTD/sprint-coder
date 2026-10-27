@@ -1019,6 +1019,8 @@ describe('Computer Use Windows helper transport', () => {
       expect(helper().served).not.toContain('start_session');
       expect(helper().served).not.toContain('stop_pending_start');
       expect(host.availability().control).toBe(false);
+      await expect(host.stopPendingStart!('pending-discovery')).rejects.toThrow(/unconfirmed/u);
+      expect(helper().served).not.toContain('stop_pending_start');
       await expect(startSession(host, 'new-id', 'turn-2')).rejects.toThrow(/unconfirmed/u);
     },
   );

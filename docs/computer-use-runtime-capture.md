@@ -326,7 +326,11 @@ This slice does not cancel discovery itself, nor establish that an OS applicatio
 before Stop has finished. Pre-binding discovery cancellation remains part of the V1 follow-up.
 Once session start submission is possible, only a validated terminal receipt confirms its closure. Pending work cannot
 adopt its late result, and quarantine remains until that work settles or an unconfirmed stop is
-resolved. Duplicate Stop callers share one bounded cleanup operation. The Controller settles a canceled
+resolved. Duplicate in-flight Stop callers share one bounded cleanup operation. A failed operation keeps
+its stop latch and quarantine but permits a later bounded query. When a stopped start request
+settles after that failure, Main makes one bounded recheck; the late start result itself is never
+a stop receipt. Only fresh validated terminal evidence releases quarantine, and uncertainty from
+launch-capable discovery is retained. The Controller settles a canceled
 start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed
 stop separately. Old overlay completions cannot unregister a newer session's shortcut.
 

@@ -336,7 +336,11 @@ export function createComputerUseNativeHost(
     });
     owner.stopPromise = stopping;
     latchStartOwner(owner);
-    void completePendingStop(owner).then(resolveStop, rejectStop);
+    void completePendingStop(owner).then(resolveStop, (error) => {
+      // Keep the latch and quarantine, but allow a later logical Stop to request fresh evidence.
+      if (owner.stopPromise === stopping) owner.stopPromise = null;
+      rejectStop(error);
+    });
     return stopping;
   };
 
@@ -853,8 +857,20 @@ export function createComputerUseNativeHost(
       } catch (error) {
         // An active Cancel/Close owns its cleanup. A late resume must not create a second
         // terminal operation that removes the session before Cancel validates its receipt.
+        const stoppedBeforeSettlement = owner.stopped;
         if (owner.stopPromise !== null) await owner.stopPromise.catch(() => undefined);
         else if (!owner.stopped && owner.attempts.size === 1 && !sessions.has(input.sessionId))
+          await stopStartOwner(owner).catch(() => undefined);
+        // A settled start request is a new opportunity to query terminal evidence, not itself
+        // a stop receipt. One bounded recheck cannot resurrect the stopped lifetime or bypass
+        // an unfinished/uncertain launch-capable discovery.
+        if (
+          stoppedBeforeSettlement &&
+          owner.nativeInvoked &&
+          owner.unconfirmed &&
+          !owner.discoveryUnconfirmed &&
+          owner.stopPromise === null
+        )
           await stopStartOwner(owner).catch(() => undefined);
         throw error;
       } finally {

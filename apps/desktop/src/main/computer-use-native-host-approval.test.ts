@@ -985,7 +985,53 @@ describe('API 3 pending-start ownership', () => {
     },
   );
 
-  it('times out twice without accepting a late receipt or clearing quarantine', async () => {
+  it.each(['resolve', 'reject'] as const)(
+    'rechecks a failed pending stop once when the late native start %s settles',
+    async (completion) => {
+      const built = build();
+      const native = deferred<unknown>();
+      const response = built.calls['startSession']!(input());
+      built.calls['startSession']!.mockClear().mockImplementationOnce(() => native.promise);
+      built.calls['stopPendingStart']!.mockImplementationOnce(() => {
+        throw new Error('stop unavailable');
+      })
+        .mockImplementationOnce(() => {
+          throw new Error('stop unavailable');
+        })
+        .mockImplementationOnce(() => terminal('pending', { cancelEpoch: 3 }));
+      const starting = built.host.startSession(input());
+      const rejected = expect(starting).rejects.toThrow();
+      await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledOnce());
+      await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unavailable/u);
+      expect(built.host.availability().control).toBe(false);
+      expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(2);
+      if (completion === 'resolve') native.resolve(response);
+      else native.reject(new Error('late start failed'));
+      await rejected;
+      expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(3);
+      expect(built.host.availability().control).toBe(true);
+      await expect(built.host.startSession(input())).rejects.toThrow(/closed/u);
+    },
+  );
+
+  it('bounds late-settlement recovery when native still cannot confirm the stop', async () => {
+    const built = build();
+    const native = deferred<unknown>();
+    built.calls['startSession']!.mockImplementationOnce(() => native.promise);
+    built.calls['stopPendingStart']!.mockImplementation(() => {
+      throw new Error('still unavailable');
+    });
+    const starting = built.host.startSession(input());
+    const rejected = expect(starting).rejects.toThrow();
+    await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledOnce());
+    await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unavailable/u);
+    native.reject(new Error('late start rejected'));
+    await rejected;
+    expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(4);
+    expect(built.host.availability().control).toBe(false);
+  });
+
+  it('keeps timeout quarantine until a new bounded query confirms the terminal owner', async () => {
     vi.useFakeTimers();
     try {
       const built = build();
@@ -1000,7 +1046,17 @@ describe('API 3 pending-start ownership', () => {
       late.resolve(terminal());
       await Promise.resolve();
       expect(built.host.availability().control).toBe(false);
-      expect(built.host.stopPendingStart!('pending')).toBe(stop);
+      built.calls['stopPendingStart']!.mockImplementationOnce(() =>
+        terminal('pending', { cancelEpoch: 2 }),
+      );
+      const retry = built.host.stopPendingStart!('pending');
+      expect(retry).not.toBe(stop);
+      await expect(retry).resolves.toMatchObject({
+        kind: 'closed',
+        inputReceipt: { cancelEpoch: 2 },
+      });
+      expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(3);
+      expect(built.host.availability().control).toBe(true);
     } finally {
       vi.useRealTimers();
     }
