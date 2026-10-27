@@ -116,19 +116,23 @@ type InspectionState =
   | { status: 'ready'; value: TeamRetainedWorktreeInspection }
   | { status: 'error'; message: string };
 
-export function TeamRetainedWorktreesDialog({
-  taskId,
-  detail,
-  onClose,
-}: {
+type RetainedDialogProps = {
   taskId: string;
-  /** Current canonical Team detail. The list is fetched again whenever what Main's discard rule
-   * reads from it changes. */
+  /** Current canonical Team detail. Refetch when Main's discard-rule inputs change. */
   detail: TeamDetail;
   onClose: () => void;
-}) {
+};
+
+export function TeamRetainedWorktreesDialog(props: RetainedDialogProps) {
+  // An in-flight discard and its confirmation belong to one Task, just like the list and reads.
+  return <RetainedWorktreesDialogContent key={props.taskId} {...props} />;
+}
+
+function RetainedWorktreesDialogContent({ taskId, detail, onClose }: RetainedDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const refreshRef = useRef<HTMLButtonElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef<string | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const closingRef = useRef(false);
   const requestRef = useRef(0);
@@ -197,6 +201,17 @@ export function TeamRetainedWorktreesDialog({
                   ...next.worktrees.map((row) => [worktreeKey(row), row] as const),
                 ]).values(),
               ];
+        if (
+          cursor !== undefined &&
+          next.nextCursor === null &&
+          moreRef.current === document.activeElement
+        ) {
+          const known = new Set((listRef.current?.worktrees ?? []).map(worktreeKey));
+          const added = rows.find((row) => !known.has(worktreeKey(row)));
+          if (added)
+            pendingFocusRef.current = `${baseId}-${added.executionId}-${added.repositoryOrdinal}-heading`;
+          else refreshRef.current?.focus({ preventScroll: true });
+        }
         const loaded = { ...next, worktrees: rows };
         listRef.current = loaded;
         setList(loaded);
@@ -210,8 +225,17 @@ export function TeamRetainedWorktreesDialog({
         if (request === requestRef.current) setLoading(false);
       }
     },
-    [taskId, retainInspections],
+    [taskId, retainInspections, baseId],
   );
+
+  useEffect(() => {
+    const id = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (id !== null) {
+      const heading = document.getElementById(id);
+      if (heading && dialogRef.current?.contains(heading)) heading.focus({ preventScroll: true });
+    }
+  }, [list]);
 
   // `retainedKey` is what makes this refetch: an execution finishing, an isolation changing phase,
   // or a repository being cleaned elsewhere. Streamed Worker output leaves it unchanged.
@@ -404,7 +428,7 @@ export function TeamRetainedWorktreesDialog({
                   data-testid="team-retained-worktree"
                   aria-labelledby={`${itemId}-heading`}
                 >
-                  <h3 id={`${itemId}-heading`} className="team-retained-heading">
+                  <h3 id={`${itemId}-heading`} className="team-retained-heading" tabIndex={-1}>
                     {`${worktree.role} · Repo ${worktree.repositoryOrdinal}`}
                   </h3>
                   <dl className="team-retained-facts">
@@ -498,7 +522,9 @@ export function TeamRetainedWorktreesDialog({
             type="button"
             className="settings-secondary-button"
             data-testid="team-retained-load-more"
-            disabled={loading || busy}
+            ref={moreRef}
+            aria-disabled={loading || busy}
+            disabled={busy}
             onClick={() => {
               if (list.nextCursor !== null) void load(list.nextCursor);
             }}

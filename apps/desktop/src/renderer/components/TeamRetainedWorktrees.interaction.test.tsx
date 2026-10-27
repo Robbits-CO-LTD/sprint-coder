@@ -835,6 +835,41 @@ describe('retained worktree pagination (#966)', () => {
     expect(container.textContent).toContain('finisher');
   });
 
+  it('does not replace the next Task with an old successful discard response', async () => {
+    const discarded = deferred<TeamRetainedWorktreeList>();
+    const nextTask = deferred<TeamRetainedWorktreeList>();
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [failed], total: 1, nextCursor: null })
+      .mockReturnValueOnce(nextTask.promise);
+    api.discardRetainedWorktree.mockReturnValueOnce(discarded.promise);
+    await renderDialog();
+    await click(button(items()[0]!, 'team-retained-discard'));
+    await click(
+      container.querySelector<HTMLButtonElement>('[data-testid="team-retained-confirm-discard"]')!,
+    );
+    await act(async () =>
+      root.render(
+        <TeamRetainedWorktreesDialog taskId="task-2" detail={detail} onClose={() => {}} />,
+      ),
+    );
+    await settle(() => discarded.resolve({ worktrees: [], total: 0, nextCursor: null }));
+    await settle(() => nextTask.resolve({ worktrees: [integrated], total: 1, nextCursor: null }));
+    expect(container.textContent).toContain('finisher');
+    expect(container.textContent).not.toContain('worktreeを破棄しました');
+    expect(container.querySelector('[data-testid="team-retained-confirm"]')).toBeNull();
+  });
+
+  it('moves focus to the first added heading when the final page removes the focused more button', async () => {
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [failed], total: 201, nextCursor: cursor })
+      .mockResolvedValueOnce({ worktrees: [last], total: 201, nextCursor: null });
+    await renderDialog();
+    more()!.focus();
+    await act(async () => more()!.click());
+    expect(document.activeElement?.textContent).toBe('last worker · Repo 1');
+    expect(document.activeElement?.tagName).toBe('H3');
+  });
+
   it('retains rows and retry cursor after a failed additional page', async () => {
     api.listRetainedWorktrees
       .mockResolvedValueOnce({ worktrees: first, total: 201, nextCursor: cursor })
