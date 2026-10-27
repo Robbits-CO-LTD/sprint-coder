@@ -77,8 +77,8 @@ function instrumentedHost(): string {
     "    Sc940RejudgeRetired(job_id);\n    // Rejudge job retirement precedes result publication. No old job may touch a new job's slot.",
   );
   source = source.slice(0, rejudgeFrom) + rejudge + source.slice(rejudgeTo);
-  const measureFrom = source.indexOf('bool MeasureWindowsV2NewStart(');
-  const measureTo = source.indexOf('struct WindowsV2StartLease', measureFrom);
+  const measureFrom = source.indexOf('bool MeasureWindowsNewStart(');
+  const measureTo = source.indexOf('struct WindowsNewStartWaitGuard', measureFrom);
   if (measureFrom < 0 || measureTo < 0) throw new Error('Start measurement boundary changed');
   source =
     source.slice(0, measureFrom) +
@@ -88,7 +88,7 @@ function instrumentedHost(): string {
       'Sc940StartOpen(target_process->value, process_executable)',
     ) +
     source.slice(measureTo);
-  const startFrom = source.indexOf('bool StartWindowsV2NewSession(');
+  const startFrom = source.indexOf('bool StartWindowsNewSession(');
   const startTo = source.indexOf('// BEGIN windows v2 existing start', startFrom);
   if (startFrom < 0 || startTo < 0) throw new Error('Start consumer boundary changed');
   let newStart = source.slice(startFrom, startTo);
@@ -855,7 +855,7 @@ std::string Sc940ResumeComponent(const WindowsSession &session, const std::strin
           "resume_component_consumer");
   const WindowsSession &source = session;
   resume_fail_after_read.store(false);
-  WindowsV2StartInput input;
+  WindowsStartInput input;
   input.pid = source.pid;
   input.window = source.window;
   input.window_value = reinterpret_cast<UINT_PTR>(source.window);

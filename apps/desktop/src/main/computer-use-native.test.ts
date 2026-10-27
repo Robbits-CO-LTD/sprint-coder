@@ -415,10 +415,10 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('RECT physical_client{}', startGate),
     );
     const newStart = source.slice(
-      source.indexOf('bool StartWindowsV2NewSession('),
+      source.indexOf('bool StartWindowsNewSession('),
       source.indexOf('// END windows v2 targets'),
     );
-    const newStartConsumer = newStart.slice(0, newStart.indexOf('WindowsV2StartLease lease'));
+    const newStartConsumer = newStart.slice(0, newStart.indexOf('WindowsNewStartWaitGuard lease'));
     const newStartWorker = newStart.slice(
       newStart.indexOf('const auto still_valid'),
       newStart.indexOf('struct Apartment'),

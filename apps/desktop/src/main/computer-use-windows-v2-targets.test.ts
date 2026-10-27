@@ -117,8 +117,29 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
   });
 
   it('takes the v2 mode from the core, never from the policy language', () => {
-    expect(v2Block).not.toContain('MaximumModeForWindowsExecutable');
-    expect(v2Block).not.toContain('IsPolicyLanguageSupported');
+    const v1Eligibility = cut(
+      '// BEGIN windows v1 new-start eligibility',
+      '// END windows v1 new-start eligibility',
+    );
+    const v2AndShared = v2Block.replace(v1Eligibility, '');
+    expect(v2AndShared).not.toContain('MaximumModeForWindowsExecutable');
+    expect(v2AndShared).not.toContain('IsPolicyLanguageSupported');
+    const sharedMeasure = cut(
+      'bool MeasureWindowsNewStart(',
+      '// Stops the worker on every consumer exit',
+    );
+    expect(sharedMeasure).toContain(
+      'const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;',
+    );
+    expect(sharedMeasure).toContain(
+      '} else if (!MeasureWindowsV1NewStartEligibility(input, *process_executable, measured))',
+    );
+    expect([...host.matchAll(/MeasureWindowsV1NewStartEligibility\(/gu)]).toHaveLength(2);
+    expect(v1Eligibility).toContain('WindowsExecutableIdentityMatches(');
+    expect(v1Eligibility).toContain('IsSupportedWindowsV1Target(');
+    expect(v1Eligibility).not.toMatch(
+      /AdmitWindowsV2|ClassifyTarget|CurrentWindowsTargetFactsContext/u,
+    );
     expect(v2Block).toContain('*maximum_mode = std::string(judged.verdict.maximum_mode);');
     const start = cut('bool StartWindowsSession(', 'bool CloseWindowsSession(');
     expect(start).toContain(
