@@ -1139,6 +1139,35 @@ describe('Computer Use Windows helper transport', () => {
     await expect(startSession(host, 'late-native', 'turn-1')).rejects.toThrow(/closed/u);
   });
 
+  it('recovers after more than sixteen preparation failures without losing the never-sent proof', async () => {
+    const { addon } = createTarget();
+    const windows = responders()['list_windows']!({})[1];
+    const host = createComputerUseNativeHost(
+      binding({ ...addon, listWindows: () => windows }),
+      'win32',
+      {
+        windowsPhysicalBoundsToDip: (value) => value,
+      },
+    );
+    const spawn = transport.spawnHelper;
+    try {
+      transport.spawnHelper = () => {
+        throw new Error('synthetic spawn failure');
+      };
+      for (let index = 0; index < 20; index += 1) {
+        await expect(
+          startSession(host, `unsent-failure-${index}`, `turn-${index}`),
+        ).rejects.toThrow('synthetic spawn failure');
+        expect(host.availability().control).toBe(true);
+      }
+    } finally {
+      transport.spawnHelper = spawn;
+    }
+    const recovered = await startSession(host, 'recovered-after-failures', 'turn-recovered');
+    expect(recovered.sessionId).toBe('recovered-after-failures');
+    await host.close(recovered);
+  });
+
   it('cancels every unsubmitted attempt of one lifetime before the pipe handshake returns', async () => {
     const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
     const attempts = [1, 2].map(() =>

@@ -275,6 +275,10 @@ class WindowsComputerUseHelperClient {
     if (owner === undefined) return 'unknown';
     owner.stopped = true;
     if (owner.everSent) return 'may_have_been_sent';
+    // Main consumes this proof after a failed call has settled. Until then, keep it distinct
+    // from an unknown ID; once no attempt remains, no continuation can still write.
+    if (owner.attempts.size === 0 && this.starts.get(sessionId) === owner)
+      this.starts.delete(sessionId);
     this.shutdownWhenIdle(this.activityGeneration, this.helperGeneration, sessionId);
     return 'never_sent';
   }
