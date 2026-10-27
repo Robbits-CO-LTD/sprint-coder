@@ -52,7 +52,7 @@ function findBuild(): Build | null {
   };
 }
 
-// No target application is started. The real pipe's V1 start is held before OS I/O, then canceled.
+// No target application is started. The real pipe's V1 worker is held at its executable-read boundary.
 // The remaining reads name this process with a deliberately wrong identity and cannot reach focus.
 const nativeSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
 
