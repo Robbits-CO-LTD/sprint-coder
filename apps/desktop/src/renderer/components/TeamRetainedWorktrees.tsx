@@ -210,7 +210,7 @@ function RetainedWorktreesDialogContent({ taskId, detail, onClose }: RetainedDia
           const added = rows.find((row) => !known.has(worktreeKey(row)));
           if (added)
             pendingFocusRef.current = `${baseId}-${added.executionId}-${added.repositoryOrdinal}-heading`;
-          else refreshRef.current?.focus({ preventScroll: true });
+          else pendingFocusRef.current = `${baseId}-refresh`;
         }
         const loaded = { ...next, worktrees: rows };
         listRef.current = loaded;
@@ -264,7 +264,7 @@ function RetainedWorktreesDialogContent({ taskId, detail, onClose }: RetainedDia
     inFlightRef.current = null;
     inspectTokensRef.current.clear();
     const opener = openerRef.current;
-    const openerTestId = opener?.dataset.testid;
+    const openerTestId = opener?.dataset.testid ?? 'team-retained-worktrees-open';
     openerRef.current = null;
     dialogRef.current?.close();
     onClose();
@@ -376,6 +376,7 @@ function RetainedWorktreesDialogContent({ taskId, detail, onClose }: RetainedDia
           <h2 id={`${baseId}-title`}>{`残っているworktree（${list?.total ?? 0}件）`}</h2>
           <button
             ref={refreshRef}
+            id={`${baseId}-refresh`}
             type="button"
             className="settings-secondary-button team-retained-refresh"
             data-testid="team-retained-refresh"

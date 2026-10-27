@@ -870,6 +870,44 @@ describe('retained worktree pagination (#966)', () => {
     expect(document.activeElement?.tagName).toBe('H3');
   });
 
+  it('restores focus to refresh after an empty final page', async () => {
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [failed], total: 201, nextCursor: cursor })
+      .mockResolvedValueOnce({ worktrees: [], total: 1, nextCursor: null });
+    await renderDialog();
+    more()!.focus();
+    await act(async () => more()!.click());
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="team-retained-refresh"]'),
+    );
+  });
+
+  it('returns focus to the current trigger after a Task-keyed remount', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0);
+      return 0;
+    });
+    const opener = document.createElement('button');
+    opener.dataset.testid = 'team-retained-worktrees-open';
+    document.body.append(opener);
+    opener.focus();
+    try {
+      await renderDialog();
+      button(items()[0]!, 'team-retained-inspect').focus();
+      await act(async () =>
+        root.render(
+          <TeamRetainedWorktreesDialog taskId="task-2" detail={detail} onClose={() => {}} />,
+        ),
+      );
+      await click(
+        container.querySelector<HTMLButtonElement>('[data-testid="team-retained-close"]')!,
+      );
+      expect(document.activeElement).toBe(opener);
+    } finally {
+      opener.remove();
+    }
+  });
+
   it('retains rows and retry cursor after a failed additional page', async () => {
     api.listRetainedWorktrees
       .mockResolvedValueOnce({ worktrees: first, total: 201, nextCursor: cursor })
