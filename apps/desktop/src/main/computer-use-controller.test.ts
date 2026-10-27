@@ -5296,6 +5296,46 @@ describe('ComputerUseController', () => {
     });
   });
 
+  it.each(['starting', 'observing'] as const)(
+    'lets a reentrant Stop at active %s win over startup success',
+    async (state) => {
+      let finish!: () => void;
+      const fixture = createFixture({
+        closeGate: new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+      });
+      let stop: Promise<void> | undefined;
+      const unsubscribe = fixture.controller.subscribe((status) => {
+        if (stop === undefined && status.state === state && status.statusRevision >= 2)
+          stop = fixture.controller.stop(status.sessionId, 'emergency_stop');
+      });
+      let settled = false;
+      const result = start(fixture).then(
+        () => {
+          settled = true;
+          return 'success';
+        },
+        (error: Error) => {
+          settled = true;
+          return error.message;
+        },
+      );
+      await vi.waitFor(() => expect(fixture.nativeCloseCount()).toBe(1));
+      expect(settled).toBe(false);
+      expect(fixture.statuses.at(-1)?.state).toBe('stopping');
+      finish();
+      await stop;
+      expect(await result).toMatch(/emergency_stop/u);
+      expect(fixture.statuses.at(-1)).toMatchObject({
+        state: 'stopped',
+        stopReason: 'emergency_stop',
+      });
+      expect(fixture.observationCount()).toBe(0);
+      unsubscribe();
+    },
+  );
+
   it('waits for close and publishes terminal status when broker startup fails', async () => {
     let finish!: () => void;
     const closeGate = new Promise<void>((resolve) => {

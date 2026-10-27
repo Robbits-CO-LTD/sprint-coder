@@ -3150,10 +3150,12 @@ export class ComputerUseController {
       // After startTurn, so a failed start leaves no attachment behind. No await before run().
       this.attachCarriedArtifacts(record, input.agent?.carry);
       this.emit(status);
+      controller.signal.throwIfAborted();
       void this.run(record).catch((error) => {
         if (!controller.signal.aborted) void this.stop(sessionId, 'error');
         return error;
       });
+      controller.signal.throwIfAborted();
       return status;
     } catch (error) {
       if (starting.stopPromise === null) starting.failure = error;
