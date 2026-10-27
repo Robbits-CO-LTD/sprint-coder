@@ -383,6 +383,13 @@ function buildHost(attested: boolean, effectiveEligibilityMode: () => ComputerUs
     dispatchApproved: () => ({}),
     dispatch: () => ({}),
     cancel: () => ({}),
+    stopPendingStart: (input: unknown) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      cancelEpoch: 1,
+      inputAttemptCount: 0,
+    }),
     close: (input: unknown) => ({
       result: 'closed',
       drained: true,

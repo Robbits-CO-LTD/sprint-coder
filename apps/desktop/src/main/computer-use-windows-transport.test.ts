@@ -999,6 +999,107 @@ describe('Computer Use Windows helper transport', () => {
     },
   );
 
+  it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
+    const { addon, host, helper } = createTarget(
+      {
+        ...responders(),
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+      },
+      (helper) => helper.holdOnly('start_session'),
+    );
+    const starting = startSession(host, 'late-native', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('late-native')).toBe('may_have_been_sent');
+    await expect(host.stopPendingStart!('late-native')).resolves.toMatchObject({ kind: 'closed' });
+    expect(host.availability().control).toBe(false);
+    expect(children[0]!.killed).toBe(false);
+    helper().release('start_session');
+    await expect(starting).resolves.toBe('rejected');
+    expect(host.availability().control).toBe(true);
+    await expect(startSession(host, 'late-native', 'turn-1')).rejects.toThrow(/closed/u);
+  });
+
+  it('cancels every unsubmitted attempt of one lifetime before the pipe handshake returns', async () => {
+    const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
+    const attempts = [1, 2].map(() =>
+      Promise.resolve(addon.startSession!({ sessionId: 'unsent', profile })).then(
+        () => 'sent',
+        () => 'canceled',
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('unknown')).toBe('unknown');
+    expect(addon.cancelUnsubmittedStart?.('unsent')).toBe('never_sent');
+    helper().release('handshake');
+    await expect(Promise.all(attempts)).resolves.toEqual(['canceled', 'canceled']);
+    expect(helper().served).not.toContain('start_session');
+  });
+
+  it('does not prove never-sent after a synchronous write failure', async () => {
+    const { addon, host } = createTarget();
+    await startSession(host, 'existing', 'turn-1');
+    const write = sockets[0]!.write.bind(sockets[0]);
+    vi.spyOn(sockets[0]!, 'write').mockImplementation((chunk, callback) => {
+      const metadata = JSON.parse(
+        decodeComputerUseNativeFrame(chunk).metadata.toString('utf8'),
+      ) as Record<string, unknown>;
+      if (metadata['operation'] === 'start_session') throw new Error('partial write failure');
+      return write(chunk, callback);
+    });
+    await expect(addon.startSession!({ sessionId: 'write-failed', profile })).rejects.toThrow(
+      /partial write/u,
+    );
+    expect(addon.cancelUnsubmittedStart?.('write-failed')).toBe('may_have_been_sent');
+    expect(addon.cancelUnsubmittedStart?.('existing')).toBe('may_have_been_sent');
+  });
+
+  it('gives logical pending-stop retries distinct wire IDs on the stop lane', async () => {
+    let epoch = 1;
+    const { addon, host, helper } = createTarget({
+      ...responders(),
+      stop_pending_start: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: epoch++,
+          inputAttemptCount: 0,
+        },
+      ],
+    });
+    await startSession(host, 'pending-stop-wire', 'turn-1');
+    const ids: string[] = [];
+    const write = sockets[0]!.write.bind(sockets[0]);
+    vi.spyOn(sockets[0]!, 'write').mockImplementation((chunk, callback) => {
+      const frame = decodeComputerUseNativeFrame(chunk);
+      if (JSON.parse(frame.metadata.toString('utf8')).operation === 'stop_pending_start')
+        ids.push(frame.requestId.hex);
+      return write(chunk, callback);
+    });
+    helper().holdOnly('stop_pending_start');
+    const first = Promise.resolve(addon.stopPendingStart!({ sessionId: 'pending-stop-wire' }));
+    const second = Promise.resolve(addon.stopPendingStart!({ sessionId: 'pending-stop-wire' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    helper().release('stop_pending_start');
+    await expect(first).resolves.toMatchObject({ result: 'closed', cancelEpoch: 1 });
+    await expect(second).resolves.toMatchObject({ result: 'closed', cancelEpoch: 2 });
+  });
+
   it('does not tear down another preparing owner when canceling an unsent start', async () => {
     const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
     const first = Promise.resolve(addon.startSession!({ sessionId: 'keep-preparing', profile }));

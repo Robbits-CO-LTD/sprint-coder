@@ -106,6 +106,7 @@ function nativeFixture() {
       observe: vi.fn(),
       dispatch: vi.fn(),
       cancel: vi.fn(),
+      stopPendingStart: vi.fn(),
       close: vi.fn(),
     },
   };

@@ -181,6 +181,7 @@ function createFixture(
     /** The Task permission policy, in full (instead of the approval-required stand-in). */
     authorize?: ComputerUseControllerDeps['authorize'];
     startSessionGate?: Promise<void>;
+    stopPendingStart?: ComputerUseNativeHost['stopPendingStart'];
     /** Main's Computer Use (beta) gate; open unless a test closes it. */
     featureEnabled?: () => boolean;
     revalidateWindowsGate?: Promise<void>;
@@ -327,6 +328,12 @@ function createFixture(
         },
       ] satisfies readonly ComputerUseNativeWindow[];
     },
+    stopPendingStart:
+      options.stopPendingStart ??
+      (async (sessionId) => ({
+        kind: 'closed' as const,
+        inputReceipt: { sessionId, cancelEpoch: 1, inputAttemptCount: 0 },
+      })),
     startSession: async (input) => {
       nativeLog.push('startSession');
       startRoutes.push(input.classifierRoute);
@@ -651,26 +658,30 @@ async function start(
   remember = false,
   expectedProfileRevision?: number,
   maxRounds?: number,
+  externalSignal?: AbortSignal,
 ) {
   const candidate = (await fixture.controller.listWindows(profile.id))[0]!;
-  return fixture.controller.start({
-    ...(maxRounds === undefined ? {} : { maxRounds }),
-    taskId: 'task-1',
-    profileId: profile.id,
-    windowId: candidate.windowId,
-    mode,
-    connectionId: profile.connectionId,
-    modelId: profile.modelId,
-    providerEgressConsent: true,
-    providerEgressConsentBinding: {
+  return fixture.controller.start(
+    {
+      ...(maxRounds === undefined ? {} : { maxRounds }),
+      taskId: 'task-1',
+      profileId: profile.id,
+      windowId: candidate.windowId,
+      mode,
       connectionId: profile.connectionId,
       modelId: profile.modelId,
+      providerEgressConsent: true,
+      providerEgressConsentBinding: {
+        connectionId: profile.connectionId,
+        modelId: profile.modelId,
+      },
+      remember,
+      expectedPolicyEpoch: 0,
+      expectedWindowRevision: candidate.revision,
+      expectedProfileRevision: expectedProfileRevision ?? profile.revision,
     },
-    remember,
-    expectedPolicyEpoch: 0,
-    expectedWindowRevision: candidate.revision,
-    expectedProfileRevision: expectedProfileRevision ?? profile.revision,
-  });
+    externalSignal,
+  );
 }
 
 /**
@@ -742,6 +753,9 @@ function createPreflightHost(
       throw new Error('dispatchApproved must not run');
     },
     cancel: () => undefined,
+    stopPendingStart: () => {
+      throw new Error('unused pending stop');
+    },
     close: () => undefined,
   };
   const binding = {
@@ -3588,8 +3602,12 @@ describe('ComputerUseController', () => {
     release();
     // The revoke is what ends it, and it is reported as the permission change it is.
     await expect(starting).rejects.toThrow('policy_changed');
-    // And no session ever went live: the only statuses published are the terminal ones.
-    expect(fixture.statuses.filter((status) => status.state !== 'stopped')).toEqual([]);
+    // Starting/stopping are visible, but no input-capable session ever went live.
+    expect(fixture.statuses.map((status) => status.state)).toEqual([
+      'starting',
+      'stopping',
+      'stopped',
+    ]);
     await fixture.controller.dispose();
   });
 
@@ -3661,7 +3679,11 @@ describe('ComputerUseController', () => {
       await fixture.controller.featureDisabled();
       release();
       await expect(starting).rejects.toThrow('policy_changed');
-      expect(fixture.statuses.filter((status) => status.state !== 'stopped')).toEqual([]);
+      expect(fixture.statuses.map((status) => status.state)).toEqual([
+        'starting',
+        'stopping',
+        'stopped',
+      ]);
       await fixture.controller.dispose();
     });
   });
@@ -5133,6 +5155,226 @@ describe('ComputerUseController', () => {
     await expect(pending).rejects.toThrow();
     expect(fixture.dispatchCount()).toBe(0);
     expect(fixture.statuses.slice(-2).map(({ state }) => state)).toEqual(['stopping', 'stopped']);
+  });
+
+  it.each([
+    'feature',
+    'renderer',
+    'dispose',
+    'task',
+    'outside',
+    'policy',
+    'external',
+    'turn',
+  ] as const)('waits for pending terminal cleanup on %s cancellation', async (source) => {
+    let sessionId = '';
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const external = new AbortController();
+    const pendingStop = vi.fn(async (id: string) => {
+      await gate;
+      return {
+        kind: 'closed' as const,
+        inputReceipt: { sessionId: id, cancelEpoch: 1, inputAttemptCount: 0 },
+      };
+    });
+    const fixture = createFixture({
+      startSessionGate: new Promise(() => {}),
+      stopPendingStart: pendingStop,
+      armEmergencyStop: async (id) => {
+        sessionId = id;
+        return true;
+      },
+    });
+    const starting = start(
+      fixture,
+      'full_access_app',
+      false,
+      undefined,
+      undefined,
+      external.signal,
+    );
+    const result = starting.catch((error: Error) => error.message);
+    let startSettled = false;
+    void result.then(() => {
+      startSettled = true;
+    });
+    await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+    const stopping =
+      source === 'feature'
+        ? fixture.controller.featureDisabled()
+        : source === 'renderer'
+          ? fixture.controller.rendererInvalidated()
+          : source === 'dispose'
+            ? fixture.controller.dispose()
+            : source === 'task'
+              ? fixture.controller.stopForTask('task-1', 'task_changed')
+              : source === 'outside'
+                ? fixture.controller.stopOutsideTask('other-task')
+                : source === 'policy'
+                  ? (fixture.controller.policyEpochChanged('task-1'), undefined)
+                  : source === 'turn'
+                    ? (fixture.controller.turnEnded('task-1', `computer-turn:${sessionId}`),
+                      undefined)
+                    : (external.abort(), undefined);
+    let stopSettled = false;
+    void stopping?.then(() => {
+      stopSettled = true;
+    });
+    await viWait();
+    expect(pendingStop).toHaveBeenCalledOnce();
+    expect(startSettled).toBe(false);
+    expect(stopSettled).toBe(false);
+    expect(fixture.controller.getStatus(sessionId)?.state).toBe('stopping');
+    finish();
+    await stopping;
+    expect(await result).toMatch(/start canceled/u);
+    expect(fixture.statuses.at(-1)?.state).toBe('stopped');
+    await fixture.controller.dispose();
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'does not disturb a newer start when an old planner later %s',
+    async (completion) => {
+      const idlePlanner = {
+        plan: async (): Promise<ComputerUsePlannedAction> => new Promise(() => {}),
+      };
+      let release!: (value: typeof idlePlanner) => void;
+      let reject!: (reason: Error) => void;
+      const oldPlanner = new Promise<typeof idlePlanner>((yes, no) => {
+        release = yes;
+        reject = no;
+      });
+      const ids: string[] = [];
+      let calls = 0;
+      const fixture = createFixture({
+        armEmergencyStop: async (id) => {
+          ids.push(id);
+          return true;
+        },
+        plannerFactory: async () => {
+          calls += 1;
+          return calls === 1 ? oldPlanner : idlePlanner;
+        },
+      });
+      const first = start(fixture).catch((error: Error) => error.message);
+      await vi.waitFor(() => expect(calls).toBe(1));
+      await fixture.controller.stop(ids[0]!, 'user_stop');
+      expect(await first).toMatch(/start canceled/u);
+      const current = await start(fixture);
+      if (completion === 'resolve') release(idlePlanner);
+      else reject(new Error('old planner failed'));
+      await viWait();
+      expect(fixture.controller.getStatus(current.sessionId)?.state).toBe('planning');
+      expect(fixture.nativeCancelCount()).toBe(1);
+      expect(fixture.nativeCloseCount()).toBe(1);
+      await fixture.controller.stop(current.sessionId);
+    },
+  );
+
+  it('reports an unconfirmed pending stop separately from verified cancellation', async () => {
+    let sessionId = '';
+    const fixture = createFixture({
+      armEmergencyStop: async (id) => {
+        sessionId = id;
+        return true;
+      },
+      startSessionGate: new Promise(() => {}),
+      stopPendingStart: async () => {
+        throw new Error('terminal timed out');
+      },
+    });
+    const starting = start(fixture).catch((error: Error) => error.message);
+    await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+    await expect(fixture.controller.stop(sessionId, 'user_stop')).resolves.toBeUndefined();
+    expect(await starting).toMatch(/native_stop_unconfirmed/u);
+    expect(fixture.statuses.at(-1)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'native_unavailable',
+    });
+  });
+
+  it('stops a permanently pending planner and settles start without awaiting the planner', async () => {
+    let sessionId = '';
+    let entered = false;
+    const fixture = createFixture({
+      armEmergencyStop: async (id) => {
+        sessionId = id;
+        return true;
+      },
+      plannerFactory: async () => {
+        entered = true;
+        return new Promise(() => {});
+      },
+    });
+    const starting = start(fixture);
+    const result = starting.then(
+      () => 'unexpected success',
+      (error: Error) => error.message,
+    );
+    let settled = false;
+    void result.then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    await fixture.controller.stop(sessionId, 'user_stop');
+    await viWait();
+    expect(fixture.nativeCancelCount()).toBe(1);
+    expect(fixture.nativeCloseCount()).toBe(1);
+    expect(settled).toBe(true);
+    expect(await result).toMatch(/start canceled/u);
+    expect(fixture.statuses.at(-1)).toMatchObject({
+      sessionId,
+      state: 'stopped',
+      stopReason: 'user_stop',
+    });
+  });
+
+  it('shares pending-native Stop completion and holds it until the terminal operation settles', async () => {
+    let sessionId = '';
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const pendingStop = vi.fn(async (id: string) => {
+      await gate;
+      return {
+        kind: 'closed' as const,
+        inputReceipt: { sessionId: id, cancelEpoch: 1, inputAttemptCount: 0 },
+      };
+    });
+    const fixture = createFixture({
+      armEmergencyStop: async (id) => {
+        sessionId = id;
+        return true;
+      },
+      startSessionGate: new Promise(() => {}),
+      stopPendingStart: pendingStop,
+    });
+    const starting = start(fixture);
+    const result = starting.catch((error: Error) => error.message);
+    await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+    const first = fixture.controller.stop(sessionId, 'emergency_stop');
+    const second = fixture.controller.stop(sessionId, 'user_stop');
+    expect(second).toBe(first);
+    expect(pendingStop).toHaveBeenCalledOnce();
+    let settled = false;
+    void first.then(() => {
+      settled = true;
+    });
+    await viWait();
+    expect(settled).toBe(false);
+    finish();
+    await first;
+    expect(await result).toMatch(/emergency_stop/u);
+    expect(fixture.nativeCancelCount()).toBe(0);
+    expect(fixture.nativeCloseCount()).toBe(0);
+    expect(fixture.statuses.at(-1)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'emergency_stop',
+    });
   });
 
   it('latches an emergency stop that races native session startup', async () => {

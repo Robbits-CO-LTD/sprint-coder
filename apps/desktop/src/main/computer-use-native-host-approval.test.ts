@@ -141,6 +141,13 @@ function build(
     ),
     dispatch: fn('dispatch', (input) => (overrides['dispatch'] ?? result)(input)),
     cancel: () => undefined,
+    stopPendingStart: fn('stopPendingStart', (i) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: i['sessionId'],
+      cancelEpoch: 1,
+      inputAttemptCount: 0,
+    })),
     close: fn('close', (i) => ({
       result: 'closed',
       drained: true,
@@ -150,7 +157,7 @@ function build(
     })),
   };
   // A test may replace how the fake native starts or closes a session.
-  for (const name of ['startSession', 'close'] as const) {
+  for (const name of ['startSession', 'close', 'stopPendingStart', 'listWindows'] as const) {
     const replacement = overrides[name];
     if (replacement !== undefined) methods[name] = fn(name, replacement);
   }
@@ -560,7 +567,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
     expect(results.map((entry) => entry.status).sort()).toEqual(['fulfilled', 'rejected']);
   });
 
-  it('leaves no binding behind when the native start fails', async () => {
+  it('retires a failed native lifetime and permits a fresh ID with another route', async () => {
     let fail = true;
     const built = build(
       { attested: true },
@@ -586,14 +593,16 @@ describe('Computer Use native host: classifier route (C3)', () => {
     );
     await expect(startWith(built.host, 'v1')).rejects.toThrow();
     fail = false;
-    await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/closed/u);
+    await expect(startWith(built.host, 'v2', 'session-new')).resolves.toBeDefined();
   });
 
-  it('forgets the route when the session is closed, so the id can be bound again', async () => {
+  it('retires a closed ID and permits a fresh ID with another route', async () => {
     const built = build({ attested: true });
     const session = await startWith(built.host, 'v1');
     await built.host.close(session);
-    await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/closed/u);
+    await expect(startWith(built.host, 'v2', 'session-new')).resolves.toBeDefined();
   });
 
   it('binds only at the start that creates the session: a later route on an unbound session is ignored', async () => {
@@ -633,7 +642,8 @@ describe('Computer Use native host: classifier route (C3)', () => {
     );
     const session = await startWith(built.host, 'v1');
     await expect(built.host.close(session)).rejects.toThrow();
-    await expect(startWith(built.host, 'v2')).rejects.toThrow(/route/u);
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/unconfirmed/u);
+    expect(built.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
   });
 
   it('refuses the approval calls to a session bound to a route that does not expect classifier 2', async () => {
@@ -776,7 +786,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
     );
   });
 
-  it('still takes the binding back when the only start of a session fails', async () => {
+  it('releases the failed start binding for fresh lifetimes', async () => {
     const built = build(
       { attested: true },
       {
@@ -786,15 +796,16 @@ describe('Computer Use native host: classifier route (C3)', () => {
       },
     );
     await expect(startWith(built.host, 'v1')).rejects.toThrow();
-    // Nothing is left bound, so the id may be bound to another route.
-    await expect(startWith(built.host, 'v2')).rejects.toThrow(/native start failed/u);
+    // API 3 retires this lifetime; a fresh ID must reach native without a stale route binding.
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/closed/u);
+    await expect(startWith(built.host, 'v2', 'session-new')).rejects.toThrow(
+      /native start failed/u,
+    );
   });
 
-  it('leaves no binding behind when every concurrent start of a session fails', async () => {
-    // Two starts of one new session and route are in flight; both fail, so the binding goes with
-    // the last one and a later start with another route is not refused by a stale binding. What
-    // protects a binding that a racing start still needs is the test above (the one where the
-    // start that created it fails first); this one only pins that nothing is left over.
+  it('retires the lifetime once every concurrent start fails', async () => {
+    // The last failed attempt closes this lifetime. Its old ID remains retired, while a new
+    // ID may reach native with another route and is not refused by a stale binding.
     const built = build(
       { attested: true },
       {
@@ -815,7 +826,145 @@ describe('Computer Use native host: classifier route (C3)', () => {
     } as const;
     await Promise.allSettled([built.host.startSession(base), built.host.startSession(base)]);
     await expect(built.host.startSession({ ...base, classifierRoute: 'v2' })).rejects.toThrow(
-      /native start failed/u,
+      /closed/u,
     );
+    await expect(
+      built.host.startSession({ ...base, sessionId: 'session-new', classifierRoute: 'v2' }),
+    ).rejects.toThrow(/native start failed/u);
+  });
+});
+
+describe('API 3 pending-start ownership', () => {
+  const input = (sessionId = 'pending') => ({
+    profile,
+    windowId: 'window-1',
+    sessionId,
+    taskId: 'task-1',
+    turnId: 'turn-1',
+    cancelEpoch: 0,
+  });
+  const terminal = (sessionId = 'pending', extra: Record<string, unknown> = {}) => ({
+    result: 'closed',
+    drained: true,
+    sessionId,
+    cancelEpoch: 1,
+    inputAttemptCount: 0,
+    ...extra,
+  });
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it('requires the terminal method even from an API 3 addon', () => {
+    const { host } = build({ omit: ['stopPendingStart'] });
+    expect(host.availability()).toMatchObject({ available: false, control: false });
+  });
+
+  it('stops during discovery without calling native start and retains quarantine until discovery settles', async () => {
+    const built = build();
+    const discovery = deferred<unknown>();
+    const candidates = built.calls['listWindows']!();
+    built.calls['listWindows']!.mockImplementationOnce(() => discovery.promise);
+    const start = built.host.startSession(input());
+    const failed = expect(start).rejects.toThrow(/canceled/u);
+    const stop = built.host.stopPendingStart!('pending');
+    expect(built.host.stopPendingStart!('pending')).toBe(stop);
+    await expect(stop).resolves.toEqual({ kind: 'not_submitted' });
+    expect(built.calls['startSession']).not.toHaveBeenCalled();
+    expect(built.calls['stopPendingStart']).not.toHaveBeenCalled();
+    expect(built.host.availability().control).toBe(false);
+    discovery.resolve(candidates);
+    await failed;
+    expect(built.calls['startSession']).not.toHaveBeenCalled();
+    expect(built.host.availability().control).toBe(true);
+    await expect(built.host.startSession(input())).rejects.toThrow(/closed/u);
+    await expect(built.host.startSession(input('fresh'))).resolves.toMatchObject({
+      sessionId: 'fresh',
+    });
+  });
+
+  it.each(['success', 'failure'] as const)(
+    'shares one stop while native is pending and rejects late %s without resurrection',
+    async (late) => {
+      const built = build();
+      const native = deferred<unknown>();
+      const stopping = deferred<unknown>();
+      const response = built.calls['startSession']!(input());
+      built.calls['startSession']!.mockClear().mockImplementationOnce(() => native.promise);
+      built.calls['stopPendingStart']!.mockImplementationOnce(() => stopping.promise);
+      const start = built.host.startSession(input());
+      const failed = expect(start).rejects.toThrow();
+      await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledTimes(1));
+      const first = built.host.stopPendingStart!('pending');
+      expect(built.host.stopPendingStart!('pending')).toBe(first);
+      expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(1);
+      expect(built.host.availability().control).toBe(false);
+      stopping.resolve(terminal());
+      await expect(first).resolves.toMatchObject({
+        kind: 'closed',
+        inputReceipt: { cancelEpoch: 1 },
+      });
+      expect(built.host.availability().control).toBe(false);
+      if (late === 'success') native.resolve(response);
+      else native.reject(new Error('late failure'));
+      await failed;
+      expect(built.host.availability().control).toBe(true);
+      expect(built.calls['close']).not.toHaveBeenCalled();
+      await expect(built.host.startSession(input())).rejects.toThrow(/closed/u);
+      await expect(built.host.stopPendingStart!('unknown')).rejects.toThrow(/unconfirmed/u);
+    },
+  );
+
+  it.each([
+    { sessionId: 'wrong' },
+    { cancelEpoch: 0 },
+    { cancelEpoch: Number.MAX_SAFE_INTEGER + 1 },
+    { drained: false },
+    { inputAttemptCount: -1 },
+    { extra: 'unexpected' },
+  ])('keeps quarantine after invalid terminal evidence %j', async (bad) => {
+    const built = build();
+    await built.host.startSession(input());
+    built.calls['stopPendingStart']!.mockImplementation(() => terminal('pending', bad));
+    await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unconfirmed/u);
+    expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(2);
+    expect(built.host.availability().control).toBe(false);
+    await expect(built.host.startSession(input('fresh'))).rejects.toThrow(/unconfirmed/u);
+  });
+
+  it('rejects a terminal input counter older than the admitted start', async () => {
+    const built = build();
+    const response = built.calls['startSession']!(input());
+    built.calls['startSession']!.mockReturnValue({ ...response, inputAttemptCount: 4 });
+    await built.host.startSession(input());
+    await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unconfirmed/u);
+    expect(built.host.availability().control).toBe(false);
+  });
+
+  it('times out twice without accepting a late receipt or clearing quarantine', async () => {
+    vi.useFakeTimers();
+    try {
+      const built = build();
+      await built.host.startSession(input());
+      const late = deferred<unknown>();
+      built.calls['stopPendingStart']!.mockImplementation(() => late.promise);
+      const stop = built.host.stopPendingStart!('pending');
+      const failed = expect(stop).rejects.toThrow(/unconfirmed/u);
+      await vi.runAllTimersAsync();
+      await failed;
+      expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(2);
+      late.resolve(terminal());
+      await Promise.resolve();
+      expect(built.host.availability().control).toBe(false);
+      expect(built.host.stopPendingStart!('pending')).toBe(stop);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

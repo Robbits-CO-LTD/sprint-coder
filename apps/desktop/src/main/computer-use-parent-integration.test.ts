@@ -35,6 +35,13 @@ function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 
     observe: vi.fn(),
     dispatch: vi.fn(),
     cancel: vi.fn((input: unknown) => ({ ...receipt(input), result: 'canceled' })),
+    stopPendingStart: vi.fn((input: unknown) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      cancelEpoch: 1,
+      inputAttemptCount: 0,
+    })),
     close: vi.fn((input: unknown) =>
       computerUseNativeCloseReceiptSchema.parse({ ...receipt(input), result: 'closed' }),
     ),

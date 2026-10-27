@@ -96,7 +96,7 @@ describe.skipIf(process.platform === 'win32')('Windows close session recovery na
         path,
         `${windowsCloseSeamPreamble}
 ${sourceBetween('std::unordered_map<std::string, WindowsSession> sessions;', 'void ReleaseWindowsSessionResources(')}
-${sourceBetween('bool CloseWindowsSession(', 'bool ValidateWindowsSession(')}
+${sourceBetween('bool CloseWindowsSession(', 'bool StopPendingWindowsStart(')}
 ${windowsCloseSeamDriver}`,
       );
       execFileSync(
@@ -170,6 +170,8 @@ bool ReadJsonUint64(std::string_view, std::string_view, std::uint64_t *output) {
   return true;
 }
 std::atomic<std::uint64_t> cancellation_epoch{0};
+// Admission bookkeeping is covered by the dedicated ownership/live pipe seams.
+template <typename Receipt> void MarkWindowsStartClosed(const std::string&, const Receipt&) {}
 unsigned releasedSessions = 0;
 void ReleaseWindowsSessionResources(WindowsSession *) { ++releasedSessions; }
 `;

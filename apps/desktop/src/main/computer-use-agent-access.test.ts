@@ -334,6 +334,13 @@ function createFixture(
       dispatchedActions.push(input.action);
       return { result: 'completed', reasonCode: null };
     },
+    stopPendingStart: async (sessionId) => {
+      closedSessions += 1;
+      return {
+        kind: 'closed' as const,
+        inputReceipt: { sessionId, cancelEpoch: 1, inputAttemptCount: 0 },
+      };
+    },
     cancel: async () => undefined,
     close: async () => {
       closedSessions += 1;

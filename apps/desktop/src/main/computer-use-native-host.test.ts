@@ -188,6 +188,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
     };
     const host = createComputerUseNativeHost(
@@ -219,6 +226,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
     };
     const nativeIdentity = {
@@ -299,6 +313,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
     };
     const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
@@ -424,6 +445,13 @@ describe('Computer Use native Main adapter', () => {
       ...(withPreflight ? { preflight } : {}),
       dispatch,
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
       ...extraSurface,
     };
@@ -604,6 +632,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
     };
     const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
@@ -768,6 +803,13 @@ describe('Computer Use native Main adapter', () => {
           cancelEpoch: request['cancelEpoch'],
           inputAttemptCount: 2,
         };
+      }),
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
       }),
       close: vi.fn((input: unknown): unknown => {
         const request = input as Record<string, unknown>;
@@ -1587,6 +1629,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close,
     };
 
@@ -1764,6 +1813,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: vi.fn(),
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close,
     };
     const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });
@@ -1853,6 +1909,13 @@ describe('Computer Use native Main adapter', () => {
       observe: () => ({}),
       dispatch: () => ({}),
       cancel: () => undefined,
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => undefined,
     });
     native.manifest.apiVersion = 2;
@@ -1951,6 +2014,13 @@ describe('Computer Use native OS permission availability', () => {
     observe: () => ({}),
     dispatch: () => ({}),
     cancel: () => undefined,
+    stopPendingStart: (input: unknown) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      cancelEpoch: 1,
+      inputAttemptCount: 0,
+    }),
     close: () => undefined,
   };
 
@@ -2267,6 +2337,13 @@ describe('Main surface evidence reaches the observation (S4-1c wiring)', () => {
       observe: () => payloads[Math.min(call++, payloads.length - 1)]!(),
       dispatch: () => ({}),
       cancel: () => ({}),
+      stopPendingStart: (input: unknown) => ({
+        result: 'closed',
+        drained: true,
+        sessionId: (input as Record<string, unknown>)['sessionId'],
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      }),
       close: () => ({}),
     };
     const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });

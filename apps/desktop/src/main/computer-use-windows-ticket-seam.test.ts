@@ -120,6 +120,7 @@ const preamble = String.raw`
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <span>
 #include <string>
@@ -781,11 +782,14 @@ function assembled(): string {
   return [
     preamble,
     between('std::string JsonEscape(', 'std::string Sha256Bytes('),
-    between('struct CachedResponse {', 'struct WindowsSession {'),
+    between('struct CachedResponse {', 'struct WindowsStartAdmission {'),
     between('// The ordinary dispatch ticket (ADR v2', 'std::uint64_t last_closed_cancel_epoch'),
-    between('std::string FrameIdKey(', 'bool StartWindowsSession('),
+    between('std::string FrameIdKey(', 'struct WindowsStartAttemptScope {'),
     between('std::string ErrorPayload(', 'bool Respond('),
-    between('std::string ResponseCacheKey(', 'bool RevalidateWindowsTarget('),
+    between(
+      'std::string ResponseCacheKey(const Frame &request) {',
+      'bool RevalidateWindowsTarget(',
+    ),
     between('bool RespondAndCache(', 'WindowsSession *FindWindowsSession('),
     cutClickRule(
       cutActionPoint(
