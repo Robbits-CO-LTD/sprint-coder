@@ -320,7 +320,10 @@ Main registers an owner before discovery or native awaits. An entirely unsubmitt
 locally without inventing a native receipt; Windows additionally tracks every socket write attempt.
 Discovery is not inherently read-only: V1 window lookup may launch the registered application.
 A Stop during an unfinished Windows discovery therefore stays unconfirmed and quarantined, even
-if its late response succeeds or a separate active session Close is confirmed. A transport timeout
+if its late response succeeds or a separate active session Close is confirmed. This quarantine is
+host-wide: future session starts, observations and input remain blocked until the Host is recreated
+(normally by restarting the app). A valid session terminal receipt cannot resolve a separate
+unconfirmed discovery, so that successful session query is not repeated in the same batch. A transport timeout
 or generic rejection does not establish native completion; an authenticated native refusal does.
 This slice does not cancel discovery itself, nor establish that an OS application launch issued
 before Stop has finished. Pre-binding discovery cancellation remains part of the V1 follow-up.

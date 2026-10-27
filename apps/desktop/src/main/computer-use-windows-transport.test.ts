@@ -1044,6 +1044,47 @@ describe('Computer Use Windows helper transport', () => {
     },
   );
 
+  it('does not repeat a valid session terminal query when discovery still prevents confirmation', async () => {
+    const { host, helper } = createTarget(
+      {
+        ...responders(),
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+      },
+      (helper) => helper.holdOnly('start_session'),
+    );
+    const first = startSession(host, 'mixed-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    helper().holdOnly('list_windows');
+    const second = startSession(host, 'mixed-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(host.stopPendingStart!('mixed-discovery')).rejects.toThrow(/unconfirmed/u);
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+    helper().release('start_session');
+    helper().release('list_windows');
+    await expect(Promise.all([first, second])).resolves.toEqual(['rejected', 'rejected']);
+    expect(host.availability().control).toBe(false);
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+  });
+
   it('does not let active Close hide another launch-capable discovery of the same owner', async () => {
     const { host, helper } = createTarget(responders(), (helper) =>
       helper.holdOnly('start_session'),

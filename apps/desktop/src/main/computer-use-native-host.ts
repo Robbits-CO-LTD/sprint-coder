@@ -315,8 +315,10 @@ export function createComputerUseNativeHost(
             inputAttemptCount: result.data.inputAttemptCount,
           },
         };
-        if (owner.discoveryUnconfirmed)
-          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        if (owner.discoveryUnconfirmed) {
+          failure = new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+          break;
+        }
         finishStartOwner(owner, outcome);
         return outcome;
       } catch (error) {
