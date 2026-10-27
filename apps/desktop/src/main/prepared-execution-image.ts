@@ -40,8 +40,42 @@ export type PreparedExecutionImage = Readonly<{
   digest: string;
   identity: string;
   environment?: Readonly<Record<string, string>>;
+  linuxSealedSources?: readonly string[];
   close(): Promise<void>;
 }>;
+
+export function linuxSandboxExecutionImage(
+  image: Pick<
+    PreparedExecutionImage,
+    'launchPath' | 'argvPrefix' | 'environment' | 'linuxSealedSources'
+  >,
+) {
+  const sources = image.linuxSealedSources ?? [];
+  if (sources.length > 2 || new Set(sources).size !== sources.length)
+    throw new Error('Invalid Linux sealed execution sources');
+  const targets = new Map(
+    sources.map((source, index) => [source, `/dev/sprint-coder-execution/image-${index}`]),
+  );
+  const argvPrefix = [...image.argvPrefix];
+  // The final prefix element is the generated script argument. Shebang options and caller argv
+  // are not paths owned by this mapper, even if their text happens to equal a sealed source.
+  const scriptIndex = argvPrefix.length - 1;
+  if (scriptIndex >= 0)
+    argvPrefix[scriptIndex] = targets.get(argvPrefix[scriptIndex]!) ?? argvPrefix[scriptIndex]!;
+  const pinned = image.environment?.['SPRINT_CODER_PINNED_EXECUTABLE'];
+  return {
+    launchPath: targets.get(image.launchPath) ?? image.launchPath,
+    argvPrefix,
+    environment:
+      pinned === undefined
+        ? image.environment
+        : {
+            ...image.environment,
+            SPRINT_CODER_PINNED_EXECUTABLE: targets.get(pinned) ?? pinned,
+          },
+    sandboxArguments: sources.length === 0 ? [] : ['--sealed-images', JSON.stringify(sources)],
+  };
+}
 
 export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentity): string {
   return sha256(
@@ -233,7 +267,7 @@ export async function prepareExecutionImage(
     const shellScript =
       canonicalInterpreter !== undefined &&
       ['sh', 'bash', 'zsh'].includes(basename(canonicalInterpreter));
-    let environment: Readonly<Record<string, string>> | undefined;
+    let environment: Readonly<Record<string, string>> | undefined = interpreter?.environment;
     if (
       process.platform === 'linux' &&
       !trustedLinuxPath &&
@@ -264,6 +298,14 @@ export async function prepareExecutionImage(
               ])
             : Object.freeze([...shebang!.arguments, scriptArgument!]),
       descriptors: Object.freeze(descriptors),
+      ...(process.platform === 'linux'
+        ? {
+            linuxSealedSources: Object.freeze([
+              ...(interpreter?.linuxSealedSources ?? []),
+              ...(trustedLinuxPath ? [] : [baseLaunchPath]),
+            ]),
+          }
+        : {}),
       digest,
       identity: sha256(
         Buffer.from(

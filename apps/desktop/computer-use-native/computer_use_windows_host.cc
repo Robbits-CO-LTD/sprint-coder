@@ -1022,6 +1022,17 @@ bool WindowsExecutableIdentityMatches(
                                 : actual.signer_digest == signer_digest);
 }
 
+bool WindowsExecutableBindingMatches(
+    const WindowsFileIdentity &recorded, std::string_view executable_digest,
+    std::string_view signer_digest, std::string_view policy_language,
+    const WindowsFileIdentity &held, const WindowsExecutableIdentity &current) {
+  return SameWindowsFileIdentity(held, recorded) &&
+         SameWindowsFileIdentity(held, current.file_identity) &&
+         executable_digest == current.executable_digest &&
+         signer_digest == current.signer_digest &&
+         policy_language == current.policy_language;
+}
+
 bool WindowsSessionExecutableMatches(
     const WindowsSession &session,
     const LockedWindowsExecutable &current_executable) {
@@ -1029,16 +1040,10 @@ bool WindowsSessionExecutableMatches(
   return session.executable_file != INVALID_HANDLE_VALUE &&
          current_executable.file != INVALID_HANDLE_VALUE &&
          ReadWindowsFileIdentity(session.executable_file, &held_identity) &&
-         held_identity.volume_serial == session.executable_volume_serial &&
-         std::memcmp(held_identity.file_id.Identifier,
-                     session.executable_file_id.Identifier,
-                     sizeof(held_identity.file_id.Identifier)) == 0 &&
-         SameWindowsFileIdentity(held_identity,
-                                 current_executable.identity.file_identity) &&
-         session.executable_digest ==
-             current_executable.identity.executable_digest &&
-         session.signer_digest == current_executable.identity.signer_digest &&
-         session.policy_language == current_executable.identity.policy_language;
+         WindowsExecutableBindingMatches(
+             {session.executable_volume_serial, session.executable_file_id},
+             session.executable_digest, session.signer_digest,
+             session.policy_language, held_identity, current_executable.identity);
 }
 
 bool IsPolicyLanguageSupported(std::string_view language) {
@@ -5161,6 +5166,402 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
   return true;
 }
 
+// BEGIN windows v2 existing start
+
+enum class WindowsV2ExistingStartPhase { BeforeFocus, AfterFocus };
+
+struct WindowsV2ExistingStartSnapshot {
+  std::string session_id;
+  std::uint32_t pid = 0;
+  HWND window = nullptr;
+  std::string app_identity;
+  std::string window_identity;
+  std::string process_start;
+  std::string maximum_mode;
+  sprint_coder::computer_use::EligibilityBasis eligibility_basis =
+      sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
+  std::uint64_t cancel_epoch = 0;
+  WindowsFileIdentity file_identity;
+  std::string executable_digest;
+  std::string signer_digest;
+  std::string policy_language;
+};
+
+WindowsV2ExistingStartSnapshot WindowsV2ExistingStartBinding(const WindowsSession &session) {
+  return {session.session_id, session.pid, session.window, session.app_identity,
+          session.window_identity, session.process_start, session.maximum_mode,
+          session.eligibility_basis, session.cancel_epoch,
+          {session.executable_volume_serial, session.executable_file_id},
+          session.executable_digest, session.signer_digest, session.policy_language};
+}
+
+bool WindowsV2ExistingStartBindingMatches(const WindowsV2ExistingStartSnapshot &expected,
+                                        const WindowsSession &session) {
+  return expected.session_id == session.session_id && expected.pid == session.pid &&
+      expected.window == session.window && expected.app_identity == session.app_identity &&
+      expected.window_identity == session.window_identity && expected.process_start == session.process_start &&
+      expected.maximum_mode == session.maximum_mode && expected.eligibility_basis == session.eligibility_basis &&
+      expected.cancel_epoch == session.cancel_epoch &&
+      SameWindowsFileIdentity(expected.file_identity,
+                              {session.executable_volume_serial, session.executable_file_id}) &&
+      expected.executable_digest == session.executable_digest && expected.signer_digest == session.signer_digest &&
+      expected.policy_language == session.policy_language;
+}
+
+struct WindowsV2ExistingStartMeasurement {
+  bool succeeded = false;
+  WindowsExecutableIdentity executable;
+  std::string process_start;
+  std::string window_identity;
+  std::string maximum_mode;
+  std::optional<WindowsTargetFactsContext> context;
+  std::string reason = "session_target_rejected";
+};
+
+struct WindowsV2ExistingStartPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::atomic<bool> abandoned{false};
+  bool done = false;
+  // This job alone owns the cancellation handle; it is closed on its worker before publication.
+  ScopedKernelHandle thread;
+  WindowsV2ExistingStartMeasurement result;
+};
+
+struct WindowsV2ExistingStartWork {
+  WindowsV2StartInput input;
+  WindowsV2ExistingStartSnapshot expected;
+  WindowsV2ExistingStartMeasurement before;
+  ScopedKernelHandle process;
+  ScopedKernelHandle executable;
+  WindowsV2ExistingStartPhase phase = WindowsV2ExistingStartPhase::BeforeFocus;
+  std::shared_ptr<WindowsV2ExistingStartPending> pending;
+};
+
+bool WindowsV2ExistingStartStillCurrent(const WindowsV2StartInput &input) {
+  return !parent_process_dead.load(std::memory_order_acquire) &&
+      cancellation_epoch.load(std::memory_order_acquire) == input.cancel_epoch &&
+      WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == input.stop_serial;
+}
+
+bool WindowsV2ExistingStartRequestMatches(const WindowsV2ExistingStartWork &work,
+                                        const WindowsV2ExistingStartMeasurement &measured) {
+  const auto &expected = work.expected;
+  const auto &input = work.input;
+  return expected.session_id == input.session_id && expected.pid == input.pid &&
+      expected.window == input.window && expected.app_identity == input.app_identity &&
+      expected.window_identity == measured.window_identity && expected.process_start == measured.process_start &&
+      expected.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+}
+
+WindowsV2ExistingStartMeasurement MeasureWindowsV2ExistingStartBefore(const WindowsV2ExistingStartWork &work) {
+  WindowsV2ExistingStartMeasurement measured;
+  const auto still_valid = [&] {
+    return !work.pending->abandoned.load(std::memory_order_acquire) &&
+        WindowsV2ExistingStartStillCurrent(work.input);
+  };
+  const auto &input = work.input;
+  if (!still_valid() || input.main_pid == 0) return measured;
+  ScopedKernelHandle target_process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, input.pid));
+  LockedWindowsExecutable current_executable;
+  if (target_process.value == nullptr || !still_valid() ||
+      !OpenLockedProcessExecutable(target_process.value, &current_executable) || !still_valid() ||
+      !SameWindowsPath(current_executable.identity.path, input.canonical_path))
+    return measured;
+  WindowsTargetFactsContext context;
+  if (input.context.has_value()) {
+    context = *input.context;
+  } else {
+    std::string signer = WindowsV2SelfSignerThumbprint();
+    if (!still_valid()) return measured;
+    context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),
+                                               /*acceptance_mode=*/false, still_valid);
+  }
+  if (!still_valid() || context.lineage_root_pid != input.main_pid) return measured;
+  // A completed context may be retained on a target refusal, just as in the synchronous admission.
+  if (!input.context.has_value()) measured.context = context;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> not_web_file;
+  if (!AdmitWindowsV2StartInContext(input.pid, input.window, current_executable, context,
+          input.ruleset_version, 0, 0, /*new_session=*/false, input.app_identity,
+          input.executable_digest, input.signer_digest, &measured.maximum_mode, &not_web_file) ||
+      !still_valid() || IsKnownProxyExecutable(current_executable.identity.path) ||
+      IsDisallowedTargetExecutable(current_executable.identity.path) || IsProcessElevated(input.pid) ||
+      !still_valid() || !ReadProcessStartIdentity(target_process.value, &measured.process_start) ||
+      !still_valid() || WaitForSingleObject(target_process.value, 0) != WAIT_TIMEOUT ||
+      !IsWindow(input.window) || !IsApplicationWindow(input.window))
+    return measured;
+  measured.window_identity = Sha256String("computer-window-identity-v1\n" + input.app_identity + "\n" +
+      measured.process_start + "\n" + std::to_string(input.window_value));
+  if (measured.window_identity != input.expected_window_identity) {
+    measured.reason = "window_identity_changed";
+    return measured;
+  }
+  measured.reason = "session_refocus_stale";
+  std::string source_start;
+  WindowsFileIdentity held{};
+  if (!WindowsV2ExistingStartRequestMatches(work, measured) || !still_valid() ||
+      GetProcessId(work.process.value) != work.expected.pid ||
+      WaitForSingleObject(work.process.value, 0) != WAIT_TIMEOUT ||
+      !ReadProcessStartIdentity(work.process.value, &source_start) || !still_valid() ||
+      source_start != work.expected.process_start ||
+      !ReadWindowsFileIdentity(work.executable.value, &held) || !still_valid() ||
+      !WindowsExecutableBindingMatches(work.expected.file_identity, work.expected.executable_digest,
+          work.expected.signer_digest, work.expected.policy_language, held, current_executable.identity))
+    return measured;
+  measured.executable = current_executable.identity;
+  measured.succeeded = true;
+  measured.reason.clear();
+  return measured;
+}
+
+WindowsV2ExistingStartMeasurement MeasureWindowsV2ExistingStartAfter(const WindowsV2ExistingStartWork &work) {
+  WindowsV2ExistingStartMeasurement measured;
+  measured.reason = "session_refocus_stale";
+  const auto still_valid = [&] {
+    return !work.pending->abandoned.load(std::memory_order_acquire) &&
+        WindowsV2ExistingStartStillCurrent(work.input);
+  };
+  std::string source_start;
+  WindowsFileIdentity held{};
+  // The source session's file lock stays open across focus. Re-read that pin and the process;
+  // do not replace the old post-focus comparison with a new path lookup or an invalid handle.
+  if (!work.before.succeeded || !WindowsV2ExistingStartRequestMatches(work, work.before) ||
+      work.expected.maximum_mode != work.before.maximum_mode || !still_valid() ||
+      GetProcessId(work.process.value) != work.expected.pid ||
+      WaitForSingleObject(work.process.value, 0) != WAIT_TIMEOUT ||
+      !ReadProcessStartIdentity(work.process.value, &source_start) || !still_valid() ||
+      source_start != work.expected.process_start ||
+      !ReadWindowsFileIdentity(work.executable.value, &held) || !still_valid() ||
+      !WindowsExecutableBindingMatches(work.expected.file_identity, work.expected.executable_digest,
+          work.expected.signer_digest, work.expected.policy_language, held, work.before.executable))
+    return measured;
+  measured.succeeded = true;
+  measured.reason.clear();
+  return measured;
+}
+
+void CancelWindowsV2ExistingStartJob(const std::shared_ptr<WindowsV2ExistingStartPending> &pending) {
+  std::lock_guard lock(pending->mutex);
+  if (pending->done) return;
+  pending->abandoned.store(true, std::memory_order_release);
+  if (pending->thread.value != nullptr) CancelSynchronousIo(pending->thread.value);
+}
+
+void WindowsV2ExistingStartWorker(std::unique_ptr<WindowsV2ExistingStartWork> work) {
+  // Existing V2 start worker entry; this job owns its thread and source duplicates.
+  const auto pending = work->pending;
+  const char *failure_reason = work->phase == WindowsV2ExistingStartPhase::BeforeFocus
+      ? "session_target_rejected" : "session_refocus_stale";
+  WindowsV2ExistingStartMeasurement measured;
+  measured.reason = failure_reason;
+  try {
+    struct Apartment {
+      HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+    } apartment;
+    bool thread_ready = false;
+    {
+      std::lock_guard lock(pending->mutex);
+      thread_ready = DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+          &pending->thread.value, 0, FALSE, DUPLICATE_SAME_ACCESS) != FALSE;
+    }
+    if (SUCCEEDED(apartment.result) && thread_ready)
+      measured = work->phase == WindowsV2ExistingStartPhase::BeforeFocus
+          ? MeasureWindowsV2ExistingStartBefore(*work) : MeasureWindowsV2ExistingStartAfter(*work);
+  } catch (...) {
+    measured = {};
+    measured.reason = failure_reason;
+  }
+  // All candidates, COM objects and source duplicates are released on this worker.
+  work.reset();
+  {
+    std::lock_guard lock(pending->mutex);
+    if (pending->thread.value != nullptr) CloseHandle(pending->thread.release());
+    WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
+    if (!pending->abandoned.load(std::memory_order_acquire)) pending->result = std::move(measured);
+    pending->done = true;
+  }
+  pending->ready.notify_one();
+  // Existing V2 start worker epilogue; no handle or shared-slot access remains.
+}
+
+struct WindowsV2ExistingStartLease {
+  std::shared_ptr<WindowsV2ExistingStartPending> pending;
+  ~WindowsV2ExistingStartLease() { CancelWindowsV2ExistingStartJob(pending); }
+};
+
+bool RunWindowsV2ExistingStartMeasurement(
+    const WindowsV2StartInput &input, const WindowsSession &session, WindowsV2ExistingStartPhase phase,
+    const WindowsV2ExistingStartMeasurement *before, WindowsV2ExistingStartMeasurement *output,
+    std::string *reason) {
+  *reason = phase == WindowsV2ExistingStartPhase::BeforeFocus ? "session_target_rejected" : "session_refocus_stale";
+  auto pending = std::make_shared<WindowsV2ExistingStartPending>();
+  auto work = std::make_unique<WindowsV2ExistingStartWork>();
+  work->input = input;
+  work->expected = WindowsV2ExistingStartBinding(session);
+  work->phase = phase;
+  work->pending = pending;
+  if (before != nullptr) work->before = *before;
+  const auto expected = work->expected;
+  const HANDLE source_process = session.process_handle;
+  const HANDLE source_executable = session.executable_file;
+  auto &control = WindowsTargetListControl();
+  const auto current = [&] {
+    const auto found = sessions.find(input.session_key);
+    return WindowsV2ExistingStartStillCurrent(input) && found != sessions.end() &&
+        &found->second == &session && session.cancel_epoch == input.cancel_epoch &&
+        WindowsV2ExistingStartBindingMatches(expected, session) &&
+        session.process_handle == source_process && session.executable_file == source_executable;
+  };
+  {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!current()) { *reason = "session_start_canceled"; return false; }
+    if (control.running.load(std::memory_order_acquire)) return false;
+    AdoptWindowsV2ContextCandidate(input.stop_serial);
+    work->input.context = WindowsV2FactsContextCache();
+    work->input.main_pid = windows_v2_main_pid;
+    if (work->input.main_pid == 0) return false;
+    control.running.store(true, std::memory_order_release);
+  }
+  const std::uint32_t main_pid = work->input.main_pid;
+  try {
+    if (source_process == nullptr || source_process == INVALID_HANDLE_VALUE ||
+        source_executable == nullptr || source_executable == INVALID_HANDLE_VALUE ||
+        !DuplicateHandle(GetCurrentProcess(), source_process, GetCurrentProcess(), &work->process.value,
+                         0, FALSE, DUPLICATE_SAME_ACCESS) ||
+        !DuplicateHandle(GetCurrentProcess(), source_executable, GetCurrentProcess(), &work->executable.value,
+                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+      work.reset();
+      control.running.store(false, std::memory_order_release);
+      return false;
+    }
+    std::thread(WindowsV2ExistingStartWorker, std::move(work)).detach();
+  } catch (...) {
+    work.reset();
+    control.running.store(false, std::memory_order_release);
+    return false;
+  }
+  WindowsV2ExistingStartLease lease{pending};
+  std::unique_lock lock(pending->mutex);
+  while (!pending->done && current()) pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!current() || windows_v2_main_pid != main_pid) {
+    *reason = "session_start_canceled";
+    return false;
+  }
+  const auto &measured = pending->result;
+  if (measured.context.has_value() && !WindowsV2FactsContextCache().has_value())
+    WindowsV2FactsContextCache() = measured.context;
+  *output = measured;
+  if (!measured.succeeded) {
+    *reason = measured.reason;
+    return false;
+  }
+  reason->clear();
+  return true;
+}
+
+bool StartWindowsV2ExistingSession(WindowsV2StartInput input, std::string *response, std::string *reason) {
+  const auto found = sessions.find(input.session_key);
+  if (found == sessions.end()) { *reason = "session_refocus_stale"; return false; }
+  // Even an early Stop/epoch refusal must void the previous ticket for this existing session.
+  InvalidateWindowsTicket(input.session_key);
+  WindowsSession &session = found->second;
+  const auto expected = WindowsV2ExistingStartBinding(session);
+  WindowsV2ExistingStartMeasurement before;
+  if (!RunWindowsV2ExistingStartMeasurement(input, session, WindowsV2ExistingStartPhase::BeforeFocus,
+                                           nullptr, &before, reason)) return false;
+  auto &control = WindowsTargetListControl();
+  const auto current = [&] {
+    return WindowsV2ExistingStartStillCurrent(input) && session.cancel_epoch == input.cancel_epoch &&
+        WindowsV2ExistingStartBindingMatches(expected, session);
+  };
+  const auto check_current = [&] {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (current()) return true;
+    *reason = "session_start_canceled";
+    return false;
+  };
+  // Existing V2 start before consumer focus preparation.
+  if (!check_current()) return false;
+  RECT physical_client{};
+  if (!ClientBoundsPhysical(input.window, &physical_client) ||
+      std::abs(static_cast<double>(physical_client.left) - input.bounds_x) > 1.0 ||
+      std::abs(static_cast<double>(physical_client.top) - input.bounds_y) > 1.0 ||
+      std::abs(static_cast<double>(physical_client.right - physical_client.left) - input.bounds_width) > 1.0 ||
+      std::abs(static_cast<double>(physical_client.bottom - physical_client.top) - input.bounds_height) > 1.0) {
+    *reason = "window_geometry_changed";
+    return false;
+  }
+  if (!check_current()) return false;
+  HWND refocus_window = input.window;
+  if (input.explicit_resume) {
+    if (!ResolveWindowsExplicitResumeTarget(&session, &refocus_window, reason)) return false;
+  } else if (!ResolveWindowsSessionRefocusTarget(session, &refocus_window, reason)) {
+    return false;
+  }
+  if (!check_current()) return false;
+  const auto begin_focus = [&] {
+    // Existing V2 start focus unit begins under the reader's Stop lock.
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!current()) { *reason = "session_start_canceled"; return false; }
+    session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+    return true;
+  };
+  if (GetForegroundWindow() != refocus_window) {
+    if (IsIconic(input.window)) {
+      if (!begin_focus()) return false;
+      ShowWindow(input.window, SW_RESTORE);
+    }
+    if (refocus_window != input.window && IsIconic(refocus_window)) {
+      if (!begin_focus()) return false;
+      ShowWindow(refocus_window, SW_RESTORE);
+    }
+    if (!begin_focus()) return false;
+    SetForegroundWindow(refocus_window);
+  }
+  RECT bounds{};
+  if (!TargetWindowFacts(input.pid, refocus_window, &bounds)) {
+    *reason = "focus_required";
+    return false;
+  }
+  RECT screen_bounds{};
+  if (!ScreenBoundsPhysicalForWindow(refocus_window, &screen_bounds)) {
+    *reason = "screen_geometry_unavailable";
+    return false;
+  }
+  WindowsDialogSetSnapshot refocused_dialogs;
+  if (!CaptureWindowsDialogSet(session, &refocused_dialogs, reason)) return false;
+  if (refocused_dialogs.digest != session.dialog_set_digest ||
+      refocused_dialogs.active_window != session.active_window ||
+      refocused_dialogs.active_identity != session.active_window_identity ||
+      refocused_dialogs.active_kind != session.active_window_kind) {
+    *reason = "session_refocus_stale";
+    return false;
+  }
+  if (!check_current()) return false;
+  WindowsV2ExistingStartMeasurement after;
+  if (!RunWindowsV2ExistingStartMeasurement(input, session, WindowsV2ExistingStartPhase::AfterFocus,
+                                           &before, &after, reason)) return false;
+  std::string built = "{\"sessionId\":\"" + JsonEscape(input.session_id) +
+      "\",\"platform\":\"win32\",\"appIdentityDigest\":\"" + input.app_identity +
+      "\",\"windowIdentityDigest\":\"" + before.window_identity + "\",\"windowId\":\"" +
+      std::to_string(input.window_value) + "\",\"policyLanguage\":\"" + before.executable.policy_language +
+      "\",\"maximumMode\":\"" + before.maximum_mode + "\",\"screenBounds\":" + RectJson(screen_bounds) +
+      ",\"profileRevision\":" + std::to_string(input.profile_revision) +
+      ",\"cancelEpoch\":" + std::to_string(input.cancel_epoch) +
+      ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
+      ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"}";
+  // Existing V2 start final success decision; a completed late phase cannot resume after Stop.
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!current()) { *reason = "session_start_canceled"; return false; }
+  InvalidateWindowsTicket(input.session_key);
+  *response = std::move(built);
+  return true;
+}
+
+// END windows v2 existing start
+
 // END windows v2 targets
 
 bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
@@ -5615,6 +6016,35 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       reinterpret_cast<HWND>(static_cast<UINT_PTR>(window_value));
   const bool v2_basis =
       eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+  if (v2_basis && sessions.contains(FrameIdKey(request.header.session_id))) {
+    if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
+      WindowsV2StartInput input;
+      input.pid = pid;
+      input.window = window;
+      input.window_value = window_value;
+      input.session_key = FrameIdKey(request.header.session_id);
+      input.session_id = session_id;
+      input.app_identity = app_identity;
+      input.expected_window_identity = expected_window_identity;
+      input.canonical_path = canonical_path;
+      input.executable_digest = expected_executable_digest;
+      input.signer_digest = expected_signer_digest;
+      input.bounds_x = expected_bounds_x;
+      input.bounds_y = expected_bounds_y;
+      input.bounds_width = expected_bounds_width;
+      input.bounds_height = expected_bounds_height;
+      input.explicit_resume = explicit_resume;
+      input.cancel_epoch = cancel_epoch;
+      input.stop_serial = queued_stop_serial.value_or(
+          WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
+      ReadJsonUint64(metadata, "profileRevision", &input.profile_revision);
+      if (!ReadJsonUint64(metadata, "denyRulesetVersion", &input.ruleset_version)) {
+        *reason = "session_target_rejected";
+        return false;
+      }
+      return StartWindowsV2ExistingSession(std::move(input), response, reason);
+    }
+  }
   if (v2_basis && !sessions.contains(FrameIdKey(request.header.session_id))) {
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
       WindowsV2StartInput input;

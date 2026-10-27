@@ -31,6 +31,7 @@ import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   getTrustedWindowsSystemDirectory,
   isRootOwnedSystemExecutable,
+  linuxSandboxExecutionImage,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -812,6 +813,10 @@ export class CommandRunner {
       options.beforeSpawn?.();
       let child: ChildProcess;
       const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
+      const launchImage =
+        process.platform === 'linux' && sandboxExecutable !== null
+          ? linuxSandboxExecutionImage(executionImage)
+          : { ...executionImage, sandboxArguments: [] };
       const commandEnvironment =
         process.platform === 'win32'
           ? windowsCommandEnvironment(
@@ -819,7 +824,7 @@ export class CommandRunner {
               executionImage.environment,
               sandboxExecutable !== null,
             )
-          : buildEnvironment(spec.envDelta, executionImage.environment);
+          : buildEnvironment(spec.envDelta, launchImage.environment);
       try {
         const windows = process.platform === 'win32';
         if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
@@ -841,10 +846,11 @@ export class CommandRunner {
                         preparedIdentity.pathGuard.workspacePath,
                         '--protected-home',
                         homedir(),
+                        ...launchImage.sandboxArguments,
                         '--',
                       ]),
-                  executionImage.launchPath,
-                  ...executionImage.argvPrefix,
+                  launchImage.launchPath,
+                  ...launchImage.argvPrefix,
                   ...spec.argv,
                 ]),
           ],

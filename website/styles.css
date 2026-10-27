@@ -8,7 +8,7 @@
 
 @font-face {
   font-family: 'Noto Sans JP Sub';
-  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261028') format('woff2');
+  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261029') format('woff2');
   font-weight: 100 900;
   font-display: swap;
 }
@@ -402,16 +402,6 @@ html:not(.js) .scene[data-dim] .footage-layer video {
     radial-gradient(120% 90% at 50% 50%, transparent 30%, rgba(5, 6, 5, 0.75) 100%),
     linear-gradient(180deg, rgba(5, 6, 5, 0.85), transparent 22%, transparent 70%, rgba(5, 6, 5, 0.95));
 }
-.scanlines {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  opacity: 0.18;
-  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.5) 0 1px, transparent 1px 3px);
-  mix-blend-mode: multiply;
-}
-
 /* 枠つきの実画面 */
 .screen {
   position: relative;
@@ -687,150 +677,6 @@ html:not(.js) .on-lime {
   }
 }
 
-/* ------------------------------------------------------------ 組織図 */
-.org {
-  position: relative;
-  width: 100%;
-}
-.org svg {
-  width: 100%;
-  height: auto;
-  overflow: visible;
-}
-.org .wire {
-  fill: none;
-  stroke: var(--lime);
-  stroke-width: 2;
-  stroke-dasharray: 1;
-  stroke-dashoffset: calc(1 - var(--r, 1));
-  filter: drop-shadow(0 0 6px var(--lime-glow));
-}
-.org .node rect {
-  fill: rgba(14, 17, 14, 0.92);
-  stroke: #3a443a;
-}
-.org .node.lead rect {
-  stroke: var(--lime);
-}
-.org .node text {
-  fill: var(--ink);
-  font-family: var(--sans);
-  font-weight: 800;
-}
-.org .node .tag {
-  fill: var(--ink-3);
-  font-family: var(--mono);
-  font-weight: 500;
-  font-size: 11px;
-}
-.org .node .where-local {
-  fill: var(--lime);
-}
-.org .node .where-cloud {
-  fill: var(--sky);
-}
-
-/* ------------------------------------------------------------ 帯グラフ */
-.gantt {
-  position: relative;
-  max-width: 1000px;
-  padding: 20px 22px 16px;
-  border-radius: 16px;
-  background: rgba(10, 12, 10, 0.8);
-  border: 1px solid var(--line);
-  backdrop-filter: blur(10px);
-}
-.gantt-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font: 11px var(--mono);
-  letter-spacing: 0.12em;
-  color: var(--ink-3);
-  margin-bottom: 12px;
-}
-.gantt-rows {
-  position: relative;
-  display: grid;
-  gap: 5px;
-  clip-path: inset(0 calc((1 - var(--r, 1)) * 100%) 0 0);
-}
-.g-row {
-  display: grid;
-  grid-template-columns: 13em 1fr;
-  gap: 10px;
-  align-items: center;
-  font-size: 12px;
-  line-height: 1.2;
-}
-.g-row > span {
-  color: var(--ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.g-track {
-  position: relative;
-  height: 12px;
-}
-.g-bar {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--a);
-  width: var(--w);
-  border-radius: 3px;
-  background: var(--sky);
-  opacity: 0.85;
-}
-.g-bar.local {
-  background: var(--lime);
-}
-.g-bar.failed {
-  background: repeating-linear-gradient(135deg, var(--amber) 0 4px, transparent 4px 7px);
-  border: 1px solid var(--amber);
-}
-.g-peak {
-  position: absolute;
-  top: -6px;
-  bottom: -6px;
-  left: calc(13em + 10px + (100% - 13em - 10px) * 0.0299);
-  width: 2px;
-  background: var(--ink);
-  box-shadow: 0 0 12px var(--ink);
-}
-.g-peak::after {
-  content: '6体が同時';
-  position: absolute;
-  top: -20px;
-  left: 6px;
-  font: 700 11px var(--sans);
-  white-space: nowrap;
-}
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 18px;
-  margin-top: 12px;
-  font-size: 12px;
-  color: var(--ink-2);
-}
-.legend i {
-  display: inline-block;
-  width: 14px;
-  height: 8px;
-  border-radius: 2px;
-  margin-right: 6px;
-  vertical-align: middle;
-  background: var(--sky);
-}
-.legend i.local {
-  background: var(--lime);
-}
-.legend i.failed {
-  background: var(--amber);
-}
-
 /* 大きな数字 */
 .bignum {
   display: flex;
@@ -963,38 +809,6 @@ html:not(.js) .on-lime {
   color: var(--ink);
 }
 
-/* ------------------------------------------------------------ 完成 */
-.checks {
-  display: grid;
-  grid-template-columns: repeat(9, 1fr);
-  gap: 8px;
-  max-width: 560px;
-}
-.check {
-  aspect-ratio: 1;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: rgba(206, 255, 82, 0.1);
-  border: 1px solid rgba(206, 255, 82, 0.4);
-}
-.check svg {
-  width: 60%;
-  fill: none;
-  stroke: var(--lime);
-  stroke-width: 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.js .check[data-show] {
-  transform: scale(0.4);
-  transition:
-    opacity 0.25s,
-    transform 0.45s var(--slam);
-}
-.js .check[data-show].on {
-  transform: none;
-}
 .stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1653,20 +1467,6 @@ td {
   .dl {
     grid-template-columns: 1fr;
   }
-  .checks {
-    grid-template-columns: repeat(9, 1fr);
-    gap: 4px;
-  }
-  .g-row {
-    grid-template-columns: 9em 1fr;
-    font-size: 10px;
-  }
-  .g-peak {
-    left: calc(9em + 10px + (100% - 9em - 10px) * 0.0299);
-  }
-  .gantt {
-    padding: 14px 12px 12px;
-  }
   .scrim {
     background: linear-gradient(180deg, rgba(5, 6, 5, 0.8) 0%, rgba(5, 6, 5, 0.7) 22%, rgba(5, 6, 5, 0.78) 45%, rgba(5, 6, 5, 0.95) 70%);
   }
@@ -1870,9 +1670,9 @@ td {
   object-fit: contain;
 }
 
-/* ============================================================ 100体の群れ（トップ）
- * 図は tools/make-swarm.py が作る（手で書かない）。値は data-style ではなくここに書く。
- * 100 の図には必ず .tag-fig「図 · 映像ではありません」を同じ画面に置く（README の honesty rules） */
+/* ============================================================ 図と実演の札（README の honesty rules）
+ * 実画面には .rec（赤い点が点滅）、記録から描いた図には .tag-fig（灰色の点・破線）を同じ画面に置く。
+ * 2 つを同じ絵に重ねない */
 
 /* 図の札: .rec と同じ大きさ・位置。点は灰色で点滅させず、枠は破線 */
 .tag-fig {
@@ -1903,18 +1703,6 @@ td {
   top: calc(var(--header) + 12px);
   right: max(24px, calc((100vw - 1200px) / 2));
 }
-.tag-fig.ink {
-  color: var(--lime-ink);
-  background: transparent;
-  border-color: rgba(15, 19, 9, 0.35);
-}
-.tag-fig.ink::before {
-  background: var(--lime-ink);
-}
-html:not(.js) .tag-fig.ink,
-.js.fit-off .tag-fig.ink {
-  display: none;
-}
 
 /* 実演の札 */
 .real-tag {
@@ -1928,160 +1716,6 @@ html:not(.js) .tag-fig.ink,
   letter-spacing: 0.12em;
 }
 
-/* 群れの図 */
-.swarm-wrap {
-  margin: 0;
-}
-.swarm {
-  width: 100%;
-  height: auto;
-  overflow: visible;
-}
-.swarm .ld,
-.swarm .ld-ring {
-  fill: var(--lime);
-}
-.swarm .ld-ring {
-  fill: none;
-  stroke: var(--lime);
-  opacity: 0;
-  transform-box: fill-box;
-  transform-origin: center;
-}
-.swarm .mg {
-  fill: var(--sky);
-}
-.swarm .n {
-  fill: var(--lime);
-}
-.swarm .lit {
-  stroke: var(--ink);
-  stroke-width: 2.5;
-}
-.swarm .wire,
-.swarm .colline {
-  fill: none;
-  stroke: rgba(206, 255, 82, 0.28);
-  stroke-width: 1.5;
-}
-/* 番号（JS に頼らない）: 列10ルール＋行10ルール */
-.swarm .col:nth-child(1) { --c: 0; }
-.swarm .col:nth-child(2) { --c: 1; }
-.swarm .col:nth-child(3) { --c: 2; }
-.swarm .col:nth-child(4) { --c: 3; }
-.swarm .col:nth-child(5) { --c: 4; }
-.swarm .col:nth-child(6) { --c: 5; }
-.swarm .col:nth-child(7) { --c: 6; }
-.swarm .col:nth-child(8) { --c: 7; }
-.swarm .col:nth-child(9) { --c: 8; }
-.swarm .col:nth-child(10) { --c: 9; }
-.swarm .col > .u:nth-child(1) { --row: 0; }
-.swarm .col > .u:nth-child(2) { --row: 1; }
-.swarm .col > .u:nth-child(3) { --row: 2; }
-.swarm .col > .u:nth-child(4) { --row: 3; }
-.swarm .col > .u:nth-child(5) { --row: 4; }
-.swarm .col > .u:nth-child(6) { --row: 5; }
-.swarm .col > .u:nth-child(7) { --row: 6; }
-.swarm .col > .u:nth-child(8) { --row: 7; }
-.swarm .col > .u:nth-child(9) { --row: 8; }
-.swarm .col > .u:nth-child(10) { --row: 9; }
-.swarm .u {
-  --i: calc(var(--row) * 10 + var(--c));
-  transform-box: fill-box;
-  transform-origin: center;
-}
-/* 序章の弾け（1回だけ） */
-.js:not(.rm):not(.motion-off) .hero .swarm .u {
-  animation: pop 0.35s var(--slam) calc(0.6s + var(--i) * 10ms) both;
-}
-.js:not(.rm):not(.motion-off) .hero .swarm .wire {
-  stroke-dasharray: 1;
-  animation: draw 0.4s var(--ease) 0.3s both;
-}
-.js:not(.rm):not(.motion-off) .hero .swarm .ld-ring {
-  animation: ring 0.6s var(--ease) both;
-}
-/* 02: スクロールで1個ずつ灯る（既定値1を先に書き、古いブラウザでは全点灯） */
-.js .swarm.fill .u {
-  opacity: 1;
-  opacity: clamp(0.1, calc(var(--r, 1) * 100 - var(--i)), 1);
-  transform: scale(clamp(0.5, calc(var(--r, 1) * 100 - var(--i)), 1));
-}
-.js .swarm.fill .wire {
-  stroke-dasharray: 1;
-  stroke-dashoffset: calc(1 - clamp(0, var(--r, 1) * 10, 1));
-}
-.js .swarm.fill .colline {
-  stroke-dasharray: 1;
-  stroke-dashoffset: calc(1 - clamp(0, var(--r, 1) * 1.111 - 0.111, 1));
-}
-/* 03: 図が出て0.5秒後に94個が輪郭だけに沈み、.lit の6個が残る */
-.swarm.real .u:not(.lit) {
-  transition:
-    fill 0.6s 0.5s,
-    stroke 0.6s 0.5s,
-    opacity 0.6s 0.5s;
-}
-.js .real-fig.on .swarm.real .u:not(.lit),
-html:not(.js) .swarm.real .u:not(.lit),
-.js.fit-off .swarm.real .u:not(.lit) {
-  fill: transparent;
-  stroke: var(--ink-3);
-  stroke-width: 1.5;
-  opacity: 0.5;
-}
-/* 仕事中のまたたき: 動かすのは列の g 10個だけ。画面の外では is-live が外れて止まる */
-.js:not(.motion-off) .scene.is-live .swarm .col {
-  animation: twinkle 2.6s ease-in-out calc(var(--c) * -0.26s) infinite;
-}
-.js:not(.motion-off) .hero.is-live .swarm .col {
-  animation-delay: calc(2.4s + var(--c) * 0.12s);
-}
-.motion-off .swarm,
-.motion-off .swarm *,
-.motion-off .flash {
-  animation: none !important;
-}
-@keyframes pop {
-  from {
-    opacity: 0;
-    transform: scale(0);
-  }
-}
-@keyframes draw {
-  from {
-    stroke-dashoffset: 1;
-  }
-}
-@keyframes ring {
-  0% {
-    opacity: 0.9;
-    transform: scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(3);
-  }
-}
-@keyframes twinkle {
-  50% {
-    opacity: 0.55;
-  }
-}
-@keyframes flash {
-  0%,
-  100% {
-    opacity: 0;
-  }
-  40% {
-    opacity: 0.12;
-  }
-}
-@keyframes pulse {
-  50% {
-    transform: scale(1.06);
-  }
-}
 .flash {
   position: absolute;
   inset: 0;
@@ -2093,40 +1727,92 @@ html:not(.js) .swarm.real .u:not(.lit),
 .js:not(.rm):not(.motion-off) .flash {
   animation: flash 0.08s linear 1.6s 1 both;
 }
-
-/* 横に置く群れ（00・02）: 右の列。左の列の文字とは重ねない */
-.side-swarm {
-  position: absolute;
-  z-index: 2;
-  right: max(24px, calc((100vw - 1200px) / 2));
-  top: 50%;
-  transform: translateY(-50%);
-  height: min(64svh, 600px);
-  aspect-ratio: 600 / 640;
-  pointer-events: none;
+@keyframes flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  40% {
+    opacity: 0.12;
+  }
 }
-.side-swarm::before {
+.motion-off .flash {
+  animation: none !important;
+}
+
+/* AI の種類の色（各社のブランド色ではなく、区別のための色） */
+:root {
+  --claude: #ff9a6b;
+  --codex: var(--sky);
+  --local: var(--lime);
+  --hot: var(--amber);
+}
+.claude {
+  --v: var(--claude);
+}
+.codex {
+  --v: var(--codex);
+}
+.local {
+  --v: var(--local);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* 同じ場所で入れ替わる中身（縦並びのときは順に並べる） */
+.swap {
+  display: grid;
+}
+.js:not(.fit-off) .swap > * {
+  grid-area: 1 / 1;
+}
+.js.fit-off .swap > * + *,
+html:not(.js) .swap > * + * {
+  margin-top: 24px;
+}
+.swap > * > * + * {
+  margin-top: 16px;
+}
+
+/* 要点の箇条書き */
+.points {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.points li {
+  position: relative;
+  padding: 10px 14px 10px 34px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 10, 0.72);
+  font-weight: 700;
+  font-size: clamp(14px, 1.3vw, 17px);
+  line-height: 1.5;
+}
+.points li::before {
   content: '';
   position: absolute;
-  inset: -12%;
-  z-index: -1;
-  background: radial-gradient(closest-side, rgba(206, 255, 82, 0.16), transparent);
+  left: 14px;
+  top: calc(50% - 4px);
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--lime);
 }
-.swarm-cap {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: calc(100% + 6px);
-  font: 11px/1.5 var(--mono);
-  letter-spacing: 0.06em;
-  color: var(--ink-3);
-  text-align: center;
+.points li.is-local::before {
+  background: var(--local);
+  box-shadow: 0 0 10px var(--lime-glow);
 }
-.side-copy > * {
-  max-width: min(620px, 52%);
-}
-.side-copy > .kcard {
-  max-width: min(640px, 54%);
+
+/* 2 列の場面の見出しは、列の幅に合わせて一回り小さく */
+.split .copy .headline {
+  font-size: clamp(30px, 4.1vw, 60px);
 }
 
 /* ------------------------------------------------------------ 00 序章 */
@@ -2149,7 +1835,7 @@ html:not(.js) .swarm.real .u:not(.lit),
   color: var(--ink);
 }
 .hero-title .count {
-  font-size: clamp(120px, min(26vw, 22svh), 360px);
+  font-size: clamp(120px, min(26vw, 24svh), 360px);
   color: var(--lime);
   line-height: 0.82;
   letter-spacing: -0.04em;
@@ -2158,6 +1844,8 @@ html:not(.js) .swarm.real .u:not(.lit),
 }
 .h-line {
   color: var(--ink);
+  font-size: 0.62em;
+  line-height: 1.1;
 }
 .js:not(.rm):not(.motion-off) .hero .h-num {
   animation: slamInHero 0.7s var(--slam) 1.7s;
@@ -2169,26 +1857,36 @@ html:not(.js) .swarm.real .u:not(.lit),
   animation: fadeUp 0.6s var(--ease) 2.2s both;
 }
 .hero .definition {
-  margin-top: 12px;
+  max-width: 720px;
+  margin-top: 14px;
 }
 .hero .hero-actions {
   margin-top: 16px;
 }
 .hero-note {
+  max-width: 640px;
   margin: 12px 0 0;
 }
 .hero .scroll-cue {
   margin-top: 18px;
 }
-
-/* 比較の札（実演 6体 → 上限 100体） */
-.proof-pair {
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  margin-top: 16px;
+/* 序章は実画面の上に文字を置くので、左側をしっかり暗くする */
+.hero-scrim {
+  background:
+    linear-gradient(90deg, rgba(5, 6, 5, 0.96) 0%, rgba(5, 6, 5, 0.86) 38%, rgba(5, 6, 5, 0.35) 70%, rgba(5, 6, 5, 0.15) 100%),
+    linear-gradient(180deg, rgba(5, 6, 5, 0.85), transparent 22%, transparent 70%, rgba(5, 6, 5, 0.95));
 }
-.pp {
+
+/* 実演の記録の 4 つの札 */
+.proof4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, max-content));
+  gap: 8px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.proof4 li {
   display: grid;
   align-content: start;
   gap: 2px;
@@ -2196,407 +1894,508 @@ html:not(.js) .swarm.real .u:not(.lit),
   padding: 10px 14px 11px;
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: rgba(10, 12, 10, 0.72);
-  color: var(--ink);
-  text-decoration: none;
+  background: rgba(10, 12, 10, 0.78);
+  backdrop-filter: blur(8px);
 }
-.pp small {
+.proof4 small {
   font: 700 11px/1.3 var(--mono);
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   color: var(--ink-3);
 }
-.pp b {
-  font-size: clamp(26px, min(3.2vw, 4.4svh), 42px);
+.proof4 b {
+  font-size: clamp(26px, min(3vw, 4.2svh), 40px);
   font-weight: 900;
   line-height: 1;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
-.pp b span {
+.proof4 b span {
   font-size: 0.5em;
   margin-left: 2px;
 }
-.pp em {
+.proof4 em {
   font-style: normal;
   font-size: 12px;
   line-height: 1.4;
   color: var(--ink-2);
 }
-.pp-real {
-  border-color: rgba(206, 255, 82, 0.7);
-  transition:
-    border-color 0.2s,
-    transform 0.2s var(--ease);
+.proof4 .is-hot {
+  border-color: rgba(255, 181, 71, 0.6);
 }
-.pp-real:hover {
-  border-color: var(--lime);
-  transform: translateY(-1px);
+.proof4 .is-hot b {
+  color: var(--hot);
 }
-.pp-real b,
-.pp-real small {
-  color: var(--lime);
-}
-.pp-cap {
-  border-style: dashed;
-  border-color: rgba(255, 255, 255, 0.22);
-}
-.pp-arrow {
-  align-self: center;
-  color: var(--ink-3);
-  font-size: 20px;
-}
-
-/* ------------------------------------------------------------ 01 一斉 */
-.ghost-word:has(> span) {
-  display: grid;
-}
-.ghost-word > span {
-  grid-area: 1 / 1;
-  transition: opacity 0.4s var(--ease);
-}
-.ghost-word .gw-b {
-  opacity: 0;
-}
-.scene:is([data-step='2'], [data-step='3']) .gw-a {
-  opacity: 0;
-}
-.scene:is([data-step='2'], [data-step='3']) .gw-b {
-  opacity: 1;
-}
-.scene:is([data-step='2'], [data-step='3']) .ghost-word {
-  -webkit-text-stroke-color: rgba(15, 19, 9, 0.2);
-}
-.queue {
+.mixb {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px 18px;
-  margin-top: 28px;
-}
-.q-ai {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--lime);
-}
-.q-cards {
-  display: flex;
-  gap: 6px;
-}
-.q-cards i {
-  width: 18px;
-  height: 26px;
-  border-radius: 4px;
-  border: 1px solid rgba(206, 255, 82, 0.45);
-  background: rgba(206, 255, 82, 0.08);
-  opacity: clamp(0, calc(var(--i) + 1 - var(--r, 1) * 4), 1);
-}
-/* 番号は CSS で付ける（JS なしでも r=1 で「残り8件」と、カード8枚がそろう） */
-.q-cards i:nth-child(1) { --i: 0; }
-.q-cards i:nth-child(2) { --i: 1; }
-.q-cards i:nth-child(3) { --i: 2; }
-.q-cards i:nth-child(4) { --i: 3; }
-.q-cards i:nth-child(5) { --i: 4; }
-.q-cards i:nth-child(6) { --i: 5; }
-.q-cards i:nth-child(7) { --i: 6; }
-.q-cards i:nth-child(8) { --i: 7; }
-.q-cards i:nth-child(9) { --i: 8; }
-.q-cards i:nth-child(10) { --i: 9; }
-.q-cards i:nth-child(11) { --i: 10; }
-.q-cards i:nth-child(12) { --i: 11; }
-.q-left {
-  margin: 0;
-  font-size: clamp(16px, 1.6vw, 20px);
-  font-weight: 800;
-  color: var(--ink-2);
-}
-.q-left b {
-  font-size: 1.6em;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-.queue + .lead {
-  margin-top: 20px;
-  max-width: 640px;
-}
-.on-lime .chapter-tag,
-.on-lime .chapter-tag b {
-  color: var(--lime-ink);
-}
-.on-lime .lead {
-  margin-top: 20px;
-  color: #2b3315;
-}
-.bars {
-  height: clamp(120px, 22vh, 220px);
-  width: min(100%, 680px);
-  margin-top: 24px;
-  background: repeating-linear-gradient(90deg, var(--lime-ink) 0 calc(var(--r, 1) * 8.4%), rgba(15, 19, 9, 0.14) 0 8.4%, transparent 0 10%);
-  -webkit-mask: repeating-linear-gradient(180deg, #000 0 6.5%, transparent 0 10%);
-  mask: repeating-linear-gradient(180deg, #000 0 6.5%, transparent 0 10%);
-}
-
-/* ------------------------------------------------------------ 02 規模 */
-.count-big {
-  display: flex;
-  align-items: baseline;
-  gap: 0.08em;
-  margin: 16px 0 0;
-  font-weight: 900;
-  line-height: 0.85;
-}
-.count-big .count {
-  display: inline-block;
-  font-size: clamp(110px, min(18vw, 22svh), 260px);
-  color: var(--lime);
-  letter-spacing: -0.04em;
-  font-variant-numeric: tabular-nums;
-  transform-origin: left bottom;
-}
-.count-big > span:not(.visually-hidden) {
-  font-size: clamp(28px, 4vw, 56px);
-}
-.js:not(.motion-off) .is-full .count-big .count {
-  animation: pulse 0.5s var(--ease) 1;
-}
-.count-label {
-  margin: 8px 0 0;
-  font: 700 12px/1.4 var(--mono);
-  letter-spacing: 0.14em;
-  color: var(--ink-3);
-}
-.tiers {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  max-width: 560px;
-  margin: 16px 0 0;
-  padding: 0;
-  list-style: none;
 }
-.tiers li {
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: rgba(10, 12, 10, 0.72);
-  opacity: 1;
-  opacity: clamp(0.28, calc((var(--r, 1) - var(--at, 0)) * 60 + 1), 1);
-}
-.tiers b {
-  display: block;
-  font-size: clamp(20px, 2.2vw, 28px);
-  font-weight: 900;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-.tiers b small {
-  font-size: 0.5em;
-  margin-left: 2px;
-}
-.tiers span {
-  display: block;
-  margin-top: 4px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--ink-2);
-}
-.tiers .t-real b,
-.tiers .t-cap b {
-  color: var(--lime);
-}
-.badge {
-  display: inline-block;
-  margin-top: 6px;
-  padding: 1px 6px;
-  border-radius: 5px;
-  font: 700 10px/1.5 var(--sans);
+.mixb i {
   font-style: normal;
-  white-space: nowrap;
-  opacity: 1;
-  opacity: clamp(0, calc((var(--r, 1) - var(--at, 0)) * 60 + 1), 1);
-}
-.badge.real {
-  border: 1px solid var(--lime);
-  color: var(--lime);
-}
-.badge.cap {
-  border: 1px dashed rgba(255, 255, 255, 0.45);
-  color: var(--ink-2);
-}
-/* 同じ場所で入れ替わる一行（縦並びのときは順に並べる） */
-.lead-swap {
-  display: grid;
-  margin-top: 18px;
-}
-.js:not(.fit-off) .lead-swap > * {
-  grid-area: 1 / 1;
-}
-html:not(.js) .lead-swap > * + *,
-.js.fit-off .lead-swap > * + * {
-  margin-top: 12px;
-}
-.split .copy > .lead-swap {
-  margin-top: 20px;
-}
-#ch-scale .headline + .lead {
-  margin-top: 20px;
-}
-.limit-bar {
-  position: relative;
-  max-width: 520px;
-  height: 56px;
-  margin-top: 28px;
-}
-.lb-track {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 10px;
-  height: 4px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, rgba(206, 255, 82, 0.25), var(--lime));
-}
-.lb-knob {
-  position: absolute;
-  top: 3px;
-  right: -9px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--lime);
-  box-shadow: 0 0 18px var(--lime-glow);
-}
-.lb-knob::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 2px solid var(--lime);
-  opacity: 0;
-}
-.js:not(.motion-off) .on .limit-bar .lb-knob::after {
-  animation: ring 0.6s var(--ease) 0.3s 1;
-}
-.limit-bar span {
-  position: absolute;
-  top: 28px;
-  font: 700 12px/1.4 var(--mono);
-  color: var(--ink-3);
-  white-space: nowrap;
-}
-.limit-bar .lb-min {
-  left: 0;
-}
-.limit-bar .lb-mid {
-  left: 49.49%;
-  transform: translateX(-50%);
-}
-.limit-bar .lb-max {
-  right: 0;
-  color: var(--lime);
-}
-.limit-bar + .note {
-  margin: 10px 0 0;
-}
-.kcard .title {
-  margin: 0;
-  color: var(--ink);
-}
-.kcard.trust {
-  border-color: rgba(206, 255, 82, 0.4);
-}
-.kcard.trust .hero-actions {
-  margin-top: 22px;
+  color: var(--v);
 }
 
-/* ------------------------------------------------------------ 03 実演 */
-.colorfield.sky {
-  background: var(--sky);
+/* ------------------------------------------------------------ 記録から描いた組織図（01 採用・03 稼働） */
+.chart-beat {
+  display: grid;
+  align-content: start;
+  gap: 14px;
 }
-.on-sky,
-.on-sky .chapter-tag,
-.on-sky .chapter-tag b,
-.on-sky .lead {
-  color: #06121c;
-}
-.on-sky .real-tag {
-  color: #06121c;
-  border-color: rgba(6, 18, 28, 0.5);
-}
-.on-sky .lead {
-  margin-top: 20px;
-}
-html:not(.js) .on-sky,
-.js.fit-off .on-sky {
-  padding: clamp(24px, 4vw, 48px);
-  border-radius: 20px;
-  background: var(--sky);
-}
-/* 実画面（お願いの映像）は拍3から。縦並びのときは図と同じ画面に重なるので出さない */
-html:not(.js) #ch-real .footage-layer,
-html:not(.js) #ch-real .scrim,
-html:not(.js) #ch-real .stage > .rec,
-.js.fit-off #ch-real .footage-layer,
-.js.fit-off #ch-real .scrim,
-.js.fit-off #ch-real .stage > .rec {
-  display: none;
-}
-.real-split .copy > * + * {
-  margin-top: 16px;
-}
-.real-fig .swarm {
-  max-height: min(54svh, 520px);
-}
-.fig-legend {
+.chart-title {
+  margin: 0;
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
-  gap: 6px 18px;
-  margin: 12px 0 0;
+  align-items: baseline;
+  gap: 4px 14px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+.chart-title b {
+  color: var(--ink);
+  font-size: clamp(22px, 2.4vw, 32px);
+  font-weight: 900;
+}
+.vendor-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 0;
   padding: 0;
   list-style: none;
   font-size: 12px;
   color: var(--ink-2);
 }
-.fig-legend i {
+.vendor-legend li::before {
+  content: '';
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   margin-right: 6px;
   border-radius: 50%;
-  border: 1.5px solid var(--ink-3);
-  vertical-align: -1px;
-}
-.fig-legend .is-real {
-  color: var(--ink);
-}
-.fig-legend .is-real i {
-  background: var(--lime);
-  border-color: var(--ink);
+  background: var(--v);
+  vertical-align: 0;
 }
 
-/* ------------------------------------------------------------ 04 チーム */
-.mix-mini {
+.org100 {
+  --r: 1;
+  position: relative;
+  padding: 14px clamp(10px, 1.6vw, 20px) 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 10, 0.82);
+}
+.o-top {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
 }
-.mix-mini .mix-col {
-  padding: 14px 16px;
+.o-top > .o-lead {
+  grid-column: 2;
 }
-.mix-mini h3 {
-  font-size: clamp(16px, 1.6vw, 20px);
+.o-top > .o-hud {
+  grid-column: 3;
+  justify-self: end;
+}
+.o-lead {
+  justify-self: center;
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1.5px solid var(--v);
+  font-weight: 800;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.o-lead small {
+  margin-left: 6px;
+  font: 700 11px var(--mono);
+  color: var(--v);
+}
+.o-hud {
+  display: flex;
+  gap: clamp(12px, 2vw, 28px);
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.o-hud > span {
+  display: grid;
+  justify-items: end;
+}
+.o-hud small {
+  font: 700 10px/1.2 var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+}
+.o-hud b {
+  font-size: clamp(22px, 2.6vw, 36px);
+  font-weight: 900;
+  line-height: 1;
+}
+.o-hud em {
+  font-style: normal;
+  font-size: clamp(12px, 1.2vw, 17px);
+  font-weight: 800;
+  margin-left: 2px;
+}
+.o-hud > span:has(em) {
+  grid-template-columns: auto auto;
+  align-items: baseline;
+}
+.o-hud > span:has(em) small {
+  grid-column: 1 / -1;
+}
+.o-act b {
+  color: var(--hot);
+}
+.o-done b {
+  color: var(--lime);
+}
+.o-depts {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: clamp(4px, 0.8vw, 12px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.o-dept {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  min-width: 0;
+}
+.o-mg {
+  width: 100%;
+  padding: 3px 2px;
+  border-radius: 7px;
+  border: 1.5px solid var(--v);
+  font-size: clamp(9px, 0.95vw, 13px);
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.o-cells {
+  display: grid;
+  grid-template-rows: repeat(5, auto);
+  grid-auto-flow: column;
+  gap: clamp(3px, 0.5vw, 7px);
+  width: 100%;
+}
+.o-cells i {
+  position: relative;
+  display: block;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1.5px solid var(--v);
+  background: var(--v);
+}
+/* 採用: --r（0..1）が採用の時刻 --h を越えたら現れる */
+.hire .o-dept,
+.hire .o-cells i {
+  opacity: clamp(0, calc((var(--r) - var(--h)) * 40), 1);
+  transform: scale(clamp(0.4, calc(0.4 + (var(--r) - var(--h)) * 30), 1));
+}
+.hire .o-cells i {
+  box-shadow: 0 0 calc(12px * clamp(0, calc(1 - (var(--r) - var(--h)) * 12), 1)) var(--v);
+}
+/* 稼働: 開始前は輪郭だけ、実行中は光り、完了すると描いた絵に変わる */
+.run .o-cells i,
+.run .o-mg {
+  --on: clamp(0, calc((var(--r) - var(--s)) * 300), 1);
+  --off: clamp(0, calc((var(--r) - var(--e)) * 300), 1);
+}
+.run .o-cells i {
+  background: transparent;
+  opacity: calc(0.35 + 0.65 * var(--on));
+  box-shadow: 0 0 calc(14px * var(--on) * (1 - var(--off))) var(--v);
+}
+.run .o-cells i::before {
+  content: '';
+  position: absolute;
+  inset: 18%;
+  border-radius: 50%;
+  background: var(--v);
+  opacity: calc(var(--on) * (1 - var(--off)));
+}
+.run .o-cells i img {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  max-width: none;
+  border-radius: 22%;
+  opacity: var(--off);
+  transform: scale(calc(0.5 + 0.5 * var(--off)));
+}
+.run .o-cells i:has(img) {
+  border-radius: calc(50% - 28% * var(--off));
+  border-color: color-mix(in srgb, var(--v) calc(100% - 60% * var(--off)), transparent);
+}
+.run .o-mg {
+  box-shadow: 0 0 calc(12px * var(--on) * (1 - var(--off))) var(--v);
+  background: color-mix(in srgb, var(--v) calc(22% * var(--off)), transparent);
+}
+
+/* ------------------------------------------------------------ 02 混成 */
+.mix3 {
+  display: grid;
+  grid-template-columns: 50fr 49fr minmax(160px, 22fr);
+  gap: clamp(10px, 1.6vw, 20px);
+  margin-top: clamp(20px, 3svh, 36px);
+}
+.m-col {
+  min-width: 0;
+  padding: 16px clamp(14px, 1.6vw, 22px) 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--v);
+  background: rgba(10, 12, 10, 0.82);
+}
+.m-kind {
+  margin: 0;
+  display: grid;
+  font-size: clamp(24px, 2.6vw, 38px);
+  font-weight: 900;
+  line-height: 1.1;
+  color: var(--v);
+}
+.m-kind small {
+  font: 700 11px/1.4 var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+.m-num {
+  margin: 4px 0 0;
+  font-size: clamp(56px, 7vw, 104px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.m-num span {
+  font-size: 0.36em;
+  margin-left: 4px;
+  color: var(--v);
+}
+.m-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 12px 0 0;
+}
+.m-dots i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--v);
+}
+.local .m-dots i {
+  box-shadow: 0 0 12px var(--v);
+}
+.m-models {
+  display: grid;
+  gap: 4px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.m-models li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  border-left: 2px solid var(--v);
+  background: rgba(255, 255, 255, 0.03);
+  font: 700 12px/1.5 var(--mono);
+}
+.m-models span {
+  color: var(--ink-3);
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ 03 稼働 */
+.beat-mid .headline {
+  text-shadow: 0 2px 24px rgba(5, 6, 5, 0.95), 0 0 2px rgba(5, 6, 5, 0.9);
+}
+.beat-mid .lead {
+  margin-top: 16px;
+}
+/* 実画面の上の注目の枠（枠の位置は録画の画素から測った割合） */
+.focus {
+  position: absolute;
+  z-index: 3;
+  left: var(--x);
+  top: var(--y);
+  width: var(--w);
+  height: var(--fh);
+  border: 2px solid var(--local);
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 4px rgba(206, 255, 82, 0.15),
+    0 0 30px var(--lime-glow);
+}
+.focus b {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 6px);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--local);
+  color: var(--lime-ink);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.meter-label {
+  margin: 0 0 6px;
+  font-weight: 800;
+  font-size: clamp(16px, 1.6vw, 22px);
+}
+.meter-label small {
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.meter {
+  --r: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.5fr);
+  gap: clamp(20px, 4vw, 56px);
+  align-items: end;
+}
+.meter .bignum b {
+  font-size: clamp(120px, min(19vw, 30svh), 280px);
+  color: var(--hot);
+  text-shadow: 0 0 80px rgba(255, 181, 71, 0.35);
+  font-variant-numeric: tabular-nums;
+}
+.meter .bignum span {
+  color: var(--hot);
+}
+.curve {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.c-grid {
+  stroke: var(--line);
+}
+.c-tick {
+  fill: var(--ink-3);
+  font: 12px var(--mono);
+}
+/* 線と塗りは同じ切り抜きで、時間（横軸）に合わせて左から伸ばす */
+.c-area,
+.c-line {
+  clip-path: inset(-10px calc((1 - var(--r)) * 100%) -10px 0);
+}
+.c-area {
+  fill: rgba(255, 181, 71, 0.18);
+}
+.c-line {
+  fill: none;
+  stroke: var(--hot);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+}
+.c-peak {
+  opacity: clamp(0, calc((var(--r) - 0.19) * 40), 1);
+}
+.c-peak line {
+  stroke: var(--hot);
+  stroke-dasharray: 3 4;
+}
+.c-peak circle {
+  fill: var(--hot);
+}
+.c-peak text {
+  fill: var(--ink);
+  font: 700 13px var(--sans);
+}
+.meter-beat .note {
+  margin: 14px 0 0;
+  max-width: 760px;
+}
+
+/* ------------------------------------------------------------ 04 完成 */
+.gallery-beat .title {
+  margin-bottom: 14px;
+}
+.mosaic-wrap {
+  --r: 1;
+  position: relative;
+}
+.mosaic {
+  display: grid;
+  grid-template-columns: repeat(15, minmax(0, 1fr));
+  gap: clamp(3px, 0.5vw, 7px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mosaic li {
+  --in: clamp(0, calc((var(--r) - var(--o)) * 30), 1);
+  opacity: var(--in);
+  transform: translateY(calc((1 - var(--in)) * -40px)) scale(calc(0.6 + 0.4 * var(--in)));
+}
+.mosaic img {
+  width: 100%;
+  height: auto;
+  border-radius: 18%;
+}
+.mosaic-count {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  margin: 0;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.mosaic-count b {
+  font-size: clamp(24px, 2.6vw, 36px);
+  color: var(--lime);
+}
+.gallery-beat .note {
+  margin: 12px 0 0;
+  max-width: 820px;
+}
+.stat b.hot {
+  color: var(--hot);
+}
+#ch-done .beat > .display + .stats {
+  margin-top: 28px;
+}
+#ch-done .beat > .stats + .note {
+  margin-top: 10px;
+}
+
+/* ------------------------------------------------------------ 05 確認 */
+#ch-check .headline {
   margin-bottom: 10px;
 }
-#ch-team[data-step='3'] .org .node:has(.where-local) rect {
-  stroke: var(--sky);
-  stroke-width: 2.5;
+.check-lead {
+  margin-bottom: 28px;
+}
+.check-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  margin: 22px 0 0;
+}
+.check-result b {
+  font-size: clamp(20px, 2.2vw, 28px);
+  font-weight: 900;
+  color: var(--lime);
+}
+.check-result span {
+  color: var(--ink-2);
 }
 
 /* ------------------------------------------------------------ 始動 */
-/* 群れの図は、ダウンロードの塊（.finale-main）の右の空きにだけ置く。
- * 文字・ダウンロードの札（最大 880px）と、下の実演動画のサムネ（.watch）には重ねない */
 .finale-main {
   position: relative;
   display: grid;
@@ -2604,31 +2403,24 @@ html:not(.js) #ch-real .stage > .rec,
   justify-items: start;
   width: 100%;
 }
-.finale-swarm {
-  position: absolute;
-  z-index: -1;
-  top: 40px;
-  right: 0;
-  width: min(300px, calc(100% - 900px));
-  height: auto;
-  opacity: 0.28;
-  pointer-events: none;
+.finale-note {
+  max-width: 760px;
+  margin: -8px 0 0;
 }
-.finale-main > .tag-fig {
-  top: 0;
-  right: 0;
-  padding: 4px 8px;
-  font-size: 10px;
-}
-/* 右に空きがない幅では、図と札を出さない */
-@media (max-width: 1239px) {
-  .finale-swarm,
-  .finale-main > .tag-fig {
-    display: none;
-  }
+.finale-main .hero-actions {
+  margin-top: 0;
 }
 .finale > .ghost-word {
   transform: none;
+}
+.watch-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+.watch-row .watch {
+  max-width: none;
 }
 .watch .rec {
   top: 8px;
@@ -2636,10 +2428,15 @@ html:not(.js) #ch-real .stage > .rec,
   font-size: 10px;
   color: var(--ink);
 }
+.watch .rec b {
+  display: inline;
+  font-size: inherit;
+}
 
 /* ------------------------------------------------------------ 再生バーの実演の札 */
 .p-real {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2666,16 +2463,12 @@ html:not(.js) #ch-real .stage > .rec,
 .player .p-track {
   min-width: 160px;
 }
-.p-real {
-  flex: 0 1 auto;
-  min-width: 0;
-}
 .p-real-full {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 1100px 以下は短い札（「実演 10/20」） */
+/* 1100px 以下は短い札（「実演 10/23」） */
 @media (max-width: 1100px) {
   .p-real-full {
     display: none;
@@ -2685,73 +2478,64 @@ html:not(.js) #ch-real .stage > .rec,
   }
 }
 
-/* ------------------------------------------------------------ 縦並び（JS なし・動きを減らす・収まらない） */
-html:not(.js) .side-swarm,
-.js.fit-off .side-swarm {
-  position: relative;
-  top: auto;
-  right: auto;
-  left: auto;
-  transform: none;
-  width: min(420px, 80vw);
-  height: auto;
-  opacity: 1;
-  margin: 0 0 40px max(16px, calc((100vw - var(--shell)) / 2));
-}
-html:not(.js) .side-copy > *,
-.js.fit-off .side-copy > * {
-  max-width: 760px;
-}
-html:not(.js) .finale-swarm,
-.js.fit-off .finale-swarm {
-  opacity: 0.16;
-}
-
+/* ------------------------------------------------------------ 狭い画面 */
 @media (max-width: 960px) {
-  .side-swarm {
-    top: calc(var(--header) + 8px);
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    width: min(88vw, 41.4svh);
-    height: auto;
-    opacity: 0.55;
+  .proof4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .side-swarm .swarm-cap {
-    display: none;
+  .meter {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
-  .side-copy > *,
-  .side-copy > .kcard {
-    max-width: none;
+  .mix3 {
+    grid-template-columns: 1fr 1fr;
   }
-  .js #ch-scale .stage {
-    align-content: end;
+  .mix3 .local {
+    grid-column: 1 / -1;
   }
-  .real-fig .swarm {
-    max-height: 34svh;
+  .mosaic {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+  }
+  .watch-row {
+    grid-template-columns: 1fr;
+  }
+  .o-depts {
+    gap: 4px;
   }
 }
 @media (max-width: 640px) {
-  .proof-pair {
+  .proof4 {
     gap: 6px;
   }
-  .pp {
+  .proof4 li {
     padding: 8px 10px;
   }
-  .pp b {
-    font-size: 28px;
+  .proof4 b {
+    font-size: 26px;
   }
-  .pp em {
+  .proof4 em {
     font-size: 11px;
+  }
+  .hero-title .count {
+    font-size: clamp(96px, min(34vw, 18svh), 200px);
+  }
+  .hero-title > .h-num {
+    margin-top: 0.06em;
+  }
+  /* 縦長の画面では文字が実画面の上に全面で重なるので、暗幕を全体に濃くする */
+  .hero-scrim {
+    background: linear-gradient(180deg, rgba(5, 6, 5, 0.9), rgba(5, 6, 5, 0.82) 40%, rgba(5, 6, 5, 0.94));
   }
   .hero .hero-actions {
     gap: 8px;
-    flex-wrap: nowrap;
   }
   .hero .hero-actions .btn {
     min-height: 38px;
     padding: 0 14px;
     font-size: 13px;
+  }
+  .hero .btn-ghost {
+    display: none;
   }
   .hero-note {
     font-size: 11px;
@@ -2760,31 +2544,87 @@ html:not(.js) .finale-swarm,
   .hero .scroll-cue {
     display: none;
   }
-  .tiers {
-    gap: 6px;
-  }
-  .tiers li {
-    padding: 8px;
-  }
-  .badge {
-    white-space: normal;
-  }
-  .mix-mini {
+  .o-top {
     grid-template-columns: 1fr;
+    gap: 8px;
   }
-  .mix-mini .mix-col {
-    padding: 10px 12px;
+  .o-top > .o-lead,
+  .o-top > .o-hud {
+    grid-column: 1;
   }
-  .mix-mini h3 {
-    margin-bottom: 6px;
-    font-size: 15px;
+  .o-top > .o-hud {
+    justify-self: stretch;
+    justify-content: space-between;
   }
-  .mix-mini .chips {
-    gap: 6px;
+  .o-hud > span {
+    justify-items: start;
   }
-  .mix-mini .chip {
-    padding: 3px 8px;
-    font-size: 11px;
+  .o-cells {
+    gap: 2px;
+  }
+  .o-cells i {
+    border-width: 1px;
+  }
+  .o-mg {
+    padding: 2px 0;
+    font-size: 8px;
+    letter-spacing: -0.04em;
+  }
+  .mix3 {
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .m-col {
+    padding: 10px 10px 8px;
+  }
+  .m-kind {
+    font-size: 21px;
+  }
+  .m-num {
+    font-size: 38px;
+  }
+  .m-dots {
+    gap: 3px;
+    margin-top: 8px;
+  }
+  .m-dots i {
+    width: 6px;
+    height: 6px;
+  }
+  .m-models {
+    margin-top: 8px;
+  }
+  .m-models li {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+  .mosaic {
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    gap: 3px;
+  }
+  .meter .bignum b {
+    font-size: clamp(96px, 30vw, 150px);
+  }
+  .points li {
+    padding: 8px 10px 8px 28px;
+  }
+  .points li::before {
+    left: 10px;
+  }
+  .check-lead {
+    margin-bottom: 16px;
+  }
+}
+/* 背の低いスマホ（360x740 など）では、02 の見出しと内訳を詰めて舞台に収める */
+@media (max-width: 640px) and (max-height: 780px) {
+  #ch-mix .headline {
+    font-size: 30px;
+  }
+  .mix3 {
+    margin-top: 10px;
+  }
+  .m-models li {
+    padding: 2px 6px;
   }
 }
 /* 低い画面では、序章の「スクロールで再生」を省いて見出しと札を収める */
@@ -2793,22 +2633,49 @@ html:not(.js) .finale-swarm,
     display: none;
   }
 }
-/* 縦 860px 以下のノート（1366x768・1536x800 など）では、01 の帯と 02 の数字を詰めて舞台に収める（収まらないとページ全体が縦並びになる） */
+/* 縦 860px 以下のノート（1366x768・1536x800 など）では、詰めて舞台に収める（収まらないとページ全体が縦並びになる） */
 @media (max-height: 860px) and (min-width: 961px) {
-  .bars {
-    height: clamp(100px, 18vh, 180px);
-    margin-top: 18px;
+  .hero-title .count {
+    font-size: clamp(100px, min(24vw, 20svh), 300px);
   }
-  .count-big .count {
-    font-size: clamp(96px, min(18vw, 16svh), 260px);
-  }
-  .count-big,
-  .tiers {
+  .proof4 {
     margin-top: 12px;
+  }
+  .proof4 li {
+    padding: 8px 12px 9px;
+  }
+  .hero .definition {
+    margin-top: 10px;
+  }
+  .m-num {
+    font-size: clamp(48px, 5.6vw, 80px);
+  }
+  .m-dots i {
+    width: 8px;
+    height: 8px;
+  }
+  .mix3 {
+    margin-top: 16px;
+  }
+  .o-cells {
+    gap: 3px;
+  }
+  .mosaic {
+    grid-template-columns: repeat(18, minmax(0, 1fr));
+  }
+}
+/* 横長の画面では、組織図とモザイクの高さを画面に合わせる（幅いっぱいだと縦に収まらない） */
+@media (min-aspect-ratio: 16 / 10) and (min-width: 961px) {
+  .org100 {
+    width: min(100%, calc((100svh - var(--header) - var(--player) - 210px) * 1.95));
+    justify-self: center;
+  }
+  .mosaic {
+    width: min(100%, calc((100svh - var(--header) - var(--player) - 260px) * 2.6));
   }
 }
 
-/* ------------------------------------------------------------ 下層ページの群れの図（静止画、ai-team #scale） */
+/* ------------------------------------------------------------ 下層ページの図（静止画、ai-team #scale） */
 .fig {
   position: relative;
   margin: 0;
@@ -2820,9 +2687,20 @@ html:not(.js) .finale-swarm,
 .fig img {
   display: block;
   width: 100%;
-  max-width: 400px;
+  max-width: 640px;
   height: auto;
   margin: 0 auto;
+}
+.fig-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 18px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--ink-2);
 }
 .reel .stats {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2835,7 +2713,8 @@ h2,
 h3,
 .title,
 .flow li b,
-.stat span {
+.stat span,
+.points li {
   word-break: auto-phrase;
 }
 /* 4枚のカードは、タブレットの幅では 3＋1 ではなく 2×2 にする */
@@ -2849,14 +2728,18 @@ h3,
   margin-top: 12px;
   color: #2b3315;
 }
+.on-lime .chapter-tag b {
+  color: var(--lime-ink);
+}
+.on-lime .lead {
+  margin-top: 16px;
+  color: #2b3315;
+  font-weight: 700;
+}
 /* 見出しの拍では、後ろの実画面を暗くして文字と重ならないようにする */
-#ch-real[data-step='3'] .footage-layer video,
-#ch-together[data-step='0'] .footage-layer video,
 #ch-done[data-step='0'] .footage-layer video {
   filter: brightness(0.3) saturate(0.6);
 }
-#ch-real .beat .headline,
-#ch-together .beat .headline,
 #ch-done .beat .headline,
 #ch-check .beat .headline {
   text-shadow: 0 2px 24px rgba(5, 6, 5, 0.95), 0 0 2px rgba(5, 6, 5, 0.9);
@@ -2867,25 +2750,27 @@ h3,
 .stage > .rec {
   background: rgba(0, 0, 0, 0.78);
 }
-/* スマホでは 02 の群れを小さくし、図の札の下から始める（図の札・章の札・見出しに重ねない） */
-@media (max-width: 640px) {
-  /* 02 は文字が多く、章の札が画面の上から3割ほどの所に来るので、群れはその上の空きに収める */
-  #ch-scale .side-swarm {
-    top: calc(var(--header) + 44px);
-    width: min(88vw, 16svh);
-  }
-}
 /* film.js が読み込めなかったとき（.js も .rm もない）: ヘッダーに背景を付け、実画面はポスターを背景で見せる */
 html:not(.js):not(.rm) body:not(.no-film) .site-header {
   background: rgba(5, 6, 5, 0.92);
   border-bottom-color: var(--line-soft);
 }
 html:not(.js):not(.rm) .film .footage-layer,
-html:not(.js):not(.rm) #ch-team .screen {
+html:not(.js):not(.rm) .film .screen {
   background: #000 center / cover no-repeat;
 }
-html:not(.js):not(.rm) #ch-together .footage-layer {
-  background-image: linear-gradient(rgba(5, 6, 5, 0.6), rgba(5, 6, 5, 0.6)), url('/media/together.jpg');
+/* JS がないと動画は読み込まれず、ブラウザが空のプレーヤーを出すので隠す（下のポスターを見せる） */
+html:not(.js):not(.rm) .film video {
+  visibility: hidden;
+}
+html:not(.js):not(.rm) #top .footage-layer {
+  background-image: url('/media/c100-cards.jpg');
+}
+html:not(.js):not(.rm) #ch-run .footage-layer {
+  background-image: linear-gradient(rgba(5, 6, 5, 0.6), rgba(5, 6, 5, 0.6)), url('/media/c100-wall.jpg');
+}
+html:not(.js):not(.rm) #ch-done .footage-layer {
+  background-image: linear-gradient(rgba(5, 6, 5, 0.7), rgba(5, 6, 5, 0.7)), url('/media/c100-final.jpg');
 }
 html:not(.js):not(.rm) #ch-check .footage-layer:first-child {
   background-image: linear-gradient(rgba(5, 6, 5, 0.7), rgba(5, 6, 5, 0.7)), url('/media/code.jpg');
@@ -2893,12 +2778,21 @@ html:not(.js):not(.rm) #ch-check .footage-layer:first-child {
 html:not(.js):not(.rm) #ch-check .footage-layer + .footage-layer {
   display: none;
 }
-html:not(.js):not(.rm) #ch-done .footage-layer {
-  background-image: linear-gradient(rgba(5, 6, 5, 0.7), rgba(5, 6, 5, 0.7)), url('/media/final.jpg');
+html:not(.js):not(.rm) #ch-hire .screen:first-child {
+  background-image: url('/media/c100-request.jpg');
 }
-html:not(.js):not(.rm) #ch-team .screen:first-child {
-  background-image: url('/media/hires.jpg');
+html:not(.js):not(.rm) #ch-hire .screen:last-child {
+  background-image: url('/media/c100-hire.jpg');
 }
-html:not(.js):not(.rm) #ch-team .screen:last-child {
-  background-image: url('/media/assemble.jpg');
+html:not(.js):not(.rm) #ch-mix .screen:first-child {
+  background-image: url('/media/c100-limit.jpg');
+}
+html:not(.js):not(.rm) #ch-mix .screen:last-child {
+  background-image: url('/media/c100-guide.jpg');
+}
+html:not(.js):not(.rm) #ch-run .screen:first-child {
+  background-image: url('/media/c100-dive.jpg');
+}
+html:not(.js):not(.rm) #ch-run .screen:last-child {
+  background-image: url('/media/c100-local.jpg');
 }

@@ -12,7 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "linux")]
 use std::io::{self, Seek, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, IntoRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -50,6 +52,26 @@ fn main() -> ExitCode {
             }
             Err(_) => ExitCode::from(70),
         };
+    }
+    #[cfg(target_os = "linux")]
+    if args.len() >= 10
+        && args[1] == "--exec"
+        && args[2] == "workspace-write"
+        && args[4] == "--protected-home"
+        && args[6] == "--sealed-images"
+        && args[8] == "--"
+    {
+        let Ok(images) = open_sealed_images(&args[7]) else {
+            eprintln!("sealed execution image rejected");
+            return ExitCode::from(64);
+        };
+        return execute_linux_workspace_command(
+            Path::new(&args[3]),
+            Path::new(&args[5]),
+            &args[9],
+            &args[10..],
+            images,
+        );
     }
     if args.len() >= 8
         && args[1] == "--exec"
@@ -118,11 +140,77 @@ fn execute_workspace_command(
 }
 
 #[cfg(target_os = "linux")]
+fn open_sealed_images(json: &str) -> io::Result<Vec<fs::File>> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    if json.len() > 1024 {
+        return Err(invalid());
+    }
+    let sources: Vec<String> = serde_json::from_str(json).map_err(|_| invalid())?;
+    if sources.len() > 2 {
+        return Err(invalid());
+    }
+    let mut images = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let parts: Vec<&str> = source.split('/').collect();
+        if source.len() > 128
+            || parts.len() != 5
+            || parts[0] != ""
+            || parts[1] != "proc"
+            || parts[3] != "fd"
+            || parts[2].is_empty()
+            || !parts[2].bytes().all(|c| c.is_ascii_digit())
+            || parts[4].is_empty()
+            || !parts[4].bytes().all(|c| c.is_ascii_digit())
+            || parts[2].parse::<u32>().map_or(true, |pid| pid == 0)
+            || parts[4].parse::<i32>().is_err()
+            || sources[..index].contains(source)
+        {
+            return Err(invalid());
+        }
+        let image = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(source)?;
+        let required =
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        // Check seals before metadata: neither bytes nor size may change after validation.
+        let seals = unsafe { libc::fcntl(image.as_raw_fd(), libc::F_GET_SEALS) };
+        if seals < 0 || seals & required != required {
+            return Err(invalid());
+        }
+        let metadata = image.metadata()?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 512 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let flags = unsafe { libc::fcntl(image.as_raw_fd(), libc::F_GETFD) };
+        if flags < 0
+            || unsafe { libc::fcntl(image.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC) }
+                < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        images.push(image);
+    }
+    Ok(images)
+}
+
+#[cfg(target_os = "linux")]
 fn execute_workspace_command(
     root: &Path,
     protected_home: &Path,
     executable: &str,
     argv: &[String],
+) -> ExitCode {
+    execute_linux_workspace_command(root, protected_home, executable, argv, Vec::new())
+}
+
+#[cfg(target_os = "linux")]
+fn execute_linux_workspace_command(
+    root: &Path,
+    protected_home: &Path,
+    executable: &str,
+    argv: &[String],
+    images: Vec<fs::File>,
 ) -> ExitCode {
     use std::os::unix::process::CommandExt;
     let Ok(root) = fs::canonicalize(root) else {
@@ -158,8 +246,19 @@ fn execute_workspace_command(
     for protected in linux_protected_paths(&protected_home) {
         command.arg("--tmpfs").arg(protected);
     }
+    command.args(["--proc", "/proc", "--dev", "/dev"]);
+    if !images.is_empty() {
+        command.args(["--tmpfs", "/dev/sprint-coder-execution"]);
+        for (index, image) in images.iter().enumerate() {
+            command
+                .args(["--perms", "0500", "--ro-bind-data"])
+                .arg(image.as_raw_fd().to_string())
+                .arg(format!("/dev/sprint-coder-execution/image-{index}"));
+        }
+        command.args(["--remount-ro", "/dev/sprint-coder-execution"]);
+    }
     let error = command
-        .args(["--proc", "/proc", "--dev", "/dev", "--chdir"])
+        .arg("--chdir")
         .arg(&root)
         .arg("--seccomp")
         .arg(seccomp_fd.to_string())

@@ -8,11 +8,15 @@
  *   区間を終えた（--r が 1 の）要素には .is-full が付く。縦並び（.fit-off）では最後の状態（1）で見せる。
  * - [data-count="100"][data-from="1"][data-pad="3"] … 数字の表示。いちばん近い [data-range] の
  *   --r に合わせて from → count を数える（pad は桁をそろえる 0 埋め）。HTML には最後の値を書く。
+ * - [data-values="0,3,9,…"] … 同じく --r に合わせて、記録から取った値の列を順に見せる（tools/make-hundred.py が作る）。
+ * - [data-clock="1495"] … --r に合わせて 0:00 → 24:55 の経過時刻を見せる（値は秒）。
  * - [data-count-intro="100"] … 序章の数え上げ（000 → 100）。読み込みが遅れたとき・動きを止める設定では
  *   数えず、HTML の値のまま見せる。
  * - .scene.is-live … 章が画面に入っている間だけ付く（群れのまたたきは、これがある間だけ動く）。
  * - .scene[data-real] … 実演の章。いる間は再生バーに「実演」の札を出す（.player.is-real）。
- *   data-real-from="3" を付けると、その拍から出す（03 の図の拍では出さない）。
+ *   data-real-from="3" を付けると、その拍から出す。data-real-label / data-real-short で札の文言を
+ *   その章だけ差し替える（別の日の実演）。
+ * - [data-open-promo="promo-100"] … その id の dialog.modal（フル版の動画）を開く。値がなければ #promo-modal。
  * - video[data-src][data-poster] … 近づいたらポスターと動画を読み込み、見えている間だけ再生。
  *   章の中では、包む [data-show] が .on の間だけ再生する。
  * - [data-motion] … 動画と点滅を止めるボタン（全ページ）。選んだ状態は覚えておく。
@@ -53,7 +57,12 @@
   /* ---------------------------------------------------------- 動画 */
   var videos = all('video[data-src]');
   var userStop = store('sc-motion') === 'off';
-  var modal = document.getElementById('promo-modal');
+  var modals = all('dialog.modal');
+  function modalOpen() {
+    return modals.some(function (d) {
+      return d.open;
+    });
+  }
 
   function showPoster(v) {
     if (v.dataset.poster && !v.getAttribute('poster')) v.setAttribute('poster', v.dataset.poster);
@@ -66,7 +75,7 @@
     v.load();
   }
   function canPlay() {
-    return !reduce.matches && !userStop && !(modal && modal.open);
+    return !reduce.matches && !userStop && !modalOpen();
   }
   function setPlaying(v, on) {
     if (on && canPlay()) {
@@ -171,13 +180,14 @@
   }
 
   /* ---------------------------------------------------------- フル版のモーダル */
-  var modalVideo = modal && modal.querySelector('video');
   var lastOpener = null;
   var stopAuto = function () {};
   var setSound = function () {};
   function openModal(e) {
+    var modal = document.getElementById(this.getAttribute('data-open-promo') || 'promo-modal');
     if (!modal || typeof modal.showModal !== 'function') return; // 古いブラウザはリンク先（動画ファイル）へ
     if (e) e.preventDefault();
+    var modalVideo = modal.querySelector('video');
     lastOpener = document.activeElement;
     stopAuto();
     setSound(false, true);
@@ -191,10 +201,11 @@
       if (p && p.catch) p.catch(function () {});
     }
   }
-  if (modal) {
-    all('[data-open-promo]').forEach(function (b) {
-      b.addEventListener('click', openModal);
-    });
+  all('[data-open-promo]').forEach(function (b) {
+    b.addEventListener('click', openModal);
+  });
+  modals.forEach(function (modal) {
+    var modalVideo = modal.querySelector('video');
     modal.addEventListener('close', function () {
       if (modalVideo) modalVideo.pause();
       if (lastOpener && lastOpener.focus) lastOpener.focus();
@@ -209,7 +220,7 @@
       closeBtn.addEventListener('click', function () {
         modal.close();
       });
-  }
+  });
 
   /* ---------------------------------------------------------- ダウンロード（お使いの OS を目立たせる） */
   (function markOS() {
@@ -269,8 +280,17 @@
       steps: steps,
       shows: shows,
       ranges: ranges,
-      counts: all('[data-count]', el).map(function (n) {
-        return { el: n, to: +n.dataset.count, from: +(n.dataset.from || 0), pad: +(n.dataset.pad || 0), host: n.closest('[data-range]'), last: null };
+      counts: all('[data-count], [data-values], [data-clock]', el).map(function (n) {
+        return {
+          el: n,
+          to: +n.dataset.count,
+          from: +(n.dataset.from || 0),
+          pad: +(n.dataset.pad || 0),
+          values: n.dataset.values ? n.dataset.values.split(',') : null,
+          clock: n.dataset.clock ? +n.dataset.clock : 0,
+          host: n.closest('[data-range]'),
+          last: null
+        };
       }),
       live: false,
       videos: all('video[data-src]', el),
@@ -395,10 +415,19 @@
     });
     m.counts.forEach(function (c) {
       var r = c.host && c.host._r !== undefined ? c.host._r : 1;
-      var v = Math.round(c.from + (c.to - c.from) * r);
+      var v;
+      if (c.values) v = c.values[Math.round(r * (c.values.length - 1))];
+      else if (c.clock) {
+        var sec = Math.round(r * c.clock);
+        v = Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+      } else {
+        v = Math.round(c.from + (c.to - c.from) * r);
+        if (c.pad) v = String(v).padStart(c.pad, '0');
+      }
+      v = String(v);
       if (v !== c.last) {
         c.last = v;
-        c.el.textContent = c.pad ? String(v).padStart(c.pad, '0') : String(v);
+        c.el.textContent = v;
       }
     });
     m.wasVisible = m.visible;
@@ -457,6 +486,13 @@
   var lastCur = -1;
   var lastHidden = null;
   var lastReal = null;
+  var lastLabel = null;
+  var realFull = player && player.querySelector('.p-real-full');
+  var realShort = player && player.querySelector('.p-real-short');
+  if (realFull) {
+    realFull.dataset.text = realFull.textContent;
+    realShort.dataset.text = realShort.textContent;
+  }
   function updatePlayer(y) {
     if (!player) return;
     var t = clamp((y - filmTop) / filmLen, 0, 1);
@@ -479,6 +515,13 @@
     if (real !== lastReal) {
       lastReal = real;
       player.classList.toggle('is-real', real);
+    }
+    // 札の文言は章ごと（別の日の実演の章は data-real-label で差し替える）
+    var label = real ? m.el.dataset.realLabel || realFull.dataset.text : null;
+    if (real && label !== lastLabel) {
+      lastLabel = label;
+      realFull.textContent = label;
+      realShort.textContent = m.el.dataset.realShort || realShort.dataset.text;
     }
     var total = filmLen / (vh * SPEED);
     timeEl.textContent = fmt(t * total) + ' / ' + fmt(total);
