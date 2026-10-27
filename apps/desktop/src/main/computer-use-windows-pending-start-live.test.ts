@@ -62,9 +62,14 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
       const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
       const marker = '  // Reject a stop observed before V1 synchronous I/O begins.';
       expect(source.split(marker)).toHaveLength(2);
+      const conflictMarker =
+        'if (found != ledger.entries.end() && found->second->digest != digest) {';
+      expect(source.split(conflictMarker)).toHaveLength(2);
       writeFileSync(
         join(root, 'pending-host.cc'),
-        source.replace(marker, '  HoldBeforeStartIo();\n' + marker),
+        source
+          .replace(marker, '  HoldBeforeStartIo();\n' + marker)
+          .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();'),
       );
       const file = join(root, 'seam.cc'),
         binary = join(root, 'seam.exe');
@@ -133,6 +138,7 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
         'other',
         'failed',
       ]);
+      expect(receipts[0]!.cancelEpoch).toBeGreaterThan(9);
       expect(receipts[1]!.cancelEpoch).toBeGreaterThan(receipts[0]!.cancelEpoch);
       expect(receipts.every((receipt) => receipt.inputAttemptCount === 0)).toBe(true);
       expect(result.stdout).toContain('PASS: pending pipe, no input, no late adoption');
@@ -145,13 +151,15 @@ const program = String.raw`
 #include <atomic>
 #include <string>
 void HoldBeforeStartIo();
+void ObserveRequestConflict();
 #define wmain ProductionHostMain
 #include "pending-host.cc"
 #undef wmain
 #include <iostream>
 #include <thread>
 using namespace sprint_coder::computer_use;
-std::atomic<bool> hold_start{true}, entered_start{false}, finished{false};
+std::atomic<bool> hold_start{true}, entered_start{false}, finished{false}, conflict_seen{false};
+void ObserveRequestConflict(){conflict_seen.store(true);}
 void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<std::endl;TerminateProcess(GetCurrentProcess(),7);}}
 void HoldBeforeStartIo(){if(!hold_start.load())return;entered_start.store(true);while(hold_start.load())Sleep(1);}
 FrameId Id(unsigned char value){FrameId id;id.bytes[0]=value;return id;}
@@ -161,7 +169,7 @@ void Send(HANDLE pipe,unsigned request,unsigned session,const std::string& paylo
  Require(WriteFrame(pipe,header,payload),"write frame");
 }
 Frame Read(HANDLE pipe,unsigned request,MessageType type){Frame frame;Require(ReadFrame(pipe,&frame),"read frame");Require(frame.header.request_id.bytes[0]==request&&frame.header.message_type==static_cast<std::uint16_t>(type),"response identity");return frame;}
-std::string Start(const std::string& id){return "{\"operation\":\"start_session\",\"sessionId\":\""+id+"\",\"pid\":"+std::to_string(GetCurrentProcessId())+",\"windowId\":\"1\",\"cancelEpoch\":0,\"appIdentityDigest\":\""+std::string(64,'a')+"\",\"windowIdentityDigest\":\""+std::string(64,'b')+"\",\"canonicalPath\":\"C:\\\\__sprint_nonexistent__.exe\",\"executableDigest\":\""+std::string(64,'c')+"\",\"signerDigest\":null,\"expectedBoundsX\":0,\"expectedBoundsY\":0,\"expectedBoundsWidth\":100,\"expectedBoundsHeight\":100}";}
+std::string Start(const std::string& id,unsigned epoch=0){return "{\"operation\":\"start_session\",\"sessionId\":\""+id+"\",\"pid\":"+std::to_string(GetCurrentProcessId())+",\"windowId\":\"1\",\"cancelEpoch\":"+std::to_string(epoch)+",\"appIdentityDigest\":\""+std::string(64,'a')+"\",\"windowIdentityDigest\":\""+std::string(64,'b')+"\",\"canonicalPath\":\"C:\\\\__sprint_nonexistent__.exe\",\"executableDigest\":\""+std::string(64,'c')+"\",\"signerDigest\":null,\"expectedBoundsX\":0,\"expectedBoundsY\":0,\"expectedBoundsWidth\":100,\"expectedBoundsHeight\":100}";}
 std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"operation\":\"stop_pending_start\"}";}
 int wmain(){
  std::thread([]{Sleep(15000);if(!finished.load())TerminateProcess(GetCurrentProcess(),42);}).detach();
@@ -181,14 +189,19 @@ int wmain(){
  bool served=false;
  std::thread serve([&]{const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
- Send(client.value,2,7,Start("pending"));
+ Send(client.value,2,7,Start("pending",9));
  for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");std::cerr<<"phase=start-gate\n"<<std::flush;
+ const auto before_conflict=WindowsTargetListControl().stop_serial.load();
+ Send(client.value,2,7,Stop("pending"));
+ for(int i=0;i<3000&&!conflict_seen.load();i++)Sleep(1);Require(conflict_seen.load(),"conflicting request observed");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(!owner->stopped.load()&&WindowsTargetListControl().stop_serial.load()==before_conflict,"conflict has no stop effect");}
  Send(client.value,3,7,Stop("pending"));
  bool latched=false;
  for(int i=0;i<3000&&!latched;i++){{std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto found=WindowsStarts().owners.find(FrameIdKey(Id(7)));latched=found!=WindowsStarts().owners.end()&&found->second->stopped.load();}if(!latched)Sleep(1);}
  std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");DWORD bytes=0;Require(PeekNamedPipe(client.value,nullptr,0,nullptr,&bytes,nullptr)&&bytes==0,"no terminal before consumer drain");
  hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
  Read(client.value,2,MessageType::kError);
+ auto conflict=Read(client.value,2,MessageType::kError);Require(Payload(conflict).find("request_id_conflict")!=std::string::npos,"conflicting operation refused");
  auto first=Read(client.value,3,MessageType::kProbeResult);std::cerr<<"phase=terminal\n"<<std::flush;std::cout<<"RECEIPT:"<<Payload(first)<<"\n";
  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(sessions.empty(),"no late adoption");}
  const auto serial=WindowsTargetListControl().stop_serial.load(), epoch=cancellation_epoch.load();

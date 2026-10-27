@@ -88,6 +88,7 @@ describe('Windows native start ownership table', () => {
       writeFileSync(
         source,
         preamble +
+          cut('struct WindowsWireFingerprint {', 'struct WindowsStartAdmission {') +
           cut('struct WindowsStartAdmission {', 'struct WindowsSession {') +
           cut(
             'struct WindowsStartRegistry {',
@@ -135,11 +136,25 @@ WindowsTargetListState& WindowsTargetListControl(){static auto* state=new Window
 const driver = String.raw`
 void Check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 int main(){
+  bool fresh_wire=false;std::string wire_error;
+  auto wire=RegisterWindowsWireRequest("probe-key",std::string(64,'a'),&fresh_wire,&wire_error);
+  Check(wire&&fresh_wire,"first wire request");
+  auto conflict=RegisterWindowsWireRequest("probe-key",std::string(64,'b'),&fresh_wire,&wire_error);
+  Check(!conflict&&wire_error=="request_id_conflict","cross-operation conflict before effects");
+  auto replay_wire=RegisterWindowsWireRequest("probe-key",std::string(64,'a'),&fresh_wire,&wire_error);
+  Check(replay_wire&&!fresh_wire,"same wire replay");
+  Check(MarkWindowsWireCached("probe-key",std::string(64,'a'),true),"cache fingerprint");
+  wire.reset();replay_wire.reset();
+  Check(!RegisterWindowsWireRequest("probe-key",std::string(64,'b'),&fresh_wire,&wire_error),"cached conflict remains");
+  MarkWindowsWireCached("probe-key",{},false);
+  auto after_eviction=RegisterWindowsWireRequest("probe-key",std::string(64,'b'),&fresh_wire,&wire_error);
+  Check(after_eviction&&fresh_wire,"fingerprint follows cache eviction");after_eviction.reset();
   const std::string keyA(16,'a'),keyB(16,'b'),digest(64,'1');
   std::string reason;
   auto a=AdmitWindowsStart(keyA,"a","request-1",digest,&reason);
-  auto a2=AdmitWindowsStart(keyA,"a","request-2",digest,&reason);
+  auto a2=AdmitWindowsStart(keyA,"a","request-2",digest,&reason,9);
   Check(a && a2 && a->owner==a2->owner,"same owner for parallel attempts");
+  Check(a->owner->requested_epoch==9,"admission retains epoch upper bound");
   Check(!AdmitWindowsStart(keyB,"a","request-3",digest,&reason),"SID alias refused");
   Check(!AdmitWindowsStart(keyA,"other","request-3",digest,&reason),"header alias refused");
   Check(!AdmitWindowsStart(keyA,"a","request-1",std::string(64,'2'),&reason),"payload conflict refused");

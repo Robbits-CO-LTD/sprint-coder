@@ -161,6 +161,74 @@ std::unordered_map<std::string, CachedResponse> response_cache;
 std::deque<std::string> response_cache_order;
 std::size_t response_cache_bytes = 0;
 
+struct WindowsWireFingerprint {
+  std::string digest;
+  std::size_t in_flight = 0;
+  bool cached = false;
+};
+struct WindowsWireLedger {
+  std::mutex mutex;
+  std::unordered_map<std::string, std::shared_ptr<WindowsWireFingerprint>> entries;
+};
+WindowsWireLedger& WindowsWireRequests() {
+  static auto* ledger = new WindowsWireLedger;
+  return *ledger;
+}
+struct WindowsWireLease {
+  std::string key;
+  std::shared_ptr<WindowsWireFingerprint> fingerprint;
+  WindowsWireLease(std::string value, std::shared_ptr<WindowsWireFingerprint> owner)
+      : key(std::move(value)), fingerprint(std::move(owner)) {}
+  ~WindowsWireLease() {
+    auto& ledger = WindowsWireRequests();
+    std::lock_guard lock(ledger.mutex);
+    const auto found = ledger.entries.find(key);
+    if (fingerprint->in_flight != 0) --fingerprint->in_flight;
+    if (found != ledger.entries.end() && found->second == fingerprint &&
+        fingerprint->in_flight == 0 && !fingerprint->cached) ledger.entries.erase(found);
+  }
+};
+
+std::shared_ptr<WindowsWireLease> RegisterWindowsWireRequest(
+    const std::string& key, const std::string& digest, bool* fresh, std::string* error) {
+  *fresh = false;
+  if (digest.size() != 64) { *error = "request_id_conflict"; return nullptr; }
+  auto& ledger = WindowsWireRequests();
+  std::lock_guard lock(ledger.mutex);
+  auto found = ledger.entries.find(key);
+  if (found != ledger.entries.end() && found->second->digest != digest) {
+    *error = "request_id_conflict"; return nullptr;
+  }
+  if (found == ledger.entries.end()) {
+    // At most 256 cached responses, 64 queued frames, one consumer and one reader.
+    if (ledger.entries.size() >= kMaximumCachedResponses + 66) {
+      *error = "request_capacity_unavailable"; return nullptr;
+    }
+    auto fingerprint = std::make_shared<WindowsWireFingerprint>();
+    fingerprint->digest = digest;
+    found = ledger.entries.emplace(key, std::move(fingerprint)).first;
+    *fresh = true;
+  }
+  ++found->second->in_flight;
+  return std::make_shared<WindowsWireLease>(key, found->second);
+}
+
+bool MarkWindowsWireCached(const std::string& key, const std::string& digest, bool cached) {
+  auto& ledger = WindowsWireRequests();
+  std::lock_guard lock(ledger.mutex);
+  auto found = ledger.entries.find(key);
+  if (found == ledger.entries.end()) {
+    if (!cached) return true;
+    auto fingerprint = std::make_shared<WindowsWireFingerprint>();
+    fingerprint->digest = digest;
+    found = ledger.entries.emplace(key, std::move(fingerprint)).first;
+  }
+  if (cached && found->second->digest != digest) return false;
+  found->second->cached = cached;
+  if (!cached && found->second->in_flight == 0) ledger.entries.erase(found);
+  return true;
+}
+
 struct WindowsStartAdmission {
   std::string session_key;
   std::string session_id;
@@ -173,6 +241,7 @@ struct WindowsStartAdmission {
   bool retired = false;
   bool terminal = false;
   std::uint64_t terminal_epoch = 0;
+  std::uint64_t requested_epoch = 0;
   std::unordered_map<std::string, std::string> request_digests;
   std::deque<std::string> request_order;
 };
@@ -3943,8 +4012,8 @@ WindowsStartLease::~WindowsStartLease() {
 
 std::shared_ptr<WindowsStartLease> AdmitWindowsStart(
     const std::string& key, const std::string& id, const std::string& request_key,
-    const std::string& digest, std::string* reason) {
-  if (key.size() != 16 || id.empty() || id.size() > 256 || digest.size() != 64) {
+    const std::string& digest, std::string* reason, std::uint64_t requested_epoch = 0) {
+  if (requested_epoch > 9007199254740991ULL || key.size() != 16 || id.empty() || id.size() > 256 || digest.size() != 64) {
     *reason = "session_input_invalid";
     return nullptr;
   }
@@ -4004,6 +4073,7 @@ std::shared_ptr<WindowsStartLease> AdmitWindowsStart(
     owner->request_order.push_back(request_key);
     owner->request_digests.emplace(request_key, digest);
   }
+  owner->requested_epoch = std::max(owner->requested_epoch, requested_epoch);
   return std::make_shared<WindowsStartLease>(owner);
 }
 
@@ -6220,7 +6290,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   if (!ParseWindowsStartParameters(metadata, &parsed)) { *reason = "session_input_invalid"; return false; }
   auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume] = parsed;
   if (!start_lease) start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), session_id,
-      ResponseCacheKey(request), RequestPayloadDigest(request), reason);
+      ResponseCacheKey(request), RequestPayloadDigest(request), reason, cancel_epoch);
   if (!start_lease || start_lease->owner->session_id != session_id ||
       start_lease->owner->session_key != FrameIdKey(request.header.session_id)) return false;
   WindowsStartAttemptScope ownership{start_lease->owner};
@@ -6676,8 +6746,8 @@ bool StopPendingWindowsStart(const Frame& request, const std::string& metadata,
     active = session != sessions.end() && session->second.session_id == id;
     if (active) owner->input_api_attempts = session->second.input_api_attempts;
     const auto base = owner->terminal ? owner->terminal_epoch :
-        std::max(cancellation_epoch.load(std::memory_order_acquire),
-                 active ? session->second.cancel_epoch : owner->terminal_epoch);
+        std::max({cancellation_epoch.load(std::memory_order_acquire), owner->requested_epoch,
+                  active ? session->second.cancel_epoch : owner->terminal_epoch});
     if (base >= max_safe_epoch) { *reason = "native_stop_epoch_exhausted"; return false; }
     epoch = base + 1;
     if (!active) {
@@ -9675,6 +9745,7 @@ bool RespondAndCache(HANDLE pipe, const Frame &request, MessageType type,
       if (evicted != response_cache.end()) {
         response_cache_bytes -=
             evicted->second.metadata.size() + evicted->second.binary.size();
+        MarkWindowsWireCached(response_cache_order.front(), {}, false);
         response_cache.erase(evicted);
       }
       response_cache_order.pop_front();
@@ -9683,6 +9754,7 @@ bool RespondAndCache(HANDLE pipe, const Frame &request, MessageType type,
       return false;
     response_cache_order.push_back(key);
     response_cache_bytes += incoming_bytes;
+    if (!MarkWindowsWireCached(key, request_digest, true)) return false;
     response_cache.emplace(
         key, CachedResponse{type, request_digest, std::move(payload),
                             std::move(binary)});
@@ -10515,6 +10587,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
             ErrorPayload("HANDSHAKE_REQUIRED"));
     return false;
   }
+  if (!admission_error.empty() && type != MessageType::kHandshake)
+    return Respond(pipe, request, MessageType::kError, ErrorPayload(admission_error));
   if (type != MessageType::kHandshake) {
     bool replayed = false;
     if (!ReplayCachedResponse(pipe, request, &replayed))
@@ -10703,13 +10777,12 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     std::uint64_t stop_serial = 0;
     std::shared_ptr<WindowsStartLease> start_lease;
     std::string admission_error;
+    std::shared_ptr<WindowsWireLease> wire_lease;
   };
   std::deque<QueuedFrame> queue;
   bool reader_finished = false;
   bool reader_valid = true;
   std::thread reader([&]() {
-    std::unordered_map<std::string, std::string> cancel_request_digests;
-    std::deque<std::string> cancel_request_order;
     bool reader_handshaken = false;
     Frame request;
     while (ReadFrame(pipe, &request)) {
@@ -10734,26 +10807,19 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
             ReadJsonUint64(metadata, "apiVersion", &api) && protocol == kProtocolVersion && api == kApiVersion)
           reader_handshaken = true;
       }
-      if (has_operation && operation == "start_session" && reader_handshaken) {
+      bool fresh_request = false;
+      std::shared_ptr<WindowsWireLease> wire_lease;
+      if (type != MessageType::kHandshake && reader_handshaken)
+        wire_lease = RegisterWindowsWireRequest(ResponseCacheKey(request), RequestPayloadDigest(request),
+            &fresh_request, &admission_error);
+      if (has_operation && operation == "start_session" && reader_handshaken && admission_error.empty()) {
         WindowsStartParameters parsed;
         if (!ParseWindowsStartParameters(metadata, &parsed)) admission_error = "session_input_invalid";
         else start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), parsed.session_id,
-            ResponseCacheKey(request), RequestPayloadDigest(request), &admission_error);
+            ResponseCacheKey(request), RequestPayloadDigest(request), &admission_error, parsed.cancel_epoch);
       }
       if (type == MessageType::kCancel || close || pending_stop) {
-        const std::string request_key = ResponseCacheKey(request);
-        const std::string request_digest = RequestPayloadDigest(request);
-        const auto prior = cancel_request_digests.find(request_key);
-        const bool new_cancel = request_digest.size() == 64 &&
-                                prior == cancel_request_digests.end();
-        if (new_cancel) {
-          if (cancel_request_order.size() >= kMaximumCachedResponses) {
-            cancel_request_digests.erase(cancel_request_order.front());
-            cancel_request_order.pop_front();
-          }
-          cancel_request_order.push_back(request_key);
-          cancel_request_digests.emplace(request_key, request_digest);
-        }
+        const bool new_cancel = fresh_request && admission_error.empty();
         std::uint64_t requested_epoch = 0;
         if (new_cancel && pending_stop && reader_handshaken) {
           std::string id;
@@ -10788,7 +10854,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         }
         queue.push_back(QueuedFrame{std::move(request),
             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire),
-            std::move(start_lease), std::move(admission_error)});
+            std::move(start_lease), std::move(admission_error), std::move(wire_lease)});
       }
       queue_ready.notify_one();
       request = {};
