@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#D8F3DC"/>
+<path d="M200 250 L200 370" stroke="#3A2410" stroke-width="22" stroke-linecap="round" fill="none"/>
+<path d="M200 250 L200 370" stroke="#2D8A3E" stroke-width="10" stroke-linecap="round" fill="none"/>
+<path d="M198 320 C150 330 110 310 90 270 C140 270 180 285 198 320 Z" fill="#2D8A3E" stroke="#3A2410" stroke-width="6" stroke-linejoin="round"/>
+<path d="M202 300 C250 310 290 290 310 250 C260 250 220 265 202 300 Z" fill="#2D8A3E" stroke="#3A2410" stroke-width="6" stroke-linejoin="round"/>
+<g fill="#FFC300" stroke="#3A2410" stroke-width="6" stroke-linejoin="round">
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(0 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(30 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(60 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(90 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(120 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(150 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(180 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(210 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(240 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(270 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(300 200 160)"/>
+<ellipse cx="200" cy="62" rx="26" ry="50" transform="rotate(330 200 160)"/>
+</g>
+<circle cx="200" cy="160" r="62" fill="#6B3F1D" stroke="#3A2410" stroke-width="6"/>
+<circle cx="178" cy="145" r="6" fill="#3A2410"/>
+<circle cx="222" cy="145" r="6" fill="#3A2410"/>
+<path d="M176 175 Q200 200 224 175" stroke="#FFC300" stroke-width="6" fill="none" stroke-linecap="round"/>
+<circle cx="200" cy="130" r="4" fill="#FFC300"/>
+<circle cx="160" cy="165" r="4" fill="#FFC300"/>
+<circle cx="240" cy="165" r="4" fill="#FFC300"/>
+<circle cx="200" cy="205" r="4" fill="#FFC300"/>
+</svg>

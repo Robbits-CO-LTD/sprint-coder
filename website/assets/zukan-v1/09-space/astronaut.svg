@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <rect width="400" height="400" rx="40" fill="#2B2D42"/>
+  <!-- 背景の星 -->
+  <circle cx="100" cy="100" r="2" fill="#FFFFFF" opacity="0.6"/>
+  <circle cx="300" cy="80" r="1.5" fill="#FFFFFF" opacity="0.8"/>
+  <circle cx="220" cy="320" r="2.5" fill="#FFFFFF" opacity="0.7"/>
+  <circle cx="350" cy="250" r="1.5" fill="#FFFFFF" opacity="0.9"/>
+  
+  <!-- 背中の生命維持装置 -->
+  <rect x="130" y="180" width="140" height="140" rx="20" fill="#d1d1d1" stroke="#B0B0B0" stroke-width="4"/>
+  <rect x="150" y="200" width="100" height="100" rx="10" fill="#b0b0b0"/>
+  
+  <!-- 宇宙服の胴体 -->
+  <path d="M120,200 Q120,350 200,350 Q280,350 280,200 L280,380 L120,380 Z" fill="#ffffff" stroke="#cccccc" stroke-width="6"/>
+  
+  <!-- 腕 -->
+  <path d="M120,220 L80,300" fill="none" stroke="#ffffff" stroke-width="35" stroke-linecap="round"/>
+  <path d="M280,220 L320,300" fill="none" stroke="#ffffff" stroke-width="35" stroke-linecap="round"/>
+  
+  <!-- ヘルメット -->
+  <circle cx="200" cy="180" r="80" fill="#FFFFFF" stroke="#cccccc" stroke-width="6"/>
+  <!-- バイザー -->
+  <path d="M130,180 A70,70 0 0 1 270,180 L270,240 A70,70 0 0 0 130,240 Z" fill="#4a90e2" opacity="0.8"/>
+  <path d="M145,180 Q200,210 255,180" fill="none" stroke="#FFFFFF" stroke-width="4" opacity="0.6"/>
+  <!-- ヘルメットの影 -->
+  <path d="M130,180 A80,80 0 0 1 270,180" fill="none" stroke="#cccccc" stroke-width="6"/>
+</svg>

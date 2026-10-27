@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <rect width="400" height="400" rx="40" fill="#FFC6C7"/>
+  <path d="M84 178C89 105 138 69 200 69C262 69 311 105 316 178Z" fill="#F4B75A" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M88 178H312V201C312 212 303 220 292 220H108C97 220 88 212 88 201Z" fill="#F4B75A" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <ellipse cx="143" cy="124" rx="9" ry="5" fill="#FFF4D2" transform="rotate(22 143 124)"/>
+  <ellipse cx="184" cy="101" rx="9" ry="5" fill="#FFF4D2" transform="rotate(-10 184 101)"/>
+  <ellipse cx="227" cy="110" rx="9" ry="5" fill="#FFF4D2" transform="rotate(18 227 110)"/>
+  <ellipse cx="267" cy="137" rx="9" ry="5" fill="#FFF4D2" transform="rotate(-20 267 137)"/>
+  <path d="M94 213C111 202 122 231 141 217C159 204 171 232 190 218C211 202 229 233 249 216C266 202 280 226 306 211V244H94Z" fill="#67B85C" stroke="#67B85C" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M112 231H288L263 270H137Z" fill="#F4B75A" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M105 254C111 235 135 229 156 237C177 245 223 245 244 237C265 229 289 235 295 254C301 273 287 290 270 296C229 310 171 310 130 296C113 290 99 273 105 254Z" fill="#5A3322" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M116 278C140 266 161 286 184 276C207 266 226 286 251 276C269 269 281 278 289 286L279 301H121Z" fill="#E94F4F" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M88 295C91 328 122 344 200 344C278 344 309 328 312 295Z" fill="#F4B75A" stroke="#5A3322" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M107 306C128 320 163 325 200 325C237 325 272 320 293 306" fill="none" stroke="#F4B75A" stroke-width="7" stroke-linecap="round"/>
+</svg>
