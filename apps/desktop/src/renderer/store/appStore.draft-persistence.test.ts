@@ -28,6 +28,60 @@ function invokeSend(kind: SendKind, text = originalDraft) {
   }
 }
 
+describe('failed Goal draft ownership', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useAppStore.setState(useAppStore.getInitialState(), true);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { setDraft: vi.fn().mockResolvedValue(undefined) },
+        turns: Object.fromEntries(
+          ['start', 'queue', 'steer', 'stopAndSend'].map((name) => [
+            name,
+            vi.fn().mockRejectedValue(new Error('ordinary send failed')),
+          ]),
+        ),
+      },
+    });
+  });
+  afterEach(async () => {
+    await vi.runOnlyPendingTimersAsync();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function recover() {
+    useAppStore.getState().setDraft(taskId, '');
+    const revision = useAppStore.getState().draftRevisionByTask[taskId]!;
+    expect(useAppStore.getState().restoreFailedGoalDraft(taskId, revision, originalDraft)).toBe(
+      true,
+    );
+    return revision;
+  }
+
+  it('rejects stale or duplicate recovery without persisting the old value', async () => {
+    const revision = recover();
+    useAppStore.getState().setDraft(taskId, 'new draft');
+    expect(useAppStore.getState().restoreFailedGoalDraft(taskId, revision, 'old goal')).toBe(false);
+    expect(useAppStore.getState().goalDraftRecoveryRevisionByTask[taskId]).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(window.sprintCoder?.tasks.setDraft).toHaveBeenLastCalledWith(taskId, 'new draft');
+  });
+
+  it.each(['startTurn', 'queueMessage', 'steerMessage', 'stopAndSend'] as const)(
+    'consumes Goal recovery intent on ordinary %s even when it fails',
+    async (kind) => {
+      recover();
+      expect(useAppStore.getState().goalDraftRecoveryRevisionByTask[taskId]).toBe(
+        useAppStore.getState().draftRevisionByTask[taskId],
+      );
+      await invokeSend(kind);
+      expect(useAppStore.getState().draftByTask[taskId]).toBe(originalDraft);
+      expect(useAppStore.getState().goalDraftRecoveryRevisionByTask[taskId]).toBeUndefined();
+    },
+  );
+});
+
 describe.each<SendKind>(['startTurn', 'queueMessage', 'steerMessage', 'stopAndSend'])(
   '%s draft recovery',
   (kind) => {

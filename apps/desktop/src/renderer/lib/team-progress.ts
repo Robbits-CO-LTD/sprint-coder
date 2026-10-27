@@ -1,3 +1,4 @@
+import type { TurnStatus } from '../store/task-turn-projection';
 import type { TeamDetail } from '../types/sprint-coder';
 import {
   latestExecutionForWorker,
@@ -9,6 +10,23 @@ import {
 export function currentTeamWorkerCount(detail: TeamDetail): number {
   return detail.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
     .length;
+}
+
+/** Whether the Team's "すべて停止" has anything to stop. The Leader runs as the Task's own Turn,
+ * so it can be working (and about to hire) before any Worker exists (issue #962). A canceling
+ * Leader means a stop is already in flight, so a second request is not offered. */
+export function canStopAllTeamWork({
+  detail,
+  leaderTurnStatus,
+  teamBusy,
+}: {
+  detail: TeamDetail;
+  leaderTurnStatus: TurnStatus | undefined;
+  teamBusy: boolean;
+}): boolean {
+  if (teamBusy || leaderTurnStatus === 'canceling') return false;
+  if (leaderTurnStatus === 'running') return true;
+  return currentTeamWorkerCount(detail) > 0 && detail.team.state !== 'completed';
 }
 
 export function teamWorkPhaseCounts(detail: TeamDetail): Record<WorkerWorkPhase, number> {

@@ -46,6 +46,11 @@ function ProjectEditorDialogOpen({
   const listProjectFolders = useAppStore((state) => state.listProjectFolders);
   const replaceProjectFolders = useAppStore((state) => state.replaceProjectFolders);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  // The opener keeps the summary from when editing started. Folder saves advance this copy so a
+  // retry after a failed rename continues from the saved revision instead of resending folders.
+  const [savedProject, setSavedProject] = useState(project);
+  const [foldersSaved, setFoldersSaved] = useState(false);
+  const projectId = project?.id ?? null;
   const [name, setName] = useState(project?.name ?? '');
   const [folders, setFolders] = useState<DraftProjectFolder[]>([]);
   const [originalFolders, setOriginalFolders] = useState<DraftProjectFolder[]>([]);
@@ -60,9 +65,9 @@ function ProjectEditorDialogOpen({
   }, []);
 
   useEffect(() => {
-    if (project === null) return;
+    if (projectId === null) return;
     let active = true;
-    void listProjectFolders(project.id).then((loaded) => {
+    void listProjectFolders(projectId).then((loaded) => {
       if (!active) return;
       if (loaded === null) {
         setError('Project foldersを読み込めませんでした。再試行してください。');
@@ -84,7 +89,7 @@ function ProjectEditorDialogOpen({
     return () => {
       active = false;
     };
-  }, [listProjectFolders, project]);
+  }, [listProjectFolders, projectId]);
 
   const foldersChanged = useMemo(
     () => JSON.stringify(folderInputs(folders)) !== JSON.stringify(folderInputs(originalFolders)),
@@ -122,36 +127,48 @@ function ProjectEditorDialogOpen({
   async function save(): Promise<void> {
     if (!validName || loading || loadFailed || pending) return;
     if (
-      project !== null &&
+      savedProject !== null &&
       foldersChanged &&
-      project.taskCount > 0 &&
+      savedProject.taskCount > 0 &&
       !window.confirm(
-        `${project.taskCount}件の所属Taskへフォルダ変更を反映します。進行中の作業がある場合は保存が拒否されます。続けますか？`,
+        `${savedProject.taskCount}件の所属Taskへフォルダ変更を反映します。進行中の作業がある場合は保存が拒否されます。続けますか？`,
       )
     )
       return;
+    const submittedName = name.trim();
+    const submittedFolders = folders;
     setPending(true);
     setError(null);
     try {
-      if (project === null) {
-        const created = await createProject(name.trim(), folderInputs(folders));
+      if (savedProject === null) {
+        const created = await createProject(submittedName, folderInputs(submittedFolders));
         if (created === null) throw new Error('Projectを作成できませんでした。');
         finishSave(created);
         return;
       }
-      let current = project;
+      let current = savedProject;
+      let savedFolders = foldersSaved;
       if (foldersChanged) {
         const replaced = await replaceProjectFolders(
           current.id,
           current.revision,
-          folderInputs(folders),
+          folderInputs(submittedFolders),
         );
         if (replaced === null) throw new Error('Project foldersを保存できませんでした。');
         current = replaced;
+        savedFolders = true;
+        setSavedProject(replaced);
+        setFoldersSaved(true);
+        setOriginalFolders(submittedFolders);
       }
-      if (name.trim() !== current.name) {
-        const renamed = await updateProject(current.id, current.revision, { name: name.trim() });
-        if (renamed === null) throw new Error('Project名を保存できませんでした。');
+      if (submittedName !== current.name) {
+        const renamed = await updateProject(current.id, current.revision, { name: submittedName });
+        if (renamed === null)
+          throw new Error(
+            savedFolders
+              ? 'フォルダ変更は保存済みです。Project名を保存できませんでした。再試行してください。'
+              : 'Project名を保存できませんでした。',
+          );
         current = renamed;
       }
       finishSave(current);
