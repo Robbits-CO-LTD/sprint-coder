@@ -637,8 +637,16 @@ describe('CommandRunner', () => {
             `const net=require('node:net'); const socket=net.connect(${address.port},'127.0.0.1'); socket.once('connect',()=>process.exit(42)); socket.once('error',()=>process.exit(7)); setTimeout(()=>process.exit(8),2000).unref();`,
           ],
         });
-        const result = await new CommandRunner({ sandboxed: true }).run(spec);
-        expect(result.exitCode).toBe(7);
+        let stderr = '';
+        const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+          onChunk: (chunk) => {
+            if (chunk.stream === 'stderr') stderr = (stderr + chunk.text).slice(-4096);
+          },
+        });
+        const failure = /(landlocked|sandbox) exec failed:.*\(os error (\d+)\)/u.exec(stderr);
+        expect(result.exitCode, JSON.stringify({ stage: failure?.[1], errno: failure?.[2] })).toBe(
+          7,
+        );
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
