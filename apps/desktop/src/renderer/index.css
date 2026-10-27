@@ -3498,21 +3498,6 @@ body.is-resizing-sidebar iframe {
   color: var(--text-primary);
   font-weight: 600;
 }
-.turn-context-button {
-  align-self: flex-start;
-  margin: -14px 0 0;
-  padding: 2px 0;
-  color: var(--text-secondary);
-  font-size: 11.5px;
-  /* 0.8, not lower: on the near-black canvas 0.7 lands at 4.1:1 and fails WCAG AA. */
-  opacity: 0.8;
-  transition: opacity var(--t-quick) var(--ease-ui);
-}
-.turn-context-button:hover,
-.turn-context-button:focus-visible {
-  color: var(--text-primary);
-  opacity: 1;
-}
 .ctx-permission-wrap {
   position: relative;
 }
@@ -6469,71 +6454,6 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-policy-dialog::backdrop {
   background: rgba(0, 0, 0, 0.5);
-}
-.project-memory-dialog pre {
-  max-height: 130px;
-  margin: 4px 0 12px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-xs);
-  padding: 8px;
-  background: var(--bg-app);
-}
-.project-memory-header h2 {
-  min-width: 0;
-}
-.project-memory-close {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--r-sm);
-  color: var(--text-secondary);
-}
-.project-memory-close:hover:not(:disabled) {
-  color: var(--text-primary);
-  background: var(--neutral-wash-strong);
-}
-.project-memory-close:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.project-memory-close:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-.project-memory-input {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--bg-app);
-  box-shadow: var(--inset-well);
-  color: var(--text-primary);
-  font: inherit;
-  line-height: 1.5;
-  resize: vertical;
-}
-.project-memory-input::placeholder {
-  color: var(--text-secondary);
-}
-.project-memory-input:focus-visible {
-  border-color: var(--accent-line);
-  box-shadow:
-    var(--inset-well),
-    0 0 0 2px var(--accent-wash-strong);
-  outline: none;
-}
-.project-memory-input:disabled {
-  cursor: not-allowed;
-  color: var(--text-secondary);
-  background: var(--neutral-wash);
-  opacity: 0.72;
 }
 .team-policy-body {
   display: flex;
