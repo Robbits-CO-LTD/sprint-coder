@@ -334,6 +334,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const retryRef = useRef<HTMLButtonElement>(null);
+  const nextPageFailureRef = useRef<NextPageFailure | null>(null);
   // Monotonic query id: a slow first page for "gpt" must not land on top of a newer "claude", and a
   // cursor page fetched under the old query must not be appended to the new one's rows.
   const queryRef = useRef(0);
@@ -364,7 +365,10 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // highlighting, ARIA and keyboard actions, without moving the user's scroll position.
   const visibleOffset = Math.max(
     0,
-    Math.min(scrollTop, page.items.length * MODEL_ROW_HEIGHT_PX - MODEL_LIST_VIEWPORT_PX),
+    Math.min(
+      Math.round(scrollTop),
+      page.items.length * MODEL_ROW_HEIGHT_PX - MODEL_LIST_VIEWPORT_PX,
+    ),
   );
   const firstVisible = Math.ceil(visibleOffset / MODEL_ROW_HEIGHT_PX);
   const lastVisible =
@@ -411,6 +415,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
       const revision = revisionRef.current;
       if (cursor === null) {
         nextCursorRef.current = null;
+        nextPageFailureRef.current = null;
         setNextPageFailure(null);
       }
       inFlightRef.current = request;
@@ -448,6 +453,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
         if (retryRef.current === document.activeElement) {
           inputRef.current?.focus({ preventScroll: true });
         }
+        nextPageFailureRef.current = null;
         setNextPageFailure(null);
         if (replace) {
           setActiveIndex(0);
@@ -464,7 +470,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           // Preserve both the rows and the exact cursor. Only an explicit retry may continue
           // after a failure; ordinary scrolling must not create an automatic retry loop.
           nextCursorRef.current = null;
-          setNextPageFailure({ cursor, request, searchText, access, revision });
+          const failure = { cursor, request, searchText, access, revision };
+          nextPageFailureRef.current = failure;
+          setNextPageFailure(failure);
         }
       } finally {
         if (inFlightRef.current === request) inFlightRef.current = null;
@@ -486,6 +494,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     const failure = nextPageFailure;
     if (
       failure === null ||
+      failure !== nextPageFailureRef.current ||
       inFlightRef.current !== null ||
       failure.request !== queryRef.current ||
       failure.revision !== revisionRef.current ||
@@ -636,6 +645,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (e.repeat) return;
       if (active) choose(active);
       return;
     }
@@ -730,6 +740,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               // Invalidate old page callbacks immediately, including the debounce interval.
               queryRef.current += 1;
               inFlightRef.current = null;
+              nextPageFailureRef.current = null;
               setNextPageFailure(null);
               setLoading(false);
               const next = e.target.value;

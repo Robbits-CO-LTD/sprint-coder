@@ -200,6 +200,35 @@ describe('ModelPickerV2 next-page recovery', () => {
     expect(retry()).not.toBeNull();
   });
 
+  it('does not consume a retry twice when the second click precedes its success commit', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const button = retry()!;
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+      button.click();
+    });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
+  it('does not select a model from repeated Enter after retry restores input focus', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const select = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection: select });
+    await act(async () => retry()!.click());
+    const input = container.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true }),
+      ),
+    );
+    expect(select).not.toHaveBeenCalled();
+    expect(container.contains(input)).toBe(true);
+  });
+
   it('does not append a successful automatic next page twice before React commits', async () => {
     showSelection(null);
     query.mockResolvedValueOnce(firstPage).mockResolvedValue(lastPage);
@@ -432,6 +461,15 @@ describe('ModelPickerV2 active option after manual scroll', () => {
       'task-a',
       expect.objectContaining({ requestedModel: 'model-45' }),
     );
+  });
+
+  it('tolerates subpixel scroll rounding after keyboard movement', async () => {
+    const { input, list } = await openMany();
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })),
+    );
+    await scrollTo(list, 1194 - 0.4 / 46);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
   });
 
   it('continues Arrow/Home/End navigation from the visible row through both scroll directions', async () => {
