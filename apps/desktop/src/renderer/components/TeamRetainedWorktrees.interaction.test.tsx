@@ -181,6 +181,60 @@ async function click(element: HTMLElement): Promise<void> {
   await act(async () => {});
 }
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Holds each inspect request until the test settles it, in the order they were made. */
+function pendingInspections(): Deferred<TeamRetainedWorktreeInspection>[] {
+  const pending: Deferred<TeamRetainedWorktreeInspection>[] = [];
+  api.inspectRetainedWorktree.mockImplementation(() => {
+    const next = deferred<TeamRetainedWorktreeInspection>();
+    pending.push(next);
+    return next.promise;
+  });
+  return pending;
+}
+
+function inspectionOf(
+  target: Pick<TeamRetainedWorktree, 'executionId' | 'repositoryOrdinal'>,
+  changedPath: string,
+): TeamRetainedWorktreeInspection {
+  return {
+    executionId: target.executionId,
+    repositoryOrdinal: target.repositoryOrdinal,
+    head: 'e'.repeat(40),
+    commitsSinceBase: 0,
+    status: [{ code: '??', path: changedPath }],
+    statusTruncated: false,
+    changesFromBase: [],
+    changesFromBaseTruncated: false,
+  };
+}
+
+async function settle(run: () => void): Promise<void> {
+  await act(async () => {
+    run();
+  });
+  await act(async () => {});
+}
+
+function panel(item: HTMLElement): HTMLElement | null {
+  return item.querySelector<HTMLElement>('[data-testid="team-retained-inspection"]');
+}
+
 describe('TeamRetainedWorktreesTrigger (issue #544)', () => {
   it('names how many worktrees are left and hides itself when none are', () => {
     expect(renderToStaticMarkup(<TeamRetainedWorktreesTrigger count={0} onOpen={() => {}} />)).toBe(
@@ -504,5 +558,169 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     ).toContain('終了したことをまだ確認できていない');
     expect(container.querySelector('[data-testid="team-retained-confirm"]')).not.toBeNull();
     expect(items()).toHaveLength(3);
+  });
+});
+
+describe('TeamRetainedWorktreesDialog inspection requests (issue #965)', () => {
+  const firstRef = { taskId: 'task-1', executionId: 'execution-1', repositoryOrdinal: 1 };
+
+  /** 中身を確認 → 中身を閉じる → 中身を確認 on the first worktree, both requests still held. */
+  async function reopenWhileFirstIsHeld(): Promise<{
+    item: HTMLElement;
+    inspect: HTMLButtonElement;
+    earlier: Deferred<TeamRetainedWorktreeInspection>;
+    latest: Deferred<TeamRetainedWorktreeInspection>;
+  }> {
+    const pending = pendingInspections();
+    await renderDialog();
+    const [item] = items();
+    const inspect = button(item!, 'team-retained-inspect');
+    await click(inspect);
+    await click(inspect);
+    expect(panel(item!)).toBeNull();
+    await click(inspect);
+    expect(api.inspectRetainedWorktree).toHaveBeenCalledTimes(2);
+    expect(api.inspectRetainedWorktree).toHaveBeenNthCalledWith(1, firstRef);
+    expect(api.inspectRetainedWorktree).toHaveBeenNthCalledWith(2, firstRef);
+    expect(panel(item!)?.textContent).toContain('読み込み中');
+    return { item: item!, inspect, earlier: pending[0]!, latest: pending[1]! };
+  }
+
+  it('keeps the reopened result when the first request answers after it (AC-1)', async () => {
+    const { item, inspect, earlier, latest } = await reopenWhileFirstIsHeld();
+
+    await settle(() => latest.resolve(inspectionOf(failed, 'new-change.txt')));
+    expect(panel(item)?.textContent).toContain('new-change.txt');
+
+    await settle(() => earlier.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(item)?.textContent).toContain('new-change.txt');
+    expect(panel(item)?.textContent).not.toContain('old-change.txt');
+    expect(inspect.getAttribute('aria-expanded')).toBe('true');
+    expect(inspect.textContent).toBe('中身を閉じる');
+  });
+
+  it('does not replace the reopened result with the first request failing late (AC-2)', async () => {
+    const { item, earlier, latest } = await reopenWhileFirstIsHeld();
+
+    await settle(() => latest.resolve(inspectionOf(failed, 'new-change.txt')));
+    await settle(() => earlier.reject(new Error('first inspect failed')));
+    expect(panel(item)?.textContent).toContain('new-change.txt');
+    expect(panel(item)?.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain('first inspect failed');
+  });
+
+  it('does not hide the reopened error behind the first request succeeding late (AC-2)', async () => {
+    const { item, earlier, latest } = await reopenWhileFirstIsHeld();
+
+    await settle(() => latest.reject(new Error('reopened inspect failed')));
+    expect(panel(item)?.querySelector('[role="alert"]')?.textContent).toContain(
+      'reopened inspect failed',
+    );
+    await settle(() => earlier.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(item)?.querySelector('[role="alert"]')?.textContent).toContain(
+      'reopened inspect failed',
+    );
+    expect(panel(item)?.textContent).not.toContain('old-change.txt');
+  });
+
+  it('leaves a closed inspection closed and another worktree inspecting on its own (AC-3)', async () => {
+    const pending = pendingInspections();
+    await renderDialog();
+    const [first, second] = items();
+    const inspectFirst = button(first!, 'team-retained-inspect');
+    const inspectSecond = button(second!, 'team-retained-inspect');
+    await click(inspectFirst);
+    await click(inspectSecond);
+    await click(inspectFirst);
+
+    await settle(() => pending[0]!.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(first!)).toBeNull();
+    expect(inspectFirst.getAttribute('aria-expanded')).toBe('false');
+    expect(inspectFirst.textContent).toBe('中身を確認');
+    // Closing the first worktree's inspection leaves the second one's request standing.
+    expect(panel(second!)?.textContent).toContain('読み込み中');
+    await settle(() => pending[1]!.resolve(inspectionOf(integrated, 'second-change.txt')));
+    expect(panel(second!)?.textContent).toContain('second-change.txt');
+
+    // A failure for a closed inspection is dropped the same way.
+    await click(inspectFirst);
+    await click(inspectFirst);
+    await settle(() => pending[2]!.reject(new Error('closed inspect failed')));
+    expect(panel(first!)).toBeNull();
+    expect(container.textContent).not.toContain('closed inspect failed');
+    expect(panel(second!)?.textContent).toContain('second-change.txt');
+  });
+
+  it('ignores the answer for a discarded worktree even when the same worktree is listed again (AC-3)', async () => {
+    const pending = pendingInspections();
+    // Synthetic: Main lists a worktree under the same key again after the discard.
+    api.discardRetainedWorktree.mockResolvedValueOnce({
+      worktrees: [failed, integrated, blocked],
+      total: 3,
+    });
+    await renderDialog();
+    const inspect = button(items()[0]!, 'team-retained-inspect');
+    // Two requests from before the discard: one closed, and the one still open at the discard.
+    await click(inspect);
+    await click(inspect);
+    await click(inspect);
+    await click(button(items()[0]!, 'team-retained-discard'));
+    await click(
+      container.querySelector<HTMLButtonElement>('[data-testid="team-retained-confirm-discard"]')!,
+    );
+    expect(api.discardRetainedWorktree).toHaveBeenCalledWith(firstRef);
+    const [again] = items();
+    expect(panel(again!)).toBeNull();
+
+    await settle(() => pending[1]!.resolve(inspectionOf(failed, 'discarded-change.txt')));
+    expect(panel(again!)).toBeNull();
+    expect(button(again!, 'team-retained-inspect').getAttribute('aria-expanded')).toBe('false');
+
+    await click(button(again!, 'team-retained-inspect'));
+    await settle(() => pending[0]!.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(again!)?.textContent).toContain('読み込み中');
+    expect(container.textContent).not.toContain('old-change.txt');
+    expect(container.textContent).not.toContain('discarded-change.txt');
+    await settle(() => pending[2]!.resolve(inspectionOf(failed, 'new-change.txt')));
+    expect(panel(again!)?.textContent).toContain('new-change.txt');
+  });
+
+  it('drops an answer that arrives after the Task changes (AC-3)', async () => {
+    const pending = pendingInspections();
+    await renderDialog();
+    await click(button(items()[0]!, 'team-retained-inspect'));
+
+    await act(async () => {
+      root.render(
+        <TeamRetainedWorktreesDialog taskId="task-2" detail={detail} onClose={() => undefined} />,
+      );
+    });
+    await act(async () => {});
+    expect(api.listRetainedWorktrees).toHaveBeenLastCalledWith('task-2');
+    // Synthetic: the other Task lists a worktree under the same key.
+    const [first] = items();
+    await settle(() => pending[0]!.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(first!)).toBeNull();
+    expect(button(first!, 'team-retained-inspect').getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('old-change.txt');
+  });
+
+  it('drops an answer that arrives after the dialog is closed and opened again (AC-3)', async () => {
+    const pending = pendingInspections();
+    await renderDialog();
+    await click(button(items()[0]!, 'team-retained-inspect'));
+    await act(async () => {
+      root.render(<></>);
+    });
+
+    await renderDialog();
+    const [first] = items();
+    expect(panel(first!)).toBeNull();
+    await click(button(first!, 'team-retained-inspect'));
+    await settle(() => pending[0]!.resolve(inspectionOf(failed, 'old-change.txt')));
+    expect(panel(first!)?.textContent).toContain('読み込み中');
+    expect(panel(first!)?.textContent).not.toContain('old-change.txt');
+    await settle(() => pending[1]!.resolve(inspectionOf(failed, 'new-change.txt')));
+    expect(panel(first!)?.textContent).toContain('new-change.txt');
   });
 });

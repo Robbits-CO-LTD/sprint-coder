@@ -131,6 +131,9 @@ export function TeamRetainedWorktreesDialog({
   const openerRef = useRef<HTMLElement | null>(null);
   const closingRef = useRef(false);
   const requestRef = useRef(0);
+  const inspectRequestRef = useRef(0);
+  /** The inspect request each open inspection is waiting for, by worktree key. */
+  const inspectTokensRef = useRef(new Map<string, number>());
   const baseId = useId();
   const [list, setList] = useState<TeamRetainedWorktreeList | null>(null);
   const [loading, setLoading] = useState(false);
@@ -176,6 +179,16 @@ export function TeamRetainedWorktreesDialog({
     void load();
   }, [load, retainedKey]);
 
+  // An inspection belongs to the Task it was asked for: a Task change or closing the dialog voids
+  // every request still in flight.
+  useEffect(() => {
+    const tokens = inspectTokensRef.current;
+    return () => {
+      tokens.clear();
+      setInspections({});
+    };
+  }, [taskId]);
+
   function closeAndRestoreFocus(): void {
     if (closingRef.current || busy) return;
     closingRef.current = true;
@@ -201,24 +214,29 @@ export function TeamRetainedWorktreesDialog({
 
   async function toggleInspection(worktree: TeamRetainedWorktree): Promise<void> {
     const key = worktreeKey(worktree);
+    const tokens = inspectTokensRef.current;
     if (inspections[key] !== undefined) {
+      tokens.delete(key);
       setInspections(({ [key]: _closed, ...rest }) => rest);
       return;
     }
     const api = window.sprintCoder?.teams;
     if (typeof api?.inspectRetainedWorktree !== 'function') return;
+    // Closing and opening again restores the same key, so only the answer to this opening may
+    // fill it: one to an earlier opening would put back what the worktree held back then.
+    const token = ++inspectRequestRef.current;
+    tokens.set(key, token);
     setInspections((current) => ({ ...current, [key]: { status: 'loading' } }));
     try {
       const value = await api.inspectRetainedWorktree(worktreeRef(taskId, worktree));
-      setInspections((current) =>
-        current[key] === undefined ? current : { ...current, [key]: { status: 'ready', value } },
-      );
+      if (tokens.get(key) !== token) return;
+      setInspections((current) => ({ ...current, [key]: { status: 'ready', value } }));
     } catch (err) {
-      setInspections((current) =>
-        current[key] === undefined
-          ? current
-          : { ...current, [key]: { status: 'error', message: describeError(err) } },
-      );
+      if (tokens.get(key) !== token) return;
+      setInspections((current) => ({
+        ...current,
+        [key]: { status: 'error', message: describeError(err) },
+      }));
     }
   }
 
@@ -245,6 +263,7 @@ export function TeamRetainedWorktreesDialog({
       setLoading(false);
       setList(next);
       setError(null);
+      inspectTokensRef.current.delete(worktreeKey(worktree));
       setInspections(({ [worktreeKey(worktree)]: _gone, ...rest }) => rest);
       setNotice(`${worktree.role}のRepo ${worktree.repositoryOrdinal}のworktreeを破棄しました。`);
       return null;
