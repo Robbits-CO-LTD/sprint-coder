@@ -11262,6 +11262,17 @@ function persistenceBridgeGapSummary(gapFile: string | undefined): string {
 
 function persistenceBridgeFailure(error: unknown, reportFile: string, gapFile?: string): Error {
   const failure: Record<string, number | string | boolean> = {};
+  if (process.platform === 'linux') {
+    try {
+      const fixture = statSync('/usr/bin/printf');
+      failure['printfLinks'] = fixture.nlink;
+      failure['printfRootOwned'] = fixture.uid === 0;
+      failure['printfWritable'] = (fixture.mode & 0o022) !== 0;
+      failure['printfCanonical'] = realpathSync('/usr/bin/printf') === '/usr/bin/printf';
+    } catch {
+      failure['printfUnavailable'] = true;
+    }
+  }
   if (typeof error === 'object' && error !== null) {
     const source = error as Record<string, unknown>;
     const code = source['code'];
