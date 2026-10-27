@@ -1,3 +1,7 @@
+import {
+  TEAM_RETAINED_WORKTREE_LIST_LIMIT,
+  type TeamRetainedWorktreeCursor,
+} from '@sprint-coder/contracts';
 import type { TeamExecutionIsolation, TeamMissionState } from '@sprint-coder/contracts';
 import type { TeamExecutionState } from '@sprint-coder/domain';
 
@@ -73,4 +77,33 @@ export function retainedWorktreeBlockedReason(facts: RetainedWorktreeFacts): str
   if (facts.runtimeUnsettled)
     return 'Workerの処理（CLI）が終了したことをまだ確認できていないため破棄できません。終了を確認できると破棄できるようになります。';
   return null;
+}
+
+/** Keyset ordering matches SQLite's assigned_at/id order; an absent cursor record is still a boundary. */
+export function retainedWorktreePage<T extends TeamRetainedWorktreeCursor>(
+  candidates: readonly T[],
+  cursor: TeamRetainedWorktreeCursor | null,
+): { items: T[]; nextCursor: TeamRetainedWorktreeCursor | null } {
+  const compare = (a: TeamRetainedWorktreeCursor, b: TeamRetainedWorktreeCursor): number =>
+    Buffer.compare(Buffer.from(a.assignedAt), Buffer.from(b.assignedAt)) ||
+    Buffer.compare(Buffer.from(a.executionId), Buffer.from(b.executionId)) ||
+    a.repositoryOrdinal - b.repositoryOrdinal;
+  const remaining = candidates
+    .filter((row) => cursor === null || compare(row, cursor) > 0)
+    .sort(compare);
+  const items = remaining.slice(0, TEAM_RETAINED_WORKTREE_LIST_LIMIT);
+  const last = items.at(-1);
+  return {
+    items,
+    nextCursor:
+      remaining.length > items.length && last
+        ? {
+            taskId: last.taskId,
+            teamId: last.teamId,
+            assignedAt: last.assignedAt,
+            executionId: last.executionId,
+            repositoryOrdinal: last.repositoryOrdinal,
+          }
+        : null,
+  };
 }

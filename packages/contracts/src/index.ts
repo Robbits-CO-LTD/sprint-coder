@@ -970,10 +970,30 @@ export const teamRetainedWorktreeSchema = z
     },
   );
 export type TeamRetainedWorktree = z.infer<typeof teamRetainedWorktreeSchema>;
+export const teamRetainedWorktreeCursorSchema = z
+  .object({
+    taskId: idSchema,
+    teamId: idSchema,
+    assignedAt: timestampSchema,
+    executionId: idSchema,
+    repositoryOrdinal: retainedWorktreeOrdinalSchema,
+  })
+  .strict();
+export type TeamRetainedWorktreeCursor = z.infer<typeof teamRetainedWorktreeCursorSchema>;
+export const teamRetainedWorktreeListInputSchema = z
+  .object({
+    taskId: idSchema,
+    cursor: teamRetainedWorktreeCursorSchema.optional(),
+  })
+  .strict()
+  .refine(({ taskId, cursor }) => cursor === undefined || cursor.taskId === taskId, {
+    message: 'Retained worktree cursor must belong to the requested Task',
+  });
 export const teamRetainedWorktreeListSchema = z
   .object({
     worktrees: z.array(teamRetainedWorktreeSchema).max(TEAM_RETAINED_WORKTREE_LIST_LIMIT),
     total: z.number().int().min(0),
+    nextCursor: teamRetainedWorktreeCursorSchema.nullable(),
   })
   .strict()
   .refine(({ worktrees, total }) => total >= worktrees.length, {
@@ -6613,7 +6633,10 @@ export interface SprintCoderApi {
     resumeMission(input: TeamResumeMissionInput): Promise<TeamMissionSummary>;
     resumeExecutionIntegration(input: TeamResumeExecutionIntegrationInput): Promise<TeamDetail>;
     /** Worktrees Team Workers left on disk for this Task (issue #544). */
-    listRetainedWorktrees(taskId: string): Promise<TeamRetainedWorktreeList>;
+    listRetainedWorktrees(
+      taskId: string,
+      cursor?: TeamRetainedWorktreeCursor,
+    ): Promise<TeamRetainedWorktreeList>;
     inspectRetainedWorktree(
       input: TeamRetainedWorktreeRef,
     ): Promise<TeamRetainedWorktreeInspection>;

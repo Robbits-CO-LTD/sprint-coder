@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   retainedWorktreeBlockedReason,
+  retainedWorktreePage,
   type RetainedWorktreeFacts,
 } from './team-retained-worktrees';
 
@@ -85,5 +86,47 @@ describe('retainedWorktreeBlockedReason (issue #544)', () => {
     expect(retainedWorktreeBlockedReason({ ...discardable, managerAvailable: false })).toContain(
       '管理できない',
     );
+  });
+});
+
+describe('retained worktree keyset paging (#966)', () => {
+  const rows = Array.from({ length: 401 }, (_, i) => ({
+    taskId: 'task',
+    teamId: 'team',
+    assignedAt: '2026-10-27T00:00:00.000Z',
+    executionId: `execution-${String(i).padStart(4, '0')}`,
+    repositoryOrdinal: 1,
+  }));
+  it('reaches all 401 entries without deleting the first 200', () => {
+    const first = retainedWorktreePage(rows, null);
+    expect(first.items).toHaveLength(200);
+    expect(first.nextCursor).toEqual(rows[199]);
+    const second = retainedWorktreePage(rows, first.nextCursor);
+    expect(second.items).toHaveLength(200);
+    const last = retainedWorktreePage(rows, second.nextCursor);
+    expect(last.items).toEqual([rows[400]]);
+    expect(last.nextCursor).toBeNull();
+  });
+  it('uses SQLite binary ordering for non-ASCII cursor IDs', () => {
+    const a = { ...rows[0]!, executionId: '\uE000' };
+    const b = { ...rows[0]!, executionId: '😀' };
+    expect(retainedWorktreePage([b, a], null).items).toEqual([a, b]);
+  });
+
+  it('keeps tuple boundaries after the cursor record is deleted, with deterministic ordinal ordering', () => {
+    const first = retainedWorktreePage(rows, null);
+    const surviving = rows.filter((_, i) => i !== 0 && i !== 199);
+    expect(retainedWorktreePage(surviving, first.nextCursor).items[0]).toEqual(rows[200]);
+    const same = rows[0]!;
+    const mixed = [
+      { ...same, repositoryOrdinal: 3 },
+      { ...same, repositoryOrdinal: 1 },
+      { ...same, repositoryOrdinal: 2 },
+    ];
+    expect(
+      retainedWorktreePage(mixed, { ...same, repositoryOrdinal: 1 }).items.map(
+        (x) => x.repositoryOrdinal,
+      ),
+    ).toEqual([2, 3]);
   });
 });

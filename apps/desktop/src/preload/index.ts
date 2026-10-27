@@ -170,6 +170,7 @@ import {
   teamResumeExecutionIntegrationInputSchema,
   teamRetainedWorktreeInspectionSchema,
   teamRetainedWorktreeListSchema,
+  teamRetainedWorktreeListInputSchema,
   teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
@@ -844,12 +845,12 @@ const api: SprintCoderApi = {
         teamDetailSchema,
         input,
       ),
-    listRetainedWorktrees: (taskId) =>
+    listRetainedWorktrees: (taskId, cursor) =>
       invoke(
         IPC_CHANNELS.teamsListRetainedWorktrees,
-        taskIdPayloadSchema,
+        teamRetainedWorktreeListInputSchema,
         teamRetainedWorktreeListSchema,
-        { taskId },
+        { taskId, ...(cursor === undefined ? {} : { cursor }) },
       ),
     inspectRetainedWorktree: (input) =>
       invoke(

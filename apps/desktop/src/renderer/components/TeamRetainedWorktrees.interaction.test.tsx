@@ -22,6 +22,7 @@ import {
 import type {
   TeamDetail,
   TeamRetainedWorktree,
+  TeamRetainedWorktreeCursor,
   TeamRetainedWorktreeInspection,
   TeamRetainedWorktreeList,
   TeamRetainedWorktreeRef,
@@ -77,7 +78,10 @@ const blocked = worktree({
 
 const detail = { executions: [] } as unknown as TeamDetail;
 
-type ListFn = (taskId: string) => Promise<TeamRetainedWorktreeList>;
+type ListFn = (
+  taskId: string,
+  cursor?: TeamRetainedWorktreeCursor,
+) => Promise<TeamRetainedWorktreeList>;
 type InspectFn = (input: TeamRetainedWorktreeRef) => Promise<TeamRetainedWorktreeInspection>;
 type OpenFn = (input: TeamRetainedWorktreeRef) => Promise<void>;
 type DiscardFn = (input: TeamRetainedWorktreeRef) => Promise<TeamRetainedWorktreeList>;
@@ -127,6 +131,7 @@ beforeEach(() => {
     listRetainedWorktrees: vi.fn<ListFn>(async () => ({
       worktrees: [failed, integrated, blocked],
       total: 3,
+      nextCursor: null,
     })),
     inspectRetainedWorktree: vi.fn<InspectFn>(async (input) => ({
       executionId: input.executionId,
@@ -142,6 +147,7 @@ beforeEach(() => {
     discardRetainedWorktree: vi.fn<DiscardFn>(async () => ({
       worktrees: [integrated, blocked],
       total: 2,
+      nextCursor: null,
     })),
   };
   Object.defineProperty(window, 'sprintCoder', { configurable: true, value: { teams: api } });
@@ -324,8 +330,8 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
         'Gitのロック状態を確認できないため、ここからは破棄できません。一覧を更新して確認してください。',
     });
     api.listRetainedWorktrees
-      .mockResolvedValueOnce({ worktrees: [locked, unknown], total: 2 })
-      .mockResolvedValueOnce({ worktrees: [failed], total: 1 });
+      .mockResolvedValueOnce({ worktrees: [locked, unknown], total: 2, nextCursor: null })
+      .mockResolvedValueOnce({ worktrees: [failed], total: 1, nextCursor: null });
     await renderDialog();
     for (const item of items()) {
       expect(button(item, 'team-retained-discard').disabled).toBe(true);
@@ -433,7 +439,11 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
       integration: 'unconfirmed',
       executionState: 'completed',
     });
-    api.listRetainedWorktrees.mockResolvedValueOnce({ worktrees: [unverified], total: 1 });
+    api.listRetainedWorktrees.mockResolvedValueOnce({
+      worktrees: [unverified],
+      total: 1,
+      nextCursor: null,
+    });
     await renderDialog();
     const [item] = items();
     expect(item!.querySelector('[data-testid="team-retained-state"]')?.textContent).toBe(
@@ -462,6 +472,7 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     api.listRetainedWorktrees.mockResolvedValueOnce({
       worktrees: [integratedWithSubmodule, unintegratedWithSubmodule, failed],
       total: 3,
+      nextCursor: null,
     });
     await renderDialog();
     const [integratedItem, unintegratedItem, plainItem] = items();
@@ -520,6 +531,7 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     api.listRetainedWorktrees.mockResolvedValueOnce({
       worktrees: [goneWithSubmodule, gone],
       total: 2,
+      nextCursor: null,
     });
     await renderDialog();
     const [withSubmodule, plain] = items();
@@ -657,6 +669,7 @@ describe('TeamRetainedWorktreesDialog inspection requests (issue #965)', () => {
     api.discardRetainedWorktree.mockResolvedValueOnce({
       worktrees: [failed, integrated, blocked],
       total: 3,
+      nextCursor: null,
     });
     await renderDialog();
     const inspect = button(items()[0]!, 'team-retained-inspect');
@@ -722,5 +735,120 @@ describe('TeamRetainedWorktreesDialog inspection requests (issue #965)', () => {
     expect(panel(first!)?.textContent).not.toContain('old-change.txt');
     await settle(() => pending[1]!.resolve(inspectionOf(failed, 'new-change.txt')));
     expect(panel(first!)?.textContent).toContain('new-change.txt');
+  });
+});
+
+describe('retained worktree pagination (#966)', () => {
+  const cursor: TeamRetainedWorktreeCursor = {
+    taskId: 'task-1',
+    teamId: 'team-1',
+    assignedAt: '2026-10-27T00:00:00.000Z',
+    executionId: 'entry-199',
+    repositoryOrdinal: 1,
+  };
+  const first = Array.from({ length: 200 }, (_, i) =>
+    worktree({ ...blocked, executionId: `entry-${i}` }),
+  );
+  const last = worktree({ executionId: 'entry-200', role: 'last worker' });
+  const more = () =>
+    container.querySelector<HTMLButtonElement>('[data-testid="team-retained-load-more"]');
+  it('shows and inspects entry201 without discarding any retained work', async () => {
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: first, total: 201, nextCursor: cursor })
+      .mockResolvedValueOnce({ worktrees: [last], total: 201, nextCursor: null });
+    await renderDialog();
+    expect(more()).not.toBeNull();
+    await act(async () => more()!.click());
+    expect(api.listRetainedWorktrees).toHaveBeenLastCalledWith('task-1', cursor);
+    expect(container.textContent).toContain('last worker');
+    expect(more()).toBeNull();
+    const button = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="team-retained-inspect"]',
+    )[200];
+    expect(button).toBeDefined();
+    await act(async () => button!.click());
+    expect(api.inspectRetainedWorktree).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      executionId: 'entry-200',
+      repositoryOrdinal: 1,
+    });
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
+  });
+  it('ignores an older additional page after refresh and prevents same-tick duplicate requests', async () => {
+    const pending = deferred<TeamRetainedWorktreeList>();
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [failed], total: 201, nextCursor: cursor })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({ worktrees: [integrated], total: 1, nextCursor: null });
+    await renderDialog();
+    await act(async () => {
+      more()!.click();
+      more()!.click();
+    });
+    expect(api.listRetainedWorktrees).toHaveBeenCalledTimes(2);
+    // A canonical Team change refreshes the first page even while the old append is outstanding.
+    await act(async () =>
+      root.render(
+        <TeamRetainedWorktreesDialog
+          taskId="task-1"
+          detail={
+            {
+              ...detail,
+              executions: [
+                {
+                  id: 'changed',
+                  state: 'failed',
+                  isolation: { phase: 'quarantined', resumeKind: null, repositories: [] },
+                },
+              ],
+            } as unknown as TeamDetail
+          }
+          onClose={() => {}}
+        />,
+      ),
+    );
+    await settle(() => pending.resolve({ worktrees: [last], total: 201, nextCursor: null }));
+    expect(container.textContent).toContain('finisher');
+    expect(container.textContent).not.toContain('last worker');
+    expect(items()).toHaveLength(1);
+  });
+
+  it('invalidates additional-page errors when switching Tasks and keeps the new loading state', async () => {
+    const oldPage = deferred<TeamRetainedWorktreeList>();
+    const newPage = deferred<TeamRetainedWorktreeList>();
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [failed], total: 201, nextCursor: cursor })
+      .mockReturnValueOnce(oldPage.promise)
+      .mockReturnValueOnce(newPage.promise);
+    await renderDialog();
+    await act(async () => more()!.click());
+    await act(async () =>
+      root.render(
+        <TeamRetainedWorktreesDialog taskId="task-2" detail={detail} onClose={() => {}} />,
+      ),
+    );
+    expect(items()).toHaveLength(0);
+    await settle(() => oldPage.reject(new Error('obsolete error')));
+    expect(container.textContent).not.toContain('obsolete error');
+    expect(container.textContent).toContain('読み込み中');
+    await settle(() => newPage.resolve({ worktrees: [integrated], total: 1, nextCursor: null }));
+    expect(container.textContent).toContain('finisher');
+  });
+
+  it('retains rows and retry cursor after a failed additional page', async () => {
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: first, total: 201, nextCursor: cursor })
+      .mockRejectedValueOnce(new Error('additional page failed'))
+      .mockResolvedValueOnce({ worktrees: [last], total: 201, nextCursor: null });
+    await renderDialog();
+    await act(async () => more()!.click());
+    expect(container.textContent).toContain('additional page failed');
+    expect(container.querySelectorAll('[data-testid="team-retained-inspect"]')).toHaveLength(200);
+    await act(async () => more()!.click());
+    expect(api.listRetainedWorktrees.mock.calls[1]).toEqual(
+      api.listRetainedWorktrees.mock.calls[2],
+    );
+    expect(container.textContent).toContain('last worker');
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
   });
 });

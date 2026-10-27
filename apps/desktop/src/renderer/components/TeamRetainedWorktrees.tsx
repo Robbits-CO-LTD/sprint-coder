@@ -8,6 +8,7 @@ import {
 import type {
   TeamDetail,
   TeamRetainedWorktree,
+  TeamRetainedWorktreeCursor,
   TeamRetainedWorktreeInspection,
   TeamRetainedWorktreeList,
 } from '../types/sprint-coder';
@@ -131,6 +132,8 @@ export function TeamRetainedWorktreesDialog({
   const openerRef = useRef<HTMLElement | null>(null);
   const closingRef = useRef(false);
   const requestRef = useRef(0);
+  const listRef = useRef<TeamRetainedWorktreeList | null>(null);
+  const inFlightRef = useRef<number | null>(null);
   const inspectRequestRef = useRef(0);
   /** The inspect request each open inspection is waiting for, by worktree key. */
   const inspectTokensRef = useRef(new Map<string, number>());
@@ -152,26 +155,63 @@ export function TeamRetainedWorktreesDialog({
     dialog.showModal();
   }, []);
 
-  const load = useCallback(async () => {
-    const api = window.sprintCoder?.teams;
-    if (typeof api?.listRetainedWorktrees !== 'function') {
-      setError('この環境では残っているworktreeを確認できません。');
-      return;
+  const retainInspections = useCallback((rows: readonly TeamRetainedWorktree[]) => {
+    const keys = new Set(rows.map(worktreeKey));
+    for (const key of inspectTokensRef.current.keys()) {
+      if (!keys.has(key)) inspectTokensRef.current.delete(key);
     }
-    const request = ++requestRef.current;
-    setLoading(true);
-    try {
-      const next = await api.listRetainedWorktrees(taskId);
-      if (request !== requestRef.current) return;
-      setList(next);
-      setError(null);
-    } catch (err) {
-      if (request === requestRef.current)
-        setError(`一覧を読み込めませんでした: ${describeError(err)}`);
-    } finally {
-      if (request === requestRef.current) setLoading(false);
-    }
-  }, [taskId]);
+    setInspections((current) =>
+      Object.fromEntries(Object.entries(current).filter(([key]) => keys.has(key))),
+    );
+  }, []);
+
+  const load = useCallback(
+    async (cursor?: TeamRetainedWorktreeCursor) => {
+      if (
+        cursor !== undefined &&
+        (inFlightRef.current !== null || cursor !== listRef.current?.nextCursor)
+      )
+        return;
+      const api = window.sprintCoder?.teams;
+      if (typeof api?.listRetainedWorktrees !== 'function') {
+        setError('この環境では残っているworktreeを確認できません。');
+        return;
+      }
+      const request = cursor === undefined ? ++requestRef.current : requestRef.current;
+      inFlightRef.current = request;
+      setLoading(true);
+      try {
+        const next = await api.listRetainedWorktrees(
+          taskId,
+          ...(cursor === undefined ? [] : [cursor]),
+        );
+        if (request !== requestRef.current) return;
+        const rows =
+          cursor === undefined
+            ? next.worktrees
+            : [
+                ...new Map([
+                  ...(listRef.current?.worktrees ?? []).map(
+                    (row) => [worktreeKey(row), row] as const,
+                  ),
+                  ...next.worktrees.map((row) => [worktreeKey(row), row] as const),
+                ]).values(),
+              ];
+        const loaded = { ...next, worktrees: rows };
+        listRef.current = loaded;
+        setList(loaded);
+        if (cursor === undefined) retainInspections(rows);
+        setError(null);
+      } catch (err) {
+        if (request === requestRef.current)
+          setError(`一覧を読み込めませんでした: ${describeError(err)}`);
+      } finally {
+        if (inFlightRef.current === request) inFlightRef.current = null;
+        if (request === requestRef.current) setLoading(false);
+      }
+    },
+    [taskId, retainInspections],
+  );
 
   // `retainedKey` is what makes this refetch: an execution finishing, an isolation changing phase,
   // or a repository being cleaned elsewhere. Streamed Worker output leaves it unchanged.
@@ -185,6 +225,10 @@ export function TeamRetainedWorktreesDialog({
     const tokens = inspectTokensRef.current;
     return () => {
       tokens.clear();
+      requestRef.current += 1;
+      inFlightRef.current = null;
+      listRef.current = null;
+      setList(null);
       setInspections({});
     };
   }, [taskId]);
@@ -192,6 +236,9 @@ export function TeamRetainedWorktreesDialog({
   function closeAndRestoreFocus(): void {
     if (closingRef.current || busy) return;
     closingRef.current = true;
+    requestRef.current += 1;
+    inFlightRef.current = null;
+    inspectTokensRef.current.clear();
     const opener = openerRef.current;
     const openerTestId = opener?.dataset.testid;
     openerRef.current = null;
@@ -260,8 +307,11 @@ export function TeamRetainedWorktreesDialog({
       const next = await api.discardRetainedWorktree(worktreeRef(taskId, worktree));
       // Any list still in flight was read before this discard.
       requestRef.current += 1;
+      inFlightRef.current = null;
       setLoading(false);
+      listRef.current = next;
       setList(next);
+      retainInspections(next.worktrees);
       setError(null);
       inspectTokensRef.current.delete(worktreeKey(worktree));
       setInspections(({ [worktreeKey(worktree)]: _gone, ...rest }) => rest);
@@ -275,7 +325,7 @@ export function TeamRetainedWorktreesDialog({
   }
 
   const worktrees = list?.worktrees ?? [];
-  const hidden = list === null ? 0 : list.total - list.worktrees.length;
+  const hidden = list === null ? 0 : Math.max(0, list.total - list.worktrees.length);
 
   return (
     <dialog
@@ -442,8 +492,19 @@ export function TeamRetainedWorktreesDialog({
             })}
           </ul>
         )}
-        {hidden > 0 && (
-          <p className="settings-hint">{`ほかに${hidden}件あります。破棄すると続きが表示されます。`}</p>
+        {hidden > 0 && <p className="settings-hint">{`ほかに${hidden}件あります。`}</p>}
+        {list?.nextCursor != null && (
+          <button
+            type="button"
+            className="settings-secondary-button"
+            data-testid="team-retained-load-more"
+            disabled={loading || busy}
+            onClick={() => {
+              if (list.nextCursor !== null) void load(list.nextCursor);
+            }}
+          >
+            {loading ? '読み込み中…' : error !== null ? '続きを再読み込み' : 'さらに表示'}
+          </button>
         )}
       </div>
       {confirming !== null && (
