@@ -233,14 +233,15 @@ export function SkillSettingsSection({
                 <p>{draft.description}</p>
                 <details
                   className="settings-skill-draft-files"
-                  onToggle={(e) =>
+                  onToggle={(e) => {
+                    const open = e.currentTarget.open;
                     setReviewed((xs) => {
                       const n = new Set(xs);
-                      if (e.currentTarget.open) n.add(draft.id);
+                      if (open) n.add(draft.id);
                       else n.delete(draft.id);
                       return n;
-                    })
-                  }
+                    });
+                  }}
                 >
                   <summary>ファイル内容を確認</summary>
                   {draft.files.map((file) => (
