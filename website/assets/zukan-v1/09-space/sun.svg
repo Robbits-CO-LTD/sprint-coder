@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="40" fill="#2B2D42"/>
+<g fill="#FF8A3D" stroke="#7A2E0E" stroke-width="6" stroke-linejoin="round">
+<polygon points="175,105 200,30 225,105"/>
+<polygon points="175,295 200,370 225,295"/>
+<polygon points="105,175 30,200 105,225"/>
+<polygon points="295,175 370,200 295,225"/>
+<polygon points="292,144 317,83 256,108"/>
+<polygon points="292,256 317,317 256,292"/>
+<polygon points="108,292 83,317 144,256"/>
+<polygon points="144,108 83,83 108,144"/>
+</g>
+<circle cx="200" cy="200" r="100" fill="#FFC83D" stroke="#7A2E0E" stroke-width="6"/>
+<circle cx="165" cy="185" r="10" fill="#7A2E0E"/>
+<circle cx="235" cy="185" r="10" fill="#7A2E0E"/>
+<ellipse cx="148" cy="222" rx="14" ry="9" fill="#FF6B6B"/>
+<ellipse cx="252" cy="222" rx="14" ry="9" fill="#FF6B6B"/>
+<path d="M170 225 Q200 262 230 225" fill="none" stroke="#7A2E0E" stroke-width="6" stroke-linecap="round"/>
+</svg>
