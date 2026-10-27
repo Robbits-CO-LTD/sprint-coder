@@ -999,6 +999,71 @@ describe('Computer Use Windows helper transport', () => {
     },
   );
 
+  it.each(['success', 'native-error', 'timeout'] as const)(
+    'keeps a Stop during launch-capable discovery unconfirmed after late %s',
+    async (ending) => {
+      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const starting = startSession(host, 'pending-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(host.stopPendingStart!('pending-discovery')).rejects.toThrow(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      if (ending === 'timeout') await vi.advanceTimersByTimeAsync(60_000);
+      else {
+        if (ending === 'native-error') helper().refuse('list_windows');
+        helper().release('list_windows');
+      }
+      await expect(starting).resolves.toBe('rejected');
+      expect(helper().served).not.toContain('start_session');
+      expect(helper().served).not.toContain('stop_pending_start');
+      expect(host.availability().control).toBe(false);
+      await expect(startSession(host, 'new-id', 'turn-2')).rejects.toThrow(/unconfirmed/u);
+    },
+  );
+
+  it.each(['native-error', 'timeout'] as const)(
+    'distinguishes a completed discovery refusal from transport failure: %s',
+    async (ending) => {
+      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const starting = startSession(host, 'failed-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (ending === 'native-error') {
+        helper().refuse('list_windows');
+        helper().release('list_windows');
+      } else await vi.advanceTimersByTimeAsync(60_000);
+      await expect(starting).resolves.toBe('rejected');
+      expect(host.availability().control).toBe(ending === 'native-error');
+      expect(helper().served).not.toContain('start_session');
+    },
+  );
+
+  it('does not let active Close hide another launch-capable discovery of the same owner', async () => {
+    const { host, helper } = createTarget(responders(), (helper) =>
+      helper.holdOnly('start_session'),
+    );
+    const first = startSession(host, 'shared-discovery', 'turn-1');
+    await vi.advanceTimersByTimeAsync(0);
+    helper().holdOnly('list_windows');
+    const second = startSession(host, 'shared-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    helper().release('start_session');
+    const active = await first;
+    await host.cancel(active, 1);
+    await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
+    helper().release('list_windows');
+    await expect(second).resolves.toBe('rejected');
+    expect(host.availability().control).toBe(false);
+    expect(helper().served.filter((operation) => operation === 'start_session')).toHaveLength(1);
+  });
+
   it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
     const { addon, host, helper } = createTarget(
       {

@@ -318,7 +318,13 @@ The frame protocol and eligibility/classifier versions are unchanged.
 
 Main registers an owner before discovery or native awaits. An entirely unsubmitted start can finish
 locally without inventing a native receipt; Windows additionally tracks every socket write attempt.
-Once submission is possible, only a validated terminal receipt confirms closure. Pending work cannot
+Discovery is not inherently read-only: V1 window lookup may launch the registered application.
+A Stop during an unfinished Windows discovery therefore stays unconfirmed and quarantined, even
+if its late response succeeds or a separate active session Close is confirmed. A transport timeout
+or generic rejection does not establish native completion; an authenticated native refusal does.
+This slice does not cancel discovery itself, nor establish that an OS application launch issued
+before Stop has finished. Pre-binding discovery cancellation remains part of the V1 follow-up.
+Once session start submission is possible, only a validated terminal receipt confirms its closure. Pending work cannot
 adopt its late result, and quarantine remains until that work settles or an unconfirmed stop is
 resolved. Duplicate Stop callers share one bounded cleanup operation. The Controller settles a canceled
 start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed

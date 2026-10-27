@@ -200,6 +200,8 @@ export function createComputerUseNativeHost(
     attempts: Set<symbol>;
     stopped: boolean;
     nativeInvoked: boolean;
+    discoveryPending: number;
+    discoveryUnconfirmed: boolean;
     knownEpoch: number;
     terminalEpoch: number;
     terminal: ComputerUsePendingStartStop | null;
@@ -213,7 +215,10 @@ export function createComputerUseNativeHost(
     [...startOwners.values()].some(
       (owner) =>
         owner.stopped &&
-        (owner.unconfirmed || owner.terminal === null || owner.attempts.size !== 0),
+        (owner.unconfirmed ||
+          owner.discoveryUnconfirmed ||
+          owner.terminal === null ||
+          owner.attempts.size !== 0),
     );
 
   const startBinding = (input: Parameters<ComputerUseNativeHost['startSession']>[0]): string =>
@@ -232,10 +237,22 @@ export function createComputerUseNativeHost(
       throw new ComputerUseNativeUnavailableError('native_start_canceled');
   };
 
+  // Windows discovery may still launch an application after Stop. Keep that uncertainty
+  // even when a separate session Close succeeds or the discovery promise later settles.
+  const latchStartOwner = (owner: StartOwner): void => {
+    owner.stopped = true;
+    if (platform === 'win32' && owner.discoveryPending !== 0) owner.discoveryUnconfirmed = true;
+  };
+
   const trimStartOwners = (): void => {
     for (const [id, owner] of startOwners) {
       if (startOwners.size < 128) break;
-      if (owner.terminal !== null && !owner.unconfirmed && owner.attempts.size === 0)
+      if (
+        owner.terminal !== null &&
+        !owner.unconfirmed &&
+        !owner.discoveryUnconfirmed &&
+        owner.attempts.size === 0
+      )
         startOwners.delete(id);
     }
   };
@@ -264,6 +281,10 @@ export function createComputerUseNativeHost(
       !owner.nativeInvoked ||
       (platform === 'win32' && addon?.cancelUnsubmittedStart?.(owner.sessionId) === 'never_sent');
     if (active === undefined && neverSent) {
+      if (owner.discoveryUnconfirmed) {
+        owner.unconfirmed = true;
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      }
       const result: ComputerUsePendingStartStop = { kind: 'not_submitted' };
       finishStartOwner(owner, result);
       return result;
@@ -294,6 +315,8 @@ export function createComputerUseNativeHost(
             inputAttemptCount: result.data.inputAttemptCount,
           },
         };
+        if (owner.discoveryUnconfirmed)
+          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
         finishStartOwner(owner, outcome);
         return outcome;
       } catch (error) {
@@ -312,7 +335,7 @@ export function createComputerUseNativeHost(
       rejectStop = reject;
     });
     owner.stopPromise = stopping;
-    owner.stopped = true;
+    latchStartOwner(owner);
     void completePendingStop(owner).then(resolveStop, rejectStop);
     return stopping;
   };
@@ -504,6 +527,26 @@ export function createComputerUseNativeHost(
   ): Record<string, unknown> =>
     platform === 'darwin' && route !== undefined ? { classifierRoute: route } : {};
 
+  const startDiscovery = async <T>(owner: StartOwner, work: () => Promise<T>): Promise<T> => {
+    owner.discoveryPending += 1;
+    try {
+      return await work();
+    } catch (error) {
+      // A bound native refusal completed the synchronous request. Transport failures and
+      // malformed results do not prove it ended; kill() is not a process-exit receipt.
+      const refused =
+        error instanceof Error &&
+        'accepted' in error &&
+        error.accepted === false &&
+        'code' in error &&
+        typeof error.code === 'string';
+      if (platform === 'win32' && !refused) owner.discoveryUnconfirmed = true;
+      throw error;
+    } finally {
+      owner.discoveryPending -= 1;
+    }
+  };
+
   const startNative = async (
     input: Omit<Parameters<ComputerUseNativeHost['startSession']>[0], 'classifierRoute'>,
     nativeRoute: 'v1' | 'v2' | undefined,
@@ -548,17 +591,19 @@ export function createComputerUseNativeHost(
     }
     let pid = pidsByIdentity.get(input.profile.identityDigest);
     if (pid === undefined) {
-      const windows = await host.listWindows(input.profile);
+      const windows = await startDiscovery(owner, () => host.listWindows(input.profile));
       assertStartOwner(owner);
       pid = pidsByIdentity.get(input.profile.identityDigest);
       if (pid === undefined || windows.every((candidate) => candidate.windowId !== input.windowId))
         throw new ComputerUseNativeUnavailableError('native_app_not_active');
     }
-    const candidate = await invoke('listWindows', {
-      ...input.profile,
-      pid,
-      appIdentityDigest: input.profile.identityDigest,
-    });
+    const candidate = await startDiscovery(owner, () =>
+      invoke('listWindows', {
+        ...input.profile,
+        pid,
+        appIdentityDigest: input.profile.identityDigest,
+      }),
+    );
     assertStartOwner(owner);
     if (!Array.isArray(candidate))
       throw new ComputerUseNativeUnavailableError('native_windows_invalid');
@@ -761,6 +806,8 @@ export function createComputerUseNativeHost(
           attempts: new Set(),
           stopped: false,
           nativeInvoked: false,
+          discoveryPending: 0,
+          discoveryUnconfirmed: false,
           knownEpoch: input.cancelEpoch,
           terminalEpoch: 0,
           terminal: null,
@@ -1117,7 +1164,7 @@ export function createComputerUseNativeHost(
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       activeStopQuarantines.add(session.sessionId);
       const owner = startOwners.get(session.sessionId);
-      if (owner !== undefined) owner.stopped = true;
+      if (owner !== undefined) latchStartOwner(owner);
       stopEpochs.set(
         session.sessionId,
         Math.max(stopEpochs.get(session.sessionId) ?? internal.cancelEpoch, cancelEpoch),
@@ -1139,7 +1186,7 @@ export function createComputerUseNativeHost(
       }
       activeStopQuarantines.add(session.sessionId);
       const owner = startOwners.get(session.sessionId);
-      if (owner !== undefined) owner.stopped = true;
+      if (owner !== undefined) latchStartOwner(owner);
       const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
       stopEpochs.set(session.sessionId, cancelEpoch);
       const parsed = computerUseNativeCloseReceiptSchema.safeParse(
@@ -1147,6 +1194,8 @@ export function createComputerUseNativeHost(
       );
       if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       inputReceipt(parsed.data, session.sessionId, cancelEpoch);
+      if (owner?.discoveryUnconfirmed)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
