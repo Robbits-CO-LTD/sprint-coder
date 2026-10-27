@@ -846,7 +846,7 @@ describe('Computer Use external final gate', () => {
           platform: 'darwin',
           architecture: 'arm64',
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           nativeVersion: 'computer-use-native-gate0-1',
           moduleDigest: 'b'.repeat(64),
           binaryDigest: 'b'.repeat(64),

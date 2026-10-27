@@ -148,7 +148,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       }) as const;
     const handshake = (eligibility?: ComputerUseEligibility) => ({
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       platform: 'win32',
       napiVersion: 10,
       sourceCommit,

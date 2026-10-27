@@ -17,7 +17,7 @@ const completion = '        // All measured handles and COM objects are gone';
 const adoption =
   '    // Stop and adoption share this lock; a late result cannot advance the generation.';
 const consumer =
-  '    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {';
+  '    if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,';
 const uiaContact =
   'WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });';
 const startReady = '  const auto begin_focus = [&] {';
@@ -46,7 +46,7 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     consumer,
-    `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
+    `    Sc940ConsumerGate(queued.frame.header.request_id.bytes[0]);\n${consumer}`,
   );
   const rejudgeFrom = source.indexOf('// BEGIN windows v2 rejudge');
   const rejudgeTo = source.indexOf('// END windows v2 rejudge', rejudgeFrom);
@@ -1690,7 +1690,7 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
     };
     if (healthy || ready || adopt) require_foreground();
     run.StartPipe(false, cancel);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "start_handshake");
     const ListedStart listed = ReadListedStart(run, 30);
     Require(windows_v2_main_pid == GetCurrentProcessId() && !sessions.contains(FrameIdKey(Id(8))) &&
@@ -1861,7 +1861,7 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     run.AttachOwnedSibling(pid, window, created, fixture_path);
     // The unrelated zero-input control seed exists only for real Cancel/Close receipts.
     run.StartPipe(false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "rejudge_handshake");
     const ListedStart listed = ReadListedStart(run, 10);
     Require(WindowsV2FactsContextCache().has_value() &&
@@ -2131,7 +2131,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
     if (live) Require(focus_stop ? (focus_control_ready && !IsIconic(window) && GetForegroundWindow() != window)
                                 : GetForegroundWindow() == window, "resume_environment_foreground_required");
     run.StartPipe(false, false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "resume_handshake");
     const ListedStart listed = ReadListedStart(run, 10);
     Require(WindowsV2FactsContextCache().has_value() &&
@@ -2552,7 +2552,7 @@ int DiagnoseValidation(std::wstring_view scenario) {
     run.StartFixture(true);
     run.PrepareValidationProbe();
     run.StartPipe(false, !repeat, !repeat);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "validation_handshake");
     if (repeat) {
       const ValidationProbeResult result = RunValidationProbe(run, 2, "repeat");
@@ -2730,7 +2730,7 @@ int DiagnoseUia(std::wstring_view scenario) {
   try {
     run.StartFixture();
     run.StartPipe(false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "uia_handshake");
     uia_hold_contact.store(deadline ? 2 : timeout || cancel || close ? 1 : 0);
     hold_point.store(queued ? HoldPoint::kConsumer : HoldPoint::kNone);
@@ -2870,7 +2870,7 @@ int Diagnose(std::wstring_view scenario) {
     run.StartFixture();
     if (two_fixtures) run.StartFixture();
     run.StartPipe(same_epoch_close);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "handshake");
     Require(!WindowsV2FactsContextCache().has_value(), "initial_context_empty");
     std::string completed_row;
@@ -3078,7 +3078,7 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('        Sc940CompletionGate();')).toHaveLength(2);
     expect(generated.split('    Sc940AdoptionGate();')).toHaveLength(2);
     expect(
-      generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
+      generated.split('    Sc940ConsumerGate(queued.frame.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
     expect(

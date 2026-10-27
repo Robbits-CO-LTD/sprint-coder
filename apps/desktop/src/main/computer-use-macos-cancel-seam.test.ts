@@ -65,6 +65,7 @@ ${driver}`,
           staleRepeatCloseRejected: boolean;
           unclosedSessionStillMissing: boolean;
           closedRegistryBounded: boolean;
+          unconfirmedOwnersRetained: boolean;
           closeClearsDispatchState: boolean;
           cancelAdvancesTicketGeneration: boolean;
           closeAdvancesTicketGeneration: boolean;
@@ -86,6 +87,7 @@ ${driver}`,
           staleRepeatCloseRejected: true,
           unclosedSessionStillMissing: true,
           closedRegistryBounded: true,
+          unconfirmedOwnersRetained: true,
           closeClearsDispatchState: true,
           cancelAdvancesTicketGeneration: true,
           closeAdvancesTicketGeneration: true,
@@ -170,6 +172,7 @@ const preamble = `
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <unordered_map>
 #include <set>
@@ -197,6 +200,7 @@ struct MacComputerUseSession {
   std::atomic<bool> closed{false}, observation_publication_claimed{false};
   std::atomic<std::uint64_t> cancel_epoch{0}, observation_publication_epoch{0};
   std::atomic<std::uint64_t> ticket_generation{0};
+  std::atomic<std::uint32_t> pending_start_work{0};
   sprint_coder::computer_use::NativeOrdinaryTicketSlot ordinary_ticket;
   // ExecuteNativeStop ends any approval on cancel and close.
   sprint_coder::computer_use::NativeApprovalFlow approval;
@@ -212,7 +216,7 @@ struct MacComputerUseSession {
 std::shared_ptr<MacComputerUseSession> current = std::make_shared<MacComputerUseSession>();
 std::atomic<std::uint64_t> cancellation_epoch{0};
 std::mutex mac_sessions_mutex;
-std::unordered_map<std::string, std::shared_ptr<MacComputerUseSession>> mac_sessions, mac_pending_sessions;
+std::unordered_map<std::string, std::shared_ptr<MacComputerUseSession>> mac_sessions, mac_pending_sessions, mac_start_lifetimes;
 struct FakeValue {};
 using napi_env = void*;
 using napi_callback_info = void*;
@@ -225,6 +229,12 @@ std::vector<FakeWork*> queue;
 std::mutex mac_dispatch_serial_mutex;
 constexpr int napi_ok = 0;
 FakeValue fake;
+constexpr auto NAPI_AUTO_LENGTH = static_cast<std::size_t>(-1);
+constexpr int napi_key_own_only = 0, napi_key_all_properties = 0, napi_key_numbers_to_strings = 0;
+int napi_create_string_utf8(napi_env, const char*, std::size_t, napi_value* out) { *out=&fake; return napi_ok; }
+int napi_get_all_property_names(napi_env, napi_value, int, int, int, napi_value* out) { *out=&fake; return napi_ok; }
+int napi_get_array_length(napi_env, napi_value, std::uint32_t* out) { *out=1; return napi_ok; }
+int napi_has_own_property(napi_env, napi_value, napi_value, bool* out) { *out=true; return napi_ok; }
 int napi_get_cb_info(napi_env, napi_callback_info, size_t* argc, napi_value* argv, void*, void*) {
   *argc = 1; argv[0] = &fake; return napi_ok;
 }
@@ -446,23 +456,39 @@ int main() {
   const bool unclosedSessionStillMissing =
     closeRequest("never-opened", 1) == CloseOutcome::kSessionMissing;
 
-  // Keeping a close answerable is bounded, so a long-lived process cannot accumulate sessions it
-  // can never release.
-  std::vector<std::weak_ptr<MacComputerUseSession>> boundedLifetimes;
+  // API3 never evicts unconfirmed owners. Production admission refuses a new owner when full
+  // (also exercised through the real addon); the stop registry must retain every existing proof.
+  mac_closed_sessions.clear();
+  mac_closed_session_order.clear();
+  std::vector<std::weak_ptr<MacComputerUseSession>> unconfirmed;
   failStopDrain = true;
+  for (std::size_t index = 0; index < kMaximumClosedMacSessions; ++index) {
+    auto held = std::make_shared<MacComputerUseSession>();
+    held->session_id = "held-" + std::to_string(index);
+    mac_sessions.emplace(held->session_id, held);
+    closeRequest(held->session_id, 1); drain(); unconfirmed.push_back(held);
+  }
+  auto overflow = std::make_shared<MacComputerUseSession>();
+  const bool refusesOverflow = !RememberClosingMacSession("overflow", overflow, 1);
+  const bool unconfirmedOwnersRetained = refusesOverflow &&
+    mac_closed_sessions.size() == kMaximumClosedMacSessions &&
+    std::all_of(unconfirmed.begin(), unconfirmed.end(), [](const auto& owner) { return !owner.expired(); });
+  failStopDrain = false;
+  for (std::size_t index = 0; index < kMaximumClosedMacSessions; ++index) {
+    closeRequest("held-" + std::to_string(index), 2); drain();
+  }
+  // Confirmed replay entries can be retired, so a long-lived process remains bounded.
+  std::vector<std::weak_ptr<MacComputerUseSession>> boundedLifetimes;
   for (int index = 0; index < 40; ++index) {
     auto boundedSession = std::make_shared<MacComputerUseSession>();
     boundedSession->session_id = "bounded-" + std::to_string(index);
     mac_sessions.emplace(boundedSession->session_id, boundedSession);
-    closeRequest(boundedSession->session_id, 1);
-    drain();
-    boundedLifetimes.push_back(boundedSession);
+    closeRequest(boundedSession->session_id, 1); drain(); boundedLifetimes.push_back(boundedSession);
   }
-  failStopDrain = false;
   std::size_t retainedClosedSessions = 0;
-  for (const auto& entry : boundedLifetimes)
-    if (!entry.expired()) ++retainedClosedSessions;
-  const bool closedRegistryBounded = retainedClosedSessions <= kSeamClosedRecordLimit;
+  for (const auto& entry : boundedLifetimes) if (!entry.expired()) ++retainedClosedSessions;
+  const bool closedRegistryBounded = retainedClosedSessions <= kSeamClosedRecordLimit &&
+    mac_closed_sessions.size() <= kMaximumClosedMacSessions;
 
   // Cancel and Close advance the ticket generation without taking the state lock, so an issued
   // ticket stops matching at once. Only the drain, which holds the state lock, clears the stored
@@ -510,6 +536,7 @@ int main() {
     << ",\\"staleRepeatCloseRejected\\":" << staleRepeatCloseRejected
     << ",\\"unclosedSessionStillMissing\\":" << unclosedSessionStillMissing
     << ",\\"closedRegistryBounded\\":" << closedRegistryBounded
+    << ",\\"unconfirmedOwnersRetained\\":" << unconfirmedOwnersRetained
     << ",\\"closeClearsDispatchState\\":" << closeClearsDispatchState
     << ",\\"cancelAdvancesTicketGeneration\\":" << cancelAdvancesTicketGeneration
     << ",\\"closeAdvancesTicketGeneration\\":" << closeAdvancesTicketGeneration
@@ -532,6 +559,7 @@ const reservationPreamble = String.raw`
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -560,6 +588,7 @@ struct MacComputerUseSession {
   std::atomic<bool> closed{false};
   std::atomic<std::uint64_t> cancel_epoch{0};
   std::atomic<std::uint64_t> ticket_generation{0};
+  std::atomic<std::uint32_t> pending_start_work{0};
   std::atomic<std::uint64_t> input_api_attempts{0};
   sprint_coder::computer_use::NativeOrdinaryTicketSlot ordinary_ticket;
   std::uint64_t preflight_owner = 0;

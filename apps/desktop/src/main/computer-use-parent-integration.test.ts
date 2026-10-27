@@ -19,7 +19,7 @@ import { createComputerUseNativeHost } from './computer-use-native-host';
 import { computerUseDesktopV1Enabled } from './feature-flags';
 
 // Synthetic native metadata tests the Main integration only; it is never signed-device evidence.
-function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 1 | 2 = 2) {
+function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 1 | 3 = 3) {
   const receipt = (input: unknown) => {
     const { sessionId, cancelEpoch } = computerUseNativeInputReceiptSchema
       .pick({ sessionId: true, cancelEpoch: true })

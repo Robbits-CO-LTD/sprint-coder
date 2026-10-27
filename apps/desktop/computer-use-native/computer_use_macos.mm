@@ -160,6 +160,8 @@ struct MacComputerUseSession {
   // The last approval generation an offer used (0: none). Only touched under state_mutex; the next
   // one is NextNativeApprovalGeneration of it, and an offer is never made once none is left.
   std::uint64_t approval_generation_counter = 0;
+  std::atomic<std::uint32_t> pending_start_work{0};
+
 };
 
 // The caller holds state_mutex. Any state change a ticket could depend on supersedes it.
@@ -172,6 +174,13 @@ constexpr std::size_t kMaxDispatchReplayEntries = 128;
 constexpr std::size_t kMaxInflightDispatchEntries = 1;
 std::unordered_map<std::string, std::shared_ptr<MacComputerUseSession>> mac_sessions;
 std::unordered_map<std::string, std::shared_ptr<MacComputerUseSession>> mac_pending_sessions;
+// Initial starts retain their identity even when startup fails before a session is published.
+// Unconfirmed owners are never evicted; admission fails before work when this table is full.
+constexpr std::size_t kMaxMacStartLifetimes = 16;
+std::unordered_map<std::string, std::shared_ptr<MacComputerUseSession>> mac_start_lifetimes;
+bool MacStartIdRetiredLocked(const std::string& session_id);
+void ReleaseMacStartWork(const std::shared_ptr<MacComputerUseSession>& session);
+
 std::mutex mac_sessions_mutex;
 std::mutex mac_dispatch_serial_mutex;
 
@@ -1605,6 +1614,11 @@ struct AsyncNativeStartSessionWork {
   CGRect screen_bounds{};
   std::string error_code;
   std::string error_message;
+  bool owns_start_work = false;
+  ~AsyncNativeStartSessionWork() {
+    if (owns_start_work && session != nullptr) ReleaseMacStartWork(session);
+  }
+
 };
 
 bool PerformNativeStartSession(AsyncNativeStartSessionWork* work);
@@ -1683,6 +1697,10 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       if (mac_pending_sessions.contains(request.session_id))
         return ThrowNativeError(env, "SESSION_BUSY",
                                 "The native session start is already pending");
+      if (MacStartIdRetiredLocked(request.session_id))
+        return ThrowNativeError(env, "SESSION_ID_REUSE", "A closed start id cannot be reused");
+      if (mac_start_lifetimes.size() >= kMaxMacStartLifetimes)
+        return ThrowNativeError(env, "SESSION_LIMIT", "Unconfirmed native starts remain");
       if (!mac_sessions.empty() || !mac_pending_sessions.empty())
         return ThrowNativeError(env, "SESSION_LIMIT",
                                 "Only one Computer Use session is allowed");
@@ -1709,6 +1727,7 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       work->session->observation_publication_epoch.store(
           current_cancel_epoch, std::memory_order_release);
       mac_pending_sessions.emplace(request.session_id, work->session);
+      mac_start_lifetimes.emplace(request.session_id, work->session);
       work->start_cancel_epoch = current_cancel_epoch;
     }
   }
@@ -1719,6 +1738,8 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
     return ThrowNativeError(env, "CLASSIFIER_ROUTE_CHANGED",
                             "The native session classifier route changed");
 
+  work->session->pending_start_work.fetch_add(1, std::memory_order_acq_rel);
+  work->owns_start_work = true;
   napi_value promise;
   if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
     RemovePendingStart(*work);
@@ -2038,8 +2059,6 @@ bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {
     native_session->expected_bounds = selected_bounds;
     native_session->active_window_id = window_id;
     native_session->active_window_identity = window_identity;
-    native_session->cancel_epoch.store(start_cancel_epoch,
-                                       std::memory_order_release);
     native_session->observation_publication_epoch.store(
         start_cancel_epoch, std::memory_order_release);
     std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
@@ -2051,8 +2070,6 @@ bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {
     mac_sessions.emplace(session_id, native_session);
   } else {
     native_session = existing_session;
-    native_session->cancel_epoch.store(start_cancel_epoch,
-                                       std::memory_order_release);
     native_session->observation_publication_epoch.store(
         start_cancel_epoch, std::memory_order_release);
   }
@@ -2190,33 +2207,53 @@ constexpr std::size_t kMaximumClosedMacSessions = 16;
 
 // The caller already holds mac_sessions_mutex, so this helper takes no lock of its own: the
 // registry is an extension of the session maps and follows their locking.
-void RememberClosingMacSession(const std::string& session_id,
+bool RememberClosingMacSession(const std::string& session_id,
                                const std::shared_ptr<MacComputerUseSession>& session,
                                std::uint64_t cancel_epoch) {
   const auto existing = mac_closed_sessions.find(session_id);
   if (existing != mac_closed_sessions.end()) {
+    // A verified drain cannot be downgraded by an older completion.
+    if (existing->second.drained) return true;
     existing->second = MacClosedSessionRecord{session, cancel_epoch, 0, false};
-    return;
+    return true;
   }
   while (mac_closed_session_order.size() >= kMaximumClosedMacSessions) {
     // An unconfirmed record is the only way back from a close that lost its receipt, so drop a
-    // drain that is already confirmed first. Only a process whose drains keep failing across many
-    // sequential sessions can fill every slot with unconfirmed records; evicting the oldest of
-    // those puts that one session id back to answering SESSION_MISSING, which is what keeps the
-    // registry bounded.
+    // drain that is already confirmed and has no queued start left. If none can be evicted,
+    // leave the owner tracked and report an unconfirmed stop instead of losing its proof.
     auto victim = std::find_if(
         mac_closed_session_order.begin(), mac_closed_session_order.end(),
         [](const std::string& candidate) {
           const auto record = mac_closed_sessions.find(candidate);
-          return record == mac_closed_sessions.end() || record->second.drained;
+          return record == mac_closed_sessions.end() ||
+                 (record->second.drained &&
+                  (record->second.session == nullptr ||
+                   record->second.session->pending_start_work.load(std::memory_order_acquire) == 0));
         });
-    if (victim == mac_closed_session_order.end()) victim = mac_closed_session_order.begin();
+    if (victim == mac_closed_session_order.end()) return false;
     mac_closed_sessions.erase(*victim);
     mac_closed_session_order.erase(victim);
   }
   mac_closed_session_order.push_back(session_id);
   mac_closed_sessions.emplace(session_id,
                               MacClosedSessionRecord{session, cancel_epoch, 0, false});
+  return true;
+}
+
+bool MacStartIdRetiredLocked(const std::string& session_id) {
+  return mac_start_lifetimes.contains(session_id) || mac_closed_sessions.contains(session_id);
+}
+
+void ReleaseMacStartWork(const std::shared_ptr<MacComputerUseSession>& session) {
+  session->pending_start_work.fetch_sub(1, std::memory_order_acq_rel);
+  std::lock_guard<std::mutex> lock(mac_sessions_mutex);
+  const auto closed = mac_closed_sessions.find(session->session_id);
+  if (closed == mac_closed_sessions.end() || !closed->second.drained ||
+      closed->second.session != session ||
+      session->pending_start_work.load(std::memory_order_acquire) != 0) return;
+  const auto owner = mac_start_lifetimes.find(session->session_id);
+  if (owner != mac_start_lifetimes.end() && owner->second == session) mac_start_lifetimes.erase(owner);
+  closed->second.session.reset();
 }
 
 // Unlike RememberClosingMacSession this runs from the N-API completion callback, which holds no
@@ -2229,8 +2266,13 @@ void ConfirmClosedMacSession(const std::string& session_id, std::uint64_t cancel
   if (record == mac_closed_sessions.end() || record->second.cancel_epoch != cancel_epoch) return;
   record->second.drained = true;
   record->second.input_api_attempts = input_api_attempts;
-  // Only the receipt has to survive a confirmed drain.
-  record->second.session.reset();
+  // A queued start still needs its closed owner until its completion has run.
+  const auto session = record->second.session;
+  if (session != nullptr && session->pending_start_work.load(std::memory_order_acquire) == 0) {
+    const auto owner = mac_start_lifetimes.find(session_id);
+    if (owner != mac_start_lifetimes.end() && owner->second == session) mac_start_lifetimes.erase(owner);
+    record->second.session.reset();
+  }
 }
 
 napi_value NativeStopReceipt(napi_env env, const char* result, const std::string& session_id,
@@ -2328,78 +2370,100 @@ napi_value QueueNativeStop(napi_env env, std::shared_ptr<MacComputerUseSession> 
   return promise;
 }
 
-napi_value CloseSession(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
-      !IsObject(env, argv[0]))
-    return ThrowNativeError(env, "INVALID_SESSION", "A native session close request is required");
-  std::string session_id;
-  std::uint64_t requested_cancel_epoch = 0;
-  if (!ReadNamedString(env, argv[0], "sessionId", &session_id) ||
-      !ReadNamedUInt64(env, argv[0], "cancelEpoch", &requested_cancel_epoch))
-    return ThrowNativeError(env, "INVALID_SESSION", "A native session id is required");
+napi_value CloseMacOwnedSession(napi_env env, const std::string& session_id,
+                                std::optional<std::uint64_t> supplied_epoch,
+                                bool include_failed_start) {
+  constexpr std::uint64_t kMaxSafeEpoch = 9007199254740991ULL;
   std::shared_ptr<MacComputerUseSession> session;
-  bool first_close = false;
+  bool current_owner = false;
   bool drain_confirmed = false;
-  std::uint64_t confirmed_input_api_attempts = 0;
+  std::uint64_t input_attempts = 0;
+  std::uint64_t epoch = 0;
   {
-    std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
-    const auto found = mac_sessions.find(session_id);
-    if (found != mac_sessions.end()) {
-      session = found->second;
-      if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
+    std::lock_guard<std::mutex> lock(mac_sessions_mutex);
+    const auto active = mac_sessions.find(session_id);
+    const auto pending = mac_pending_sessions.find(session_id);
+    const auto closed = mac_closed_sessions.find(session_id);
+    if (active != mac_sessions.end()) { session = active->second; current_owner = true; }
+    else if (pending != mac_pending_sessions.end()) { session = pending->second; current_owner = true; }
+    else if (closed != mac_closed_sessions.end()) {
+      session = closed->second.session;
+      drain_confirmed = closed->second.drained;
+      input_attempts = closed->second.input_api_attempts;
+    } else if (include_failed_start) {
+      const auto admitted = mac_start_lifetimes.find(session_id);
+      if (admitted != mac_start_lifetimes.end()) session = admitted->second;
+    }
+    if (session == nullptr && !drain_confirmed)
+      return ThrowNativeError(env, "SESSION_MISSING", "Native close is unconfirmed");
+    const auto previous = closed != mac_closed_sessions.end() && !current_owner
+        ? closed->second.cancel_epoch : session->cancel_epoch.load(std::memory_order_acquire);
+    if (supplied_epoch.has_value()) {
+      epoch = *supplied_epoch;
+      if (epoch <= previous)
         return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
-      mac_sessions.erase(session_id);
-      RememberClosingMacSession(session_id, session, requested_cancel_epoch);
-      first_close = true;
     } else {
-      const auto pending = mac_pending_sessions.find(session_id);
-      if (pending != mac_pending_sessions.end()) {
-        session = pending->second;
-        if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
-          return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
-        mac_pending_sessions.erase(pending);
-        RememberClosingMacSession(session_id, session, requested_cancel_epoch);
-        first_close = true;
-      } else {
-        // A repeat close for a session the first close already removed. Only the registry can
-        // answer it, and only a drain that completed answers it as confirmed.
-        const auto closed = mac_closed_sessions.find(session_id);
-        if (closed != mac_closed_sessions.end()) {
-          if (requested_cancel_epoch <= closed->second.cancel_epoch)
-            return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
-          closed->second.cancel_epoch = requested_cancel_epoch;
-          drain_confirmed = closed->second.drained;
-          confirmed_input_api_attempts = closed->second.input_api_attempts;
-          session = closed->second.session;
-        }
+      const auto base = closed != mac_closed_sessions.end() && !current_owner
+          ? previous : std::max(previous, cancellation_epoch.load(std::memory_order_acquire));
+      if (base >= kMaxSafeEpoch)
+        return ThrowNativeError(env, "INVALID_CANCEL", "The native stop epoch is exhausted");
+      epoch = base + 1;
+    }
+    if (closed != mac_closed_sessions.end() && !current_owner) {
+      closed->second.cancel_epoch = epoch;
+    } else {
+      session->closed.store(true, std::memory_order_release);
+      if (!RememberClosingMacSession(session_id, session, epoch))
+        return ThrowNativeError(env, "SESSION_LIMIT", "Native stop records are unconfirmed");
+      if (active != mac_sessions.end()) mac_sessions.erase(active);
+      if (pending != mac_pending_sessions.end()) mac_pending_sessions.erase(pending);
+    }
+    if (session != nullptr) {
+      session->closed.store(true, std::memory_order_release);
+      session->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
+      session->cancel_epoch.store(epoch, std::memory_order_release);
+      if (current_owner) {
+        auto current = cancellation_epoch.load(std::memory_order_acquire);
+        while (epoch > current && !cancellation_epoch.compare_exchange_weak(
+            current, epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
+        session->observation_publication_claimed.store(false, std::memory_order_release);
       }
     }
   }
-  if (drain_confirmed)
-    return NativeStopReceipt(env, "closed", session_id, requested_cancel_epoch,
-                             confirmed_input_api_attempts);
-  if (session != nullptr) {
-    session->closed.store(true, std::memory_order_release);
-    // No state lock here: any outstanding ticket stops matching the generation at once, and the
-    // drain clears the stored secret.
-    session->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
-    session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
-    if (first_close) {
-      // Only the close that took the session out of the active maps owns the global stop epoch and
-      // the observation publication state. A repeat close drains a session that is already gone and
-      // must not invalidate whatever session the process runs now.
-      auto current = cancellation_epoch.load(std::memory_order_acquire);
-      while (requested_cancel_epoch > current && !cancellation_epoch.compare_exchange_weak(
-          current, requested_cancel_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
-      session->observation_publication_claimed.store(false,
-                                                     std::memory_order_release);
-    }
-    const auto close_epoch = session->cancel_epoch.load(std::memory_order_acquire);
-    return QueueNativeStop(env, std::move(session), close_epoch, true);
-  }
-  return ThrowNativeError(env, "SESSION_MISSING", "Native close is unconfirmed");
+  if (drain_confirmed) return NativeStopReceipt(env, "closed", session_id, epoch, input_attempts);
+  return QueueNativeStop(env, std::move(session), epoch, true);
+}
+
+napi_value CloseSession(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  std::string session_id;
+  std::uint64_t epoch = 0;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      !IsObject(env, argv[0]) || !ReadNamedString(env, argv[0], "sessionId", &session_id) ||
+      !ReadNamedUInt64(env, argv[0], "cancelEpoch", &epoch))
+    return ThrowNativeError(env, "INVALID_SESSION", "A native session close request is required");
+  return CloseMacOwnedSession(env, session_id, epoch, false);
+}
+
+napi_value StopPendingStart(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value keys;
+  napi_value session_key;
+  bool own_session = false;
+  std::uint32_t count = 0;
+  std::string session_id;
+  if (napi_create_string_utf8(env, "sessionId", NAPI_AUTO_LENGTH, &session_key) != napi_ok ||
+      napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      !IsObject(env, argv[0]) ||
+      napi_get_all_property_names(env, argv[0], napi_key_own_only, napi_key_all_properties,
+                                 napi_key_numbers_to_strings, &keys) != napi_ok ||
+      napi_get_array_length(env, keys, &count) != napi_ok || count != 1 ||
+      napi_has_own_property(env, argv[0], session_key, &own_session) != napi_ok || !own_session ||
+      !ReadNamedString(env, argv[0], "sessionId", &session_id) || session_id.empty())
+    return ThrowNativeError(env, "INVALID_SESSION", "A pending start id is required");
+  return CloseMacOwnedSession(env, session_id, std::nullopt, true);
 }
 
 bool ReadWindowBounds(std::uint32_t window_id, CGRect* bounds) {
@@ -7156,6 +7220,7 @@ napi_value Init(napi_env env, napi_value exports) {
       {"dispatchApproved", nullptr, DispatchApproved, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"close", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"stopPendingStart", nullptr, StopPendingStart, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;

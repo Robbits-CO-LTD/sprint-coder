@@ -29,7 +29,7 @@ const artifactSha256 = createHash('sha256').update(readFileSync(artifact)).diges
 if (
   manifest.sourceCommit !== sourceCommit ||
   manifest.platform !== process.platform ||
-  manifest.apiVersion !== 2 ||
+  manifest.apiVersion !== 3 ||
   manifest.protocolVersion !== 1 ||
   manifest.binaryDigest !== artifactSha256 ||
   manifest.moduleDigest !== artifactSha256

@@ -73,7 +73,7 @@ function packageFixture(
       platform,
       architecture: platform === 'darwin' ? 'arm64' : 'x64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: createHash('sha256').update(bytes).digest('hex'),
       binaryDigest: createHash('sha256').update(bytes).digest('hex'),
@@ -330,7 +330,7 @@ describe('Windows native helper compile boundary', () => {
       assertWindowsComputerUseHelperHandshake(
         {
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           platform: 'win32',
           sourceCommit: 'd'.repeat(40),
         },
@@ -703,7 +703,8 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain('bool ReadOptionalJsonBoolean(');
     expect(source).toContain('json.find(needle, position + needle.size())');
     expect(source).toContain('json.substr(cursor, 4) == "true"');
-    expect(startSource).toContain('ReadOptionalJsonBoolean(metadata, "resume"');
+    expect(startSource).toContain('ParseWindowsStartParameters(metadata, &parsed)');
+    expect(source).toContain('ReadOptionalJsonBoolean(metadata, "resume"');
     expect(startSource).toContain('else if (explicit_resume)');
     expect(startSource).toContain('ResolveWindowsExplicitResumeTarget(');
     expect(existingV2Source).toContain('if (input.explicit_resume) {');
@@ -732,7 +733,7 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain('session.has_observation = true');
   });
 
-  it('declares the Windows explicit-resume parser state in StartWindowsSession only', () => {
+  it('initializes explicit-resume in the shared admission and start parser', () => {
     const source = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
       'utf8',
@@ -747,10 +748,16 @@ describe('Windows native helper compile boundary', () => {
     );
 
     expect(listSource).not.toContain('bool explicit_resume');
-    expect(startSource).toContain('bool explicit_resume = false;');
-    expect(startSource.indexOf('bool explicit_resume = false;')).toBeLessThan(
-      startSource.indexOf('ReadOptionalJsonBoolean(metadata, "resume"'),
+    const parser = source.slice(
+      source.indexOf('struct WindowsStartParameters {'),
+      source.indexOf('bool StartWindowsSession('),
     );
+    expect(parser).toContain('bool explicit_resume = false;');
+    expect(parser.indexOf('bool explicit_resume = false;')).toBeLessThan(
+      parser.indexOf('ReadOptionalJsonBoolean(metadata, "resume"'),
+    );
+    expect(startSource).toContain('WindowsStartParameters parsed;');
+    expect(startSource).toContain('ParseWindowsStartParameters(metadata, &parsed)');
   });
 
   it('carries an OS-evidenced target policy language through every Windows response boundary', () => {
@@ -1274,7 +1281,7 @@ describe('macOS native capture boundary', () => {
     expect(source).toContain(
       'BoundsEqual(session->observation_bounds, request.observation_bounds)',
     );
-    expect(source).toContain('mac_sessions.erase(session_id)');
+    expect(source).toContain('mac_sessions.erase(active)');
     expect(source).toContain('"nativeObservationRevision"');
   });
 
@@ -1618,7 +1625,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: 'a'.repeat(64),
       binaryDigest: 'a'.repeat(64),
@@ -1639,7 +1646,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       requireAddon: () => ({
-        probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+        probe: () => ({ protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' }),
       }),
     });
     expect(binding.probe.available).toBe(false);
@@ -1649,8 +1656,8 @@ describe('Computer Use native manifest and runtime gate', () => {
   it('requires the feature flag, packaged path, digest, and native handshake', () => {
     const fixture = packageFixture();
     const addon = {
-      probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
-      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
+      probe: () => ({ protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 3, platform: 'darwin', napiVersion: 10 }),
     };
     const binding = loadComputerUseNative({
       environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
@@ -1727,7 +1734,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       const handshake = {};
       for (const [key, value] of Object.entries({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         platform: 'darwin',
         napiVersion: 10,
       }))
@@ -1741,7 +1748,7 @@ describe('Computer Use native manifest and runtime gate', () => {
         platform: 'darwin',
         architecture: 'arm64',
         requireAddon: () => ({
-          probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+          probe: () => ({ protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' }),
           handshake: () => handshake,
         }),
         verifySignature: () => 'a'.repeat(64),
@@ -1788,10 +1795,10 @@ describe('Computer Use native manifest and runtime gate', () => {
           ? {}
           : { compiledPin: { ...pin, eligibility: compiledEligibility } as unknown as typeof pin }),
         requireAddon: () => ({
-          probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+          probe: () => ({ protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' }),
           handshake: () => ({
             protocolVersion: 1,
-            apiVersion: 2,
+            apiVersion: 3,
             platform: 'darwin',
             napiVersion: 10,
             ...(attestation === undefined ? {} : { eligibility: attestation }),
@@ -1852,10 +1859,10 @@ describe('Computer Use native manifest and runtime gate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       requireAddon: () => ({
-        probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+        probe: () => ({ protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' }),
         handshake: () => ({
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           platform: 'darwin',
           napiVersion: 10,
           ...change,
@@ -1885,7 +1892,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       architecture: 'x64',
       probeHelper: () => ({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         platform: 'win32',
         napiVersion: 10,
         sourceCommit: 'f'.repeat(40),
@@ -1932,7 +1939,7 @@ describe('Computer Use native manifest and runtime gate', () => {
           return {
             probe: () => ({
               protocolVersion: 1,
-              apiVersion: 2,
+              apiVersion: 3,
               available: true,
               backend: 'fixture',
             }),
@@ -1940,7 +1947,7 @@ describe('Computer Use native manifest and runtime gate', () => {
         },
         probeHelper: () => {
           loaded = true;
-          return { protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' };
+          return { protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' };
         },
       });
       expect(binding.probe.available).toBe(false);
@@ -1960,7 +1967,7 @@ describe('Computer Use native manifest and runtime gate', () => {
         packaged: true,
         platform: 'darwin',
         manifest,
-        probe: { protocolVersion: 1, apiVersion: 2, available: false, backend: 'fixture' },
+        probe: { protocolVersion: 1, apiVersion: 3, available: false, backend: 'fixture' },
         artifactDigest: manifest['moduleDigest'],
       }).available,
     ).toBe(false);
@@ -1971,11 +1978,11 @@ describe('Computer Use native manifest and runtime gate', () => {
     const addon = {
       probe: () => ({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'fixture',
       }),
-      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 3, platform: 'darwin', napiVersion: 10 }),
     };
     const binding = loadComputerUseNative({
       environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
@@ -2005,7 +2012,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       verifySignature: () => 'a'.repeat(64),
       probeHelper: () => ({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         sourceCommit: 'f'.repeat(40),
         platform: 'win32',
         napiVersion: 10,
@@ -2049,7 +2056,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       verifySignature: () => 'a'.repeat(64),
       probeHelper: () => ({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         sourceCommit: 'e'.repeat(40),
         platform: 'win32',
         napiVersion: 10,
@@ -2082,7 +2089,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
 
   const windowsProbe = (sourceCommit = 'f'.repeat(40)) => ({
     protocolVersion: 1,
-    apiVersion: 2,
+    apiVersion: 3,
     sourceCommit,
     platform: 'win32',
     napiVersion: 10,
@@ -2325,7 +2332,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
     ).toThrow('trust binding is invalid');
     expect(() =>
       assertWindowsComputerUseHelperHandshake(
-        { protocolVersion: 1, apiVersion: 2, platform: 'win32', sourceCommit: 'e'.repeat(40) },
+        { protocolVersion: 1, apiVersion: 3, platform: 'win32', sourceCommit: 'e'.repeat(40) },
         waived,
       ),
     ).toThrow('source commit mismatch');
@@ -2468,7 +2475,7 @@ describe('Computer Use native OS permission reporting', () => {
     expect(
       macGate({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'macos-ax-screen-capture-kit-cgevent',
         reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
@@ -2497,7 +2504,7 @@ describe('Computer Use native OS permission reporting', () => {
     expect(
       macGate({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'macos-ax-screen-capture-kit-cgevent',
         reason: 'SCREEN_RECORDING_PERMISSION_REQUIRED',
@@ -2528,7 +2535,7 @@ describe('Computer Use native OS permission reporting', () => {
       expect(
         macGate({
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           available: false,
           backend: 'fixture',
           reason,
@@ -2552,7 +2559,7 @@ describe('Computer Use native OS permission reporting', () => {
       expect(
         macGate({
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           available: false,
           backend: 'fixture',
           reason,
@@ -2564,7 +2571,7 @@ describe('Computer Use native OS permission reporting', () => {
     expect(
       macGate({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'fixture',
         reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
@@ -2578,7 +2585,7 @@ describe('Computer Use native OS permission reporting', () => {
     expect(
       macGate({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'fixture',
         reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
@@ -2590,7 +2597,7 @@ describe('Computer Use native OS permission reporting', () => {
   it('keeps every package refusal ahead of a native permission reason', () => {
     const permissionProbe = {
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       available: false,
       backend: 'fixture',
       reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
@@ -2649,7 +2656,7 @@ describe('Computer Use native OS permission reporting', () => {
           manifest: macManifest(fixture),
           probe: {
             protocolVersion: 1,
-            apiVersion: 2,
+            apiVersion: 3,
             available: false,
             backend: 'fixture',
             reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
@@ -2669,13 +2676,13 @@ describe('Computer Use native OS permission reporting', () => {
     const addon = {
       probe: () => ({
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         available: false,
         backend: 'fixture',
         reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
         capabilities: { accessibility: false, screenCapture: true, screenCaptureKit: true },
       }),
-      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 3, platform: 'darwin', napiVersion: 10 }),
     };
     const binding = loadComputerUseNative({
       environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },

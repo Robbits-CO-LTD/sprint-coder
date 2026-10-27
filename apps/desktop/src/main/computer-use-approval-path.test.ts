@@ -398,7 +398,7 @@ function buildHost(attested: boolean, effectiveEligibilityMode: () => ComputerUs
       platform: 'darwin',
       architecture: 'arm64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'test-native',
       moduleDigest: zero('1'),
       binaryDigest: zero('2'),
@@ -408,7 +408,7 @@ function buildHost(attested: boolean, effectiveEligibilityMode: () => ComputerUs
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       artifactPath: '/Resources/sprint_coder_computer_use_native.node',

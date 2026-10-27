@@ -5,7 +5,7 @@ export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 export type ComputerUseNativeProbe = Readonly<{
   available: boolean;
   protocolVersion: 1;
-  apiVersion: 2;
+  apiVersion: 3;
   backend: string;
   reason: string;
   artifactPath: string | null;
@@ -32,6 +32,10 @@ export type ComputerUseNativeAddon = Readonly<{
   /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
   listTargets?(input: unknown): unknown;
   startSession?(input: unknown): unknown;
+  /** API3: terminates an admitted lifetime without guessing its native epoch. */
+  stopPendingStart?(input: unknown): unknown;
+  /** Main-only Windows transport proof; never a value received from native. */
+  cancelUnsubmittedStart?(sessionId: string): 'never_sent' | 'may_have_been_sent' | 'unknown';
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
   preflight?(input: unknown): unknown;

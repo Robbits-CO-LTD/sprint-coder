@@ -161,7 +161,32 @@ std::unordered_map<std::string, CachedResponse> response_cache;
 std::deque<std::string> response_cache_order;
 std::size_t response_cache_bytes = 0;
 
+struct WindowsStartAdmission {
+  std::string session_key;
+  std::string session_id;
+  std::atomic<bool> stopped{false};
+  std::atomic<std::uint32_t> pending_requests{0};
+  std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+  // Protected by the stop/adoption mutex; the reader never touches the sessions map.
+  bool active = false;
+  bool retired = false;
+  bool terminal = false;
+  std::uint64_t terminal_epoch = 0;
+  std::unordered_map<std::string, std::string> request_digests;
+  std::deque<std::string> request_order;
+};
+
+struct WindowsStartLease {
+  std::shared_ptr<WindowsStartAdmission> owner;
+  explicit WindowsStartLease(std::shared_ptr<WindowsStartAdmission> value) : owner(std::move(value)) {
+    owner->pending_requests.fetch_add(1, std::memory_order_acq_rel);
+  }
+  ~WindowsStartLease();
+};
+
 struct WindowsSession {
+  std::shared_ptr<WindowsStartAdmission> start_owner;
   // Counts API attempts, never inferred successful effects. Shared by session refocus copies.
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
       std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -426,6 +451,65 @@ bool ReadJsonString(std::string_view json, std::string_view key,
     }
   }
   return false;
+}
+
+bool ReadJsonStringValueAt(std::string_view json, std::size_t* position, std::string* output) {
+  auto& cursor = *position;
+  if (cursor >= json.size() || json[cursor] != '"')
+    return false;
+  ++cursor;
+  std::string result;
+  while (cursor < json.size()) {
+    const char character = json[cursor++];
+    if (character == '"') {
+      *output = std::move(result);
+      return output->size() <= 4'096;
+    }
+    if (character == '\\') {
+      if (cursor >= json.size())
+        return false;
+      const char escaped = json[cursor++];
+      if (escaped == '"' || escaped == '\\' || escaped == '/')
+        result.push_back(escaped);
+      else if (escaped == 'n')
+        result.push_back('\n');
+      else if (escaped == 'r')
+        result.push_back('\r');
+      else if (escaped == 't')
+        result.push_back('\t');
+      else
+        return false;
+    } else {
+      if (static_cast<unsigned char>(character) < 0x20)
+        return false;
+      result.push_back(character);
+    }
+  }
+  return false;
+}
+
+bool ReadPendingWindowsStop(const std::string& metadata, std::string* session_id) {
+  std::size_t cursor = 0;
+  const auto space = [&] {
+    while (cursor < metadata.size() && (metadata[cursor] == ' ' || metadata[cursor] == '\t' ||
+           metadata[cursor] == '\r' || metadata[cursor] == '\n')) ++cursor;
+  };
+  space();
+  if (cursor >= metadata.size() || metadata[cursor++] != '{') return false;
+  bool operation_seen = false, session_seen = false;
+  for (int member = 0; member < 2; ++member) {
+    space(); std::string key, value;
+    if (!ReadJsonStringValueAt(metadata, &cursor, &key)) return false;
+    space(); if (cursor >= metadata.size() || metadata[cursor++] != ':') return false;
+    space(); if (!ReadJsonStringValueAt(metadata, &cursor, &value)) return false;
+    if (key == "operation" && !operation_seen && value == "stop_pending_start") operation_seen = true;
+    else if (key == "sessionId" && !session_seen && !value.empty() && value.size() <= 256) {
+      session_seen = true; *session_id = std::move(value);
+    } else return false;
+    space();
+    if (cursor >= metadata.size() || metadata[cursor++] != (member == 0 ? ',' : '}')) return false;
+  }
+  space(); return operation_seen && session_seen && cursor == metadata.size();
 }
 
 bool ReadJsonUint64(std::string_view json, std::string_view key,
@@ -3833,6 +3917,124 @@ WindowsTargetListState &WindowsTargetListControl() {
   return *state;
 }
 
+struct WindowsStartRegistry {
+  std::unordered_map<std::string, std::shared_ptr<WindowsStartAdmission>> owners;
+  std::unordered_map<std::string, std::string> keys_by_id;
+  std::deque<std::string> order;
+  std::shared_ptr<WindowsStartAdmission> input_owner;
+  std::weak_ptr<WindowsStartAdmission> last_input_owner;
+};
+
+WindowsStartRegistry &WindowsStarts() {
+  // Like the measurement slot, a lease may outlive ServePipe and static destruction.
+  static auto* registry = new WindowsStartRegistry;
+  return *registry;
+}
+
+WindowsStartLease::~WindowsStartLease() {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  const auto previous = owner->pending_requests.fetch_sub(1, std::memory_order_acq_rel);
+  auto& registry = WindowsStarts();
+  if (previous == 1 && !owner->active) {
+    owner->retired = true;
+    if (registry.input_owner == owner) registry.input_owner.reset();
+  }
+}
+
+std::shared_ptr<WindowsStartLease> AdmitWindowsStart(
+    const std::string& key, const std::string& id, const std::string& request_key,
+    const std::string& digest, std::string* reason) {
+  if (key.size() != 16 || id.empty() || id.size() > 256 || digest.size() != 64) {
+    *reason = "session_input_invalid";
+    return nullptr;
+  }
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  auto& registry = WindowsStarts();
+  const auto by_id = registry.keys_by_id.find(id);
+  auto found = registry.owners.find(key);
+  if ((by_id != registry.keys_by_id.end() && by_id->second != key) ||
+      (found != registry.owners.end() && found->second->session_id != id)) {
+    *reason = "session_id_reuse";
+    return nullptr;
+  }
+  if (found == registry.owners.end()) {
+    constexpr std::size_t limit = 16;
+    while (registry.owners.size() >= limit) {
+      const auto victim = std::find_if(registry.order.begin(), registry.order.end(),
+          [&](const auto& candidate) {
+            const auto value = registry.owners.find(candidate);
+            return value == registry.owners.end() ||
+                (value->second->terminal && !value->second->active &&
+                 value->second->pending_requests.load(std::memory_order_acquire) == 0);
+          });
+      if (victim == registry.order.end()) {
+        *reason = "session_limit";
+        return nullptr;
+      }
+      const auto value = registry.owners.find(*victim);
+      if (value != registry.owners.end()) {
+        registry.keys_by_id.erase(value->second->session_id);
+        registry.owners.erase(value);
+      }
+      registry.order.erase(victim);
+    }
+    auto owner = std::make_shared<WindowsStartAdmission>();
+    owner->session_key = key;
+    owner->session_id = id;
+    registry.keys_by_id.emplace(id, key);
+    registry.order.push_back(key);
+    found = registry.owners.emplace(key, std::move(owner)).first;
+  }
+  const auto& owner = found->second;
+  const auto prior = owner->request_digests.find(request_key);
+  if (prior != owner->request_digests.end()) {
+    if (prior->second != digest) {
+      *reason = "request_id_reuse";
+      return nullptr;
+    }
+  } else {
+    if (owner->stopped.load(std::memory_order_acquire) || owner->terminal || owner->retired) {
+      *reason = "session_id_reuse";
+      return nullptr;
+    }
+    if (owner->request_order.size() >= kMaximumCachedResponses) {
+      owner->request_digests.erase(owner->request_order.front());
+      owner->request_order.pop_front();
+    }
+    owner->request_order.push_back(request_key);
+    owner->request_digests.emplace(request_key, digest);
+  }
+  return std::make_shared<WindowsStartLease>(owner);
+}
+
+bool LatchWindowsPendingStop(const std::string& key, const std::string& id) {
+  auto& control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  auto& registry = WindowsStarts();
+  const auto found = registry.owners.find(key);
+  if (found == registry.owners.end() || found->second->session_id != id) return false;
+  const auto& owner = found->second;
+  if (!owner->stopped.exchange(true, std::memory_order_acq_rel) &&
+      !owner->terminal && registry.input_owner == owner) {
+    control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
+    control.context_candidate.reset();
+  }
+  return true;
+}
+
+bool ClaimWindowsStartInput(const std::shared_ptr<WindowsStartLease>& lease) {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  auto& registry = WindowsStarts();
+  const auto& owner = lease->owner;
+  const auto found = registry.owners.find(owner->session_key);
+  if (found == registry.owners.end() || found->second != owner || owner->terminal || owner->retired ||
+      owner->stopped.load(std::memory_order_acquire) ||
+      (registry.input_owner != nullptr && registry.input_owner != owner)) return false;
+  registry.input_owner = owner;
+  registry.last_input_owner = owner;
+  return true;
+}
+
 std::atomic<bool> &WindowsTargetListWorkerRunning() {
   return WindowsTargetListControl().running;
 }
@@ -4817,6 +5019,7 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
       app_identity, executable_digest, signer_digest, maximum_mode, not_web_file);
 }
 struct WindowsV2StartInput {
+  std::shared_ptr<WindowsStartLease> start_lease;
   std::uint32_t pid = 0;
   HWND window = nullptr;
   std::uint64_t window_value = 0;
@@ -4930,6 +5133,7 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
   const auto start_valid = [&] {
     const std::uint64_t epoch = cancellation_epoch.load(std::memory_order_acquire);
     return !parent_process_dead.load(std::memory_order_acquire) &&
+        (!input.start_lease || !input.start_lease->owner->stopped.load(std::memory_order_acquire)) &&
         control.stop_serial.load(std::memory_order_acquire) == input.stop_serial &&
         windows_v2_list_generation == input.generation && !sessions.contains(input.session_key) &&
         (epoch <= last_closed_cancel_epoch || input.cancel_epoch >= epoch);
@@ -4959,6 +5163,7 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
         bool succeeded = false;
         const auto still_valid = [&] {
           return !pending->abandoned.load(std::memory_order_acquire) &&
+              (!input.start_lease || !input.start_lease->owner->stopped.load(std::memory_order_acquire)) &&
               !parent_process_dead.load(std::memory_order_acquire) &&
               WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == input.stop_serial &&
               cancellation_epoch.load(std::memory_order_acquire) == input.initial_epoch;
@@ -5075,6 +5280,10 @@ bool StartWindowsV2NewSession(WindowsV2StartInput input, std::string *response, 
     return false;
   }
   WindowsSession session;
+  if (input.start_lease) {
+    session.start_owner = input.start_lease->owner;
+    session.input_api_attempts = input.start_lease->owner->input_api_attempts;
+  }
   const auto begin_focus = [&] {
     std::lock_guard stop_lock(control.stop_mutex);
     if (!start_valid()) {
@@ -5940,13 +6149,23 @@ std::string FrameIdKey(const sprint_coder::computer_use::FrameId &id) {
                      id.bytes.size());
 }
 
-bool StartWindowsSession(const Frame &request, const std::string &metadata,
-                         std::string *response, std::string *reason,
-                         std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
-  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
-    *reason = "session_target_rejected";
-    return false;
+std::string ResponseCacheKey(const Frame& request);
+std::string RequestPayloadDigest(const Frame& request);
+
+struct WindowsStartAttemptScope {
+  std::shared_ptr<WindowsStartAdmission> owner;
+  ~WindowsStartAttemptScope() {
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    const auto active = sessions.find(owner->session_key);
+    owner->active = active != sessions.end() && active->second.session_id == owner->session_id;
+    if (owner->active) {
+      active->second.start_owner = owner;
+      owner->input_api_attempts = active->second.input_api_attempts;
+    }
   }
+};
+
+struct WindowsStartParameters {
   std::uint64_t pid_value = 0;
   std::uint64_t window_value = 0;
   std::uint64_t cancel_epoch = 0;
@@ -5961,6 +6180,11 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   double expected_bounds_width = 0;
   double expected_bounds_height = 0;
   bool explicit_resume = false;
+};
+
+bool ParseWindowsStartParameters(const std::string& metadata, WindowsStartParameters* output) {
+  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume] = *output;
+  (void)expected_signer_digest;
   if (!ReadJsonUint64(metadata, "pid", &pid_value) || pid_value == 0 ||
       pid_value > std::numeric_limits<DWORD>::max() ||
       !ReadJsonUint64(metadata, "windowId", &window_value) ||
@@ -5982,8 +6206,27 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
                       &expected_bounds_height) ||
       !ReadOptionalJsonBoolean(metadata, "resume", &explicit_resume) ||
       expected_bounds_width <= 0 || expected_bounds_height <= 0) {
-    *reason = "session_input_invalid";
     return false;
+  }
+  return !session_id.empty() && session_id.size() <= 256;
+}
+
+bool StartWindowsSession(const Frame &request, const std::string &metadata,
+                         std::string *response, std::string *reason,
+                         std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
+                         std::shared_ptr<WindowsStartLease> start_lease = nullptr) {
+  const auto start_serial = queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
+  WindowsStartParameters parsed;
+  if (!ParseWindowsStartParameters(metadata, &parsed)) { *reason = "session_input_invalid"; return false; }
+  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume] = parsed;
+  if (!start_lease) start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), session_id,
+      ResponseCacheKey(request), RequestPayloadDigest(request), reason);
+  if (!start_lease || start_lease->owner->session_id != session_id ||
+      start_lease->owner->session_key != FrameIdKey(request.header.session_id)) return false;
+  WindowsStartAttemptScope ownership{start_lease->owner};
+  if (!ClaimWindowsStartInput(start_lease)) { *reason = "session_start_canceled"; return false; }
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+    *reason = "session_target_rejected"; return false;
   }
   // The eligibility basis the session is bound to (S5-c-3 PR-3). No field is the v1 basis, the only
   // one this function admits through (the V1 allow-list below). A field that is there must name a
@@ -6027,6 +6270,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   if (v2_basis && sessions.contains(FrameIdKey(request.header.session_id))) {
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
       WindowsV2StartInput input;
+      input.start_lease = start_lease;
       input.pid = pid;
       input.window = window;
       input.window_value = window_value;
@@ -6043,8 +6287,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       input.bounds_height = expected_bounds_height;
       input.explicit_resume = explicit_resume;
       input.cancel_epoch = cancel_epoch;
-      input.stop_serial = queued_stop_serial.value_or(
-          WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
+      input.stop_serial = start_serial;
       ReadJsonUint64(metadata, "profileRevision", &input.profile_revision);
       if (!ReadJsonUint64(metadata, "denyRulesetVersion", &input.ruleset_version)) {
         *reason = "session_target_rejected";
@@ -6056,6 +6299,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   if (v2_basis && !sessions.contains(FrameIdKey(request.header.session_id))) {
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
       WindowsV2StartInput input;
+      input.start_lease = start_lease;
       input.pid = pid;
       input.window = window;
       input.window_value = window_value;
@@ -6072,8 +6316,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       input.bounds_height = expected_bounds_height;
       input.explicit_resume = explicit_resume;
       input.cancel_epoch = cancel_epoch;
-      input.stop_serial = queued_stop_serial.value_or(
-          WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
+      input.stop_serial = start_serial;
       ReadJsonUint64(metadata, "profileRevision", &input.profile_revision);
       if (!ReadJsonUint64(metadata, "denyRulesetVersion", &input.ruleset_version) ||
           !ReadJsonUint64(metadata, "targetGeneration", &input.requested_generation)) {
@@ -6082,6 +6325,11 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       }
       return StartWindowsV2NewSession(std::move(input), response, reason);
     }
+  }
+  // Reject a stop observed before V1 synchronous I/O begins.
+  if (start_lease->owner->stopped.load(std::memory_order_acquire) ||
+      WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) != start_serial) {
+    *reason = "session_start_canceled"; return false;
   }
   ScopedKernelHandle target_process(OpenProcess(
       PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
@@ -6141,7 +6389,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   }
   const auto active_before_focus = sessions.find(session_key);
   const auto input_api_attempts = active_before_focus == sessions.end()
-      ? std::make_shared<std::atomic<std::uint64_t>>(0)
+      ? start_lease->owner->input_api_attempts
       : active_before_focus->second.input_api_attempts;
   if (active_before_focus != sessions.end() &&
       (active_before_focus->second.session_id != session_id ||
@@ -6158,6 +6406,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     return false;
   }
   const auto start_not_canceled = [&]() {
+    if (start_lease->owner->stopped.load(std::memory_order_acquire) ||
+        WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) != start_serial) return false;
     if (parent_process_dead.load(std::memory_order_acquire))
       return false;
     const std::uint64_t current =
@@ -6213,13 +6463,16 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   }
   if (GetForegroundWindow() != refocus_window) {
     if (IsIconic(window)) {
+      if (!start_not_canceled()) { *reason = "session_start_canceled"; return false; }
       input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       ShowWindow(window, SW_RESTORE);
     }
     if (refocus_window != window && IsIconic(refocus_window)) {
+      if (!start_not_canceled()) { *reason = "session_start_canceled"; return false; }
       input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       ShowWindow(refocus_window, SW_RESTORE);
     }
+    if (!start_not_canceled()) { *reason = "session_start_canceled"; return false; }
     input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
     SetForegroundWindow(refocus_window);
   }
@@ -6276,17 +6529,12 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
              cancel_epoch < effective_cancel_epoch) {
     *reason = "session_start_canceled";
     return false;
-  } else if (cancel_epoch > effective_cancel_epoch) {
-    std::uint64_t current = effective_cancel_epoch;
-    while (cancel_epoch > current &&
-           !cancellation_epoch.compare_exchange_weak(
-               current, cancel_epoch, std::memory_order_acq_rel,
-               std::memory_order_acquire)) {
-    }
-    effective_cancel_epoch = cancellation_epoch.load(std::memory_order_acquire);
   }
+  std::optional<WindowsSession> prepared_session;
   if (existing == sessions.end()) {
-    WindowsSession session;
+    prepared_session.emplace();
+    auto& session = *prepared_session;
+    session.start_owner = start_lease->owner;
     session.input_api_attempts = input_api_attempts;
     session.session_id = session_id;
     session.pid = pid;
@@ -6298,9 +6546,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     session.active_window_kind = "application";
     session.process_start = process_start;
     session.canonical_path = process_executable.identity.path;
-    session.process_handle = target_process.release();
+    session.process_handle = target_process.value;
     session.executable_file = process_executable.file;
-    process_executable.file = INVALID_HANDLE_VALUE;
     session.executable_volume_serial =
         process_executable.identity.file_identity.volume_serial;
     session.executable_file_id =
@@ -6312,8 +6559,26 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     session.maximum_mode = maximum_mode;
     session.eligibility_basis = eligibility_basis;
     session.not_web_file = v2_not_web_file;
-    session.cancel_epoch = effective_cancel_epoch;
-    sessions.emplace(session_key, std::move(session));
+  }
+  {
+    std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+    if (!start_not_canceled()) { *reason = "session_start_canceled"; return false; }
+    const auto current_epoch = cancellation_epoch.load(std::memory_order_acquire);
+    effective_cancel_epoch = std::max(current_epoch, cancel_epoch);
+    if (effective_cancel_epoch != current_epoch) {
+      auto expected = current_epoch;
+      if (!cancellation_epoch.compare_exchange_strong(expected, effective_cancel_epoch,
+              std::memory_order_acq_rel, std::memory_order_acquire)) {
+        *reason = "session_start_canceled"; return false;
+      }
+    }
+    if (prepared_session.has_value()) {
+      prepared_session->cancel_epoch = effective_cancel_epoch;
+      const auto inserted = sessions.emplace(session_key, std::move(*prepared_session));
+      if (!inserted.second) { *reason = "session_start_canceled"; return false; }
+      (void)target_process.release();
+      process_executable.file = INVALID_HANDLE_VALUE;
+    }
   }
   // A start or a resume begins a new measurement; any ticket from before it is void.
   InvalidateWindowsTicket(session_key);
@@ -6334,6 +6599,20 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
               ",\"pid\":" + std::to_string(pid) + ",\"windowHandle\":\"" +
               std::to_string(window_value) + "\"}";
   return true;
+}
+
+void MarkWindowsStartClosed(const std::string& key, const ClosedWindowsSessionRecord& receipt) {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  auto& registry = WindowsStarts();
+  const auto found = registry.owners.find(key);
+  if (found == registry.owners.end() || found->second->session_id != receipt.session_id) return;
+  const auto& owner = found->second;
+  owner->active = false;
+  owner->terminal = true;
+  owner->terminal_epoch = std::max(owner->terminal_epoch, receipt.cancel_epoch);
+  owner->stopped.store(true, std::memory_order_release);
+  if (registry.input_owner == owner && owner->pending_requests.load(std::memory_order_acquire) == 0)
+    registry.input_owner.reset();
 }
 
 bool CloseWindowsSession(const Frame &request, const std::string& metadata, std::string *response) {
@@ -6368,9 +6647,68 @@ bool CloseWindowsSession(const Frame &request, const std::string& metadata, std:
     ForgetWindowsTicket(session_key);
     sessions.erase(found);
   }
+  MarkWindowsStartClosed(session_key, receipt);
   *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" +
       JsonEscape(receipt.session_id) + "\",\"cancelEpoch\":" + std::to_string(receipt.cancel_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(receipt.input_api_attempts) + "}";
+  return true;
+}
+
+bool StopPendingWindowsStart(const Frame& request, const std::string& metadata,
+                             std::string* response, std::string* reason) {
+  constexpr std::uint64_t max_safe_epoch = 9007199254740991ULL;
+  std::string id;
+  if (!ReadPendingWindowsStop(metadata, &id)) { *reason = "session_input_invalid"; return false; }
+  const auto key = FrameIdKey(request.header.session_id);
+  if (!LatchWindowsPendingStop(key, id)) { *reason = "native_close_unconfirmed"; return false; }
+  std::shared_ptr<WindowsStartAdmission> owner;
+  std::uint64_t epoch = 0;
+  bool active = false;
+  {
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    auto& registry = WindowsStarts();
+    const auto found = registry.owners.find(key);
+    if (found == registry.owners.end() || found->second->session_id != id) {
+      *reason = "native_close_unconfirmed"; return false;
+    }
+    owner = found->second;
+    const auto session = sessions.find(key);
+    active = session != sessions.end() && session->second.session_id == id;
+    if (active) owner->input_api_attempts = session->second.input_api_attempts;
+    const auto base = owner->terminal ? owner->terminal_epoch :
+        std::max(cancellation_epoch.load(std::memory_order_acquire),
+                 active ? session->second.cancel_epoch : owner->terminal_epoch);
+    if (base >= max_safe_epoch) { *reason = "native_stop_epoch_exhausted"; return false; }
+    epoch = base + 1;
+    if (!active) {
+      if (!owner->terminal && registry.input_owner == owner) {
+        auto current = cancellation_epoch.load(std::memory_order_acquire);
+        while (epoch > current && !cancellation_epoch.compare_exchange_weak(current, epoch,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {}
+        last_closed_cancel_epoch = std::max(last_closed_cancel_epoch, epoch);
+      } else if (!owner->terminal && registry.input_owner == nullptr && registry.last_input_owner.lock() == owner) {
+        // The failed input owner has no work left. Release its old barrier without canceling
+        // unrelated discovery by advancing the global epoch.
+        last_closed_cancel_epoch = std::max(last_closed_cancel_epoch,
+            cancellation_epoch.load(std::memory_order_acquire));
+      }
+      owner->terminal = true;
+      owner->terminal_epoch = epoch;
+      owner->active = false;
+      if (registry.input_owner == owner && owner->pending_requests.load(std::memory_order_acquire) == 0)
+        registry.input_owner.reset();
+    }
+  }
+  if (active) {
+    const auto close_metadata = "{\"cancelEpoch\":" + std::to_string(epoch) + "}";
+    if (!CloseWindowsSession(request, close_metadata, response)) {
+      *reason = "native_close_unconfirmed"; return false;
+    }
+    return true;
+  }
+  *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" + JsonEscape(id) +
+      "\",\"cancelEpoch\":" + std::to_string(epoch) + ",\"inputAttemptCount\":" +
+      std::to_string(owner->input_api_attempts->load(std::memory_order_acquire)) + "}";
   return true;
 }
 
@@ -10163,7 +10501,9 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
 
 bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const Frame &request, bool *handshaken,
-                       std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
+                       std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
+                       std::shared_ptr<WindowsStartLease> start_lease = nullptr,
+                       const std::string& admission_error = {}) {
   const auto type = static_cast<MessageType>(request.header.message_type);
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
@@ -10228,7 +10568,10 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       // S5-c-3 PR-5: unsupported_operation in a v1 build.
       succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);
     } else if (operation == "start_session") {
-      succeeded = StartWindowsSession(request, metadata, &response, &reason, queued_stop_serial);
+      if (!admission_error.empty()) reason = admission_error;
+      else succeeded = StartWindowsSession(request, metadata, &response, &reason, queued_stop_serial, std::move(start_lease));
+    } else if (operation == "stop_pending_start") {
+      succeeded = StopPendingWindowsStart(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
       succeeded = CloseWindowsSession(request, metadata, &response);
       if (!succeeded) reason = "native_close_unconfirmed";
@@ -10355,12 +10698,19 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
   constexpr std::size_t kMaximumQueuedFrames = 64;
   std::mutex queue_mutex;
   std::condition_variable queue_ready;
-  std::deque<std::pair<Frame, std::uint64_t>> queue;
+  struct QueuedFrame {
+    Frame frame;
+    std::uint64_t stop_serial = 0;
+    std::shared_ptr<WindowsStartLease> start_lease;
+    std::string admission_error;
+  };
+  std::deque<QueuedFrame> queue;
   bool reader_finished = false;
   bool reader_valid = true;
   std::thread reader([&]() {
     std::unordered_map<std::string, std::string> cancel_request_digests;
     std::deque<std::string> cancel_request_order;
+    bool reader_handshaken = false;
     Frame request;
     while (ReadFrame(pipe, &request)) {
       if (!IsBoundedUtf8(request.metadata) || !request.binary.empty()) {
@@ -10371,9 +10721,26 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
                                  request.metadata.size());
       std::string operation;
       const auto type = static_cast<MessageType>(request.header.message_type);
-      const bool close = type == MessageType::kProbe &&
-                         ReadJsonString(metadata, "operation", &operation) && operation == "close_session";
-      if (type == MessageType::kCancel || close) {
+      const bool has_operation = type == MessageType::kProbe && ReadJsonString(metadata, "operation", &operation);
+      const bool close = has_operation && operation == "close_session";
+      const bool pending_stop = has_operation && operation == "stop_pending_start";
+      std::shared_ptr<WindowsStartLease> start_lease;
+      std::string admission_error;
+      // This is the same side-effect-free version check used by the consumer. The verified pipe
+      // peer may pipeline frames, but cannot obtain an owner before a valid handshake frame.
+      if (type == MessageType::kHandshake) {
+        std::uint64_t protocol = 0, api = 0;
+        if (ReadJsonUint64(metadata, "protocolVersion", &protocol) &&
+            ReadJsonUint64(metadata, "apiVersion", &api) && protocol == kProtocolVersion && api == kApiVersion)
+          reader_handshaken = true;
+      }
+      if (has_operation && operation == "start_session" && reader_handshaken) {
+        WindowsStartParameters parsed;
+        if (!ParseWindowsStartParameters(metadata, &parsed)) admission_error = "session_input_invalid";
+        else start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), parsed.session_id,
+            ResponseCacheKey(request), RequestPayloadDigest(request), &admission_error);
+      }
+      if (type == MessageType::kCancel || close || pending_stop) {
         const std::string request_key = ResponseCacheKey(request);
         const std::string request_digest = RequestPayloadDigest(request);
         const auto prior = cancel_request_digests.find(request_key);
@@ -10388,7 +10755,11 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           cancel_request_digests.emplace(request_key, request_digest);
         }
         std::uint64_t requested_epoch = 0;
-        if (new_cancel &&
+        if (new_cancel && pending_stop && reader_handshaken) {
+          std::string id;
+          if (ReadPendingWindowsStop(metadata, &id))
+            LatchWindowsPendingStop(FrameIdKey(request.header.session_id), id);
+        } else if (new_cancel && !pending_stop &&
             ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch)) {
           auto &control = WindowsTargetListControl();
           std::lock_guard stop_lock(control.stop_mutex);
@@ -10415,8 +10786,9 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           reader_valid = false;
           break;
         }
-        queue.emplace_back(std::move(request),
-                         WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
+        queue.push_back(QueuedFrame{std::move(request),
+            WindowsTargetListControl().stop_serial.load(std::memory_order_acquire),
+            std::move(start_lease), std::move(admission_error)});
       }
       queue_ready.notify_one();
       request = {};
@@ -10431,19 +10803,18 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
   bool handshaken = false;
   bool served = true;
   for (;;) {
-    Frame request;
-    std::uint64_t queued_stop_serial = 0;
+    QueuedFrame queued;
     {
       std::unique_lock lock(queue_mutex);
       queue_ready.wait(lock,
                        [&]() { return reader_finished || !queue.empty(); });
       if (queue.empty())
         break;
-      request = std::move(queue.front().first);
-      queued_stop_serial = queue.front().second;
+      queued = std::move(queue.front());
       queue.pop_front();
     }
-    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {
+    if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,
+                           std::move(queued.start_lease), queued.admission_error)) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;

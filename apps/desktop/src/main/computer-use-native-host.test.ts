@@ -25,7 +25,7 @@ function binding(
       platform,
       architecture: platform === 'win32' ? 'x64' : 'arm64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'test-native',
       moduleDigest: digest('1'),
       binaryDigest: digest('2'),
@@ -35,7 +35,7 @@ function binding(
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       artifactPath: '/Resources/sprint_coder_computer_use_native.node',
@@ -1844,7 +1844,7 @@ describe('Computer Use native Main adapter', () => {
     expect(closeEpochs).toHaveLength(5);
   });
 
-  it('fails closed when an API1 manifest is mixed with an API2 helper', () => {
+  it('fails closed when an API2 manifest is mixed with an API3 helper', () => {
     const native = binding({
       probe: () => ({}),
       pickApplication: () => ({}),
@@ -1855,7 +1855,7 @@ describe('Computer Use native Main adapter', () => {
       cancel: () => undefined,
       close: () => undefined,
     });
-    native.manifest.apiVersion = 1;
+    native.manifest.apiVersion = 2;
     expect(createComputerUseNativeHost(native, 'darwin').availability()).toMatchObject({
       handshakeReady: false,
       observe: false,

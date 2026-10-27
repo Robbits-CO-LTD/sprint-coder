@@ -166,6 +166,42 @@ class FakeWindowsHelper {
     this.pump();
   }
 
+  releaseLast(operation: string): void {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const frame = this.queue[index]!;
+      const metadata = JSON.parse(frame.metadata.toString('utf8')) as Record<string, unknown>;
+      if (metadata['operation'] === operation) {
+        this.queue.splice(index, 1);
+        this.answer(frame);
+        return;
+      }
+    }
+    throw new Error('No held request');
+  }
+
+  private answer(frame: ComputerUseNativeFrame): void {
+    const metadata = JSON.parse(frame.metadata.toString('utf8')) as Record<string, unknown>;
+    const operation = String(metadata['operation']);
+    this.served.push(operation);
+    const responder = this.responders[operation];
+    if (responder === undefined) throw new Error(`unexpected helper operation ${operation}`);
+    const [messageType, payload] = this.refused.has(operation)
+      ? (['error', { code: 'SESSION_MISSING', accepted: false }] as const)
+      : responder(metadata);
+    this.socket.emit(
+      'data',
+      encodeComputerUseNativeFrame({
+        messageType,
+        flags: 0,
+        requestId: frame.requestId,
+        sessionId: frame.sessionId,
+        cancelId: null,
+        metadata: Buffer.from(JSON.stringify(payload), 'utf8'),
+        binary: Buffer.alloc(0),
+      }),
+    );
+  }
+
   private pump(): void {
     for (let index = 0; index < this.queue.length && !this.socket.destroyed;) {
       const frame = this.queue[index]!;
@@ -178,24 +214,7 @@ class FakeWindowsHelper {
         continue;
       }
       this.queue.splice(index, 1);
-      this.served.push(operation);
-      const responder = this.responders[operation];
-      if (responder === undefined) throw new Error(`unexpected helper operation ${operation}`);
-      const [messageType, payload] = this.refused.has(operation)
-        ? (['error', { code: 'SESSION_MISSING', accepted: false }] as const)
-        : responder(metadata);
-      this.socket.emit(
-        'data',
-        encodeComputerUseNativeFrame({
-          messageType,
-          flags: 0,
-          requestId: frame.requestId,
-          sessionId: frame.sessionId,
-          cancelId: null,
-          metadata: Buffer.from(JSON.stringify(payload), 'utf8'),
-          binary: Buffer.alloc(0),
-        }),
-      );
+      this.answer(frame);
       index = 0;
     }
   }
@@ -205,7 +224,7 @@ function responders(): Readonly<Record<string, Responder>> {
   return {
     handshake: () => [
       'handshake_result',
-      { protocolVersion: 1, apiVersion: 2, platform: 'win32', napiVersion: 10, sourceCommit },
+      { protocolVersion: 1, apiVersion: 3, platform: 'win32', napiVersion: 10, sourceCommit },
     ],
     list_windows: () => [
       'probe_result',
@@ -280,7 +299,7 @@ function binding(addon: NonNullable<ComputerUseNativeBinding['addon']>): Compute
       platform: 'win32',
       architecture: 'x64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'test-native',
       moduleDigest: digest('1'),
       binaryDigest: digest('2'),
@@ -290,7 +309,7 @@ function binding(addon: NonNullable<ComputerUseNativeBinding['addon']>): Compute
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       artifactPath: helperPath,
@@ -333,7 +352,10 @@ const profile = Object.freeze({
   updatedAt: '2026-09-18T00:00:00.000Z',
 });
 
-function createTarget(customResponders: Readonly<Record<string, Responder>> = responders()): {
+function createTarget(
+  customResponders: Readonly<Record<string, Responder>> = responders(),
+  configure?: (helper: FakeWindowsHelper) => void,
+): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
   helper: () => FakeWindowsHelper;
@@ -343,13 +365,14 @@ function createTarget(customResponders: Readonly<Record<string, Responder>> = re
   // Every reconnect gets its own fake helper, the way a fresh child process would.
   onSocket = (socket) => {
     helper = new FakeWindowsHelper(socket, table);
+    configure?.(helper);
   };
   const addon = createWindowsComputerUseNativeAddon(
     helperPath,
     {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       capabilities: { observe: true, control: true },
@@ -599,7 +622,7 @@ describe('Computer Use Windows helper transport', () => {
           'handshake_result',
           {
             protocolVersion: 1,
-            apiVersion: 2,
+            apiVersion: 3,
             platform: 'win32',
             napiVersion: 10,
             sourceCommit,
@@ -950,6 +973,49 @@ describe('Computer Use Windows helper transport', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(children[0]!.killed).toBe(false);
     expect(children).toHaveLength(1);
+  });
+
+  it.each(['reply', 'timeout'] as const)(
+    'keeps a new lifetime alive after an older stop %s',
+    async (ending) => {
+      const { addon, host, helper } = createTarget();
+      await startSession(host, 'old-stop', 'old-turn');
+      helper().holdOnly('close_session');
+      const first = Promise.resolve(addon.close!({ sessionId: 'old-stop', cancelEpoch: 1 })).then(
+        () => 'reply',
+        () => 'timeout',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const second = Promise.resolve(addon.close!({ sessionId: 'old-stop', cancelEpoch: 2 }));
+      await vi.advanceTimersByTimeAsync(0);
+      helper().releaseLast('close_session');
+      await second;
+      await startSession(host, 'new-after-stop', 'new-turn');
+      if (ending === 'reply') helper().release('close_session');
+      else await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS);
+      await expect(first).resolves.toBe(ending);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(false);
+    },
+  );
+
+  it('does not tear down another preparing owner when canceling an unsent start', async () => {
+    const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
+    const first = Promise.resolve(addon.startSession!({ sessionId: 'keep-preparing', profile }));
+    const second = Promise.resolve(
+      addon.startSession!({ sessionId: 'cancel-preparing', profile }),
+    ).then(
+      () => 'sent',
+      () => 'canceled',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('cancel-preparing')).toBe('never_sent');
+    helper().release('handshake');
+    await expect(second).resolves.toBe('canceled');
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(helper().served.filter((operation) => operation === 'start_session')).toHaveLength(1);
+    expect(children[0]!.killed).toBe(false);
   });
 
   it('ends the helper when the last outstanding request is refused rather than answered', async () => {

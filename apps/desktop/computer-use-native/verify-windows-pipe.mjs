@@ -131,9 +131,9 @@ async function withHelper(run) {
       socket.write(bytes);
       return response;
     };
-    const handshake = await send(1, { operation: 'handshake', protocolVersion: 1, apiVersion: 2 });
+    const handshake = await send(1, { operation: 'handshake', protocolVersion: 1, apiVersion: 3 });
     assert.equal(handshake.type, 2);
-    assert.equal(handshake.metadata.apiVersion, 2);
+    assert.equal(handshake.metadata.apiVersion, 3);
     await run({ socket, send, expect });
     closing = true;
     socket.destroy();

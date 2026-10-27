@@ -71,7 +71,7 @@ function nativeFixture() {
       platform: 'win32',
       architecture: 'x64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'test-native',
       moduleDigest: '1'.repeat(64),
       binaryDigest: '2'.repeat(64),
@@ -89,7 +89,7 @@ function nativeFixture() {
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       artifactPath: 'C:\\Resources\\helper.exe',

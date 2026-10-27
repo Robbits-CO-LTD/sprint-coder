@@ -171,9 +171,9 @@ export function createComputerUseNativeHost(
   const handshakeReady =
     packageReady &&
     binding.manifest.protocolVersion === 1 &&
-    binding.manifest.apiVersion === 2 &&
+    binding.manifest.apiVersion === 3 &&
     binding.probe.protocolVersion === 1 &&
-    binding.probe.apiVersion === 2 &&
+    binding.probe.apiVersion === 3 &&
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
@@ -988,7 +988,7 @@ export function createUnavailableComputerUseNativeHost(
         platform: nativePlatform,
         architecture: platform === 'win32' ? 'x64' : process.arch === 'arm64' ? 'arm64' : 'x64',
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         nativeVersion: 'disabled',
         moduleDigest: zero,
         binaryDigest: zero,
@@ -998,7 +998,7 @@ export function createUnavailableComputerUseNativeHost(
       probe: {
         available: false,
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         backend: `${platform}-unavailable`,
         reason: 'FEATURE_FLAG_DISABLED',
         artifactPath: null,
