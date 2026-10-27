@@ -8,6 +8,7 @@ import {
   hasUnsafeWindowsDllImport,
   hasWindowsApiSetContract,
   prepareExecutionImage,
+  linuxSandboxExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
 } from './prepared-execution-image';
@@ -23,6 +24,51 @@ const identity = (digest: string) => ({
   ctimeNs: '1000000',
   mode: 0o755,
   digest,
+});
+
+describe('Linux sandbox image mapping', () => {
+  it('maps generated image paths and the Node pin without rewriting shebang options or caller arguments', () => {
+    const node = '/proc/123/fd/7';
+    const script = '/proc/123/fd/8';
+    const callerArguments = [node, script, '--sealed-images', '--'];
+    const image = linuxSandboxExecutionImage({
+      launchPath: node,
+      argvPrefix: [script, script],
+      linuxSealedSources: [node, script],
+      environment: { NODE_OPTIONS: 'constant-preload', SPRINT_CODER_PINNED_EXECUTABLE: node },
+    });
+    expect(image.launchPath).toBe('/dev/sprint-coder-execution/image-0');
+    expect(image.argvPrefix).toEqual([script, '/dev/sprint-coder-execution/image-1']);
+    expect([...image.argvPrefix, ...callerArguments].slice(2)).toEqual(callerArguments);
+    expect(image.environment).toEqual({
+      NODE_OPTIONS: 'constant-preload',
+      SPRINT_CODER_PINNED_EXECUTABLE: image.launchPath,
+    });
+    expect(image.sandboxArguments).toEqual(['--sealed-images', JSON.stringify([node, script])]);
+  });
+
+  it('keeps the old invocation for trusted system images', () => {
+    expect(linuxSandboxExecutionImage({ launchPath: '/bin/sh', argvPrefix: [] })).toEqual({
+      launchPath: '/bin/sh',
+      argvPrefix: [],
+      environment: undefined,
+      sandboxArguments: [],
+    });
+  });
+
+  it('rejects more than an executable and its single interpreter or duplicate sources', () => {
+    for (const sources of [
+      ['a', 'b', 'c'],
+      ['a', 'a'],
+    ])
+      expect(() =>
+        linuxSandboxExecutionImage({
+          launchPath: 'a',
+          argvPrefix: [],
+          linuxSealedSources: sources,
+        }),
+      ).toThrow('Invalid Linux sealed execution sources');
+  });
 });
 
 describe('sealedExecutableIdentityDigest', () => {
