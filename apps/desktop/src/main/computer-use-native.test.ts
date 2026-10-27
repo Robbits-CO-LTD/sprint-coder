@@ -423,6 +423,10 @@ describe('Windows native helper compile boundary', () => {
       newStart.indexOf('const auto still_valid'),
       newStart.indexOf('struct Apartment'),
     );
+    const existingStartGate = source.slice(
+      source.indexOf('bool WindowsV2ExistingStartStillCurrent('),
+      source.indexOf('bool WindowsV2ExistingStartRequestMatches('),
+    );
 
     expect(watcherSource.indexOf('parent_process_dead.store')).toBeGreaterThanOrEqual(0);
     expect(watcherSource.indexOf('cancellation_epoch.fetch_add')).toBeGreaterThanOrEqual(0);
@@ -440,6 +444,9 @@ describe('Windows native helper compile boundary', () => {
     expect(startSource).toContain('parent_process_dead.load(std::memory_order_acquire)');
     expect(newStartConsumer).toContain('parent_process_dead.load(std::memory_order_acquire)');
     expect(newStartWorker).toContain('parent_process_dead.load(std::memory_order_acquire)');
+    expect(existingStartGate).toContain('!parent_process_dead.load(std::memory_order_acquire)');
+    expect(existingStartGate).toContain('cancellation_epoch.load(std::memory_order_acquire)');
+    expect(existingStartGate).toContain('input.stop_serial');
     expect(source.match(/\bSendInput\(/gu)).toHaveLength(1);
     expect(source.match(/SendInputForBoundTarget\(/gu)?.length).toBeGreaterThanOrEqual(7);
   });
@@ -640,6 +647,10 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('bool StartWindowsSession('),
       source.indexOf('bool CloseWindowsSession('),
     );
+    const existingV2Source = source.slice(
+      source.indexOf('bool StartWindowsV2ExistingSession('),
+      source.indexOf('// END windows v2 existing start'),
+    );
 
     expect(resolverSource).toContain('CaptureWindowsDialogInventory');
     expect(resolverSource).toContain('inventory.digest != session.dialog_set_digest');
@@ -653,6 +664,14 @@ describe('Windows native helper compile boundary', () => {
     expect(startSource).toContain('refocused_dialogs.digest !=');
     expect(startSource).toContain('active_before_focus->second.dialog_set_digest');
     expect(startSource).not.toContain('dialog_set_revision = 0');
+    expect(existingV2Source).toContain(
+      'ResolveWindowsSessionRefocusTarget(session, &refocus_window, reason)',
+    );
+    expect(existingV2Source).toContain('refocused_dialogs.digest != session.dialog_set_digest');
+    expect(existingV2Source).toContain(
+      'refocused_dialogs.active_identity != session.active_window_identity',
+    );
+    expect(existingV2Source).not.toContain('dialog_set_revision = 0');
   });
 
   it('rebinds only an explicit resume to the current safe dialog set and requires a fresh observation', () => {
@@ -672,6 +691,10 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('bool StartWindowsSession('),
       source.indexOf('bool CloseWindowsSession('),
     );
+    const existingV2Source = source.slice(
+      source.indexOf('bool StartWindowsV2ExistingSession('),
+      source.indexOf('// END windows v2 existing start'),
+    );
     const dispatchSource = source.slice(
       source.indexOf('bool DispatchWindowsAction('),
       source.indexOf('BackendProbe ProbeBackend('),
@@ -683,6 +706,11 @@ describe('Windows native helper compile boundary', () => {
     expect(startSource).toContain('ReadOptionalJsonBoolean(metadata, "resume"');
     expect(startSource).toContain('else if (explicit_resume)');
     expect(startSource).toContain('ResolveWindowsExplicitResumeTarget(');
+    expect(existingV2Source).toContain('if (input.explicit_resume) {');
+    expect(existingV2Source).toContain(
+      'ResolveWindowsExplicitResumeTarget(&session, &refocus_window, reason)',
+    );
+    expect(existingV2Source).toContain('} else if (!ResolveWindowsSessionRefocusTarget(');
     expect(resumeSource).toContain('CaptureWindowsDialogInventory');
     expect(resumeSource).toContain('GetLastActivePopup');
     expect(resumeSource).toContain('session->dialog_set_revision += 1');
