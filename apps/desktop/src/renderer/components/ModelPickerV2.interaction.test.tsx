@@ -100,6 +100,192 @@ afterEach(async () => {
   useAppStore.setState(initial, true);
   Reflect.deleteProperty(window, 'sprintCoder');
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe('ModelPickerV2 next-page recovery', () => {
+  const firstItems = Array.from({ length: 50 }, (_, index) =>
+    model({ modelId: `page-${index}`, displayName: `Model ${index}` }),
+  );
+  const nextItems = Array.from({ length: 50 }, (_, index) =>
+    model({ modelId: `page-${index + 50}`, displayName: `Model ${index + 50}` }),
+  );
+  const firstPage = { ...catalogResult(firstItems), total: 100, nextCursor: 'c50' };
+  const lastPage = { ...catalogResult(nextItems), total: 100 };
+  async function scrollEnd() {
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+  async function failNext() {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockRejectedValueOnce(new Error('page unavailable'));
+    await renderPicker('paging');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    await scrollEnd();
+  }
+  const retry = () =>
+    container.querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-next-retry"]');
+  const count = () => container.querySelector('[data-testid="model-picker-v2-count"]')?.textContent;
+
+  it('keeps loaded rows, reports the failed page and retries the same cursor only once', async () => {
+    await failNext();
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(container.textContent).toContain('続きを読み込めませんでした');
+    expect(retry()).not.toBeNull();
+    await scrollEnd();
+    expect(query).toHaveBeenCalledTimes(2);
+    let resolve!: (value: ModelCatalogQueryResult) => void;
+    query.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const button = retry()!;
+    button.focus();
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    await scrollEnd();
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2]?.[0]).toEqual(query.mock.calls[1]?.[0]);
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(button);
+    await act(async () => resolve(lastPage));
+    expect(count()).toBe('100件中100件を読み込み済み');
+    expect(retry()).toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="model-picker-v2-search"]'),
+    );
+  });
+
+  it('retains the same retry after a repeated failure and replaces changed catalog revisions', async () => {
+    await failNext();
+    query.mockRejectedValueOnce(new Error('still unavailable'));
+    expect(retry()).not.toBeNull();
+    const button = retry()!;
+    button.focus();
+    await act(async () => button.click());
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(document.activeElement).toBe(button);
+    query.mockResolvedValueOnce({
+      ...catalogResult([
+        model({ connectionId: 'connection-one', modelId: 'same', displayName: 'Fresh one' }),
+        model({ connectionId: 'connection-two', modelId: 'same', displayName: 'Fresh two' }),
+      ]),
+      revision: 2,
+    });
+    await act(async () => button.click());
+    expect(count()).toBe('2件中2件を読み込み済み');
+    expect(container.textContent).toContain('Fresh one');
+    expect(container.textContent).toContain('Fresh two');
+    expect(retry()).toBeNull();
+  });
+  async function changeSearch(text: string) {
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-testid="model-picker-v2-search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  it.each(['search', 'access', 'reopen', 'unmount'] as const)(
+    'ignores stale retry success and failure after %s',
+    async (change) => {
+      vi.useFakeTimers();
+      await failNext();
+      let resolve!: (value: ModelCatalogQueryResult) => void;
+      query.mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await act(async () => retry()!.click());
+      const fresh = {
+        ...catalogResult([model({ modelId: 'fresh', displayName: 'Fresh result' })]),
+        revision: 9,
+      };
+      query.mockResolvedValueOnce(fresh);
+      if (change === 'search') {
+        await changeSearch('fresh');
+        // An old response during the debounce interval must not append rows or hide the new loading state.
+        await act(async () => resolve(lastPage));
+        expect(count()).not.toBe('100件中100件を読み込み済み');
+        await act(async () => vi.advanceTimersByTimeAsync(200));
+      } else if (change === 'access') {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-access-api"]')!
+            .click(),
+        );
+      } else if (change === 'reopen') {
+        const trigger = container.querySelector<HTMLButtonElement>(
+          '[data-testid="model-picker-v2-trigger"]',
+        )!;
+        await act(async () => trigger.click());
+        await act(async () => trigger.click());
+      } else {
+        await renderPicker('replacement');
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+            .click(),
+        );
+      }
+      await act(async () => resolve(lastPage));
+      expect(count()).toBe('1件中1件を読み込み済み');
+      expect(container.textContent).toContain('Fresh result');
+      expect(retry()).toBeNull();
+    },
+  );
+
+  it('does not let an obsolete failure release a newer request or steal focus', async () => {
+    vi.useFakeTimers();
+    await failNext();
+    let reject!: (reason: Error) => void;
+    query.mockReturnValueOnce(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    await act(async () => retry()!.click());
+    let resolve!: (value: ModelCatalogQueryResult) => void;
+    query.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-access-api"]')!
+        .click(),
+    );
+    await act(async () => reject(new Error('late failure')));
+    expect(count()).toBe('検索中');
+    expect(retry()).toBeNull();
+    await act(async () => resolve(catalogResult([])));
+    expect(count()).toBe('0件中0件を読み込み済み');
+  });
+
+  it('refreshes the original query when typing is reverted before debounce', async () => {
+    vi.useFakeTimers();
+    await failNext();
+    query.mockResolvedValueOnce(firstPage);
+    await changeSearch('x');
+    await changeSearch('');
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(retry()).toBeNull();
+  });
 });
 
 describe('ModelPickerV2 trigger name after a remount', () => {
