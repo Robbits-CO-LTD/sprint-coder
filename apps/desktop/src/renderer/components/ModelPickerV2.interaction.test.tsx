@@ -100,6 +100,402 @@ afterEach(async () => {
   useAppStore.setState(initial, true);
   Reflect.deleteProperty(window, 'sprintCoder');
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe('ModelPickerV2 next-page recovery', () => {
+  const firstItems = Array.from({ length: 50 }, (_, index) =>
+    model({ modelId: `page-${index}`, displayName: `Model ${index}` }),
+  );
+  const nextItems = Array.from({ length: 50 }, (_, index) =>
+    model({ modelId: `page-${index + 50}`, displayName: `Model ${index + 50}` }),
+  );
+  const firstPage = { ...catalogResult(firstItems), total: 100, nextCursor: 'c50' };
+  const lastPage = { ...catalogResult(nextItems), total: 100 };
+  async function scrollEnd() {
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+  async function failNext() {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockRejectedValueOnce(new Error('page unavailable'));
+    await renderPicker('paging');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    await scrollEnd();
+  }
+  const retry = () =>
+    container.querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-next-retry"]');
+  const count = () => container.querySelector('[data-testid="model-picker-v2-count"]')?.textContent;
+
+  it('keeps loaded rows, reports the failed page and retries the same cursor only once', async () => {
+    await failNext();
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(container.textContent).toContain('続きを読み込めませんでした');
+    expect(retry()).not.toBeNull();
+    await scrollEnd();
+    expect(query).toHaveBeenCalledTimes(2);
+    let resolve!: (value: ModelCatalogQueryResult) => void;
+    query.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const button = retry()!;
+    button.focus();
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    await scrollEnd();
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2]?.[0]).toEqual(query.mock.calls[1]?.[0]);
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(button);
+    await act(async () => resolve(lastPage));
+    expect(count()).toBe('100件中100件を読み込み済み');
+    expect(retry()).toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="model-picker-v2-search"]'),
+    );
+  });
+
+  it('does not fetch a consumed cursor from a scroll event before the success render commits', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      retry()!.click();
+      // IPC resolves while React still exposes the previous page's handlers.
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
+  it('does not automatically retry a failed cursor before its error render commits', async () => {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockRejectedValue(new Error('page unavailable'));
+    await renderPicker('automatic-failure');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(retry()).not.toBeNull();
+  });
+
+  it('does not consume a retry twice when the second click precedes its success commit', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const button = retry()!;
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+      button.click();
+    });
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
+  it('does not select a model from repeated Enter after retry restores input focus', async () => {
+    await failNext();
+    query.mockResolvedValue(lastPage);
+    const select = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection: select });
+    await act(async () => retry()!.click());
+    const input = container.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true }),
+      ),
+    );
+    expect(select).not.toHaveBeenCalled();
+    expect(container.contains(input)).toBe(true);
+  });
+
+  it('does not append a successful automatic next page twice before React commits', async () => {
+    showSelection(null);
+    query.mockResolvedValueOnce(firstPage).mockResolvedValue(lastPage);
+    await renderPicker('automatic-page');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    await act(async () => {
+      list.scrollTop = 44 * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await Promise.resolve();
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(count()).toBe('100件中100件を読み込み済み');
+  });
+
+  it('keeps loading distinct from empty during first-page search debounce', async () => {
+    vi.useFakeTimers();
+    showSelection(null);
+    query.mockReturnValue(new Promise(() => {}));
+    await renderPicker('debounce');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+        .click(),
+    );
+    await changeSearch('pending');
+    expect(count()).toBe('検索中');
+    expect(container.textContent).not.toContain('一致するモデルがありません');
+    expect(container.textContent).not.toContain('プロバイダー接続を追加');
+  });
+
+  it('dismisses the popup with Escape from the retry button and restores focus', async () => {
+    await failNext();
+    retry()!.focus();
+    await act(async () =>
+      retry()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="model-picker-v2-trigger"]'),
+    );
+  });
+
+  it('retains the same retry after a repeated failure and replaces changed catalog revisions', async () => {
+    await failNext();
+    query.mockRejectedValueOnce(new Error('still unavailable'));
+    expect(retry()).not.toBeNull();
+    const button = retry()!;
+    button.focus();
+    await act(async () => button.click());
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(document.activeElement).toBe(button);
+    query.mockResolvedValueOnce({ ...catalogResult([]), revision: 2, total: 2 });
+    query.mockResolvedValueOnce({
+      ...catalogResult([
+        model({ connectionId: 'connection-one', modelId: 'same', displayName: 'Fresh one' }),
+        model({ connectionId: 'connection-two', modelId: 'same', displayName: 'Fresh two' }),
+      ]),
+      revision: 2,
+    });
+    await act(async () => button.click());
+    expect(count()).toBe('2件中2件を読み込み済み');
+    expect(query.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ cursor: null }));
+    expect(container.textContent).toContain('Fresh one');
+    expect(container.textContent).toContain('Fresh two');
+    expect(retry()).toBeNull();
+  });
+  async function changeSearch(text: string) {
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-testid="model-picker-v2-search"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  it.each(['search', 'access', 'reopen', 'unmount'] as const)(
+    'ignores stale retry success after %s',
+    async (change) => {
+      vi.useFakeTimers();
+      await failNext();
+      let resolve!: (value: ModelCatalogQueryResult) => void;
+      query.mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      );
+      await act(async () => retry()!.click());
+      const fresh = {
+        ...catalogResult([model({ modelId: 'fresh', displayName: 'Fresh result' })]),
+        revision: 9,
+      };
+      query.mockResolvedValueOnce(fresh);
+      if (change === 'search') {
+        await changeSearch('fresh');
+        // An old response during the debounce interval must not append rows or hide the new loading state.
+        await act(async () => resolve(lastPage));
+        expect(count()).not.toBe('100件中100件を読み込み済み');
+        await act(async () => vi.advanceTimersByTimeAsync(200));
+      } else if (change === 'access') {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-access-api"]')!
+            .click(),
+        );
+      } else if (change === 'reopen') {
+        const trigger = container.querySelector<HTMLButtonElement>(
+          '[data-testid="model-picker-v2-trigger"]',
+        )!;
+        await act(async () => trigger.click());
+        await act(async () => trigger.click());
+      } else {
+        await renderPicker('replacement');
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-trigger"]')!
+            .click(),
+        );
+      }
+      await act(async () => resolve(lastPage));
+      expect(count()).toBe('1件中1件を読み込み済み');
+      expect(container.textContent).toContain('Fresh result');
+      expect(retry()).toBeNull();
+    },
+  );
+
+  it('does not let an obsolete failure release a newer request or steal focus', async () => {
+    vi.useFakeTimers();
+    await failNext();
+    let reject!: (reason: Error) => void;
+    query.mockReturnValueOnce(
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+    );
+    await act(async () => retry()!.click());
+    let resolve!: (value: ModelCatalogQueryResult) => void;
+    query.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-v2-access-api"]')!
+        .click(),
+    );
+    await act(async () => reject(new Error('late failure')));
+    expect(count()).toBe('検索中');
+    expect(retry()).toBeNull();
+    await act(async () => resolve(catalogResult([])));
+    expect(count()).toBe('0件中0件を読み込み済み');
+  });
+
+  it('refreshes the original query when typing is reverted before debounce', async () => {
+    vi.useFakeTimers();
+    await failNext();
+    query.mockResolvedValueOnce(firstPage);
+    await changeSearch('x');
+    await changeSearch('');
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(count()).toBe('100件中50件を読み込み済み');
+    expect(retry()).toBeNull();
+  });
+});
+
+describe('ModelPickerV2 active option after manual scroll', () => {
+  async function openMany() {
+    showSelection(null);
+    const setModelSelection = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection });
+    const items = Array.from({ length: 1200 }, (_, i) =>
+      model({ modelId: `model-${i}`, displayName: `Model ${i}` }),
+    );
+    query.mockResolvedValue(catalogResult(items));
+    await renderPicker('large');
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-trigger"]',
+    )!;
+    await act(async () => trigger.click());
+    const input = container.querySelector<HTMLInputElement>('[role="combobox"]')!;
+    const list = container.querySelector<HTMLElement>('[role="listbox"]')!;
+    return { input, list, trigger, setModelSelection };
+  }
+  async function scrollTo(list: HTMLElement, row: number) {
+    await act(async () => {
+      list.scrollTop = row * 46;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+  function activeRow(input: HTMLInputElement) {
+    const id = input.getAttribute('aria-activedescendant');
+    expect(id).not.toBeNull();
+    const row = document.getElementById(id!);
+    expect(row).not.toBeNull();
+    expect(row?.classList.contains('active')).toBe(true);
+    // Fractional scrolling can mount two partial edge rows plus the fixed overscan.
+    expect(container.querySelectorAll('[role="option"]').length).toBeLessThanOrEqual(11);
+    return row;
+  }
+  it('keeps the visible active row, ARIA reference and Enter selection aligned without pulling scroll back', async () => {
+    const { input, list, trigger, setModelSelection } = await openMany();
+    await scrollTo(list, 44);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-44');
+    expect(list.scrollTop).toBe(44 * 46);
+    expect(document.activeElement).toBe(input);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith(
+      'task-a',
+      expect.objectContaining({ requestedModel: 'model-44' }),
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+  it('selects a fully visible row when scrolling leaves only one pixel of the old row', async () => {
+    const { input, list, setModelSelection } = await openMany();
+    await scrollTo(list, 44 + 45 / 46);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-45');
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith(
+      'task-a',
+      expect.objectContaining({ requestedModel: 'model-45' }),
+    );
+  });
+
+  it('tolerates subpixel scroll rounding after keyboard movement', async () => {
+    const { input, list } = await openMany();
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })),
+    );
+    await scrollTo(list, 1194 - 0.4 / 46);
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
+  });
+
+  it('continues Arrow/Home/End navigation from the visible row through both scroll directions', async () => {
+    const { input, list } = await openMany();
+    await scrollTo(list, 44);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-45');
+    await scrollTo(list, 10);
+    const row = activeRow(input)!;
+    const index = Number(row.dataset.testid?.split('-').at(-1));
+    expect(index).toBeGreaterThanOrEqual(10);
+    expect(index).toBeLessThan(16);
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
+    await act(async () => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-1199');
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })),
+    );
+    expect(activeRow(input)?.dataset.testid).toBe('model-picker-v2-option-model-0');
+    expect(list.scrollTop).toBe(0);
+  });
 });
 
 describe('ModelPickerV2 trigger name after a remount', () => {
@@ -206,6 +602,81 @@ describe('ModelPickerV2 trigger name after a remount', () => {
     await renderPicker('none');
     expect(query).not.toHaveBeenCalled();
     expect(triggerText()).toBe('自動');
+  });
+});
+
+describe('ModelPickerV2 IME keyboard boundary', () => {
+  async function openChoices() {
+    const setModelSelection = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({ setModelSelection });
+    query.mockResolvedValue(
+      catalogResult([
+        model({ modelId: 'sonnet', displayName: 'Sonnet' }),
+        model({ modelId: 'opus', displayName: 'Opus' }),
+      ]),
+    );
+    await renderPicker('ime');
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-trigger"]',
+    )!;
+    await act(async () => trigger.click());
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-testid="model-picker-v2-search"]',
+    )!;
+    return { trigger, input, setModelSelection };
+  }
+
+  it.each(['Enter', 'Escape', 'ArrowDown', 'ArrowUp', 'Home', 'End'])(
+    'leaves composing %s to the IME without selecting, moving or closing',
+    async (key) => {
+      const { input, setModelSelection } = await openChoices();
+      const active = input.getAttribute('aria-activedescendant');
+      const event = new KeyboardEvent('keydown', {
+        key,
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(event, 'keyCode', { value: 229 });
+      await act(async () => input.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(setModelSelection).not.toHaveBeenCalled();
+      expect(container.contains(input)).toBe(true);
+      expect(input.getAttribute('aria-activedescendant')).toBe(active);
+      expect(document.activeElement).toBe(input);
+    },
+  );
+
+  it('selects once with normal Arrow/Enter after composition and returns focus', async () => {
+    const { input, trigger, setModelSelection } = await openChoices();
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }),
+      ),
+    );
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })),
+    );
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })),
+    );
+    expect(setModelSelection).toHaveBeenCalledExactlyOnceWith('task-a', {
+      connectionId: 'builtin:claude-cli',
+      requestedProvider: 'anthropic',
+      requestedModel: 'opus',
+    });
+    expect(container.contains(input)).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('closes without selecting on normal Escape', async () => {
+    const { input, trigger, setModelSelection } = await openChoices();
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+    );
+    expect(setModelSelection).not.toHaveBeenCalled();
+    expect(container.contains(input)).toBe(false);
+    expect(document.activeElement).toBe(trigger);
   });
 });
 
