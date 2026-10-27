@@ -43,7 +43,10 @@ export function FileEditorDialog({
   const [savedLineEnding, setSavedLineEnding] = useState<LineEnding>('lf');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<'close' | 'reload' | null>(null);
+  // Read synchronously by handlers, so a click in the same tick as Save sees it before a re-render.
+  const savingRef = useRef(false);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const editorGenerationRef = useRef(new EditorRequestGeneration());
   const filesApi = typeof window !== 'undefined' ? window.sprintCoder?.files : undefined;
@@ -137,13 +140,18 @@ export function FileEditorDialog({
   }
 
   function requestReload(): void {
+    if (savingRef.current) return;
     if (dirty) setPendingDiscard('reload');
     else void reload();
   }
 
   async function save(): Promise<void> {
-    if (!opened?.editable || busy || !dirty || !filesApi) return;
+    if (!opened?.editable || busy || savingRef.current || !dirty || !filesApi) return;
+    savingRef.current = true;
+    setSaving(true);
     setBusy(true);
+    setPendingDiscard(null);
+    setMessage('保存中…');
     const generation = editorGenerationRef.current.capture();
     try {
       const text = diskText(draft, { text: opened.text }, lineEnding);
@@ -179,11 +187,15 @@ export function FileEditorDialog({
       if (editorGenerationRef.current.isCurrent(generation))
         setMessage('保存に失敗しました。内容は画面に残っています。');
     } finally {
+      savingRef.current = false;
+      setSaving(false);
       if (editorGenerationRef.current.isCurrent(generation)) setBusy(false);
     }
   }
 
   function requestClose(): void {
+    // A save handed to Main cannot be cancelled; discarding now would only hide whether it landed.
+    if (savingRef.current) return;
     if (dirty) setPendingDiscard('close');
     else close();
   }
@@ -249,7 +261,12 @@ export function FileEditorDialog({
                   <h2 id="file-editor-title">ファイルを編集</h2>
                   <code title={opened.path}>{opened.path}</code>
                 </div>
-                <button type="button" onClick={requestClose} aria-label="ファイル編集を閉じる">
+                <button
+                  type="button"
+                  onClick={requestClose}
+                  disabled={saving}
+                  aria-label="ファイル編集を閉じる"
+                >
                   閉じる
                 </button>
               </header>
@@ -301,6 +318,7 @@ export function FileEditorDialog({
                     type="button"
                     className="danger"
                     onClick={() => {
+                      if (savingRef.current) return;
                       if (pendingDiscard === 'reload') void reload();
                       else close();
                     }}
