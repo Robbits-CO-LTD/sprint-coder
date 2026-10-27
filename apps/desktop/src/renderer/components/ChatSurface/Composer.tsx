@@ -777,7 +777,7 @@ export function Composer({ taskId }: { taskId: string }) {
           );
           return;
         }
-        if (e.key === 'Enter' || e.key === 'Tab') {
+        if (!e.shiftKey && (e.key === 'Enter' || e.key === 'Tab')) {
           e.preventDefault();
           const selected = slashItems[activeSlashSelection];
           if (selected && selected.unavailable === undefined) selectSlashItem(selected);
