@@ -1,5 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -60,16 +67,20 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
     const root = mkdtempSync(join(tmpdir(), 'sc-pending-start-'));
     try {
       const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
-      const marker = '  // Reject a stop observed before V1 synchronous I/O begins.';
-      expect(source.split(marker)).toHaveLength(2);
+      const legacyOpen = 'OpenLockedProcessExecutable(target_process.value, &process_executable)';
+      const workerOpen = 'OpenLockedProcessExecutable(target_process->value, process_executable)';
+      expect(source.split(legacyOpen)).toHaveLength(2);
+      expect(source.split(workerOpen)).toHaveLength(2);
       const conflictMarker =
         'if (found != ledger.entries.end() && found->second->digest != digest) {';
       expect(source.split(conflictMarker)).toHaveLength(2);
       writeFileSync(
         join(root, 'pending-host.cc'),
         source
-          .replace(marker, '  HoldBeforeStartIo();\n' + marker)
-          .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();'),
+          .replace(legacyOpen, 'HoldStartOpen(target_process.value, &process_executable)')
+          .replace(workerOpen, 'HoldStartOpen(target_process->value, process_executable)')
+          .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();')
+          .replaceAll('CloseHandle(', 'TrackHandleClose('),
       );
       const file = join(root, 'seam.cc'),
         binary = join(root, 'seam.exe');
@@ -126,7 +137,10 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
         env: { ...process.env, VSLANG: '1033' },
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
-      const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 20000 });
+      const result = spawnSync(realpathSync.native(binary), [], {
+        encoding: 'utf8',
+        timeout: 20000,
+      });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       const receipts = result.stdout
         .split(/\r?\n/u)
@@ -141,7 +155,9 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
       expect(receipts[0]!.cancelEpoch).toBeGreaterThan(9);
       expect(receipts[1]!.cancelEpoch).toBeGreaterThan(receipts[0]!.cancelEpoch);
       expect(receipts.every((receipt) => receipt.inputAttemptCount === 0)).toBe(true);
-      expect(result.stdout).toContain('PASS: pending pipe, no input, no late adoption');
+      expect(result.stdout).toContain(
+        'PASS: worker-held I/O, pending pipe, no input, no late adoption',
+      );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
@@ -150,7 +166,8 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
 const program = String.raw`
 #include <atomic>
 #include <string>
-void HoldBeforeStartIo();
+#include <windows.h>
+namespace { struct LockedWindowsExecutable; bool HoldStartOpen(HANDLE process, LockedWindowsExecutable* output); BOOL TrackHandleClose(HANDLE handle); }
 void ObserveRequestConflict();
 #define wmain ProductionHostMain
 #include "pending-host.cc"
@@ -161,7 +178,33 @@ using namespace sprint_coder::computer_use;
 std::atomic<bool> hold_start{true}, entered_start{false}, finished{false}, conflict_seen{false};
 void ObserveRequestConflict(){conflict_seen.store(true);}
 void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<std::endl;TerminateProcess(GetCurrentProcess(),7);}}
-void HoldBeforeStartIo(){if(!hold_start.load())return;entered_start.store(true);while(hold_start.load())Sleep(1);}
+std::atomic<DWORD> consumer_thread{0}, io_thread{0};
+std::atomic<unsigned> actual_reads{0}, successful_reads{0}, process_releases{0}, file_releases{0};
+std::atomic<HANDLE> tracked_process{nullptr}, tracked_file{INVALID_HANDLE_VALUE};
+ScopedKernelHandle held_worker;
+namespace {
+BOOL TrackHandleClose(HANDLE handle) {
+  const BOOL closed=::CloseHandle(handle);
+  if(closed&&handle!=nullptr&&handle!=INVALID_HANDLE_VALUE) {
+    HANDLE expected=handle;if(tracked_process.compare_exchange_strong(expected,nullptr))process_releases.fetch_add(1);
+    expected=handle;if(tracked_file.compare_exchange_strong(expected,INVALID_HANDLE_VALUE))file_releases.fetch_add(1);
+  }
+  return closed;
+}
+bool HoldStartOpen(HANDLE process, LockedWindowsExecutable* output) {
+  Require(process!=nullptr&&GetProcessId(process)==GetCurrentProcessId(),"owned process already opened");
+  const bool tracked=hold_start.load();
+  if(tracked) {
+    tracked_process.store(process);
+    io_thread.store(GetCurrentThreadId());
+    Require(DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&held_worker.value,SYNCHRONIZE,FALSE,0),"worker handle");
+    entered_start.store(true);while(hold_start.load())Sleep(1);
+  }
+  const bool result=OpenLockedProcessExecutable(process,output);
+  if(tracked&&result)tracked_file.store(output->file);
+  actual_reads.fetch_add(1);if(result)successful_reads.fetch_add(1);return result;
+}
+}
 FrameId Id(unsigned char value){FrameId id;id.bytes[0]=value;return id;}
 std::string Payload(const Frame& frame){return std::string(frame.metadata.begin(),frame.metadata.end());}
 void Send(HANDLE pipe,unsigned request,unsigned session,const std::string& payload,MessageType type=MessageType::kProbe){
@@ -187,23 +230,27 @@ int wmain(){
  ULONG peer=0;Require(GetNamedPipeClientProcessId(server.value,&peer)&&peer==GetCurrentProcessId(),"owned peer");
  std::cerr<<"phase=connected\n"<<std::flush;
  bool served=false;
- std::thread serve([&]{const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
+ std::thread serve([&]{consumer_thread.store(GetCurrentThreadId());const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
  Send(client.value,2,7,Start("pending",9));
- for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");std::cerr<<"phase=start-gate\n"<<std::flush;
+ for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()!=consumer_thread.load(),"identity I/O is off the consumer");std::cerr<<"phase=start-gate\n"<<std::flush;
  const auto before_conflict=WindowsTargetListControl().stop_serial.load();
  Send(client.value,2,7,Stop("pending"));
  for(int i=0;i<3000&&!conflict_seen.load();i++)Sleep(1);Require(conflict_seen.load(),"conflicting request observed");
  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(!owner->stopped.load()&&WindowsTargetListControl().stop_serial.load()==before_conflict,"conflict has no stop effect");}
- Send(client.value,3,7,Stop("pending"));
+ const auto stop_started=GetTickCount64();Send(client.value,3,7,Stop("pending"));
  bool latched=false;
  for(int i=0;i<3000&&!latched;i++){{std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto found=WindowsStarts().owners.find(FrameIdKey(Id(7)));latched=found!=WindowsStarts().owners.end()&&found->second->stopped.load();}if(!latched)Sleep(1);}
- std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");DWORD bytes=0;Require(PeekNamedPipe(client.value,nullptr,0,nullptr,&bytes,nullptr)&&bytes==0,"no terminal before consumer drain");
- hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
- Read(client.value,2,MessageType::kError);
+ std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");
+ auto canceled=Read(client.value,2,MessageType::kError);Require(Payload(canceled).find("session_start_canceled")!=std::string::npos,"start abandoned before read release");
  auto conflict=Read(client.value,2,MessageType::kError);Require(Payload(conflict).find("request_id_conflict")!=std::string::npos,"conflicting operation refused");
  auto first=Read(client.value,3,MessageType::kProbeResult);std::cerr<<"phase=terminal\n"<<std::flush;std::cout<<"RECEIPT:"<<Payload(first)<<"\n";
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(sessions.empty(),"no late adoption");}
+ Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"terminal before held I/O release");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->terminal&&owner->pending_requests.load()!=0&&WindowsTargetListWorkerRunning().load(),"terminal retains worker ownership without adoption");}
+ hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
+ Require(held_worker.value!=nullptr&&WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0,"worker exits after real read");
+ Require(actual_reads.load()==1&&successful_reads.load()==1&&process_releases.load()==1&&file_releases.load()==1&&!WindowsTargetListWorkerRunning().load(),"actual read and resource cleanup");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->pending_requests.load()==0,"late result discarded and lease released");}
  const auto serial=WindowsTargetListControl().stop_serial.load(), epoch=cancellation_epoch.load();
  Send(client.value,4,8,Stop("pending"));Read(client.value,4,MessageType::kError);
  Send(client.value,5,7,Stop("wrong"));Read(client.value,5,MessageType::kError);
@@ -217,6 +264,6 @@ int wmain(){
  Send(client.value,9,10,Stop("failed"));auto failed=Read(client.value,9,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(failed)<<"\n";
  Send(client.value,10,10,"{\"sessionId\":\"failed\",\"operation\":\"stop_pending_start\",\"action\":\"click\"}");Read(client.value,10,MessageType::kError);
  std::cerr<<"phase=cleanup\n"<<std::flush;CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
- Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: pending pipe, no input, no late adoption\n";return 0;
+ Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: worker-held I/O, pending pipe, no input, no late adoption\n";return 0;
 }
 `;
