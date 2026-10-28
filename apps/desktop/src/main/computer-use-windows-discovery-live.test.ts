@@ -157,7 +157,7 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         env: { ...process.env, VSLANG: '1033' },
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
-      for (const mode of ['stop', 'deadline', 'queue-expired', 'eof']) {
+      for (const mode of ['stop', 'deadline', 'queue-expired', 'eof', 'cross-owner-rca']) {
         const result = spawnSync(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
           timeout: 20000,
@@ -190,7 +190,11 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         expect(control.sessionId).toBe('pending');
         expect(control.cancelEpoch).toBeGreaterThan(9);
         expect(control.inputAttemptCount).toBe(0);
-        expect(result.stdout).toContain('PASS: discovery terminal before read release');
+        expect(result.stdout).toContain(
+          mode === 'cross-owner-rca'
+            ? 'PASS: another discovery blocks a terminal owner Stop receipt'
+            : 'PASS: discovery terminal before read release',
+        );
         expect(result.stdout).toContain(
           'PASS: owned discovery stopped, late actual read and cleanup, no input',
         );
@@ -216,6 +220,8 @@ void ObserveRequestConflict();
 using namespace sprint_coder::computer_use;
 std::atomic<bool> hold_start{true}, entered_start{false}, finished{false}, conflict_seen{false};
 std::atomic<ULONGLONG> clock_offset{0};
+std::atomic<bool> cross_owner_mode{false};
+std::atomic<unsigned> open_attempts{0};
 ULONGLONG DiscoveryTestNow(){return GetTickCount64()+clock_offset.load();}
 void ObserveRequestConflict(){conflict_seen.store(true);}
 void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<std::endl;TerminateProcess(GetCurrentProcess(),7);}}
@@ -239,9 +245,13 @@ BOOL TrackHandleClose(HANDLE handle) {
 bool RcaRefuseLaunch(const LockedWindowsExecutable&, HANDLE*, const std::function<bool()>&, const std::function<void()>&) { Require(false,"unexpected application launch");return false; }
 bool HoldListOpen(const std::wstring& path, LockedWindowsExecutable* output) {
   Require(SameWindowsPath(path,owned_path),"list may read only the owned executable");
+  const unsigned attempt = open_attempts.fetch_add(1);
   io_thread.store(GetCurrentThreadId());
+  if (held_worker.value != nullptr && held_worker.value != INVALID_HANDLE_VALUE) CloseHandle(held_worker.value);
   Require(DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&held_worker.value,SYNCHRONIZE,FALSE,0),"consumer thread handle");
-  entered_start.store(true);while(hold_start.load())Sleep(1);
+  if (!cross_owner_mode.load() || attempt != 0) {
+    entered_start.store(true);while(hold_start.load())Sleep(1);
+  }
   const bool read=OpenLockedWindowsExecutable(path,output);
   if(read)tracked_file.store(output->file);
   actual_reads.fetch_add(1);if(read)successful_reads.fetch_add(1);return read;
@@ -290,6 +300,46 @@ int wmain(int argc,wchar_t** argv){
  bool served=false;
  std::thread serve([&]{consumer_thread.store(GetCurrentThreadId());const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
+ if(mode==L"cross-owner-rca") {
+   cross_owner_mode.store(true);
+   // A's owned executable read fails the deliberately wrong identity digest normally.
+   // B was submitted before A's failure could make Main schedule Stop(A).
+   std::string second=List();const auto id=second.find("discovery:1");
+   Require(id!=std::string::npos,"second discovery id");second.replace(id,11,"discovery:2");
+   Send(client.value,2,8,List());Send(client.value,4,9,second);
+   const auto first=Read(client.value,2,MessageType::kError);
+   Require(Payload(first).find("profile_identity_invalid")!=std::string::npos,"first owned read rejects identity");
+   const auto waiting=GetTickCount64();while(!entered_start.load()&&GetTickCount64()-waiting<5000)Sleep(1);
+   Require(entered_start.load()&&actual_reads.load()==1&&file_releases.load()==1,"second alone holds read");
+   const auto serial=WindowsTargetListControl().stop_serial.load();
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+     auto a=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));auto b=WindowsDiscoveries().owners.at(FrameIdKey(Id(9)));
+     Require(a->terminal&&!a->launch_in_flight&&a->launch_attempts==0&&!b->terminal&&!b->stopped.load(),"first safe second active");}
+   const auto started=GetTickCount64();Send(client.value,3,8,DiscoveryStop("discovery:1"));
+   bool latched=false;while(!latched&&GetTickCount64()-started<1000){
+     {std::lock_guard lock(WindowsTargetListControl().stop_mutex);latched=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)))->stopped.load();}Sleep(1);}
+   Require(latched,"first Stop reader latch");
+   std::atomic<bool> received_stop{false},received_second{false};std::string receipt;
+   std::thread reader([&]{for(unsigned index=0;index<2;++index){
+     Frame frame;Require(ReadFrame(client.value,&frame),"cross-owner response read");
+     if(frame.header.request_id.bytes==Id(3).bytes){
+       Require(frame.header.session_id.bytes==Id(8).bytes&&frame.header.message_type==static_cast<unsigned>(MessageType::kProbeResult),"first Stop binding");
+       receipt=Payload(frame);received_stop.store(true);
+     }else{Require(frame.header.request_id.bytes==Id(4).bytes&&frame.header.session_id.bytes==Id(9).bytes&&frame.header.message_type==static_cast<unsigned>(MessageType::kError),"second response binding");received_second.store(true);}
+   }});
+   while(GetTickCount64()-started<1100&&!received_stop.load())Sleep(1);
+   Require(!received_stop.load()&&!received_second.load()&&hold_start.load(),"cross-owner Stop starvation reproduced");
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(!WindowsDiscoveries().owners.at(FrameIdKey(Id(9)))->stopped.load(),"Stop A leaves B running");}
+   Require(WindowsTargetListControl().stop_serial.load()==serial&&cancellation_epoch.load()==9,"cross-owner Stop does not invalidate B");
+   const auto held_ms=GetTickCount64()-started;
+   hold_start.store(false);reader.join();
+   Require(received_stop.load()&&received_second.load(),"both responses after release");
+   Require(WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0&&actual_reads.load()==2&&successful_reads.load()==2&&file_releases.load()==2&&!WindowsTargetListWorkerRunning().load(),"both actual reads cleaned");
+   std::cout<<"RECEIPT:"<<receipt<<"\nRCA: terminal owner Stop heldMs="<<held_ms<<"\n";
+   Send(client.value,7,7,Stop("pending"));auto control=Read(client.value,7,MessageType::kProbeResult);std::cout<<"CONTROL:"<<Payload(control)<<"\n";
+   CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served&&sessions.empty(),"cross-owner final cleanup");
+   finished.store(true);std::cout<<"PASS: another discovery blocks a terminal owner Stop receipt\nPASS: owned discovery stopped, late actual read and cleanup, no input\n";return 0;
+ }
  if(mode==L"queue-expired") {
    for(unsigned char index=20;index<40;++index) {
      const std::string id="expired:"+std::to_string(index);std::string reason,response;
