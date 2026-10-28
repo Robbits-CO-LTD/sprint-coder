@@ -3933,6 +3933,13 @@ export class ComputerUseController {
    * conversation, and archiving is not the user changing their mind.
    */
   taskClosed(taskId: string): void {
+    for (const stopping of this.stopStartingWhere(
+      (starting) => starting.taskId === taskId,
+      'task_changed',
+    ))
+      void stopping.catch(() => undefined);
+    if (this.startingTaskId === taskId)
+      this.startingController?.abort(new Error('Computer Use Task closed while starting'));
     void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId).catch(() => undefined);
     this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
     this.taskScopedGrants.delete(taskId);
