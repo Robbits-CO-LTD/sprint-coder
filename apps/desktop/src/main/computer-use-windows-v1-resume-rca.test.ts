@@ -242,7 +242,15 @@ int wmain(){
  // Diagnostic lifetime only: no valid target or approved grant is constructed.
  std::string seed_reason;auto seed=AdmitWindowsStart(FrameIdKey(Id(7)),"pending","diagnostic-seed",std::string(64,'d'),&seed_reason,9);
  Require(seed&&ClaimWindowsStartInput(seed),"seed diagnostic lifetime");
+ ScopedKernelHandle source_process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,GetCurrentProcessId()));
+ LockedWindowsExecutable source_executable;Require(source_process.value!=nullptr&&OpenLockedProcessExecutable(source_process.value,&source_executable),"owned source handles");
  WindowsSession existing;existing.session_id="pending";existing.cancel_epoch=9;existing.start_owner=seed->owner;
+ existing.pid=GetCurrentProcessId();existing.window=reinterpret_cast<HWND>(static_cast<UINT_PTR>(1));
+ Require(ReadProcessStartIdentity(source_process.value,&existing.process_start),"owned source start");
+ existing.process_handle=source_process.release();existing.executable_file=source_executable.file;source_executable.file=INVALID_HANDLE_VALUE;
+ existing.executable_volume_serial=source_executable.identity.file_identity.volume_serial;existing.executable_file_id=source_executable.identity.file_identity.file_id;
+ existing.executable_digest=source_executable.identity.executable_digest;existing.signer_digest=source_executable.identity.signer_digest;existing.policy_language=source_executable.identity.policy_language;
+ existing.canonical_path=source_executable.identity.path;existing.app_identity=std::string(64,'a');existing.window_identity=std::string(64,'b');
  existing.input_api_attempts=seed->owner->input_api_attempts;existing.eligibility_basis=EligibilityBasis::kV1Allowlist;
  seed->owner->active=true;sessions.emplace(FrameIdKey(Id(7)),std::move(existing));cancellation_epoch.store(9);seed.reset();
  bool served=false;
