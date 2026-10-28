@@ -166,6 +166,42 @@ class FakeWindowsHelper {
     this.pump();
   }
 
+  releaseLast(operation: string): void {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const frame = this.queue[index]!;
+      const metadata = JSON.parse(frame.metadata.toString('utf8')) as Record<string, unknown>;
+      if (metadata['operation'] === operation) {
+        this.queue.splice(index, 1);
+        this.answer(frame);
+        return;
+      }
+    }
+    throw new Error('No held request');
+  }
+
+  private answer(frame: ComputerUseNativeFrame): void {
+    const metadata = JSON.parse(frame.metadata.toString('utf8')) as Record<string, unknown>;
+    const operation = String(metadata['operation']);
+    this.served.push(operation);
+    const responder = this.responders[operation];
+    if (responder === undefined) throw new Error(`unexpected helper operation ${operation}`);
+    const [messageType, payload] = this.refused.has(operation)
+      ? (['error', { code: 'SESSION_MISSING', accepted: false }] as const)
+      : responder(metadata);
+    this.socket.emit(
+      'data',
+      encodeComputerUseNativeFrame({
+        messageType,
+        flags: 0,
+        requestId: frame.requestId,
+        sessionId: frame.sessionId,
+        cancelId: null,
+        metadata: Buffer.from(JSON.stringify(payload), 'utf8'),
+        binary: Buffer.alloc(0),
+      }),
+    );
+  }
+
   private pump(): void {
     for (let index = 0; index < this.queue.length && !this.socket.destroyed;) {
       const frame = this.queue[index]!;
@@ -178,24 +214,7 @@ class FakeWindowsHelper {
         continue;
       }
       this.queue.splice(index, 1);
-      this.served.push(operation);
-      const responder = this.responders[operation];
-      if (responder === undefined) throw new Error(`unexpected helper operation ${operation}`);
-      const [messageType, payload] = this.refused.has(operation)
-        ? (['error', { code: 'SESSION_MISSING', accepted: false }] as const)
-        : responder(metadata);
-      this.socket.emit(
-        'data',
-        encodeComputerUseNativeFrame({
-          messageType,
-          flags: 0,
-          requestId: frame.requestId,
-          sessionId: frame.sessionId,
-          cancelId: null,
-          metadata: Buffer.from(JSON.stringify(payload), 'utf8'),
-          binary: Buffer.alloc(0),
-        }),
-      );
+      this.answer(frame);
       index = 0;
     }
   }
@@ -205,7 +224,7 @@ function responders(): Readonly<Record<string, Responder>> {
   return {
     handshake: () => [
       'handshake_result',
-      { protocolVersion: 1, apiVersion: 2, platform: 'win32', napiVersion: 10, sourceCommit },
+      { protocolVersion: 1, apiVersion: 3, platform: 'win32', napiVersion: 10, sourceCommit },
     ],
     list_windows: () => [
       'probe_result',
@@ -280,7 +299,7 @@ function binding(addon: NonNullable<ComputerUseNativeBinding['addon']>): Compute
       platform: 'win32',
       architecture: 'x64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'test-native',
       moduleDigest: digest('1'),
       binaryDigest: digest('2'),
@@ -290,7 +309,7 @@ function binding(addon: NonNullable<ComputerUseNativeBinding['addon']>): Compute
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       artifactPath: helperPath,
@@ -333,7 +352,10 @@ const profile = Object.freeze({
   updatedAt: '2026-09-18T00:00:00.000Z',
 });
 
-function createTarget(customResponders: Readonly<Record<string, Responder>> = responders()): {
+function createTarget(
+  customResponders: Readonly<Record<string, Responder>> = responders(),
+  configure?: (helper: FakeWindowsHelper) => void,
+): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
   helper: () => FakeWindowsHelper;
@@ -343,13 +365,14 @@ function createTarget(customResponders: Readonly<Record<string, Responder>> = re
   // Every reconnect gets its own fake helper, the way a fresh child process would.
   onSocket = (socket) => {
     helper = new FakeWindowsHelper(socket, table);
+    configure?.(helper);
   };
   const addon = createWindowsComputerUseNativeAddon(
     helperPath,
     {
       available: true,
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       backend: 'test-native',
       reason: '',
       capabilities: { observe: true, control: true },
@@ -599,7 +622,7 @@ describe('Computer Use Windows helper transport', () => {
           'handshake_result',
           {
             protocolVersion: 1,
-            apiVersion: 2,
+            apiVersion: 3,
             platform: 'win32',
             napiVersion: 10,
             sourceCommit,
@@ -950,6 +973,287 @@ describe('Computer Use Windows helper transport', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(children[0]!.killed).toBe(false);
     expect(children).toHaveLength(1);
+  });
+
+  it.each(['reply', 'timeout'] as const)(
+    'keeps a new lifetime alive after an older stop %s',
+    async (ending) => {
+      const { addon, host, helper } = createTarget();
+      await startSession(host, 'old-stop', 'old-turn');
+      helper().holdOnly('close_session');
+      const first = Promise.resolve(addon.close!({ sessionId: 'old-stop', cancelEpoch: 1 })).then(
+        () => 'reply',
+        () => 'timeout',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const second = Promise.resolve(addon.close!({ sessionId: 'old-stop', cancelEpoch: 2 }));
+      await vi.advanceTimersByTimeAsync(0);
+      helper().releaseLast('close_session');
+      await second;
+      await startSession(host, 'new-after-stop', 'new-turn');
+      if (ending === 'reply') helper().release('close_session');
+      else await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS);
+      await expect(first).resolves.toBe(ending);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(false);
+    },
+  );
+
+  it.each(['success', 'native-error', 'timeout'] as const)(
+    'keeps a Stop during launch-capable discovery unconfirmed after late %s',
+    async (ending) => {
+      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const starting = startSession(host, 'pending-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(host.stopPendingStart!('pending-discovery')).rejects.toThrow(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      if (ending === 'timeout') await vi.advanceTimersByTimeAsync(60_000);
+      else {
+        if (ending === 'native-error') helper().refuse('list_windows');
+        helper().release('list_windows');
+      }
+      await expect(starting).resolves.toBe('rejected');
+      expect(helper().served).not.toContain('start_session');
+      expect(helper().served).not.toContain('stop_pending_start');
+      expect(host.availability().control).toBe(false);
+      await expect(host.stopPendingStart!('pending-discovery')).rejects.toThrow(/unconfirmed/u);
+      expect(helper().served).not.toContain('stop_pending_start');
+      await expect(startSession(host, 'new-id', 'turn-2')).rejects.toThrow(/unconfirmed/u);
+    },
+  );
+
+  it.each(['native-error', 'timeout'] as const)(
+    'distinguishes a completed discovery refusal from transport failure: %s',
+    async (ending) => {
+      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const starting = startSession(host, 'failed-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (ending === 'native-error') {
+        helper().refuse('list_windows');
+        helper().release('list_windows');
+      } else await vi.advanceTimersByTimeAsync(60_000);
+      await expect(starting).resolves.toBe('rejected');
+      expect(host.availability().control).toBe(ending === 'native-error');
+      expect(helper().served).not.toContain('start_session');
+    },
+  );
+
+  it('does not repeat a valid session terminal query when discovery still prevents confirmation', async () => {
+    const { host, helper } = createTarget(
+      {
+        ...responders(),
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+      },
+      (helper) => helper.holdOnly('start_session'),
+    );
+    const first = startSession(host, 'mixed-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    helper().holdOnly('list_windows');
+    const second = startSession(host, 'mixed-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(host.stopPendingStart!('mixed-discovery')).rejects.toThrow(/unconfirmed/u);
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+    helper().release('start_session');
+    helper().release('list_windows');
+    await expect(Promise.all([first, second])).resolves.toEqual(['rejected', 'rejected']);
+    expect(host.availability().control).toBe(false);
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+  });
+
+  it('does not let active Close hide another launch-capable discovery of the same owner', async () => {
+    const { host, helper } = createTarget(responders(), (helper) =>
+      helper.holdOnly('start_session'),
+    );
+    const first = startSession(host, 'shared-discovery', 'turn-1');
+    await vi.advanceTimersByTimeAsync(0);
+    helper().holdOnly('list_windows');
+    const second = startSession(host, 'shared-discovery', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    helper().release('start_session');
+    const active = await first;
+    await host.cancel(active, 1);
+    await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
+    helper().release('list_windows');
+    await expect(second).resolves.toBe('rejected');
+    expect(host.availability().control).toBe(false);
+    expect(helper().served.filter((operation) => operation === 'start_session')).toHaveLength(1);
+  });
+
+  it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
+    const { addon, host, helper } = createTarget(
+      {
+        ...responders(),
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+      },
+      (helper) => helper.holdOnly('start_session'),
+    );
+    const starting = startSession(host, 'late-native', 'turn-1').then(
+      () => 'adopted',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('late-native')).toBe('may_have_been_sent');
+    await expect(host.stopPendingStart!('late-native')).resolves.toMatchObject({ kind: 'closed' });
+    expect(host.availability().control).toBe(false);
+    expect(children[0]!.killed).toBe(false);
+    helper().release('start_session');
+    await expect(starting).resolves.toBe('rejected');
+    expect(host.availability().control).toBe(true);
+    await expect(startSession(host, 'late-native', 'turn-1')).rejects.toThrow(/closed/u);
+  });
+
+  it('recovers after more than sixteen preparation failures without losing the never-sent proof', async () => {
+    const { addon } = createTarget();
+    const windows = responders()['list_windows']!({})[1];
+    const host = createComputerUseNativeHost(
+      binding({ ...addon, listWindows: () => windows }),
+      'win32',
+      {
+        windowsPhysicalBoundsToDip: (value) => value,
+      },
+    );
+    const spawn = transport.spawnHelper;
+    try {
+      transport.spawnHelper = () => {
+        throw new Error('synthetic spawn failure');
+      };
+      for (let index = 0; index < 20; index += 1) {
+        await expect(
+          startSession(host, `unsent-failure-${index}`, `turn-${index}`),
+        ).rejects.toThrow('synthetic spawn failure');
+        expect(host.availability().control).toBe(true);
+      }
+    } finally {
+      transport.spawnHelper = spawn;
+    }
+    const recovered = await startSession(host, 'recovered-after-failures', 'turn-recovered');
+    expect(recovered.sessionId).toBe('recovered-after-failures');
+    await host.close(recovered);
+  });
+
+  it('cancels every unsubmitted attempt of one lifetime before the pipe handshake returns', async () => {
+    const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
+    const attempts = [1, 2].map(() =>
+      Promise.resolve(addon.startSession!({ sessionId: 'unsent', profile })).then(
+        () => 'sent',
+        () => 'canceled',
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('unknown')).toBe('unknown');
+    expect(addon.cancelUnsubmittedStart?.('unsent')).toBe('never_sent');
+    helper().release('handshake');
+    await expect(Promise.all(attempts)).resolves.toEqual(['canceled', 'canceled']);
+    expect(helper().served).not.toContain('start_session');
+  });
+
+  it('does not prove never-sent after a synchronous write failure', async () => {
+    const { addon, host } = createTarget();
+    await startSession(host, 'existing', 'turn-1');
+    const write = sockets[0]!.write.bind(sockets[0]);
+    vi.spyOn(sockets[0]!, 'write').mockImplementation((chunk, callback) => {
+      const metadata = JSON.parse(
+        decodeComputerUseNativeFrame(chunk).metadata.toString('utf8'),
+      ) as Record<string, unknown>;
+      if (metadata['operation'] === 'start_session') throw new Error('partial write failure');
+      return write(chunk, callback);
+    });
+    await expect(addon.startSession!({ sessionId: 'write-failed', profile })).rejects.toThrow(
+      /partial write/u,
+    );
+    expect(addon.cancelUnsubmittedStart?.('write-failed')).toBe('may_have_been_sent');
+    expect(addon.cancelUnsubmittedStart?.('existing')).toBe('may_have_been_sent');
+  });
+
+  it('gives logical pending-stop retries distinct wire IDs on the stop lane', async () => {
+    let epoch = 1;
+    const { addon, host, helper } = createTarget({
+      ...responders(),
+      stop_pending_start: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: epoch++,
+          inputAttemptCount: 0,
+        },
+      ],
+    });
+    await startSession(host, 'pending-stop-wire', 'turn-1');
+    const ids: string[] = [];
+    const write = sockets[0]!.write.bind(sockets[0]);
+    vi.spyOn(sockets[0]!, 'write').mockImplementation((chunk, callback) => {
+      const frame = decodeComputerUseNativeFrame(chunk);
+      if (JSON.parse(frame.metadata.toString('utf8')).operation === 'stop_pending_start')
+        ids.push(frame.requestId.hex);
+      return write(chunk, callback);
+    });
+    helper().holdOnly('stop_pending_start');
+    const first = Promise.resolve(addon.stopPendingStart!({ sessionId: 'pending-stop-wire' }));
+    const second = Promise.resolve(addon.stopPendingStart!({ sessionId: 'pending-stop-wire' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    helper().release('stop_pending_start');
+    await expect(first).resolves.toMatchObject({ result: 'closed', cancelEpoch: 1 });
+    await expect(second).resolves.toMatchObject({ result: 'closed', cancelEpoch: 2 });
+  });
+
+  it('does not tear down another preparing owner when canceling an unsent start', async () => {
+    const { addon, helper } = createTarget(responders(), (helper) => helper.hold('handshake'));
+    const first = Promise.resolve(addon.startSession!({ sessionId: 'keep-preparing', profile }));
+    const second = Promise.resolve(
+      addon.startSession!({ sessionId: 'cancel-preparing', profile }),
+    ).then(
+      () => 'sent',
+      () => 'canceled',
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(addon.cancelUnsubmittedStart?.('cancel-preparing')).toBe('never_sent');
+    helper().release('handshake');
+    await expect(second).resolves.toBe('canceled');
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(helper().served.filter((operation) => operation === 'start_session')).toHaveLength(1);
+    expect(children[0]!.killed).toBe(false);
   });
 
   it('ends the helper when the last outstanding request is refused rather than answered', async () => {

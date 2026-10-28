@@ -37,7 +37,7 @@ function manifest(eligibility?: ComputerUseEligibility, platform: 'darwin' | 'wi
     platform,
     architecture: platform === 'darwin' ? 'arm64' : 'x64',
     protocolVersion: 1,
-    apiVersion: 2,
+    apiVersion: 3,
     nativeVersion: 'computer-use-native-gate0-1',
     moduleDigest: sha('b'),
     binaryDigest: sha('b'),
@@ -63,7 +63,7 @@ function gate(input: {
     packaged: true,
     platform: 'darwin',
     manifest: parsed,
-    probe: { protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' },
+    probe: { protocolVersion: 1, apiVersion: 3, available: true, backend: 'fixture' },
     artifactDigest: parsed.moduleDigest,
     // `undefined` means a Main built before D7 (no compiled pin at all).
     ...(input.main === undefined ? {} : { compiledPin: pin }),
@@ -99,16 +99,21 @@ describe('Computer Use eligibility contract (D7-1)', () => {
     });
 
     it('keeps the manifest digest of a manifest without eligibility byte-for-byte', () => {
-      const legacy = computerUseNativeManifestSchema.parse(manifest());
+      const legacy = computerUseNativeManifestSchema.parse({ ...manifest(), apiVersion: 2 });
       expect(computerUseNativeManifestDigest(legacy)).toBe(
         'ebcd1430f7443ae7ba47f2e88d939d91726b49a7deca5cca01e60e7531f75197',
       );
-      const withEligibility = computerUseNativeManifestSchema.parse(manifest(V1));
+      const withEligibility = computerUseNativeManifestSchema.parse({
+        ...manifest(V1),
+        apiVersion: 2,
+      });
       expect(computerUseNativeManifestDigest(withEligibility)).not.toBe(
         computerUseNativeManifestDigest(legacy),
       );
       expect(
-        computerUseNativeManifestDigest(computerUseNativeManifestSchema.parse(manifest(V2))),
+        computerUseNativeManifestDigest(
+          computerUseNativeManifestSchema.parse({ ...manifest(V2), apiVersion: 2 }),
+        ),
       ).not.toBe(computerUseNativeManifestDigest(withEligibility));
     });
 
@@ -130,12 +135,12 @@ describe('Computer Use eligibility contract (D7-1)', () => {
     });
 
     it('accepts one optional strict eligibility claim in the handshake on both platforms', () => {
-      const mac = { protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 };
+      const mac = { protocolVersion: 1, apiVersion: 3, platform: 'darwin', napiVersion: 10 };
       expect(parseNativeHandshake(mac, 'darwin')).toBeNull();
       expect(parseNativeHandshake({ ...mac, eligibility: V1 }, 'darwin')).toEqual(V1);
       const win = {
         protocolVersion: 1,
-        apiVersion: 2,
+        apiVersion: 3,
         platform: 'win32',
         napiVersion: 10,
         sourceCommit: commit,
@@ -250,7 +255,7 @@ describe('Computer Use eligibility contract (D7-1)', () => {
         manifest: parsed,
         probe: {
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           available: false,
           backend: 'fixture',
           reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',

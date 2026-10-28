@@ -248,7 +248,7 @@ export function verifyComputerUseNativeBuild(platform: ForgePlatform, architectu
     manifest.platform !== platform ||
     manifest.architecture !== architecture ||
     manifest.protocolVersion !== 1 ||
-    manifest.apiVersion !== 2 ||
+    manifest.apiVersion !== 3 ||
     manifest.moduleDigest !== digest ||
     manifest.binaryDigest !== digest
   )
@@ -318,7 +318,7 @@ export function verifyPackagedComputerUseNativeBundle(
     manifest.platform !== platform ||
     manifest.architecture !== architecture ||
     manifest.protocolVersion !== 1 ||
-    manifest.apiVersion !== 2 ||
+    manifest.apiVersion !== 3 ||
     packagedArtifactCount !== 1 ||
     packagedManifestCount !== 1 ||
     hasAsarDuplicate ||

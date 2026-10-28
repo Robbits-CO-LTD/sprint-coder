@@ -113,6 +113,54 @@ describe('Computer Use emergency stop', () => {
     expect(overlay.setPosition).toHaveBeenCalledWith(812, 80, false);
   });
 
+  it.each(['resolve', 'reject'] as const)(
+    'keeps the new overlay when an old pending arm later %s',
+    async (completion) => {
+      let resolveOld!: () => void;
+      let rejectOld!: (reason: Error) => void;
+      const pending = new Promise<void>((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      const overlay = (loadURL: () => Promise<void>) => {
+        let destroyed = false;
+        return {
+          setContentProtection: vi.fn(),
+          setVisibleOnAllWorkspaces: vi.fn(),
+          webContents: { on: vi.fn(), setWindowOpenHandler: vi.fn() },
+          once: vi.fn(),
+          loadURL: vi.fn(loadURL),
+          isDestroyed: () => destroyed,
+          showInactive: vi.fn(),
+          destroy: vi.fn(() => {
+            destroyed = true;
+          }),
+          setPosition: vi.fn(),
+        };
+      };
+      const old = overlay(() => pending),
+        current = overlay(async () => undefined);
+      electronMocks.BrowserWindow.mockImplementationOnce(() => old).mockImplementationOnce(
+        () => current,
+      );
+      const stop = new ComputerUseEmergencyStop({ onStop: vi.fn() });
+      const bounds = { x: 0, y: 0, width: 800, height: 600 };
+      const first = stop.arm(bounds);
+      stop.disarm();
+      expect(old.destroy).toHaveBeenCalledOnce();
+      await expect(stop.arm(bounds)).resolves.toBe(true);
+      const unregisters = electronMocks.globalShortcut.unregister.mock.calls.length;
+      if (completion === 'resolve') resolveOld();
+      else rejectOld(new Error('old load failed'));
+      await expect(first).resolves.toBe(false);
+      expect(old.showInactive).not.toHaveBeenCalled();
+      expect(current.destroy).not.toHaveBeenCalled();
+      expect(electronMocks.globalShortcut.unregister).toHaveBeenCalledTimes(unregisters);
+      expect(stop.reposition(bounds)).toBe(true);
+      stop.dispose();
+    },
+  );
+
   it('refuses to arm when no display can host the overlay outside the target', async () => {
     const stop = new ComputerUseEmergencyStop({ onStop: vi.fn() });
 

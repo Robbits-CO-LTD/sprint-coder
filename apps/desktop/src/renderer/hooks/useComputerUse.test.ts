@@ -190,6 +190,15 @@ describe('Computer Use renderer projection', () => {
     ).toBeNull();
   });
 
+  it('does not present an unconfirmed native stop as verified', () => {
+    const notice = computerUseTerminalNotice({
+      state: 'stopped',
+      stopReason: 'native_unavailable',
+    } as ComputerUseSessionStatus);
+    expect(notice).toContain('停止を確認できませんでした');
+    expect(notice).not.toContain('安全のため停止しました');
+  });
+
   it('keeps a named-permission boundary visible so the user can open the right settings pane', () => {
     const permissionRequired = {
       platform: 'darwin' as const,

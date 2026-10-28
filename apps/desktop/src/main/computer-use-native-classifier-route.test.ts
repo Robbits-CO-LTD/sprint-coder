@@ -104,6 +104,7 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
       [
         'session',
         'creating_session',
+        'owns_start_work',
         'session',
         'session_id',
         'app_identity',

@@ -17,7 +17,7 @@ const completion = '        // All measured handles and COM objects are gone';
 const adoption =
   '    // Stop and adoption share this lock; a late result cannot advance the generation.';
 const consumer =
-  '    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {';
+  '    if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,';
 const uiaContact =
   'WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });';
 const startReady = '  const auto begin_focus = [&] {';
@@ -46,7 +46,7 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     consumer,
-    `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
+    `    Sc940ConsumerGate(queued.frame.header.request_id.bytes[0]);\n${consumer}`,
   );
   const rejudgeFrom = source.indexOf('// BEGIN windows v2 rejudge');
   const rejudgeTo = source.indexOf('// END windows v2 rejudge', rejudgeFrom);
@@ -101,8 +101,8 @@ function instrumentedHost(): string {
   );
   newStart = replaceOnce(
     newStart,
-    '    std::thread([pending, input] {',
-    '    Sc940StartWorkerAttempt();\n    std::thread([pending, input] {',
+    '    std::thread([pending, input]() mutable {',
+    '    Sc940StartWorkerAttempt();\n    std::thread([pending, input]() mutable {',
   );
   newStart = replaceOnce(
     newStart,
@@ -1559,7 +1559,14 @@ void AssertBusyRefusals(RcaRun &run) {
   const unsigned measured = measurement_calls.load();
   run.Send(MessageType::kProbe, 5, "{\"operation\":\"list_targets\"}");
   Require(run.Wait(5, 1000) && run.Error(5, "list_targets_unavailable"), "busy_list_refused");
-  run.Send(MessageType::kProbe, 6, "{\"operation\":\"start_session\"}");
+  // API 3 parses/adopts the start owner before the busy check. Supply a syntactically valid
+  // request so this still proves the occupied worker refuses target I/O, not just malformed input.
+  const std::string busy_start = "{\"operation\":\"start_session\",\"sessionId\":\"sc940-control\","
+      "\"pid\":1,\"windowId\":\"1\",\"cancelEpoch\":0,\"appIdentityDigest\":\"" + std::string(64, 'a') +
+      "\",\"windowIdentityDigest\":\"" + std::string(64, 'b') + "\",\"canonicalPath\":\"C:/unread-fixture.exe\","
+      "\"executableDigest\":\"" + std::string(64, 'c') + "\",\"expectedBoundsX\":0,\"expectedBoundsY\":0,"
+      "\"expectedBoundsWidth\":1,\"expectedBoundsHeight\":1}";
+  run.Send(MessageType::kProbe, 6, busy_start);
   Require(run.Wait(6, 1000) && run.Error(6, "session_target_rejected"), "busy_start_refused");
   WindowsSession unmeasured;
   RECT bounds{};
@@ -1589,8 +1596,8 @@ struct ListedStart {
   std::uint64_t generation = 0, ruleset = 0, pid = 0;
   std::string window, app, window_identity, executable, path, signer, mode;
   double x = 0, y = 0, width = 0, height = 0;
-  std::string Metadata(std::uint64_t epoch) const {
-    return "{\"operation\":\"start_session\",\"eligibilityBasis\":\"v2-denylist\",\"sessionId\":\"sc940-new\","
+  std::string Metadata(std::uint64_t epoch, const std::string &session_id = "sc940-new") const {
+    return "{\"operation\":\"start_session\",\"eligibilityBasis\":\"v2-denylist\",\"sessionId\":\"" + JsonEscape(session_id) + "\","
         "\"profileRevision\":1,\"cancelEpoch\":" + std::to_string(epoch) + ",\"pid\":" + std::to_string(pid) +
         ",\"windowId\":\"" + window + "\",\"appIdentityDigest\":\"" + app +
         "\",\"windowIdentityDigest\":\"" + window_identity + "\",\"canonicalPath\":\"" + JsonEscape(path) +
@@ -1630,10 +1637,12 @@ ListedStart ReadListedStart(RcaRun &run, std::uint8_t request) {
   return result;
 }
 
-void AssertStarted(RcaRun &run, std::uint8_t request, const ListedStart &listed, std::uint64_t epoch) {
-  std::string body, app, window, mode;
+void AssertStarted(RcaRun &run, std::uint8_t request, const ListedStart &listed, std::uint64_t epoch,
+                   std::uint8_t session_byte = 8, std::string_view session_name = "sc940-new") {
+  std::string body, app, window, mode, session_id;
   std::uint64_t actual_epoch = 0, attempts = 1;
-  Require(run.Wait(request, 10'000) && run.ProbeBody(request, &body, 8) &&
+  Require(run.Wait(request, 10'000) && run.ProbeBody(request, &body, session_byte) &&
+              ReadJsonString(body, "sessionId", &session_id) && session_id == session_name &&
               ReadJsonString(body, "appIdentityDigest", &app) && app == listed.app &&
               ReadJsonString(body, "windowIdentityDigest", &window) && window == listed.window_identity &&
               ReadJsonString(body, "maximumMode", &mode) && mode == "observe_only" &&
@@ -1641,11 +1650,11 @@ void AssertStarted(RcaRun &run, std::uint8_t request, const ListedStart &listed,
               ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0,
           "start_new_session_success");
   Require(!WindowsTargetListWorkerRunning().load(), "start_success_releases_busy_immediately");
-  const auto found = sessions.find(FrameIdKey(Id(8)));
+  const auto found = sessions.find(FrameIdKey(Id(session_byte)));
   Require(found != sessions.end() && found->second.pid == fixture_pids[0] &&
               found->second.window == fixture_windows[0] && found->second.app_identity == listed.app &&
               found->second.maximum_mode == "observe_only" && GetProcessId(found->second.process_handle) == listed.pid &&
-              !ticket_states.contains(FrameIdKey(Id(8))), "start_only_consumer_adopts_session");
+              !ticket_states.contains(FrameIdKey(Id(session_byte))), "start_only_consumer_adopts_session");
   RECT bounds{};
   std::string reason;
   const unsigned before = synchronous_session_probes.load();
@@ -1655,14 +1664,15 @@ void AssertStarted(RcaRun &run, std::uint8_t request, const ListedStart &listed,
               std::abs(bounds.bottom - bounds.top - listed.height) <= 1, "start_immediate_real_validation");
 }
 
-void CloseStarted(RcaRun &run, std::uint8_t cancel_request, std::uint8_t close_request, std::uint64_t epoch) {
-  run.Send(MessageType::kCancel, cancel_request, "{\"cancelEpoch\":" + std::to_string(epoch) + "}", 8);
+void CloseStarted(RcaRun &run, std::uint8_t cancel_request, std::uint8_t close_request, std::uint64_t epoch,
+                  std::uint8_t session_byte = 8, std::string_view session_name = "sc940-new") {
+  run.Send(MessageType::kCancel, cancel_request, "{\"cancelEpoch\":" + std::to_string(epoch) + "}", session_byte);
   run.Send(MessageType::kProbe, close_request,
-           "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(epoch + 1) + "}", 8);
-  Require(run.Wait(cancel_request, 1000) && run.Receipt(cancel_request, MessageType::kDispatchResult, "canceled", epoch, 8, "sc940-new") &&
-              run.Wait(close_request, 1000) && run.Receipt(close_request, MessageType::kProbeResult, "closed", epoch + 1, 8, "sc940-new"),
+           "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(epoch + 1) + "}", session_byte);
+  Require(run.Wait(cancel_request, 1000) && run.Receipt(cancel_request, MessageType::kDispatchResult, "canceled", epoch, session_byte, session_name) &&
+              run.Wait(close_request, 1000) && run.Receipt(close_request, MessageType::kProbeResult, "closed", epoch + 1, session_byte, session_name),
           "start_real_session_drained");
-  Require(!sessions.contains(FrameIdKey(Id(8))), "start_closed_session_removed");
+  Require(!sessions.contains(FrameIdKey(Id(session_byte))), "start_closed_session_removed");
 }
 
 int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std::string &created,
@@ -1690,7 +1700,7 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
     };
     if (healthy || ready || adopt) require_foreground();
     run.StartPipe(false, cancel);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "start_handshake");
     const ListedStart listed = ReadListedStart(run, 30);
     Require(windows_v2_main_pid == GetCurrentProcessId() && !sessions.contains(FrameIdKey(Id(8))) &&
@@ -1733,11 +1743,20 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
         Require(run.Wait(2, 1000) && run.Error(2, "session_start_canceled", 8) &&
                     run.Wait(4, 1000) && run.Receipt(4, MessageType::kDispatchResult, "canceled", 2),
                 "start_valid_cancel_receipt_before_release");
-        // Fresh requests carry the new serial and epoch; staleness cannot stand in for the busy guard.
+        // API 3 keeps each SID/header pair immutable. First prove alias rejection, then use
+        // a genuinely fresh lifetime with the new epoch/serial to test the occupied input lane.
         run.Send(MessageType::kProbe, 6, listed.Metadata(2), 9);
+        Require(run.Wait(6, 1000) && run.Error(6, "session_id_reuse", 9), "start_sid_alias_refused");
+        run.Send(MessageType::kProbe, 11, listed.Metadata(2, "sc940-busy"), 9);
         run.Send(MessageType::kProbe, 7, "{\"operation\":\"list_targets\"}");
-        Require(run.Wait(6, 1000) && run.Error(6, "session_target_rejected", 9) &&
+        Require(run.Wait(11, 1000) && run.Error(11, "session_start_canceled", 9) &&
                     run.Wait(7, 1000) && run.Error(7, "list_targets_unavailable"), "start_fresh_busy_requests_refused");
+        {
+          std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+          const auto owner = WindowsStarts().input_owner;
+          Require(owner != nullptr && owner->session_key == FrameIdKey(Id(8)) &&
+                      owner->pending_requests.load() != 0, "start_old_worker_retains_input_lane");
+        }
         run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}", 8);
         Require(run.Wait(3, 1000) && run.Error(3, "invalid_cancel", 8), "start_uncreated_cancel_bounded");
         run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
@@ -1777,10 +1796,12 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
       if (cancel) {
         require_foreground();
         const ListedStart fresh = ReadListedStart(run, 20);
-        run.Send(MessageType::kProbe, 21, fresh.Metadata(4), 8);
-        AssertStarted(run, 21, fresh, 4);
+        run.Send(MessageType::kProbe, 25, fresh.Metadata(4), 8);
+        Require(run.Wait(25, 1000) && run.Error(25, "session_id_reuse", 8), "start_retired_lifetime_refused");
+        run.Send(MessageType::kProbe, 21, fresh.Metadata(4, "sc940-retry"), 10);
+        AssertStarted(run, 21, fresh, 4, 10, "sc940-retry");
         Require(start_open_calls.load() == 2 && start_worker_attempts.load() == 2, "start_explicit_retry_has_one_new_worker");
-        CloseStarted(run, 22, 23, 5);
+        CloseStarted(run, 22, 23, 5, 10, "sc940-retry");
       }
     }
     Require(start_focus_calls.load() == 0 && !wrong_measurement.load() && !gate_timed_out.load(), "start_no_input_or_foreign_target");
@@ -1861,7 +1882,7 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     run.AttachOwnedSibling(pid, window, created, fixture_path);
     // The unrelated zero-input control seed exists only for real Cancel/Close receipts.
     run.StartPipe(false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "rejudge_handshake");
     const ListedStart listed = ReadListedStart(run, 10);
     Require(WindowsV2FactsContextCache().has_value() &&
@@ -2131,7 +2152,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
     if (live) Require(focus_stop ? (focus_control_ready && !IsIconic(window) && GetForegroundWindow() != window)
                                 : GetForegroundWindow() == window, "resume_environment_foreground_required");
     run.StartPipe(false, false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "resume_handshake");
     const ListedStart listed = ReadListedStart(run, 10);
     Require(WindowsV2FactsContextCache().has_value() &&
@@ -2170,16 +2191,18 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       Require(id != std::string::npos, "resume_binding_negative_field");
       mismatch.replace(id, std::string("\"sessionId\":\"sc940-new\"").size(), "\"sessionId\":\"different\"");
       run.Send(MessageType::kProbe, 23, mismatch);
-      Require(run.Wait(23, 15'000) && run.Error(23, "session_refocus_stale") && WaitAllResumeThreads() &&
-                  resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
-              "resume_identified_refusal_still_invalidates_ticket");
+      // The header/metadata ID pair is immutable in API 3. A different owner is rejected
+      // before the existing session's tickets or measurement state can be touched.
+      Require(run.Wait(23, 15'000) && run.Error(23, "session_id_reuse") && WaitAllResumeThreads() &&
+                  resume_ticket_invalidations.load() == 4 && resume_after_jobs.load() == 2,
+              "resume_sid_alias_refused_without_ticket_mutation");
       mismatch = ResumeMetadata(listed, 1);
       const auto digest = mismatch.find(listed.app);
       Require(digest != std::string::npos, "resume_app_negative_field");
       mismatch.replace(digest, listed.app.size(), std::string(64, '0'));
       run.Send(MessageType::kProbe, 24, mismatch);
       Require(run.Wait(24, 15'000) && run.Error(24, "session_target_rejected") && WaitAllResumeThreads() &&
-                  resume_ticket_invalidations.load() == 6 && resume_after_jobs.load() == 2,
+                  resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
               "resume_refused_attempt_also_invalidates_ticket");
     } else if (repeat) {
       SendResumeComponent(run, listed, 21, "repeat");
@@ -2552,7 +2575,7 @@ int DiagnoseValidation(std::wstring_view scenario) {
     run.StartFixture(true);
     run.PrepareValidationProbe();
     run.StartPipe(false, !repeat, !repeat);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "validation_handshake");
     if (repeat) {
       const ValidationProbeResult result = RunValidationProbe(run, 2, "repeat");
@@ -2730,7 +2753,7 @@ int DiagnoseUia(std::wstring_view scenario) {
   try {
     run.StartFixture();
     run.StartPipe(false);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "uia_handshake");
     uia_hold_contact.store(deadline ? 2 : timeout || cancel || close ? 1 : 0);
     hold_point.store(queued ? HoldPoint::kConsumer : HoldPoint::kNone);
@@ -2870,7 +2893,7 @@ int Diagnose(std::wstring_view scenario) {
     run.StartFixture();
     if (two_fixtures) run.StartFixture();
     run.StartPipe(same_epoch_close);
-    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "handshake");
     Require(!WindowsV2FactsContextCache().has_value(), "initial_context_empty");
     std::string completed_row;
@@ -3078,7 +3101,7 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('        Sc940CompletionGate();')).toHaveLength(2);
     expect(generated.split('    Sc940AdoptionGate();')).toHaveLength(2);
     expect(
-      generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
+      generated.split('    Sc940ConsumerGate(queued.frame.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
     expect(

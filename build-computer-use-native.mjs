@@ -24,7 +24,7 @@ const electronPackagePath = require.resolve('electron/package.json', {
 });
 const electronVersion = JSON.parse(readFileSync(electronPackagePath, 'utf8')).version;
 const protocolVersion = 1;
-const apiVersion = 2;
+const apiVersion = 3;
 
 const target =
   process.argv.find((argument) => argument.startsWith('--target='))?.slice('--target='.length) ??

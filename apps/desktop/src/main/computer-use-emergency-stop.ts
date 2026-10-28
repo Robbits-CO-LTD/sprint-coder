@@ -16,11 +16,14 @@ export class ComputerUseEmergencyStop {
   private overlay: BrowserWindow | null = null;
   private targetBounds: Rectangle | null = null;
   private armed = false;
+  private armGeneration = 0;
 
   constructor(private readonly options: ComputerUseEmergencyStopOptions) {}
 
   async arm(targetBounds?: Rectangle): Promise<boolean> {
     if (this.armed) return true;
+    this.disarm();
+    const generation = this.armGeneration;
     let registered: boolean;
     try {
       registered = globalShortcut.register(COMPUTER_USE_EMERGENCY_ACCELERATOR, () => {
@@ -71,6 +74,7 @@ export class ComputerUseEmergencyStop {
           devTools: false,
         },
       });
+      this.overlay = overlay;
       overlay.setContentProtection(true);
       if (process.platform === 'darwin')
         overlay.setVisibleOnAllWorkspaces(true, {
@@ -86,7 +90,8 @@ export class ComputerUseEmergencyStop {
         if (this.overlay === overlay) this.overlay = null;
       });
       await overlay.loadURL(stopOverlayDataUrl());
-      if (overlay.isDestroyed()) throw new Error('Computer Use Stop overlay was destroyed');
+      if (generation !== this.armGeneration || this.overlay !== overlay || overlay.isDestroyed())
+        throw new Error('Computer Use Stop overlay was superseded');
       overlay.showInactive();
       this.overlay = overlay;
       this.targetBounds = targetBounds ?? null;
@@ -94,7 +99,7 @@ export class ComputerUseEmergencyStop {
       return true;
     } catch {
       if (overlay !== null && !overlay.isDestroyed()) overlay.destroy();
-      globalShortcut.unregister(COMPUTER_USE_EMERGENCY_ACCELERATOR);
+      if (generation === this.armGeneration) this.disarm();
       return false;
     }
   }
@@ -138,6 +143,7 @@ export class ComputerUseEmergencyStop {
   }
 
   disarm(): void {
+    this.armGeneration += 1;
     this.armed = false;
     globalShortcut.unregister(COMPUTER_USE_EMERGENCY_ACCELERATOR);
     const overlay = this.overlay;

@@ -2071,8 +2071,8 @@ export class IpcRouter {
         return this.computerUseEmergencyStop.arm(targetBounds);
       },
       disarmEmergencyStop: (sessionId) => {
-        if (this.computerUseEmergencySessionId === sessionId)
-          this.computerUseEmergencySessionId = null;
+        if (this.computerUseEmergencySessionId !== sessionId) return;
+        this.computerUseEmergencySessionId = null;
         this.computerUseEmergencyStop.disarm();
       },
       repositionEmergencyStop: (sessionId, screenBounds) =>

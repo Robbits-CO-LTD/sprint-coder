@@ -77,13 +77,13 @@ generator inputs. All launches used isolated profiles, hidden presentation and C
 allowlisted parent/child environments and ignored raw stdout/stderr. No Provider or native input
 was requested. Existing signed packages, fuses, other applications and user profiles were not changed.
 
-| Host / package source | Startup hello | Source binding | Terminal frame | Acceptance scope |
-| --- | --- | --- | --- | --- |
-| macOS arm64 / `931be52fab93c52b10dca922b5d52e15c002cad4` | Received | **Not established**: CU-OFF disabled binding emitted a zero source | Received | Startup transport only; not source-bound |
-| macOS arm64 / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Received | Hello and packaged native manifest matched this source | Received; 2 frames, 0 events, 0 sessions | Source-bound startup and empty-stream shutdown transport only |
-| Windows x64, `ssh mainpc` / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Not received within 30 seconds | Package manifest matched; no hello binding established | Missing | Build/provenance checkpoint; startup transport **FAIL** |
-| Windows x64, `ssh mainpc` / `1349068cab54941564403c86c6125077507719f1` | Received | Hello and packaged native manifest matched this source | Missing after owned-child termination | Source-bound startup only; `transportCompleted=false` |
-| Windows x64, `ssh mainpc` / same `1349068cab54941564403c86c6125077507719f1`, normal-close follow-up | Received | Same original package; hello source matched | Received after normal Renderer `window.close()`; 2 frames, 0 events, 0 sessions | Empty-stream startup/shutdown transport only; `coreEvidenceComplete=false` |
+| Host / package source                                                                               | Startup hello                  | Source binding                                                     | Terminal frame                                                                  | Acceptance scope                                                           |
+| --------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| macOS arm64 / `931be52fab93c52b10dca922b5d52e15c002cad4`                                            | Received                       | **Not established**: CU-OFF disabled binding emitted a zero source | Received                                                                        | Startup transport only; not source-bound                                   |
+| macOS arm64 / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9`                                            | Received                       | Hello and packaged native manifest matched this source             | Received; 2 frames, 0 events, 0 sessions                                        | Source-bound startup and empty-stream shutdown transport only              |
+| Windows x64, `ssh mainpc` / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9`                              | Not received within 30 seconds | Package manifest matched; no hello binding established             | Missing                                                                         | Build/provenance checkpoint; startup transport **FAIL**                    |
+| Windows x64, `ssh mainpc` / `1349068cab54941564403c86c6125077507719f1`                              | Received                       | Hello and packaged native manifest matched this source             | Missing after owned-child termination                                           | Source-bound startup only; `transportCompleted=false`                      |
+| Windows x64, `ssh mainpc` / same `1349068cab54941564403c86c6125077507719f1`, normal-close follow-up | Received                       | Same original package; hello source matched                        | Received after normal Renderer `window.close()`; 2 frames, 0 events, 0 sessions | Empty-stream startup/shutdown transport only; `coreEvidenceComplete=false` |
 
 In both successful source-bound startups, `packaged=true`, `packageReady=false`, and
 `coreEvidenceComplete=false`. Native API was 2 and its packaged artifact hash matched the manifest.
@@ -91,11 +91,11 @@ macOS used ad-hoc signing with deep/strict verification; Windows app/helper were
 Neither proves the required production signer or real-Provider journey. macOS source `1349068`
 was not repackaged/retested by this lane; these two OS checkpoints are not a same-SHA final gate.
 
-| Artifact SHA-256 | macOS `0e97b72` | Windows `1349068` |
-| --- | --- | --- |
-| Executable | `8b1825fbd4530c2c4e5ac48e2b9c423fc1beeb32e1e09f37c92e76dc2cc8718c` | `0fac48c5147268452f65fb2fb83a7d0848b0829609d57f9aa35de8d203df7e3b` |
-| app.asar | `43183e7f2c0a65fbeedeafd326ba146afb0c52d68cde84fb612950f8ec7a1c6b` | `eaccef15b93c1c9d20e4c39b736d3fd1b9704ac987e1c847c897ed009c6ffdb2` |
-| Native artifact | `4d3d35e9d527b1f8a754229f105d6627f8230fd4bab7c2380b3be89fa9abe226` | `5f62db6415d726002e07a0c1f67feca5e921f2192ad62a28857a08d55f1a03d0` |
+| Artifact SHA-256 | macOS `0e97b72`                                                    | Windows `1349068`                                                  |
+| ---------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| Executable       | `8b1825fbd4530c2c4e5ac48e2b9c423fc1beeb32e1e09f37c92e76dc2cc8718c` | `0fac48c5147268452f65fb2fb83a7d0848b0829609d57f9aa35de8d203df7e3b` |
+| app.asar         | `43183e7f2c0a65fbeedeafd326ba146afb0c52d68cde84fb612950f8ec7a1c6b` | `eaccef15b93c1c9d20e4c39b736d3fd1b9704ac987e1c847c897ed009c6ffdb2` |
+| Native artifact  | `4d3d35e9d527b1f8a754229f105d6627f8230fd4bab7c2380b3be89fa9abe226` | `5f62db6415d726002e07a0c1f67feca5e921f2192ad62a28857a08d55f1a03d0` |
 
 The Mac child PID/PPID were 27601/27591; the Windows child PID/PPID were 44124/50964.
 Each PPID matched its collector, and an OS process-path read matched the owned executable.
@@ -273,7 +273,7 @@ never be sent over the metadata pipe to supply scanner samples.
 | Bounded runtime / final state                  | Normal 1–25 round limit and final observation; direct race tests          | Both OS signed-package final state with real Provider                                                                                        |
 | Semantic plus typing/scroll, TTL, egress, cost | Partial runtime metadata only                                             | Correlated action-class/TTL/consent/budget assertions, final app state, both OS sessions                                                     |
 | Source/package/signer                          | Native manifest digest observed                                           | Independent exact-source portable/installer/DMG and signer verification from #387                                                            |
-| Native zero-after-Stop                         | Native API 2 attempt counter, async drain, direct C++/ASan and host tests | Windows build and both OS representative signed-package input/Stop journeys                                                                  |
+| Native zero-after-Stop                         | Native API 3 attempt counter, async drain, direct C++/ASan and host tests | Windows build and both OS representative signed-package input/Stop journeys                                                                  |
 | Privacy                                        | Direct tests of explicit-file scanner                                     | Full sink inventory and transient payload samples from each real package run; independently inspect unsupported formats                      |
 | Safety                                         | Direct Controller/planner regressions                                     | Original AC/INV proportional direct tests and representative per-OS Core hard-boundary/Stop scenarios in parent map                          |
 | Canonical transcript and protected sealing     | All PASS imports rejected                                                 | Reviewed assertions consuming source-bound runtime/native/privacy facts, complete original AC coverage, protected collection and attestation |
@@ -293,7 +293,7 @@ cannot turn that timeout into an accepted receipt. The Controller publishes `nat
 instead of a successful user-stop reason when native acknowledgement fails.
 
 The binary frame protocol stays **1** because its header layout is unchanged. Loader, handshake,
-build manifest, Forge package checks and final-gate workflow now require native API **2**.
+build manifest, Forge package checks and final-gate workflow now require native API **3**. API 1/2 artifacts are rejected before use.
 Production-function C++ seams reproduce the pre-fix macOS post-ack calls and establish zero after
 the fix, also under ASan/UBSan; Windows SendInput's portable seam distinguishes attempted calls
 from successful effects. These tests execute inert OS seams, not signed-device acceptance.
@@ -309,6 +309,37 @@ default deadline follows the native close budget (the macOS stop work shares the
 lock and has no internal timeout; the Windows helper transport budgets 10s for a close round trip)
 instead of the shorter Cancel acknowledgement deadline. Only a Close that exceeds that budget is
 unconfirmed, and the quarantine it leaves is intentional.
+
+API 3 adds private `stopPendingStart({ sessionId })` for an admitted start that has not returned
+its native handle. Native chooses the terminal epoch and retains bounded lifetime ownership through
+queued work and failed starts; unknown IDs never produce a successful receipt. A session ID is fresh
+for each lifetime, and retained closed IDs cannot be restarted. Resume uses the existing lifetime.
+The frame protocol and eligibility/classifier versions are unchanged.
+
+Main registers an owner before discovery or native awaits. An entirely unsubmitted start can finish
+locally without inventing a native receipt; Windows additionally tracks every socket write attempt.
+Discovery is not inherently read-only: V1 window lookup may launch the registered application.
+A Stop during an unfinished Windows discovery therefore stays unconfirmed and quarantined, even
+if its late response succeeds or a separate active session Close is confirmed. This quarantine is
+host-wide: future session starts, observations and input remain blocked until the Host is recreated
+(normally by restarting the app). A valid session terminal receipt cannot resolve a separate
+unconfirmed discovery, so that successful session query is not repeated in the same batch. A transport timeout
+or generic rejection does not establish native completion; an authenticated native refusal does.
+This slice does not cancel discovery itself, nor establish that an OS application launch issued
+before Stop has finished. Pre-binding discovery cancellation remains part of the V1 follow-up.
+Once session start submission is possible, only a validated terminal receipt confirms its closure. Pending work cannot
+adopt its late result, and quarantine remains until that work settles or an unconfirmed stop is
+resolved. Duplicate in-flight Stop callers share one bounded cleanup operation. A failed operation keeps
+its stop latch and quarantine but permits a later bounded query. When a stopped start request
+settles after that failure, Main makes one bounded recheck; the late start result itself is never
+a stop receipt. Only fresh validated terminal evidence releases quarantine, and uncertainty from
+launch-capable discovery is retained. The Controller settles a canceled
+start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed
+stop separately. Old overlay completions cannot unregister a newer session's shortcut.
+
+These ownership guarantees do not make every Windows V1 filesystem or UIA operation bounded. If
+native cannot drain, the deadline still reports an unconfirmed stop and retains quarantine. The
+remaining V1 boundedness and real desktop acceptance are separate requirements of #940/#820.
 
 For a clean committed checkout after `node build-computer-use-native.mjs`, run
 `node verify-computer-use-native-offline.mjs` with Node 22 (and an x64 VS developer environment

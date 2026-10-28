@@ -180,7 +180,7 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
         JSON.stringify({
           platform: 'darwin',
           protocolVersion: 1,
-          apiVersion: 2,
+          apiVersion: 3,
           moduleDigest: sha('placeholder addon'),
           binaryDigest: sha('placeholder addon'),
           eligibility: declare('v1', 'darwin'),

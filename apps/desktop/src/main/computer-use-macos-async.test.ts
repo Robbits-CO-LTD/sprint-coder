@@ -193,7 +193,10 @@ describe('macOS Computer Use asynchronous native boundary', () => {
   it('confirms a closed session only from the resolved stop on the N-API thread', () => {
     const stopWorker = sourceBetween('void ExecuteNativeStop(', 'void CompleteNativeStop(');
     const stopComplete = sourceBetween('void CompleteNativeStop(', 'napi_value QueueNativeStop(');
-    const closeSource = sourceBetween('napi_value CloseSession(', 'bool ReadWindowBounds(');
+    const closeSource = sourceBetween(
+      'napi_value CloseMacOwnedSession(',
+      'napi_value CloseSession(',
+    );
 
     // The closed-session registry is guarded by mac_sessions_mutex like the active session maps.
     // The stop worker runs with the serial dispatch lock held, so reaching the registry from there
@@ -228,12 +231,12 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     expect(confirmedBranch.indexOf('napi_resolve_deferred')).toBeGreaterThan(
       confirmedBranch.indexOf('ConfirmClosedMacSession('),
     );
-    // The session leaves the active maps exactly as before, and the registry records it under the
-    // same lock so a repeat close for that id is answerable.
-    expect(closeSource.indexOf('RememberClosingMacSession(')).toBeGreaterThan(
-      closeSource.indexOf('mac_sessions.erase(session_id);'),
+    // The bounded terminal registry must accept ownership before the active entry is removed.
+    // Both changes occur under the same lock so a repeat close remains answerable.
+    expect(closeSource.indexOf('RememberClosingMacSession(')).toBeLessThan(
+      closeSource.indexOf('mac_sessions.erase(active);'),
     );
-    expect(closeSource.match(/RememberClosingMacSession\(/gu)).toHaveLength(2);
+    expect(closeSource.match(/RememberClosingMacSession\(/gu)).toHaveLength(1);
     expect(closeSource).toContain('ThrowNativeError(env, "SESSION_MISSING"');
   });
 
@@ -403,7 +406,7 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       );
       expect(init.indexOf('"dispatch"')).toBeLessThan(init.indexOf('"preflight"'));
       // preflight (N2a) plus approvalApprove, approvalDiscard and dispatchApproved (N2b-4).
-      expect(init.match(/napi_default/gu)).toHaveLength(13);
+      expect(init.match(/napi_default/gu)).toHaveLength(14);
       expect(init).not.toMatch(/napi_(writable|enumerable|configurable)/u);
     });
 
@@ -626,7 +629,7 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       expect(cancel.indexOf('ticket_generation.fetch_add')).toBeLessThan(
         cancel.indexOf('session->cancel_epoch.store('),
       );
-      const close = sourceBetween('napi_value CloseSession(', 'bool ReadWindowBounds(');
+      const close = sourceBetween('napi_value CloseMacOwnedSession(', 'napi_value CloseSession(');
       expect(close).toContain('session->ticket_generation.fetch_add(1, std::memory_order_acq_rel)');
       expect(close.indexOf('ticket_generation.fetch_add')).toBeLessThan(
         close.indexOf('session->cancel_epoch.store('),

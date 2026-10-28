@@ -20,7 +20,7 @@ export function parseNativeHandshake(
     throw new Error('HANDSHAKE_INVALID');
   if (
     handshake['protocolVersion'] !== 1 ||
-    handshake['apiVersion'] !== 2 ||
+    handshake['apiVersion'] !== 3 ||
     handshake['platform'] !== platform ||
     handshake['napiVersion'] !== 10
   )

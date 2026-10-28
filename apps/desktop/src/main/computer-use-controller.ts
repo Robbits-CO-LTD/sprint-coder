@@ -272,6 +272,10 @@ export type ComputerUseNativeApprovalApproveResult =
     }>;
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
+export type ComputerUsePendingStartStop =
+  | Readonly<{ kind: 'not_submitted' }>
+  | Readonly<{ kind: 'closed'; inputReceipt: ComputerUseNativeInputReceipt }>;
+
 export interface ComputerUseNativeHost {
   /** Private discovery seam; Controller exposure and token binding are a separate step. */
   listTargets?(): Promise<ComputerUseNativeTargetList>;
@@ -300,6 +304,8 @@ export interface ComputerUseNativeHost {
       classifierRoute?: ComputerUseClassifierRoute;
     }>,
   ): Promise<ComputerUseNativeSession>;
+  /** Stops this Host's in-flight start independently of its result Promise. */
+  stopPendingStart?(sessionId: string): Promise<ComputerUsePendingStartStop>;
   observe(
     session: ComputerUseNativeSession,
     input: Readonly<{ requestId: string; cancelEpoch: number }>,
@@ -646,6 +652,19 @@ type PendingAppGrantRequest = {
   settle: (outcome: ComputerRequestAccessOutput) => void;
 };
 
+type StartingSession = {
+  controller: AbortController;
+  reason: ComputerUseStopReason | null;
+  taskId: string;
+  profileId: string;
+  turnId: string;
+  status: ComputerUseSessionStatus;
+  nativeStarted: boolean;
+  native: ComputerUseNativeSession | null;
+  stopPromise: Promise<void> | null;
+  failure: unknown;
+};
+
 type SessionRecord = {
   status: ComputerUseSessionStatus;
   profile: ComputerAppProfileRecord;
@@ -862,21 +881,13 @@ export class ComputerUseController {
    * counter back to 0, and a session that began at 0 would pass again.
    */
   private readonly artifactGenerations = new Map<string, number>();
-  private readonly startingSessions = new Map<
-    string,
-    {
-      controller: AbortController;
-      reason: ComputerUseStopReason | null;
-      taskId: string;
-      /** Which application this start is for, so a revoked grant can cancel it (ADR v2 §6.5). */
-      profileId: string;
-    }
-  >();
+  private readonly startingSessions = new Map<string, StartingSession>();
   private readonly now: () => number;
   private disposed = false;
   private startInProgress = false;
   private startingController: AbortController | null = null;
   private startingTaskId: string | null = null;
+  private startingTurnId: string | null = null;
   /**
    * The application a start in flight is for, so revoking its grant can cancel it (ADR v2 §6.5).
    *
@@ -1352,22 +1363,22 @@ export class ComputerUseController {
     // Starts in flight, before anything reaches `sessions`. A start that is waiting on native or on
     // the planner would otherwise finish and become a live session for an application the user has
     // just revoked — the same hole `policyEpochChanged` closes for a permission change.
+    const pendingStops = this.stopStartingWhere(
+      (starting) => revoked(starting.profileId),
+      'policy_changed',
+    );
     if (this.startingProfileId !== null && revoked(this.startingProfileId))
       this.startingController?.abort(new Error('Computer Use application grant was revoked'));
-    for (const starting of this.startingSessions.values())
-      if (revoked(starting.profileId)) {
-        starting.reason = 'policy_changed';
-        starting.controller.abort(new Error('Computer Use application grant was revoked'));
-      }
-    await Promise.all(
-      [...this.sessions.values()]
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.values()]
         .filter(
           (session) =>
             this.boundGrantIdentity(session.profile)?.grantIdentityDigest ===
             grant.grantIdentityDigest,
         )
         .map((session) => this.stop(session.status.sessionId, 'policy_changed')),
-    );
+    ]);
   }
 
   /**
@@ -2645,10 +2656,47 @@ export class ComputerUseController {
     const controller = new AbortController();
     this.startingController = controller;
     this.startingTaskId = input.taskId;
+    this.startingTurnId = input.turnId ?? null;
     this.startingProfileId = input.profileId;
     // Linked to *this* start's own controller, never the other way round: an abort of the caller
     // cancels this start-up — the native session handshake's cleanup, the provider preflight, the
     // first planner call — and nothing here can abort anybody else's.
+    let rejectCanceled!: (error: unknown) => void;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      rejectCanceled = reject;
+    });
+    void canceled.catch(() => undefined);
+    const cancelStart = (): void => {
+      const starting = [...this.startingSessions.values()].find(
+        (entry) => entry.controller === controller,
+      );
+      if (starting === undefined) {
+        const active = [...this.sessions.values()].find((entry) => entry.controller === controller);
+        if (active === undefined) rejectCanceled(controller.signal.reason);
+        else
+          void this.stop(active.status.sessionId, 'user_stop').then(
+            () =>
+              rejectCanceled(
+                active.status.stopReason === 'native_unavailable'
+                  ? new Error('Computer Use native_stop_unconfirmed')
+                  : controller.signal.reason,
+              ),
+            rejectCanceled,
+          );
+        return;
+      }
+      void this.stop(starting.status.sessionId, starting.reason ?? 'user_stop').then(() => {
+        rejectCanceled(
+          starting.failure ??
+            new Error(
+              starting.status.stopReason === 'native_unavailable'
+                ? 'Computer Use native_stop_unconfirmed'
+                : `Computer Use start canceled: ${starting.reason}`,
+            ),
+        );
+      }, rejectCanceled);
+    };
+    controller.signal.addEventListener('abort', cancelStart, { once: true });
     const forward = (): void =>
       controller.abort(
         externalSignal?.reason instanceof Error
@@ -2658,19 +2706,26 @@ export class ComputerUseController {
     if (externalSignal?.aborted === true) forward();
     else externalSignal?.addEventListener('abort', forward, { once: true });
     try {
-      return await this.startInternal(input, controller, artifactGeneration);
+      controller.signal.throwIfAborted();
+      return await Promise.race([
+        this.startInternal(input, controller, artifactGeneration),
+        canceled,
+      ]);
     } catch (error) {
       if (!controller.signal.aborted)
         controller.abort(error instanceof Error ? error : new Error('Computer Use start failed'));
       throw error;
     } finally {
       externalSignal?.removeEventListener('abort', forward);
-      if (this.startingController === controller) this.startingController = null;
-      if (this.startingTaskId === input.taskId) {
+      controller.signal.removeEventListener('abort', cancelStart);
+      // A canceled work promise may finish after a new start has acquired this slot.
+      if (this.startingController === controller) {
+        this.startingController = null;
         this.startingTaskId = null;
+        this.startingTurnId = null;
         this.startingProfileId = null;
+        this.startInProgress = false;
       }
-      this.startInProgress = false;
     }
   }
 
@@ -2913,28 +2968,58 @@ export class ComputerUseController {
       effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
     });
     const turnId = input.turnId ?? `computer-turn:${sessionId}`;
-    const starting = {
+    const startedAt = new Date(this.now()).toISOString();
+    const initialStatus = computerUseSessionStatusSchema.parse({
+      sessionId,
+      taskId: input.taskId,
+      profileId: selectedProfile.id,
+      windowId: input.windowId,
+      connectionId: input.connectionId,
+      modelId: input.modelId,
+      appIdentityDigest: selectedProfile.identityDigest,
+      windowIdentityDigest: candidate.windowIdentityDigest,
+      mode: preflightMode,
+      maximumMode: preflightMaximumMode,
+      policyLanguage: preflightPolicyLanguage,
+      state: 'starting',
+      statusRevision: 0,
+      policyEpoch,
+      observationRevision: 0,
+      round: 0,
+      maxRounds: input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
+      profileRevision: selectedProfile.revision,
+      startedAt,
+      expiresAt: new Date(
+        this.now() + COMPUTER_USE_LIMITS.maxSessionHours * 60 * 60 * 1_000 - 1_000,
+      ).toISOString(),
+      lastObservationAt: null,
+      stopReason: null,
+      pendingApproval: null,
+    });
+    const starting: StartingSession = {
       controller,
-      reason: null as ComputerUseStopReason | null,
+      reason: null,
       taskId: input.taskId,
       profileId: input.profileId,
+      turnId,
+      status: initialStatus,
+      nativeStarted: false,
+      native: null,
+      stopPromise: null,
+      failure: null,
     };
     this.startingSessions.set(sessionId, starting);
-    if (
-      this.deps.armEmergencyStop !== undefined &&
-      !(await this.deps.armEmergencyStop(sessionId, candidate.screenBounds))
-    ) {
-      this.startingSessions.delete(sessionId);
-      throw new Error('Computer Use emergency stop could not be armed');
-    }
-    if (controller.signal.aborted) {
-      this.startingSessions.delete(sessionId);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      throw new Error(`Computer Use start canceled: ${starting.reason ?? 'emergency_stop'}`);
-    }
-    let native: ComputerUseNativeSession;
     try {
-      native = await this.deps.native.startSession({
+      this.emit(initialStatus);
+      controller.signal.throwIfAborted();
+      if (
+        this.deps.armEmergencyStop !== undefined &&
+        !(await this.deps.armEmergencyStop(sessionId, candidate.screenBounds))
+      )
+        throw new Error('Computer Use emergency stop could not be armed');
+      controller.signal.throwIfAborted();
+      starting.nativeStarted = true;
+      const native = await this.deps.native.startSession({
         profile: selectedProfile,
         windowId: candidate.windowId,
         sessionId,
@@ -2943,79 +3028,51 @@ export class ComputerUseController {
         cancelEpoch: 0,
         classifierRoute,
       });
-    } catch (error) {
-      this.startingSessions.delete(sessionId);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      throw error;
-    }
-    if (controller.signal.aborted) {
-      this.startingSessions.delete(sessionId);
-      await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      throw new Error(`Computer Use start canceled: ${starting.reason ?? 'emergency_stop'}`);
-    }
-    try {
+      controller.signal.throwIfAborted();
+      starting.native = native;
       this.assertStartBinding(input.taskId, policyEpoch, ownerTurnId);
-    } catch (error) {
-      this.startingSessions.delete(sessionId);
-      await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      throw error;
-    }
-    if (
-      native.sessionId !== sessionId ||
-      native.appIdentityDigest !== selectedProfile.identityDigest ||
-      native.windowIdentityDigest !== candidate.windowIdentityDigest ||
-      native.windowId !== candidate.windowId ||
-      native.profileRevision !== selectedProfile.revision
-    ) {
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      this.startingSessions.delete(sessionId);
-      throw new Error('Computer Use native session identity mismatch');
-    }
-    if (!(await this.repositionEmergencyStop(sessionId, native.screenBounds))) {
-      await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      this.startingSessions.delete(sessionId);
-      throw new Error('Computer Use Stop overlay could not follow the native target');
-    }
-    const policyLanguage = bindComputerUsePolicyLanguage(
-      preflightPolicyLanguage,
-      native.policyLanguage,
-    );
-    const maximumMode = bindComputerUseMaximumMode(preflightMaximumMode, native.maximumMode);
-    const effectiveMode = effectiveComputerUseMode(
-      preflightMode,
-      availability.control,
-      policyLanguage,
-      maximumMode,
-    );
-    let planner: ComputerUsePlannerPort | null;
-    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
-      capture.start({
-        type: 'session',
-        sessionDigest: computerUseCaptureDigest(sessionId),
-        platform: native.platform,
-        appDigest: native.appIdentityDigest,
-        windowDigest: native.windowIdentityDigest,
-        manifestDigest: availability.manifestDigest ?? '0'.repeat(64),
-        ...(native.inputReceipt === undefined
-          ? {}
-          : {
-              inputAttemptCount: native.inputReceipt.inputAttemptCount,
-              cancelEpoch: native.inputReceipt.cancelEpoch,
-            }),
-      }),
-    );
-    try {
+      if (
+        native.sessionId !== sessionId ||
+        native.appIdentityDigest !== selectedProfile.identityDigest ||
+        native.windowIdentityDigest !== candidate.windowIdentityDigest ||
+        native.windowId !== candidate.windowId ||
+        native.profileRevision !== selectedProfile.revision
+      )
+        throw new Error('Computer Use native session identity mismatch');
+      if (!(await this.repositionEmergencyStop(sessionId, native.screenBounds)))
+        throw new Error('Computer Use Stop overlay could not follow the native target');
+      controller.signal.throwIfAborted();
+      const policyLanguage = bindComputerUsePolicyLanguage(
+        preflightPolicyLanguage,
+        native.policyLanguage,
+      );
+      const maximumMode = bindComputerUseMaximumMode(preflightMaximumMode, native.maximumMode);
+      const effectiveMode = effectiveComputerUseMode(
+        preflightMode,
+        availability.control,
+        policyLanguage,
+        maximumMode,
+      );
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.start({
+          type: 'session',
+          sessionDigest: computerUseCaptureDigest(sessionId),
+          platform: native.platform,
+          appDigest: native.appIdentityDigest,
+          windowDigest: native.windowIdentityDigest,
+          manifestDigest: availability.manifestDigest ?? '0'.repeat(64),
+          ...(native.inputReceipt === undefined
+            ? {}
+            : {
+                inputAttemptCount: native.inputReceipt.inputAttemptCount,
+                cancelEpoch: native.inputReceipt.cancelEpoch,
+              }),
+        }),
+      );
       // Before the factory, not only after it: the factory is where the provider preflight and the
       // model-capability check happen, and a start that is already cancelled must not make them.
       controller.signal.throwIfAborted();
-      planner =
+      const planner =
         this.deps.plannerFactory === undefined
           ? (this.deps.planner ?? null)
           : await this.deps.plannerFactory({
@@ -3032,83 +3089,31 @@ export class ComputerUseController {
       controller.signal.throwIfAborted();
       if (this.disposed) throw new Error('Computer Use controller is disposed');
       this.assertStartBinding(input.taskId, policyEpoch, ownerTurnId);
-    } catch (error) {
-      this.startingSessions.delete(sessionId);
-      await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
-      throw error;
-    }
-    const startedAt = new Date(this.now()).toISOString();
-    const status = computerUseSessionStatusSchema.parse({
-      sessionId,
-      taskId: input.taskId,
-      profileId: selectedProfile.id,
-      windowId: input.windowId,
-      connectionId: input.connectionId,
-      modelId: input.modelId,
-      appIdentityDigest: selectedProfile.identityDigest,
-      windowIdentityDigest: candidate.windowIdentityDigest,
-      mode: effectiveMode,
-      maximumMode,
-      policyLanguage,
-      state: 'starting',
-      statusRevision: 0,
-      policyEpoch,
-      observationRevision: 0,
-      round: 0,
-      maxRounds: input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
-      profileRevision: selectedProfile.revision,
-      startedAt,
-      expiresAt: new Date(
-        this.now() + COMPUTER_USE_LIMITS.maxSessionHours * 60 * 60 * 1_000 - 1_000,
-      ).toISOString(),
-      lastObservationAt: null,
-      stopReason: null,
-      pendingApproval: null,
-    });
-    const record: SessionRecord = {
-      status,
-      profile: selectedProfile,
-      agent: input.agent ?? null,
-      classifierRoute,
-      native,
-      screenBounds: native.screenBounds,
-      controller,
-      turnId,
-      syntheticTurn,
-      observation: null,
-      planGrant: null,
-      plannerExecutionId: null,
-      planner,
-      expiryTimer: null,
-      stopPromise: null,
-      artifactGeneration,
-    };
-    this.sessions.set(sessionId, record);
-    this.startingSessions.delete(sessionId);
-    // Bound before any round can start. Digest of the limits only; no policy body or identifier.
-    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
-      capture.record({
-        type: 'cost_limit_bound',
-        sessionDigest: computerUseCaptureDigest(sessionId),
-        costLimitDigest: computerUseCaptureDigest(
-          JSON.stringify([
-            status.maxRounds,
-            COMPUTER_USE_LIMITS.maxRounds,
-            COMPUTER_USE_LIMITS.maxSessionHours,
-            status.policyEpoch,
-          ]),
-        ),
-        maxRounds: status.maxRounds,
-      }),
-    );
-    record.expiryTimer = setTimeout(
-      () => void this.stop(sessionId, 'limit_reached'),
-      Math.max(1, Date.parse(status.expiresAt) - this.now()),
-    );
-    record.expiryTimer.unref?.();
-    try {
+      const status = computerUseSessionStatusSchema.parse({
+        ...starting.status,
+        mode: effectiveMode,
+        maximumMode,
+        policyLanguage,
+      });
+      const record: SessionRecord = {
+        status,
+        profile: selectedProfile,
+        agent: input.agent ?? null,
+        classifierRoute,
+        native,
+        screenBounds: native.screenBounds,
+        controller,
+        turnId,
+        syntheticTurn,
+        observation: null,
+        planGrant: null,
+        plannerExecutionId: null,
+        planner,
+        expiryTimer: null,
+        stopPromise: null,
+        artifactGeneration,
+      };
+      // Keep pending ownership until the synchronous broker binding succeeds.
       this.broker.startTurn(
         {
           taskId: input.taskId,
@@ -3119,23 +3124,44 @@ export class ComputerUseController {
         'computer-controller',
         [COMPUTER_OBSERVE_TOOL.toolId, COMPUTER_ACT_TOOL.toolId],
       );
+      this.sessions.set(sessionId, record);
+      this.startingSessions.delete(sessionId);
+      // Bound before any round can start. Digest of the limits only; no policy body or identifier.
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.record({
+          type: 'cost_limit_bound',
+          sessionDigest: computerUseCaptureDigest(sessionId),
+          costLimitDigest: computerUseCaptureDigest(
+            JSON.stringify([
+              status.maxRounds,
+              COMPUTER_USE_LIMITS.maxRounds,
+              COMPUTER_USE_LIMITS.maxSessionHours,
+              status.policyEpoch,
+            ]),
+          ),
+          maxRounds: status.maxRounds,
+        }),
+      );
+      record.expiryTimer = setTimeout(
+        () => void this.stop(sessionId, 'limit_reached'),
+        Math.max(1, Date.parse(status.expiresAt) - this.now()),
+      );
+      record.expiryTimer.unref?.();
+      // After startTurn, so a failed start leaves no attachment behind. No await before run().
+      this.attachCarriedArtifacts(record, input.agent?.carry);
+      this.emit(status);
+      controller.signal.throwIfAborted();
+      void this.run(record).catch((error) => {
+        if (!controller.signal.aborted) void this.stop(sessionId, 'error');
+        return error;
+      });
+      controller.signal.throwIfAborted();
+      return status;
     } catch (error) {
-      this.sessions.delete(sessionId);
-      if (record.expiryTimer !== null) clearTimeout(record.expiryTimer);
-      record.expiryTimer = null;
-      controller.abort();
-      await this.deps.native.close(native).catch(() => undefined);
-      await this.deps.disarmEmergencyStop?.(sessionId);
+      if (starting.stopPromise === null) starting.failure = error;
+      await this.stop(sessionId, starting.reason ?? 'error');
       throw error;
     }
-    // After startTurn, so a failed start leaves no attachment behind. No await before run().
-    this.attachCarriedArtifacts(record, input.agent?.carry);
-    this.emit(status);
-    void this.run(record).catch((error) => {
-      if (!controller.signal.aborted) void this.stop(sessionId, 'error');
-      return error;
-    });
-    return status;
   }
 
   async act(
@@ -3230,8 +3256,17 @@ export class ComputerUseController {
     if (record === undefined) {
       const starting = this.startingSessions.get(sessionId);
       if (starting !== undefined) {
+        if (starting.stopPromise !== null) return starting.stopPromise;
+        let resolveStop!: () => void;
+        let rejectStop!: (error: unknown) => void;
+        const stopping = new Promise<void>((resolve, reject) => {
+          resolveStop = resolve;
+          rejectStop = reject;
+        });
+        starting.stopPromise = stopping;
         starting.reason = reason;
-        starting.controller.abort(new Error(`Computer Use stopped while starting: ${reason}`));
+        void this.completeStartingStop(starting).then(resolveStop, rejectStop);
+        return stopping;
       }
       return Promise.resolve();
     }
@@ -3247,6 +3282,77 @@ export class ComputerUseController {
     record.stopPromise = stopPromise;
     void this.completeStop(record, reason).then(resolveStop, rejectStop);
     return stopPromise;
+  }
+
+  private async completeStartingStop(starting: StartingSession): Promise<void> {
+    const sessionId = starting.status.sessionId;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_requested',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        reasonDigest: computerUseCaptureDigest(starting.reason ?? 'error'),
+      }),
+    );
+    starting.status = computerUseSessionStatusSchema.parse({
+      ...starting.status,
+      state: 'stopping',
+    });
+    this.emit(starting.status);
+    starting.controller.abort(new Error(`Computer Use start canceled: ${starting.reason}`));
+    let acknowledged = true;
+    let inputReceipt: ComputerUseNativeInputReceipt | void = undefined;
+    if (starting.native !== null) {
+      try {
+        inputReceipt = await this.deps.native.cancel(
+          starting.native,
+          starting.native.cancelEpoch + 1,
+        );
+      } catch {
+        acknowledged = false;
+      }
+      let closed = false;
+      for (
+        let attempt = 0;
+        attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT && !closed;
+        attempt += 1
+      )
+        closed = await this.deps.native.close(starting.native).then(
+          () => true,
+          () => false,
+        );
+      acknowledged = acknowledged && closed;
+    } else if (starting.nativeStarted) {
+      try {
+        if (this.deps.native.stopPendingStart === undefined)
+          throw new Error('Pending stop unavailable');
+        const result = await this.deps.native.stopPendingStart(sessionId);
+        if (result.kind === 'closed') inputReceipt = result.inputReceipt;
+      } catch {
+        acknowledged = false;
+      }
+    }
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_acknowledged',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        nativeAcknowledged: acknowledged,
+        ...(inputReceipt === undefined
+          ? {}
+          : {
+              inputAttemptCount: inputReceipt.inputAttemptCount,
+              cancelEpoch: inputReceipt.cancelEpoch,
+            }),
+      }),
+    );
+    await Promise.resolve(this.deps.disarmEmergencyStop?.(sessionId)).catch(() => undefined);
+    starting.status = computerUseSessionStatusSchema.parse({
+      ...starting.status,
+      state: 'stopped',
+      stopReason: acknowledged ? starting.reason : 'native_unavailable',
+    });
+    this.emit(starting.status);
+    if (this.startingSessions.get(sessionId) === starting) this.startingSessions.delete(sessionId);
+    this.statusRevisionBySession.delete(sessionId);
   }
 
   private async completeStop(record: SessionRecord, reason: ComputerUseStopReason): Promise<void> {
@@ -3336,40 +3442,46 @@ export class ComputerUseController {
     this.pauseReasons.delete(sessionId);
   }
 
+  private stopStartingWhere(
+    matches: (starting: StartingSession) => boolean,
+    reason: ComputerUseStopReason,
+  ): Promise<void>[] {
+    return [...this.startingSessions.values()]
+      .filter(matches)
+      .map((starting) => this.stop(starting.status.sessionId, reason));
+  }
+
   async stopForTask(
     taskId: string,
     reason: Extract<ComputerUseStopReason, 'task_changed' | 'turn_started'>,
   ): Promise<void> {
+    const pendingStops = this.stopStartingWhere((starting) => starting.taskId === taskId, reason);
     if (this.startingTaskId === taskId && this.startingController !== null)
       this.startingController.abort(new Error(`Computer Use stopped while starting: ${reason}`));
-    for (const starting of this.startingSessions.values()) {
-      if (starting.taskId !== taskId) continue;
-      starting.reason = reason;
-      starting.controller.abort(new Error(`Computer Use stopped while starting: ${reason}`));
-    }
-    await Promise.all(
-      [...this.sessions.values()]
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.values()]
         .filter((record) => record.status.taskId === taskId)
         .map((record) => this.stop(record.status.sessionId, reason)),
-    );
+    ]);
   }
 
   async stopOutsideTask(selectedTaskId: string): Promise<void> {
     // The card lives in one Task's conversation. Once the user is looking somewhere else it is no
     // longer in front of them, and a card nobody can see must not keep a tool call waiting.
     this.withdrawAppGrantCardFor((pending) => pending.taskId !== selectedTaskId);
+    const pendingStops = this.stopStartingWhere(
+      (starting) => starting.taskId !== selectedTaskId,
+      'task_changed',
+    );
     if (this.startingTaskId !== null && this.startingTaskId !== selectedTaskId)
       this.startingController?.abort(new Error('Computer Use Task selection changed'));
-    for (const starting of this.startingSessions.values()) {
-      if (starting.taskId === selectedTaskId) continue;
-      starting.reason = 'task_changed';
-      starting.controller.abort(new Error('Computer Use Task selection changed'));
-    }
-    await Promise.all(
-      [...this.sessions.values()]
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.values()]
         .filter((record) => record.status.taskId !== selectedTaskId)
         .map((record) => this.stop(record.status.sessionId, 'task_changed')),
-    );
+    ]);
   }
 
   async resolveApproval(input: ComputerUseApprovalResolveInput): Promise<ComputerUseSessionStatus> {
@@ -3576,12 +3688,15 @@ export class ComputerUseController {
   }
 
   getStatus(sessionId: string): ComputerUseSessionStatus | null {
-    return this.sessions.get(sessionId)?.status ?? null;
+    return (
+      this.sessions.get(sessionId)?.status ?? this.startingSessions.get(sessionId)?.status ?? null
+    );
   }
 
   subscribe(listener: (status: ComputerUseSessionStatus) => void): () => void {
     this.listeners.add(listener);
     for (const session of this.sessions.values()) listener(session.status);
+    for (const starting of this.startingSessions.values()) listener(starting.status);
     return () => this.listeners.delete(listener);
   }
 
@@ -3592,6 +3707,13 @@ export class ComputerUseController {
       (pending) => pending.taskId === taskId && pending.turnId === turnId,
     );
     this.accessRequestsByTurn.delete(turnId);
+    for (const stopping of this.stopStartingWhere(
+      (starting) => starting.taskId === taskId && starting.turnId === turnId,
+      'turn_started',
+    ))
+      void stopping.catch(() => undefined);
+    if (this.startingTaskId === taskId && this.startingTurnId === turnId)
+      this.startingController?.abort(new Error('Computer Use Turn ended while starting'));
     for (const session of this.sessions.values())
       if (session.status.taskId === taskId && session.turnId === turnId)
         void this.stop(session.status.sessionId, 'turn_started');
@@ -3733,13 +3855,13 @@ export class ComputerUseController {
     // "Allow once" was given under the permissions that were in force; a change to those is exactly
     // the event §6.5 says must invalidate what is bound to the epoch.
     this.taskScopedGrants.delete(taskId);
+    for (const stopping of this.stopStartingWhere(
+      (starting) => starting.taskId === taskId,
+      'policy_changed',
+    ))
+      void stopping.catch(() => undefined);
     if (this.startingTaskId === taskId)
       this.startingController?.abort(new Error('Computer Use policy changed while starting'));
-    for (const starting of this.startingSessions.values())
-      if (starting.taskId === taskId) {
-        starting.reason = 'policy_changed';
-        starting.controller.abort(new Error('Computer Use policy changed while starting'));
-      }
     for (const session of this.sessions.values())
       if (session.status.taskId === taskId)
         void this.stop(session.status.sessionId, 'policy_changed');
@@ -3751,41 +3873,34 @@ export class ComputerUseController {
    */
   async featureDisabled(): Promise<void> {
     this.withdrawAppGrantCardFor(() => true);
+    const pendingStops = this.stopStartingWhere(() => true, 'policy_changed');
     this.startingController?.abort(new Error('Computer Use was turned off'));
-    for (const starting of this.startingSessions.values()) {
-      starting.reason = 'policy_changed';
-      starting.controller.abort(new Error('Computer Use was turned off'));
-    }
-    await Promise.all(
-      [...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'policy_changed')),
-    );
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'policy_changed')),
+    ]);
   }
 
   async rendererInvalidated(): Promise<void> {
     // The window that was showing the card is gone, so the click it was waiting for can never come.
     this.withdrawAppGrantCardFor(() => true);
+    const pendingStops = this.stopStartingWhere(() => true, 'renderer_reloaded');
     this.startingController?.abort(new Error('Computer Use renderer was reloaded'));
-    for (const starting of this.startingSessions.values()) {
-      starting.reason = 'renderer_reloaded';
-      starting.controller.abort(new Error('Computer Use renderer was reloaded'));
-    }
-    await Promise.all(
-      [...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'renderer_reloaded')),
-    );
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'renderer_reloaded')),
+    ]);
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
     this.withdrawAppGrantCardFor(() => true);
+    const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
     this.startingController?.abort(new Error('Computer Use disposed while starting'));
-    for (const [sessionId, starting] of this.startingSessions) {
-      starting.reason = 'app_closed';
-      starting.controller.abort(new Error('Computer Use disposed while starting'));
-      this.startingSessions.delete(sessionId);
-    }
-    await Promise.all(
-      [...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'app_closed')),
-    );
+    await Promise.all([
+      ...pendingStops,
+      ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'app_closed')),
+    ]);
     await this.broker.dispose();
     this.listeners.clear();
     this.statusRevisionBySession.clear();
@@ -5520,6 +5635,8 @@ export class ComputerUseController {
     this.statusRevisionBySession.set(status.sessionId, statusRevision);
     const record = this.sessions.get(status.sessionId);
     if (record !== undefined) record.status = parsed;
+    const starting = this.startingSessions.get(status.sessionId);
+    if (starting !== undefined) starting.status = parsed;
     this.deps.publishStatus?.(parsed);
     for (const listener of this.listeners) listener(parsed);
   }

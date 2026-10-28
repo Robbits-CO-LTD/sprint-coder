@@ -61,7 +61,7 @@ function load(eligibility: Record<string, unknown> | undefined) {
       platform: 'win32',
       architecture: 'x64',
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: digest,
       binaryDigest: digest,
@@ -78,7 +78,7 @@ function load(eligibility: Record<string, unknown> | undefined) {
     architecture: 'x64',
     probeHelper: () => ({
       protocolVersion: 1,
-      apiVersion: 2,
+      apiVersion: 3,
       platform: 'win32',
       napiVersion: 10,
       sourceCommit: 'f'.repeat(40),

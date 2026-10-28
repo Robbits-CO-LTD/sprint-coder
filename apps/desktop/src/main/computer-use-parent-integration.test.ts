@@ -19,7 +19,7 @@ import { createComputerUseNativeHost } from './computer-use-native-host';
 import { computerUseDesktopV1Enabled } from './feature-flags';
 
 // Synthetic native metadata tests the Main integration only; it is never signed-device evidence.
-function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 1 | 2 = 2) {
+function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 1 | 3 = 3) {
   const receipt = (input: unknown) => {
     const { sessionId, cancelEpoch } = computerUseNativeInputReceiptSchema
       .pick({ sessionId: true, cancelEpoch: true })
@@ -35,6 +35,13 @@ function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 
     observe: vi.fn(),
     dispatch: vi.fn(),
     cancel: vi.fn((input: unknown) => ({ ...receipt(input), result: 'canceled' })),
+    stopPendingStart: vi.fn((input: unknown) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      cancelEpoch: 1,
+      inputAttemptCount: 0,
+    })),
     close: vi.fn((input: unknown) =>
       computerUseNativeCloseReceiptSchema.parse({ ...receipt(input), result: 'closed' }),
     ),

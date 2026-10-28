@@ -1,5 +1,8 @@
 import { parseNativeHandshake } from './computer-use-native-handshake';
-import type { ComputerUseEligibility } from '@sprint-coder/contracts';
+import {
+  computerUseNativeCloseReceiptSchema,
+  type ComputerUseEligibility,
+} from '@sprint-coder/contracts';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createConnection, type Socket } from 'node:net';
@@ -55,6 +58,8 @@ type PendingRequest = Readonly<{
   sessionId: ComputerUseNativeFrameId;
   /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
   stopsSession: boolean;
+  activityGeneration: number;
+  helperGeneration: number;
   responseType: ComputerUseNativeMessageType;
   allowBinary: boolean;
 }>;
@@ -156,23 +161,40 @@ export function createWindowsComputerUseNativeAddon(
         windowsStopRequestKey('cancel', sessionId, value['cancelEpoch']),
       );
     },
-    close: async (input) => {
+    close: (input) => {
       const value = record(input);
       const sessionId = stringField(value, 'sessionId');
-      try {
-        return await client.call(
-          'probe',
-          'close_session',
-          value,
-          sessionId,
-          windowsStopRequestKey('close', sessionId, value['cancelEpoch']),
-        );
-      } finally {
-        client.shutdownWhenIdle();
-      }
+      return client.call(
+        'probe',
+        'close_session',
+        value,
+        sessionId,
+        windowsStopRequestKey('close', sessionId, value['cancelEpoch']),
+      );
     },
+    stopPendingStart: (input) => {
+      const value = record(input);
+      const sessionId = stringField(value, 'sessionId');
+      if (
+        Object.keys(value).length !== 1 ||
+        sessionId.length === 0 ||
+        Buffer.byteLength(sessionId, 'utf8') > 256
+      )
+        throw new Error('Invalid pending start stop request');
+      // No epoch exists at the caller yet. Every logical retry gets a fresh wire request id.
+      return client.call('probe', 'stop_pending_start', value, sessionId, undefined);
+    },
+    cancelUnsubmittedStart: (sessionId) => client.cancelUnsubmittedStart(sessionId),
   });
 }
+
+type StartTransmission = {
+  sessionId: string;
+  stopped: boolean;
+  everSent: boolean;
+  closed: boolean;
+  attempts: Set<symbol>;
+};
 
 class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
@@ -181,6 +203,9 @@ class WindowsComputerUseHelperClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
+  private activityGeneration = 0;
+  private helperGeneration = 0;
+  private readonly starts = new Map<string, StartTransmission>();
 
   constructor(
     private readonly helperPath: string,
@@ -211,18 +236,51 @@ class WindowsComputerUseHelperClient {
    * (the helper stops itself with its parent). That is the deliberate direction — re-arming on a
    * refused start would kill the helper of the session a refused *resume* is still running on.
    */
-  shutdownWhenIdle(): void {
+  shutdownWhenIdle(
+    activity = this.activityGeneration,
+    helper = this.helperGeneration,
+    closingSession?: string,
+  ): void {
+    if (activity !== this.activityGeneration || helper !== this.helperGeneration) return;
+    for (const [id, owner] of this.starts) {
+      if (
+        id !== closingSession &&
+        !owner.closed &&
+        (owner.everSent || (!owner.stopped && owner.attempts.size !== 0))
+      )
+        return;
+    }
     this.idleShutdownPending = true;
     this.shutdownIfIdle();
   }
 
   private shutdownIfIdle(): void {
-    if (this.idleShutdownPending && this.pending.size === 0) this.shutdown();
+    if (this.idleShutdownPending && this.pending.size === 0 && this.connecting === null)
+      this.shutdown();
   }
 
   private hasPendingStop(): boolean {
-    for (const request of this.pending.values()) if (request.stopsSession) return true;
+    for (const request of this.pending.values())
+      if (
+        request.stopsSession &&
+        request.activityGeneration === this.activityGeneration &&
+        request.helperGeneration === this.helperGeneration
+      )
+        return true;
     return false;
+  }
+
+  cancelUnsubmittedStart(sessionId: string): 'never_sent' | 'may_have_been_sent' | 'unknown' {
+    const owner = this.starts.get(sessionId);
+    if (owner === undefined) return 'unknown';
+    owner.stopped = true;
+    if (owner.everSent) return 'may_have_been_sent';
+    // Main consumes this proof after a failed call has settled. Until then, keep it distinct
+    // from an unknown ID; once no attempt remains, no continuation can still write.
+    if (owner.attempts.size === 0 && this.starts.get(sessionId) === owner)
+      this.starts.delete(sessionId);
+    this.shutdownWhenIdle(this.activityGeneration, this.helperGeneration, sessionId);
+    return 'never_sent';
   }
 
   async call(
@@ -232,20 +290,85 @@ class WindowsComputerUseHelperClient {
     sessionKey: string | undefined,
     requestKey: string | undefined,
   ): Promise<unknown> {
-    // Starting a session hands the helper to a live session, so a teardown armed by the close of
-    // an earlier session must not fire once the requests it was waiting on drain away.
-    if (operation === 'start_session') this.idleShutdownPending = false;
-    await this.ensureConnected();
-    return this.sendConnected(
-      messageType,
-      { ...input, operation },
-      sessionKey === undefined ? this.transportSessionId : frameIdFromText(`session:${sessionKey}`),
-      requestKey === undefined
-        ? newComputerUseNativeFrameId()
-        : frameIdFromText(`request:${requestKey}`),
-      operationTimeoutMilliseconds(operation),
-      isComputerUseStopOperation(operation),
-    );
+    let owner: StartTransmission | undefined;
+    let attempt: symbol | undefined;
+    if (operation === 'start_session') {
+      if (sessionKey === undefined) throw new Error('A native start needs a session id');
+      owner = this.starts.get(sessionKey);
+      if (owner?.stopped) throw new Error('Computer Use start canceled before send');
+      if (owner === undefined) {
+        if (this.starts.size >= 16) throw new Error('Unconfirmed native starts remain');
+        owner = {
+          sessionId: sessionKey,
+          stopped: false,
+          everSent: false,
+          closed: false,
+          attempts: new Set(),
+        };
+        this.starts.set(sessionKey, owner);
+      }
+      attempt = Symbol('native-start-send');
+      owner.attempts.add(attempt);
+      this.activityGeneration += 1;
+      this.idleShutdownPending = false;
+    }
+    const closes = operation === 'close_session' || operation === 'stop_pending_start';
+    if (closes && sessionKey !== undefined) {
+      const closing = this.starts.get(sessionKey);
+      if (closing !== undefined) closing.stopped = true;
+    }
+    const activity = this.activityGeneration;
+    let helper: number | undefined;
+    try {
+      await this.ensureConnected();
+      helper = this.helperGeneration;
+      if (owner !== undefined) {
+        if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
+          throw new Error('Computer Use start canceled before send');
+      }
+      const result = await this.sendConnected(
+        messageType,
+        { ...input, operation },
+        sessionKey === undefined
+          ? this.transportSessionId
+          : frameIdFromText(`session:${sessionKey}`),
+        requestKey === undefined
+          ? newComputerUseNativeFrameId()
+          : frameIdFromText(`request:${requestKey}`),
+        operationTimeoutMilliseconds(operation),
+        isComputerUseStopOperation(operation),
+        owner === undefined
+          ? undefined
+          : () => {
+              const sending = owner;
+              if (sending.stopped || this.starts.get(sending.sessionId) !== sending)
+                throw new Error('Computer Use start canceled before send');
+              // A synchronous/partial write failure is still a possible native submission.
+              sending.everSent = true;
+            },
+      );
+      if (closes && sessionKey !== undefined) {
+        const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
+        const closing = this.starts.get(sessionKey);
+        if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
+          closing.closed = true;
+          if (closing.attempts.size === 0) this.starts.delete(sessionKey);
+        }
+      }
+      return result;
+    } finally {
+      if (owner !== undefined && attempt !== undefined) {
+        owner.attempts.delete(attempt);
+        if (
+          owner.attempts.size === 0 &&
+          (owner.closed || (owner.stopped && !owner.everSent)) &&
+          this.starts.get(owner.sessionId) === owner
+        )
+          this.starts.delete(owner.sessionId);
+      }
+      if (closes && helper !== undefined) this.shutdownWhenIdle(activity, helper, sessionKey);
+      else this.shutdownIfIdle();
+    }
   }
 
   private async ensureConnected(): Promise<void> {
@@ -261,6 +384,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private async connect(): Promise<void> {
+    this.helperGeneration += 1;
     const nonce = randomBytes(16).toString('hex');
     const pipePath = `\\\\.\\pipe\\sprint-coder-computer-use-${nonce}`;
     const child = spawn(
@@ -317,7 +441,7 @@ class WindowsComputerUseHelperClient {
         });
         const handshake = await this.sendConnected(
           'handshake',
-          { operation: 'handshake', protocolVersion: 1, apiVersion: 2 },
+          { operation: 'handshake', protocolVersion: 1, apiVersion: 3 },
           this.transportSessionId,
           newComputerUseNativeFrameId(),
         );
@@ -341,6 +465,7 @@ class WindowsComputerUseHelperClient {
     requestId: ComputerUseNativeFrameId,
     timeoutMilliseconds = 10_000,
     stopsSession = false,
+    beforeWrite?: () => void,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
@@ -356,8 +481,11 @@ class WindowsComputerUseHelperClient {
       metadata: Buffer.from(JSON.stringify(metadata), 'utf8'),
       binary: Buffer.alloc(0),
     });
+    const activityGeneration = this.activityGeneration;
+    const helperGeneration = this.helperGeneration;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        if (this.pending.get(requestId.hex) !== pending) return;
         this.pending.delete(requestId.hex);
         const error = new Error('Computer Use Windows helper request timed out');
         reject(error);
@@ -368,7 +496,13 @@ class WindowsComputerUseHelperClient {
         // their own that would otherwise expire inside Stop's window and kill the helper the stop
         // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
         // the transport — the last stop to time out finds no stop pending and aborts here.
-        if (!this.hasPendingStop()) this.abortTransport(error);
+        if (
+          activityGeneration === this.activityGeneration &&
+          helperGeneration === this.helperGeneration &&
+          !this.hasPendingStop()
+        )
+          this.abortTransport(error);
+        else this.shutdownIfIdle();
       }, timeoutMilliseconds);
       const pending: PendingRequest = {
         resolve,
@@ -376,18 +510,39 @@ class WindowsComputerUseHelperClient {
         timeout,
         sessionId,
         stopsSession,
+        activityGeneration,
+        helperGeneration,
         responseType: responseTypeFor(messageType),
         allowBinary: messageType === 'observe',
       };
       this.pending.set(requestId.hex, pending);
-      socket.write(encoded, (error) => {
-        if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
-        if (error === null || error === undefined) return;
+      try {
+        if (this.socket !== socket)
+          throw new Error('Computer Use Windows helper changed before send');
+        beforeWrite?.();
+      } catch (error) {
         clearTimeout(timeout);
         this.pending.delete(requestId.hex);
         reject(error);
-        this.abortTransport(error);
-      });
+        this.shutdownIfIdle();
+        return;
+      }
+      try {
+        socket.write(encoded, (error) => {
+          if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
+          if (error === null || error === undefined) return;
+          clearTimeout(timeout);
+          this.pending.delete(requestId.hex);
+          reject(error);
+          this.abortTransport(error);
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(requestId.hex);
+        const failure = error instanceof Error ? error : new Error(String(error));
+        reject(failure);
+        this.abortTransport(failure);
+      }
     });
   }
 
@@ -532,7 +687,7 @@ export function assertWindowsComputerUseHelperHandshake(
   const handshake = asRecord(value, 'Computer Use Windows helper handshake is invalid');
   if (
     handshake['protocolVersion'] !== 1 ||
-    handshake['apiVersion'] !== 2 ||
+    handshake['apiVersion'] !== 3 ||
     handshake['platform'] !== 'win32'
   )
     throw new Error('Computer Use Windows helper handshake mismatch');
@@ -771,7 +926,9 @@ export const COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS =
  * so these two requests have to survive a timeout raised by anything else on the transport.
  */
 export function isComputerUseStopOperation(operation: string): boolean {
-  return operation === 'cancel' || operation === 'close_session';
+  return (
+    operation === 'cancel' || operation === 'close_session' || operation === 'stop_pending_start'
+  );
 }
 
 export function operationTimeoutMilliseconds(operation: string): number {
@@ -780,7 +937,8 @@ export function operationTimeoutMilliseconds(operation: string): number {
   if (operation === 'start_session') return 15_000;
   // The helper answers a read within the lane's 500 ms hold; a longer wait is a helper that is stuck.
   if (operation === 'read_node_value') return 5_000;
-  if (operation === 'close_session') return COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+  if (operation === 'close_session' || operation === 'stop_pending_start')
+    return COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
   return 10_000;
 }
 

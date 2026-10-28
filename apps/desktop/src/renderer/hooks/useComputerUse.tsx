@@ -724,8 +724,10 @@ export function computerUseWindowViews(
 }
 
 export function computerUseTerminalNotice(status: ComputerUseSessionStatus): string | null {
-  return status.state === 'stopped' &&
-    (status.stopReason === 'error' || status.stopReason === 'native_unavailable')
+  if (status.state !== 'stopped') return null;
+  if (status.stopReason === 'native_unavailable')
+    return 'Computer Useの停止を確認できませんでした。対象アプリの状態を確認し、再開できない場合はSprint Coderを再起動してください。';
+  return status.stopReason === 'error'
     ? 'Computer Useは安全のため停止しました。対象アプリ、OSの許可、Provider設定を確認してから再度開始してください。'
     : null;
 }

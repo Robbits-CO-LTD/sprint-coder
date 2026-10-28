@@ -435,7 +435,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     const semanticBody = c.slice(
       c.indexOf('bool DispatchWindowsSemanticAction('),
-      c.indexOf('std::string ResponseCacheKey('),
+      c.indexOf('std::string ResponseCacheKey(const Frame &request) {'),
     );
     expect([...semanticBody.matchAll(/\*accepted = true;/gu)]).toHaveLength(5);
     expect([
