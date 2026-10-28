@@ -708,6 +708,31 @@ describe('Computer Use Windows helper transport', () => {
       await expect(fresh.result).resolves.toHaveLength(1);
     });
 
+    it('recovers capacity after repeated locally proven handshake capability refusals', async () => {
+      let supported = false;
+      const { host } = createTarget({
+        ...discoveryResponders(),
+        handshake: () => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            capabilities: { cancellableWindowDiscovery: supported },
+          },
+        ],
+      });
+      for (let index = 0; index < 20; index += 1) {
+        await expect(host.listWindows(profile)).rejects.toThrow('handshake capability');
+        expect(host.availability().control).toBe(true);
+      }
+      supported = true;
+      sockets.at(-1)!.destroy();
+      await expect(host.listWindows(profile)).resolves.toHaveLength(1);
+    });
+
     it('rejects wrong-owner evidence and never reconnects to prove an old discovery stopped', async () => {
       const { addon, helper } = createTarget(
         {

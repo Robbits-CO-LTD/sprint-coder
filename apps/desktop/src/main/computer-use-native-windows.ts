@@ -392,6 +392,11 @@ class WindowsComputerUseHelperClient {
       owner.launches = proof.launchAttemptCount;
       owner.closed = true;
       return proof;
+    } catch (error) {
+      // The branded local proof is already sufficient for Main; no later cleanup call is required.
+      if (error instanceof ComputerUseDiscoveryNotSubmittedError && !owner.everSent)
+        owner.closed = true;
+      throw error;
     } finally {
       owner.attempts.delete(attempt);
       // Stop may have consumed never_sent while preparation still owned this attempt.
