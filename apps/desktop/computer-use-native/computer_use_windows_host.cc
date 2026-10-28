@@ -6345,10 +6345,10 @@ struct WindowsDiscoveryWaitGuard {
 
 // Only the consumer services these queued owner-specific Stops, so response/cache writes stay serial.
 struct WindowsDiscoveryStopPump {
-  std::function<bool()> service;
+  std::function<bool(const std::string&)> service;
   bool failed = false;
-  bool Poll() {
-    if (!failed && !service()) failed = true;
+  bool Poll(const std::string& waiting_owner) {
+    if (!failed && !service(waiting_owner)) failed = true;
     return !failed;
   }
 };
@@ -6441,7 +6441,7 @@ bool RunWindowsDiscovery(const std::string& metadata,
   while (!pending->done && WindowsDiscoveryCurrent(owner, serial)) {
     // A different owner may already be terminal while this measurement is still blocked.
     lock.unlock();
-    if (stop_pump != nullptr && !stop_pump->Poll()) return false;
+    if (stop_pump != nullptr && !stop_pump->Poll(owner->key)) return false;
     lock.lock();
     if (!pending->done && WindowsDiscoveryCurrent(owner, serial))
       pending->ready.wait_for(lock, std::chrono::milliseconds(20));
@@ -11191,14 +11191,17 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
 
   bool handshaken = false;
   bool served = true;
-  WindowsDiscoveryStopPump discovery_stop_pump{[&]() {
+  WindowsDiscoveryStopPump discovery_stop_pump{[&](const std::string& waiting_owner) {
     // Bound each pass even if the reader keeps receiving Stops. Do not run another query or input.
     for (std::size_t count = 0; count < kMaximumQueuedFrames; ++count) {
       QueuedFrame stopped;
       {
         std::lock_guard lock(queue_mutex);
         const auto next = std::find_if(queue.begin(), queue.end(),
-            [](const auto& queued) { return queued.discovery_stop; });
+            [&](const auto& queued) {
+              // This owner's Stop already breaks its wait; keep its usual query/receipt ordering.
+              return queued.discovery_stop && FrameIdKey(queued.frame.header.session_id) != waiting_owner;
+            });
         if (next == queue.end()) return true;
         stopped = std::move(*next);
         queue.erase(next);
