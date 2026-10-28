@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -19,6 +19,28 @@ const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vs
 type Build = Readonly<{
   wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
 }>;
+
+// A long synchronous compiler/native run prevents the worker from receiving Vitest RPC replies.
+function runNative(
+  file: string,
+  args: string[],
+  options: {
+    encoding: 'utf8';
+    timeout: number;
+    windowsVerbatimArguments?: boolean;
+    env?: NodeJS.ProcessEnv;
+  },
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error === null ? 0 : typeof error.code === 'number' ? error.code : null,
+        stdout,
+        stderr: stderr || error?.message || '',
+      });
+    });
+  });
+}
 
 function findBuild(): Build | null {
   if (process.platform !== 'win32') return null;
@@ -90,7 +112,7 @@ it('holds only the V1 list identity read and trips before any application launch
 });
 
 describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery terminal pipe', () => {
-  it('stops a held discovery without stopping another lifetime or waiting for its read', ({
+  it('stops a held discovery without stopping another lifetime or waiting for its read', async ({
     skip,
   }) => {
     const build = findBuild();
@@ -150,7 +172,7 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         'windowsapp.lib',
         'uuid.lib',
       ]);
-      const compiled = spawnSync(command.file, command.args, {
+      const compiled = await runNative(command.file, command.args, {
         encoding: 'utf8',
         windowsVerbatimArguments: command.verbatim,
         timeout: 500000,
@@ -158,7 +180,7 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
       for (const mode of ['stop', 'deadline', 'queue-expired', 'eof', 'cross-owner-stop']) {
-        const result = spawnSync(realpathSync.native(binary), [mode], {
+        const result = await runNative(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
           timeout: 20000,
         });
