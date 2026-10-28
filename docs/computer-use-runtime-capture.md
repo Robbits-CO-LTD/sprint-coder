@@ -330,6 +330,9 @@ cache eviction is not a permanent native guarantee. Discovery measurement uses t
 worker slot and a 25-second admission-to-result budget (Main transport: 30 seconds). Stop or expiry
 rejects partial/late windows, attempts `CancelSynchronousIo`, and retains busy ownership until actual
 worker cleanup. A stalled read cannot block consumer Stop/Close; it still prevents another measurement.
+While waiting for one discovery, the consumer services queued Stops for other discovery owners
+through the same strict handler and response cache. Each pass is bounded by the 64-frame queue limit;
+it neither cancels the waiting owner nor creates another writer thread.
 
 Launch claims and Stop are ordered under the same mutex. Stop before a claim prevents launch;
 a prior claim is in flight even if the OS call has not started. Its process/thread handles are owned
@@ -341,7 +344,9 @@ The wait releases the stop mutex and does not wait for read-only workers. Otherw
 exit would bypass a detached worker's child cleanup. Forced termination is not a cleanup receipt.
 Only bound `stopped` receipts, the original query's strict `completed` envelope, or its strict
 `not_admitted` response establish terminal evidence. Arrays, generic refusals and timeouts do not.
-A late valid completion may clear quarantine, but never publish windows. Session and discovery
+A late valid completion or Stop receipt may clear quarantine, but never publish windows. Stop
+receipts are validated independently of the caller's deadline, so evidence received after both
+bounded attempts expired is still retained. Session and discovery
 proofs are separate. Query timeouts preserve the original helper for bounded Stop retries, and Stop
 never reconnects to another helper to pretend the old operation ended.
 
