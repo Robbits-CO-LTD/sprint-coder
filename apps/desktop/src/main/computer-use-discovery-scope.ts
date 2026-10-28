@@ -26,7 +26,7 @@ export class ComputerUseDiscoveryScope {
     readonly turnId: string | null,
     readonly cardId: string | null,
     readonly actor: string | null,
-    private readonly native: ComputerUseNativeHost,
+    private readonly native: Pick<ComputerUseNativeHost, 'beginWindowDiscovery' | 'listWindows'>,
     private readonly retired: () => void,
     private readonly externalSignal?: AbortSignal,
   ) {
@@ -113,7 +113,9 @@ export class ComputerUseDiscoveryScope {
   async run<T>(work: () => Promise<T>): Promise<T> {
     try {
       this.check();
-      return await work();
+      const result = await work();
+      if (!this.finished) this.check();
+      return result;
     } catch (error) {
       await this.stop(false);
       throw error;

@@ -1977,7 +1977,12 @@ export class ComputerUseController {
   ): Promise<ComputerRequestAccessOutput> {
     const scope = this.discoveryScope(context.taskId, context.turnId, signal);
     try {
-      return await scope.run(() => this.requestAccessInScope(input, context, scope));
+      return await scope.run(async () => {
+        const outcome = await this.requestAccessInScope(input, context, scope);
+        // A settled card already owns its grant/refusal result; withdrawal must not rewrite it.
+        scope.finish();
+        return outcome;
+      });
     } catch (error) {
       if (error !== scope.signal.reason) throw error;
       return this.accessRefused(
@@ -2343,7 +2348,10 @@ export class ComputerUseController {
       pending.request.id,
     );
     scope.profileIds.add(pending.profileId);
-    return scope.run(() => this.resolveAppGrantRequestInScope(input, activationIntent, scope));
+    return scope.run(async () => {
+      await this.resolveAppGrantRequestInScope(input, activationIntent, scope);
+      scope.finish();
+    });
   }
 
   private async resolveAppGrantRequestInScope(
