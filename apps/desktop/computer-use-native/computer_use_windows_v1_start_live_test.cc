@@ -87,9 +87,12 @@ struct PipeRun {
       }
       DisconnectNamedPipe(server.value);
     });
+  }
+  void Handshake(sprint_coder::computer_use::MessageType expected =
+                     sprint_coder::computer_use::MessageType::kHandshakeResult) {
     Exchange(1, "{\"protocolVersion\":1,\"apiVersion\":3}",
         sprint_coder::computer_use::MessageType::kHandshake,
-        sprint_coder::computer_use::MessageType::kHandshakeResult);
+        expected);
   }
   std::string Exchange(unsigned char id, const std::string& metadata,
       sprint_coder::computer_use::MessageType type = sprint_coder::computer_use::MessageType::kProbe,
@@ -109,8 +112,14 @@ struct PipeRun {
   ~PipeRun() { Close(); }
 };
 }
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
   try {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--handshake-failure") {
+      PipeRun pipe;
+      // Exercise an unexpected handshake reply after construction so unwinding must join.
+      pipe.Handshake(sprint_coder::computer_use::MessageType::kProbeResult);
+      throw std::runtime_error("handshake failure was not detected");
+    }
     UINT32 packages = 0, buffer = 0;
     const LONG lookup = GetPackagesByPackageFamily(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe",
         &packages, nullptr, &buffer, nullptr);
@@ -187,6 +196,7 @@ int wmain() {
           "\",\"profileRevision\":1,\"expectedBoundsX\":" + std::to_string(bounds.left) + ",\"expectedBoundsY\":" + std::to_string(bounds.top) +
           ",\"expectedBoundsWidth\":" + std::to_string(bounds.right-bounds.left) + ",\"expectedBoundsHeight\":" + std::to_string(bounds.bottom-bounds.top) + "}";
       PipeRun pipe;
+      pipe.Handshake();
       const std::string response = pipe.Exchange(2, metadata);
       sprint_coder::computer_use::FrameId session_key; session_key.bytes[0] = 21;
       Require(sessions.size() == 1 && sessions.at(FrameIdKey(session_key)).eligibility_basis == input.eligibility_basis &&

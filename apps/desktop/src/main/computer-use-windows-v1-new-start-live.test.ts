@@ -152,6 +152,14 @@ describe.skipIf(process.platform !== 'win32')('Windows real V1 new-start measure
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
 
+      const cleanup = spawnSync(realpathSync.native(binary), ['--handshake-failure'], {
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+      expect(cleanup.status, cleanup.stdout + '\n' + cleanup.stderr).toBe(1);
+      expect(cleanup.stderr).toContain('FAIL: bound native reply');
+      console.log('native_v1_handshake_failure_cleanup: PASS');
+
       const result = spawnSync(realpathSync.native(binary), [], {
         encoding: 'utf8',
         timeout: 120000,
