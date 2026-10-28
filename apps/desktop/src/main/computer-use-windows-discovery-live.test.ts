@@ -77,7 +77,8 @@ function instrumentPendingHost(source: string): string {
     .replaceAll('CloseHandle(', 'TrackHandleClose(')
     .replaceAll('ShowWindow(', 'RcaRefuseShow(')
     .replaceAll('SetForegroundWindow(', 'RcaRefuseForeground(')
-    .replaceAll('SendInput(', 'RcaRefuseInput(');
+    .replaceAll('SendInput(', 'RcaRefuseInput(')
+    .replaceAll('GetTickCount64() - owner->admitted_at', 'DiscoveryTestNow() - owner->admitted_at');
 }
 
 it('holds only the V1 list identity read and trips before any application launch', () => {
@@ -156,28 +157,44 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         env: { ...process.env, VSLANG: '1033' },
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
-      const result = spawnSync(realpathSync.native(binary), [], {
-        encoding: 'utf8',
-        timeout: 20000,
-      });
-      expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
-      const receipts = result.stdout
-        .split(/\r?\n/u)
-        .filter((line) => line.startsWith('RECEIPT:'))
-        .map((line) =>
-          computerUseNativeDiscoveryStopReceiptSchema.parse(JSON.parse(line.slice(8))),
+      for (const mode of ['stop', 'deadline', 'queue-expired', 'eof']) {
+        const result = spawnSync(realpathSync.native(binary), [mode], {
+          encoding: 'utf8',
+          timeout: 20000,
+        });
+        expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
+        if (mode === 'eof') {
+          expect(result.stdout).toContain(
+            'PASS: EOF latches discovery before held read cleanup, no launch or input',
+          );
+          continue;
+        }
+        if (mode === 'deadline')
+          expect(result.stdout).toContain('PASS: deadline alone rejects held query before Stop');
+        if (mode === 'queue-expired')
+          expect(result.stdout).toContain('PASS: twenty queue-expired owners reclaimed before I/O');
+        const receipts = result.stdout
+          .split(/\r?\n/u)
+          .filter((line) => line.startsWith('RECEIPT:'))
+          .map((line) =>
+            computerUseNativeDiscoveryStopReceiptSchema.parse(JSON.parse(line.slice(8))),
+          );
+        expect(receipts.map((receipt) => receipt.discoveryId)).toEqual(['discovery:1']);
+        expect(receipts[0]!.launchAttemptCount).toBe(0);
+        const controlLine = result.stdout
+          .split(/\r?\n/u)
+          .find((line) => line.startsWith('CONTROL:'));
+        const control = computerUseNativeCloseReceiptSchema.parse(
+          JSON.parse(controlLine!.slice(8)),
         );
-      expect(receipts.map((receipt) => receipt.discoveryId)).toEqual(['discovery:1']);
-      expect(receipts[0]!.launchAttemptCount).toBe(0);
-      const controlLine = result.stdout.split(/\r?\n/u).find((line) => line.startsWith('CONTROL:'));
-      const control = computerUseNativeCloseReceiptSchema.parse(JSON.parse(controlLine!.slice(8)));
-      expect(control.sessionId).toBe('pending');
-      expect(control.cancelEpoch).toBeGreaterThan(9);
-      expect(control.inputAttemptCount).toBe(0);
-      expect(result.stdout).toContain('PASS: discovery terminal before read release');
-      expect(result.stdout).toContain(
-        'PASS: owned discovery stopped, late actual read and cleanup, no input',
-      );
+        expect(control.sessionId).toBe('pending');
+        expect(control.cancelEpoch).toBeGreaterThan(9);
+        expect(control.inputAttemptCount).toBe(0);
+        expect(result.stdout).toContain('PASS: discovery terminal before read release');
+        expect(result.stdout).toContain(
+          'PASS: owned discovery stopped, late actual read and cleanup, no input',
+        );
+      }
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
@@ -189,6 +206,7 @@ const program = String.raw`
 #include <string>
 #include <windows.h>
 namespace { struct LockedWindowsExecutable; bool HoldListOpen(const std::wstring&, LockedWindowsExecutable*); bool RcaRefuseLaunch(const LockedWindowsExecutable&, HANDLE*, const std::function<bool()>&, const std::function<void()>&); BOOL TrackHandleClose(HANDLE handle); BOOL RcaRefuseShow(HWND, int); BOOL RcaRefuseForeground(HWND); UINT RcaRefuseInput(UINT, LPINPUT, int); }
+ULONGLONG DiscoveryTestNow();
 void ObserveRequestConflict();
 #define wmain ProductionHostMain
 #include "pending-host.cc"
@@ -197,6 +215,8 @@ void ObserveRequestConflict();
 #include <thread>
 using namespace sprint_coder::computer_use;
 std::atomic<bool> hold_start{true}, entered_start{false}, finished{false}, conflict_seen{false};
+std::atomic<ULONGLONG> clock_offset{0};
+ULONGLONG DiscoveryTestNow(){return GetTickCount64()+clock_offset.load();}
 void ObserveRequestConflict(){conflict_seen.store(true);}
 void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<std::endl;TerminateProcess(GetCurrentProcess(),7);}}
 std::atomic<DWORD> consumer_thread{0}, io_thread{0};
@@ -237,7 +257,8 @@ Frame Read(HANDLE pipe,unsigned request,MessageType type){Frame frame;Require(Re
 std::string List(){return "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"discovery:1\",\"canonicalPath\":\""+JsonEscape(Utf8FromWide(owned_path))+"\",\"identityDigest\":\""+std::string(64,'a')+"\",\"executableDigest\":\""+std::string(64,'c')+"\",\"signerDigest\":\"\"}";}
 std::string DiscoveryStop(const std::string& id){return "{\"operation\":\"stop_window_discovery\",\"discoveryId\":\""+id+"\"}";}
 std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"operation\":\"stop_pending_start\"}";}
-int wmain(){
+int wmain(int argc,wchar_t** argv){
+ const std::wstring mode=argc>1?argv[1]:L"stop";
  std::thread([]{Sleep(15000);if(!finished.load())TerminateProcess(GetCurrentProcess(),42);}).detach();
  const auto name=L"\\\\.\\pipe\\sc-pending-start-"+std::to_wstring(GetCurrentProcessId());
  SECURITY_ATTRIBUTES security{}; PSECURITY_DESCRIPTOR descriptor=nullptr;
@@ -269,11 +290,41 @@ int wmain(){
  bool served=false;
  std::thread serve([&]{consumer_thread.store(GetCurrentThreadId());const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
+ if(mode==L"queue-expired") {
+   for(unsigned char index=20;index<40;++index) {
+     const std::string id="expired:"+std::to_string(index);std::string reason,response;
+     auto admission=AdmitWindowsDiscovery(FrameIdKey(Id(index)),id,"request:"+id,std::string(64,'a'),true,GetTickCount64()-kWindowsDiscoveryBudgetMs-1,&reason);
+     Require(admission.lease!=nullptr,"expired admission capacity reclaimed");auto owner=admission.lease->owner;
+     Require(!RunWindowsDiscovery(List(),std::move(admission.lease),WindowsTargetListControl().stop_serial.load(),&response,&reason),"queue deadline rejects query");
+     Require(owner->terminal&&owner->launch_attempts==0&&owner->references.load()==0&&!WindowsTargetListWorkerRunning().load()&&actual_reads.load()==0,"expired queue creates no I/O or worker");
+   }
+   Require(WindowsDiscoveries().owners.size()==16,"expired records remain bounded");
+   std::cout<<"PASS: twenty queue-expired owners reclaimed before I/O\n";
+ }
  Send(client.value,2,8,List());
  for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()!=consumer_thread.load(),"list identity I/O is on the worker");std::cerr<<"phase=start-gate\n"<<std::flush;
  const auto serial=WindowsTargetListControl().stop_serial.load();
+ if(mode==L"eof") {
+   CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;
+   serve.join();Require(!served,"closed pipe cannot publish pending query");
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->stopped.load()&&owner->terminal&&owner->references.load()!=0,"EOF latches discovery while read remains");}
+   Require(hold_start.load()&&actual_reads.load()==0&&WindowsTargetListWorkerRunning().load(),"EOF returns without read completion");
+   hold_start.store(false);
+   Require(WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0&&actual_reads.load()==1&&successful_reads.load()==1&&file_releases.load()==1&&!WindowsTargetListWorkerRunning().load(),"EOF late read cleanup");
+   for(auto& entry:sessions)ReleaseWindowsSessionResources(&entry.second);sessions.clear();
+   finished.store(true);std::cout<<"PASS: EOF latches discovery before held read cleanup, no launch or input\n";return 0;
+ }
+ if(mode==L"deadline") {
+   clock_offset.store(kWindowsDiscoveryBudgetMs+1);
+   auto expired=Read(client.value,2,MessageType::kError);
+   Require(Payload(expired).find("window_discovery_unavailable")!=std::string::npos&&hold_start.load()&&actual_reads.load()==0,"deadline rejects before read or Stop");
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->stopped.load()&&owner->terminal&&owner->references.load()!=0,"deadline retains held worker");}
+   std::cout<<"PASS: deadline alone rejects held query before Stop\n";
+ }
  const auto stop_started=GetTickCount64();Send(client.value,3,8,DiscoveryStop("discovery:1"));
- auto rejected=Read(client.value,2,MessageType::kError);Require(Payload(rejected).find("window_discovery_unavailable")!=std::string::npos,"stopped query rejected");
+ if(mode!=L"deadline") {
+   auto rejected=Read(client.value,2,MessageType::kError);Require(Payload(rejected).find("window_discovery_unavailable")!=std::string::npos,"stopped query rejected");
+ }
  auto terminal=Read(client.value,3,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(terminal)<<"\n";
  Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"terminal before read release");
  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->terminal&&owner->stopped.load()&&owner->references.load()!=0&&WindowsTargetListWorkerRunning().load(),"worker ownership retained");Require(sessions.size()==1&&!WindowsStarts().owners.at(FrameIdKey(Id(7)))->stopped.load(),"discovery stop leaves control alive");}
