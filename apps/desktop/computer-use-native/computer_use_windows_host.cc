@@ -6343,9 +6343,20 @@ struct WindowsDiscoveryWaitGuard {
   }
 };
 
+// Only the consumer services these queued owner-specific Stops, so response/cache writes stay serial.
+struct WindowsDiscoveryStopPump {
+  std::function<bool()> service;
+  bool failed = false;
+  bool Poll() {
+    if (!failed && !service()) failed = true;
+    return !failed;
+  }
+};
+
 bool RunWindowsDiscovery(const std::string& metadata,
                          std::shared_ptr<WindowsDiscoveryLease> lease,
-                         std::uint64_t serial, std::string* response, std::string* reason) {
+                         std::uint64_t serial, std::string* response, std::string* reason,
+                         WindowsDiscoveryStopPump* stop_pump = nullptr) {
   *reason = "window_discovery_unavailable";
   if (!lease || !ClaimWindowsDiscoveryQuery(lease)) return false;
   const auto owner = lease->owner;
@@ -6427,8 +6438,14 @@ bool RunWindowsDiscovery(const std::string& metadata,
     return false;
   }
   std::unique_lock lock(pending->mutex);
-  while (!pending->done && WindowsDiscoveryCurrent(owner, serial))
-    pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  while (!pending->done && WindowsDiscoveryCurrent(owner, serial)) {
+    // A different owner may already be terminal while this measurement is still blocked.
+    lock.unlock();
+    if (stop_pump != nullptr && !stop_pump->Poll()) return false;
+    lock.lock();
+    if (!pending->done && WindowsDiscoveryCurrent(owner, serial))
+      pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  }
   std::lock_guard stop_lock(control.stop_mutex);
   if (!WindowsDiscoveryCurrent(owner, serial)) return false;
   if (!pending->ok) { *reason = pending->reason; return false; }
@@ -10843,7 +10860,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
                        std::shared_ptr<WindowsStartLease> start_lease = nullptr,
                        const std::string& admission_error = {},
-                       WindowsDiscoveryAdmission discovery = {}) {
+                       WindowsDiscoveryAdmission discovery = {},
+                       WindowsDiscoveryStopPump* discovery_stop_pump = nullptr) {
   const auto type = static_cast<MessageType>(request.header.message_type);
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
@@ -10918,7 +10936,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       } else {
         succeeded = RunWindowsDiscovery(metadata, std::move(discovery.lease),
             queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load()),
-            &response, &reason);
+            &response, &reason, discovery_stop_pump);
+        if (discovery_stop_pump != nullptr && discovery_stop_pump->failed) return false;
       }
     } else if (operation == "stop_window_discovery") {
       succeeded = StopWindowsDiscovery(FrameIdKey(request.header.session_id), metadata,
@@ -11064,6 +11083,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     std::string admission_error;
     std::shared_ptr<WindowsWireLease> wire_lease;
     WindowsDiscoveryAdmission discovery;
+    bool discovery_stop = false;
   };
   std::deque<QueuedFrame> queue;
   bool reader_finished = false;
@@ -11156,7 +11176,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         queue.push_back(QueuedFrame{std::move(request),
             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire),
             std::move(start_lease), std::move(admission_error), std::move(wire_lease),
-            std::move(discovery)});
+            std::move(discovery), has_operation && operation == "stop_window_discovery"});
       }
       queue_ready.notify_one();
       request = {};
@@ -11171,6 +11191,24 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
 
   bool handshaken = false;
   bool served = true;
+  WindowsDiscoveryStopPump discovery_stop_pump{[&]() {
+    // Bound each pass even if the reader keeps receiving Stops. Do not run another query or input.
+    for (std::size_t count = 0; count < kMaximumQueuedFrames; ++count) {
+      QueuedFrame stopped;
+      {
+        std::lock_guard lock(queue_mutex);
+        const auto next = std::find_if(queue.begin(), queue.end(),
+            [](const auto& queued) { return queued.discovery_stop; });
+        if (next == queue.end()) return true;
+        stopped = std::move(*next);
+        queue.erase(next);
+      }
+      if (!HandlePipeRequest(pipe, probe, stopped.frame, &handshaken, stopped.stop_serial,
+                             std::move(stopped.start_lease), stopped.admission_error,
+                             std::move(stopped.discovery))) return false;
+    }
+    return true;
+  }};
   for (;;) {
     QueuedFrame queued;
     {
@@ -11184,7 +11222,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     }
     if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,
                            std::move(queued.start_lease), queued.admission_error,
-                           std::move(queued.discovery))) {
+                           std::move(queued.discovery), &discovery_stop_pump)) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;
