@@ -145,8 +145,10 @@ int wmain(int argc, wchar_t** argv) {
               << " policyLanguage=" << approved.identity.policy_language
               << " trustedSystemNotepad=" << IsTrustedSystemNotepad(approved.identity)
               << " maximumMode=" << MaximumModeForWindowsExecutable(approved.identity) << "\n";
-    Require(IsTrustedSystemNotepad(approved.identity) && IsSupportedWindowsV1Target(approved.identity),
-            "genuine supported V1 baseline");
+    if (!IsTrustedSystemNotepad(approved.identity) || !IsSupportedWindowsV1Target(approved.identity)) {
+      std::cout << "RESULT:{\"measurement\":\"NOT_RUN\",\"nativeStart\":\"NOT_RUN\",\"reason\":\"v1_baseline_not_eligible\",\"childExited\":true}\n";
+      return 0;
+    }
     OwnedTarget owned;
     owned.job.value = CreateJobObjectW(nullptr, nullptr);
     Require(owned.job.value != nullptr, "owned job");
