@@ -202,6 +202,7 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         'image-mismatch',
         'termination-unconfirmed',
         'post-create-exception',
+        'helper-exit-control',
       ]) {
         const result = spawnSync(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
@@ -211,6 +212,15 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         if (mode === 'observer-rights') {
           expect(result.stdout).toContain('PASS: old observer lacks PID query access');
           console.log('native_discovery_old_observer_rights: confirmed');
+          continue;
+        }
+        if (mode === 'helper-exit-control') {
+          expect(result.stdout).toContain(
+            'CONTROL: normal helper exit abandoned held unverified child; observer cleaned it',
+          );
+          console.log(
+            'native_discovery_helper_exit_control: orphan reproduced and owned child cleaned',
+          );
           continue;
         }
         expect(result.stdout).toContain(

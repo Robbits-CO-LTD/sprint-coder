@@ -33,6 +33,8 @@ using namespace sprint_coder::computer_use;
 std::string mode;
 std::wstring owned_path;
 ScopedKernelHandle job, gate_entered, gate_release;
+struct ExitState { volatile LONG child_pid = 0, reads = 0, terminations = 0; };
+ExitState* exit_state = nullptr;
 std::atomic<HANDLE> child_observer{nullptr}, worker_observer{nullptr};
 std::atomic<unsigned> create_entries{0}, created_children{0}, image_reads{0}, termination_calls{0};
 void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
@@ -83,16 +85,18 @@ BOOL FixtureCreate(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES pr
     throw std::runtime_error("child observation handle");
   }
   child_observer.store(observation);
+  if (exit_state) InterlockedExchange(&exit_state->child_pid, static_cast<LONG>(GetProcessId(observation)));
   return TRUE;
 }
 bool FixtureImage(HANDLE process, LockedWindowsExecutable* output) {
   const auto child = child_observer.load();
   Check(child && GetProcessId(child) == GetProcessId(process), "image read is owned-only");
-  if (mode == "after-create-read") Gate();
+  if (mode == "after-create-read" || mode.starts_with("helper-exit-")) Gate();
   if (mode == "post-create-exception") throw std::bad_alloc();
   image_reads.fetch_add(1);
   const bool read = OpenLockedProcessExecutable(process, output);
-  if (read && (mode == "image-mismatch" || mode == "termination-unconfirmed"))
+  if (read && exit_state) InterlockedIncrement(&exit_state->reads);
+  if (read && (mode == "image-mismatch" || mode == "termination-unconfirmed" || mode == "helper-exit-mismatch"))
     output->identity.executable_digest = std::string(64, 'f');
   return read;
 }
@@ -100,6 +104,7 @@ BOOL FixtureTerminate(HANDLE process, UINT code) {
   Check(child_observer.load() && GetProcessId(process) == GetProcessId(child_observer.load()),
         "termination is owned-only");
   termination_calls.fetch_add(1);
+  if (exit_state) InterlockedIncrement(&exit_state->terminations);
   if (mode == "termination-unconfirmed") {
     SetEvent(gate_entered.value);
     return FALSE;
@@ -117,14 +122,14 @@ BOOL RefuseFocus(HWND) { Check(false, "unexpected focus"); return FALSE; }
 UINT RefuseInput(UINT, LPINPUT, int) { Check(false, "unexpected input"); return 0; }
 
 struct Harness {
-  Harness() {
-    job.value = CreateJobObjectW(nullptr, nullptr); Check(job.value, "owned job");
+  explicit Harness(const std::wstring& name = {}) {
+    job.value = CreateJobObjectW(nullptr, name.empty() ? nullptr : (name + L"-job").c_str()); Check(job.value, "owned job");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     Check(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
                                    sizeof(limits)), "owned job cleanup");
-    gate_entered.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    gate_release.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    gate_entered.value = CreateEventW(nullptr, TRUE, FALSE, name.empty() ? nullptr : (name + L"-entered").c_str());
+    gate_release.value = CreateEventW(nullptr, TRUE, FALSE, name.empty() ? nullptr : (name + L"-release").c_str());
     Check(gate_entered.value && gate_release.value, "gate events");
     Check(SetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_CHILD", L"owned"), "child mode");
   }
@@ -195,6 +200,93 @@ struct Pipe {
   }
   ~Pipe() { Close(); }
 };
+
+struct ExitMapping {
+  ScopedKernelHandle handle;
+  explicit ExitMapping(const std::wstring& name, bool create) {
+    handle.value = create ? CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+        0, sizeof(ExitState), (name + L"-state").c_str())
+        : OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, (name + L"-state").c_str());
+    Check(handle.value != nullptr, "exit state mapping");
+    exit_state = static_cast<ExitState*>(MapViewOfFile(handle.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ExitState)));
+    Check(exit_state != nullptr, "exit state view");
+  }
+  ~ExitMapping() { if (exit_state) UnmapViewOfFile(exit_state); exit_state = nullptr; }
+};
+
+void ReadOwnPath() {
+  ScopedKernelHandle self(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, GetCurrentProcessId()));
+  LockedWindowsExecutable image;
+  Check(self.value && OpenLockedProcessExecutable(self.value, &image), "exit helper own image");
+  owned_path = image.identity.path;
+}
+
+int RunExitHelper(const std::wstring& pipe, DWORD parent, const std::wstring& name) {
+  ExitMapping mapping(name, false);
+  job.value = OpenJobObjectW(JOB_OBJECT_ASSIGN_PROCESS | JOB_OBJECT_TERMINATE, FALSE, (name + L"-job").c_str());
+  gate_entered.value = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, (name + L"-entered").c_str());
+  gate_release.value = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, (name + L"-release").c_str());
+  Check(job.value && gate_entered.value && gate_release.value, "observer owns fixture resources");
+  ReadOwnPath();
+  Check(SetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_CHILD", L"owned"), "exit child mode");
+  return ServeMain(pipe, parent);
+}
+
+void RunHelperExitControl(const LockedWindowsExecutable& image, const std::wstring& name, Harness& harness) {
+  ExitMapping mapping(name, true);
+  const auto pipe_name = LR"(\\.\pipe\sprint-coder-computer-use-exit-)" + std::to_wstring(GetCurrentProcessId());
+  const auto command = L"\"" + owned_path + L"\" --fixture-exit-helper \"" + pipe_name + L"\" " +
+      std::to_wstring(GetCurrentProcessId()) + L" " + name + L" " + std::wstring(mode.begin(), mode.end());
+  std::vector<wchar_t> writable(command.begin(), command.end()); writable.push_back(L'\0');
+  STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+  PROCESS_INFORMATION info{};
+  Check(::CreateProcessW(owned_path.c_str(), writable.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                         nullptr, nullptr, &startup, &info), "spawn owned exit helper");
+  struct Helper {
+    ScopedKernelHandle process, thread;
+    ~Helper() {
+      if (WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT) ::TerminateProcess(process.value, 1);
+      WaitForSingleObject(process.value, 5000);
+    }
+  } helper;
+  helper.process.value = info.hProcess; helper.thread.value = info.hThread;
+  ScopedKernelHandle pipe;
+  for (unsigned attempt = 0; attempt < 1000; ++attempt) {
+    pipe.value = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (pipe.value != INVALID_HANDLE_VALUE) break;
+    Check(WaitForSingleObject(helper.process.value, 0) == WAIT_TIMEOUT, "helper alive before pipe");
+    Sleep(10);
+  }
+  Check(pipe.value != INVALID_HANDLE_VALUE, "exit helper pipe");
+  auto send = [&](unsigned char id, MessageType type, const std::string& metadata) {
+    FrameHeader header; header.message_type = static_cast<std::uint16_t>(type);
+    header.request_id.bytes[0] = id; header.session_id.bytes[0] = 21;
+    Check(WriteFrame(pipe.value, header, metadata), "exit request");
+  };
+  send(1, MessageType::kHandshake, "{\"protocolVersion\":1,\"apiVersion\":3}");
+  Frame answer; Check(ReadFrame(pipe.value, &answer) && answer.header.message_type == static_cast<std::uint16_t>(MessageType::kHandshakeResult), "exit handshake");
+  const std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"exit:1\",\"canonicalPath\":\"" +
+      JsonEscape(Utf8FromWide(owned_path)) + "\",\"identityDigest\":\"" + image.identity.identity_digest +
+      "\",\"executableDigest\":\"" + image.identity.executable_digest + "\",\"signerDigest\":\"" + image.identity.signer_digest + "\"}";
+  send(2, MessageType::kProbe, query);
+  Check(WaitForSingleObject(gate_entered.value, 15000) == WAIT_OBJECT_0, "actual helper image read held");
+  const DWORD child_pid = static_cast<DWORD>(InterlockedCompareExchange(&exit_state->child_pid, 0, 0));
+  Check(child_pid != 0, "owned child published");
+  ScopedKernelHandle child(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, child_pid));
+  LockedWindowsExecutable child_image;
+  Check(child.value && OpenLockedProcessExecutable(child.value, &child_image) &&
+        SameWindowsFileIdentity(child_image.identity.file_identity, image.identity.file_identity), "observer checks exact owned child");
+  child_observer.store(child.release());
+  CloseHandle(pipe.release());
+  // The observer, not the helper, keeps the kill-on-close job open. Helper exit therefore
+  // cannot hide an abandoned child by accidentally triggering fixture cleanup.
+  Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0, "old helper exits while worker is held");
+  Check(WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0 &&
+        exit_state->terminations == 0, "old helper abandons its unverified child");
+  Check(harness.Cleanup(), "observer removes abandoned owned child");
+  std::cout << "CONTROL: normal helper exit abandoned held unverified child; observer cleaned it\n";
+}
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -203,6 +295,12 @@ int wmain(int argc, wchar_t** argv) {
     Sleep(30000); return 0;
   }
   try {
+    if (argc == 6 && std::wstring_view(argv[1]) == L"--fixture-exit-helper") {
+      std::thread([] { Sleep(60000); ::TerminateProcess(GetCurrentProcess(), 43); }).detach();
+      DWORD parent = 0; Check(ParseUnsigned(argv[3], &parent), "exit parent PID");
+      mode = Utf8FromWide(argv[5]);
+      return RunExitHelper(argv[2], parent, argv[4]);
+    }
     Check(argc == 2, "one case required"); mode = Utf8FromWide(argv[1]);
     if (mode == "observer-rights") {
       ScopedKernelHandle limited;
@@ -214,12 +312,17 @@ int wmain(int argc, wchar_t** argv) {
       Check(observed == 0 && error == ERROR_ACCESS_DENIED, "PID read requires query access");
       std::cout << "PASS: old observer lacks PID query access\n"; return 0;
     }
-    Harness harness;
+    if (mode.starts_with("helper-exit-"))
+      std::thread([] { Sleep(60000); ::TerminateProcess(GetCurrentProcess(), 43); }).detach();
+    const std::wstring exit_name = mode.starts_with("helper-exit-")
+        ? L"sc-discovery-exit-" + std::to_wstring(GetCurrentProcessId()) : std::wstring{};
+    Harness harness(exit_name);
     ScopedKernelHandle self(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                                         FALSE, GetCurrentProcessId()));
     LockedWindowsExecutable image;
     Check(self.value && OpenLockedProcessExecutable(self.value, &image), "own image");
     owned_path = image.identity.path;
+    if (mode == "helper-exit-control") { RunHelperExitControl(image, exit_name, harness); return 0; }
     const auto id = "launch:" + mode;
     const std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"" + id +
         "\",\"canonicalPath\":\"" + JsonEscape(Utf8FromWide(owned_path)) + "\",\"identityDigest\":\"" +
