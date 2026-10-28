@@ -75,7 +75,7 @@ BOOL FixtureCreate(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES pr
   }
   HANDLE observation = nullptr;
   if (!DuplicateHandle(GetCurrentProcess(), information->hProcess, GetCurrentProcess(), &observation,
-                       SYNCHRONIZE | PROCESS_TERMINATE, FALSE, 0)) {
+                       SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
     TerminateJobObject(job.value, 1);
     WaitForSingleObject(information->hProcess, 35000);
     CloseHandle(information->hThread); CloseHandle(information->hProcess);
@@ -204,6 +204,16 @@ int wmain(int argc, wchar_t** argv) {
   }
   try {
     Check(argc == 2, "one case required"); mode = Utf8FromWide(argv[1]);
+    if (mode == "observer-rights") {
+      ScopedKernelHandle limited;
+      Check(DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+                            &limited.value, SYNCHRONIZE | PROCESS_TERMINATE, FALSE, 0),
+            "limited observer duplicate");
+      SetLastError(ERROR_SUCCESS);
+      const DWORD observed = GetProcessId(limited.value), error = GetLastError();
+      Check(observed == 0 && error == ERROR_ACCESS_DENIED, "PID read requires query access");
+      std::cout << "PASS: old observer lacks PID query access\n"; return 0;
+    }
     Harness harness;
     ScopedKernelHandle self(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                                         FALSE, GetCurrentProcessId()));

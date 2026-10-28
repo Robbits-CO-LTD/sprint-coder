@@ -193,6 +193,7 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
 
       for (const mode of [
+        'observer-rights',
         'normal',
         'create-failure',
         'before-claim',
@@ -207,6 +208,11 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
           timeout: 90000,
         });
         expect(result.status, mode + '\n' + result.stdout + '\n' + result.stderr).toBe(0);
+        if (mode === 'observer-rights') {
+          expect(result.stdout).toContain('PASS: old observer lacks PID query access');
+          console.log('native_discovery_old_observer_rights: confirmed');
+          continue;
+        }
         expect(result.stdout).toContain(
           'PASS: ' + mode + ' child cleanup, no OS input, no public qualification',
         );
