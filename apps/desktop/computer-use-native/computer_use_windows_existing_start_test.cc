@@ -58,6 +58,7 @@ struct Case {
   bool source_missing_process = false, source_missing_file = false, source_bad_digest = false;
   bool duplicate_failure = false, publication_stop = false, after_stop = false, after_read_failure = false;
   bool move_focus = false, dialog_failure = false, resolver_failure = false;
+  bool hold_before_file = false, hold_after_file = false;
   std::uint64_t global_epoch = 0, closed_epoch = 0, input_epoch = 0;
   std::uint64_t session_epoch = 0;
 };
@@ -70,6 +71,8 @@ unsigned case_count = 0;
 HANDLE source_process = nullptr, source_file = INVALID_HANDLE_VALUE;
 std::atomic<unsigned> held_reads{0}, thread_attempts{0}, resumes{0}, refocuses{0};
 bool focused = false;
+std::atomic<bool> held_entered{false}, release_held{false};
+std::atomic<unsigned> released_reads{0};
 void Check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void Track(HANDLE handle) {
   if (handle == nullptr || handle == INVALID_HANDLE_VALUE) return;
@@ -157,7 +160,11 @@ bool ComponentReadHeld(HANDLE handle, WindowsFileIdentity* output) {
   const auto phase=held_reads.fetch_add(1);
   if(phase==1&&current.after_stop)WindowsTargetListControl().stop_serial.fetch_add(1);
   if(phase==1&&current.after_read_failure)return false;
-  return ReadWindowsFileIdentity(handle,output);
+  const bool hold=(phase==0&&current.hold_before_file)||(phase==1&&current.hold_after_file);
+  if(hold){held_entered.store(true);while(!release_held.load())Sleep(1);}
+  const bool read=ReadWindowsFileIdentity(handle,output);
+  if(hold&&read)released_reads.fetch_add(1);
+  return read;
 }
 ComponentWorkerLifetime::ComponentWorkerLifetime() { workers.fetch_add(1); }
 ComponentWorkerLifetime::~ComponentWorkerLifetime() { workers.fetch_sub(1); }
@@ -169,6 +176,7 @@ void WaitWorkers() {
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
   current=config;reads=0;contexts=0;com_calls=0;com_releases=0;input_calls=0;
   held_reads=0;thread_attempts=0;resumes=0;refocuses=0;focused=false;
+  held_entered=false;release_held=false;released_reads=0;
   parent_process_dead=false;cancellation_epoch=config.global_epoch;last_closed_cancel_epoch=config.closed_epoch;
   WindowsTargetListControl().stop_serial=0;WindowsTargetListControl().context_candidate.reset();WindowsV2FactsContextCache().reset();
   windows_v2_main_pid=config.v2?GetCurrentProcessId():0;windows_v2_list_generation=1;
@@ -193,7 +201,17 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   if(config.source_missing_process){ComponentCloseHandle(session.process_handle);session.process_handle=nullptr;}
   if(config.source_missing_file){ComponentCloseHandle(session.executable_file);session.executable_file=INVALID_HANDLE_VALUE;}
   sessions.emplace(input.session_key,std::move(session));ticket_states[input.session_key].generation=10;
-  std::string response,failure;const bool succeeded=StartWindowsExistingSession(input,&response,&failure);WaitWorkers();
+  const bool held_case=config.hold_before_file||config.hold_after_file;
+  std::jthread stop_reader;
+  if(held_case)stop_reader=std::jthread([]{
+    const auto until=GetTickCount64()+5000;
+    while(!held_entered.load()&&GetTickCount64()<until)Sleep(1);
+    if(!held_entered.load()){release_held=true;parent_process_dead=true;return;}
+    WindowsTargetListControl().stop_serial.fetch_add(1);
+  });
+  std::string response,failure;const bool succeeded=StartWindowsExistingSession(input,&response,&failure);
+  if(held_case)Check(held_entered.load()&&!release_held.load()&&WindowsTargetListWorkerRunning().load(),"caller returns before held read and retains slot");
+  else WaitWorkers();
   Check(succeeded==expected,name);if(!expected)Check(failure==reason,"refusal reason");
   Check(ticket_states[input.session_key].generation==10+ticket_calls,"ticket count");
   Check(sessions.size()==1,"existing lifetime remains until explicit close");
@@ -206,11 +224,16 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     std::uint64_t epoch=99;Check(ReadJsonUint64(response,"cancelEpoch",&epoch)&&epoch==config.session_epoch,"receipt epoch");
     Check(config.resume?resumes.load()==1:refocuses.load()==1,"correct resolver");
   }
-  if(config.after_stop)Check(input_calls.load()==1,"pre-stop focus count retained");
+  if(config.after_stop||config.hold_after_file)Check(input_calls.load()==1,"pre-stop focus count retained");
   sprint_coder::computer_use::Frame frame;frame.header.session_id.bytes.fill(static_cast<unsigned char>('A'+case_count));
   std::string receipt;const auto terminal_epoch=std::max(config.global_epoch,config.session_epoch)+1;
   Check(CloseWindowsSession(frame,"{\"cancelEpoch\":"+std::to_string(terminal_epoch)+"}",&receipt),"component terminal close");
   std::uint64_t count=99;Check(ReadJsonUint64(receipt,"inputAttemptCount",&count)&&count==input_calls.load(),"terminal receipt preserves prior focus count");
+  if(held_case){
+    Check(!release_held.load()&&WindowsTargetListWorkerRunning().load(),"Close completes while duplicate read remains held");
+    release_held=true;stop_reader.join();WaitWorkers();
+    Check(released_reads.load()==1&&sessions.empty(),"real held read survives original close without late adoption");
+  }
   ticket_states.clear();{std::lock_guard lock(handles_mutex);Check(tracked_handles.empty(),"all owned handles closed");}
   ++case_count;std::cout<<"CASE:"<<name<<"\n";
 }
@@ -243,6 +266,8 @@ int wmain() {
     c={};c.after_read_failure=true;Run("v1-after-read-failure",c,false,"session_refocus_stale",1);
     c={};c.move_focus=true;c.after_stop=true;Run("v1-after-stop-counter",c,false,"session_start_canceled",1);
     c={};c.com_failure=true;Run("v1-no-com",c,true,"",2);
+    c={};c.hold_before_file=true;Run("v1-held-before-file",c,false,"session_start_canceled",0);
+    c={};c.hold_after_file=true;c.move_focus=true;Run("v1-held-after-file-counter",c,false,"session_start_canceled",1);
     c={};c.v2=true;Run("v2-normal",c,true,"",2);
     c.input_epoch=7;Run("v2-epoch-entry",c,false,"session_start_canceled",1);
     c={};c.v2=true;c.duplicate_failure=true;Run("v2-dup-entry",c,false,"session_target_rejected",1);
