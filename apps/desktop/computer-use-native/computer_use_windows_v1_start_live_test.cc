@@ -61,7 +61,7 @@ struct PipeRun {
   std::thread serving;
   bool served = false;
   PipeRun() {
-    const auto name = L"\\.\pipe\sc-v1-real-" + std::to_wstring(GetCurrentProcessId());
+    const auto name = LR"(\\.\pipe\sc-v1-real-)" + std::to_wstring(GetCurrentProcessId());
     SECURITY_ATTRIBUTES security{}; PSECURITY_DESCRIPTOR descriptor = nullptr;
     Require(BuildCurrentUserPipeSecurity(&security, &descriptor), "private pipe security");
     server.value = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
