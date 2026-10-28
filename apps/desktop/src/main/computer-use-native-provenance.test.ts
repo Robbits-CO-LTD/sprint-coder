@@ -160,7 +160,19 @@ describe('Computer Use native compiled provenance', () => {
       source.indexOf('bool CloseWindowsSession('),
     );
 
-    for (const boundary of [picker, list, start])
+    const newEligibility = source.slice(
+      source.indexOf('// BEGIN windows v1 new-start eligibility'),
+      source.indexOf('// END windows v1 new-start eligibility'),
+    );
+    const existingEligibility = source.slice(
+      source.indexOf('// BEGIN windows v1 existing-start eligibility'),
+      source.indexOf('// END windows v1 existing-start eligibility'),
+    );
+    expect(start).toContain('StartWindowsNewSession(std::move(input)');
+    expect(start).toContain('StartWindowsExistingSession(std::move(input)');
+    expect(start).toContain('EligibilityBasisAdmitted(');
+    expect(start).not.toContain('OpenLockedProcessExecutable(');
+    for (const boundary of [picker, list, newEligibility, existingEligibility])
       expect(boundary).toContain('IsSupportedWindowsV1Target');
     const eligibility = source.slice(
       source.indexOf('bool IsSupportedWindowsV1Target('),
