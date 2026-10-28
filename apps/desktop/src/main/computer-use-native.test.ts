@@ -539,7 +539,7 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain('SameWindowsFileIdentity');
     expect(launchSource).toContain('const LockedWindowsExecutable &locked');
     expect(launchSource.indexOf('CreateProcessW')).toBeLessThan(
-      launchSource.indexOf('OpenLockedProcessExecutable(information.hProcess'),
+      launchSource.indexOf('OpenLockedProcessExecutable(child.process.value'),
     );
     expect(launchSource).toContain('TerminateProcess');
     expect(source).toContain('WindowsSessionExecutableMatches');
