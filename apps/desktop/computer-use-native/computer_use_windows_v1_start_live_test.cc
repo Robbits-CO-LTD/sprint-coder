@@ -140,6 +140,11 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring path = std::wstring(system.data(), length) + L"\\notepad.exe";
     LockedWindowsExecutable approved;
     Require(OpenLockedWindowsExecutable(path, &approved), "trusted executable read");
+    std::cerr << "BASELINE: microsoftSigner=" << approved.identity.microsoft_signer
+              << " signerPresent=" << !approved.identity.signer_digest.empty()
+              << " policyLanguage=" << approved.identity.policy_language
+              << " trustedSystemNotepad=" << IsTrustedSystemNotepad(approved.identity)
+              << " maximumMode=" << MaximumModeForWindowsExecutable(approved.identity) << "\n";
     Require(IsTrustedSystemNotepad(approved.identity) && IsSupportedWindowsV1Target(approved.identity),
             "genuine supported V1 baseline");
     OwnedTarget owned;
