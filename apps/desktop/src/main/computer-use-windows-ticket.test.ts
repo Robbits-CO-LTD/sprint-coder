@@ -132,7 +132,13 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
       observe.indexOf('ObserveWindowsWindow('),
     );
     const start = between(host, 'bool StartWindowsSession(', 'bool CloseWindowsSession(');
-    expect(start).toContain('InvalidateWindowsTicket(session_key)');
+    expect(start).toContain('StartWindowsNewSession(std::move(input)');
+    expect(start).toContain('StartWindowsExistingSession(std::move(input)');
+    for (const [begin, end] of [
+      ['bool StartWindowsNewSession(', '// END windows shared new start'],
+      ['bool StartWindowsExistingSession(', '// END windows shared existing start'],
+    ])
+      expect(between(host, begin!, end!)).toContain('InvalidateWindowsTicket(input.session_key)');
     const close = between(host, 'bool CloseWindowsSession(', 'std::string ProbeJson(');
     expect(close).toContain('ForgetWindowsTicket(session_key)');
   });
