@@ -1884,6 +1884,29 @@ describe('Computer Use Windows helper transport', () => {
     await controller.dispose();
   });
 
+  it('production Controller reports unconfirmed discovery instead of an empty target list', async () => {
+    const { host, helper } = createTarget(responders(), (helper) => {
+      helper.refuse('list_windows_cancellable');
+      helper.refuse('stop_window_discovery');
+    });
+    const controller = controllerFor(host, [profile, { ...profile, id: 'profile-2' }]);
+    await expect(
+      controller.listTargets(
+        {},
+        {
+          taskId: 'task-a',
+          turnId: 'turn-a',
+          workspaceId: null,
+          policyEpoch: 0,
+        },
+      ),
+    ).rejects.toThrow(/native_stop_unconfirmed/u);
+    expect(helper().served.filter((op) => op === 'list_windows_cancellable')).toHaveLength(1);
+    expect(host.availability().control).toBe(false);
+    helper().allow('stop_window_discovery');
+    await controller.dispose();
+  });
+
   it('production Controller never starts the next profile after tool cancellation', async () => {
     const { host, helper } = createTarget(responders(), (helper) =>
       helper.holdOnly('list_windows_cancellable'),

@@ -121,7 +121,10 @@ import {
   computerUseActionKind,
   computerUseActionRoute,
 } from './computer-use-action';
-import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
+import {
+  COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+  ComputerUseNativeUnavailableError,
+} from './computer-use-native-host';
 import type { ComputerUseNativeTargetList } from './computer-use-native-targets';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
@@ -1675,7 +1678,15 @@ export class ComputerUseController {
       scope.check();
       if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
       // One unreachable application must not blank the whole list; the agent still needs the rest.
-      const windows = await this.listNativeWindows(profile, scope).catch(() => []);
+      const windows = await this.listNativeWindows(profile, scope).catch((error: unknown) => {
+        if (
+          error instanceof ComputerUseNativeUnavailableError &&
+          error.reasonCode === 'native_stop_unconfirmed'
+        )
+          throw error;
+        scope.check();
+        return [];
+      });
       scope.check();
       // Native took time to answer. A permission revoked meanwhile has already cleared this Task's
       // tokens, so minting new ones — or returning titles that were read under the old policy —
@@ -2130,7 +2141,13 @@ export class ComputerUseController {
       windows = await this.listNativeWindows(profile, scope);
       scope.check();
       profile = this.refreshSignedWindowsProfile(profile, windows);
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof ComputerUseNativeUnavailableError &&
+        error.reasonCode === 'native_stop_unconfirmed'
+      )
+        throw error;
+      scope.check();
       return null;
     }
     const identity = this.boundGrantIdentity(profile);
