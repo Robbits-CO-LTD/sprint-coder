@@ -57,23 +57,18 @@ function findBuild(): Build | null {
 const nativeSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
 
 function instrumentPendingHost(source: string): string {
-  const legacyOpen =
-    /OpenLockedProcessExecutable\(target_process\.value,\s*&process_executable\)/gu;
   const workerOpen = /OpenLockedProcessExecutable\(target_process->value,\s*process_executable\)/gu;
-  expect([...source.matchAll(legacyOpen)]).toHaveLength(1);
   expect([...source.matchAll(workerOpen)]).toHaveLength(1);
   const conflictMarker = 'if (found != ledger.entries.end() && found->second->digest != digest) {';
   expect(source.split(conflictMarker)).toHaveLength(2);
   return source
-    .replace(legacyOpen, 'HoldStartOpen(target_process.value, &process_executable)')
     .replace(workerOpen, 'HoldStartOpen(target_process->value, process_executable)')
     .replace(conflictMarker, conflictMarker + '\n    ObserveRequestConflict();')
     .replaceAll('CloseHandle(', 'TrackHandleClose(');
 }
 
-it('instruments both identity-read paths without depending on source line wrapping', () => {
+it('instruments the new-start worker identity read without depending on source line wrapping', () => {
   const source = instrumentPendingHost(nativeSource);
-  expect(source).toContain('HoldStartOpen(target_process.value, &process_executable)');
   expect(source).toContain('HoldStartOpen(target_process->value, process_executable)');
 });
 

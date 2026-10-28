@@ -89,7 +89,7 @@ function instrumentedHost(): string {
     ) +
     source.slice(measureTo);
   const startFrom = source.indexOf('bool StartWindowsNewSession(');
-  const startTo = source.indexOf('// BEGIN windows v2 existing start', startFrom);
+  const startTo = source.indexOf('// BEGIN windows shared existing start', startFrom);
   if (startFrom < 0 || startTo < 0) throw new Error('Start consumer boundary changed');
   let newStart = source.slice(startFrom, startTo);
   newStart = replaceOnce(newStart, startReady, `${startReady}\n    Sc940StartReadyGate();`);
@@ -115,8 +115,8 @@ function instrumentedHost(): string {
     'Sc940StartForeground(input.window);',
   );
   source = source.slice(0, startFrom) + newStart + source.slice(startTo);
-  const resumeFrom = source.indexOf('// BEGIN windows v2 existing start');
-  const resumeTo = source.indexOf('// END windows v2 existing start', resumeFrom);
+  const resumeFrom = source.indexOf('// BEGIN windows shared existing start');
+  const resumeTo = source.indexOf('// END windows shared existing start', resumeFrom);
   if (resumeFrom < 0 || resumeTo < 0) throw new Error('Resume consumer boundary changed');
   let resume = replaceOnce(
     source.slice(resumeFrom, resumeTo),
@@ -129,13 +129,13 @@ function instrumentedHost(): string {
   resume = resume.replaceAll(heldRead, 'Sc940ResumeFileIdentity(work, &held)');
   resume = replaceOnce(
     resume,
-    '    context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
-    '    Sc940ResumeContextGate(work);\n    context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
+    '      context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
+    '      Sc940ResumeContextGate(work);\n      context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
   );
   resume = replaceOnce(
     resume,
-    '  // Existing V2 start worker entry; this job owns its thread and source duplicates.',
-    '  // Existing V2 start worker entry; this job owns its thread and source duplicates.\n  Sc940ResumeWorkerStarted(*work);',
+    '  // Existing start worker entry; this job owns its thread and source duplicates.',
+    '  // Existing start worker entry; this job owns its thread and source duplicates.\n  Sc940ResumeWorkerStarted(*work);',
   );
   resume = replaceOnce(
     resume,
@@ -143,13 +143,13 @@ function instrumentedHost(): string {
     '  if (pending->thread.value != nullptr) { Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value); }',
   );
   const ticketInvalidation = 'InvalidateWindowsTicket(input.session_key);';
-  if (resume.split(ticketInvalidation).length !== 3)
+  if (resume.split(ticketInvalidation).length !== 4)
     throw new Error('Resume ticket boundaries changed');
   resume = resume.replaceAll(ticketInvalidation, 'Sc940ResumeInvalidateTicket(input.session_key);');
   resume = replaceOnce(
     resume,
-    '  // Existing V2 start before consumer focus preparation.',
-    '  // Existing V2 start before consumer focus preparation.\n  if (!Sc940ResumeSourcePin(session, before)) { *reason = "diagnostic_source_pin"; return false; }',
+    '  // Existing start before consumer focus preparation.',
+    '  // Existing start before consumer focus preparation.\n  if (!Sc940ResumeSourcePin(session, before)) { *reason = "diagnostic_source_pin"; return false; }',
   );
   resume = replaceOnce(
     resume,
@@ -376,14 +376,14 @@ void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id);
 void Sc940ValidationRetired(std::uint64_t job_id);
 std::string Sc940ValidationProbe(const std::string &metadata);
 bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
-struct WindowsV2ExistingStartWork;
-struct WindowsV2ExistingStartPending;
-struct WindowsV2ExistingStartMeasurement;
-bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsV2ExistingStartMeasurement &before);
-bool Sc940ResumeOpen(const WindowsV2ExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output);
-bool Sc940ResumeFileIdentity(const WindowsV2ExistingStartWork &work, WindowsFileIdentity *identity);
-void Sc940ResumeContextGate(const WindowsV2ExistingStartWork &work);
-void Sc940ResumeWorkerStarted(const WindowsV2ExistingStartWork &work);
+struct WindowsExistingStartWork;
+struct WindowsExistingStartPending;
+struct WindowsExistingStartMeasurement;
+bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsExistingStartMeasurement &before);
+bool Sc940ResumeOpen(const WindowsExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output);
+bool Sc940ResumeFileIdentity(const WindowsExistingStartWork &work, WindowsFileIdentity *identity);
+void Sc940ResumeContextGate(const WindowsExistingStartWork &work);
+void Sc940ResumeWorkerStarted(const WindowsExistingStartWork &work);
 void Sc940ResumeCancelAttempt();
 void Sc940ResumeInvalidateTicket(const std::string &session_key);
 bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason);
@@ -463,8 +463,8 @@ std::atomic<unsigned> resume_workers{0}, resume_cancel_attempts{0}, resume_ticke
 std::atomic<unsigned> resume_before_jobs{0}, resume_after_jobs{0}, resume_before_file_reads{0};
 std::atomic<HANDLE> resume_source_process{nullptr}, resume_source_file{INVALID_HANDLE_VALUE};
 std::mutex resume_threads_mutex;
-std::vector<std::pair<std::shared_ptr<WindowsV2ExistingStartPending>, HANDLE>> resume_threads;
-std::shared_ptr<WindowsV2ExistingStartPending> resume_held_pending;
+std::vector<std::pair<std::shared_ptr<WindowsExistingStartPending>, HANDLE>> resume_threads;
+std::shared_ptr<WindowsExistingStartPending> resume_held_pending;
 std::atomic<unsigned> resume_pin_checks{0};
 HANDLE resume_other_file = INVALID_HANDLE_VALUE;
 std::atomic<bool> validation_case_active{false};
@@ -679,10 +679,10 @@ bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output) {
   if (opened) start_open_successes.fetch_add(1);
   return opened;
 }
-void Sc940ResumeWorkerStarted(const WindowsV2ExistingStartWork &work) {
+void Sc940ResumeWorkerStarted(const WindowsExistingStartWork &work) {
   if (!resume_diagnostic_active.load()) return;
   resume_workers.fetch_add(1);
-  if (work.phase == WindowsV2ExistingStartPhase::BeforeFocus) resume_before_jobs.fetch_add(1);
+  if (work.phase == WindowsExistingStartPhase::BeforeFocus) resume_before_jobs.fetch_add(1);
   else resume_after_jobs.fetch_add(1);
   HANDLE thread = nullptr;
   if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
@@ -705,7 +705,7 @@ void Sc940ResumeInvalidateTicket(const std::string &session_key) {
 void Sc940ResumeCancelAttempt() {
   if (resume_diagnostic_active.load()) resume_cancel_attempts.fetch_add(1);
 }
-void Sc940ResumeHold(const WindowsV2ExistingStartWork &work) {
+void Sc940ResumeHold(const WindowsExistingStartWork &work) {
   {
     std::lock_guard lock(resume_threads_mutex);
     resume_held_pending = work.pending;
@@ -713,7 +713,7 @@ void Sc940ResumeHold(const WindowsV2ExistingStartWork &work) {
   SetEvent(gate_entered);
   if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
 }
-bool Sc940ResumeOpen(const WindowsV2ExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output) {
+bool Sc940ResumeOpen(const WindowsExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output) {
   if (!resume_diagnostic_active.load()) return OpenLockedProcessExecutable(process, output);
   if (GetProcessId(process) != fixture_pids[0] || work.process.value == resume_source_process.load() ||
       work.executable.value == resume_source_file.load()) {
@@ -726,9 +726,9 @@ bool Sc940ResumeOpen(const WindowsV2ExistingStartWork &work, HANDLE process, Loc
   if (opened) resume_before_successes.fetch_add(1);
   return opened;
 }
-bool Sc940ResumeFileIdentity(const WindowsV2ExistingStartWork &work, WindowsFileIdentity *identity) {
+bool Sc940ResumeFileIdentity(const WindowsExistingStartWork &work, WindowsFileIdentity *identity) {
   if (!resume_diagnostic_active.load()) return ReadWindowsFileIdentity(work.executable.value, identity);
-  const bool after = work.phase == WindowsV2ExistingStartPhase::AfterFocus;
+  const bool after = work.phase == WindowsExistingStartPhase::AfterFocus;
   if (after) resume_after_reads.fetch_add(1);
   else resume_before_file_reads.fetch_add(1);
   if (work.executable.value == resume_source_file.load()) wrong_measurement.store(true);
@@ -737,16 +737,16 @@ bool Sc940ResumeFileIdentity(const WindowsV2ExistingStartWork &work, WindowsFile
   if (after && read) resume_after_successes.fetch_add(1);
   return read;
 }
-void Sc940ResumeContextGate(const WindowsV2ExistingStartWork &work) {
+void Sc940ResumeContextGate(const WindowsExistingStartWork &work) {
   if (!resume_diagnostic_active.load()) return;
   resume_context_calls.fetch_add(1);
   if (resume_hold_context.load()) Sc940ResumeHold(work);
 }
-std::shared_ptr<WindowsV2ExistingStartPending> ResumeHeldPending() {
+std::shared_ptr<WindowsExistingStartPending> ResumeHeldPending() {
   std::lock_guard lock(resume_threads_mutex);
   return resume_held_pending;
 }
-bool WaitResumeThread(const std::shared_ptr<WindowsV2ExistingStartPending> &pending, DWORD budget = 5000) {
+bool WaitResumeThread(const std::shared_ptr<WindowsExistingStartPending> &pending, DWORD budget = 5000) {
   HANDLE thread = nullptr;
   {
     std::lock_guard lock(resume_threads_mutex);
@@ -836,7 +836,7 @@ std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string
       ",\"admissionMatches\":" + (admitted ? "true" : "false") + ",\"inputAttemptCount\":" +
       std::to_string(session.input_api_attempts->load()) + "}";
 }
-bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsV2ExistingStartMeasurement &before) {
+bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsExistingStartMeasurement &before) {
   if (!resume_diagnostic_active.load()) return true;
   WindowsFileIdentity original;
   const bool matched = GetCurrentThreadId() == rca_consumer_thread_id.load() &&
@@ -879,9 +879,9 @@ std::string Sc940ResumeComponent(const WindowsSession &session, const std::strin
   unsigned completed = 0;
   bool before_ok = false, after_ok = false;
   for (unsigned index = 0; index < count; ++index) {
-    WindowsV2ExistingStartMeasurement before, after;
+    WindowsExistingStartMeasurement before, after;
     std::string reason;
-    before_ok = RunWindowsV2ExistingStartMeasurement(input, source, WindowsV2ExistingStartPhase::BeforeFocus,
+    before_ok = RunWindowsExistingStartMeasurement(input, source, WindowsExistingStartPhase::BeforeFocus,
                                                      nullptr, &before, &reason);
     if (!before_ok) break;
     // Before's temporary handles have been closed. The original Session still pins the same file
@@ -896,7 +896,7 @@ std::string Sc940ResumeComponent(const WindowsSession &session, const std::strin
       before.executable.file_identity = other;
     }
     resume_fail_after_read.store(mode == "after_read_failure");
-    after_ok = RunWindowsV2ExistingStartMeasurement(input, source, WindowsV2ExistingStartPhase::AfterFocus,
+    after_ok = RunWindowsExistingStartMeasurement(input, source, WindowsExistingStartPhase::AfterFocus,
                                                     &before, &after, &reason);
     resume_fail_after_read.store(false);
     if (!after_ok) break;
@@ -2337,7 +2337,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
           const auto next = ResumeHeldPending();
           const unsigned cancels = resume_cancel_attempts.load();
           Require(next != nullptr && next != pending && WaitResumeThread(pending, 0), "resume_old_thread_really_finished");
-          CancelWindowsV2ExistingStartJob(pending);
+          CancelWindowsExistingStartJob(pending);
           Require(resume_cancel_attempts.load() == cancels && WindowsTargetListWorkerRunning().load() &&
                       WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "resume_old_pending_cannot_cancel_new_job");
           resume_hold_before.store(false); SetEvent(run.release.value);
@@ -3115,13 +3115,13 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('!Sc940ResumeFileIdentity(work, &held)')).toHaveLength(3);
     expect(generated.split('  Sc940ResumeWorkerStarted(*work);')).toHaveLength(2);
     expect(generated.split('    Sc940ResumeContextGate(work);')).toHaveLength(2);
-    expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(3);
+    expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(4);
     expect(
       generated.split('Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value);'),
     ).toHaveLength(2);
     expect(program).toContain('WaitForSingleObject(thread, budget) == WAIT_OBJECT_0');
     expect(program).toContain('run.Error(2, "session_start_canceled")');
-    expect(program).toContain('CancelWindowsV2ExistingStartJob(pending);');
+    expect(program).toContain('CancelWindowsExistingStartJob(pending);');
     expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
     expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
     expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);

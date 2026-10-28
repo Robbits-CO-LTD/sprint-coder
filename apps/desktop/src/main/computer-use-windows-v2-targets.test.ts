@@ -121,7 +121,11 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
       '// BEGIN windows v1 new-start eligibility',
       '// END windows v1 new-start eligibility',
     );
-    const v2AndShared = v2Block.replace(v1Eligibility, '');
+    const v1ExistingEligibility = cut(
+      '// BEGIN windows v1 existing-start eligibility',
+      '// END windows v1 existing-start eligibility',
+    );
+    const v2AndShared = v2Block.replace(v1Eligibility, '').replace(v1ExistingEligibility, '');
     expect(v2AndShared).not.toContain('MaximumModeForWindowsExecutable');
     expect(v2AndShared).not.toContain('IsPolicyLanguageSupported');
     const sharedMeasure = cut(
@@ -141,19 +145,26 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
       /AdmitWindowsV2|ClassifyTarget|CurrentWindowsTargetFactsContext/u,
     );
     expect(v2Block).toContain('*maximum_mode = std::string(judged.verdict.maximum_mode);');
-    const start = cut('bool StartWindowsSession(', 'bool CloseWindowsSession(');
-    expect(start).toContain(
-      [
-        '  const std::string maximum_mode =',
-        '      v2_basis ? v2_maximum_mode',
-        '               : MaximumModeForWindowsExecutable(process_executable.identity);',
-      ].join('\n'),
+    expect(v1ExistingEligibility).toContain('WindowsExecutableIdentityMatches(');
+    expect(v1ExistingEligibility).toContain('IsSupportedWindowsV1Target(');
+    expect(v1ExistingEligibility).not.toMatch(
+      /AdmitWindowsV2|ClassifyTarget|CurrentWindowsTargetFactsContext/u,
     );
-    // A v1 session is admitted exactly as before; the v2 judgement exists only in a v2 build.
-    expect(start).toContain('IsSupportedWindowsV1Target(process_executable.identity);');
-    expect(start).toMatch(
-      /if constexpr \(!sprint_coder::computer_use::kNativeEligibilityIsV2\) \{\s+return false;\s+\} else \{\s+return AdmitWindowsV2Start\(/u,
+    const existingMeasure = cut(
+      'WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(',
+      'WindowsExistingStartMeasurement MeasureWindowsExistingStartAfter(',
     );
+    expect(existingMeasure).toContain(
+      '} else if (!MeasureWindowsV1ExistingStartEligibility(input, current_executable, &measured))',
+    );
+    expect(existingMeasure).toContain('if (v2) {');
+    expect([...host.matchAll(/MeasureWindowsV1ExistingStartEligibility\(/gu)]).toHaveLength(2);
+    const start = cut('bool StartWindowsSession(', 'void MarkWindowsStartClosed(');
+    expect(start).toContain('EligibilityBasisAdmitted(');
+    expect(start).toContain('input.eligibility_basis = eligibility_basis');
+    expect(start).toContain('StartWindowsExistingSession(std::move(input)');
+    expect(start).toContain('StartWindowsNewSession(std::move(input)');
+    expect(start).not.toContain('OpenLockedProcessExecutable(');
   });
 
   it('judges a v2 session again before every input, and only there answers the not-web table', () => {
