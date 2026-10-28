@@ -790,6 +790,46 @@ describe('Computer Use Windows helper transport', () => {
       expect(await query).toMatch(/binding/u);
     });
 
+    it.each(['completed', 'stopped'] as const)(
+      'remembers session teardown while discovery is pending until it is %s',
+      async (terminal) => {
+        const { addon, helper } = createTarget(discoveryResponders());
+        await addon.startSession!({ sessionId: 'closing-with-discovery', profile });
+        helper().holdOnly('list_windows_cancellable');
+        const query = addon.discoverWindows!(input('close-during-discovery'));
+        await vi.advanceTimersByTimeAsync(0);
+        await addon.close!({ sessionId: 'closing-with-discovery', cancelEpoch: 1 });
+        expect(children[0]!.killed).toBe(false);
+        if (terminal === 'stopped') {
+          await addon.stopWindowDiscovery!({ discoveryId: 'close-during-discovery' });
+          // The original query still owns a pending transport response.
+          expect(children[0]!.killed).toBe(false);
+        }
+        helper().release('list_windows_cancellable');
+        await query;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(children[0]!.killed).toBe(true);
+        expect(sockets[0]!.destroyed).toBe(true);
+      },
+    );
+
+    it('disarms deferred discovery teardown when a newer session starts', async () => {
+      const { addon, helper } = createTarget(discoveryResponders());
+      await addon.startSession!({ sessionId: 'older-session', profile });
+      helper().holdOnly('list_windows_cancellable');
+      const query = addon.discoverWindows!(input('overlapping-discovery'));
+      await vi.advanceTimersByTimeAsync(0);
+      await addon.close!({ sessionId: 'older-session', cancelEpoch: 1 });
+      await addon.startSession!({ sessionId: 'newer-session', profile });
+      helper().release('list_windows_cancellable');
+      await query;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(false);
+      await addon.close!({ sessionId: 'newer-session', cancelEpoch: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(true);
+    });
+
     it('does not pin a new helper idle lifetime with an unconfirmed old-generation discovery', async () => {
       const { addon, helper } = createTarget(discoveryResponders(), (helper) =>
         helper.holdOnly('list_windows_cancellable'),

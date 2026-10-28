@@ -269,13 +269,7 @@ class WindowsComputerUseHelperClient {
       )
         return;
     }
-    for (const owner of this.discoveries.values())
-      if (
-        (owner.helper === null || owner.helper === this.helperGeneration) &&
-        !owner.closed &&
-        (owner.everSent || (!owner.stopped && owner.attempts.size !== 0))
-      )
-        return;
+    // Keep the close intent while discovery drains; shutdownIfIdle owns that wait.
     this.idleShutdownPending = true;
     this.shutdownIfIdle();
   }
