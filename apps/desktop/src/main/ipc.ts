@@ -1771,8 +1771,8 @@ export class IpcRouter {
       ...(computerUseAgentDrivenV2Enabled()
         ? {
             computerTargets: {
-              listTargets: (input, context) =>
-                this.computerUseController.listTargets(input, context),
+              listTargets: (input, context, signal) =>
+                this.computerUseController.listTargets(input, context, signal),
               // Both wait on the world outside this process, so both take the dispatch's signal:
               // cancelling the Turn withdraws the card and stops the session.
               requestAccess: (input, context, signal) =>
@@ -2557,19 +2557,33 @@ export class IpcRouter {
           throw new ComputerUseNativeUnavailableError(
             availability.reasonCode ?? availability.state,
           );
-        const candidates = await this.computerUseController.listWindows(input.profileId);
-        if (activation !== null && activationExpectedProfileRevision !== null)
-          this.latchComputerUseQuickStart(
-            event,
-            activation,
-            input,
-            candidates,
-            activationExpectedProfileRevision,
-          );
-        return {
-          profileId: input.profileId,
-          candidates,
-        };
+        const frame = event.senderFrame;
+        if (frame === null) throw new SecurityError();
+        const actor = [this.window.id, event.sender.id, frame.processId, frame.routingId].join(':');
+        const intent = this.computerUseController.beginWindowCandidates(
+          input.profileId,
+          input.taskId,
+          actor,
+        );
+        try {
+          await intent.result;
+          if (event.sender.isDestroyed() || event.senderFrame !== frame || frame.isDestroyed())
+            throw new SecurityError();
+          return intent.commit((candidates) => {
+            if (activation !== null && activationExpectedProfileRevision !== null)
+              this.latchComputerUseQuickStart(
+                event,
+                activation,
+                input,
+                candidates,
+                activationExpectedProfileRevision,
+              );
+            return { profileId: input.profileId, candidates };
+          });
+        } catch (error) {
+          await intent.cancel();
+          throw error;
+        }
       },
     );
     this.handleMutation(

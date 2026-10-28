@@ -2705,13 +2705,9 @@ describe('ComputerUseController', () => {
       await viWait();
       fixture.controller.taskClosed('task-1');
       release();
-      const started = await starting;
-      await fixture.controller.observe(started.sessionId);
-      await expect(
-        fixture.controller.act(started.sessionId, copy, 'copy-1'),
-      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      await expect(starting).rejects.toThrow('discovery canceled');
+      expect(fixture.startSessionEnteredCount()).toBe(0);
       expect(owners).toEqual([]);
-      await fixture.controller.stop(started.sessionId);
     });
 
     it('notes the generation before the first await of every start path', () => {
@@ -2721,13 +2717,13 @@ describe('ComputerUseController', () => {
       );
       // startForAgent notes it first thing and hands it on; start notes it before startInternal.
       expect(source).toMatch(
-        /Promise<ComputerStartToolOutput> \{ \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
+        /Promise<ComputerStartToolOutput> \{ let signal: AbortSignal \| undefined = scope\.signal; \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
       );
       expect(source).toContain('signal, artifactGeneration, );');
       expect(source).toContain(
         'notedArtifactGeneration ?? this.artifactGenerations.get(input.taskId) ?? 0; if (this.disposed)',
       );
-      expect(source).toContain('this.startInternal(input, controller, artifactGeneration)');
+      expect(source).toContain('this.startInternal(input, controller, artifactGeneration, scope)');
     });
 
     it('lets a session started after the Task was closed and reopened copy', async () => {

@@ -31,6 +31,9 @@ function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 
     probe: vi.fn(),
     pickApplication: vi.fn(),
     listWindows: vi.fn(),
+    discoverWindows: vi.fn(),
+    stopWindowDiscovery: vi.fn(),
+    cancelUnsubmittedDiscovery: vi.fn(() => 'unknown' as const),
     startSession: vi.fn(),
     observe: vi.fn(),
     dispatch: vi.fn(),
@@ -73,6 +76,11 @@ function nativeFixture(platform: 'darwin' | 'win32', signed = true, apiVersion: 
       apiVersion,
       sourceCommit: manifest.sourceCommit,
       backend: 'synthetic-parent-integration',
+      capabilities: {
+        observe: true,
+        control: true,
+        ...(platform === 'win32' ? { cancellableWindowDiscovery: true } : {}),
+      },
     },
   });
   return { binding: { manifest, artifactPath, probe, addon }, addon };

@@ -1,3 +1,4 @@
+import type { ComputerUseDiscoveryStop } from './computer-use-native-discovery';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -230,6 +231,7 @@ async function settle<T>(pending: Promise<T>, steps = 200, stepMs = 1_000): Prom
 function createFixture(
   options: {
     profiles?: readonly ComputerAppProfileRecord[];
+    beginWindowDiscovery?: ComputerUseNativeHost['beginWindowDiscovery'];
     windowsFor?: (profile: ComputerAppProfileRecord) => readonly ComputerUseNativeWindow[];
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
     /** Read on every call, so a test can move the Turn to another destination mid-session. */
@@ -279,6 +281,9 @@ function createFixture(
   const dispatchedActions: ComputerUseAction[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
+    ...(options.beginWindowDiscovery === undefined
+      ? {}
+      : { beginWindowDiscovery: options.beginWindowDiscovery }),
     pickApplication: async () => null,
     listWindows: async (profile) => {
       listWindowCalls += 1;
@@ -949,6 +954,78 @@ describe('computer_request_access', () => {
     // Most recent first, so what is dropped is the oldest history rather than an arbitrary slice.
     expect(listing.requestedApps[0]?.appId).toBe('com.example.app69');
   });
+
+  it.each(['timeout', 'deny', 'turn-ended'] as const)(
+    'stops an owned native refetch when its exact grant card ends: %s',
+    async (ending) => {
+      let queries = 0;
+      let resolveTerminal!: (proof: ComputerUseDiscoveryStop) => void;
+      const terminal = new Promise<ComputerUseDiscoveryStop>((resolve) => {
+        resolveTerminal = resolve;
+      });
+      let release!: (rows: readonly ComputerUseNativeWindow[]) => void;
+      const held = new Promise<readonly ComputerUseNativeWindow[]>((resolve) => {
+        release = resolve;
+      });
+      const stop = vi.fn(async () => {
+        const proof = { kind: 'stopped', launchAttemptCount: 0 } as const;
+        resolveTerminal(proof);
+        return proof;
+      });
+      let heldProfile!: ComputerAppProfileRecord;
+      const fixture = createFixture({
+        beginWindowDiscovery: (profile) => {
+          queries += 1;
+          if (queries === 3) {
+            heldProfile = profile;
+            return { id: 'held-card-refetch', result: held, terminal, stop };
+          }
+          return {
+            id: 'done:' + queries,
+            result: Promise.resolve([nativeWindow(profile)]),
+            terminal: Promise.resolve({ kind: 'completed', launchAttemptCount: 0 } as const),
+            stop: async () => ({ kind: 'completed', launchAttemptCount: 0 }) as const,
+          };
+        },
+      });
+      const target = await listOne(fixture);
+      const asked = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'ask' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const card = fixture.pending();
+      const clicked = fixture.controller
+        .resolveAppGrantRequest(
+          { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+          intentFor(card, 'allow_always'),
+        )
+        .then(
+          () => 'allowed',
+          (error: Error) => error.message,
+        );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queries).toBe(3);
+      if (ending === 'timeout') await vi.advanceTimersByTimeAsync(120_000);
+      else if (ending === 'deny')
+        await fixture.controller.resolveAppGrantRequest(
+          { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+          null,
+        );
+      else fixture.controller.turnEnded(context.taskId, context.turnId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(await clicked).toMatch(/canceled/u);
+      expect((await asked).granted).toBe(false);
+      expect(fixture.grants.size).toBe(0);
+      release([nativeWindow(heldProfile)]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.grants.size).toBe(0);
+      expect(fixture.cardsRaised()).toBe(1);
+      expect(fixture.published.at(-1)?.state).not.toBe('pending');
+      await fixture.controller.dispose();
+    },
+  );
 
   it('lapses after two minutes without an answer', async () => {
     const fixture = createFixture();

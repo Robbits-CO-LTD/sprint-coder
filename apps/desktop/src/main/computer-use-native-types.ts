@@ -2,6 +2,9 @@ import type { ComputerUseNativeManifest } from '@sprint-coder/contracts';
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
+/** Local transport proof only. A native error response can never create this instance. */
+export class ComputerUseDiscoveryNotSubmittedError extends Error {}
+
 export type ComputerUseNativeProbe = Readonly<{
   available: boolean;
   protocolVersion: 1;
@@ -31,6 +34,9 @@ export type ComputerUseNativeAddon = Readonly<{
   handshake?(input: unknown): unknown;
   pickApplication?(input: unknown): unknown;
   listWindows?(input: unknown): unknown;
+  discoverWindows?(input: unknown): unknown;
+  stopWindowDiscovery?(input: unknown): unknown;
+  cancelUnsubmittedDiscovery?(discoveryId: string): 'never_sent' | 'may_have_been_sent' | 'unknown';
   /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
   listTargets?(input: unknown): unknown;
   startSession?(input: unknown): unknown;

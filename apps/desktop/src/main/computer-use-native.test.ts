@@ -527,7 +527,7 @@ describe('Windows native helper compile boundary', () => {
     );
     const launchSource = source.slice(
       source.indexOf('bool LaunchVerifiedExecutable('),
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
     );
 
     expect(source).toContain('GetFinalPathNameByHandleW');
@@ -552,7 +552,7 @@ describe('Windows native helper compile boundary', () => {
       'utf8',
     );
     const listSource = source.slice(
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
     );
     const enumerationSource = source.slice(
@@ -735,7 +735,7 @@ describe('Windows native helper compile boundary', () => {
       'utf8',
     );
     const listSource = source.slice(
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
     );
     const startSource = source.slice(
@@ -2047,13 +2047,15 @@ describe('Computer Use native manifest and runtime gate', () => {
         napiVersion: 10,
         available: true,
         backend: 'windows-uia-graphics-capture-sendinput',
+        capabilities: { cancellableWindowDiscovery: true },
       }),
     });
 
     expect(binding.probe.available).toBe(true);
     expect(binding.addon).toMatchObject({
       pickApplication: expect.any(Function),
-      listWindows: expect.any(Function),
+      discoverWindows: expect.any(Function),
+      stopWindowDiscovery: expect.any(Function),
       startSession: expect.any(Function),
       observe: expect.any(Function),
       dispatch: expect.any(Function),
@@ -2124,6 +2126,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
     napiVersion: 10,
     available: true,
     backend: 'windows-uia-graphics-capture-sendinput',
+    capabilities: { cancellableWindowDiscovery: true },
   });
 
   const loadWindowsFixture = (

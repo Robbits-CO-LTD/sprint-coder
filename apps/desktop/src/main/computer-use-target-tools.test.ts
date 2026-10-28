@@ -328,7 +328,7 @@ describe('computer_list_targets', () => {
     expect(row?.untrustedLabel).toBeNull();
   });
 
-  it('drops a row whose grant was revoked while native was still enumerating', async () => {
+  it('cancels enumeration when a contributing grant is revoked', async () => {
     const first = profileRecord('profile-a-notes', macIdentity(), { remember: false });
     const second = profileRecord(
       'profile-b-preview',
@@ -361,10 +361,9 @@ describe('computer_list_targets', () => {
     expect(before.map((row) => row.granted)).toEqual([true, true]);
 
     revoke = () => void fixture.controller.revokeAppGrant(grant.id, grant.revision);
-    const after = selectable((await fixture.controller.listTargets({}, toolContext)).targets);
-    // The revoked application's row is gone entirely, token included — keeping the token would let
-    // S3b spend a reference to a grant the user has just withdrawn.
-    expect(after.map((row) => row.verified.appId)).toEqual(['com.example.preview']);
+    await expect(fixture.controller.listTargets({}, toolContext)).rejects.toThrow(
+      'discovery canceled',
+    );
     expect(fixture.controller.targetTokenBinding(before[0]!.targetToken)).toBeNull();
   });
 
