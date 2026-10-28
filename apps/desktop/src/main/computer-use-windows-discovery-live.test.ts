@@ -308,7 +308,9 @@ int wmain(int argc,wchar_t** argv){
    Require(id!=std::string::npos,"second discovery id");second.replace(id,11,"discovery:2");
    Send(client.value,2,8,List());Send(client.value,4,9,second);
    const auto first=Read(client.value,2,MessageType::kError);
-   Require(Payload(first).find("profile_identity_invalid")!=std::string::npos,"first owned read rejects identity");
+   std::string first_code;Require(ReadJsonString(Payload(first),"code",&first_code),"first error code");
+   std::cout<<"RCA: firstErrorCode="<<first_code<<"\n"<<std::flush;
+   Require(first_code=="app_identity_changed","first owned read rejects identity");
    const auto waiting=GetTickCount64();while(!entered_start.load()&&GetTickCount64()-waiting<5000)Sleep(1);
    Require(entered_start.load()&&actual_reads.load()==1&&file_releases.load()==1,"second alone holds read");
    const auto serial=WindowsTargetListControl().stop_serial.load();
