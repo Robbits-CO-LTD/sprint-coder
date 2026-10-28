@@ -170,8 +170,12 @@ describe('strict interlock of v2 sessions (S5-c-3 PR-3)', () => {
       'if (!sprint_coder::computer_use::EligibilityBasisAdmitted(\n          eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2)) {',
     );
     expect(host).toContain('*reason = "eligibility_basis_unsupported";');
-    expect(host).toContain('session.eligibility_basis = eligibility_basis;');
-    expect(host.match(/eligibility_basis != eligibility_basis/gu)).toHaveLength(2);
+    expect(host).toContain('input.eligibility_basis = eligibility_basis;');
+    expect(host).toContain('session.eligibility_basis = input.eligibility_basis;');
+    expect(host).toContain('expected.eligibility_basis == input.eligibility_basis;');
+    expect(host).toContain('expected.eligibility_basis == session.eligibility_basis');
+    expect(host).toContain('!WindowsExistingStartRequestMatches(work, measured)');
+    expect(host).toContain('!WindowsExistingStartRequestMatches(work, work.before)');
     expect(host).toContain('return sprint_coder::computer_use::ApplyIncompletePolicy(');
     expect(host).toContain(
       'session.eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2)',
