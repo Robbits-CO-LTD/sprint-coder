@@ -1975,6 +1975,8 @@ export class ComputerUseController {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<ComputerRequestAccessOutput> {
+    if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
+      return this.accessRefused('access_request_unavailable');
     const scope = this.discoveryScope(context.taskId, context.turnId, signal);
     try {
       return await scope.run(async () => {

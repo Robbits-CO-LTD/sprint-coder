@@ -685,6 +685,29 @@ describe('Computer Use Windows helper transport', () => {
       });
     });
 
+    it('recovers capacity after twenty cancellations during handshake preparation', async () => {
+      const { host, helper } = createTarget(discoveryResponders(), (helper) =>
+        helper.holdOnly('handshake'),
+      );
+      for (let index = 0; index < 20; index += 1) {
+        const discovery = host.beginWindowDiscovery!(profile);
+        const result = discovery.result.catch((error: Error) => error.message);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(children).toHaveLength(index + 1);
+        await expect(discovery.stop()).resolves.toEqual({ kind: 'not_submitted' });
+        helper().release('handshake');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await result).toMatch(/canceled/u);
+        expect(helper().served).not.toContain('list_windows_cancellable');
+        expect(host.availability().control).toBe(true);
+        sockets.at(-1)!.destroy();
+      }
+      const fresh = host.beginWindowDiscovery!(profile);
+      await vi.advanceTimersByTimeAsync(0);
+      helper().release('handshake');
+      await expect(fresh.result).resolves.toHaveLength(1);
+    });
+
     it('rejects wrong-owner evidence and never reconnects to prove an old discovery stopped', async () => {
       const { addon, helper } = createTarget(
         {

@@ -1115,6 +1115,21 @@ describe('computer_request_access', () => {
     expect(await next).toEqual({ granted: false, reasonCode: 'access_request_timed_out' });
   });
 
+  it.each(['during', 'after'] as const)(
+    'returns structured unavailable %s disposal',
+    async (when) => {
+      const fixture = createFixture();
+      const disposing = fixture.controller.dispose();
+      if (when === 'after') await disposing;
+      await expect(
+        fixture.controller.requestAccess({ appToken: 'unused', reason: 'ask' }, context),
+      ).resolves.toEqual({ granted: false, reasonCode: 'access_request_unavailable' });
+      await disposing;
+      expect(fixture.published).toHaveLength(0);
+      expect(fixture.listWindowCalls()).toBe(0);
+    },
+  );
+
   it('never raises a card for a Turn that is already gone', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);

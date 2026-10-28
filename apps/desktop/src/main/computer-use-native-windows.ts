@@ -394,7 +394,15 @@ class WindowsComputerUseHelperClient {
       return proof;
     } finally {
       owner.attempts.delete(attempt);
-      // Retain an unsuccessful unsent record until Main consumes its distinct never_sent proof.
+      // Stop may have consumed never_sent while preparation still owned this attempt.
+      if (
+        owner.stopped &&
+        !owner.everSent &&
+        owner.attempts.size === 0 &&
+        this.discoveries.get(id) === owner
+      )
+        this.discoveries.delete(id);
+      // Other unsuccessful unsent records remain until Main consumes their distinct proof.
       this.shutdownIfIdle();
     }
   }
