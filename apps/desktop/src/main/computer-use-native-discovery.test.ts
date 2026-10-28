@@ -125,6 +125,44 @@ describe('owned Main window discovery', () => {
     await expect(handle.stop()).resolves.toEqual({ kind: 'completed', launchAttemptCount: 1 });
   });
 
+  it.each(['wrong-owner', 'malformed'] as const)(
+    'retains a valid late Stop after both deadlines and rejects %s late proof',
+    async (invalid) => {
+      vi.useFakeTimers();
+      const { manager, query, stop } = setup();
+      const queryReply = deferred<unknown>();
+      const firstReply = deferred<unknown>();
+      const secondReply = deferred<unknown>();
+      query.mockImplementation(() => queryReply.promise);
+      stop
+        .mockImplementationOnce(() => firstReply.promise)
+        .mockImplementationOnce(() => secondReply.promise);
+      const handle = manager.begin({});
+      const delivered = vi.fn();
+      void handle.result.then(delivered, () => undefined);
+      await Promise.resolve();
+      const stopping = handle.stop().catch((error: Error) => error.message);
+      queryReply.reject(new Error('native query canceled'));
+      await vi.advanceTimersByTimeAsync(25);
+      expect(await stopping).toBe('native_stop_unconfirmed');
+      await expect(handle.result).rejects.toThrow('native_stop_unconfirmed');
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(manager.quarantined()).toBe(true);
+
+      firstReply.resolve(invalid === 'wrong-owner' ? stopped('another-owner') : []);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.quarantined()).toBe(true);
+      secondReply.resolve(stopped(handle.id));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.quarantined()).toBe(false);
+      await expect(handle.terminal).resolves.toEqual({ kind: 'stopped', launchAttemptCount: 1 });
+      await expect(handle.stop()).resolves.toEqual({ kind: 'stopped', launchAttemptCount: 1 });
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(delivered).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it('does not treat a late legacy array or a native error string as terminal proof', async () => {
     const { manager, query, stop } = setup();
     const pending = deferred<unknown>();

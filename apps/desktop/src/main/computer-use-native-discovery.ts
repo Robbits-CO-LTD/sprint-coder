@@ -68,22 +68,23 @@ export function createComputerUseDiscoveryManager(
     for (let attempt = 0; attempt < options.attemptLimit; attempt += 1) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const answer = await Promise.race([
+        return await Promise.race([
           Promise.resolve()
             .then(() => options.stop(owner.id))
-            .then((value) => ({
-              source: 'native' as const,
-              value,
-            })),
-          owner.terminalSignal.then((proof) => ({ source: 'terminal' as const, proof })),
+            .then((value) => {
+              // A caller deadline does not invalidate this operation's eventual Stop proof.
+              const receipt = computerUseNativeDiscoveryStopReceiptSchema.parse(value);
+              if (receipt.discoveryId !== owner.id) throw options.unconfirmedError();
+              return finish(owner, {
+                kind: 'stopped',
+                launchAttemptCount: receipt.launchAttemptCount,
+              });
+            }),
+          owner.terminalSignal,
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => reject(options.unconfirmedError()), options.timeoutMs);
           }),
         ]);
-        if (answer.source === 'terminal') return answer.proof;
-        const receipt = computerUseNativeDiscoveryStopReceiptSchema.parse(answer.value);
-        if (receipt.discoveryId !== owner.id) throw options.unconfirmedError();
-        return finish(owner, { kind: 'stopped', launchAttemptCount: receipt.launchAttemptCount });
       } catch {
         if (owner.terminal !== null) return owner.terminal;
       } finally {

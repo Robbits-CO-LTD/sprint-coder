@@ -886,6 +886,36 @@ describe('Computer Use Windows helper transport', () => {
       helper().release('list_windows_cancellable');
     });
 
+    it('keeps late Stop proof after Main deadlines even when session close then exits the helper', async () => {
+      const { host, helper } = createTarget();
+      const session = await startSession(host, 'late-stop-session', 'turn-1');
+      helper().holdOnly('list_windows_cancellable');
+      helper().holdOnly('stop_window_discovery');
+      const discovery = host.beginWindowDiscovery!(profile);
+      const query = discovery.result.catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(0);
+      const stopping = discovery.stop().catch((error: Error) => error.message);
+      helper().refuse('list_windows_cancellable');
+      helper().release('list_windows_cancellable');
+      await vi.advanceTimersByTimeAsync(20_001);
+      expect(await stopping).toMatch(/unconfirmed/u);
+      expect(await query).toMatch(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      expect(children[0]!.killed).toBe(false);
+      helper().release('stop_window_discovery');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.availability().control).toBe(true);
+      await expect(discovery.terminal).resolves.toMatchObject({ kind: 'stopped' });
+      await host.close(session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(true);
+      await expect(discovery.stop()).resolves.toMatchObject({ kind: 'stopped' });
+      expect(
+        helper().served.filter((operation) => operation === 'stop_window_discovery'),
+      ).toHaveLength(2);
+      expect(children).toHaveLength(1);
+    });
+
     it('keeps the discovery Stop lane alive when an older query reaches its deadline', async () => {
       const { addon, helper } = createTarget(discoveryResponders(), (h) => {
         h.holdOnly('list_windows_cancellable');
