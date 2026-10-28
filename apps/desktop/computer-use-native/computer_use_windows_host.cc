@@ -6350,7 +6350,9 @@ bool RunWindowsDiscovery(const std::string& metadata,
   if (!lease || !ClaimWindowsDiscoveryQuery(lease)) return false;
   const auto owner = lease->owner;
   auto& control = WindowsTargetListControl();
-  auto pending = std::make_shared<WindowsDiscoveryPending>();
+  std::shared_ptr<WindowsDiscoveryPending> pending;
+  try { pending = std::make_shared<WindowsDiscoveryPending>(); }
+  catch (...) { FinishWindowsDiscovery(owner, false); return false; }
   {
     std::lock_guard stop_lock(control.stop_mutex);
     if (!WindowsDiscoveryCurrent(owner, serial) || control.running.load(std::memory_order_acquire)) {
