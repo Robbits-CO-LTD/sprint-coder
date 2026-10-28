@@ -6459,6 +6459,23 @@ bool StopWindowsDiscovery(const std::string& key, const std::string& metadata,
   *response = WindowsDiscoveryReceiptJson(id, "stopped", owner->launch_attempts);
   return true;
 }
+
+void DrainWindowsDiscoveryLaunchesForExit() {
+  StopWindowsDiscoveriesForPipeEnd();
+  // Returning from main does not unwind detached workers. Keep their launch guards alive
+  // until verification or actual failed-child exit retires the claimed unit. Read-only
+  // workers cannot claim a launch after this latch and do not delay process exit.
+  for (;;) {
+    {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      const auto& owners = WindowsDiscoveries().owners;
+      if (std::none_of(owners.begin(), owners.end(), [](const auto& entry) {
+            return entry.second->launch_in_flight;
+          })) return;
+    }
+    Sleep(10);
+  }
+}
 // END windows cancellable discovery worker
 
 // BEGIN windows session identity validation (#940)
@@ -11362,6 +11379,7 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   for (auto &entry : sessions)
     ReleaseWindowsSessionResources(&entry.second);
   sessions.clear();
+  DrainWindowsDiscoveryLaunchesForExit();
   if (SUCCEEDED(initialized))
     CoUninitialize();
   CloseHandle(pipe);

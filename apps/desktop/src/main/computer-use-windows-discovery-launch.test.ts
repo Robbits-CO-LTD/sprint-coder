@@ -109,6 +109,11 @@ function componentSource(): string {
     '    std::thread([pending, lease, metadata, serial]() mutable {',
     '    std::thread([pending, lease, metadata, serial]() mutable {\n      FixtureWorkerStarted();',
   );
+  generated = replaceOne(
+    generated,
+    '  DrainWindowsDiscoveryLaunchesForExit();',
+    '  if (FixtureRetainLaunchOnExit()) DrainWindowsDiscoveryLaunchesForExit();',
+  );
   return generated
     .replaceAll('ShowWindow(', 'RefuseShow(')
     .replaceAll('SetForegroundWindow(', 'RefuseFocus(')
@@ -203,6 +208,8 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         'termination-unconfirmed',
         'post-create-exception',
         'helper-exit-control',
+        'helper-exit-mismatch',
+        'helper-exit-verified',
       ]) {
         const result = spawnSync(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
@@ -218,8 +225,24 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
           expect(result.stdout).toContain(
             'CONTROL: normal helper exit abandoned held unverified child; observer cleaned it',
           );
+          const state = result.stdout
+            .split(/\r?\n/u)
+            .find((line) => line.startsWith('CONTROLSTATE:'));
+          const facts: unknown = JSON.parse(state!.slice('CONTROLSTATE:'.length));
+          expect(facts).toEqual({ helperExit: 0, childAlive: true, reads: 0, terminations: 0 });
+          console.log(JSON.stringify({ kind: 'native_discovery_helper_exit_control', facts }));
+          continue;
+        }
+        if (mode.startsWith('helper-exit-')) {
+          expect(result.stdout).toContain(
+            'PASS: ' + mode + ' helper lifetime preserves launch ownership',
+          );
           console.log(
-            'native_discovery_helper_exit_control: orphan reproduced and owned child cleaned',
+            JSON.stringify({
+              kind: 'native_discovery_helper_exit',
+              case: mode,
+              inputPerformed: false,
+            }),
           );
           continue;
         }

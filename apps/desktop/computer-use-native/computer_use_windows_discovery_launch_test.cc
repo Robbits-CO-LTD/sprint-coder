@@ -18,6 +18,7 @@ BOOL FixtureCreate(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES
 bool FixtureImage(HANDLE, LockedWindowsExecutable*);
 BOOL FixtureTerminate(HANDLE, UINT);
 void FixtureWorkerStarted();
+bool FixtureRetainLaunchOnExit();
 BOOL RefuseShow(HWND, int);
 BOOL RefuseFocus(HWND);
 UINT RefuseInput(UINT, LPINPUT, int);
@@ -117,6 +118,7 @@ void FixtureWorkerStarted() {
                         SYNCHRONIZE, FALSE, 0), "worker observation handle");
   Check(worker_observer.exchange(thread) == nullptr, "single worker");
 }
+bool FixtureRetainLaunchOnExit() { return mode != "helper-exit-control"; }
 BOOL RefuseShow(HWND, int) { Check(false, "unexpected show"); return FALSE; }
 BOOL RefuseFocus(HWND) { Check(false, "unexpected focus"); return FALSE; }
 UINT RefuseInput(UINT, LPINPUT, int) { Check(false, "unexpected input"); return 0; }
@@ -232,7 +234,7 @@ int RunExitHelper(const std::wstring& pipe, DWORD parent, const std::wstring& na
   return ServeMain(pipe, parent);
 }
 
-void RunHelperExitControl(const LockedWindowsExecutable& image, const std::wstring& name, Harness& harness) {
+void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring& name, Harness& harness) {
   ExitMapping mapping(name, true);
   const auto pipe_name = LR"(\\.\pipe\sprint-coder-computer-use-exit-)" + std::to_wstring(GetCurrentProcessId());
   const auto command = L"\"" + owned_path + L"\" --fixture-exit-helper \"" + pipe_name + L"\" " +
@@ -281,11 +283,35 @@ void RunHelperExitControl(const LockedWindowsExecutable& image, const std::wstri
   CloseHandle(pipe.release());
   // The observer, not the helper, keeps the kill-on-close job open. Helper exit therefore
   // cannot hide an abandoned child by accidentally triggering fixture cleanup.
-  Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0, "old helper exits while worker is held");
-  Check(WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0 &&
-        exit_state->terminations == 0, "old helper abandons its unverified child");
-  Check(harness.Cleanup(), "observer removes abandoned owned child");
-  std::cout << "CONTROL: normal helper exit abandoned held unverified child; observer cleaned it\n";
+  if (mode == "helper-exit-control") {
+    Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0, "old helper exits while worker is held");
+    DWORD helper_code = 99;
+    Check(GetExitCodeProcess(helper.process.value, &helper_code) && helper_code == 0, "old helper normal exit");
+    Check(WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0 &&
+          exit_state->terminations == 0, "old helper abandons its unverified child");
+    std::cout << "CONTROLSTATE:{\"helperExit\":" << helper_code
+              << ",\"childAlive\":true,\"reads\":" << exit_state->reads
+              << ",\"terminations\":" << exit_state->terminations << "}\n";
+    Check(harness.Cleanup(), "observer removes abandoned owned child");
+    std::cout << "CONTROL: normal helper exit abandoned held unverified child; observer cleaned it\n";
+    return;
+  }
+  Check(WaitForSingleObject(helper.process.value, 500) == WAIT_TIMEOUT &&
+        WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0,
+        "helper retains launch guard while post-create read is held");
+  SetEvent(gate_release.value);
+  Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0 && exit_state->reads == 1,
+        "helper exits after actual image verification");
+  DWORD helper_code = 99; Check(GetExitCodeProcess(helper.process.value, &helper_code) && helper_code == 0,
+        "ServeMain exits normally");
+  if (mode == "helper-exit-mismatch")
+    Check(exit_state->terminations == 1 && WaitForSingleObject(child_observer.load(), 0) == WAIT_OBJECT_0,
+          "unverified child exited before helper owner disappeared");
+  else
+    Check(exit_state->terminations == 0 && WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT,
+          "verified child is not rolled back on helper exit");
+  Check(harness.Cleanup(), "observer completes own cleanup");
+  std::cout << "PASS: " << mode << " helper lifetime preserves launch ownership\n";
 }
 }
 
@@ -322,7 +348,7 @@ int wmain(int argc, wchar_t** argv) {
     LockedWindowsExecutable image;
     Check(self.value && OpenLockedProcessExecutable(self.value, &image), "own image");
     owned_path = image.identity.path;
-    if (mode == "helper-exit-control") { RunHelperExitControl(image, exit_name, harness); return 0; }
+    if (mode.starts_with("helper-exit-")) { RunHelperExitCase(image, exit_name, harness); return 0; }
     const auto id = "launch:" + mode;
     const std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"" + id +
         "\",\"canonicalPath\":\"" + JsonEscape(Utf8FromWide(owned_path)) + "\",\"identityDigest\":\"" +

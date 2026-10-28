@@ -335,6 +335,10 @@ Launch claims and Stop are ordered under the same mutex. Stop before a claim pre
 a prior claim is in flight even if the OS call has not started. Its process/thread handles are owned
 immediately. An unverified child must actually exit before launch cleanup is confirmed; a verified
 application is not rolled back. An unresolved launch keeps Stop unconfirmed and input quarantined.
+Normal helper exit also retains these launch guards: after pipe service ends, discovery is latched
+stopped and the helper waits for every claimed launch unit to retire before returning from Main.
+The wait releases the stop mutex and does not wait for read-only workers. Otherwise normal process
+exit would bypass a detached worker's child cleanup. Forced termination is not a cleanup receipt.
 Only bound `stopped` receipts, the original query's strict `completed` envelope, or its strict
 `not_admitted` response establish terminal evidence. Arrays, generic refusals and timeouts do not.
 A late valid completion may clear quarantine, but never publish windows. Session and discovery
