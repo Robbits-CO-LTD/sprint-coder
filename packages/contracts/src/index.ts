@@ -6417,6 +6417,40 @@ export type ComputerUseNativeInputReceipt = z.infer<typeof computerUseNativeInpu
 export const computerUseNativeCloseReceiptSchema = computerUseNativeInputReceiptSchema
   .extend({ result: z.literal('closed'), drained: z.literal(true) })
   .strict();
+
+/** Private Windows discovery lifetime. A claim counts even when process creation fails. */
+const computerUseNativeDiscoveryReceiptFields = {
+  discoveryId: z.string().min(1).max(256),
+  drained: z.literal(true),
+  launchAttemptCount: z.union([z.literal(0), z.literal(1)]),
+} as const;
+export const computerUseNativeDiscoveryStopReceiptSchema = z
+  .object({ ...computerUseNativeDiscoveryReceiptFields, result: z.literal('stopped') })
+  .strict();
+export type ComputerUseNativeDiscoveryStopReceipt = z.infer<
+  typeof computerUseNativeDiscoveryStopReceiptSchema
+>;
+export const computerUseNativeDiscoveryResultSchema = z.discriminatedUnion('result', [
+  z
+    .object({
+      ...computerUseNativeDiscoveryReceiptFields,
+      result: z.literal('completed'),
+      // Main validates each native row before issuing public window candidates.
+      windows: z.array(z.unknown()).max(64),
+    })
+    .strict(),
+  z
+    .object({
+      ...computerUseNativeDiscoveryReceiptFields,
+      result: z.literal('not_admitted'),
+      launchAttemptCount: z.literal(0),
+      reason: z.literal('discovery_capacity'),
+    })
+    .strict(),
+]);
+export type ComputerUseNativeDiscoveryResult = z.infer<
+  typeof computerUseNativeDiscoveryResultSchema
+>;
 export type ComputerUseHandshake = z.infer<typeof computerUseHandshakeSchema>;
 
 export const COMPUTER_USE_LIMITS = Object.freeze({

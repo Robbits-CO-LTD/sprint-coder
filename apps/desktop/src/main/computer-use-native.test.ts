@@ -1917,6 +1917,39 @@ describe('Computer Use native manifest and runtime gate', () => {
     }
   });
 
+  it.each([undefined, false, true, 'true'])(
+    'retains only the literal Windows discovery capability: %s',
+    (claim) => {
+      const fixture = packageFixture({ platform: 'win32' });
+      const binding = loadComputerUseNative({
+        environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+        dirname: fixture.packagedDirname,
+        resourcesPath: fixture.resources,
+        platform: 'win32',
+        architecture: 'x64',
+        probeHelper: () => ({
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          sourceCommit: 'f'.repeat(40),
+          backend: 'windows-uia-graphics-capture-sendinput',
+          architecture: 'x64',
+          available: true,
+          reason: 'READY',
+          capabilities: {
+            observe: true,
+            control: true,
+            ...(claim === undefined ? {} : { cancellableWindowDiscovery: claim }),
+          },
+        }),
+        verifySignature: () => 'a'.repeat(64),
+      });
+      expect(binding.probe.available).toBe(typeof claim !== 'string');
+      expect(binding.probe.capabilities.cancellableWindowDiscovery === true).toBe(claim === true);
+    },
+  );
+
   it('rejects ad-hoc macOS and unsigned Windows manifests before loading artifacts', () => {
     for (const [platform, trust] of [
       ['darwin', 'ad-hoc'],

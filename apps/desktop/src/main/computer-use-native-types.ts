@@ -21,6 +21,8 @@ export type ComputerUseNativeProbe = Readonly<{
     accessibility?: boolean;
     screenCapture?: boolean;
     screenCaptureKit?: boolean;
+    /** Private Windows protocol extension; absence never enables its query/Stop methods. */
+    cancellableWindowDiscovery?: boolean;
   }>;
 }>;
 

@@ -48,8 +48,14 @@ export function parseNativeHandshake(
         Array.isArray(capabilities) ||
         Object.entries(capabilities).some(
           ([key, enabled]) =>
-            !['observe', 'control', 'uiAutomation', 'graphicsCapture', 'sendInput'].includes(key) ||
-            typeof enabled !== 'boolean',
+            ![
+              'observe',
+              'control',
+              'uiAutomation',
+              'graphicsCapture',
+              'sendInput',
+              'cancellableWindowDiscovery',
+            ].includes(key) || typeof enabled !== 'boolean',
         )
       )
         throw new Error('HANDSHAKE_INVALID');

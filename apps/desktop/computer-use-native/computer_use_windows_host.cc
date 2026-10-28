@@ -4338,7 +4338,6 @@ void FinishWindowsDiscovery(const std::shared_ptr<WindowsDiscoveryOwner>& owner,
   if (owner->launch_in_flight) return;
   owner->completed = completed && !owner->stopped.load(std::memory_order_acquire);
   owner->terminal = true;
-  if (!owner->completed) owner->stopped.store(true, std::memory_order_release);
 }
 
 void StopWindowsDiscoveriesForPipeEnd() {
@@ -6179,9 +6178,17 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
 
 // END windows v2 targets
 
-bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
-                            std::string *reason) {
-  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+// BEGIN windows cancellable discovery measurement
+struct WindowsDiscoveryWorkControl {
+  std::function<bool()> current;
+  std::function<DWORD(DWORD)> remaining;
+  std::function<bool()> claim_launch;
+  std::function<void()> retire_launch;
+};
+
+bool MeasureWindowsDiscovery(const std::string &metadata, const WindowsDiscoveryWorkControl& work,
+                             std::string *response, std::string *reason) {
+  if (!work.current()) {
     *reason = "profile_identity_invalid";
     return false;
   }
@@ -6220,6 +6227,7 @@ bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
   const bool same_canonical_path =
       identity_read &&
       SameWindowsPath(current_executable.identity.path, canonical_path);
+  if (!work.current()) { *reason = "window_discovery_unavailable"; return false; }
   // Authenticode identity is stable across a same-path, same-signer app update.
   // Unsigned registrations remain bound to the exact bytes because they have no
   // independent signing authority that can authenticate replacement bytes.
@@ -6252,36 +6260,36 @@ bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
       !EnumerateWindowsForExecutable(
           current_executable.identity.path, expected_identity,
           current_executable.identity.executable_digest,
-          expected_signer_digest, &candidates)) {
+          expected_signer_digest, &candidates, work.current)) {
     CloseLockedWindowsExecutable(&current_executable);
     *reason = "process_enumeration_unavailable";
     return false;
   }
-  if (candidates.empty() && identity_matches &&
+  if (work.current() && candidates.empty() && identity_matches &&
       !IsDisallowedTargetExecutable(current_executable.identity.path)) {
-    HANDLE launched_process = nullptr;
-    if (LaunchVerifiedExecutable(current_executable, &launched_process)) {
-      WaitForInputIdle(launched_process, 5'000);
-      for (std::size_t attempt = 0; attempt < 20 && candidates.empty();
+    ScopedKernelHandle launched_process;
+    if (LaunchVerifiedExecutable(current_executable, &launched_process.value, work.claim_launch, work.retire_launch)) {
+      if (!work.current()) { *reason = "window_discovery_unavailable"; return false; }
+      WaitForInputIdle(launched_process.value, work.remaining(5'000));
+      for (std::size_t attempt = 0; attempt < 20 && candidates.empty() && work.current();
            ++attempt) {
         if (!EnumerateWindowsForExecutable(
                 current_executable.identity.path, expected_identity,
                 current_executable.identity.executable_digest,
                 expected_signer_digest,
-                &candidates)) {
-          CloseHandle(launched_process);
+                &candidates, work.current)) {
           CloseLockedWindowsExecutable(&current_executable);
           *reason = "process_enumeration_unavailable";
           return false;
         }
         if (candidates.empty() &&
-            WaitForSingleObject(launched_process, 250) != WAIT_TIMEOUT)
+            WaitForSingleObject(launched_process.value, work.remaining(250)) != WAIT_TIMEOUT)
           break;
       }
-      CloseHandle(launched_process);
     }
   }
   CloseLockedWindowsExecutable(&current_executable);
+  if (!work.current() || candidates.size() > 64) { *reason = "window_discovery_unavailable"; return false; }
   *response = "[";
   for (std::size_t index = 0; index < candidates.size(); ++index) {
     if (index != 0)
@@ -6291,6 +6299,165 @@ bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
   *response += ']';
   return true;
 }
+
+// END windows cancellable discovery measurement
+
+// BEGIN windows cancellable discovery worker
+bool WindowsDiscoveryCurrent(const std::shared_ptr<WindowsDiscoveryOwner>& owner,
+                             std::uint64_t serial) {
+  return !owner->stopped.load(std::memory_order_acquire) &&
+      !parent_process_dead.load(std::memory_order_acquire) &&
+      WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == serial &&
+      GetTickCount64() - owner->admitted_at < kWindowsDiscoveryBudgetMs;
+}
+
+std::string WindowsDiscoveryReceiptJson(std::string_view id, std::string_view result,
+                                       std::uint32_t launches) {
+  return "{\"discoveryId\":\"" + JsonEscape(id) + "\",\"result\":\"" + std::string(result) +
+      "\",\"drained\":true,\"launchAttemptCount\":" + std::to_string(launches) + "}";
+}
+
+struct WindowsDiscoveryPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  HANDLE thread = nullptr;
+  bool done = false;
+  bool ok = false;
+  std::string windows;
+  std::string reason = "window_discovery_unavailable";
+};
+
+struct WindowsDiscoveryWaitGuard {
+  std::shared_ptr<WindowsDiscoveryOwner> owner;
+  std::shared_ptr<WindowsDiscoveryPending> pending;
+  bool completed = false;
+  ~WindowsDiscoveryWaitGuard() {
+    if (completed) return;
+    std::lock_guard lock(pending->mutex);
+    {
+      std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+      owner->stopped.store(true, std::memory_order_release);
+      if (!owner->launch_in_flight) { owner->terminal = true; owner->completed = false; }
+    }
+    if (pending->thread != nullptr) CancelSynchronousIo(pending->thread);
+  }
+};
+
+bool RunWindowsDiscovery(const std::string& metadata,
+                         std::shared_ptr<WindowsDiscoveryLease> lease,
+                         std::uint64_t serial, std::string* response, std::string* reason) {
+  *reason = "window_discovery_unavailable";
+  if (!lease || !ClaimWindowsDiscoveryQuery(lease)) return false;
+  const auto owner = lease->owner;
+  auto& control = WindowsTargetListControl();
+  auto pending = std::make_shared<WindowsDiscoveryPending>();
+  {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!WindowsDiscoveryCurrent(owner, serial) || control.running.load(std::memory_order_acquire)) {
+      owner->terminal = true;
+      *reason = "profile_identity_invalid";
+      return false;
+    }
+    control.running.store(true, std::memory_order_release);
+  }
+  WindowsDiscoveryWaitGuard guard{owner, pending};
+  try {
+    std::thread([pending, lease, metadata, serial]() mutable {
+      const auto owner = lease->owner;
+      bool ok = false;
+      std::string windows, reason = "window_discovery_unavailable";
+      {
+        ScopedKernelHandle thread;
+        try {
+          if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                              &thread.value, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            {
+              std::lock_guard lock(pending->mutex);
+              pending->thread = thread.value;
+            }
+            WindowsDiscoveryWorkControl work;
+            work.current = [owner, serial] { return WindowsDiscoveryCurrent(owner, serial); };
+            work.remaining = [owner](DWORD maximum) {
+              const auto elapsed = GetTickCount64() - owner->admitted_at;
+              return elapsed >= kWindowsDiscoveryBudgetMs ? DWORD{0} :
+                  static_cast<DWORD>(std::min<std::uint64_t>(maximum, kWindowsDiscoveryBudgetMs - elapsed));
+            };
+            work.claim_launch = [owner, serial] {
+              std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+              if (!WindowsDiscoveryCurrent(owner, serial) || owner->terminal || owner->launch_attempts != 0)
+                return false;
+              owner->launch_attempts = 1;
+              owner->launch_in_flight = true;
+              return true;
+            };
+            work.retire_launch = [owner] {
+              std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+              owner->launch_in_flight = false;
+              if (owner->stopped.load(std::memory_order_acquire)) {
+                owner->terminal = true; owner->completed = false;
+              }
+            };
+            ok = MeasureWindowsDiscovery(metadata, work, &windows, &reason);
+          }
+        } catch (...) {
+          ok = false;
+          reason = "window_discovery_unavailable";
+        }
+        // Withdrawing the alias and cancelling it are ordered by the same pending mutex.
+        std::lock_guard lock(pending->mutex);
+        pending->thread = nullptr;
+      }
+      FinishWindowsDiscovery(owner, ok);
+      lease.reset();
+      {
+        std::lock_guard lock(pending->mutex);
+        pending->windows = std::move(windows);
+        pending->reason = std::move(reason);
+        pending->ok = ok;
+        pending->done = true;
+        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
+      }
+      pending->ready.notify_one();
+    }).detach();
+  } catch (...) {
+    FinishWindowsDiscovery(owner, false);
+    control.running.store(false, std::memory_order_release);
+    return false;
+  }
+  std::unique_lock lock(pending->mutex);
+  while (!pending->done && WindowsDiscoveryCurrent(owner, serial))
+    pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!WindowsDiscoveryCurrent(owner, serial)) return false;
+  if (!pending->ok) { *reason = pending->reason; return false; }
+  if (!owner->terminal || !owner->completed || owner->launch_in_flight) return false;
+  std::string built = WindowsDiscoveryReceiptJson(owner->id, "completed", owner->launch_attempts);
+  built.pop_back();
+  built += ",\"windows\":" + pending->windows + "}";
+  if (built.size() > kMaxMetadataBytes) return false;
+  *response = std::move(built);
+  guard.completed = true;
+  return true;
+}
+
+bool StopWindowsDiscovery(const std::string& key, const std::string& metadata,
+                          const std::shared_ptr<WindowsDiscoveryLease>& lease,
+                          std::string* response, std::string* reason) {
+  std::string id;
+  if (!ReadWindowsDiscoveryStop(metadata, &id)) { *reason = "discovery_input_invalid"; return false; }
+  if (!lease || lease->owner->key != key || lease->owner->id != id) {
+    *reason = "window_discovery_unconfirmed"; return false;
+  }
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  const auto& owner = lease->owner;
+  owner->stopped.store(true, std::memory_order_release);
+  if (owner->launch_in_flight) { *reason = "window_discovery_unconfirmed"; return false; }
+  owner->terminal = true;
+  owner->completed = false;
+  *response = WindowsDiscoveryReceiptJson(id, "stopped", owner->launch_attempts);
+  return true;
+}
+// END windows cancellable discovery worker
 
 // BEGIN windows session identity validation (#940)
 thread_local const std::uint64_t *windows_validation_frame_serial = nullptr;
@@ -9780,6 +9947,7 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"uiAutomation\":" + (probe.ui_automation ? "true" : "false") +
          ",\"graphicsCapture\":" + (probe.graphics_capture ? "true" : "false") +
          ",\"sendInput\":" + (probe.send_input ? "true" : "false") +
+         ",\"cancellableWindowDiscovery\":true" +
          "},\"eligibility\":{\"mode\":\"" +
          std::string(sprint_coder::computer_use::kNativeEligibilityModeName) +
          "\",\"rulesetVersion\":" +
@@ -10655,7 +10823,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const Frame &request, bool *handshaken,
                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
                        std::shared_ptr<WindowsStartLease> start_lease = nullptr,
-                       const std::string& admission_error = {}) {
+                       const std::string& admission_error = {},
+                       WindowsDiscoveryAdmission discovery = {}) {
   const auto type = static_cast<MessageType>(request.header.message_type);
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
@@ -10716,8 +10885,25 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       succeeded = true;
     } else if (operation == "pick_application") {
       succeeded = PickWindowsExecutable(&response, &reason);
-    } else if (operation == "list_windows") {
-      succeeded = ListWindowsForIdentity(metadata, &response, &reason);
+    } else if (operation == "list_windows_cancellable") {
+      if (discovery.not_admitted) {
+        WindowsDiscoveryParameters parsed;
+        if (ReadWindowsDiscoveryQuery(metadata, &parsed)) {
+          response = WindowsDiscoveryReceiptJson(parsed.id, "not_admitted", 0);
+          response.pop_back();
+          response += ",\"reason\":\"discovery_capacity\"}";
+          succeeded = true;
+        } else reason = "discovery_input_invalid";
+      } else if (discovery.replay_only) {
+        reason = "discovery_id_reuse";
+      } else {
+        succeeded = RunWindowsDiscovery(metadata, std::move(discovery.lease),
+            queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load()),
+            &response, &reason);
+      }
+    } else if (operation == "stop_window_discovery") {
+      succeeded = StopWindowsDiscovery(FrameIdKey(request.header.session_id), metadata,
+                                       discovery.lease, &response, &reason);
     } else if (operation == "list_targets") {
       // S5-c-3 PR-5: unsupported_operation in a v1 build.
       succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);
@@ -10858,6 +11044,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     std::shared_ptr<WindowsStartLease> start_lease;
     std::string admission_error;
     std::shared_ptr<WindowsWireLease> wire_lease;
+    WindowsDiscoveryAdmission discovery;
   };
   std::deque<QueuedFrame> queue;
   bool reader_finished = false;
@@ -10879,6 +11066,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
       const bool pending_stop = has_operation && operation == "stop_pending_start";
       std::shared_ptr<WindowsStartLease> start_lease;
       std::string admission_error;
+      WindowsDiscoveryAdmission discovery;
       // This is the same side-effect-free version check used by the consumer. The verified pipe
       // peer may pipeline frames, but cannot obtain an owner before a valid handshake frame.
       if (type == MessageType::kHandshake) {
@@ -10897,6 +11085,20 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         if (!ParseWindowsStartParameters(metadata, &parsed)) admission_error = "session_input_invalid";
         else start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), parsed.session_id,
             ResponseCacheKey(request), RequestPayloadDigest(request), &admission_error, parsed.cancel_epoch);
+      }
+      if (has_operation && reader_handshaken && admission_error.empty()) {
+        if (operation == "list_windows_cancellable") {
+          WindowsDiscoveryParameters parsed;
+          if (!ReadWindowsDiscoveryQuery(metadata, &parsed)) admission_error = "discovery_input_invalid";
+          else discovery = AdmitWindowsDiscovery(FrameIdKey(request.header.session_id), parsed.id,
+              ResponseCacheKey(request), RequestPayloadDigest(request), fresh_request, GetTickCount64(),
+              &admission_error);
+        } else if (operation == "stop_window_discovery") {
+          std::string id;
+          if (!ReadWindowsDiscoveryStop(metadata, &id)) admission_error = "discovery_input_invalid";
+          else discovery.lease = ReferenceWindowsDiscoveryStop(FrameIdKey(request.header.session_id), id,
+                                                               fresh_request);
+        }
       }
       if (type == MessageType::kCancel || close || pending_stop) {
         const bool new_cancel = fresh_request && admission_error.empty();
@@ -10934,11 +11136,13 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         }
         queue.push_back(QueuedFrame{std::move(request),
             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire),
-            std::move(start_lease), std::move(admission_error), std::move(wire_lease)});
+            std::move(start_lease), std::move(admission_error), std::move(wire_lease),
+            std::move(discovery)});
       }
       queue_ready.notify_one();
       request = {};
     }
+    StopWindowsDiscoveriesForPipeEnd();
     {
       std::lock_guard lock(queue_mutex);
       reader_finished = true;
@@ -10960,7 +11164,8 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
       queue.pop_front();
     }
     if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,
-                           std::move(queued.start_lease), queued.admission_error)) {
+                           std::move(queued.start_lease), queued.admission_error,
+                           std::move(queued.discovery))) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;
