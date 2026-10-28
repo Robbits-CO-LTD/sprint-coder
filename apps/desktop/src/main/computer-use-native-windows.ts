@@ -270,7 +270,11 @@ class WindowsComputerUseHelperClient {
         return;
     }
     for (const owner of this.discoveries.values())
-      if (!owner.closed && (owner.everSent || (!owner.stopped && owner.attempts.size !== 0)))
+      if (
+        (owner.helper === null || owner.helper === this.helperGeneration) &&
+        !owner.closed &&
+        (owner.everSent || (!owner.stopped && owner.attempts.size !== 0))
+      )
         return;
     this.idleShutdownPending = true;
     this.shutdownIfIdle();
@@ -278,7 +282,12 @@ class WindowsComputerUseHelperClient {
 
   private shutdownIfIdle(): void {
     for (const owner of this.discoveries.values())
-      if (!owner.closed && (owner.everSent || owner.attempts.size !== 0)) return;
+      if (
+        (owner.helper === null || owner.helper === this.helperGeneration) &&
+        !owner.closed &&
+        (owner.everSent || owner.attempts.size !== 0)
+      )
+        return;
     if (this.idleShutdownPending && this.pending.size === 0 && this.connecting === null)
       this.shutdown();
   }

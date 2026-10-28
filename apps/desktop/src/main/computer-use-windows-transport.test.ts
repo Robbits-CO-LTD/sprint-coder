@@ -742,6 +742,62 @@ describe('Computer Use Windows helper transport', () => {
       expect(await query).toMatch(/binding/u);
     });
 
+    it('does not pin a new helper idle lifetime with an unconfirmed old-generation discovery', async () => {
+      const { addon, helper } = createTarget(discoveryResponders(), (helper) =>
+        helper.holdOnly('list_windows_cancellable'),
+      );
+      const lost = Promise.resolve(addon.discoverWindows!(input('lost-generation'))).catch(
+        () => 'lost',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.destroy();
+      await expect(lost).resolves.toBe('lost');
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'lost-generation' })).rejects.toThrow(
+        'generation',
+      );
+      await addon.startSession!({ sessionId: 'fresh-generation', profile });
+      expect(children).toHaveLength(2);
+      await addon.close!({ sessionId: 'fresh-generation', cancelEpoch: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[1]!.killed).toBe(true);
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'lost-generation' })).rejects.toThrow(
+        'generation',
+      );
+      expect(helper().served).not.toContain('stop_window_discovery');
+    });
+
+    it('retains an unconfirmed launch owner through session Stop timeouts and recovers only on receipts', async () => {
+      const { host, helper } = createTarget();
+      const session = await startSession(host, 'active-before-discovery', 'turn-1');
+      helper().holdOnly('list_windows_cancellable');
+      helper().holdOnly('stop_window_discovery');
+      helper().holdOnly('close_session');
+      const discovery = host.beginWindowDiscovery!(profile);
+      const query = discovery.result.catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(0);
+      const discoveryStop = discovery.stop().catch((error: Error) => error.message);
+      const close = host.close(session).then(
+        () => 'closed',
+        (error: Error) => error.message,
+      );
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(await discoveryStop).toMatch(/unconfirmed/u);
+      expect(await close).toMatch(/unconfirmed/u);
+      expect(await query).toMatch(/unconfirmed/u);
+      expect(children[0]!.killed).toBe(false);
+      const before = helper().served.length;
+      await expect(host.observe(session, { requestId: 'blocked', cancelEpoch: 0 })).rejects.toThrow(
+        /unconfirmed/u,
+      );
+      expect(helper().served).toHaveLength(before);
+      helper().release('stop_window_discovery');
+      helper().release('close_session');
+      await discovery.stop();
+      await host.close(session);
+      expect(host.availability().control).toBe(true);
+      helper().release('list_windows_cancellable');
+    });
+
     it('keeps the discovery Stop lane alive when an older query reaches its deadline', async () => {
       const { addon, helper } = createTarget(discoveryResponders(), (h) => {
         h.holdOnly('list_windows_cancellable');
