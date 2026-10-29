@@ -1341,6 +1341,75 @@ describe('Computer Use Windows helper transport', () => {
     },
   );
 
+  it.each(['completion', 'timeout'] as const)(
+    'retains a pending semantic input when a queued read times out before its %s',
+    async (ending) => {
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: (metadata) => [
+          'dispatch_result',
+          {
+            result: 'completed',
+            reasonCode: null,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+        read_node_value: () => ['probe_result', { ok: false }],
+        close_session: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+      });
+      const session = await startSession(host, 'semantic-pending-read', 'turn-1');
+      helper().hold('dispatch');
+      const dispatch = Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'pending-semantic',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ).then(
+        () => 'completed',
+        () => 'unconfirmed',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const read = Promise.resolve(
+        addon.readNodeValue!({
+          sessionId: session.sessionId,
+          requestId: 'queued-read',
+        }),
+      ).then(
+        () => 'read',
+        () => 'timed-out',
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(await read).toBe('timed-out');
+      expect(children[0]!.killed).toBe(false);
+      expect(sockets[0]!.destroyed).toBe(false);
+      if (ending === 'timeout') {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(await dispatch).toBe('unconfirmed');
+        expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      }
+      helper().release('dispatch');
+      expect(await dispatch).toBe(ending === 'timeout' ? 'unconfirmed' : 'completed');
+      await expect(host.close(session)).resolves.toBeUndefined();
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+  );
+
   it.each(['native-error', 'timeout'] as const)(
     'retains an unconfirmed semantic input on the same helper after %s until Host confirms close',
     async (ending) => {

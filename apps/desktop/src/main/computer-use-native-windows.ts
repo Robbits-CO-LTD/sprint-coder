@@ -837,13 +837,17 @@ class WindowsComputerUseHelperClient {
         // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
         // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
         // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
-        // the original launch unit ended. Its result timeout is not terminal evidence.
+        // the original input/launch unit ended. A submitted semantic request also needs its
+        // helper before its own deadline: a shorter queued read can time out first.
         if (
           activityGeneration === this.activityGeneration &&
           helperGeneration === this.helperGeneration &&
           !this.hasPendingStop() &&
           !this.hasUnconfirmedDiscovery() &&
-          !this.hasUnconfirmedSemanticInputs()
+          !this.hasUnconfirmedSemanticInputs() &&
+          ![...this.pending.values()].some(
+            (request) => request.semantic?.submitted && !request.semantic.owner.confirmed,
+          )
         )
           this.abortTransport(error);
         else this.shutdownIfIdle();
