@@ -108,8 +108,8 @@ function workerSource(): string {
   let engine = cut('// Observation rejects a worker timeout', 'struct WindowsUiaObservationResult');
   engine = once(
     engine,
-    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
-    '    TestBeforeSpawn();\n    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
+    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
+    '    TestBeforeSpawn();\n    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
   );
   engine = once(
     engine,

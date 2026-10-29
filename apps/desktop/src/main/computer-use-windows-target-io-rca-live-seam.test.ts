@@ -333,17 +333,33 @@ function instrumentedHost(): string {
     ['ClassifyWindowsFocusedElement(', 'Sc820ObserveRisk(', 1],
     ['ScreenBoundsPhysicalForWindow(', 'Sc820ObserveScreen(', 1],
     ['WindowsFocusedElementSignature(', 'Sc820ObserveSignature(', 1],
-    ['CaptureWindowWithGraphicsCapture(', 'Sc820ObserveCapture(', 1],
   ] as const) {
     if (observe.split(name).length !== count + 1)
       throw new Error('Observe dependency boundary changed');
     observe = observe.replaceAll(name, wrapper);
   }
   source = source.slice(0, observeFrom) + observe + source.slice(observeTo);
+  const captureFrom = source.indexOf('// BEGIN windows capture read ownership');
+  const captureTo = source.indexOf('// END windows capture read ownership', captureFrom);
+  if (captureFrom < 0 || captureTo < captureFrom)
+    throw new Error('Capture ownership boundary changed');
+  let capture = source.slice(captureFrom, captureTo);
+  capture = replaceOnce(
+    capture,
+    'CaptureWindowWithGraphicsCaptureOnWorker(',
+    'Sc820ObserveCapture(',
+  );
+  capture = replaceOnce(
+    capture,
+    'winrt::init_apartment(winrt::apartment_type::multi_threaded)',
+    'Sc820CaptureRuntimeInit()',
+  );
+  capture = replaceOnce(capture, 'winrt::uninit_apartment()', 'Sc820CaptureRuntimeUninit()');
+  source = source.slice(0, captureFrom) + capture + source.slice(captureTo);
   source = replaceOnce(
     source,
-    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
-    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {\n      Sc820ReadWorkerStarted();',
+    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
+    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {\n      Sc820ReadWorkerStarted(&running);',
   );
   source = replaceOnce(
     source,
@@ -650,8 +666,8 @@ function run(file: string, args: string[], timeout: number, verbatim = false) {
 }
 
 function captureEventFragment(): string {
-  const from = host.indexOf('    const HANDLE frame_event = CreateEventW(');
-  const to = host.indexOf('    const auto frame = frame_pool.TryGetNextFrame();', from);
+  const from = host.indexOf('// BEGIN windows capture event lease');
+  const to = host.indexOf('// END windows capture event lease', from);
   if (from < 0 || to < from) throw new Error('Capture event source boundary changed');
   return host
     .slice(from, to)
@@ -659,7 +675,7 @@ function captureEventFragment(): string {
       'CreateEventW(nullptr, TRUE, FALSE, nullptr)',
       'Sc820EventCreated(CreateEventW(nullptr, TRUE, FALSE, nullptr))',
     )
-    .replace('SetEvent(frame_event)', 'Sc820EventSignal(frame_event)');
+    .replace('SetEvent(frame_event->value)', 'Sc820EventSignal(frame_event->value)');
 }
 
 const program = String.raw`
@@ -668,6 +684,7 @@ const program = String.raw`
 #include <ole2.h>
 #include <UIAutomation.h>
 #include <cstdint>
+#include <atomic>
 #include <optional>
 #include <functional>
 #include <string>
@@ -711,6 +728,8 @@ WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 bool Sc820ObserveSignature(std::uint32_t,const RECT&,std::string*);
 bool Sc820ObserveCapture(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*);
+void Sc820CaptureRuntimeInit();
+void Sc820CaptureRuntimeUninit();
 std::string Sc820CaptureStallProbe(std::optional<std::uint64_t>);
 std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t>);
 std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t>);
@@ -755,7 +774,7 @@ void Sc940StartWorkerAttempt();
 BOOL Sc940StartShow(HWND window, int command);
 BOOL Sc940StartForeground(HWND window);
 void Sc820AutomationCreated();
-void Sc820ReadWorkerStarted();
+void Sc820ReadWorkerStarted(std::atomic<bool>*);
 bool Sc820ClassificationContactHeld();
 HRESULT Sc820HeldClassificationContact(IUIAutomation*, IUIAutomationElement**);
 HRESULT Sc820BindingAutomation(IUIAutomation**);
@@ -1321,7 +1340,11 @@ std::atomic<unsigned> classification_contacts{0}, classification_returns{0}, uia
 std::atomic<ULONGLONG> classification_contact_started{0};
 std::atomic<unsigned> uia_factory_calls{0};
 void Sc820AutomationCreated(){uia_factory_calls.fetch_add(1);}
-void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
+std::atomic<unsigned> capture_worker_starts{0};
+void Sc820ReadWorkerStarted(std::atomic<bool>* slot){
+  if(slot==&WindowsCaptureWorkerRunning())capture_worker_starts.fetch_add(1);
+  else uia_read_worker_starts.fetch_add(1);
+}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 std::string classification_detail;
 std::string semantic_lifecycle;
@@ -1469,8 +1492,28 @@ void Sc820ReadCoUninitialize(){
 // Only the Observe prerequisite reads are controlled here. The production Observe flow and
 // focused-signature worker execute normally; any downstream capture attempt is a test failure.
 bool observe_signature_mode=false;
-bool observe_capture_mode=false;
+std::atomic<bool> observe_capture_mode{false};
 std::atomic<unsigned> observe_capture_calls{0};
+std::atomic<unsigned> capture_runtime_inits{0},capture_runtime_uninits{0};
+thread_local bool capture_runtime_tracked=false;
+void Sc820CaptureRuntimeInit(){
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  winrt::init_apartment(winrt::apartment_type::multi_threaded);
+  capture_runtime_tracked=observe_capture_mode.load();
+  if(capture_runtime_tracked){
+    APTTYPE type;APTTYPEQUALIFIER qualifier;
+    Require(SUCCEEDED(CoGetApartmentType(&type,&qualifier))&&type==APTTYPE_MTA,"capture_runtime_mta");
+    capture_runtime_inits.fetch_add(1);
+  }
+#endif
+}
+void Sc820CaptureRuntimeUninit(){
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  winrt::uninit_apartment();
+  if(capture_runtime_tracked)capture_runtime_uninits.fetch_add(1);
+  capture_runtime_tracked=false;
+#endif
+}
 std::atomic<unsigned> observe_after_signature_calls{0};
 bool Sc820ObserveValidate(const WindowsSession& session,RECT* bounds,std::string* reason,WindowsDialogSetSnapshot* dialogs){
   if(!observe_signature_mode&&!observe_capture_mode)return ValidateWindowsSession(session,bounds,reason,dialogs);
@@ -1498,7 +1541,7 @@ bool Sc820ObserveSignature(std::uint32_t pid,const RECT& bounds,std::string* sig
   return WindowsFocusedElementSignature(pid,bounds,signature);
 }
 bool Sc820ObserveCapture(HWND window,std::vector<std::uint8_t>* output,std::size_t* width,std::size_t* height){
-  if(!observe_capture_mode)return CaptureWindowWithGraphicsCapture(window,output,width,height);
+  if(!observe_capture_mode)return CaptureWindowWithGraphicsCaptureOnWorker(window,output,width,height);
   DWORD pid=0;Require(window==fixture_windows[0]&&GetWindowThreadProcessId(window,&pid)!=0&&pid==fixture_pids[0],"capture_owned_window");
   observe_capture_calls.fetch_add(1);Sc820DetailGate();output->clear();*width=0;*height=0;return false;
 }
@@ -2271,6 +2314,12 @@ struct RcaRun {
     return !WindowsUiaReadWorkerRunning().load(std::memory_order_acquire);
   }
 
+  bool WaitCaptureWorkerIdle(DWORD milliseconds) {
+    const auto deadline=GetTickCount64()+milliseconds;
+    while(WindowsCaptureWorkerRunning().load()&&GetTickCount64()<deadline)Sleep(1);
+    return !WindowsCaptureWorkerRunning().load();
+  }
+
   unsigned ReplyCount(unsigned id) {
     std::lock_guard lock(replies_mutex);
     return reply_counts[id];
@@ -2340,6 +2389,7 @@ struct RcaRun {
     // The detached production worker must release its slot/resources before our fixture is killed.
     worker_idle = WaitWorkerIdle(15'000) && !capture_failed;
     worker_idle = WaitUiaWorkerIdle(15'000) && worker_idle;
+    worker_idle = WaitCaptureWorkerIdle(15'000) && worker_idle;
     if (resume_diagnostic_active.load()) {
       if (!worker_idle || !WaitAllResumeThreads()) {
         watchdog_fired.store(true);
@@ -3808,6 +3858,7 @@ int DiagnoseBindingHealthy(){
 HANDLE capture_event_handle=nullptr;
 std::function<void()> capture_delayed_callback;
 bool capture_start_throws=false;
+bool capture_revoke_throws=false;
 std::atomic<bool> capture_signal_ok{false};
 std::atomic<DWORD> capture_signal_error{0};
 HANDLE Sc820EventCreated(HANDLE handle){capture_event_handle=handle;return handle;}
@@ -3816,19 +3867,21 @@ BOOL Sc820EventSignal(HANDLE handle){
   capture_signal_error=ok?ERROR_SUCCESS:GetLastError();return ok;
 }
 struct CaptureEventPool {
-  std::function<void()> registered;
-  template<class Callback> int FrameArrived(Callback callback){registered=[callback]{callback(0,0);};return 1;}
-  void FrameArrived(int){registered={};}
+  struct State {std::function<void()> registered;};
+  std::shared_ptr<State> state=std::make_shared<State>();
+  template<class Callback> int FrameArrived(Callback callback) const {state->registered=[callback]{callback(0,0);};return 1;}
+  void FrameArrived(int) const {state->registered={};if(capture_revoke_throws)throw std::runtime_error("controlled revoke fault");}
 };
 struct CaptureEventSession {
   CaptureEventPool& pool;
   void StartCapture(){
-    capture_delayed_callback=pool.registered;
+    capture_delayed_callback=pool.state->registered;
     if(capture_start_throws)throw std::runtime_error("controlled capture start fault");
-    pool.registered();
+    pool.state->registered();
   }
 };
 bool CaptureEventSourceFragment(){
+  const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),cancellation_epoch.load(),WindowsValidationFrameStopSerial());
   CaptureEventPool frame_pool;CaptureEventSession session{frame_pool};
   try {
 //@@CAPTURE_EVENT_FRAGMENT@@
@@ -3836,24 +3889,25 @@ bool CaptureEventSourceFragment(){
   }catch(...){return false;}
 }
 int DiagnoseCaptureEvent(std::wstring_view scenario){
-  const std::string label(scenario.begin(),scenario.end());capture_start_throws=scenario.ends_with(L"-exception");
+  const std::string label(scenario.begin(),scenario.end());
+  capture_start_throws=scenario.ends_with(L"-exception")||scenario.ends_with(L"-unwind");
+  capture_revoke_throws=scenario.ends_with(L"-revoke")||scenario.ends_with(L"-unwind");
   const auto cleanup=[] {
     capture_delayed_callback={};DWORD flags=0;
     if(capture_event_handle!=nullptr&&GetHandleInformation(capture_event_handle,&flags))CloseHandle(capture_event_handle);
   };
   try {
     const bool ok=CaptureEventSourceFragment();DWORD flags=0;
-    Require(ok!=capture_start_throws&&capture_event_handle!=nullptr&&capture_delayed_callback,"capture_event_probe_prerequisites");
+    Require(ok==!(capture_start_throws||capture_revoke_throws)&&capture_event_handle!=nullptr&&capture_delayed_callback,"capture_event_probe_prerequisites");
     const bool alive=GetHandleInformation(capture_event_handle,&flags)!=FALSE;
     // Model a queued callback after scope exit without allocating another kernel handle that could
     // accidentally recycle the closed event before the ownership assertion.
     capture_delayed_callback();
     capture_delayed_callback={};
     const bool alive_after=GetHandleInformation(capture_event_handle,&flags)!=FALSE;
-    if(capture_start_throws)Require(alive&&alive_after&&capture_signal_ok.load(),"capture_event_exception_leak_reproduced");
-    else Require(!alive&&!alive_after&&!capture_signal_ok.load()&&capture_signal_error==ERROR_INVALID_HANDLE,"capture_event_callback_after_close_reproduced");
+    Require(alive&&!alive_after&&capture_signal_ok.load()&&capture_signal_error==ERROR_SUCCESS,"capture_event_lease_survives_until_callback_retires");
     cleanup();Require(!GetHandleInformation(capture_event_handle,&flags),"capture_event_owned_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"actualKernelEvent\":true,\"controlledEventSource\":true,\"baselineProblemReproduced\":true,\"exceptionLeak\":"<<(capture_start_throws?"true":"false")<<",\"lateCallbackInvalidHandle\":"<<(capture_start_throws?"false":"true")<<",\"ownedHandleClosed\":true,\"actualCapture\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"actualKernelEvent\":true,\"controlledEventSource\":true,\"ownershipVerified\":true,\"exceptionLeak\":false,\"lateCallbackInvalidHandle\":false,\"ownedHandleClosed\":true,\"actualCapture\":false}\n";return 0;
   }catch(const std::exception& error){cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -3867,15 +3921,15 @@ int DiagnoseCaptureStall(std::wstring_view scenario){
     const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
     if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
     Require(WaitStopSerial(before,1000),"capture_stall_reader_latched");
-    Require(!run.Wait(3,1100)&&run.ReplyCount(2)==0,"capture_stall_consumer_blocked_before_release");
+    Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"capture_stop_receipt_before_release");
     const auto held_ms=GetTickCount64()-started;
-    SetEvent(run.release.value);
     std::string body,reason;bool ok=true,empty=false;
-    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadJsonString(body,"reason",&reason)&&reason=="graphics_capture_unavailable","capture_stall_result_after_release");
-    Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"capture_stall_stop_after_release");
+    Require(run.Wait(2,1000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadJsonString(body,"reason",&reason)&&reason=="observation_stale","capture_stopped_result");
+    Require(held_ms<1000&&WindowsCaptureWorkerRunning().load()&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"capture_owned_while_consumer_returns");
     if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"capture_stall_final_close");}
+    SetEvent(run.release.value);Require(run.WaitCaptureWorkerIdle(5000)&&capture_worker_starts==1&&capture_runtime_inits==1&&capture_runtime_uninits==1&&run.ReplyCount(2)==1,"capture_late_runtime_cleanup");
     run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"capture_stall_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"observePrerequisitesControlled\":true,\"syntheticCaptureStall\":true,\"actualCaptureLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"receiptBeforeRelease\":false,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"observePrerequisitesControlled\":true,\"syntheticCaptureStall\":true,\"actualCaptureLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"receiptBeforeRelease\":true,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4829,9 +4883,9 @@ describe.skipIf(
             case: scenario,
             actualKernelEvent: true,
             controlledEventSource: true,
-            baselineProblemReproduced: true,
-            exceptionLeak: scenario.endsWith('-exception'),
-            lateCallbackInvalidHandle: !scenario.endsWith('-exception'),
+            ownershipVerified: true,
+            exceptionLeak: false,
+            lateCallbackInvalidHandle: false,
             ownedHandleClosed: true,
             actualCapture: false,
           });
@@ -4845,7 +4899,7 @@ describe.skipIf(
             syntheticCaptureStall: true,
             actualCaptureLatencyMeasured: false,
             heldMs: expect.any(Number),
-            receiptBeforeRelease: false,
+            receiptBeforeRelease: true,
             receiptAfterRelease: true,
             inputAttempts: 0,
             childExited: true,
@@ -5071,11 +5125,16 @@ describe.skipIf(
     }
   }
 
-  it('diagnoses capture event ownership across delayed callbacks and StartCapture exceptions', async () => {
-    await runScenarios(['capture-event-late', 'capture-event-exception']);
+  it('keeps capture event ownership across delayed callbacks and StartCapture exceptions', async () => {
+    await runScenarios([
+      'capture-event-late',
+      'capture-event-exception',
+      'capture-event-revoke',
+      'capture-event-unwind',
+    ]);
   }, 700_000);
 
-  it('diagnoses consumer Stop delay while Observe capture is held', async () => {
+  it('keeps consumer Stop responsive while Observe capture is held', async () => {
     await runScenarios(['capture-stall-cancel', 'capture-stall-close']);
   }, 700_000);
 
