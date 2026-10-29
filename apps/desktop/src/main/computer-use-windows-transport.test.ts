@@ -10,7 +10,8 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeNet from 'node:net';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   computerUseNativeMessageTypeNames,
@@ -24,6 +25,7 @@ import type { ComputerUseNativeAddon, ComputerUseNativeBinding } from './compute
 import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+  ComputerUseNativeUnavailableError,
   createComputerUseNativeHost,
 } from './computer-use-native-host';
 import {
@@ -1314,6 +1316,567 @@ describe('Computer Use Windows helper transport', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['semantic_input_in_flight', 'ticket_invalid', 'session_missing'])(
+    'keeps a semantic pre-input rejection usable: %s',
+    async (code) => {
+      const { addon, host } = createTarget({
+        ...responders(),
+        dispatch: () => ['error', { result: 'rejected', code, accepted: false }],
+      });
+      const session = await startSession(host, 'semantic-pre-input', 'turn-1');
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'semantic-pre-input-dispatch',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toMatchObject({ code, accepted: false });
+      expect(addon.hasUnconfirmedSemanticInputs!()).toBe(false);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+      expect(children[0]!.killed).toBe(false);
+      await expect(host.close(session)).resolves.toBeUndefined();
+    },
+  );
+
+  it.each(['completion', 'timeout'] as const)(
+    'retains a pending semantic input when a queued read times out before its %s',
+    async (ending) => {
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: (metadata) => [
+          'dispatch_result',
+          {
+            result: 'completed',
+            reasonCode: null,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+        read_node_value: () => ['probe_result', { ok: false }],
+        close_session: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+      });
+      const session = await startSession(host, 'semantic-pending-read', 'turn-1');
+      helper().hold('dispatch');
+      const dispatch = Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'pending-semantic',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ).then(
+        () => 'completed',
+        () => 'unconfirmed',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const read = Promise.resolve(
+        addon.readNodeValue!({
+          sessionId: session.sessionId,
+          requestId: 'queued-read',
+        }),
+      ).then(
+        () => 'read',
+        () => 'timed-out',
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(await read).toBe('timed-out');
+      expect(children[0]!.killed).toBe(false);
+      expect(sockets[0]!.destroyed).toBe(false);
+      if (ending === 'timeout') {
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(await dispatch).toBe('unconfirmed');
+        expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      }
+      helper().release('dispatch');
+      expect(await dispatch).toBe(ending === 'timeout' ? 'unconfirmed' : 'completed');
+      await expect(host.close(session)).resolves.toBeUndefined();
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retains the actual public dispatch error before a separately delivered Stop refusal',
+    async () => {
+      const native = readFileSync(
+        join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+        'utf8',
+      );
+      const start = native.indexOf(
+        '} else if (kind == "invoke"',
+        native.indexOf('bool DispatchWindowsAction('),
+      );
+      const end = native.indexOf('\nBackendProbe ProbeBackend()', start);
+      const errorStart = native.indexOf('std::string ErrorPayload(');
+      const errorEnd = native.indexOf('\nbool Respond(', errorStart);
+      expect(start).toBeGreaterThan(0);
+      expect(end).toBeGreaterThan(start);
+      expect(errorEnd).toBeGreaterThan(errorStart);
+      const root = mkdtempSync(join(tmpdir(), 'semantic-dispatch-wire-'));
+      let payload: unknown;
+      try {
+        const actual = await vi.importActual<typeof NodeChildProcess>('node:child_process');
+        const path = join(root, 'dispatch.cc');
+        const binary = join(root, 'dispatch');
+        writeFileSync(
+          path,
+          `
+#include <atomic>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+struct WindowsSession {};
+struct RECT {};
+std::atomic<std::uint64_t> cancellation_epoch{0};
+bool DispatchWindowsSemanticAction(const WindowsSession&, const RECT&, std::uint64_t,
+    const std::string&, const std::string&, bool* accepted, std::string* reason) {
+  *accepted = true; *reason = "semantic_input_in_flight"; return false;
+}
+bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t) { return true; }
+bool PublicDispatch(std::string* result, std::string* reason, bool* accepted) {
+  WindowsSession session; RECT bounds; std::uint64_t expected_epoch = 0;
+  std::string kind = "invoke", metadata = "{}"; bool dispatched = false;
+  ${native.slice(start + '} else '.length, end)}
+${native.slice(errorStart, errorEnd)}
+int main() {
+  std::string result, reason; bool accepted = false;
+  if (PublicDispatch(&result, &reason, &accepted)) return 1;
+  std::cout << ErrorPayload(reason, accepted);
+}
+`,
+        );
+        actual.execFileSync(
+          'clang++',
+          ['-std=c++20', '-Wall', '-Wextra', '-Werror', path, '-o', binary],
+          { timeout: 30_000 },
+        );
+        payload = JSON.parse(
+          actual.execFileSync(binary, [], { encoding: 'utf8', timeout: 5_000 }),
+        ) as unknown;
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: () => ['error', payload],
+        close_session: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+      });
+      const session = await startSession(host, 'public-semantic-wire', 'turn-1');
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'public-semantic-input',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'semantic_input_in_flight', accepted: true });
+      // Let call().finally run before a later Stop response is delivered.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      helper().refuse('close_session');
+      await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      expect(children[0]!.killed).toBe(false);
+      helper().allow('close_session');
+      await expect(host.close(session)).resolves.toBeUndefined();
+      expect(children).toHaveLength(1);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+    60_000,
+  );
+
+  it.each(['native-error', 'timeout'] as const)(
+    'retains an unconfirmed semantic input on the same helper after %s until Host confirms close',
+    async (ending) => {
+      let inFlight = true;
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: (metadata) =>
+          ending === 'native-error'
+            ? ['error', { code: 'semantic_input_in_flight', accepted: true }]
+            : [
+                'dispatch_result',
+                {
+                  result: 'completed',
+                  reasonCode: null,
+                  sessionId: metadata['sessionId'],
+                  cancelEpoch: metadata['cancelEpoch'],
+                  inputAttemptCount: 1,
+                },
+              ],
+        close_session: (metadata) =>
+          inFlight
+            ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
+            : [
+                'probe_result',
+                {
+                  result: 'closed',
+                  drained: true,
+                  sessionId: metadata['sessionId'],
+                  cancelEpoch: metadata['cancelEpoch'],
+                  inputAttemptCount: 1,
+                },
+              ],
+      });
+      const session = await startSession(host, 'semantic-owner', 'turn-1');
+      if (ending === 'timeout') helper().holdOnly('dispatch');
+      const dispatched = Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-request',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ).then(
+        () => 'completed',
+        () => 'unconfirmed',
+      );
+      await vi.advanceTimersByTimeAsync(ending === 'timeout' ? 10_001 : 0);
+      expect(await dispatched).toBe('unconfirmed');
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      if (ending === 'native-error') {
+        const closing = host.close(session).then(
+          () => 'closed',
+          () => 'unconfirmed',
+        );
+        await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+        expect(await closing).toBe('unconfirmed');
+      }
+      // An error/timeout is not proof that an already claimed native input has returned.
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(false);
+      expect(sockets[0]!.destroyed).toBe(false);
+      if (ending === 'timeout') {
+        const closing = host.close(session).then(
+          () => 'closed',
+          () => 'unconfirmed',
+        );
+        await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+        expect(await closing).toBe('unconfirmed');
+      }
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      const closeCalls = helper().served.filter(
+        (operation) => operation === 'close_session',
+      ).length;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(helper().served.filter((operation) => operation === 'close_session')).toHaveLength(
+        closeCalls,
+      );
+      inFlight = false;
+      if (ending === 'timeout') {
+        helper().release('dispatch');
+        await vi.advanceTimersByTimeAsync(0);
+        // A late dispatch result must not replace the Host's session-bound close proof.
+        expect(children[0]!.killed).toBe(false);
+        expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      }
+      await expect(host.close(session)).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+  );
+
+  it.each(['json', 'error-shape', 'completion-shape', 'completion-owner', 'frame-type'] as const)(
+    'retains semantic uncertainty after a %s response loses the helper',
+    async (fault) => {
+      const { addon, host } = createTarget();
+      const session = await startSession(host, 'semantic-corrupt', 'turn-1');
+      const socket = sockets[0]!;
+      socket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const complete = {
+          result: 'completed',
+          reasonCode: null,
+          sessionId: session.sessionId,
+          cancelEpoch: 0,
+          inputAttemptCount: 1,
+        };
+        const body =
+          fault === 'json'
+            ? '{'
+            : JSON.stringify(
+                fault === 'error-shape'
+                  ? { code: 'semantic_input_in_flight' }
+                  : fault === 'completion-shape'
+                    ? { result: 'completed' }
+                    : fault === 'completion-owner'
+                      ? { ...complete, sessionId: 'other-owner' }
+                      : complete,
+              );
+        socket.emit(
+          'data',
+          encodeComputerUseNativeFrame({
+            ...request,
+            messageType:
+              fault === 'error-shape'
+                ? 'error'
+                : fault === 'frame-type'
+                  ? 'probe_result'
+                  : 'dispatch_result',
+            metadata: Buffer.from(body),
+            binary: Buffer.alloc(0),
+          }),
+        );
+      };
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'semantic-corrupt-input',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      await expect(startSession(host, 'next-session', 'turn-2')).rejects.toThrow();
+      expect(children).toHaveLength(1);
+    },
+  );
+
+  it('does not consume a semantic close candidate for forged evidence or different receipt fields', async () => {
+    const { addon, host } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: 1,
+        },
+      ],
+    });
+    const session = await startSession(host, 'semantic-proof', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-proof-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    const evidence = await addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    expect(() =>
+      addon.confirmSessionClosed!(receipt, { ...receipt, result: 'closed', drained: true }),
+    ).toThrow('native_stop_unconfirmed');
+    expect(() =>
+      addon.confirmSessionClosed!({ ...receipt, inputAttemptCount: 0 }, evidence),
+    ).toThrow('native_stop_unconfirmed');
+    addon.confirmSessionClosed!({ ...receipt, sessionId: 'other-owner' }, evidence);
+    expect(children[0]!.killed).toBe(false);
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('retries a failed Host confirmation with its older received proof after another close reply', async () => {
+    const { addon, helper } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      stop_pending_start: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: 1,
+          inputAttemptCount: 1,
+        },
+      ],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: 1,
+        },
+      ],
+    });
+    let failConfirmation = true;
+    const host = createComputerUseNativeHost(
+      binding({
+        ...addon,
+        confirmSessionClosed(receipt, evidence) {
+          if (failConfirmation) {
+            failConfirmation = false;
+            throw new Error('confirmation fault');
+          }
+          addon.confirmSessionClosed!(receipt, evidence);
+        },
+      }),
+      'win32',
+      { windowsPhysicalBoundsToDip: (value) => value },
+    );
+    const session = await startSession(host, 'semantic-cached-proof', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-cached-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    await expect(host.stopPendingStart!(session.sessionId)).rejects.toBeInstanceOf(
+      ComputerUseNativeUnavailableError,
+    );
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await addon.close!({ sessionId: session.sessionId, cancelEpoch: 2 });
+    expect(children[0]!.killed).toBe(false);
+    await expect(host.stopPendingStart!(session.sessionId)).resolves.toMatchObject({
+      kind: 'closed',
+      inputReceipt: { cancelEpoch: 1, inputAttemptCount: 1 },
+    });
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('waits within the original Stop deadline for a transient in-flight semantic operation', async () => {
+    let inFlight = true;
+    const { addon, host, helper } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) =>
+        inFlight
+          ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
+          : [
+              'probe_result',
+              {
+                result: 'closed',
+                drained: true,
+                sessionId: metadata['sessionId'],
+                cancelEpoch: metadata['cancelEpoch'],
+                inputAttemptCount: 1,
+              },
+            ],
+    });
+    const session = await startSession(host, 'semantic-transient', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-transient-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    const closing = host.close(session);
+    await vi.advanceTimersByTimeAsync(125);
+    expect(children[0]!.killed).toBe(false);
+    inFlight = false;
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(closing).resolves.toBeUndefined();
+    expect(
+      helper().served.filter((operation) => operation === 'close_session').length,
+    ).toBeGreaterThan(1);
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('keeps a semantic owner reachable when Host rejects a decreasing input counter', async () => {
+    let count = 4;
+    const { addon, host } = createTarget({
+      ...responders(),
+      start_session: (metadata) => [
+        'probe_result',
+        {
+          sessionId: metadata['sessionId'],
+          windowId: '100',
+          appIdentityDigest,
+          windowIdentityDigest,
+          profileRevision: 1,
+          cancelEpoch: 0,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+          screenBounds: bounds,
+          inputAttemptCount: 5,
+        },
+      ],
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: count,
+        },
+      ],
+    });
+    const session = await startSession(host, 'semantic-counter', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-counter-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    await expect(host.close(session)).rejects.toThrow();
+    expect(children[0]!.killed).toBe(false);
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    count = 6;
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(children).toHaveLength(1);
+    expect(children[0]!.killed).toBe(true);
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+  });
+
   it('keeps the helper reachable so a close re-sent after the Main deadline is confirmed', async () => {
     const { host, helper } = createTarget();
     const session = await startSession(host, 'session-1', 'turn-1');
@@ -1578,30 +2141,62 @@ describe('Computer Use Windows helper transport', () => {
     expect(helper().served.filter((op) => op === 'stop_pending_start')).toHaveLength(1);
   });
 
-  it('does not let active Close hide discovery, then combines a late discovery proof', async () => {
-    const { host, helper } = createTarget(responders(), (helper) =>
-      helper.holdOnly('start_session'),
-    );
-    const first = startSession(host, 'shared-discovery', 'turn-1');
-    await vi.advanceTimersByTimeAsync(0);
-    helper().holdOnly('list_windows_cancellable');
-    helper().refuse('stop_window_discovery');
-    const second = startSession(host, 'shared-discovery', 'turn-1').then(
-      () => 'adopted',
-      () => 'rejected',
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    helper().release('start_session');
-    const active = await first;
-    await host.cancel(active, 1);
-    await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
-    expect(host.availability().control).toBe(false);
-    helper().release('list_windows_cancellable');
-    await expect(second).resolves.toBe('rejected');
-    await vi.advanceTimersByTimeAsync(0);
-    expect(host.availability().control).toBe(true);
-    expect(helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
-  });
+  it.each([false, true])(
+    'combines late discovery proof after active Close (semantic unknown=%s)',
+    async (semanticUnknown) => {
+      const { addon, host, helper } = createTarget(
+        {
+          ...responders(),
+          dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+          close_session: (metadata) => [
+            'probe_result',
+            {
+              result: 'closed',
+              drained: true,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: semanticUnknown ? 1 : 0,
+            },
+          ],
+        },
+        (helper) => helper.holdOnly('start_session'),
+      );
+      const first = startSession(host, 'shared-discovery', 'turn-1');
+      await vi.advanceTimersByTimeAsync(0);
+      helper().holdOnly('list_windows_cancellable');
+      helper().refuse('stop_window_discovery');
+      const second = startSession(host, 'shared-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      helper().release('start_session');
+      const active = await first;
+      if (semanticUnknown) {
+        await expect(
+          Promise.resolve(
+            addon.dispatch!({
+              sessionId: active.sessionId,
+              requestId: 'coexisting-semantic',
+              cancelEpoch: 0,
+              type: 'invoke',
+              targetId: 'owned-control',
+            }),
+          ),
+        ).rejects.toThrow('semantic_input_in_flight');
+        expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      }
+      await host.cancel(active, 1);
+      await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      expect(helper().served).toContain('stop_window_discovery');
+      helper().release('list_windows_cancellable');
+      await expect(second).resolves.toBe('rejected');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.availability().control).toBe(true);
+      expect(helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
+    },
+  );
 
   it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
     const { addon, host, helper } = createTarget(

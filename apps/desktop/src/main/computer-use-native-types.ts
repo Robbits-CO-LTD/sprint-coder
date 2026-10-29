@@ -1,4 +1,7 @@
-import type { ComputerUseNativeManifest } from '@sprint-coder/contracts';
+import type {
+  ComputerUseNativeInputReceipt,
+  ComputerUseNativeManifest,
+} from '@sprint-coder/contracts';
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
@@ -44,6 +47,10 @@ export type ComputerUseNativeAddon = Readonly<{
   stopPendingStart?(input: unknown): unknown;
   /** Main-only Windows transport proof; never a value received from native. */
   cancelUnsubmittedStart?(sessionId: string): 'never_sent' | 'may_have_been_sent' | 'unknown';
+  /** Main-only Windows lifetime state, never native wire data or a public tool. */
+  hasUnconfirmedSemanticInputs?(): boolean;
+  /** Host has validated this exact native response, including epoch/counter and discovery Stop. */
+  confirmSessionClosed?(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void;
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
   preflight?(input: unknown): unknown;

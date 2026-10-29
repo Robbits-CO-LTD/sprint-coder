@@ -106,6 +106,8 @@ struct WindowsClickBasis { bool tracked = false; bool opens = false; bool input_
 std::vector<std::string> g_calls;
 std::string g_kind = "click";
 bool g_binding_ok = true;
+bool g_semantic_in_flight = false;
+bool WindowsSemanticInputInFlight() { return g_semantic_in_flight; }
 InterlockEvaluation g_answer;
 // What the focus is after the interlocks ran, and whether it can be read.
 std::string g_focus_after_interlock = "observed-focus";
@@ -170,6 +172,9 @@ Outcome Run() {
 } // namespace
 
 int main() {
+  g_semantic_in_flight = true;
+  { const Outcome out = Run(); Check(!out.ran_on && !out.accepted && out.reason == "semantic_input_in_flight" && out.calls.empty(), "in_flight_refused_before_binding_cursor_or_input"); }
+  g_semantic_in_flight = false;
   struct Row { InterlockOutcome outcome; InterlockReason reason; const char *code; };
   const Row rows[] = {
       {InterlockOutcome::kBlocked, InterlockReason::kShellSurface, "shell_surface_blocked"},

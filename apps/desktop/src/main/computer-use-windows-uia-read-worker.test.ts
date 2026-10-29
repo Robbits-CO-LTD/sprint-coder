@@ -127,7 +127,11 @@ function workerSource(): string {
       host.indexOf('void WindowsV1UiaCountNode()'),
       host.indexOf('\n}', host.indexOf('void WindowsV1UiaCountNode()')) + 2,
     ) +
-    engine
+    engine +
+    cut(
+      '// BEGIN windows semantic operation ownership',
+      '// END windows semantic operation ownership',
+    )
   );
 }
 
@@ -162,6 +166,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
 // Portable control-logic evidence only. COM initialization/cleanup are controlled stubs;
 // the Windows pipe/real-UIA seams independently validate the actual OS boundary.
 const preamble = String.raw`
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -181,6 +186,9 @@ const preamble = String.raw`
 #include <vector>
 using HRESULT=std::int32_t;
 using DWORD=std::uint32_t;
+using HWND=void*;
+void Sleep(DWORD milliseconds){std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));}
+struct WindowsSession {std::string session_id;std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts=std::make_shared<std::atomic<std::uint64_t>>(0);};
 using BSTR=wchar_t*;
 struct RECT { long left=0,top=0,right=0,bottom=0; };
 constexpr HRESULT S_OK=0,E_ABORT=static_cast<HRESULT>(0x80004004),E_FAIL=static_cast<HRESULT>(0x80004005);
@@ -237,6 +245,54 @@ struct Consumer {
   ~Consumer(){ReleaseAll();if(thread.joinable())thread.join();}
 };
 Sample Value(){return {true,true,"signature"};}
+struct SemanticOutcome {bool accepted=false,threw=false;HRESULT result=E_FAIL;};
+struct SemanticCall {
+  std::promise<SemanticOutcome> promise;std::future<SemanticOutcome> future=promise.get_future();std::thread thread;
+  SemanticCall(std::shared_ptr<WindowsSemanticPending> pending,std::function<HRESULT()> action,bool validate=false){
+    thread=std::thread([this,pending,action=std::move(action),validate]{
+      windows_semantic_operation=pending.get();windows_uia_read_progress=pending.get();
+      const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),0,0);
+      SemanticOutcome out;
+      try {if(!validate||AwaitWindowsSemanticValidation())out.result=InvokeWindowsSemanticInput(action,&out.accepted);}
+      catch(...){out.threw=true;}
+      windows_semantic_operation=nullptr;windows_uia_read_progress=nullptr;promise.set_value(out);
+    });
+  }
+  SemanticOutcome Take(){Check(future.wait_for(std::chrono::seconds(2))==std::future_status::ready,"semantic call returned");return future.get();}
+  ~SemanticCall(){ReleaseAll();if(thread.joinable())thread.join();}
+};
+std::shared_ptr<WindowsSemanticPending> SemanticOwner(WindowsSession& session){
+  auto pending=std::make_shared<WindowsSemanticPending>();pending->session_id=session.session_id;pending->attempts=session.input_api_attempts;
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);WindowsSemanticOperations().active=pending;return pending;
+}
+void SemanticPolicies(){
+  for(int invalid=0;invalid<3;++invalid){Reset();WindowsSession session{"semantic"};auto pending=SemanticOwner(session);
+    std::uint64_t count=99;if(invalid==0)Check(StopWindowsSemanticInput(session,&count)&&count==0,"preclaim Stop is drained");
+    else if(invalid==1)Stop(false);else parent_process_dead=true;
+    unsigned calls=0;{SemanticCall call(pending,[&]{++calls;return S_OK;});const auto out=call.Take();Check(!out.accepted&&out.result==E_ABORT&&calls==0&&*session.input_api_attempts==0,"preclaim invalidity cannot enter input");}}
+  Reset();{WindowsSession session{"semantic"},other{"other"};auto pending=SemanticOwner(session);auto gate=MakeGate();unsigned calls=0;
+    {SemanticCall call(pending,[&]{++calls;gate->Hold();return S_OK;});Check(gate->Wait()&&WindowsSemanticInputInFlight(),"claimed API held");
+      std::uint64_t count=99;Check(StopWindowsSemanticInput(other,&count)&&count==0&&WindowsSemanticInputInFlight(),"another owner receipt does not retire this input");
+      Check(!StopWindowsSemanticInput(session,&count)&&*session.input_api_attempts==1,"in-flight Stop is not drained");
+      gate->Release();const auto out=call.Take();Check(out.accepted&&!out.threw&&calls==1&&!WindowsSemanticInputInFlight(),"API return retires claim");
+      Check(StopWindowsSemanticInput(session,&count)&&count==1,"returned API has stable attempt receipt");}}
+  Reset();{WindowsSession session{"semantic"};auto pending=SemanticOwner(session);
+    {SemanticCall call(pending,[]{throw std::runtime_error("input fault");return E_FAIL;});const auto out=call.Take();std::uint64_t count=0;
+      Check(out.accepted&&out.threw&&!WindowsSemanticInputInFlight()&&StopWindowsSemanticInput(session,&count)&&count==1,"exception retires input claim without claiming success");}}
+  for(bool allow:{false,true}){Reset();WindowsSession session{"semantic"};auto pending=SemanticOwner(session);unsigned calls=0;
+    {SemanticCall call(pending,[&]{++calls;return S_OK;},true);{
+      std::unique_lock lock(pending->mutex);Check(pending->ready.wait_for(lock,std::chrono::seconds(2),[&]{return pending->validation_requested;}),"worker requests consumer validation");
+      Check(*session.input_api_attempts==0,"no input before validation");pending->validation=allow;pending->ready.notify_all();}
+      const auto out=call.Take();Check(out.accepted==allow&&calls==(allow?1u:0u),"only successful consumer validation permits claim");}}
+  Reset();{WindowsSession session{"semantic"};auto pending=SemanticOwner(session);auto gate=MakeGate();
+    std::future<void> drain;
+    SemanticCall call(pending,[&]{gate->Hold();return S_OK;});Check(gate->Wait(),"exit-drain claimed input held");
+    drain=std::async(std::launch::async,[]{DrainWindowsSemanticInputForExit();});
+    Check(drain.wait_for(std::chrono::milliseconds(40))==std::future_status::timeout,"normal helper exit waits for claimed API return");
+    gate->Release();Check(call.Take().accepted,"exit-drain input returned");Check(drain.wait_for(std::chrono::seconds(1))==std::future_status::ready,"normal exit drain completed");drain.get();}
+  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);WindowsSemanticOperations().active.reset();}
+  Reset();std::cout<<"PASS: semantic input claim, Stop, validation and exit ownership\n";
+}
 int main(){try {
   // Same-epoch prequeued Close must use the frame's old serial, not the current global one.
   Reset();{WindowsValidationFrameScope frame(0);Stop(false);const WindowsV1UiaPath path;bool adopted=false;
@@ -300,6 +356,7 @@ int main(){try {
   Reset();for(int i=0;i<3;++i){cleanup_gate=MakeGate();{Consumer call([]{return std::optional<Sample>{Value()};});Check(cleanup_gate->Wait()&&!call.Ready(20),"success waits for cleanup");cleanup_gate->Release();Check(call.Take().ok,"success published after cleanup");}
     cleanup_gate.reset();{Consumer next([]{return std::optional<Sample>{Value()};});Check(next.Take().ok,"consecutive classification not spuriously busy");}}
   Check(Drain()&&initialized==6&&cleaned==6,"all apartments retired");
+  SemanticPolicies();
   std::cout<<"PASS: UIA read engine policies and ownership\n";return 0;
 } catch(const std::exception& error){ReleaseAll();std::cerr<<"FAIL: "<<error.what()<<"\n";return 1;}}
 `;

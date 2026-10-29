@@ -281,7 +281,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
     // began), and only the observe has a budget, with the session's epoch.
     // Classification, bindings and focus-signature entry points share the worker's inherited scope.
-    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(4);
+    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(5);
     expect(c).toContain(
       'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, observe_stop_serial);',
     );
@@ -321,35 +321,40 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // Every input of a semantic action is sent only while the path is alive: when it is not, nothing
     // is sent, the attempt is not counted and the action is not accepted (so it cannot become
     // input_timeout_unconfirmed, which needs an accepted action).
-    const semanticStart = c.indexOf('bool DispatchWindowsSemanticAction(');
+    const semanticStart = c.indexOf('bool DispatchWindowsSemanticActionOnWorker(');
+    const semanticEnd = c.indexOf('bool DispatchWindowsSemanticAction(', semanticStart);
     expect(semanticStart).toBeGreaterThanOrEqual(0);
-    const semanticRest = c.slice(semanticStart);
-    const semantic = semanticRest.slice(0, semanticRest.indexOf(' return true; }'));
+    expect(semanticEnd).toBeGreaterThan(semanticStart);
+    const semantic = c.slice(semanticStart, semanticEnd);
     const gate =
-      'if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); } else { *accepted = true; session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);';
-    // Counted against each other: an input added outside the gate makes the two counts differ.
+      'if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); } else { action_result = InvokeWindowsSemanticInput(';
     const gated = semantic.split(gate).length - 1;
-    expect(gated).toBeGreaterThanOrEqual(5);
-    expect(semantic.split('input_api_attempts->fetch_add(').length - 1).toBe(gated);
-    expect(semantic.split('*accepted = true;').length - 1).toBe(gated);
-    expect(semantic).not.toContain('*accepted = false;');
-    // ...and each gate's else block holds the pattern call itself, which is assigned to action_result
-    // (its own HRESULT decides input_timeout_unconfirmed). No pattern call stands anywhere else.
-    const escapedGate = gate.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    const effect =
-      'action_result = [^;]*?pattern->(?:Invoke|SetValue|Select|Toggle|Expand|Collapse)\\(';
-    expect([...semantic.matchAll(new RegExp(`${escapedGate}[^}]*?${effect}`, 'gu'))]).toHaveLength(
-      gated,
-    );
-    expect([...semantic.matchAll(new RegExp(effect, 'gu'))]).toHaveLength(gated);
-    // Outside those assignments only reads (get_*/Get*) and housekeeping are called through a pointer,
-    // whatever the variable or the method is called: any other call there would be an unguarded input.
+    expect(gated).toBe(5);
+    expect(semantic.split('action_result = InvokeWindowsSemanticInput(').length - 1).toBe(gated);
+    expect(semantic).not.toContain('input_api_attempts->fetch_add(');
+    expect(semantic).not.toContain('*accepted = true;');
+    const input =
+      /action_result = InvokeWindowsSemanticInput\(\[&\] \{ return [^}]+; \}, accepted\);/gu;
+    expect([...semantic.matchAll(input)]).toHaveLength(gated);
     const otherCalls = [
-      ...semantic.replace(/action_result = [^;]*;/gu, '').matchAll(/\b\w+->(?!get_|Get)(\w+)\(/gu),
+      ...semantic.replace(input, '').matchAll(/\b\w+->(?!get_|Get)(\w+)\(/gu),
     ].map((match) => match[1]);
-    expect(
-      otherCalls.filter((name) => !['Release', 'AddRef', 'fetch_add', 'empty'].includes(name!)),
-    ).toEqual([]);
+    expect(otherCalls.filter((name) => !['Release', 'AddRef', 'empty'].includes(name!))).toEqual(
+      [],
+    );
+    const claim = c.slice(
+      c.indexOf('template <class Call> HRESULT InvokeWindowsSemanticInput('),
+      c.indexOf('struct WindowsSemanticWork'),
+    );
+    expect(claim).toContain('std::lock_guard lock(WindowsTargetListControl().stop_mutex);');
+    expect(claim).toContain('pending->input_in_flight || pending->ever_claimed');
+    expect(claim).toContain(
+      'pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone',
+    );
+    expect(claim).toContain(
+      'pending->attempts->fetch_add(1, std::memory_order_acq_rel); *accepted = true;',
+    );
+    expect(claim).toContain('} returned{pending}; return call();');
     expect(semantic).toContain(
       '*reason = !*accepted ? "semantic_action_failed" : WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed"',
     );
@@ -434,16 +439,11 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect([...c.matchAll(/->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu)]).toHaveLength(
       6,
     );
-    const semanticBody = c.slice(
-      c.indexOf('bool DispatchWindowsSemanticAction('),
-      c.indexOf('std::string ResponseCacheKey(const Frame &request) {'),
-    );
-    expect([...semanticBody.matchAll(/\*accepted = true;/gu)]).toHaveLength(5);
+    expect([...semantic.matchAll(/InvokeWindowsSemanticInput\(/gu)]).toHaveLength(5);
     expect([
-      ...c.matchAll(
-        /if \(!WindowsV1UiaMayCall\(\)\) \{ \*reason = WindowsV1UiaEndedReason\(\); \} else \{ \*accepted = true; session\.input_api_attempts->fetch_add\(1, std::memory_order_acq_rel\); action_result = [^;]*->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu,
-      ),
-    ]).toHaveLength(5);
+      ...semantic.matchAll(/->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu),
+    ]).toHaveLength(6);
+    expect([...claim.matchAll(/\*accepted = true;/gu)]).toHaveLength(1);
     // What a read that could not be made leaves behind is NOT "no risk": the risk is all false, which
     // ClassifyNativePreflightFacts (checked in the harness) puts first of all as unclassified, and
     // RejectWindowsRisk rejects as target_unclassified.
@@ -555,7 +555,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       'WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed" : "input_not_confirmed"',
     );
     expect(c).toContain(
-      'if (*accepted) { if (*reason != "input_timeout_unconfirmed") *reason = "input_not_confirmed"; } else if (cancellation_epoch',
+      'if (*accepted) { if (*reason != "input_timeout_unconfirmed" && *reason != "semantic_input_in_flight") *reason = "input_not_confirmed"; } else if (cancellation_epoch',
     );
     // A failed read is the "unreadable" of each caller (fail closed).
     expect(c).toContain(
@@ -1116,7 +1116,7 @@ int RunDriver(bool ci) {
     IUIAutomationElement *target = nullptr;
     std::string reason;
     bool ok = true;
-    const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] { ok = FindWindowsSemanticTarget(session, "x", &target, &reason); });
+    const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] { ok = FindWindowsSemanticTarget(session.active_window, "x", &target, &reason); });
     if (target != nullptr) target->Release();
     SeamCheck(reason == "accessibility_timeout", "a_timed_out_target_search_says_accessibility_timeout");
     cases.push_back({"FindWindowsSemanticTarget", ms, !ok, true});
