@@ -224,6 +224,16 @@ function instrumentedHost(): string {
       ) +
       source.slice(to);
   }
+  const semanticFrom = source.indexOf('bool FindWindowsSemanticTarget(');
+  const semanticTo = source.indexOf('\nbool Utf16FromUtf8(', semanticFrom);
+  if (semanticFrom < 0 || semanticTo < semanticFrom)
+    throw new Error('Semantic search contact boundary changed');
+  const semantic = replaceOnce(
+    source.slice(semanticFrom, semanticTo),
+    'automation->ElementFromHandle(session.active_window, &root)',
+    '(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, &root) : automation->ElementFromHandle(session.active_window, &root))',
+  );
+  source = source.slice(0, semanticFrom) + semantic + source.slice(semanticTo);
   const observeFrom = source.indexOf('bool ObserveWindowsWindow(');
   const observeTo = source.indexOf('\nstruct ArtifactReadPending', observeFrom);
   if (observeFrom < 0 || observeTo < observeFrom) throw new Error('Observe boundary changed');
@@ -387,6 +397,10 @@ function instrumentedHost(): string {
       } catch (...) {
         return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_validation_probe_failed"));
       }
+    }
+    if (operation == "sc820_semantic_stall_probe") {
+      try {return Respond(pipe,request,MessageType::kProbeResult,Sc820SemanticStallProbe(metadata,queued_stop_serial));}
+      catch(const std::exception& error){return Respond(pipe,request,MessageType::kError,ErrorPayload(error.what()));}
     }
     if (operation == "sc820_binding_healthy_probe") {
       try {return Respond(pipe, request, MessageType::kProbeResult, Sc820BindingHealthyProbe(queued_stop_serial));}
@@ -555,6 +569,7 @@ WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t>);
 std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t>);
+std::string Sc820SemanticStallProbe(const std::string&,std::optional<std::uint64_t>);
 
 struct WindowsValidationWork;
 struct WindowsFileIdentity;
@@ -1329,6 +1344,19 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   const bool ok=ObserveWindowsWindow(session,&response,&binary,&reason,stop_serial);
   observe_signature_mode=false;
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
+}
+
+std::string Sc820SemanticStallProbe(const std::string& metadata,std::optional<std::uint64_t> stop_serial){
+  const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,stop_serial);
+  std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="search"||kind=="dispatch"),"semantic_stall_kind");
+  WindowsSession session;session.pid=fixture_pids[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
+  // No observed target signature is present: even an unexpected match cannot reach an input API.
+  bool ok=false,accepted=false;std::string reason;IUIAutomationElement* target=nullptr;
+  if(kind=="search")ok=FindWindowsSemanticTarget(session,"sc820-absent-control",&target,&reason);
+  else ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke","{\"targetId\":\"sc820-absent-control\"}",&accepted,&reason);
+  if(target!=nullptr)target->Release();
+  return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
+      ",\"inputAttempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
 }
 
 std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t> stop_serial){
@@ -3298,6 +3326,34 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+// A passing diagnostic here reproduces a broken Stop boundary; it is not a product PASS.
+int DiagnoseSemanticStall(std::wstring_view scenario){
+  const bool dispatch=scenario.starts_with(L"semantic-stall-dispatch-");
+  const bool cancel=scenario.ends_with(L"-cancel");const std::string label(scenario.begin(),scenario.end());RcaRun run;
+  try {
+    run.StartFixture();run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000)&&run.ProbeReply(1,MessageType::kHandshakeResult),"semantic_stall_handshake");
+    classification_contact_held=true;
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_semantic_stall_probe\",\"kind\":\"")+(dispatch?"dispatch":"search")+"\"}");
+    Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&classification_contacts==1&&classification_returns==0,"semantic_stall_contact_held");
+    const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+    Require(WaitStopSerial(before,1000),"semantic_stall_reader_latched");
+    Require(!run.Wait(3,1100)&&!run.Wait(2,0)&&classification_returns==0,"semantic_stall_consumer_blocked");
+    const auto held_ms=GetTickCount64()-started;
+    Require(held_ms>=1100&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"semantic_stall_duration");
+    SetEvent(run.release.value);
+    Require(run.Wait(3,5000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"semantic_stall_receipt_after_release");
+    std::string body,reason;bool ok=true,accepted=true;std::uint64_t attempts=1;
+    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&!accepted&&
+      ReadJsonUint64(body,"inputAttempts",&attempts)&&attempts==0&&ReadJsonString(body,"reason",&reason)&&reason=="accessibility_timeout","semantic_stall_refusal_without_input");
+    Require(classification_returns==1&&!gate_timed_out.load(),"semantic_stall_contact_returned");
+    if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"semantic_stall_final_close");}
+    classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"semantic_stall_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"baselineStallReproduced\":true,\"syntheticContactStall\":true,\"actualUiaLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":true,\"receiptBeforeRelease\":false,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseBindingDetails(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());
   classification_detail="binding-"+label.substr(std::string("binding-detail-").size());
@@ -3853,6 +3909,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"semantic-stall-")) return DiagnoseSemanticStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"binding-detail-")) return DiagnoseBindingDetails(argv[1]);
   if (std::wstring_view(argv[1]) == L"binding-healthy") return DiagnoseBindingHealthy();
   if (std::wstring_view(argv[1]).starts_with(L"binding-observe-")) return DiagnoseObserveSignatureStop(argv[1]);
@@ -4288,6 +4345,24 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('semantic-stall-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            baselineStallReproduced: true,
+            syntheticContactStall: true,
+            actualUiaLatencyMeasured: false,
+            heldMs: expect.any(Number),
+            readerLatched: true,
+            receiptBeforeRelease: false,
+            receiptAfterRelease: true,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('binding-detail-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -4444,6 +4519,15 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('diagnoses semantic search and dispatch Stop stalls before any input on the merged baseline', async () => {
+    await runScenarios([
+      'semantic-stall-search-cancel',
+      'semantic-stall-search-close',
+      'semantic-stall-dispatch-cancel',
+      'semantic-stall-dispatch-close',
+    ]);
+  }, 700_000);
 
   it('cleans binding and signature COM values after noncontact Stop and measurement faults', async () => {
     await runScenarios([
