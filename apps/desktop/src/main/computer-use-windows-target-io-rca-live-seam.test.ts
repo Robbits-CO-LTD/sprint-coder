@@ -1054,6 +1054,7 @@ std::mutex classification_resource_mutex;
 std::set<BSTR> classification_bstrs;
 std::set<SAFEARRAY*> classification_arrays;
 void Sc820DetailGate() {
+  if(classification_detail.starts_with("success-"))Require(windows_v1_uia_lane!=nullptr&&windows_v1_uia_lane->stop==WindowsV1UiaStop::kNone,"successful_cleanup_has_no_prior_stop");
   classification_gate_calls.fetch_add(1);SetEvent(gate_entered);
   if(WaitForSingleObject(gate_release,20'000)!=WAIT_OBJECT_0)gate_timed_out.store(true);
 }
@@ -1097,7 +1098,7 @@ HRESULT Sc820ReadParent(IUIAutomationTreeWalker* walker,IUIAutomationElement* el
 }
 ULONG Sc820Release(IUnknown* value){
   const bool tracked=classification_contact_held.load()&&windows_uia_read_progress!=nullptr;
-  if(tracked){const auto call=classification_release_calls.fetch_add(1);if(call==0&&classification_detail=="release-cancel")Sc820DetailGate();}
+  if(tracked){const auto call=classification_release_calls.fetch_add(1);if(call==0&&(classification_detail=="release-cancel"||classification_detail=="success-release-cancel"))Sc820DetailGate();}
   const auto result=value->Release();if(tracked)classification_release_returns.fetch_add(1);return result;
 }
 HRESULT Sc820RuntimeId(IUIAutomationElement* element,SAFEARRAY** output){
@@ -1130,7 +1131,7 @@ HRESULT Sc820DestroyArray(SAFEARRAY* value){
 }
 void Sc820ReadCoUninitialize(){
   const bool tracked=classification_contact_held.load()&&windows_uia_read_progress!=nullptr;
-  if(tracked&&classification_detail=="apartment-close")Sc820DetailGate();
+  if(tracked&&(classification_detail=="apartment-close"||classification_detail=="success-apartment-close"))Sc820DetailGate();
   if(tracked&&classification_detail=="healthy-consecutive")Sleep(30);
   CoUninitialize();if(tracked)classification_apartments.fetch_add(1);
 }
@@ -2996,7 +2997,7 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
       if(!queued) {
         Require(classification_contacts==1&&classification_returns==1&&classification_gate_calls==1,"noncontact_gate_reached");
       }
-      if(internal)Require(!run.Wait(2,50),"internal_result_waits_for_cleanup");
+      if(internal||classification_detail.starts_with("success-"))Require(!run.Wait(2,50),"result_waits_for_cleanup");
       const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
       if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");
       else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
@@ -3993,6 +3994,8 @@ describe.skipIf(
       'classification-detail-signature-result',
       'classification-detail-release-cancel',
       'classification-detail-apartment-close',
+      'classification-detail-success-release-cancel',
+      'classification-detail-success-apartment-close',
       'classification-detail-name-exception',
       'classification-detail-signature-exception',
       'classification-detail-healthy-consecutive',

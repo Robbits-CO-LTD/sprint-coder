@@ -269,6 +269,13 @@ int main(){try {
     const auto out=call.Take();Check(!out.ok&&out.stop==WindowsV1UiaStop::kTimeout&&out.value.signature.empty(),"cleanup stop policy");
     Check(cleaned==0&&WindowsUiaReadWorkerRunning().load(),"cleanup retains slot");cleanup_gate->Release();Check(Drain()&&cleaned==1,"cleanup retired once");
   }}
+  // A successful measurement is also abandoned if Stop arrives while cleanup is held.
+  for(bool cancel:{false,true}){Reset();cleanup_gate=MakeGate();{
+    Consumer call([]{return std::optional<Sample>{Value()};});
+    Check(cleanup_gate->Wait()&&!call.Ready(50),"successful measurement waits for cleanup");Stop(cancel);
+    const auto out=call.Take();Check(!out.ok&&!out.value.secure&&out.value.signature.empty()&&out.stop==WindowsV1UiaStop::kCanceled,"successful late result not adopted after cleanup Stop");
+    Check(cleaned==0&&WindowsUiaReadWorkerRunning().load(),"successful cleanup retains slot");cleanup_gate->Release();Check(Drain()&&cleaned==1,"successful stopped cleanup retired once");
+  }}
   // Slow but nonempty property results are not turned into a timeout.
   Reset();{Consumer call([]{int value=0;const bool ok=WindowsV1UiaRead(value,[&]{std::this_thread::sleep_for(std::chrono::milliseconds(320));value=7;return S_OK;});
     return ok?std::optional<Sample>{Value()}:std::nullopt;});const auto out=call.Take();Check(out.ok&&out.stop==WindowsV1UiaStop::kNone,"slow nonempty answer preserved");}

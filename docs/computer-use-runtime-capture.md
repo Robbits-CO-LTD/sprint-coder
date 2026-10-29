@@ -377,8 +377,8 @@ COM cleanup finishes; another read cannot spawn another worker while it is occup
 Observation keeps its early timeout rejection. Classification preserves partial risk flags and an
 empty signature after a worker-side timeout, adopting them with the first stop reason only after
 cleanup. Consumer-side cancellation or expiry abandons that result even during Release or
-CoUninitialize. Busy or failed classification stops its calling UIA path, including a following focus
-signature read. Slow nonempty property values and deep trees retain their existing semantics; there
+CoUninitialize. Busy, allocation/initialization failure or a measurement exception stops the calling
+classification UIA path with its timeout reason, including a following focus signature read. Slow nonempty property values and deep trees retain their existing semantics; there
 is no new short whole-classification deadline. Consequently, a stalled noncontact property or cleanup
 without Stop or an inherited deadline is still a remaining #820 boundary. Binding capture, standalone
 focus signatures and semantic target resolution also need their own boundedness verification. Native
