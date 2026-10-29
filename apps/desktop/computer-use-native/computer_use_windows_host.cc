@@ -7261,7 +7261,7 @@ HRESULT CreateWindowsV1Automation(IUIAutomation **automation) {
 
 enum class WindowsV1UiaStop { kNone, kTimeout, kBudget, kCanceled };
 
-struct WindowsUiaObservationPending {
+struct WindowsUiaReadProgress {
   std::mutex mutex;
   std::condition_variable ready;
   std::atomic<WindowsV1UiaStop> abandoned{WindowsV1UiaStop::kNone};
@@ -7270,15 +7270,16 @@ struct WindowsUiaObservationPending {
   bool contact_active = false;
   std::chrono::steady_clock::time_point contact_started;
   bool done = false;
-  bool succeeded = false;
-  std::string tree;
-  std::size_t tree_nodes = 0;
 };
 
-// Installed only by the observation worker. No caller's lane or COM pointer crosses threads.
-thread_local WindowsUiaObservationPending *windows_uia_observation_pending = nullptr;
+template <class Result> struct WindowsUiaReadPending : WindowsUiaReadProgress {
+  std::optional<Result> value;
+};
 
-std::atomic<bool> &WindowsUiaObservationWorkerRunning() {
+// Installed only by the UIA read worker. No caller's lane or COM pointer crosses threads.
+thread_local WindowsUiaReadProgress *windows_uia_read_progress = nullptr;
+
+std::atomic<bool> &WindowsUiaReadWorkerRunning() {
   // A provider stuck in COM may outlive ServePipe and static destruction.
   static auto *running = new std::atomic<bool>{false};
   return *running;
@@ -7346,8 +7347,8 @@ bool WindowsV1UiaMayCall() {
   if (lane == nullptr)
     return false;
   // The consumer already rejected this result; no further provider calls are useful.
-  if (lane->stop == WindowsV1UiaStop::kNone && windows_uia_observation_pending != nullptr)
-    lane->stop = windows_uia_observation_pending->abandoned.load(std::memory_order_acquire);
+  if (lane->stop == WindowsV1UiaStop::kNone && windows_uia_read_progress != nullptr)
+    lane->stop = windows_uia_read_progress->abandoned.load(std::memory_order_acquire);
   if (lane->stop == WindowsV1UiaStop::kNone) {
     if (cancellation_epoch.load(std::memory_order_acquire) != lane->epoch ||
         (lane->stop_serial.has_value() &&
@@ -7357,8 +7358,8 @@ bool WindowsV1UiaMayCall() {
     else if (lane->has_deadline && std::chrono::steady_clock::now() > lane->deadline)
       lane->stop = WindowsV1UiaStop::kBudget;
   }
-  if (windows_uia_observation_pending != nullptr && lane->stop != WindowsV1UiaStop::kNone)
-    windows_uia_observation_pending->stop.store(lane->stop, std::memory_order_release);
+  if (windows_uia_read_progress != nullptr && lane->stop != WindowsV1UiaStop::kNone)
+    windows_uia_read_progress->stop.store(lane->stop, std::memory_order_release);
   return lane->stop == WindowsV1UiaStop::kNone;
 }
 
@@ -7378,9 +7379,9 @@ bool WindowsV1UiaOk(HRESULT result) {
   WindowsV1UiaLane *lane = windows_v1_uia_lane;
   if (lane != nullptr && lane->stop == WindowsV1UiaStop::kNone && WindowsV1UiaIsTimeout(result))
     lane->stop = WindowsV1UiaStop::kTimeout;
-  if (windows_uia_observation_pending != nullptr && lane != nullptr &&
+  if (windows_uia_read_progress != nullptr && lane != nullptr &&
       lane->stop != WindowsV1UiaStop::kNone)
-    windows_uia_observation_pending->stop.store(lane->stop, std::memory_order_release);
+    windows_uia_read_progress->stop.store(lane->stop, std::memory_order_release);
   return false;
 }
 
@@ -7417,10 +7418,10 @@ bool WindowsV1UiaEmpty(Value value) {
   return value == Value{};
 }
 
-class WindowsUiaObservationContact {
+class WindowsUiaReadContact {
 public:
-  WindowsUiaObservationContact(bool contact, std::chrono::steady_clock::time_point started)
-      : pending_(contact ? windows_uia_observation_pending : nullptr) {
+  WindowsUiaReadContact(bool contact, std::chrono::steady_clock::time_point started)
+      : pending_(contact ? windows_uia_read_progress : nullptr) {
     if (pending_ == nullptr)
       return;
     {
@@ -7430,7 +7431,7 @@ public:
     }
     pending_->ready.notify_one();
   }
-  ~WindowsUiaObservationContact() {
+  ~WindowsUiaReadContact() {
     if (pending_ == nullptr)
       return;
     {
@@ -7446,7 +7447,7 @@ public:
   }
 
 private:
-  WindowsUiaObservationPending *pending_;
+  WindowsUiaReadProgress *pending_;
 };
 
 // One UI Automation call of a path: the cancel / timeout / budget check first (E_ABORT, no call made,
@@ -7459,7 +7460,7 @@ HRESULT WindowsV1UiaTimed(std::chrono::milliseconds slow, bool output_proves_ans
   if (!WindowsV1UiaMayCall())
     return E_ABORT;
   const auto start = std::chrono::steady_clock::now();
-  WindowsUiaObservationContact contact(!output_proves_answer, start);
+  WindowsUiaReadContact contact(!output_proves_answer, start);
   HRESULT result = call();
   if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow &&
       (!output_proves_answer || WindowsV1UiaEmpty(output)))
@@ -7502,8 +7503,8 @@ const char *WindowsV1UiaEndedReason() {
 void WindowsV1UiaCountNode() {
   if (windows_v1_uia_lane != nullptr)
     ++windows_v1_uia_lane->nodes;
-  if (windows_uia_observation_pending != nullptr)
-    windows_uia_observation_pending->nodes.fetch_add(1, std::memory_order_relaxed);
+  if (windows_uia_read_progress != nullptr)
+    windows_uia_read_progress->nodes.fetch_add(1, std::memory_order_relaxed);
 }
 
 // The reason an observe gives for a read that did not complete: a target that did not answer
@@ -8232,16 +8233,22 @@ bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tre
   return true;
 }
 
-bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
-                        std::size_t *nodes) {
+// Observation rejects a worker timeout as soon as it is known. Classification instead keeps
+// the worker's partial risk/signature and first stop, once its COM cleanup has completed.
+// Both policies abandon immediately on consumer-side Stop, deadline or slow first contact.
+template <class Result, class Measure, class Adopt>
+bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adopt) {
+  static_assert(std::is_nothrow_move_constructible_v<Result> && std::is_nothrow_move_assignable_v<Result>,
+                "UIA read results must be publishable without throwing.");
   const WindowsV1UiaPath path;
-  if (!WindowsV1UiaMayCall())
-    return false;
+  if (!WindowsV1UiaMayCall()) return false;
   WindowsV1UiaLane snapshot = *windows_v1_uia_lane;
   auto &control = WindowsTargetListControl();
   if (!snapshot.stop_serial.has_value())
-    snapshot.stop_serial = control.stop_serial.load(std::memory_order_acquire);
-  auto pending = std::make_shared<WindowsUiaObservationPending>();
+    snapshot.stop_serial = WindowsValidationFrameStopSerial();
+  std::shared_ptr<WindowsUiaReadPending<Result>> pending;
+  try { pending = std::make_shared<WindowsUiaReadPending<Result>>(); }
+  catch (...) { if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult); return false; }
   {
     std::lock_guard stop_lock(control.stop_mutex);
     if (parent_process_dead.load(std::memory_order_acquire) ||
@@ -8249,81 +8256,102 @@ bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
       windows_v1_uia_lane->stop = WindowsV1UiaStop::kCanceled;
       return false;
     }
-    if (WindowsUiaObservationWorkerRunning().exchange(true, std::memory_order_acq_rel))
+    if (WindowsUiaReadWorkerRunning().exchange(true, std::memory_order_acq_rel)) {
+      if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       return false;
+    }
   }
   try {
-    std::thread([pending, snapshot, pid, window] {
+    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {
       struct Progress {
-        explicit Progress(WindowsUiaObservationPending *value) {
-          windows_uia_observation_pending = value;
-        }
-        ~Progress() { windows_uia_observation_pending = nullptr; }
+        explicit Progress(WindowsUiaReadProgress *value) { windows_uia_read_progress = value; }
+        ~Progress() { windows_uia_read_progress = nullptr; }
       } progress(pending.get());
       const WindowsV1UiaPath worker_path(snapshot);
-      bool succeeded = false;
-      std::string value;
-      std::size_t count = 0;
+      std::optional<Result> value;
       try {
         struct Apartment {
           HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
           ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
         } apartment;
-        if (SUCCEEDED(apartment.result) && WindowsV1UiaMayCall())
-          succeeded = ReadUiaObservationOnWorker(pid, window, &value, &count);
+        if (SUCCEEDED(apartment.result) && WindowsV1UiaMayCall()) value = measure();
+        else if (FAILED(apartment.result) && preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       } catch (...) {
-        succeeded = false;
+        value.reset();
+        if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       }
-      // Release and CoUninitialize finish before another observation can claim the slot.
+      // No result or free slot is published while Release/CoUninitialize can still be running.
       {
         std::lock_guard lock(pending->mutex);
         if (pending->abandoned.load(std::memory_order_acquire) == WindowsV1UiaStop::kNone) {
-          pending->succeeded = succeeded;
-          pending->tree = std::move(value);
-          pending->tree_nodes = count;
+          pending->value = std::move(value);
           pending->stop.store(worker_path.Stop(), std::memory_order_release);
         }
         pending->done = true;
-        WindowsUiaObservationWorkerRunning().store(false, std::memory_order_release);
+        WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
       }
       pending->ready.notify_one();
     }).detach();
   } catch (...) {
-    WindowsUiaObservationWorkerRunning().store(false, std::memory_order_release);
+    WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
+    if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
     return false;
   }
   std::unique_lock lock(pending->mutex);
   for (;;) {
-    // As with list_targets, Stop receipt and adoption are serialized. Close is identified by the
-    // enqueue serial, independently of its input cancellation epoch and replay watermark.
     {
       std::lock_guard stop_lock(control.stop_mutex);
       WindowsV1UiaLane &lane = *windows_v1_uia_lane;
-      WindowsV1UiaMayCall();
-      if (lane.stop == WindowsV1UiaStop::kNone &&
-          (parent_process_dead.load(std::memory_order_acquire) ||
-           control.stop_serial.load(std::memory_order_acquire) != *snapshot.stop_serial))
-        lane.stop = WindowsV1UiaStop::kCanceled;
-      if (lane.stop == WindowsV1UiaStop::kNone)
-        lane.stop = pending->stop.load(std::memory_order_acquire);
-      if (lane.stop == WindowsV1UiaStop::kNone && pending->contact_active &&
+      auto external_stop = lane.stop;
+      if (external_stop == WindowsV1UiaStop::kNone) {
+        if (parent_process_dead.load(std::memory_order_acquire) ||
+            cancellation_epoch.load(std::memory_order_acquire) != snapshot.epoch ||
+            control.stop_serial.load(std::memory_order_acquire) != *snapshot.stop_serial)
+          external_stop = WindowsV1UiaStop::kCanceled;
+        else if (lane.has_deadline && std::chrono::steady_clock::now() > lane.deadline)
+          external_stop = WindowsV1UiaStop::kBudget;
+      }
+      const auto worker_stop = pending->stop.load(std::memory_order_acquire);
+      if (external_stop == WindowsV1UiaStop::kNone && pending->contact_active &&
           std::chrono::steady_clock::now() - pending->contact_started >= kWindowsV1UiaSlowContact)
-        lane.stop = WindowsV1UiaStop::kTimeout;
-      if (lane.stop != WindowsV1UiaStop::kNone || pending->done) {
+        external_stop = WindowsV1UiaStop::kTimeout;
+      if (external_stop != WindowsV1UiaStop::kNone ||
+          (!preserve_stopped_result && worker_stop != WindowsV1UiaStop::kNone)) {
+        if (lane.stop == WindowsV1UiaStop::kNone)
+          lane.stop = preserve_stopped_result && worker_stop != WindowsV1UiaStop::kNone
+              ? worker_stop : external_stop != WindowsV1UiaStop::kNone ? external_stop : worker_stop;
+        pending->abandoned.store(lane.stop, std::memory_order_release);
         lane.nodes += pending->nodes.load(std::memory_order_acquire);
-        if (lane.stop != WindowsV1UiaStop::kNone) {
-          pending->abandoned.store(lane.stop, std::memory_order_release);
-          return false;
-        }
-        if (!pending->succeeded)
-          return false;
-        *tree = std::move(pending->tree);
-        *nodes = pending->tree_nodes;
+        return false;
+      }
+      if (pending->done) {
+        lane.nodes += pending->nodes.load(std::memory_order_acquire);
+        lane.stop = worker_stop;
+        if (!pending->value.has_value()) return false;
+        adopt(std::move(*pending->value));
         return true;
       }
     }
     pending->ready.wait_for(lock, std::chrono::milliseconds(20));
   }
+}
+
+struct WindowsUiaObservationResult {
+  std::string tree;
+  std::size_t nodes = 0;
+};
+
+bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
+                        std::size_t *nodes) {
+  return RunWindowsUiaRead<WindowsUiaObservationResult>(false,
+      [pid, window]() -> std::optional<WindowsUiaObservationResult> {
+        WindowsUiaObservationResult value;
+        if (!ReadUiaObservationOnWorker(pid, window, &value.tree, &value.nodes)) return std::nullopt;
+        return value;
+      }, [tree, nodes](WindowsUiaObservationResult value) {
+        *tree = std::move(value.tree);
+        *nodes = value.nodes;
+      });
 }
 
 struct WindowsUiaRisk {
@@ -8425,9 +8453,15 @@ WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {
   WindowsUiaRisk risk;
   if (element == nullptr || !WindowsV1UiaMayCall())
     return risk;
-  BSTR name = nullptr;
-  BSTR automation_id = nullptr;
-  BSTR help = nullptr;
+  struct Labels {
+    BSTR name = nullptr, automation_id = nullptr, help = nullptr;
+    ~Labels() {
+      if (name != nullptr) SysFreeString(name);
+      if (automation_id != nullptr) SysFreeString(automation_id);
+      if (help != nullptr) SysFreeString(help);
+    }
+  } labels;
+  BSTR &name = labels.name, &automation_id = labels.automation_id, &help = labels.help;
   CONTROLTYPEID control_type = 0;
   BOOL password = FALSE;
   const bool attributes_read =
@@ -8437,12 +8471,6 @@ WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {
       WindowsV1UiaRead(control_type, [&] { return element->get_CurrentControlType(&control_type); }) &&
       WindowsV1UiaRead(password, [&] { return element->get_CurrentIsPassword(&password); });
   if (!attributes_read) {
-    if (name != nullptr)
-      SysFreeString(name);
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (help != nullptr)
-      SysFreeString(help);
     return risk;
   }
   const auto convert = [](BSTR value) {
@@ -8459,20 +8487,8 @@ WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {
        !automation_text.empty()) &&
       (help == nullptr || SysStringLen(help) == 0 || !help_text.empty());
   if (!text_converted) {
-    if (name != nullptr)
-      SysFreeString(name);
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (help != nullptr)
-      SysFreeString(help);
     return risk;
   }
-  if (name != nullptr)
-    SysFreeString(name);
-  if (automation_id != nullptr)
-    SysFreeString(automation_id);
-  if (help != nullptr)
-    SysFreeString(help);
   const std::string normalized =
       LowercaseAscii(name_text + "\n" + automation_text + "\n" + help_text);
   risk.classified = control_type != 0 || !normalized.empty();
@@ -8492,19 +8508,28 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
   if (element == nullptr)
     return merged;
   const WindowsV1UiaPath path;
-  IUIAutomation *automation = nullptr;
-  IUIAutomationTreeWalker *walker = nullptr;
+  if (!WindowsV1UiaMayCall()) return merged;
+  struct Objects {
+    IUIAutomation *automation = nullptr;
+    IUIAutomationTreeWalker *walker = nullptr;
+    IUIAutomationElement *current = nullptr, *parent = nullptr;
+    ~Objects() {
+      if (parent != nullptr) parent->Release();
+      if (current != nullptr) current->Release();
+      if (walker != nullptr) walker->Release();
+      if (automation != nullptr) automation->Release();
+    }
+  } objects;
+  IUIAutomation *&automation = objects.automation;
+  IUIAutomationTreeWalker *&walker = objects.walker;
+  IUIAutomationElement *&current = objects.current, *&parent = objects.parent;
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr || FAILED(automation->get_RawViewWalker(&walker)) ||
       walker == nullptr) {
-    if (walker != nullptr)
-      walker->Release();
-    if (automation != nullptr)
-      automation->Release();
     return {};
   }
   element->AddRef();
-  IUIAutomationElement *current = element;
+  current = element;
   bool metadata_complete = true;
   for (std::size_t depth = 0; current != nullptr && depth < 8; ++depth) {
     const WindowsUiaRisk risk = ClassifyWindowsUiaElementSelf(current);
@@ -8518,7 +8543,7 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
     // more timeout each.
     if (!risk.metadata_complete)
       break;
-    IUIAutomationElement *parent = nullptr;
+    parent = nullptr;
     const HRESULT parent_result =
         WindowsV1UiaCall(parent, [&] { return walker->GetParentElement(current, &parent); });
     if (!WindowsV1UiaOk(parent_result)) {
@@ -8529,40 +8554,39 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
     }
     current->Release();
     current = parent;
+    parent = nullptr;
   }
-  if (current != nullptr) {
-    current->Release();
-    metadata_complete = false;
-  }
-  walker->Release();
-  automation->Release();
+  if (current != nullptr) metadata_complete = false;
   merged.metadata_complete = metadata_complete;
   return merged;
 }
 
-WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
-                                    std::string *control_signature = nullptr) {
+WindowsUiaRisk ClassifyWindowsPointOnWorker(POINT point, std::uint32_t expected_pid,
+                                    std::string *control_signature) {
   if (control_signature != nullptr)
     control_signature->clear();
-  const WindowsV1UiaPath path;
-  IUIAutomation *automation = nullptr;
+  struct Objects {
+    IUIAutomation *automation = nullptr;
+    IUIAutomationElement *element = nullptr;
+    ~Objects() {
+      if (element != nullptr) element->Release();
+      if (automation != nullptr) automation->Release();
+    }
+  } objects;
+  IUIAutomation *&automation = objects.automation;
+  IUIAutomationElement *&element = objects.element;
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return {};
-  IUIAutomationElement *element = nullptr;
   const POINT query = point;
   const HRESULT found =
       WindowsV1UiaContact(element, [&] { return automation->ElementFromPoint(query, &element); });
-  automation->Release();
   if (!WindowsV1UiaOk(found) || element == nullptr) {
-    if (element != nullptr)
-      element->Release();
     return {};
   }
   int owner_pid = 0;
   if (!WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
       static_cast<std::uint32_t>(owner_pid) != expected_pid) {
-    element->Release();
     return {};
   }
   const WindowsUiaRisk risk = ClassifyWindowsUiaElement(element);
@@ -8571,34 +8595,66 @@ WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
   // to an element that has just failed to answer).
   if (control_signature != nullptr && risk.metadata_complete)
     ComputeWindowsControlSignature(element, expected_pid, nullptr, control_signature);
-  element->Release();
   return risk;
 }
 
-WindowsUiaRisk ClassifyWindowsFocusedElement(std::uint32_t expected_pid) {
-  const WindowsV1UiaPath path;
-  IUIAutomation *automation = nullptr;
+WindowsUiaRisk ClassifyWindowsFocusedElementOnWorker(std::uint32_t expected_pid) {
+  struct Objects {
+    IUIAutomation *automation = nullptr;
+    IUIAutomationElement *element = nullptr;
+    ~Objects() {
+      if (element != nullptr) element->Release();
+      if (automation != nullptr) automation->Release();
+    }
+  } objects;
+  IUIAutomation *&automation = objects.automation;
+  IUIAutomationElement *&element = objects.element;
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return {};
-  IUIAutomationElement *element = nullptr;
   const HRESULT found =
       WindowsV1UiaContact(element, [&] { return automation->GetFocusedElement(&element); });
-  automation->Release();
   if (!WindowsV1UiaOk(found) || element == nullptr) {
-    if (element != nullptr)
-      element->Release();
     return {};
   }
   int owner_pid = 0;
   if (!WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
       static_cast<std::uint32_t>(owner_pid) != expected_pid) {
-    element->Release();
     return {};
   }
   const WindowsUiaRisk risk = ClassifyWindowsUiaElement(element);
-  element->Release();
   return risk;
+}
+
+struct WindowsUiaPointResult {
+  WindowsUiaRisk risk;
+  std::string signature;
+};
+
+WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
+                                    std::string *control_signature = nullptr) {
+  if (control_signature != nullptr) control_signature->clear();
+  WindowsUiaRisk result;
+  const bool want_signature = control_signature != nullptr;
+  RunWindowsUiaRead<WindowsUiaPointResult>(true,
+      [point, expected_pid, want_signature]() -> std::optional<WindowsUiaPointResult> {
+        WindowsUiaPointResult value;
+        value.risk = ClassifyWindowsPointOnWorker(point, expected_pid, want_signature ? &value.signature : nullptr);
+        return value;
+      }, [&result, control_signature](WindowsUiaPointResult value) {
+        result = value.risk;
+        if (control_signature != nullptr) *control_signature = std::move(value.signature);
+      });
+  return result;
+}
+
+WindowsUiaRisk ClassifyWindowsFocusedElement(std::uint32_t expected_pid) {
+  WindowsUiaRisk result;
+  RunWindowsUiaRead<WindowsUiaRisk>(true,
+      [expected_pid]() -> std::optional<WindowsUiaRisk> {
+        return ClassifyWindowsFocusedElementOnWorker(expected_pid);
+      }, [&result](WindowsUiaRisk value) { result = value; });
+  return result;
 }
 
 bool ComputeWindowsControlSignature(IUIAutomationElement *element,
@@ -8610,8 +8666,20 @@ bool ComputeWindowsControlSignature(IUIAutomationElement *element,
   int owner_pid = 0;
   CONTROLTYPEID control_type = 0;
   RECT bounds{};
-  BSTR automation_id = nullptr;
-  SAFEARRAY *runtime_id = nullptr;
+  struct Values {
+    BSTR automation_id = nullptr;
+    SAFEARRAY *runtime_id = nullptr;
+    bool accessed = false;
+    ~Values() {
+      if (automation_id != nullptr) SysFreeString(automation_id);
+      if (runtime_id != nullptr) {
+        if (accessed) SafeArrayUnaccessData(runtime_id);
+        SafeArrayDestroy(runtime_id);
+      }
+    }
+  } values;
+  BSTR &automation_id = values.automation_id;
+  SAFEARRAY *&runtime_id = values.runtime_id;
   const bool facts =
       WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) && owner_pid > 0 &&
       static_cast<std::uint32_t>(owner_pid) == expected_pid &&
@@ -8627,10 +8695,6 @@ bool ComputeWindowsControlSignature(IUIAutomationElement *element,
       WindowsV1UiaRead(runtime_id, [&] { return element->GetRuntimeId(&runtime_id); }) && runtime_id != nullptr &&
       SafeArrayGetDim(runtime_id) == 1;
   if (!facts) {
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (runtime_id != nullptr)
-      SafeArrayDestroy(runtime_id);
     return false;
   }
   LONG lower = 0;
@@ -8645,27 +8709,18 @@ bool ComputeWindowsControlSignature(IUIAutomationElement *element,
           ? SafeArrayAccessData(runtime_id,
                                 reinterpret_cast<void **>(&runtime_values))
           : E_FAIL;
-  if (!bounded_shape || FAILED(accessed) || runtime_values == nullptr) {
-    if (SUCCEEDED(accessed))
-      SafeArrayUnaccessData(runtime_id);
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    SafeArrayDestroy(runtime_id);
-    return false;
-  }
+  values.accessed = SUCCEEDED(accessed);
+  if (!bounded_shape || FAILED(accessed) || runtime_values == nullptr) return false;
   std::string material =
       "computer-control-element-v1\n" + std::to_string(control_type) + "\n" +
       std::to_string(bounds.left) + "," + std::to_string(bounds.top) + "," +
       std::to_string(bounds.right) + "," + std::to_string(bounds.bottom) + "\n";
   for (LONG index = lower; index <= upper; ++index)
     material += std::to_string(runtime_values[index - lower]) + ",";
-  SafeArrayUnaccessData(runtime_id);
-  SafeArrayDestroy(runtime_id);
   material += "\n";
   if (automation_id != nullptr) {
     material += Utf8FromWide(
         std::wstring_view(automation_id, SysStringLen(automation_id)));
-    SysFreeString(automation_id);
   }
   *signature = Sha256String(material);
   return signature->size() == 64;
@@ -8812,6 +8867,7 @@ bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
   if (signature == nullptr)
     return false;
   const WindowsV1UiaPath path;
+  if (!WindowsV1UiaMayCall()) return false;
   IUIAutomation *automation = nullptr;
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
@@ -10549,8 +10605,8 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   WindowsDialogSetSnapshot dialogs;
   // The UI Automation reads of the whole observe share one budget and the cancellation epoch (see the
   // bounds above). The reason of a read that did not complete says why (WindowsV1ObserveReason).
-  const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch,
-      queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire)));
+  const auto observe_stop_serial = queued_stop_serial.value_or(WindowsValidationFrameStopSerial());
+  const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, observe_stop_serial);
   const auto unreadable = [&uia_path](const char *otherwise) -> const char * {
     if (uia_path.Stop() == WindowsV1UiaStop::kBudget) {
       // Only a count (never a label or a text): how far the walks got before the budget was spent.
@@ -10598,6 +10654,10 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   const WindowsUiaRisk focused_risk =
       ClassifyWindowsFocusedElement(session.pid);
+  if (!WindowsValidationStillCurrent(session.cancel_epoch, observe_stop_serial)) {
+    *reason = "observation_stale";
+    return false;
+  }
   // The focused element's signature is read whatever its classification says, as before #820: a live
   // focus that is only unclassified (deeper than the climb, say) keeps its signature, so its key / type
   // is refused later as target_unclassified, not as a focus that moved. After a timeout or a Cancel in

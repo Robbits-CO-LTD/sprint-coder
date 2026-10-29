@@ -367,6 +367,23 @@ launch-capable discovery requires its own terminal evidence. The Controller sett
 start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed
 stop separately. Old overlay completions cannot unregister a newer session's shortcut.
 
+Windows UIA tree observation and point/focused classification share a separate single-flight read
+worker. It owns its MTA, COM objects and temporary values; only tree/risk/signature values return to
+the consumer. The consumer checks the original frame Stop serial, cancellation epoch, parent death,
+inherited absolute deadline and the existing 470 ms first-contact limit every 20 ms. Stop and result
+adoption use the same mutex. Abandoned results cannot be adopted, and the slot remains occupied until
+COM cleanup finishes; another read cannot spawn another worker while it is occupied.
+
+Observation keeps its early timeout rejection. Classification preserves partial risk flags and an
+empty signature after a worker-side timeout, adopting them with the first stop reason only after
+cleanup. Consumer-side cancellation or expiry abandons that result even during Release or
+CoUninitialize. Busy, allocation/initialization failure or a measurement exception stops the calling
+classification UIA path with its timeout reason, including a following focus signature read. Slow nonempty property values and deep trees retain their existing semantics; there
+is no new short whole-classification deadline. Consequently, a stalled noncontact property or cleanup
+without Stop or an inherited deadline is still a remaining #820 boundary. Binding capture, standalone
+focus signatures and semantic target resolution also need their own boundedness verification. Native
+held-call tests establish cancellation and resource ownership, not normal GUI or real-AI acceptance.
+
 These ownership guarantees do not make every Windows V1 filesystem or UIA operation bounded. If
 native cannot drain, the deadline still reports an unconfirmed stop and retains quarantine. The
 remaining V1 boundedness and real desktop acceptance are separate requirements of #940/#820.

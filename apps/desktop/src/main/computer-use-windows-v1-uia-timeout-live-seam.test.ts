@@ -280,9 +280,10 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
     // began), and only the observe has a budget, with the session's epoch.
-    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(8);
+    // The two classification entry points now share the read worker's inherited outer scope.
+    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(6);
     expect(c).toContain(
-      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire)));',
+      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, observe_stop_serial);',
     );
     expect(c).toContain(
       'WindowsV1UiaPath() : WindowsV1UiaPath(std::chrono::milliseconds::zero(), cancellation_epoch.load(std::memory_order_acquire)) {}',
@@ -554,10 +555,20 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'const auto decision = ClassifyNativePreflightFacts( {risk.metadata_complete, risk.classified, risk.secure, risk.high_impact});',
     );
-    for (const name of ['ClassifyWindowsPoint(', 'ClassifyWindowsFocusedElement(']) {
+    for (const name of [
+      'ClassifyWindowsPointOnWorker(',
+      'ClassifyWindowsFocusedElementOnWorker(',
+    ]) {
       const at = host.indexOf(`WindowsUiaRisk ${name}`);
       expect(at, name).toBeGreaterThan(0);
       expect(host.slice(at, at + 1700), name).toContain('return {};');
+    }
+    for (const name of ['ClassifyWindowsPoint(', 'ClassifyWindowsFocusedElement(']) {
+      const at = host.indexOf(`WindowsUiaRisk ${name}`);
+      const body = host.slice(at, host.indexOf('\n}', at));
+      expect(body).toContain('WindowsUiaRisk result;');
+      expect(body).toContain('RunWindowsUiaRead<');
+      expect(body).toContain('return result;');
     }
     expect(host).toContain('*reason = "accessibility_unavailable";');
   });
@@ -864,6 +875,7 @@ template <class Call> long long WhileStuck(HWND window, UINT message, WPARAM w, 
   call();
   const long long elapsed = Millis(start);
   Sleep(3300);
+  SeamCheck(!WindowsUiaReadWorkerRunning().load(), "owned_provider_recovered_and_read_worker_retired");
   return elapsed;
 }
 
