@@ -234,6 +234,37 @@ function instrumentedHost(): string {
     '(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, &root) : automation->ElementFromHandle(window, &root))',
   );
   source = source.slice(0, semanticFrom) + semantic + source.slice(semanticTo);
+  const semanticRunFrom = source.indexOf(
+    'bool DispatchWindowsSemanticAction(const WindowsSession &session,',
+  );
+  const semanticRunTo = source.indexOf('\nstd::string ResponseCacheKey(', semanticRunFrom);
+  let semanticRun = source.slice(semanticRunFrom, semanticRunTo);
+  semanticRun = replaceOnce(
+    semanticRun,
+    'DispatchWindowsSemanticActionOnWorker(*work, &accepted, &reason)',
+    'Sc820SemanticMeasure(*work, &accepted, &reason)',
+  );
+  semanticRun = replaceOnce(
+    semanticRun,
+    'RevalidateWindowsTarget(session, expected, expected_epoch)',
+    'Sc820SemanticValidate(session, expected, expected_epoch)',
+  );
+  semanticRun = replaceOnce(
+    semanticRun,
+    '~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }',
+    '~Apartment() { if (SUCCEEDED(result)) Sc820ReadCoUninitialize(); }',
+  );
+  source = source.slice(0, semanticRunFrom) + semanticRun + source.slice(semanticRunTo);
+  const claimFrom = source.indexOf('template <class Call> HRESULT InvokeWindowsSemanticInput(');
+  const claimTo = source.indexOf('struct WindowsSemanticWork', claimFrom);
+  let claim = source.slice(claimFrom, claimTo);
+  claim = replaceOnce(
+    claim,
+    '  auto *pending = windows_semantic_operation;',
+    '  Sc820SemanticBeforeClaim();\n  auto *pending = windows_semantic_operation;',
+  );
+  claim = replaceOnce(claim, '  return call();', '  Sc820SemanticBeforeApi();\n  return call();');
+  source = source.slice(0, claimFrom) + claim + source.slice(claimTo);
   const observeFrom = source.indexOf('bool ObserveWindowsWindow(');
   const observeTo = source.indexOf('\nstruct ArtifactReadPending', observeFrom);
   if (observeFrom < 0 || observeTo < observeFrom) throw new Error('Observe boundary changed');
@@ -398,6 +429,13 @@ function instrumentedHost(): string {
         return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_validation_probe_failed"));
       }
     }
+    if (operation == "sc820_semantic_lifecycle_probe") {
+      try {return Respond(pipe,request,MessageType::kProbeResult,Sc820SemanticLifecycleProbe(request,metadata,queued_stop_serial));}
+      catch(const std::exception& error){return Respond(pipe,request,MessageType::kProbeResult,ErrorPayload(error.what()));}
+    }
+    if (operation == "sc820_semantic_status_probe") {
+      return Respond(pipe,request,MessageType::kProbeResult,Sc820SemanticStatusProbe(request));
+    }
     if (operation == "sc820_semantic_stall_probe") {
       try {return Respond(pipe,request,MessageType::kProbeResult,Sc820SemanticStallProbe(metadata,queued_stop_serial));}
       catch(const std::exception& error){return Respond(pipe,request,MessageType::kError,ErrorPayload(error.what()));}
@@ -550,6 +588,7 @@ function run(file: string, args: string[], timeout: number, verbatim = false) {
 }
 
 const program = String.raw`
+#include "computer_use_protocol.h"
 #include <windows.h>
 #include <ole2.h>
 #include <UIAutomation.h>
@@ -559,6 +598,14 @@ const program = String.raw`
 namespace {
 struct LockedWindowsExecutable;
 struct WindowsSession;
+struct WindowsSemanticWork;
+bool Sc820SemanticMeasure(const WindowsSemanticWork&,bool*,std::string*);
+bool Sc820SemanticValidate(const WindowsSession&,const RECT&,std::uint64_t);
+void Sc820SemanticBeforeClaim();
+void Sc820SemanticBeforeApi();
+std::string Sc820SemanticLifecycleProbe(const sprint_coder::computer_use::Frame&,const std::string&,std::optional<std::uint64_t>);
+std::string Sc820SemanticStatusProbe(const sprint_coder::computer_use::Frame&);
+
 struct WindowsDialogSetSnapshot;
 struct WindowsControlBindings;
 struct WindowsUiaRisk;
@@ -1179,6 +1226,10 @@ void Sc820AutomationCreated(){uia_factory_calls.fetch_add(1);}
 void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 std::string classification_detail;
+std::string semantic_lifecycle;
+std::atomic<unsigned> semantic_method_calls{0}, semantic_validation_calls{0};
+std::atomic<bool> semantic_validation_wrong_thread{false};
+
 std::atomic<unsigned> binding_acquired_refs{0};
 bool Sc820BindingTracking(){return classification_detail.starts_with("binding-")&&windows_uia_read_progress!=nullptr;}
 
@@ -1303,6 +1354,7 @@ HRESULT Sc820DestroyArray(SAFEARRAY* value){
 }
 void Sc820ReadCoUninitialize(){
   const bool tracked=classification_contact_held.load()&&windows_uia_read_progress!=nullptr;
+  if(windows_semantic_operation!=nullptr&&semantic_lifecycle=="cleanup-close")Sc820DetailGate();
   if(tracked&&Sc820BindingTracking()){
     if(classification_release_returns!=binding_acquired_refs)classification_bad_cleanup=true;
     std::lock_guard lock(classification_resource_mutex);
@@ -1344,6 +1396,51 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   const bool ok=ObserveWindowsWindow(session,&response,&binary,&reason,stop_serial);
   observe_signature_mode=false;
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
+}
+
+void Sc820SemanticBeforeClaim(){if(semantic_lifecycle=="preclaim-close")Sc820DetailGate();}
+void Sc820SemanticBeforeApi(){if(semantic_lifecycle=="claimed-gap-close")Sc820DetailGate();}
+bool Sc820SemanticValidate(const WindowsSession& session,const RECT& bounds,std::uint64_t epoch){
+  if(semantic_lifecycle.empty())return RevalidateWindowsTarget(session,bounds,epoch);
+  semantic_validation_calls.fetch_add(1);
+  if(GetCurrentThreadId()!=rca_consumer_thread_id.load())semantic_validation_wrong_thread=true;
+  DWORD owner=0;Require(GetWindowThreadProcessId(fixture_windows[0],&owner)!=0&&owner==session.pid,"semantic_validation_owned_window");
+  if(semantic_lifecycle=="validation-close"){
+    const auto before=WindowsTargetListControl().stop_serial.load();SetEvent(gate_entered);
+    const auto until=GetTickCount64()+5000;
+    while(WindowsTargetListControl().stop_serial.load()==before&&GetTickCount64()<until)Sleep(1);
+    return false;
+  }
+  return true;
+}
+bool Sc820SemanticMeasure(const WindowsSemanticWork& work,bool* accepted,std::string* reason){
+  if(semantic_lifecycle.empty())return DispatchWindowsSemanticActionOnWorker(work,accepted,reason);
+  Require(GetCurrentThreadId()!=rca_consumer_thread_id.load(),"semantic_measure_runs_on_worker");
+  if(!AwaitWindowsSemanticValidation()){*reason="stale_target";return false;}
+  const auto result=InvokeWindowsSemanticInput([&]() -> HRESULT {
+    semantic_method_calls.fetch_add(1);
+    if(semantic_lifecycle=="input-close"||semantic_lifecycle=="input-cancel")Sc820DetailGate();
+    if(semantic_lifecycle=="input-exception")throw std::runtime_error("controlled input exception");
+    return S_OK;
+  },accepted);
+  if(FAILED(result)){*reason="semantic_action_failed";return false;}return true;
+}
+std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& metadata,std::optional<std::uint64_t> serial){
+  const auto* owner=FindWindowsSession(request);Require(owner!=nullptr,"semantic_control_owner");
+  const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,serial);
+  WindowsSession session;session.session_id=owner->session_id;session.input_api_attempts=owner->input_api_attempts;
+  session.pid=fixture_pids[0];session.window=fixture_windows[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
+  bool accepted=false;std::string reason;
+  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke","{\"targetId\":\"controlled\"}",&accepted,&reason);
+  return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
+    ",\"attempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
+}
+
+std::string Sc820SemanticStatusProbe(const Frame& request){
+  const auto* session=FindWindowsSession(request);
+  return std::string("{\"present\":")+(session?"true":"false")+",\"closedRecord\":"+
+    (closed_sessions.contains(FrameIdKey(request.header.session_id))?"true":"false")+",\"epoch\":"+
+    std::to_string(session?session->cancel_epoch:0)+"}";
 }
 
 std::string Sc820SemanticStallProbe(const std::string& metadata,std::optional<std::uint64_t> stop_serial){
@@ -1642,6 +1739,7 @@ struct RcaRun {
   std::mutex replies_mutex;
   std::condition_variable replies_ready;
   std::unordered_map<unsigned, Frame> replies;
+  std::unordered_map<unsigned, Frame> last_replies;
   std::unordered_map<unsigned, unsigned> reply_counts;
   std::atomic<bool> watchdog_fired{false};
   std::atomic<bool> serve_ok{false};
@@ -1833,6 +1931,7 @@ struct RcaRun {
         {
           std::lock_guard<std::mutex> lock(replies_mutex);
           ++reply_counts[frame.header.request_id.bytes[0]];
+          last_replies.insert_or_assign(frame.header.request_id.bytes[0],frame);
           replies.emplace(frame.header.request_id.bytes[0], std::move(frame));
         }
         replies_ready.notify_all();
@@ -1855,12 +1954,18 @@ struct RcaRun {
     return replies_ready.wait_for(lock, std::chrono::milliseconds(milliseconds), [&] { return replies.contains(id); });
   }
 
+  bool WaitReplies(unsigned id,unsigned count,DWORD milliseconds){
+    std::unique_lock lock(replies_mutex);
+    return replies_ready.wait_for(lock,std::chrono::milliseconds(milliseconds),[&]{return reply_counts[id]>=count;});
+  }
+
   bool Receipt(unsigned id, MessageType type, std::string_view expected, std::uint64_t epoch,
                std::uint8_t session_byte = 7, std::string_view session_name = "sc940-control",
-               std::uint64_t expected_attempts = 0) {
+               std::uint64_t expected_attempts = 0, bool latest = false) {
     std::lock_guard<std::mutex> lock(replies_mutex);
-    const auto found = replies.find(id);
-    if (found == replies.end()) return false;
+    const auto& records=latest?last_replies:replies;
+    const auto found = records.find(id);
+    if (found == records.end()) return false;
     const Frame &frame = found->second;
     const std::string body(frame.metadata.begin(), frame.metadata.end());
     std::string result, session;
@@ -3326,6 +3431,48 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+int DiagnoseSemanticLifecycle(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
+  const bool cancel=semantic_lifecycle=="input-cancel";
+  const bool in_flight=semantic_lifecycle=="input-close"||cancel||semantic_lifecycle=="claimed-gap-close";
+  const bool no_stop=semantic_lifecycle=="success"||semantic_lifecycle=="input-exception";
+  const bool no_input=semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close";
+  RcaRun run;ULONGLONG stop_ms=0;
+  try {
+    run.StartFixture();run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"semantic_life_handshake");
+    classification_contact_held=true;
+    run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_semantic_lifecycle_probe\"}");
+    if(!no_stop){
+      Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"semantic_life_phase_entered");
+      const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000)&&run.Wait(3,1000),"semantic_life_stop_reply");stop_ms=GetTickCount64()-started;
+      if(in_flight){
+        Require(run.Error(3,"semantic_input_in_flight"),"semantic_life_no_false_drained_receipt");
+        run.Send(MessageType::kProbe,7,"{\"operation\":\"sc820_semantic_status_probe\"}");std::string status;bool present=false,closed=true;std::uint64_t epoch=0;
+        Require(run.Wait(7,1000)&&run.ProbeBody(7,&status)&&ReadOptionalJsonBoolean(status,"present",&present)&&present&&ReadOptionalJsonBoolean(status,"closedRecord",&closed)&&!closed&&ReadJsonUint64(status,"epoch",&epoch)&&epoch==1,"semantic_life_nonterminal_state_preserved");
+      }else Require(run.Receipt(3,MessageType::kProbeResult,"closed",2,7,"sc940-control",no_input?0:1),"semantic_life_drained_without_active_api");
+      if(semantic_lifecycle=="claimed-gap-close")Require(semantic_method_calls==0,"semantic_life_claim_precedes_api_entry");
+    }
+    std::string body,reason;bool ok=false,accepted=false;std::uint64_t attempts=99;
+    Require(run.Wait(2,1000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&ReadJsonUint64(body,"attempts",&attempts)&&ReadJsonString(body,"reason",&reason),"semantic_life_result_shape");
+    Require(accepted==!no_input&&attempts==(no_input?0:1)&&ok==(semantic_lifecycle=="success"),"semantic_life_result_and_counter");
+    if(in_flight)Require(reason=="semantic_input_in_flight","semantic_life_unknown_dispatch");
+    if(semantic_lifecycle=="cleanup-close"||semantic_lifecycle=="input-exception")Require(reason=="input_not_confirmed","semantic_life_returned_input_not_success");
+    SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000),"semantic_life_worker_drained");
+    Require(run.ReplyCount(2)==1&&semantic_method_calls==(no_input?0:1)&&classification_apartments==1&&semantic_validation_calls==1&&!semantic_validation_wrong_thread.load(),"semantic_life_single_input_and_consumer_validation");
+    if(in_flight){
+      // Same request id/epoch must be retryable after a nonterminal error, not cached forever.
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(run.WaitReplies(3,2,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2,7,"sc940-control",1,true),"semantic_life_uncached_stop_retry");
+    }
+    if(cancel||no_stop){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3,7,"sc940-control",1),"semantic_life_final_close");}
+    classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"semantic_life_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":true,\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 // Direct resolver calls are worker-only controls. The public dispatch path must release the consumer.
 int DiagnoseSemanticStall(std::wstring_view scenario){
   const bool dispatch=scenario.starts_with(L"semantic-stall-dispatch-");
@@ -3916,6 +4063,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"semantic-life-")) return DiagnoseSemanticLifecycle(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"semantic-stall-")) return DiagnoseSemanticStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"binding-detail-")) return DiagnoseBindingDetails(argv[1]);
   if (std::wstring_view(argv[1]) == L"binding-healthy") return DiagnoseBindingHealthy();
@@ -4352,6 +4500,22 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('semantic-life-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            controlledSemanticMeasure: true,
+            actualGuiInput: false,
+            stopMs: expect.any(Number),
+            simulatedApiCalls: expect.any(Number),
+            consumerValidation: true,
+            terminalReceiptVerified: true,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('semantic-stall-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -4527,6 +4691,19 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('orders semantic input claims, consumer validation and nonterminal Stop receipts', async () => {
+    await runScenarios([
+      'semantic-life-success',
+      'semantic-life-validation-close',
+      'semantic-life-preclaim-close',
+      'semantic-life-claimed-gap-close',
+      'semantic-life-input-close',
+      'semantic-life-input-cancel',
+      'semantic-life-cleanup-close',
+      'semantic-life-input-exception',
+    ]);
+  }, 700_000);
 
   it('bounds semantic dispatch Stop while retaining worker-only resolver stall controls', async () => {
     await runScenarios([
