@@ -277,10 +277,54 @@ function instrumentedHost(): string {
     'Sc820RuntimeId(element, &runtime_id)',
   );
   signature = replaceOnce(signature, 'Sha256String(material)', 'Sc820SignatureHash(material)');
+  signature = replaceOnce(
+    signature,
+    'element->get_CurrentAutomationId(&automation_id)',
+    'Sc820BindingAutomationId(element, &automation_id)',
+  );
+  signature = signature.replaceAll('SysFreeString(', 'Sc820FreeBstr(');
   signature = signature
     .replaceAll('SafeArrayUnaccessData(runtime_id)', 'Sc820UnaccessArray(runtime_id)')
     .replaceAll('SafeArrayDestroy(runtime_id)', 'Sc820DestroyArray(runtime_id)');
   source = source.slice(0, signatureFrom) + signature + source.slice(signatureTo);
+  const bindingsFrom = source.indexOf('bool ReadWindowsElementTargetId(');
+  const bindingsTo = source.indexOf('\nbool RejectWindowsRisk(', bindingsFrom);
+  let bindings = source.slice(bindingsFrom, bindingsTo);
+  bindings = replaceOnce(
+    bindings,
+    'element->get_CurrentAutomationId(&automation_id)',
+    'Sc820BindingAutomationId(element, &automation_id)',
+  );
+  bindings = replaceOnce(
+    bindings,
+    'element->get_CurrentName(&name)',
+    'Sc820BindingName(element, &name)',
+  );
+  bindings = replaceOnce(
+    bindings,
+    'walker->GetFirstChildElement(element, &child)',
+    'Sc820BindingFirst(walker, element, &child)',
+  );
+  bindings = replaceOnce(
+    bindings,
+    'walker->GetNextSiblingElement(child, &next)',
+    'Sc820BindingNext(walker, child, &next)',
+  );
+  bindings = replaceOnce(
+    bindings,
+    'automation->get_RawViewWalker(&walker)',
+    'Sc820BindingWalker(automation, &walker)',
+  );
+  if (bindings.split('CreateWindowsV1Automation(&automation)').length !== 3)
+    throw new Error('Binding factory boundary changed');
+  bindings = bindings.replaceAll(
+    'CreateWindowsV1Automation(&automation)',
+    'Sc820BindingAutomation(&automation)',
+  );
+  bindings = bindings
+    .replace(/(next|child|root|walker|automation|element)->Release\(\)/gu, 'Sc820Release($1)')
+    .replaceAll('SysFreeString(', 'Sc820FreeBstr(');
+  source = source.slice(0, bindingsFrom) + bindings + source.slice(bindingsTo);
   const engineFrom = source.indexOf('bool RunWindowsUiaRead(');
   const engineTo = source.indexOf('struct WindowsUiaObservationResult', engineFrom);
   const engine = replaceOnce(
@@ -554,6 +598,12 @@ void Sc820AutomationCreated();
 void Sc820ReadWorkerStarted();
 bool Sc820ClassificationContactHeld();
 HRESULT Sc820HeldClassificationContact(IUIAutomation*, IUIAutomationElement**);
+HRESULT Sc820BindingAutomation(IUIAutomation**);
+HRESULT Sc820BindingWalker(IUIAutomation*, IUIAutomationTreeWalker**);
+HRESULT Sc820BindingFirst(IUIAutomationTreeWalker*, IUIAutomationElement*, IUIAutomationElement**);
+HRESULT Sc820BindingNext(IUIAutomationTreeWalker*, IUIAutomationElement*, IUIAutomationElement**);
+HRESULT Sc820BindingAutomationId(IUIAutomationElement*, BSTR*);
+HRESULT Sc820BindingName(IUIAutomationElement*, BSTR*);
 HRESULT Sc820ReadName(IUIAutomationElement*, BSTR*);
 HRESULT Sc820ReadParent(IUIAutomationTreeWalker*, IUIAutomationElement*, IUIAutomationElement**);
 ULONG Sc820Release(IUnknown*);
@@ -1114,6 +1164,9 @@ void Sc820AutomationCreated(){uia_factory_calls.fetch_add(1);}
 void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 std::string classification_detail;
+std::atomic<unsigned> binding_acquired_refs{0};
+bool Sc820BindingTracking(){return classification_detail.starts_with("binding-")&&windows_uia_read_progress!=nullptr;}
+
 std::atomic<unsigned> classification_gate_calls{0}, classification_release_calls{0}, classification_release_returns{0};
 std::atomic<unsigned> classification_bstr_allocs{0}, classification_bstr_frees{0};
 std::atomic<unsigned> classification_array_allocs{0}, classification_array_unlocks{0}, classification_array_frees{0};
@@ -1134,12 +1187,46 @@ HRESULT Sc820HeldClassificationContact(IUIAutomation* automation, IUIAutomationE
     DWORD owner=0;
     Require(fixture_count==1&&GetWindowThreadProcessId(fixture_windows[0],&owner)!=0&&owner==fixture_pids[0],"classification_contact_owned_window");
     const auto result=automation->ElementFromHandle(fixture_windows[0],output);
+    if(Sc820BindingTracking()&&*output!=nullptr)binding_acquired_refs.fetch_add(1);
     classification_returns.fetch_add(1);return result;
   }
   SetEvent(gate_entered);
   if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
   classification_returns.fetch_add(1);
   return kWindowsV1UiaTimeoutResult;
+}
+HRESULT Sc820BindingAutomation(IUIAutomation** output){
+  const auto result=CreateWindowsV1Automation(output);if(Sc820BindingTracking()&&*output)binding_acquired_refs.fetch_add(1);return result;
+}
+HRESULT Sc820BindingWalker(IUIAutomation* automation,IUIAutomationTreeWalker** output){
+  const auto result=automation->get_RawViewWalker(output);if(Sc820BindingTracking()&&*output)binding_acquired_refs.fetch_add(1);return result;
+}
+HRESULT Sc820BindingFirst(IUIAutomationTreeWalker* walker,IUIAutomationElement* element,IUIAutomationElement** output){
+  const auto result=walker->GetFirstChildElement(element,output);
+  if(Sc820BindingTracking()){
+    if(*output)binding_acquired_refs.fetch_add(1);
+    if(classification_detail=="binding-first-child-close"&&classification_gate_calls==0)Sc820DetailGate();
+  }return result;
+}
+HRESULT Sc820BindingNext(IUIAutomationTreeWalker* walker,IUIAutomationElement* element,IUIAutomationElement** output){
+  const auto result=walker->GetNextSiblingElement(element,output);
+  if(Sc820BindingTracking()){
+    if(*output)binding_acquired_refs.fetch_add(1);
+    if(classification_detail=="binding-sibling-cancel"&&classification_gate_calls==0)Sc820DetailGate();
+  }return result;
+}
+void Sc820BindingTrackBstr(BSTR value){
+  if(Sc820BindingTracking()&&value){std::lock_guard lock(classification_resource_mutex);Require(classification_bstrs.insert(value).second,"binding_bstr_unique_allocation");classification_bstr_allocs.fetch_add(1);}
+}
+HRESULT Sc820BindingAutomationId(IUIAutomationElement* element,BSTR* output){
+  const auto result=element->get_CurrentAutomationId(output);Sc820BindingTrackBstr(*output);return result;
+}
+HRESULT Sc820BindingName(IUIAutomationElement* element,BSTR* output){
+  const auto result=element->get_CurrentName(output);Sc820BindingTrackBstr(*output);
+  if(Sc820BindingTracking()){
+    if(classification_detail=="binding-name-cancel"&&classification_gate_calls==0)Sc820DetailGate();
+    if(classification_detail=="binding-name-exception")throw std::runtime_error("binding_name_fault");
+  }return result;
 }
 HRESULT Sc820ReadName(IUIAutomationElement* element,BSTR* output) {
   if(classification_contact_held.load()&&classification_detail.starts_with("name-")) {
@@ -1167,7 +1254,7 @@ HRESULT Sc820ReadParent(IUIAutomationTreeWalker* walker,IUIAutomationElement* el
 }
 ULONG Sc820Release(IUnknown* value){
   const bool tracked=classification_contact_held.load()&&windows_uia_read_progress!=nullptr;
-  if(tracked){const auto call=classification_release_calls.fetch_add(1);if(call==0&&(classification_detail=="release-cancel"||classification_detail=="success-release-cancel"))Sc820DetailGate();}
+  if(tracked){const auto call=classification_release_calls.fetch_add(1);if(call==0&&(classification_detail=="release-cancel"||classification_detail=="success-release-cancel"||classification_detail=="binding-release-cancel"))Sc820DetailGate();}
   const auto result=value->Release();if(tracked)classification_release_returns.fetch_add(1);return result;
 }
 HRESULT Sc820RuntimeId(IUIAutomationElement* element,SAFEARRAY** output){
@@ -1178,10 +1265,11 @@ HRESULT Sc820RuntimeId(IUIAutomationElement* element,SAFEARRAY** output){
   if(classification_contact_held.load()&&!classification_detail.empty()&&SUCCEEDED(result)&&*output!=nullptr){
     std::lock_guard lock(classification_resource_mutex);classification_arrays.insert(*output);classification_array_allocs.fetch_add(1);
   }
+  if(Sc820BindingTracking()&&classification_detail=="binding-runtime-close"&&classification_gate_calls==0)Sc820DetailGate();
   return result;
 }
 std::string Sc820SignatureHash(const std::string& value){
-  if(classification_contact_held.load()&&classification_detail=="signature-exception"){
+  if(classification_contact_held.load()&&(classification_detail=="signature-exception"||classification_detail=="binding-hash-exception")){
     classification_hash_faults.fetch_add(1);throw std::runtime_error("classification_hash_fault");
   }
   return Sha256String(value);
@@ -1200,7 +1288,12 @@ HRESULT Sc820DestroyArray(SAFEARRAY* value){
 }
 void Sc820ReadCoUninitialize(){
   const bool tracked=classification_contact_held.load()&&windows_uia_read_progress!=nullptr;
-  if(tracked&&(classification_detail=="apartment-close"||classification_detail=="success-apartment-close"))Sc820DetailGate();
+  if(tracked&&Sc820BindingTracking()){
+    if(classification_release_returns!=binding_acquired_refs)classification_bad_cleanup=true;
+    std::lock_guard lock(classification_resource_mutex);
+    if(!classification_bstrs.empty()||!classification_arrays.empty())classification_bad_cleanup=true;
+  }
+  if(tracked&&(classification_detail=="apartment-close"||classification_detail=="success-apartment-close"||classification_detail=="binding-apartment-close"))Sc820DetailGate();
   if(tracked&&classification_detail=="healthy-consecutive")Sleep(30);
   CoUninitialize();if(tracked)classification_apartments.fetch_add(1);
 }
@@ -1281,8 +1374,10 @@ std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::ui
     return std::string("{\"recovered\":")+(recovered?"true":"false")+"}";
   }
   WindowsControlBindings bindings;std::string signature;
+  // Controlled owned-window contact tests isolate lifetime from focus/coordinate acceptance.
+  const RECT signature_bounds=classification_detail.starts_with("binding-")?RECT{-1000000,-1000000,1000000,1000000}:RECT{0,0,100,100};
   const bool ok=kind=="bindings" ? CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&bindings)
-      : WindowsFocusedElementSignature(fixture_pids[0],RECT{0,0,100,100},&signature);
+      : WindowsFocusedElementSignature(fixture_pids[0],signature_bounds,&signature);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"empty\":"+
       (bindings.semantic.empty()&&bindings.visual.empty()&&signature.empty()?"true":"false")+
       ",\"canceled\":"+(path.Stop()==WindowsV1UiaStop::kCanceled?"true":"false")+
@@ -3198,6 +3293,41 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+int DiagnoseBindingDetails(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());
+  classification_detail="binding-"+label.substr(std::string("binding-detail-").size());
+  const bool cancel=scenario.ends_with(L"-cancel"),close=scenario.ends_with(L"-close"),stopping=cancel||close;
+  const bool signature=classification_detail=="binding-runtime-close"||classification_detail=="binding-hash-exception"||classification_detail=="binding-apartment-close";
+  const char* kind=signature?"signature":"bindings";RcaRun run;ULONGLONG stop_ms=0;
+  try {
+    run.StartFixture(false,true);run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"binding_detail_handshake");
+    classification_contact_held=true;
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+kind+"\"}");
+    if(stopping){
+      Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&classification_contacts==1&&classification_returns==1&&classification_gate_calls==1,"binding_detail_noncontact_held");
+      Require(!run.Wait(2,50),"binding_detail_result_not_published_while_held");
+      const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000)&&run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"binding_detail_stop_receipt");
+      stop_ms=GetTickCount64()-started;
+      Require(stop_ms<1000&&WindowsUiaReadWorkerRunning().load()&&classification_apartments==0,"binding_detail_worker_retained");
+    }
+    std::string body;bool ok=true,empty=false,canceled=false;
+    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadOptionalJsonBoolean(body,"canceled",&canceled)&&canceled==stopping,"binding_detail_refusal");
+    const auto original=body;
+    if(stopping){SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000),"binding_detail_drained");}
+    Require(run.ReplyCount(2)==1&&run.ProbeBody(2,&body)&&body==original,"binding_detail_no_late_reply");
+    Require(binding_acquired_refs>=2&&classification_release_calls==binding_acquired_refs&&classification_release_returns==binding_acquired_refs&&classification_apartments==1&&!classification_bad_cleanup.load(),"binding_detail_com_cleanup_once");
+    Require((signature||classification_bstr_allocs>0)&&classification_bstr_allocs==classification_bstr_frees&&classification_array_allocs==classification_array_frees,"binding_detail_values_freed");
+    if(classification_detail=="binding-hash-exception")Require(classification_hash_faults==1&&classification_array_unlocks==1&&classification_array_frees==1,"binding_detail_locked_array_cleanup");
+    {std::lock_guard lock(classification_resource_mutex);Require(classification_bstrs.empty()&&classification_arrays.empty(),"binding_detail_no_value_residue");}
+    if(!close){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"binding_detail_final_close");}
+    classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"binding_detail_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"ownedHwndContact\":true,\"normalUiaAcceptance\":false,\"stopMs\":"<<stop_ms<<",\"resourceCleanupVerified\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseBindingHealthy(){
   RcaRun run;
   try {
@@ -3718,6 +3848,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"binding-detail-")) return DiagnoseBindingDetails(argv[1]);
   if (std::wstring_view(argv[1]) == L"binding-healthy") return DiagnoseBindingHealthy();
   if (std::wstring_view(argv[1]).starts_with(L"binding-observe-")) return DiagnoseObserveSignatureStop(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"binding-read-")) return DiagnoseBindingStall(argv[1]);
@@ -4152,6 +4283,21 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('binding-detail-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            ownedHwndContact: true,
+            normalUiaAcceptance: false,
+            stopMs: expect.any(Number),
+            resourceCleanupVerified: true,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario === 'binding-healthy') {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -4290,6 +4436,19 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('cleans binding and signature COM values after noncontact Stop and measurement faults', async () => {
+    await runScenarios([
+      'binding-detail-name-cancel',
+      'binding-detail-first-child-close',
+      'binding-detail-sibling-cancel',
+      'binding-detail-runtime-close',
+      'binding-detail-release-cancel',
+      'binding-detail-apartment-close',
+      'binding-detail-name-exception',
+      'binding-detail-hash-exception',
+    ]);
+  }, 700_000);
 
   it('preserves owned binding values, duplicate IDs and focus signature values across sequential workers', async () => {
     await runScenarios(['binding-healthy']);
