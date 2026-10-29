@@ -344,6 +344,10 @@ function instrumentedHost(): string {
         return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_validation_probe_failed"));
       }
     }
+    if (operation == "sc820_binding_healthy_probe") {
+      try {return Respond(pipe, request, MessageType::kProbeResult, Sc820BindingHealthyProbe(queued_stop_serial));}
+      catch(const std::exception& error){return Respond(pipe,request,MessageType::kProbeResult,ErrorPayload(error.what()));}
+    }
     if (operation == "sc820_observe_signature_probe") {
       return Respond(pipe, request, MessageType::kProbeResult, Sc820ObserveSignatureProbe(queued_stop_serial));
     }
@@ -506,6 +510,7 @@ bool Sc820ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*);
 WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t>);
+std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t>);
 
 struct WindowsValidationWork;
 struct WindowsFileIdentity;
@@ -1233,6 +1238,39 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
 }
 
+std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t> stop_serial){
+  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,1,stop_serial);
+  struct Objects {IUIAutomation* automation=nullptr;IUIAutomationElement* element=nullptr;
+    ~Objects(){if(element)element->Release();if(automation)automation->Release();}} objects;
+  Require(SUCCEEDED(CreateWindowsV1Automation(&objects.automation))&&objects.automation,"binding_healthy_automation");
+  Require(SUCCEEDED(objects.automation->ElementFromHandle(fixture_windows[0],&objects.element))&&objects.element,"binding_healthy_root");
+  RECT bounds{};Require(SUCCEEDED(objects.element->get_CurrentBoundingRectangle(&bounds)),"binding_healthy_bounds");
+  std::string duplicate_id;unsigned duplicate_controls=0;
+  for(HWND child=GetWindow(fixture_windows[0],GW_CHILD);child!=nullptr;child=GetWindow(child,GW_HWNDNEXT)){
+    if(GetDlgCtrlID(child)!=901)continue;
+    DWORD owner=0;Require(GetWindowThreadProcessId(child,&owner)!=0&&owner==fixture_pids[0],"binding_healthy_child_owner");
+    struct Element {IUIAutomationElement* value=nullptr;~Element(){if(value)value->Release();}} element;
+    Require(SUCCEEDED(objects.automation->ElementFromHandle(child,&element.value))&&element.value,"binding_healthy_child");
+    std::string id;Require(ReadWindowsElementTargetId(element.value,&id)&&!id.empty(),"binding_healthy_child_id");
+    if(duplicate_controls==0)duplicate_id=id;else Require(id==duplicate_id,"binding_healthy_duplicate_id");
+    ++duplicate_controls;
+  }
+  Require(duplicate_controls==2,"binding_healthy_duplicate_controls");
+  WindowsControlBindings baseline,first,second;
+  Require(CaptureWindowsControlBindingsOnWorker(fixture_pids[0],fixture_windows[0],&baseline),"binding_healthy_direct_capture");
+  const auto nodes=path.Nodes();Require(nodes>=3&&baseline.visual.size()>=3&&!baseline.semantic.contains(duplicate_id),"binding_healthy_duplicate_omitted");
+  Require(CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&first)&&
+          CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&second),"binding_healthy_worker_capture");
+  Require(first.semantic==baseline.semantic&&second.semantic==baseline.semantic&&first.visual==baseline.visual&&second.visual==baseline.visual&&path.Nodes()==3*nodes,"binding_healthy_values_and_cumulative_nodes");
+  std::string direct_signature,first_signature,second_signature;
+  Require(WindowsFocusedElementSignatureOnWorker(fixture_pids[0],bounds,&direct_signature)&&
+          WindowsFocusedElementSignature(fixture_pids[0],bounds,&first_signature)&&
+          WindowsFocusedElementSignature(fixture_pids[0],bounds,&second_signature)&&direct_signature.size()==64&&
+          direct_signature==first_signature&&direct_signature==second_signature,"binding_healthy_signature_equivalence");
+  Require(path.Stop()==WindowsV1UiaStop::kNone&&!WindowsUiaReadWorkerRunning().load(),"binding_healthy_worker_retired");
+  return "{\"equivalent\":true,\"duplicateOmitted\":true,\"nodes\":"+std::to_string(nodes)+"}";
+}
+
 std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
   Require(fixture_count==1,"binding_owned_fixture");
   std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="bindings"||kind=="signature"||kind=="recovery"),"binding_probe_kind");
@@ -1368,7 +1406,7 @@ BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
 
 struct FixtureReady { DWORD pid; UINT_PTR window; };
 
-int Fixture(const wchar_t *mapping_name, const wchar_t *event_name) {
+int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding_controls = false) {
   ScopedKernelHandle mapping(OpenFileMappingW(FILE_MAP_WRITE, FALSE, mapping_name));
   ScopedKernelHandle ready(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name));
   if (mapping.value == nullptr || ready.value == nullptr) return 2;
@@ -1382,6 +1420,11 @@ int Fixture(const wchar_t *mapping_name, const wchar_t *event_name) {
   HWND window = CreateWindowExW(0, wc.lpszClassName, L"RCA fixture", WS_OVERLAPPEDWINDOW,
                                 0, 0, 320, 200, nullptr, nullptr, wc.hInstance, nullptr);
   if (window == nullptr) { UnmapViewOfFile(shared); return 4; }
+  if(binding_controls)for(int i=0;i<2;++i){
+    HWND child=CreateWindowExW(0,L"BUTTON",L"Fixture duplicate",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+      20,20+40*i,150,25,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(901)),wc.hInstance,nullptr);
+    if(child==nullptr){UnmapViewOfFile(shared);DestroyWindow(window);return 5;}
+  }
   ShowWindow(window, SW_SHOWNOACTIVATE);
   shared->pid = GetCurrentProcessId();
   shared->window = reinterpret_cast<UINT_PTR>(window);
@@ -1511,7 +1554,7 @@ struct RcaRun {
     });
   }
 
-  void StartFixture(bool canonical_executable = false) {
+  void StartFixture(bool canonical_executable = false, bool binding_controls = false) {
     Require(fixture_count < fixture_pids.size(), "fixture_limit");
     const unsigned index = fixture_count;
     ScopedKernelHandle &child = children[index];
@@ -1537,6 +1580,7 @@ struct RcaRun {
     }
     std::wstring command = L"\"" + fixture_executable + L"\" fixture \"" +
                            mapping_name + L"\" \"" + event_name + L"\"";
+    if(binding_controls)command+=L" bindings";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -3154,6 +3198,25 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+int DiagnoseBindingHealthy(){
+  RcaRun run;
+  try {
+    run.StartFixture(false,true);run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"binding_healthy_handshake");
+    classification_contact_held=true;classification_detail="binding-healthy";
+    run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_binding_healthy_probe\"}");
+    std::string body,failure;bool equivalent=false,duplicate=false;std::uint64_t nodes=0;
+    Require(run.Wait(2,15000)&&run.ProbeBody(2,&body),"binding_healthy_reply");
+    if(ReadJsonString(body,"code",&failure))throw std::runtime_error(failure);
+    Require(ReadOptionalJsonBoolean(body,"equivalent",&equivalent)&&equivalent&&
+      ReadOptionalJsonBoolean(body,"duplicateOmitted",&duplicate)&&duplicate&&ReadJsonUint64(body,"nodes",&nodes)&&nodes>=3,"binding_healthy_result");
+    Require(uia_read_worker_starts==4&&classification_apartments==4&&!WindowsUiaReadWorkerRunning().load(),"binding_healthy_sequential_apartments");
+    run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");Require(run.Wait(3,1000)&&run.Receipt(3,MessageType::kProbeResult,"closed",2),"binding_healthy_close");
+    classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"binding_healthy_cleanup");
+    std::cout<<"{\"case\":\"binding-healthy\",\"ownedHwndContact\":true,\"normalFocusAcceptance\":false,\"equivalentValues\":true,\"duplicateOmitted\":true,\"nodes\":"<<nodes<<",\"sequentialWorkers\":4,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseObserveSignatureStop(std::wstring_view scenario){
   const bool cancel=scenario.ends_with(L"-cancel");const std::string label(scenario.begin(),scenario.end());RcaRun run;
   try {
@@ -3638,6 +3701,7 @@ int Diagnose(std::wstring_view scenario) {
 
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
+  if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"bindings") return Fixture(argv[2],argv[3],true);
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
@@ -3654,6 +3718,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]) == L"binding-healthy") return DiagnoseBindingHealthy();
   if (std::wstring_view(argv[1]).starts_with(L"binding-observe-")) return DiagnoseObserveSignatureStop(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"binding-read-")) return DiagnoseBindingStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"classification-detail-")) return DiagnoseClassificationDetails(argv[1]);
@@ -4087,6 +4152,23 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario === 'binding-healthy') {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            ownedHwndContact: true,
+            normalFocusAcceptance: false,
+            equivalentValues: true,
+            duplicateOmitted: true,
+            nodes: expect.any(Number),
+            sequentialWorkers: 4,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('binding-observe-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -4208,6 +4290,10 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('preserves owned binding values, duplicate IDs and focus signature values across sequential workers', async () => {
+    await runScenarios(['binding-healthy']);
+  }, 700_000);
 
   it('stops Observe after a canceled focus signature without entering capture', async () => {
     await runScenarios(['binding-observe-cancel', 'binding-observe-close']);
