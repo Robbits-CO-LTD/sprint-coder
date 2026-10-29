@@ -3041,8 +3041,9 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
 int DiagnoseClassificationStall(std::wstring_view scenario) {
   const bool focused = scenario.starts_with(L"classification-focused-");
   const bool cancel = scenario.ends_with(L"-cancel");
+  const bool timeout = scenario.ends_with(L"-timeout");
   const char *kind = focused ? "focused" : "point";
-  const std::string label = std::string("classification-") + kind + (cancel ? "-cancel" : "-close");
+  const std::string label = std::string("classification-") + kind + (timeout ? "-timeout" : cancel ? "-cancel" : "-close");
   RcaRun run;
   try {
     run.StartFixture();
@@ -3053,29 +3054,39 @@ int DiagnoseClassificationStall(std::wstring_view scenario) {
     run.Send(MessageType::kProbe, 2, std::string("{\"operation\":\"sc820_classification_probe\",\"kind\":\"") + kind + "\"}");
     Require(WaitForSingleObject(run.entered.value, 5000) == WAIT_OBJECT_0, "classification_gate_entered");
     Require(classification_contacts.load() == 1 && classification_returns.load() == 0, "classification_contact_pending");
-    const auto before = WindowsTargetListControl().stop_serial.load();
-    const ULONGLONG started = GetTickCount64();
-    Require(started-classification_contact_started.load()<300,"classification_stop_sent_before_contact_deadline");
-    if (cancel) run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
-    else run.Send(MessageType::kProbe, 3, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
-    Require(WaitStopSerial(before, 1000), "classification_stop_reader_progress");
-    Require(GetTickCount64()-classification_contact_started.load()<470,"classification_stop_latched_before_contact_deadline");
-    Require(run.Wait(3, 1000), "classification_stop_receipt_before_release");
-    const ULONGLONG held_ms = GetTickCount64() - started;
-    Require(held_ms<1000 && classification_returns.load() == 0 && WindowsUiaReadWorkerRunning().load() &&
-                uia_read_worker_starts.load()==1 && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-            "classification_stop_keeps_held_worker");
-    Require(run.Wait(2, 1000), "classification_result_before_release");
+    ULONGLONG held_ms=0;
+    if(timeout) {
+      Require(run.Wait(2,1000),"classification_contact_deadline_response");
+      held_ms=GetTickCount64()-classification_contact_started.load();
+      Require(held_ms>=400&&held_ms<1000&&classification_returns.load()==0&&WindowsUiaReadWorkerRunning().load()&&
+                  WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"classification_contact_deadline_before_release");
+    } else {
+      const auto before = WindowsTargetListControl().stop_serial.load();
+      const ULONGLONG started = GetTickCount64();
+      Require(started-classification_contact_started.load()<300,"classification_stop_sent_before_contact_deadline");
+      if (cancel) run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+      else run.Send(MessageType::kProbe, 3, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before, 1000), "classification_stop_reader_progress");
+      Require(GetTickCount64()-classification_contact_started.load()<470,"classification_stop_latched_before_contact_deadline");
+      Require(run.Wait(3, 1000), "classification_stop_receipt_before_release");
+      held_ms = GetTickCount64() - started;
+      Require(held_ms<1000 && classification_returns.load() == 0 && WindowsUiaReadWorkerRunning().load() &&
+                  uia_read_worker_starts.load()==1 && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
+              "classification_stop_keeps_held_worker");
+      Require(run.Wait(2, 1000), "classification_result_before_release");
+    }
     std::string body;
-    bool incomplete = false, empty = false, canceled = false;
+    bool incomplete = false, empty = false, canceled = false, timed=false;
     Require(run.ProbeBody(2, &body) && ReadOptionalJsonBoolean(body, "incomplete", &incomplete) && incomplete &&
                 ReadOptionalJsonBoolean(body, "signatureEmpty", &empty) && empty &&
-                ReadOptionalJsonBoolean(body,"canceled",&canceled) && canceled, "classification_stop_not_contact_timeout");
+                ReadOptionalJsonBoolean(body,"canceled",&canceled) && canceled==!timeout &&
+                ReadOptionalJsonBoolean(body,"timedOut",&timed) && timed==timeout, "classification_stop_and_deadline_causes_distinct");
     const std::string original_body=body;
     run.Send(MessageType::kProbe,5,std::string("{\"operation\":\"sc820_classification_probe\",\"kind\":\"")+kind+"\",\"fresh\":true}");
     bool busy_timeout=false;
     Require(run.Wait(5,1000)&&run.ProbeBody(5,&body)&&ReadOptionalJsonBoolean(body,"timedOut",&busy_timeout)&&busy_timeout &&
                 classification_contacts.load()==1&&uia_read_worker_starts.load()==1,"classification_busy_does_not_spawn");
+    if(timeout)run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
     Require(run.Wait(3, 5000) && run.Receipt(3, cancel ? MessageType::kDispatchResult : MessageType::kProbeResult,
                 cancel ? "canceled" : "closed", 2), "classification_late_stop_receipt");
     if (cancel) {
@@ -3094,8 +3105,8 @@ int DiagnoseClassificationStall(std::wstring_view scenario) {
     run.Cleanup();
     Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "classification_cleanup");
     std::cout << "{\"case\":\"" << label << "\",\"syntheticContactStall\":true,\"actualUiaLatencyMeasured\":false"
-              << ",\"readerLatched\":true,\"receiptBeforeRelease\":true,\"heldMs\":" << held_ms
-              << ",\"lateReceiptConfirmed\":true,\"canceledByStop\":true,\"lateResultDiscarded\":true,\"slotRecovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
+              << ",\"readerLatched\":"<<(timeout?"false":"true")<<",\"receiptBeforeRelease\":true,\"heldMs\":" << held_ms
+              << ",\"lateReceiptConfirmed\":true,\"canceledByStop\":"<<(timeout?"false":"true")<<",\"contactDeadline\":"<<(timeout?"true":"false")<<",\"lateResultDiscarded\":true,\"slotRecovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
               << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
   } catch (const std::exception &error) {
@@ -3902,9 +3913,10 @@ describe.skipIf(
             case: scenario,
             syntheticContactStall: true,
             actualUiaLatencyMeasured: false,
-            readerLatched: true,
+            readerLatched: !scenario.endsWith('-timeout'),
             receiptBeforeRelease: true,
-            canceledByStop: true,
+            canceledByStop: !scenario.endsWith('-timeout'),
+            contactDeadline: scenario.endsWith('-timeout'),
             lateResultDiscarded: true,
             slotRecovered: true,
             heldMs: expect.any(Number),
@@ -3995,6 +4007,8 @@ describe.skipIf(
       'classification-point-close',
       'classification-focused-cancel',
       'classification-focused-close',
+      'classification-point-timeout',
+      'classification-focused-timeout',
     ]);
   }, 700_000);
 
