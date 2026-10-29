@@ -1239,11 +1239,13 @@ grant はグローバル・無期限を推奨（§6.5）だが、1 度使った�
 
 ### #820: UIA 読取りの停止境界
 
-tree 観測と point／focused 分類は、I/O 測定とは別の単一 UIA read worker 枠を共有する。worker は MTA、COM 参照、BSTR、SAFEARRAY を所有し、consumer には値だけを返す。consumer は元の frame の stop serial、epoch、親 process、既存の絶対期限、470 ms の初回 contact を20 ms間隔で確認する。Stop と結果採用を同じ mutex で順序付け、Release／CoUninitialize が終わるまで枠を再利用しない。待機を中止しても thread を強制終了せず、遅い結果を採用しない。
+tree 観測、point／focused 分類、control bindings、単独の focused signature は、I/O 測定とは別の単一 UIA read worker 枠を共有する。worker は MTA、COM 参照、BSTR、SAFEARRAY を所有し、consumer には値だけを返す。consumer は元の frame の stop serial、epoch、親 process、既存の絶対期限、470 ms の初回 contact を20 ms間隔で確認する。Stop と結果採用を同じ mutex で順序付け、Release／CoUninitialize が終わるまで枠を再利用しない。待機を中止しても thread を強制終了せず、遅い結果を採用しない。
 
-観測は worker の timeout を早期拒否する。分類は部分的な secure／high-impact 情報と空の signature を失わないよう、worker 内の最初の停止理由と結果を cleanup 後にまとめて採用する。ただし consumer 側の Stop／期限は cleanup 中でも待機を中止する。分類の busy／確保・起動失敗／測定中の例外は timeout 理由で呼出し元の UIA path を止め、続く focus signature の UIA 呼出しも拒否する。observe は分類直後に外部停止を確認し、その時点で停止済みなら後続の signature／capture に進まない。後続の同期 signature 内で起きる停止は、下記の残件として扱う。
+観測は worker の timeout を早期拒否する。分類は部分的な secure／high-impact 情報と空の signature を失わないよう、worker 内の最初の停止理由と結果を cleanup 後にまとめて採用する。ただし consumer 側の Stop／期限は cleanup 中でも待機を中止する。分類の busy／確保・起動失敗／測定中の例外は timeout 理由で呼出し元の UIA path を止め、続く focus signature の UIA 呼出しも拒否する。observe は分類直後と focused signature の待機直後に外部停止を確認し、その時点で停止済みなら後続の signature／capture に進まない。
 
-この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、bindings、単独の focused signature、semantic target の同期経路、通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
+bindings／単独 signature は観測と同じ早期拒否policyを使い、完全成功時だけ結果を採用する。失敗時はcallerの出力を変更しない。MSVCではcontainerのmove構築が確保を伴うため、bindingsは通常heapの値を所有するunique_ptrとして受け取り、engineのmutex解放後にnoexcept swapと旧値破棄を行う。COMやSession参照はthreadを跨がせない。重複semantic IDの除外、visual集合、signature材料、累積node数は維持する。busy／読取失敗時のpreflight・dispatchは既存のfocused_target_changedで拒否し、入力やticket発行へ進まない。元frameのserialを使うため、同じglobal epochのCloseでも古い要求からworkerを作らない。
+
+この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、semantic target／actionの同期経路、capture自体の待機、通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
 
 ## 付録: 参照した主なコード位置
 

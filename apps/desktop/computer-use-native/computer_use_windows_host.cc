@@ -8735,16 +8735,18 @@ bool ReadWindowsElementTargetId(IUIAutomationElement *element,
                                 std::string *target_id) {
   if (element == nullptr || target_id == nullptr)
     return false;
-  BSTR automation_id = nullptr;
-  BSTR name = nullptr;
+  struct Labels {
+    BSTR automation_id = nullptr, name = nullptr;
+    ~Labels() {
+      if (automation_id != nullptr) SysFreeString(automation_id);
+      if (name != nullptr) SysFreeString(name);
+    }
+  } labels;
+  BSTR &automation_id = labels.automation_id, &name = labels.name;
   const bool read =
       WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
       WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); });
   if (!read) {
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (name != nullptr)
-      SysFreeString(name);
     return false;
   }
   const std::string automation_utf8 =
@@ -8760,16 +8762,8 @@ bool ReadWindowsElementTargetId(IUIAutomationElement *element,
        !automation_utf8.empty()) &&
       (name == nullptr || SysStringLen(name) == 0 || !name_utf8.empty());
   if (!text_converted) {
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (name != nullptr)
-      SysFreeString(name);
     return false;
   }
-  if (automation_id != nullptr)
-    SysFreeString(automation_id);
-  if (name != nullptr)
-    SysFreeString(name);
   *target_id = automation_utf8.empty() ? name_utf8 : automation_utf8;
   return target_id->size() <= 128;
 }
@@ -8805,45 +8799,56 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
     }
   }
 
-  IUIAutomationElement *child = nullptr;
+  struct Children {
+    IUIAutomationElement *child = nullptr, *next = nullptr;
+    ~Children() {
+      if (next != nullptr) next->Release();
+      if (child != nullptr) child->Release();
+    }
+  } children;
+  IUIAutomationElement *&child = children.child, *&next = children.next;
   const HRESULT first_result =
       WindowsV1UiaCall(child, [&] { return walker->GetFirstChildElement(element, &child); });
   if (!WindowsV1UiaOk(first_result)) {
-    if (child != nullptr)
-      child->Release();
     return false;
   }
   while (child != nullptr) {
     if (!CollectWindowsControlBindings(child, walker, expected_pid, depth + 1, nodes,
                                        bindings, duplicate_targets)) {
-      child->Release();
       return false;
     }
-    IUIAutomationElement *next = nullptr;
+    next = nullptr;
     const HRESULT next_result =
         WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); });
     child->Release();
-    if (!WindowsV1UiaOk(next_result)) {
-      if (next != nullptr)
-        next->Release();
-      return false;
-    }
+    child = nullptr;
+    if (!WindowsV1UiaOk(next_result)) return false;
     child = next;
+    next = nullptr;
   }
   return true;
 }
 
-bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
+bool CaptureWindowsControlBindingsOnWorker(std::uint32_t pid, HWND window,
                                   WindowsControlBindings *bindings) {
   if (bindings == nullptr)
     return false;
-  const WindowsV1UiaPath path;
-  IUIAutomation *automation = nullptr;
+  struct Objects {
+    IUIAutomation *automation = nullptr;
+    IUIAutomationElement *root = nullptr;
+    IUIAutomationTreeWalker *walker = nullptr;
+    ~Objects() {
+      if (root != nullptr) root->Release();
+      if (walker != nullptr) walker->Release();
+      if (automation != nullptr) automation->Release();
+    }
+  } objects;
+  IUIAutomation *&automation = objects.automation;
+  IUIAutomationElement *&root = objects.root;
+  IUIAutomationTreeWalker *&walker = objects.walker;
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return false;
-  IUIAutomationElement *root = nullptr;
-  IUIAutomationTreeWalker *walker = nullptr;
   const bool initialized =
       WindowsV1UiaOk(WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); })) &&
       root != nullptr &&
@@ -8853,38 +8858,72 @@ bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
   const bool complete =
       initialized && CollectWindowsControlBindings(root, walker, pid, 0, &nodes, bindings,
                                                    &duplicate_targets);
-  if (root != nullptr)
-    root->Release();
-  if (walker != nullptr)
-    walker->Release();
-  automation->Release();
   return complete && nodes > 0 && nodes <= 5'000;
+}
+
+bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
+                                  WindowsControlBindings *bindings) {
+  if (bindings == nullptr) return false;
+  // MSVC containers can allocate in a move constructor. Publish only ownership under the
+  // engine's locks; swap/destroy the caller's old value after those locks have been released.
+  std::unique_ptr<WindowsControlBindings> measured;
+  if (!RunWindowsUiaRead<std::unique_ptr<WindowsControlBindings>>(false,
+      [pid, window]() -> std::optional<std::unique_ptr<WindowsControlBindings>> {
+        auto value = std::make_unique<WindowsControlBindings>();
+        if (!CaptureWindowsControlBindingsOnWorker(pid, window, value.get())) return std::nullopt;
+        return value;
+      }, [&measured](std::unique_ptr<WindowsControlBindings> value) { measured = std::move(value); }))
+    return false;
+  static_assert(noexcept(bindings->semantic.swap(measured->semantic)) &&
+                noexcept(bindings->visual.swap(measured->visual)));
+  bindings->semantic.swap(measured->semantic);
+  bindings->visual.swap(measured->visual);
+  return true;
+}
+
+bool WindowsFocusedElementSignatureOnWorker(std::uint32_t expected_pid,
+                                    const RECT &client_bounds,
+                                    std::string *signature) {
+  if (signature == nullptr)
+    return false;
+  if (!WindowsV1UiaMayCall()) return false;
+  struct Objects {
+    IUIAutomation *automation = nullptr;
+    IUIAutomationElement *element = nullptr;
+    ~Objects() {
+      if (element != nullptr) element->Release();
+      if (automation != nullptr) automation->Release();
+    }
+  } objects;
+  IUIAutomation *&automation = objects.automation;
+  IUIAutomationElement *&element = objects.element;
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
+      automation == nullptr)
+    return false;
+  const HRESULT found =
+      WindowsV1UiaContact(element, [&] { return automation->GetFocusedElement(&element); });
+  if (!WindowsV1UiaOk(found) || element == nullptr) {
+    return false;
+  }
+  const bool result =
+      ComputeWindowsControlSignature(element, expected_pid, &client_bounds, signature);
+  return result;
 }
 
 bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
                                     const RECT &client_bounds,
                                     std::string *signature) {
-  if (signature == nullptr)
+  if (signature == nullptr) return false;
+  std::string measured;
+  if (!RunWindowsUiaRead<std::string>(false,
+      [expected_pid, client_bounds]() -> std::optional<std::string> {
+        std::string value;
+        if (!WindowsFocusedElementSignatureOnWorker(expected_pid, client_bounds, &value)) return std::nullopt;
+        return value;
+      }, [&measured](std::string value) { measured = std::move(value); }))
     return false;
-  const WindowsV1UiaPath path;
-  if (!WindowsV1UiaMayCall()) return false;
-  IUIAutomation *automation = nullptr;
-  if (FAILED(CreateWindowsV1Automation(&automation)) ||
-      automation == nullptr)
-    return false;
-  IUIAutomationElement *element = nullptr;
-  const HRESULT found =
-      WindowsV1UiaContact(element, [&] { return automation->GetFocusedElement(&element); });
-  automation->Release();
-  if (!WindowsV1UiaOk(found) || element == nullptr) {
-    if (element != nullptr)
-      element->Release();
-    return false;
-  }
-  const bool result =
-      ComputeWindowsControlSignature(element, expected_pid, &client_bounds, signature);
-  element->Release();
-  return result;
+  signature->swap(measured);
+  return true;
 }
 
 bool RejectWindowsRisk(const WindowsUiaRisk &risk, std::string *reason) {
@@ -10665,6 +10704,10 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   std::string focused_element_signature;
   const bool has_focused_element_signature =
       WindowsFocusedElementSignature(session.pid, bounds, &focused_element_signature);
+  if (!WindowsValidationStillCurrent(session.cancel_epoch, observe_stop_serial)) {
+    *reason = "observation_stale";
+    return false;
+  }
   RECT screen_bounds{};
   if (!ScreenBoundsPhysicalForWindow(dialogs.active_window, &screen_bounds)) {
     *reason = "screen_geometry_unavailable";
