@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -59,6 +59,36 @@ function findBuild(): Build | null {
   };
 }
 
+function replaceDiagnostic(source: string, before: string, after: string): string {
+  if (source.split(before).length !== 2)
+    throw new Error('Artifact read diagnostic boundary changed');
+  return source.replace(before, after);
+}
+let diagnosticHeader = readFileSync(
+  join(nativeDirectory, 'computer_use_windows_artifact_read.h'),
+  'utf8',
+);
+diagnosticHeader = replaceDiagnostic(
+  diagnosticHeader,
+  '[[nodiscard]] inline WindowsArtifactReadResult ReadWindowsArtifactValue(',
+  'void Sc785Capture(const ShadowUiaCapture&);\nvoid Sc785Facts(const ShadowUiaCapture&, const ShadowRequestInfo&, const WindowsArtifactReadFacts&, const ArtifactReadVerdict&);\nvoid Sc785ValueAttempt();\n[[nodiscard]] inline WindowsArtifactReadResult ReadWindowsArtifactValue(',
+);
+diagnosticHeader = replaceDiagnostic(
+  diagnosticHeader,
+  'const ShadowUiaCapture capture = reader.Capture("copy", target_id);',
+  'const ShadowUiaCapture capture = reader.Capture("copy", target_id);\n  Sc785Capture(capture);',
+);
+diagnosticHeader = replaceDiagnostic(
+  diagnosticHeader,
+  'result.verdict = JudgeArtifactRead(built.facts, built.role);',
+  'result.verdict = JudgeArtifactRead(built.facts, built.role);\n  Sc785Facts(capture, request, built, result.verdict);',
+);
+diagnosticHeader = replaceDiagnostic(
+  diagnosticHeader,
+  'const ShadowReadResult read = reader.ReadTargetValue(kArtifactReadMaxBytes, &text);',
+  'Sc785ValueAttempt();\n  const ShadowReadResult read = reader.ReadTargetValue(kArtifactReadMaxBytes, &text);',
+);
+
 const program = String.raw`
 #include <windows.h>
 #include <ole2.h>
@@ -87,6 +117,44 @@ void Check(bool ok, const char *name) {
   }
 }
 
+// Fixed metadata only; never emit node names, text values, process paths or signatures.
+struct ArtifactTrace {
+  bool source_created=false, capture_seen=false, facts_seen=false, target=false, root=false;
+  bool neighbors_complete=false, read_failed=false, budget=false, known_password_caption=false;
+  bool metadata_complete=false, secure=false, target_password=false;
+  unsigned chain=0, neighbors=0, bad_neighbors=0, typed_gaps=0, activated_gaps=0;
+  unsigned typed_class=0, activated_class=0, value_attempts=0;
+};
+ArtifactTrace artifact_trace;
+bool artifact_trace_active=false;
+namespace sprint_coder::computer_use {
+void Sc785Capture(const ShadowUiaCapture& c) {
+  if (!artifact_trace_active) return;
+  auto& t=artifact_trace;t.capture_seen=true;t.target=c.target_found;t.root=c.chain_reached_root;
+  t.chain=static_cast<unsigned>(c.chain.size());t.neighbors=static_cast<unsigned>(c.neighbors.size());
+  t.neighbors_complete=c.neighbors_complete;t.read_failed=c.read_failed;t.budget=c.budget_exhausted;
+  t.target_password=!c.chain.empty()&&c.chain.front().is_password;
+  for(const auto& n:c.neighbors){
+    if(n.read_failed||n.oversize)++t.bad_neighbors;
+    if(n.name.find("Password field")!=std::string::npos||n.value.find("Password field")!=std::string::npos)
+      t.known_password_caption=true;
+  }
+}
+void Sc785Facts(const ShadowUiaCapture& c, const ShadowRequestInfo& request,
+                const WindowsArtifactReadFacts& f, const ArtifactReadVerdict&) {
+  if (!artifact_trace_active) return;
+  auto& t=artifact_trace;t.facts_seen=true;t.metadata_complete=f.facts.metadata_complete;t.secure=f.facts.secure;
+  ShadowRequestInfo typing=request;typing.kind="type";typing.maximum_mode="full_access_app";
+  ShadowRequestInfo activating=typing;activating.kind="invoke";
+  const auto typed=BuildWindowsShadowFacts(c,typing),activated=BuildWindowsShadowFacts(c,activating);
+  t.typed_gaps=typed.gaps;t.activated_gaps=activated.gaps;
+  const EffectRuleset closed;
+  t.typed_class=static_cast<unsigned>(ClassifyEffect(typed.facts,closed).effect_class);
+  t.activated_class=static_cast<unsigned>(ClassifyEffect(activated.facts,closed).effect_class);
+}
+void Sc785ValueAttempt(){if(artifact_trace_active)++artifact_trace.value_attempts;}
+}
+
 struct Read { WindowsArtifactReadResult result; long long micros; };
 
 Read ReadOf(HWND window, const std::string &target) {
@@ -98,6 +166,7 @@ Read ReadOf(HWND window, const std::string &target) {
   if (source == nullptr) {
     read.result.incomplete = true;
   } else {
+    if(artifact_trace_active) artifact_trace.source_created=true;
     // The host's signature (runtime id included) is its own function; here a fixed one stands in, so
     // this seam shows the real source, reader and judgement. The host's check is in the harness.
     source->SetSignatureProvider([](IUIAutomationElement *, std::string *out) {
@@ -247,7 +316,20 @@ int main(int argc, char **argv) {
       }
       Sleep(800);
       if (window != nullptr && readable) {
+        artifact_trace={};artifact_trace_active=true;
         const Read edit = ReadOf(window, "1001");
+        artifact_trace_active=false;
+        const auto& t=artifact_trace;
+        std::cout<<"artifact_diag ok="<<edit.result.ok<<" incomplete="<<edit.result.incomplete
+          <<" signature_mismatch="<<edit.result.signature_mismatch<<" refusals="<<static_cast<unsigned>(edit.result.verdict.refusals)
+          <<" value_attempts="<<t.value_attempts<<" source="<<t.source_created<<" capture="<<t.capture_seen<<" facts="<<t.facts_seen
+          <<" target="<<t.target<<" root="<<t.root<<" chain="<<t.chain<<" neighbors="<<t.neighbors
+          <<" neighbors_complete="<<t.neighbors_complete<<" bad_neighbors="<<t.bad_neighbors<<" read_failed="<<t.read_failed
+          <<" budget="<<t.budget<<" known_password_caption="<<t.known_password_caption<<" target_password="<<t.target_password
+          <<" metadata_complete="<<t.metadata_complete<<" secure="<<t.secure<<" typed_gaps="<<t.typed_gaps
+          <<" activated_gaps="<<t.activated_gaps<<" typed_class="<<t.typed_class<<" activated_class="<<t.activated_class
+          <<" micros="<<edit.micros<<"\n";
+
         // The fixture's main form is FLAT: the Edit sits beside the "Password field" caption, and the
         // read judges the captions around a text field (a PIN or a password caption makes it secure,
         // as in a web form). So this Edit is refused, on purpose (fail closed): the verdict says secure.
@@ -354,6 +436,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
 
         const source = join(scratch, 'seam.cc');
         const binary = join(scratch, 'seam.exe');
+        writeFileSync(join(scratch, 'computer_use_windows_artifact_read.h'), diagnosticHeader);
         writeFileSync(source, program);
         const built = run([
           '/nologo',
