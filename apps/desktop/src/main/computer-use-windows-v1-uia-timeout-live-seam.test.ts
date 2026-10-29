@@ -555,7 +555,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       'WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed" : "input_not_confirmed"',
     );
     expect(c).toContain(
-      'if (*accepted) { if (*reason != "input_timeout_unconfirmed") *reason = "input_not_confirmed"; } else if (cancellation_epoch',
+      'if (*accepted) { if (*reason != "input_timeout_unconfirmed" && *reason != "semantic_input_in_flight") *reason = "input_not_confirmed"; } else if (cancellation_epoch',
     );
     // A failed read is the "unreadable" of each caller (fail closed).
     expect(c).toContain(
