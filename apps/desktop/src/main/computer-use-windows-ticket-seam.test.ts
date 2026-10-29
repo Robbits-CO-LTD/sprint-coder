@@ -121,6 +121,7 @@ const preamble = String.raw`
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -143,6 +144,9 @@ using DWORD = unsigned long;
 struct RECT { LONG left = 0, top = 0, right = 0, bottom = 0; };
 
 namespace {
+struct WindowsTargetFactsContext;
+std::atomic<std::uint64_t> cancellation_epoch{3};
+std::atomic<bool> parent_process_dead{false};
 
 using sprint_coder::computer_use::Frame;
 using sprint_coder::computer_use::FrameHeader;
@@ -150,9 +154,12 @@ using sprint_coder::computer_use::MessageType;
 
 // ---- inert replacements ----------------------------------------------------------------------
 bool g_rng_ok = true;
+bool g_stop_during_rng = false, g_parent_during_rng = false;
+void StopDuringTokenGeneration();
 unsigned char g_rng_fill = 0x11;
 long BCryptGenRandom(void *, unsigned char *buffer, unsigned long size, unsigned long) {
   if (!g_rng_ok) return -1;
+  if (g_stop_during_rng || g_parent_during_rng) StopDuringTokenGeneration();
   for (unsigned long i = 0; i < size; ++i) buffer[i] = static_cast<unsigned char>(g_rng_fill + i);
   return 0;
 }
@@ -290,6 +297,12 @@ Frame PipeFrame(MessageType type, std::uint8_t request_byte) {
 const std::string kSessionKey = FrameIdKey(IdOf(1));
 
 void Reset() {
+  cancellation_epoch = 3;
+  parent_process_dead = false;
+  WindowsTargetListControl().stop_serial = 1;
+  g_stop_during_interlock = false;
+  g_stop_during_rng = false;
+  g_parent_during_rng = false;
   sessions.clear();
   ticket_states.clear();
   response_cache.clear();
@@ -341,9 +354,10 @@ std::string TicketFrom(const std::string &receipt) {
 }
 
 // Preflights and returns the ticket (empty when none was issued); the receipt is left in sent.
-std::string Preflight(const std::string &metadata) {
+std::string Preflight(const std::string &metadata, std::optional<std::uint64_t> queued_serial = std::nullopt) {
   g_sent.clear();
   Frame frame = PipeFrame(MessageType::kPreflight, 9);
+  const WindowsValidationFrameScope frame_scope(queued_serial);
   HandleWindowsPreflight(nullptr, frame, metadata);
   return g_sent.empty() ? "" : TicketFrom(g_sent.back().payload);
 }
@@ -705,6 +719,33 @@ int main() {
   Reset();
   Check(Preflight("{\"requestId\":\"request-1\"}").empty() && g_interlock_kinds.empty(), "invalid_action_asks_nothing");
 
+  // Reader Stop invalidates the original frame even if the session/global epoch is unchanged.
+  for (bool advance_epoch : {false, true}) {
+    Reset();
+    cancellation_epoch = 3;
+    WindowsTargetListControl().stop_serial = 1;
+    g_stop_during_interlock = true;
+    g_advance_stop_epoch = advance_epoch;
+    ticket = Preflight(Meta());
+    Check(WindowsTargetListControl().stop_serial == 2 && cancellation_epoch == (advance_epoch ? 4 : 3), "reader_stop_latched_before_interlock_return");
+    Check(ticket.empty() && !ticket_states.at(kSessionKey).slot.occupied(),
+          advance_epoch ? "epoch_stop_issues_no_late_ticket" : "same_epoch_stop_issues_no_late_ticket");
+    g_stop_during_interlock = false;
+  }
+  for (bool parent_dead : {false, true}) {
+    Reset();
+    g_stop_during_rng = !parent_dead;
+    g_parent_during_rng = parent_dead;
+    ticket = Preflight(Meta());
+    Check(ticket.empty() && !ticket_states.at(kSessionKey).slot.occupied(),
+          parent_dead ? "parent_death_during_rng_issues_no_ticket" : "stop_during_rng_issues_no_ticket");
+  }
+  Reset();
+  WindowsTargetListControl().stop_serial = 2;
+  ticket = Preflight(Meta(), 1);
+  Check(ticket.empty() && !ticket_states.at(kSessionKey).slot.occupied(), "old_queued_frame_issues_no_ticket");
+  ticket = Preflight(Meta(), 2);
+  Check(ticket.size() == 64 && Consume(Meta("", ticket)), "fresh_frame_still_issues_consumable_ticket");
   if (g_failures != 0) return 1;
   std::cout << "OK\n";
   return 0;
@@ -729,9 +770,25 @@ using sprint_coder::computer_use::InterlockOutcome;
 using sprint_coder::computer_use::InterlockReason;
 std::vector<std::string> g_interlock_kinds;
 InterlockEvaluation g_interlock_answer;
+bool g_stop_during_interlock = false, g_advance_stop_epoch = false;
+void StopDuringTokenGeneration() {
+  std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+  if (g_parent_during_rng) parent_process_dead = true;
+  else WindowsTargetListControl().stop_serial.fetch_add(1);
+  if (WindowsValidationStillCurrent(3, WindowsValidationFrameStopSerial())) std::abort();
+}
 InterlockEvaluation WindowsInterlockRefusal(const WindowsSession &, const std::string &,
                                             const std::string &kind) noexcept {
   g_interlock_kinds.push_back(kind);
+  if (g_stop_during_interlock) {
+    std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+    WindowsTargetListControl().stop_serial.fetch_add(1);
+    if (g_advance_stop_epoch) cancellation_epoch.store(4);
+    if (WindowsValidationStillCurrent(3, WindowsValidationFrameStopSerial())) std::abort();
+    InterlockEvaluation result;
+    result.no_verdict = InterlockNoVerdict::kCanceled;
+    return result;
+  }
   return g_interlock_answer;
 }
 `;
@@ -781,6 +838,11 @@ function assembled(): string {
   };
   return [
     preamble,
+    between('struct WindowsTargetListState {', 'struct WindowsStartRegistry {'),
+    between(
+      'thread_local const std::uint64_t *windows_validation_frame_serial',
+      'struct WindowsSessionIdentityResult {',
+    ),
     between('std::string JsonEscape(', 'std::string Sha256Bytes('),
     between('struct CachedResponse {', 'struct WindowsStartAdmission {'),
     between('// The ordinary dispatch ticket (ADR v2', 'std::uint64_t last_closed_cancel_epoch'),

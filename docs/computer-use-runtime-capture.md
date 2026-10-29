@@ -423,6 +423,12 @@ owner's Stop; this does not provide independent concurrent input sessions. A stu
 the shared UIA slot busy, so semantic operations reject until it retires. Normal helper exit can wait
 indefinitely for a claimed foreign API; force termination still leaves the input outcome unconfirmed.
 
+Preflight ticket registration also checks the original frame's epoch and Stop serial under the
+reader's Stop mutex. RNG and binding hashes run outside that mutex; if Stop or parent death occurs
+while they or the interlock are running, the prepared token is discarded without registering a
+ticket. Healthy no-verdict and replay behavior is preserved. This prevents a late ticket commit;
+it does not bound the duration of a foreign RNG or interlock call itself.
+
 Slow nonempty property values and deep trees retain their existing semantics; there is no new short
 whole-path deadline. A stalled noncontact property or cleanup without Stop or an inherited deadline
 remains a #820 boundary. Consumer-side Win32 session/dialog validation and capture also retain their

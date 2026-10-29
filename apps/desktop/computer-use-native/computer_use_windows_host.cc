@@ -10779,6 +10779,7 @@ WindowsInterlockRefusal(const WindowsSession &session, const std::string &metada
 
 bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
                             const std::string &metadata) {
+  const WindowsValidationFrameScope frame;
   const std::string session_key = FrameIdKey(request.header.session_id);
   const auto found = sessions.find(session_key);
   if (found == sessions.end())
@@ -10848,15 +10849,20 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     }
   }
   std::string token;
-  const bool issued =
-      GenerateTicketToken(&token) &&
-      state.slot.Issue(
-          token,
-          WindowsTicketBinding(session, request_id, action_digest,
-                               WindowsDispatchPayloadDigest(metadata),
-                               cancel_epoch, state.generation),
-          MonotonicNowNs(),
+  bool issued = false;
+  if (GenerateTicketToken(&token)) {
+    auto binding = WindowsTicketBinding(session, request_id, action_digest,
+                                        WindowsDispatchPayloadDigest(metadata),
+                                        cancel_epoch, state.generation);
+    const auto now = MonotonicNowNs();
+    // Crypto and target reads stay outside the reader's Stop lock. Only the bounded slot commit
+    // is ordered with Stop, using the original frame rather than a fresh serial after the wait.
+    std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+    if (session.cancel_epoch == cancel_epoch &&
+        WindowsValidationStillCurrent(cancel_epoch, frame.StopSerial()))
+      issued = state.slot.Issue(token, std::move(binding), now,
           sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs);
+  }
   std::string receipt = WindowsPreflightReceipt(
       session, request_id, cancel_epoch, observation_revision,
       issued ? "ordinary" : "denied",
