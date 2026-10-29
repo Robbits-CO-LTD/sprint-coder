@@ -414,6 +414,15 @@ The original response object's identity binds that confirmation to received evid
 older cached proof when another reply has since arrived. Malformed responses or a lost helper keep
 input quarantined. These private hooks do not change the public protocol or eligibility rules.
 
+A pre-input rejection (`accepted:false`) does not create an uncertain semantic owner. Once input is
+uncertain, Cancel alone does not release that owner: a verified Close is required. The retry deadline
+is per Host Stop attempt; the existing controller's bounded outer close attempts retain their own
+policy. Windows admits only one active input owner per helper. The existing global cancellation epoch
+and reader Stop serial conservatively invalidate old work, including work interrupted by another
+owner's Stop; this does not provide independent concurrent input sessions. A stuck read/cleanup keeps
+the shared UIA slot busy, so semantic operations reject until it retires. Normal helper exit can wait
+indefinitely for a claimed foreign API; force termination still leaves the input outcome unconfirmed.
+
 Slow nonempty property values and deep trees retain their existing semantics; there is no new short
 whole-path deadline. A stalled noncontact property or cleanup without Stop or an inherited deadline
 remains a #820 boundary. Consumer-side Win32 session/dialog validation and capture also retain their

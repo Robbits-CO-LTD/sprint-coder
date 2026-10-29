@@ -24,6 +24,7 @@ import type { ComputerUseNativeAddon, ComputerUseNativeBinding } from './compute
 import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+  ComputerUseNativeUnavailableError,
   createComputerUseNativeHost,
 } from './computer-use-native-host';
 import {
@@ -1314,6 +1315,32 @@ describe('Computer Use Windows helper transport', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['semantic_input_in_flight', 'ticket_invalid', 'session_missing'])(
+    'keeps a semantic pre-input rejection usable: %s',
+    async (code) => {
+      const { addon, host } = createTarget({
+        ...responders(),
+        dispatch: () => ['error', { result: 'rejected', code, accepted: false }],
+      });
+      const session = await startSession(host, 'semantic-pre-input', 'turn-1');
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'semantic-pre-input-dispatch',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toMatchObject({ code, accepted: false });
+      expect(addon.hasUnconfirmedSemanticInputs!()).toBe(false);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+      expect(children[0]!.killed).toBe(false);
+      await expect(host.close(session)).resolves.toBeUndefined();
+    },
+  );
+
   it.each(['native-error', 'timeout'] as const)(
     'retains an unconfirmed semantic input on the same helper after %s until Host confirms close',
     async (ending) => {
@@ -1564,7 +1591,9 @@ describe('Computer Use Windows helper transport', () => {
         }),
       ),
     ).rejects.toThrow('semantic_input_in_flight');
-    await expect(host.stopPendingStart!(session.sessionId)).rejects.toThrow('confirmation fault');
+    await expect(host.stopPendingStart!(session.sessionId)).rejects.toBeInstanceOf(
+      ComputerUseNativeUnavailableError,
+    );
     expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
     await addon.close!({ sessionId: session.sessionId, cancelEpoch: 2 });
     expect(children[0]!.killed).toBe(false);
@@ -1940,30 +1969,62 @@ describe('Computer Use Windows helper transport', () => {
     expect(helper().served.filter((op) => op === 'stop_pending_start')).toHaveLength(1);
   });
 
-  it('does not let active Close hide discovery, then combines a late discovery proof', async () => {
-    const { host, helper } = createTarget(responders(), (helper) =>
-      helper.holdOnly('start_session'),
-    );
-    const first = startSession(host, 'shared-discovery', 'turn-1');
-    await vi.advanceTimersByTimeAsync(0);
-    helper().holdOnly('list_windows_cancellable');
-    helper().refuse('stop_window_discovery');
-    const second = startSession(host, 'shared-discovery', 'turn-1').then(
-      () => 'adopted',
-      () => 'rejected',
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    helper().release('start_session');
-    const active = await first;
-    await host.cancel(active, 1);
-    await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
-    expect(host.availability().control).toBe(false);
-    helper().release('list_windows_cancellable');
-    await expect(second).resolves.toBe('rejected');
-    await vi.advanceTimersByTimeAsync(0);
-    expect(host.availability().control).toBe(true);
-    expect(helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
-  });
+  it.each([false, true])(
+    'combines late discovery proof after active Close (semantic unknown=%s)',
+    async (semanticUnknown) => {
+      const { addon, host, helper } = createTarget(
+        {
+          ...responders(),
+          dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+          close_session: (metadata) => [
+            'probe_result',
+            {
+              result: 'closed',
+              drained: true,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: semanticUnknown ? 1 : 0,
+            },
+          ],
+        },
+        (helper) => helper.holdOnly('start_session'),
+      );
+      const first = startSession(host, 'shared-discovery', 'turn-1');
+      await vi.advanceTimersByTimeAsync(0);
+      helper().holdOnly('list_windows_cancellable');
+      helper().refuse('stop_window_discovery');
+      const second = startSession(host, 'shared-discovery', 'turn-1').then(
+        () => 'adopted',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      helper().release('start_session');
+      const active = await first;
+      if (semanticUnknown) {
+        await expect(
+          Promise.resolve(
+            addon.dispatch!({
+              sessionId: active.sessionId,
+              requestId: 'coexisting-semantic',
+              cancelEpoch: 0,
+              type: 'invoke',
+              targetId: 'owned-control',
+            }),
+          ),
+        ).rejects.toThrow('semantic_input_in_flight');
+        expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      }
+      await host.cancel(active, 1);
+      await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      expect(helper().served).toContain('stop_window_discovery');
+      helper().release('list_windows_cancellable');
+      await expect(second).resolves.toBe('rejected');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.availability().control).toBe(true);
+      expect(helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
+    },
+  );
 
   it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
     const { addon, host, helper } = createTarget(

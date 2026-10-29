@@ -959,7 +959,11 @@ class WindowsComputerUseHelperClient {
         )
           throw new Error('Unconfirmed semantic input error');
         const code = typeof value['code'] === 'string' ? value['code'] : 'NATIVE_HELPER_REJECTED';
-        if (code === 'semantic_input_in_flight') this.markSemanticUncertain(pending);
+        if (
+          code === 'semantic_input_in_flight' &&
+          (pending.stopsSession || value['accepted'] === true)
+        )
+          this.markSemanticUncertain(pending);
         pending.reject(
           Object.assign(new Error(code), { code, accepted: value['accepted'] === true }),
         );

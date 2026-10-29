@@ -293,9 +293,20 @@ export function createComputerUseNativeHost(
     }
   };
 
+  const confirmSessionClosed = (
+    receipt: ComputerUseNativeInputReceipt,
+    evidence: unknown,
+  ): void => {
+    try {
+      addon?.confirmSessionClosed?.(receipt, evidence);
+    } catch {
+      throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+    }
+  };
+
   const finishStartOwner = (owner: StartOwner, result: ComputerUsePendingStartStop): void => {
     if (result.kind === 'closed')
-      addon?.confirmSessionClosed?.(result.inputReceipt, owner.nativeTerminalEvidence);
+      confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence);
     owner.nativeTerminalEvidence = null;
     sessions.delete(owner.sessionId);
     classifierBindings.delete(owner.sessionId);
@@ -1402,7 +1413,7 @@ export function createComputerUseNativeHost(
         if (owner !== undefined) owner.unconfirmed = true;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
-      addon?.confirmSessionClosed?.(terminal.inputReceipt, nativeClose.value);
+      confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);

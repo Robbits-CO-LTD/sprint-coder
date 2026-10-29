@@ -47,7 +47,9 @@ struct INPUT {};
 using LPINPUT = INPUT*;
 struct WindowsSession { std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts = std::make_shared<std::atomic<std::uint64_t>>(0); };
 bool valid = true;
+bool semanticInputInFlight = false;
 unsigned calls = 0;
+bool WindowsSemanticInputInFlight() { return semanticInputInFlight; }
 bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t) { return valid; }
 UINT SendInput(UINT, LPINPUT, unsigned) { ++calls; return 0; }
 ${source.slice(from, to)}
@@ -59,7 +61,11 @@ int main() {
   if (session.input_api_attempts->load() != 1 || calls != 1) return 2;
   valid = false;
   SendInputForBoundTarget(session, bounds, 1, 1, &input);
-  return session.input_api_attempts->load() == 1 && calls == 1 ? 0 : 3;
+  if (session.input_api_attempts->load() != 1 || calls != 1) return 3;
+  valid = true;
+  semanticInputInFlight = true;
+  SendInputForBoundTarget(session, bounds, 1, 1, &input);
+  return session.input_api_attempts->load() == 1 && calls == 1 ? 0 : 4;
 }`,
         );
         execFileSync(
@@ -160,6 +166,12 @@ struct WindowsSession {
   std::string session_id;
   std::uint64_t cancel_epoch = 0;
 };
+bool semanticInputInFlight = false;
+bool StopWindowsSemanticInput(const WindowsSession& session, std::uint64_t* attempts) {
+  if (semanticInputInFlight) return false;
+  *attempts = session.input_api_attempts->load(std::memory_order_acquire);
+  return true;
+}
 std::string FrameIdKey(const FrameId &id) { return id.key; }
 std::string JsonEscape(std::string_view value) { return std::string(value); }
 std::uint64_t requestedEpoch = 0;
@@ -226,6 +238,20 @@ int main() {
   }
   const bool closedRecordsBounded = boundedClosesDrained && !Reclose("bounded-0", 2, &response) &&
     Reclose("bounded-39", 2, &response);
+
+  const auto epochBefore = cancellation_epoch.load();
+  const auto releasedBefore = releasedSessions;
+  semanticInputInFlight = true;
+  const bool refused = !OpenAndClose("in-flight", 5, epochBefore + 1, &response);
+  std::string reason;
+  const bool refusedAgain = !CloseWindowsSession(FrameFor("in-flight"), "", &response, &reason);
+  if (!refused || !refusedAgain || reason != "semantic_input_in_flight" ||
+      sessions.at("in-flight").cancel_epoch != 0 || cancellation_epoch.load() != epochBefore ||
+      releasedSessions != releasedBefore || closed_sessions.find("in-flight") != closed_sessions.end()) return 1;
+  semanticInputInFlight = false;
+  if (!Reclose("in-flight", epochBefore + 1, &response) ||
+      closed_sessions.at("in-flight").input_api_attempts != 5 ||
+      releasedSessions != releasedBefore + 1 || !sessions.empty()) return 2;
 
   std::cout << std::boolalpha << "{\\"liveCloseDrained\\":" << liveCloseDrained
     << ",\\"sessionReleased\\":" << sessionReleased
