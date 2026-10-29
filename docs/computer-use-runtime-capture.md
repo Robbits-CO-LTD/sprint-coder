@@ -367,9 +367,9 @@ launch-capable discovery requires its own terminal evidence. The Controller sett
 start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed
 stop separately. Old overlay completions cannot unregister a newer session's shortcut.
 
-Windows UIA tree observation and point/focused classification share a separate single-flight read
-worker. It owns its MTA, COM objects and temporary values; only tree/risk/signature values return to
-the consumer. The consumer checks the original frame Stop serial, cancellation epoch, parent death,
+Windows UIA tree observation, point/focused classification, control bindings and standalone focus
+signatures share a separate single-flight read worker. It owns its MTA, COM objects and temporary
+values; only tree/risk/binding/signature values return to the consumer. The consumer checks the original frame Stop serial, cancellation epoch, parent death,
 inherited absolute deadline and the existing 470 ms first-contact limit every 20 ms. Stop and result
 adoption use the same mutex. Abandoned results cannot be adopted, and the slot remains occupied until
 COM cleanup finishes; another read cannot spawn another worker while it is occupied.
@@ -378,10 +378,20 @@ Observation keeps its early timeout rejection. Classification preserves partial 
 empty signature after a worker-side timeout, adopting them with the first stop reason only after
 cleanup. Consumer-side cancellation or expiry abandons that result even during Release or
 CoUninitialize. Busy, allocation/initialization failure or a measurement exception stops the calling
-classification UIA path with its timeout reason, including a following focus signature read. Slow nonempty property values and deep trees retain their existing semantics; there
-is no new short whole-classification deadline. Consequently, a stalled noncontact property or cleanup
-without Stop or an inherited deadline is still a remaining #820 boundary. Binding capture, standalone
-focus signatures and semantic target resolution also need their own boundedness verification. Native
+classification UIA path with its timeout reason, including a following focus signature read.
+
+Binding and standalone signature reads use the observation policy: only a complete success is
+adopted, after COM cleanup. Failure leaves the caller's output unchanged. Binding containers travel
+in an owning pointer because their move construction can allocate on MSVC; the consumer swaps their
+values and destroys old output after releasing the engine locks. Duplicate semantic IDs, visual
+signatures, node accounting and the signature material retain their existing rules. An unreadable or
+busy focus signature still rejects preflight/dispatch as `focused_target_changed`. Observe checks the
+original epoch/Stop serial and parent again after the signature read, so a Stop observed during that
+wait prevents subsequent capture. Queued same-epoch Close cannot admit a fresh worker for an old frame.
+
+Slow nonempty property values and deep trees retain their existing semantics; there is no new short
+whole-path deadline. A stalled noncontact property or cleanup without Stop or an inherited deadline
+remains a #820 boundary, as do synchronous semantic target/action paths and capture itself. Native
 held-call tests establish cancellation and resource ownership, not normal GUI or real-AI acceptance.
 
 These ownership guarantees do not make every Windows V1 filesystem or UIA operation bounded. If
