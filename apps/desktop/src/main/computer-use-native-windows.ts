@@ -1,9 +1,11 @@
 import { parseNativeHandshake } from './computer-use-native-handshake';
 import {
   computerUseNativeCloseReceiptSchema,
+  computerUseNativeInputReceiptSchema,
   computerUseNativeDiscoveryResultSchema,
   computerUseNativeDiscoveryStopReceiptSchema,
   type ComputerUseEligibility,
+  type ComputerUseNativeInputReceipt,
 } from '@sprint-coder/contracts';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -67,6 +69,8 @@ type PendingRequest = Readonly<{
   helperGeneration: number;
   responseType: ComputerUseNativeMessageType;
   allowBinary: boolean;
+  semantic?: SemanticAttempt;
+  ownerSession?: string;
 }>;
 
 export function createWindowsComputerUseNativeAddon(
@@ -191,6 +195,8 @@ export function createWindowsComputerUseNativeAddon(
       return client.call('probe', 'stop_pending_start', value, sessionId, undefined);
     },
     cancelUnsubmittedStart: (sessionId) => client.cancelUnsubmittedStart(sessionId),
+    hasUnconfirmedSemanticInputs: () => client.hasUnconfirmedSemanticInputs(),
+    confirmSessionClosed: (receipt, evidence) => client.confirmSessionClosed(receipt, evidence),
   });
 }
 
@@ -212,6 +218,40 @@ type DiscoveryTransmission = {
   attempts: Set<symbol>;
 };
 
+type SemanticTransmission = {
+  sessionId: string;
+  helper: number | null;
+  attempts: Set<symbol>;
+  uncertain: boolean;
+  closeCandidate: boolean;
+  confirmed: boolean;
+};
+type SemanticAttempt = {
+  owner: SemanticTransmission;
+  id: symbol;
+  epoch: number;
+  submitted: boolean;
+};
+type SemanticCloseProof = {
+  owner: SemanticTransmission;
+  receipt: ComputerUseNativeInputReceipt;
+  helper: number;
+  activity: number;
+};
+const semanticActionTypes: ReadonlySet<unknown> = new Set([
+  'invoke',
+  'set_text',
+  'select',
+  'toggle',
+  'expand_collapse',
+]);
+function semanticNotSubmitted(): Error {
+  return Object.assign(new Error('native_stop_unconfirmed'), {
+    code: 'NATIVE_STOP_UNCONFIRMED',
+    accepted: false,
+  });
+}
+
 class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
@@ -224,6 +264,54 @@ class WindowsComputerUseHelperClient {
   private readonly starts = new Map<string, StartTransmission>();
   private readonly discoveries = new Map<string, DiscoveryTransmission>();
   private discoveryHandshakeSupported = false;
+  private readonly semantic = new Map<string, SemanticTransmission>();
+  // Object identity binds Host's confirmation to a received response. A later close reply must not
+  // overwrite the earlier evidence that Host cached while independent discovery was still stopping.
+  private readonly semanticCloseProofs = new WeakMap<object, SemanticCloseProof>();
+
+  hasUnconfirmedSemanticInputs(): boolean {
+    return [...this.semantic.values()].some(
+      (owner) => !owner.confirmed && (owner.uncertain || owner.closeCandidate),
+    );
+  }
+
+  confirmSessionClosed(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void {
+    const owner = this.semantic.get(receipt.sessionId);
+    if (owner === undefined) return;
+    const proof =
+      typeof evidence === 'object' && evidence !== null
+        ? this.semanticCloseProofs.get(evidence)
+        : undefined;
+    if (
+      proof === undefined ||
+      proof.owner !== owner ||
+      proof.helper !== owner.helper ||
+      proof.helper !== this.helperGeneration ||
+      proof.receipt.sessionId !== receipt.sessionId ||
+      proof.receipt.cancelEpoch !== receipt.cancelEpoch ||
+      proof.receipt.inputAttemptCount !== receipt.inputAttemptCount
+    )
+      throw new Error('native_stop_unconfirmed');
+    owner.confirmed = true;
+    owner.uncertain = false;
+    if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
+    this.shutdownWhenIdle(proof.activity, proof.helper, owner.sessionId);
+  }
+
+  private markSemanticUncertain(pending: PendingRequest): void {
+    const owner =
+      pending.semantic?.submitted === true
+        ? pending.semantic.owner
+        : pending.stopsSession && pending.ownerSession !== undefined
+          ? this.semantic.get(pending.ownerSession)
+          : undefined;
+    if (owner !== undefined && !owner.confirmed && owner.helper === pending.helperGeneration)
+      owner.uncertain = true;
+  }
+
+  private assertSemanticAvailable(): void {
+    if (this.hasUnconfirmedSemanticInputs()) throw semanticNotSubmitted();
+  }
 
   constructor(
     private readonly helperPath: string,
@@ -254,6 +342,8 @@ class WindowsComputerUseHelperClient {
    * idle, session-less helper behind until the next close arms the teardown again or Main exits
    * (the helper stops itself with its parent). That is the deliberate direction — re-arming on a
    * refused start would kill the helper of the session a refused *resume* is still running on.
+   * Unknown semantic inputs retain this helper even with no wire request left. Host must confirm
+   * the bound close receipt before that owner permits shutdown or another input lifetime.
    */
   shutdownWhenIdle(
     activity = this.activityGeneration,
@@ -275,6 +365,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private shutdownIfIdle(): void {
+    if (this.hasUnconfirmedSemanticInputs()) return;
     for (const owner of this.discoveries.values())
       if (
         (owner.helper === null || owner.helper === this.helperGeneration) &&
@@ -323,6 +414,8 @@ class WindowsComputerUseHelperClient {
   }
 
   async discoverWindows(input: unknown): Promise<unknown> {
+    if (this.hasUnconfirmedSemanticInputs())
+      throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed semantic input remains');
     const raw = record(input);
     const candidateId = raw['discoveryId'];
     if (typeof candidateId === 'string' && this.discoveries.has(candidateId))
@@ -354,6 +447,8 @@ class WindowsComputerUseHelperClient {
     this.idleShutdownPending = false;
     try {
       await this.ensureConnected();
+      if (this.hasUnconfirmedSemanticInputs())
+        throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed semantic input remains');
       if (!this.discoveryHandshakeSupported)
         throw new ComputerUseDiscoveryNotSubmittedError(
           'Windows discovery handshake capability is unavailable',
@@ -373,6 +468,8 @@ class WindowsComputerUseHelperClient {
             owner.helper !== this.helperGeneration
           )
             throw new ComputerUseDiscoveryNotSubmittedError('Discovery canceled before send');
+          if (this.hasUnconfirmedSemanticInputs())
+            throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed semantic input remains');
           owner.everSent = true;
         },
       );
@@ -454,6 +551,7 @@ class WindowsComputerUseHelperClient {
     sessionKey: string | undefined,
     requestKey: string | undefined,
   ): Promise<unknown> {
+    if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
     let owner: StartTransmission | undefined;
     let attempt: symbol | undefined;
     if (operation === 'start_session') {
@@ -476,6 +574,35 @@ class WindowsComputerUseHelperClient {
       this.activityGeneration += 1;
       this.idleShutdownPending = false;
     }
+    let semantic: SemanticAttempt | undefined;
+    if (operation === 'dispatch' && semanticActionTypes.has(input['type'])) {
+      const epoch = input['cancelEpoch'];
+      if (
+        sessionKey === undefined ||
+        sessionKey.length === 0 ||
+        Buffer.byteLength(sessionKey, 'utf8') > 256 ||
+        typeof epoch !== 'number' ||
+        !Number.isSafeInteger(epoch) ||
+        epoch < 0
+      )
+        throw semanticNotSubmitted();
+      let lifetime = this.semantic.get(sessionKey);
+      if (lifetime?.confirmed) throw semanticNotSubmitted();
+      if (lifetime === undefined) {
+        if (this.semantic.size >= 16) throw semanticNotSubmitted();
+        lifetime = {
+          sessionId: sessionKey,
+          helper: null,
+          attempts: new Set(),
+          uncertain: false,
+          closeCandidate: false,
+          confirmed: false,
+        };
+        this.semantic.set(sessionKey, lifetime);
+      }
+      semantic = { owner: lifetime, id: Symbol('semantic-dispatch'), epoch, submitted: false };
+      lifetime.attempts.add(semantic.id);
+    }
     const closes = operation === 'close_session' || operation === 'stop_pending_start';
     if (closes && sessionKey !== undefined) {
       const closing = this.starts.get(sessionKey);
@@ -486,6 +613,12 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
+      if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
+      if (semantic !== undefined) {
+        if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
+          throw semanticNotSubmitted();
+        semantic.owner.helper = helper;
+      }
       if (owner !== undefined) {
         if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
           throw new Error('Computer Use start canceled before send');
@@ -501,19 +634,46 @@ class WindowsComputerUseHelperClient {
           : frameIdFromText(`request:${requestKey}`),
         operationTimeoutMilliseconds(operation),
         isComputerUseStopOperation(operation),
-        owner === undefined
-          ? undefined
-          : () => {
-              const sending = owner;
-              if (sending.stopped || this.starts.get(sending.sessionId) !== sending)
-                throw new Error('Computer Use start canceled before send');
-              // A synchronous/partial write failure is still a possible native submission.
-              sending.everSent = true;
-            },
+        () => {
+          if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
+          if (owner !== undefined) {
+            if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
+              throw new Error('Computer Use start canceled before send');
+            owner.everSent = true;
+          }
+          if (semantic !== undefined) {
+            if (
+              semantic.owner.confirmed ||
+              this.semantic.get(semantic.owner.sessionId) !== semantic.owner
+            )
+              throw semanticNotSubmitted();
+            semantic.submitted = true;
+          }
+        },
+        semantic,
       );
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
+        const inputOwner = this.semantic.get(sessionKey);
+        if (
+          inputOwner !== undefined &&
+          !inputOwner.confirmed &&
+          receipt.success &&
+          receipt.data.sessionId === sessionKey &&
+          (operation !== 'close_session' || receipt.data.cancelEpoch === input['cancelEpoch']) &&
+          inputOwner.helper === helper &&
+          typeof result === 'object' &&
+          result !== null
+        ) {
+          inputOwner.closeCandidate = true;
+          this.semanticCloseProofs.set(result, {
+            owner: inputOwner,
+            receipt: receipt.data,
+            helper,
+            activity,
+          });
+        }
         if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
           closing.closed = true;
           if (closing.attempts.size === 0) this.starts.delete(sessionKey);
@@ -521,6 +681,16 @@ class WindowsComputerUseHelperClient {
       }
       return result;
     } finally {
+      if (semantic !== undefined) {
+        semantic.owner.attempts.delete(semantic.id);
+        if (
+          semantic.owner.attempts.size === 0 &&
+          (semantic.owner.confirmed ||
+            (!semantic.owner.uncertain && !semantic.owner.closeCandidate)) &&
+          this.semantic.get(semantic.owner.sessionId) === semantic.owner
+        )
+          this.semantic.delete(semantic.owner.sessionId);
+      }
       if (owner !== undefined && attempt !== undefined) {
         owner.attempts.delete(attempt);
         if (
@@ -536,6 +706,8 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.socket === null && this.hasUnconfirmedSemanticInputs())
+      throw new Error('native_stop_unconfirmed');
     if (this.connecting !== null) {
       await this.connecting;
       return;
@@ -632,6 +804,7 @@ class WindowsComputerUseHelperClient {
     timeoutMilliseconds = 10_000,
     stopsSession = false,
     beforeWrite?: () => void,
+    semantic?: SemanticAttempt,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
@@ -653,6 +826,7 @@ class WindowsComputerUseHelperClient {
       const timeout = setTimeout(() => {
         if (this.pending.get(requestId.hex) !== pending) return;
         this.pending.delete(requestId.hex);
+        this.markSemanticUncertain(pending);
         const error = new Error('Computer Use Windows helper request timed out');
         reject(error);
         // A request that never came back means the helper is unusable, so this normally ends it
@@ -661,14 +835,15 @@ class WindowsComputerUseHelperClient {
         // input quarantine, and requests that were already in flight when Stop began keep timers of
         // their own that would otherwise expire inside Stop's window and kill the helper the stop
         // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-        // the transport — the last stop normally aborts here. An unconfirmed discovery instead
+        // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
         // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
         // the original launch unit ended. Its result timeout is not terminal evidence.
         if (
           activityGeneration === this.activityGeneration &&
           helperGeneration === this.helperGeneration &&
           !this.hasPendingStop() &&
-          !this.hasUnconfirmedDiscovery()
+          !this.hasUnconfirmedDiscovery() &&
+          !this.hasUnconfirmedSemanticInputs()
         )
           this.abortTransport(error);
         else this.shutdownIfIdle();
@@ -683,6 +858,10 @@ class WindowsComputerUseHelperClient {
         helperGeneration,
         responseType: responseTypeFor(messageType),
         allowBinary: messageType === 'observe',
+        ...(semantic === undefined ? {} : { semantic }),
+        ...(typeof metadata['sessionId'] === 'string'
+          ? { ownerSession: metadata['sessionId'] }
+          : {}),
       };
       this.pending.set(requestId.hex, pending);
       try {
@@ -701,6 +880,7 @@ class WindowsComputerUseHelperClient {
           if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
           if (error === null || error === undefined) return;
           clearTimeout(timeout);
+          this.markSemanticUncertain(pending);
           this.pending.delete(requestId.hex);
           reject(error);
           this.abortTransport(error);
@@ -709,6 +889,7 @@ class WindowsComputerUseHelperClient {
         clearTimeout(timeout);
         this.pending.delete(requestId.hex);
         const failure = error instanceof Error ? error : new Error(String(error));
+        this.markSemanticUncertain(pending);
         reject(failure);
         this.abortTransport(failure);
       }
@@ -757,6 +938,7 @@ class WindowsComputerUseHelperClient {
     if (pending === undefined) return;
     if (!isWindowsHelperResponseBound(frame, pending)) {
       const error = new Error('Computer Use Windows helper response binding mismatch');
+      this.markSemanticUncertain(pending);
       this.pending.delete(frame.requestId.hex);
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -769,12 +951,37 @@ class WindowsComputerUseHelperClient {
       let parsed = JSON.parse(frame.metadata.toString('utf8')) as unknown;
       if (frame.messageType === 'error') {
         const value = asRecord(parsed, 'Computer Use Windows helper rejected the request');
+        if (
+          pending.semantic?.submitted &&
+          (typeof value['accepted'] !== 'boolean' ||
+            typeof value['code'] !== 'string' ||
+            !/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(value['code']))
+        )
+          throw new Error('Unconfirmed semantic input error');
         const code = typeof value['code'] === 'string' ? value['code'] : 'NATIVE_HELPER_REJECTED';
+        if (code === 'semantic_input_in_flight') this.markSemanticUncertain(pending);
         pending.reject(
           Object.assign(new Error(code), { code, accepted: value['accepted'] === true }),
         );
         this.shutdownIfIdle();
         return;
+      }
+      if (pending.semantic?.submitted) {
+        const value = asRecord(parsed, 'Unconfirmed semantic input result');
+        const receipt = computerUseNativeInputReceiptSchema.safeParse({
+          sessionId: value['sessionId'],
+          cancelEpoch: value['cancelEpoch'],
+          inputAttemptCount: value['inputAttemptCount'],
+        });
+        if (
+          !receipt.success ||
+          value['result'] !== 'completed' ||
+          value['reasonCode'] !== null ||
+          Object.keys(value).length !== 5 ||
+          receipt.data.sessionId !== pending.semantic.owner.sessionId ||
+          receipt.data.cancelEpoch !== pending.semantic.epoch
+        )
+          throw new Error('Unconfirmed semantic input result');
       }
       if (frame.binary.byteLength > 0)
         parsed = decodeWindowsObservationPayload(parsed, frame.binary);
@@ -785,6 +992,7 @@ class WindowsComputerUseHelperClient {
         error instanceof Error
           ? error
           : new Error('Computer Use Windows helper returned an invalid response');
+      this.markSemanticUncertain(pending);
       pending.reject(invalid);
       this.abortTransport(invalid);
     }
@@ -796,6 +1004,7 @@ class WindowsComputerUseHelperClient {
     this.idleShutdownPending = false;
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
+      this.markSemanticUncertain(pending);
       clearTimeout(pending.timeout);
       pending.reject(normalized);
       this.pending.delete(requestId);

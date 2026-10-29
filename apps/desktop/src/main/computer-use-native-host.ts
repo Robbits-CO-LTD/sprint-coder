@@ -219,6 +219,7 @@ export function createComputerUseNativeHost(
     terminalEpoch: number;
     terminal: ComputerUsePendingStartStop | null;
     nativeTerminal: ComputerUsePendingStartStop | null;
+    nativeTerminalEvidence: unknown;
     unconfirmed: boolean;
     stopPromise: Promise<ComputerUsePendingStartStop> | null;
   };
@@ -242,7 +243,9 @@ export function createComputerUseNativeHost(
     attemptLimit: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
     unconfirmedError: () => new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
   });
+  const semanticUnconfirmed = (): boolean => addon?.hasUnconfirmedSemanticInputs?.() === true;
   const inputQuarantined = (): boolean =>
+    semanticUnconfirmed() ||
     activeStopQuarantines.size !== 0 ||
     discoveryManager.quarantined() ||
     [...startOwners.values()].some(
@@ -291,6 +294,9 @@ export function createComputerUseNativeHost(
   };
 
   const finishStartOwner = (owner: StartOwner, result: ComputerUsePendingStartStop): void => {
+    if (result.kind === 'closed')
+      addon?.confirmSessionClosed?.(result.inputReceipt, owner.nativeTerminalEvidence);
+    owner.nativeTerminalEvidence = null;
     sessions.delete(owner.sessionId);
     classifierBindings.delete(owner.sessionId);
     inputAttemptsBySession.delete(owner.sessionId);
@@ -325,9 +331,8 @@ export function createComputerUseNativeHost(
     let failure: unknown = new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     for (let attempt = 0; attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT; attempt += 1) {
       try {
-        const result = computerUseNativeCloseReceiptSchema.safeParse(
-          await stopWithDeadline('stopPendingStart', { sessionId: owner.sessionId }),
-        );
+        const evidence = await stopWithDeadline('stopPendingStart', { sessionId: owner.sessionId });
+        const result = computerUseNativeCloseReceiptSchema.safeParse(evidence);
         const lowerEpoch = Math.max(owner.knownEpoch, stopEpochs.get(owner.sessionId) ?? 0);
         const lowerCount = inputAttemptsBySession.get(owner.sessionId) ?? 0;
         if (
@@ -347,6 +352,7 @@ export function createComputerUseNativeHost(
             inputAttemptCount: result.data.inputAttemptCount,
           },
         };
+        owner.nativeTerminalEvidence = evidence;
         owner.nativeTerminal = outcome;
         return outcome;
       } catch (error) {
@@ -461,7 +467,12 @@ export function createComputerUseNativeHost(
         method === 'readNodeValue' ||
         method === 'dispatch')
     )
-      throw new ComputerUseNativeUnavailableError(unavailableReason());
+      throw semanticUnconfirmed()
+        ? Object.assign(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'), {
+            code: 'NATIVE_STOP_UNCONFIRMED',
+            accepted: false,
+          })
+        : new ComputerUseNativeUnavailableError(unavailableReason());
     return (input: unknown) => addon[method](input);
   };
 
@@ -480,9 +491,36 @@ export function createComputerUseNativeHost(
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000)
       throw new ComputerUseNativeUnavailableError('native_stop_timeout_invalid');
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let releaseRetry: (() => void) | undefined;
+    let ended = false;
+    // A claimed UIA call may return shortly after Stop. Retry only that explicit nonterminal
+    // answer, within this one original deadline; never leave a retry running after the caller ends.
+    const attempt = async (): Promise<unknown> => {
+      for (;;) {
+        if (ended) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        try {
+          return await invoke(method, input);
+        } catch (error) {
+          if (
+            platform !== 'win32' ||
+            typeof error !== 'object' ||
+            error === null ||
+            !('code' in error) ||
+            error.code !== 'semantic_input_in_flight'
+          )
+            throw error;
+          if (ended) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+          await new Promise<void>((resolve) => {
+            releaseRetry = resolve;
+            retryTimer = setTimeout(resolve, 50);
+          });
+        }
+      }
+    };
     try {
       return await Promise.race([
-        invoke(method, input),
+        attempt(),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed')),
@@ -491,7 +529,10 @@ export function createComputerUseNativeHost(
         }),
       ]);
     } finally {
+      ended = true;
       if (timer !== undefined) clearTimeout(timer);
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      releaseRetry?.();
     }
   };
 
@@ -941,6 +982,7 @@ export function createComputerUseNativeHost(
           terminalEpoch: 0,
           terminal: null,
           nativeTerminal: null,
+          nativeTerminalEvidence: null,
           unconfirmed: false,
           stopPromise: null,
         };
@@ -1349,7 +1391,10 @@ export function createComputerUseNativeHost(
           inputAttemptCount: parsed.data.inputAttemptCount,
         },
       };
-      if (owner !== undefined) owner.nativeTerminal = terminal;
+      if (owner !== undefined) {
+        owner.nativeTerminal = terminal;
+        owner.nativeTerminalEvidence = nativeClose.value;
+      }
       if (
         owner?.discoveryUnconfirmed ||
         (discoveryStop.status === 'rejected' && owner !== undefined && owner.discoveries.size !== 0)
@@ -1357,6 +1402,7 @@ export function createComputerUseNativeHost(
         if (owner !== undefined) owner.unconfirmed = true;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
+      addon?.confirmSessionClosed?.(terminal.inputReceipt, nativeClose.value);
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
@@ -1370,6 +1416,7 @@ export function createComputerUseNativeHost(
       activeStopQuarantines.delete(session.sessionId);
       if (owner !== undefined) {
         owner.terminal = terminal;
+        owner.nativeTerminalEvidence = null;
         owner.unconfirmed = false;
         owner.stopPromise ??= Promise.resolve(owner.terminal);
         trimStartOwners();

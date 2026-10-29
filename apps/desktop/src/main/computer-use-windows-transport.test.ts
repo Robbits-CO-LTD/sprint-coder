@@ -1363,15 +1363,35 @@ describe('Computer Use Windows helper transport', () => {
       );
       await vi.advanceTimersByTimeAsync(ending === 'timeout' ? 10_001 : 0);
       expect(await dispatched).toBe('unconfirmed');
-      if (ending === 'native-error')
-        await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      if (ending === 'native-error') {
+        const closing = host.close(session).then(
+          () => 'closed',
+          () => 'unconfirmed',
+        );
+        await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+        expect(await closing).toBe('unconfirmed');
+      }
       // An error/timeout is not proof that an already claimed native input has returned.
       expect(children).toHaveLength(1);
       expect(children[0]!.killed).toBe(false);
       expect(sockets[0]!.destroyed).toBe(false);
-      if (ending === 'timeout')
-        await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      if (ending === 'timeout') {
+        const closing = host.close(session).then(
+          () => 'closed',
+          () => 'unconfirmed',
+        );
+        await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+        expect(await closing).toBe('unconfirmed');
+      }
       expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      const closeCalls = helper().served.filter(
+        (operation) => operation === 'close_session',
+      ).length;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(helper().served.filter((operation) => operation === 'close_session')).toHaveLength(
+        closeCalls,
+      );
       inFlight = false;
       if (ending === 'timeout') {
         helper().release('dispatch');
@@ -1387,6 +1407,274 @@ describe('Computer Use Windows helper transport', () => {
       expect(host.availability()).toMatchObject({ state: 'ready', control: true });
     },
   );
+
+  it.each(['json', 'error-shape', 'completion-shape', 'completion-owner', 'frame-type'] as const)(
+    'retains semantic uncertainty after a %s response loses the helper',
+    async (fault) => {
+      const { addon, host } = createTarget();
+      const session = await startSession(host, 'semantic-corrupt', 'turn-1');
+      const socket = sockets[0]!;
+      socket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const complete = {
+          result: 'completed',
+          reasonCode: null,
+          sessionId: session.sessionId,
+          cancelEpoch: 0,
+          inputAttemptCount: 1,
+        };
+        const body =
+          fault === 'json'
+            ? '{'
+            : JSON.stringify(
+                fault === 'error-shape'
+                  ? { code: 'semantic_input_in_flight' }
+                  : fault === 'completion-shape'
+                    ? { result: 'completed' }
+                    : fault === 'completion-owner'
+                      ? { ...complete, sessionId: 'other-owner' }
+                      : complete,
+              );
+        socket.emit(
+          'data',
+          encodeComputerUseNativeFrame({
+            ...request,
+            messageType:
+              fault === 'error-shape'
+                ? 'error'
+                : fault === 'frame-type'
+                  ? 'probe_result'
+                  : 'dispatch_result',
+            metadata: Buffer.from(body),
+            binary: Buffer.alloc(0),
+          }),
+        );
+      };
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'semantic-corrupt-input',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      await expect(startSession(host, 'next-session', 'turn-2')).rejects.toThrow();
+      expect(children).toHaveLength(1);
+    },
+  );
+
+  it('does not consume a semantic close candidate for forged evidence or different receipt fields', async () => {
+    const { addon, host } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: 1,
+        },
+      ],
+    });
+    const session = await startSession(host, 'semantic-proof', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-proof-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    const evidence = await addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    expect(() =>
+      addon.confirmSessionClosed!(receipt, { ...receipt, result: 'closed', drained: true }),
+    ).toThrow('native_stop_unconfirmed');
+    expect(() =>
+      addon.confirmSessionClosed!({ ...receipt, inputAttemptCount: 0 }, evidence),
+    ).toThrow('native_stop_unconfirmed');
+    addon.confirmSessionClosed!({ ...receipt, sessionId: 'other-owner' }, evidence);
+    expect(children[0]!.killed).toBe(false);
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('retries a failed Host confirmation with its older received proof after another close reply', async () => {
+    const { addon, helper } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      stop_pending_start: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: 1,
+          inputAttemptCount: 1,
+        },
+      ],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: 1,
+        },
+      ],
+    });
+    let failConfirmation = true;
+    const host = createComputerUseNativeHost(
+      binding({
+        ...addon,
+        confirmSessionClosed(receipt, evidence) {
+          if (failConfirmation) {
+            failConfirmation = false;
+            throw new Error('confirmation fault');
+          }
+          addon.confirmSessionClosed!(receipt, evidence);
+        },
+      }),
+      'win32',
+      { windowsPhysicalBoundsToDip: (value) => value },
+    );
+    const session = await startSession(host, 'semantic-cached-proof', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-cached-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    await expect(host.stopPendingStart!(session.sessionId)).rejects.toThrow('confirmation fault');
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await addon.close!({ sessionId: session.sessionId, cancelEpoch: 2 });
+    expect(children[0]!.killed).toBe(false);
+    await expect(host.stopPendingStart!(session.sessionId)).resolves.toMatchObject({
+      kind: 'closed',
+      inputReceipt: { cancelEpoch: 1, inputAttemptCount: 1 },
+    });
+    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
+      1,
+    );
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('waits within the original Stop deadline for a transient in-flight semantic operation', async () => {
+    let inFlight = true;
+    const { addon, host, helper } = createTarget({
+      ...responders(),
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) =>
+        inFlight
+          ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
+          : [
+              'probe_result',
+              {
+                result: 'closed',
+                drained: true,
+                sessionId: metadata['sessionId'],
+                cancelEpoch: metadata['cancelEpoch'],
+                inputAttemptCount: 1,
+              },
+            ],
+    });
+    const session = await startSession(host, 'semantic-transient', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-transient-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    const closing = host.close(session);
+    await vi.advanceTimersByTimeAsync(125);
+    expect(children[0]!.killed).toBe(false);
+    inFlight = false;
+    await vi.advanceTimersByTimeAsync(50);
+    await expect(closing).resolves.toBeUndefined();
+    expect(
+      helper().served.filter((operation) => operation === 'close_session').length,
+    ).toBeGreaterThan(1);
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('keeps a semantic owner reachable when Host rejects a decreasing input counter', async () => {
+    let count = 4;
+    const { addon, host } = createTarget({
+      ...responders(),
+      start_session: (metadata) => [
+        'probe_result',
+        {
+          sessionId: metadata['sessionId'],
+          windowId: '100',
+          appIdentityDigest,
+          windowIdentityDigest,
+          profileRevision: 1,
+          cancelEpoch: 0,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+          screenBounds: bounds,
+          inputAttemptCount: 5,
+        },
+      ],
+      dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+      close_session: (metadata) => [
+        'probe_result',
+        {
+          result: 'closed',
+          drained: true,
+          sessionId: metadata['sessionId'],
+          cancelEpoch: metadata['cancelEpoch'],
+          inputAttemptCount: count,
+        },
+      ],
+    });
+    const session = await startSession(host, 'semantic-counter', 'turn-1');
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-counter-input',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ),
+    ).rejects.toThrow('semantic_input_in_flight');
+    await expect(host.close(session)).rejects.toThrow();
+    expect(children[0]!.killed).toBe(false);
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    count = 6;
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(children).toHaveLength(1);
+    expect(children[0]!.killed).toBe(true);
+    expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+  });
 
   it('keeps the helper reachable so a close re-sent after the Main deadline is confirmed', async () => {
     const { host, helper } = createTarget();
