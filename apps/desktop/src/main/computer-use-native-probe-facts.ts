@@ -50,6 +50,9 @@ export function nativeProbeCapabilities(value: unknown): ComputerUseNativeProbe[
     accessibility: nativeCapabilityGranted(value, 'accessibility'),
     screenCapture: nativeCapabilityGranted(value, 'screenCapture'),
     screenCaptureKit: nativeCapabilityGranted(value, 'screenCaptureKit'),
+    ...(nativeCapabilityGranted(value, 'cancellableWindowDiscovery')
+      ? { cancellableWindowDiscovery: true }
+      : {}),
   };
 }
 

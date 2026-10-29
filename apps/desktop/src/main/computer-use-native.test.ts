@@ -527,7 +527,7 @@ describe('Windows native helper compile boundary', () => {
     );
     const launchSource = source.slice(
       source.indexOf('bool LaunchVerifiedExecutable('),
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
     );
 
     expect(source).toContain('GetFinalPathNameByHandleW');
@@ -539,7 +539,7 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain('SameWindowsFileIdentity');
     expect(launchSource).toContain('const LockedWindowsExecutable &locked');
     expect(launchSource.indexOf('CreateProcessW')).toBeLessThan(
-      launchSource.indexOf('OpenLockedProcessExecutable(information.hProcess'),
+      launchSource.indexOf('OpenLockedProcessExecutable(child.process.value'),
     );
     expect(launchSource).toContain('TerminateProcess');
     expect(source).toContain('WindowsSessionExecutableMatches');
@@ -552,7 +552,7 @@ describe('Windows native helper compile boundary', () => {
       'utf8',
     );
     const listSource = source.slice(
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
     );
     const enumerationSource = source.slice(
@@ -735,7 +735,7 @@ describe('Windows native helper compile boundary', () => {
       'utf8',
     );
     const listSource = source.slice(
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
     );
     const startSource = source.slice(
@@ -1917,6 +1917,39 @@ describe('Computer Use native manifest and runtime gate', () => {
     }
   });
 
+  it.each([undefined, false, true, 'true'])(
+    'retains only the literal Windows discovery capability: %s',
+    (claim) => {
+      const fixture = packageFixture({ platform: 'win32' });
+      const binding = loadComputerUseNative({
+        environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+        dirname: fixture.packagedDirname,
+        resourcesPath: fixture.resources,
+        platform: 'win32',
+        architecture: 'x64',
+        probeHelper: () => ({
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          sourceCommit: 'f'.repeat(40),
+          backend: 'windows-uia-graphics-capture-sendinput',
+          architecture: 'x64',
+          available: true,
+          reason: 'READY',
+          capabilities: {
+            observe: true,
+            control: true,
+            ...(claim === undefined ? {} : { cancellableWindowDiscovery: claim }),
+          },
+        }),
+        verifySignature: () => 'a'.repeat(64),
+      });
+      expect(binding.probe.available).toBe(typeof claim !== 'string');
+      expect(binding.probe.capabilities.cancellableWindowDiscovery === true).toBe(claim === true);
+    },
+  );
+
   it('rejects ad-hoc macOS and unsigned Windows manifests before loading artifacts', () => {
     for (const [platform, trust] of [
       ['darwin', 'ad-hoc'],
@@ -2014,13 +2047,15 @@ describe('Computer Use native manifest and runtime gate', () => {
         napiVersion: 10,
         available: true,
         backend: 'windows-uia-graphics-capture-sendinput',
+        capabilities: { cancellableWindowDiscovery: true },
       }),
     });
 
     expect(binding.probe.available).toBe(true);
     expect(binding.addon).toMatchObject({
       pickApplication: expect.any(Function),
-      listWindows: expect.any(Function),
+      discoverWindows: expect.any(Function),
+      stopWindowDiscovery: expect.any(Function),
       startSession: expect.any(Function),
       observe: expect.any(Function),
       dispatch: expect.any(Function),
@@ -2091,6 +2126,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
     napiVersion: 10,
     available: true,
     backend: 'windows-uia-graphics-capture-sendinput',
+    capabilities: { cancellableWindowDiscovery: true },
   });
 
   const loadWindowsFixture = (

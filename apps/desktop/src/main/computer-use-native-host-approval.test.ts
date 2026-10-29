@@ -1002,7 +1002,9 @@ describe('API 3 pending-start ownership', () => {
       const starting = built.host.startSession(input());
       const rejected = expect(starting).rejects.toThrow();
       await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledOnce());
-      await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unavailable/u);
+      await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(
+        /native_stop_unconfirmed/u,
+      );
       expect(built.host.availability().control).toBe(false);
       expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(2);
       if (completion === 'resolve') native.resolve(response);
@@ -1024,7 +1026,9 @@ describe('API 3 pending-start ownership', () => {
     const starting = built.host.startSession(input());
     const rejected = expect(starting).rejects.toThrow();
     await vi.waitFor(() => expect(built.calls['startSession']).toHaveBeenCalledOnce());
-    await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(/unavailable/u);
+    await expect(built.host.stopPendingStart!('pending')).rejects.toThrow(
+      /native_stop_unconfirmed/u,
+    );
     native.reject(new Error('late start rejected'));
     await rejected;
     expect(built.calls['stopPendingStart']).toHaveBeenCalledTimes(4);

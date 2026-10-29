@@ -1579,7 +1579,10 @@ void AssertBusyRefusals(RcaRun &run) {
   Require(run.Wait(8, 1000) && run.PreflightDenied(8), "busy_preflight_refused");
   run.Send(MessageType::kProbe, 9, "{\"operation\":\"pick_application\"}");
   Require(run.Wait(9, 1000) && run.Error(9, "picker_unavailable"), "busy_picker_refused");
-  run.Send(MessageType::kProbe, 10, "{\"operation\":\"list_windows\"}");
+  const std::string busy_discovery = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"busy-discovery\","
+      "\"canonicalPath\":\"C:/unread-fixture.exe\",\"identityDigest\":\"" + std::string(64, 'a') +
+      "\",\"executableDigest\":\"" + std::string(64, 'c') + "\",\"signerDigest\":\"\"}";
+  run.Send(MessageType::kProbe, 10, busy_discovery);
   Require(run.Wait(10, 1000) && run.Error(10, "profile_identity_invalid"), "busy_windows_refused");
   Require(measurement_calls.load() == measured && synchronous_session_probes.load() == 0,
           "busy_paths_read_no_target");

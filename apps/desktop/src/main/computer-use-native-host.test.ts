@@ -18,6 +18,45 @@ function binding(
   probeOverrides: Partial<ComputerUseNativeBinding['probe']> = {},
   platform: 'darwin' | 'win32' = 'darwin',
 ): ComputerUseNativeBinding {
+  const adapted: typeof addon =
+    platform === 'win32' && addon.listWindows !== undefined
+      ? {
+          ...addon,
+          discoverWindows:
+            addon.discoverWindows ??
+            (async (input: unknown) => {
+              if (
+                typeof input !== 'object' ||
+                input === null ||
+                !('discoveryId' in input) ||
+                typeof input.discoveryId !== 'string'
+              )
+                throw new Error('fixture discovery input');
+              const { discoveryId, ...request } = input;
+              return {
+                discoveryId,
+                result: 'completed',
+                drained: true,
+                launchAttemptCount: 0,
+                windows: await Promise.resolve(addon.listWindows!(request)),
+              };
+            }),
+          stopWindowDiscovery:
+            addon.stopWindowDiscovery ??
+            (async (input: unknown) => {
+              if (typeof input !== 'object' || input === null || !('discoveryId' in input))
+                throw new Error('fixture discovery stop');
+              return {
+                discoveryId: input.discoveryId,
+                result: 'stopped',
+                drained: true,
+                launchAttemptCount: 0,
+              };
+            }),
+          cancelUnsubmittedDiscovery:
+            addon.cancelUnsubmittedDiscovery ?? (() => 'may_have_been_sent'),
+        }
+      : addon;
   return {
     manifest: {
       version: 1,
@@ -40,14 +79,19 @@ function binding(
       reason: '',
       artifactPath: '/Resources/sprint_coder_computer_use_native.node',
       artifactDigest: digest('1'),
-      capabilities: { observe: true, control: true },
       ...probeOverrides,
+      capabilities: {
+        observe: true,
+        control: true,
+        ...(platform === 'win32' ? { cancellableWindowDiscovery: true } : {}),
+        ...probeOverrides.capabilities,
+      },
     },
     artifactPath:
       platform === 'win32'
         ? '/Resources/sprint-coder-computer-use-host.exe'
         : '/Resources/sprint_coder_computer_use_native.node',
-    addon,
+    addon: adapted,
   };
 }
 
@@ -2073,21 +2117,29 @@ describe('Computer Use native OS permission availability', () => {
 
   it('never names a permission when the native probe did not measure one', () => {
     const host = createComputerUseNativeHost(
-      binding(controllerAddon, {
-        available: false,
-        reason: 'UI_AUTOMATION_UNAVAILABLE',
-        capabilities: { observe: false, control: false },
-      }),
+      binding(
+        controllerAddon,
+        {
+          available: false,
+          reason: 'UI_AUTOMATION_UNAVAILABLE',
+          capabilities: { observe: false, control: false },
+        },
+        'win32',
+      ),
       'win32',
     );
 
     expect(
       createComputerUseNativeHost(
-        binding(controllerAddon, {
-          available: false,
-          reason: 'UI_AUTOMATION_UNAVAILABLE',
-          capabilities: { observe: false, control: false },
-        }),
+        binding(
+          controllerAddon,
+          {
+            available: false,
+            reason: 'UI_AUTOMATION_UNAVAILABLE',
+            capabilities: { observe: false, control: false },
+          },
+          'win32',
+        ),
         'win32',
         { windowsPhysicalBoundsToDip: (bounds) => bounds },
       ).availability(),

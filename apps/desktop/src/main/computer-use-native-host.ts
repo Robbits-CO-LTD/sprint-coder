@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import {
+  createComputerUseDiscoveryManager,
+  type ComputerUseDiscoveryHandle,
+} from './computer-use-native-discovery';
+import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-types';
+import {
   COMPUTER_USE_ARTIFACT_LIMITS,
   bindComputerUseMaximumMode,
   computerAppIdentitySchema,
@@ -97,6 +102,8 @@ type RuntimePlatform = 'darwin' | 'win32' | 'linux' | 'other';
 type NativeMethod =
   | 'pickApplication'
   | 'listWindows'
+  | 'discoverWindows'
+  | 'stopWindowDiscovery'
   | 'listTargets'
   | 'startSession'
   | 'stopPendingStart'
@@ -160,7 +167,12 @@ export function createComputerUseNativeHost(
   const controllerReady =
     coordinateReady &&
     pickerReady &&
-    hasMethod(addon, 'listWindows') &&
+    (platform === 'win32'
+      ? binding.probe.capabilities.cancellableWindowDiscovery === true &&
+        hasMethod(addon, 'discoverWindows') &&
+        hasMethod(addon, 'stopWindowDiscovery') &&
+        typeof addon?.cancelUnsubmittedDiscovery === 'function'
+      : hasMethod(addon, 'listWindows')) &&
     hasMethod(addon, 'startSession') &&
     hasMethod(addon, 'stopPendingStart') &&
     hasMethod(addon, 'observe') &&
@@ -202,16 +214,37 @@ export function createComputerUseNativeHost(
     nativeInvoked: boolean;
     discoveryPending: number;
     discoveryUnconfirmed: boolean;
+    discoveries: Set<ComputerUseDiscoveryHandle<readonly unknown[]>>;
     knownEpoch: number;
     terminalEpoch: number;
     terminal: ComputerUsePendingStartStop | null;
+    nativeTerminal: ComputerUsePendingStartStop | null;
     unconfirmed: boolean;
     stopPromise: Promise<ComputerUsePendingStartStop> | null;
   };
   const startOwners = new Map<string, StartOwner>();
   const activeStopQuarantines = new Set<string>();
+  const discoveryManager = createComputerUseDiscoveryManager({
+    query: async (id, input) => {
+      let method: (input: unknown) => unknown;
+      try {
+        method = requireMethod('discoverWindows');
+      } catch {
+        throw new ComputerUseDiscoveryNotSubmittedError(
+          'Native discovery unavailable before invocation',
+        );
+      }
+      return await Promise.resolve(method({ ...input, discoveryId: id }));
+    },
+    stop: async (id) => await invoke('stopWindowDiscovery', { discoveryId: id }),
+    cancelUnsubmitted: (id) => addon?.cancelUnsubmittedDiscovery?.(id) ?? 'unknown',
+    timeoutMs: options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+    attemptLimit: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+    unconfirmedError: () => new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
+  });
   const inputQuarantined = (): boolean =>
     activeStopQuarantines.size !== 0 ||
+    discoveryManager.quarantined() ||
     [...startOwners.values()].some(
       (owner) =>
         owner.stopped &&
@@ -237,11 +270,11 @@ export function createComputerUseNativeHost(
       throw new ComputerUseNativeUnavailableError('native_start_canceled');
   };
 
-  // Windows discovery may still launch an application after Stop. Keep that uncertainty
-  // even when a separate session Close succeeds or the discovery promise later settles.
+  // Session completion never substitutes for a discovery's own terminal evidence.
   const latchStartOwner = (owner: StartOwner): void => {
     owner.stopped = true;
-    if (platform === 'win32' && owner.discoveryPending !== 0) owner.discoveryUnconfirmed = true;
+    if (platform === 'win32' && owner.discoveries.size !== 0) owner.discoveryUnconfirmed = true;
+    for (const discovery of owner.discoveries) void discovery.stop().catch(() => undefined);
   };
 
   const trimStartOwners = (): void => {
@@ -274,19 +307,18 @@ export function createComputerUseNativeHost(
     trimStartOwners();
   };
 
-  const completePendingStop = async (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
+  const completeNativePendingStop = async (
+    owner: StartOwner,
+  ): Promise<ComputerUsePendingStartStop> => {
     if (owner.terminal !== null) return owner.terminal;
+    if (owner.nativeTerminal !== null) return owner.nativeTerminal;
     const active = sessions.get(owner.sessionId);
     const neverSent =
       !owner.nativeInvoked ||
       (platform === 'win32' && addon?.cancelUnsubmittedStart?.(owner.sessionId) === 'never_sent');
     if (active === undefined && neverSent) {
-      if (owner.discoveryUnconfirmed) {
-        owner.unconfirmed = true;
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      }
       const result: ComputerUsePendingStartStop = { kind: 'not_submitted' };
-      finishStartOwner(owner, result);
+      owner.nativeTerminal = result;
       return result;
     }
     owner.unconfirmed = true;
@@ -315,17 +347,41 @@ export function createComputerUseNativeHost(
             inputAttemptCount: result.data.inputAttemptCount,
           },
         };
-        if (owner.discoveryUnconfirmed) {
-          failure = new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-          break;
-        }
-        finishStartOwner(owner, outcome);
+        owner.nativeTerminal = outcome;
         return outcome;
       } catch (error) {
         failure = error;
       }
     }
     throw failure;
+  };
+
+  const stopOwnerDiscoveries = async (owner: StartOwner): Promise<void> => {
+    const results = await Promise.allSettled(
+      [...owner.discoveries].map(async (discovery) => {
+        await discovery.stop();
+        owner.discoveries.delete(discovery);
+      }),
+    );
+    owner.discoveryUnconfirmed =
+      owner.discoveries.size !== 0 && results.some((result) => result.status === 'rejected');
+    if (owner.discoveryUnconfirmed)
+      throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+  };
+
+  const completePendingStop = async (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
+    if (owner.terminal !== null) return owner.terminal;
+    owner.unconfirmed = true;
+    // Independent native lifetimes stop concurrently; neither proof stands in for the other.
+    const [discovery, native] = await Promise.allSettled([
+      stopOwnerDiscoveries(owner),
+      completeNativePendingStop(owner),
+    ]);
+    if (owner.terminal !== null) return owner.terminal;
+    if (discovery.status === 'rejected' || native.status === 'rejected')
+      throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+    finishStartOwner(owner, native.value);
+    return native.value;
   };
 
   const stopStartOwner = (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
@@ -395,7 +451,8 @@ export function createComputerUseNativeHost(
       );
     if (
       (!probeReady || inputQuarantined()) &&
-      (method === 'listTargets' ||
+      (method === 'discoverWindows' ||
+        method === 'listTargets' ||
         method === 'startSession' ||
         method === 'observe' ||
         method === 'preflight' ||
@@ -533,6 +590,100 @@ export function createComputerUseNativeHost(
   ): Record<string, unknown> =>
     platform === 'darwin' && route !== undefined ? { classifierRoute: route } : {};
 
+  const parseWindows = (
+    profile: Parameters<ComputerUseNativeHost['listWindows']>[0],
+    value: unknown,
+    current: () => boolean = () => true,
+  ): readonly ComputerUseNativeWindow[] => {
+    if (!Array.isArray(value))
+      throw new ComputerUseNativeUnavailableError('native_windows_invalid');
+    const pids: number[] = [];
+    const windows = value.map((candidate) => {
+      const raw = asRecord(candidate, 'native_window_invalid');
+      const executableDigest = nativeWindowExecutableDigest(raw, profile);
+      const resolvedPid = raw['pid'];
+      if (typeof resolvedPid === 'number' && Number.isSafeInteger(resolvedPid) && resolvedPid > 0)
+        pids.push(resolvedPid);
+      const publicCandidate = stripNativeEphemeralFields(raw);
+      delete publicCandidate['executableDigest'];
+      publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
+      publicCandidate['maximumMode'] = nativeMaximumMode(raw);
+      let screenBounds: ComputerUseNativeBounds;
+      if (profile.platform === 'win32') {
+        if (raw['boundsUnit'] !== 'physical_px' || options.windowsPhysicalBoundsToDip === undefined)
+          throw new ComputerUseNativeUnavailableError('native_window_coordinate_invalid');
+        publicCandidate['bounds'] = options.windowsPhysicalBoundsToDip(
+          parseNativeBounds(raw['bounds']),
+        );
+        screenBounds = options.windowsPhysicalBoundsToDip(parseNativeBounds(raw['screenBounds']));
+      } else {
+        screenBounds = parseNativeBounds(raw['screenBounds']);
+      }
+      delete publicCandidate['screenBounds'];
+      const parsed = computerUseWindowCandidateSchema.parse(publicCandidate);
+      return Object.freeze({
+        ...parsed,
+        platform: profile.platform,
+        executableDigest,
+        screenBounds,
+      }) as ComputerUseNativeWindow;
+    });
+    if (!current()) throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
+    for (const pid of pids) pidsByIdentity.set(profile.identityDigest, pid);
+    return windows;
+  };
+
+  const discoveryInput = (profile: Parameters<ComputerUseNativeHost['listWindows']>[0]) => {
+    const pid = pidsByIdentity.get(profile.identityDigest);
+    return {
+      ...profile,
+      appIdentityDigest: profile.identityDigest,
+      ...(pid === undefined ? {} : { pid }),
+    };
+  };
+  const beginRawDiscovery = (input: Readonly<Record<string, unknown>>) => {
+    requireMethod('discoverWindows');
+    return discoveryManager.begin(input);
+  };
+  const beginWindowDiscovery = (
+    profile: Parameters<ComputerUseNativeHost['listWindows']>[0],
+  ): ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]> => {
+    const raw = beginRawDiscovery(discoveryInput(profile));
+    let stopped = false;
+    const result = raw.result.then((value) => {
+      if (stopped) throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
+      return parseWindows(profile, value, () => !stopped);
+    });
+    void result.catch(() => undefined);
+    return Object.freeze({
+      id: raw.id,
+      result,
+      terminal: raw.terminal,
+      stop: () => {
+        stopped = true;
+        return raw.stop();
+      },
+    });
+  };
+
+  const startWindowsDiscovery = async (
+    owner: StartOwner,
+    input: Readonly<Record<string, unknown>>,
+  ) => {
+    assertStartOwner(owner);
+    const discovery = beginRawDiscovery(input);
+    owner.discoveries.add(discovery);
+    void discovery.terminal.then(() => {
+      owner.discoveries.delete(discovery);
+      owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
+      if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
+        finishStartOwner(owner, owner.nativeTerminal);
+    });
+    const value = await discovery.result;
+    assertStartOwner(owner);
+    return value;
+  };
+
   const startDiscovery = async <T>(owner: StartOwner, work: () => Promise<T>): Promise<T> => {
     owner.discoveryPending += 1;
     try {
@@ -597,19 +748,28 @@ export function createComputerUseNativeHost(
     }
     let pid = pidsByIdentity.get(input.profile.identityDigest);
     if (pid === undefined) {
-      const windows = await startDiscovery(owner, () => host.listWindows(input.profile));
+      const windows =
+        platform === 'win32'
+          ? parseWindows(
+              input.profile,
+              await startWindowsDiscovery(owner, discoveryInput(input.profile)),
+              () => !owner.stopped,
+            )
+          : await startDiscovery(owner, () => host.listWindows(input.profile));
       assertStartOwner(owner);
       pid = pidsByIdentity.get(input.profile.identityDigest);
       if (pid === undefined || windows.every((candidate) => candidate.windowId !== input.windowId))
         throw new ComputerUseNativeUnavailableError('native_app_not_active');
     }
-    const candidate = await startDiscovery(owner, () =>
-      invoke('listWindows', {
-        ...input.profile,
-        pid,
-        appIdentityDigest: input.profile.identityDigest,
-      }),
-    );
+    const discoveryRequest = {
+      ...input.profile,
+      pid,
+      appIdentityDigest: input.profile.identityDigest,
+    };
+    const candidate =
+      platform === 'win32'
+        ? await startWindowsDiscovery(owner, discoveryRequest)
+        : await startDiscovery(owner, () => invoke('listWindows', discoveryRequest));
     assertStartOwner(owner);
     if (!Array.isArray(candidate))
       throw new ComputerUseNativeUnavailableError('native_windows_invalid');
@@ -747,48 +907,10 @@ export function createComputerUseNativeHost(
       return identity;
     },
 
+    ...(platform === 'win32' ? { beginWindowDiscovery } : {}),
     listWindows: async (profile): Promise<readonly ComputerUseNativeWindow[]> => {
-      const pid = pidsByIdentity.get(profile.identityDigest);
-      const value = await invoke('listWindows', {
-        ...profile,
-        appIdentityDigest: profile.identityDigest,
-        ...(pid === undefined ? {} : { pid }),
-      });
-      if (!Array.isArray(value))
-        throw new ComputerUseNativeUnavailableError('native_windows_invalid');
-      return value.map((candidate) => {
-        const raw = asRecord(candidate, 'native_window_invalid');
-        const executableDigest = nativeWindowExecutableDigest(raw, profile);
-        const resolvedPid = raw['pid'];
-        if (typeof resolvedPid === 'number' && Number.isSafeInteger(resolvedPid) && resolvedPid > 0)
-          pidsByIdentity.set(profile.identityDigest, resolvedPid);
-        const publicCandidate = stripNativeEphemeralFields(raw);
-        delete publicCandidate['executableDigest'];
-        publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
-        publicCandidate['maximumMode'] = nativeMaximumMode(raw);
-        let screenBounds: ComputerUseNativeBounds;
-        if (profile.platform === 'win32') {
-          if (
-            raw['boundsUnit'] !== 'physical_px' ||
-            options.windowsPhysicalBoundsToDip === undefined
-          )
-            throw new ComputerUseNativeUnavailableError('native_window_coordinate_invalid');
-          publicCandidate['bounds'] = options.windowsPhysicalBoundsToDip(
-            parseNativeBounds(raw['bounds']),
-          );
-          screenBounds = options.windowsPhysicalBoundsToDip(parseNativeBounds(raw['screenBounds']));
-        } else {
-          screenBounds = parseNativeBounds(raw['screenBounds']);
-        }
-        delete publicCandidate['screenBounds'];
-        const parsed = computerUseWindowCandidateSchema.parse(publicCandidate);
-        return Object.freeze({
-          ...parsed,
-          platform: profile.platform,
-          executableDigest,
-          screenBounds,
-        }) as ComputerUseNativeWindow;
-      });
+      if (platform === 'win32') return await beginWindowDiscovery(profile).result;
+      return parseWindows(profile, await invoke('listWindows', discoveryInput(profile)));
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
@@ -814,9 +936,11 @@ export function createComputerUseNativeHost(
           nativeInvoked: false,
           discoveryPending: 0,
           discoveryUnconfirmed: false,
+          discoveries: new Set(),
           knownEpoch: input.cancelEpoch,
           terminalEpoch: 0,
           terminal: null,
+          nativeTerminal: null,
           unconfirmed: false,
           stopPromise: null,
         };
@@ -1207,13 +1331,32 @@ export function createComputerUseNativeHost(
       if (owner !== undefined) latchStartOwner(owner);
       const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
       stopEpochs.set(session.sessionId, cancelEpoch);
-      const parsed = computerUseNativeCloseReceiptSchema.safeParse(
-        await stopWithDeadline('close', { ...internal.raw, cancelEpoch }),
-      );
+      const [discoveryStop, nativeClose] = await Promise.allSettled([
+        owner === undefined ? Promise.resolve() : stopOwnerDiscoveries(owner),
+        stopWithDeadline('close', { ...internal.raw, cancelEpoch }),
+      ]);
+      if (nativeClose.status === 'rejected')
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      if (owner?.terminal !== null && owner?.terminal !== undefined) return;
+      const parsed = computerUseNativeCloseReceiptSchema.safeParse(nativeClose.value);
       if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       inputReceipt(parsed.data, session.sessionId, cancelEpoch);
-      if (owner?.discoveryUnconfirmed)
+      const terminal: ComputerUsePendingStartStop = {
+        kind: 'closed',
+        inputReceipt: {
+          sessionId: parsed.data.sessionId,
+          cancelEpoch: parsed.data.cancelEpoch,
+          inputAttemptCount: parsed.data.inputAttemptCount,
+        },
+      };
+      if (owner !== undefined) owner.nativeTerminal = terminal;
+      if (
+        owner?.discoveryUnconfirmed ||
+        (discoveryStop.status === 'rejected' && owner !== undefined && owner.discoveries.size !== 0)
+      ) {
+        if (owner !== undefined) owner.unconfirmed = true;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      }
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
@@ -1226,14 +1369,7 @@ export function createComputerUseNativeHost(
       // leaves the old session tracked and cannot open a new input lane.
       activeStopQuarantines.delete(session.sessionId);
       if (owner !== undefined) {
-        owner.terminal = {
-          kind: 'closed',
-          inputReceipt: {
-            sessionId: parsed.data.sessionId,
-            cancelEpoch: parsed.data.cancelEpoch,
-            inputAttemptCount: parsed.data.inputAttemptCount,
-          },
-        };
+        owner.terminal = terminal;
         owner.unconfirmed = false;
         owner.stopPromise ??= Promise.resolve(owner.terminal);
         trimStartOwners();

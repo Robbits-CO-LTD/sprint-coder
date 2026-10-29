@@ -152,7 +152,7 @@ describe('Computer Use native compiled provenance', () => {
       source.indexOf('bool SameWindowsPath('),
     );
     const list = source.slice(
-      source.indexOf('bool ListWindowsForIdentity('),
+      source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
     );
     const start = source.slice(

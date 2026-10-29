@@ -319,21 +319,51 @@ The frame protocol and eligibility/classifier versions are unchanged.
 Main registers an owner before discovery or native awaits. An entirely unsubmitted start can finish
 locally without inventing a native receipt; Windows additionally tracks every socket write attempt.
 Discovery is not inherently read-only: V1 window lookup may launch the registered application.
-A Stop during an unfinished Windows discovery therefore stays unconfirmed and quarantined, even
-if its late response succeeds or a separate active session Close is confirmed. This quarantine is
-host-wide: future session starts, observations and input remain blocked until the Host is recreated
-(normally by restarting the app). A valid session terminal receipt cannot resolve a separate
-unconfirmed discovery, so that successful session query is not repeated in the same batch. A transport timeout
-or generic rejection does not establish native completion; an authenticated native refusal does.
-This slice does not cancel discovery itself, nor establish that an OS application launch issued
-before Stop has finished. Pre-binding discovery cancellation remains part of the V1 follow-up.
+Windows requires the private `cancellableWindowDiscovery: true` capability in both the initial
+probe and each pipe handshake. API 3 / frame 1 remain unchanged; the legacy Windows `list_windows`
+operation is retired, with no fallback. macOS keeps its existing discovery path.
+
+Each Windows query has a Main-issued nonce/counter identity and one original wire request. Native
+binds it to all 16 header bytes and retains at most 16 owners; terminal owners may be evicted only
+after their leases and launch work end. Main never reuses an issued ID. Replay rejection after native
+cache eviction is not a permanent native guarantee. Discovery measurement uses the shared single
+worker slot and a 25-second admission-to-result budget (Main transport: 30 seconds). Stop or expiry
+rejects partial/late windows, attempts `CancelSynchronousIo`, and retains busy ownership until actual
+worker cleanup. A stalled read cannot block consumer Stop/Close; it still prevents another measurement.
+While waiting for one discovery, the consumer services queued Stops for other discovery owners
+through the same strict handler and response cache. Each pass is bounded by the 64-frame queue limit;
+it neither cancels the waiting owner nor creates another writer thread.
+
+Launch claims and Stop are ordered under the same mutex. Stop before a claim prevents launch;
+a prior claim is in flight even if the OS call has not started. Its process/thread handles are owned
+immediately. An unverified child must actually exit before launch cleanup is confirmed; a verified
+application is not rolled back. An unresolved launch keeps Stop unconfirmed and input quarantined.
+Normal helper exit also retains these launch guards: after pipe service ends, discovery is latched
+stopped and the helper waits for every claimed launch unit to retire before returning from Main.
+The wait releases the stop mutex and does not wait for read-only workers. Otherwise normal process
+exit would bypass a detached worker's child cleanup. Forced termination is not a cleanup receipt.
+Only bound `stopped` receipts, the original query's strict `completed` envelope, or its strict
+`not_admitted` response establish terminal evidence. Arrays, generic refusals and timeouts do not.
+A late valid completion or Stop receipt may clear quarantine, but never publish windows. Stop
+receipts are validated independently of the caller's deadline, so evidence received after both
+bounded attempts expired is still retained. Session and discovery
+proofs are separate. Query timeouts preserve the original helper for bounded Stop retries, and Stop
+never reconnects to another helper to pretend the old operation ended.
+
+Controller discovery scopes bind Task, Turn, profiles, UI actor/call and grant card as applicable.
+They latch cancellation synchronously, then await shared bounded native cleanup independently of the
+query result. UI scopes remain current through the IPC commit that creates permits and Quick Start
+latches. Tool cancellation stops the current profile and forbids the next one; card expiry or denial
+stops its refetch without creating a grant. Session handoff ends discovery ownership, preserving the
+existing running-session Stop result. Failed scopes retain ownership for later explicit Stop or late
+terminal evidence. An old scope cannot remove a newer scope or its permits.
 Once session start submission is possible, only a validated terminal receipt confirms its closure. Pending work cannot
 adopt its late result, and quarantine remains until that work settles or an unconfirmed stop is
 resolved. Duplicate in-flight Stop callers share one bounded cleanup operation. A failed operation keeps
 its stop latch and quarantine but permits a later bounded query. When a stopped start request
 settles after that failure, Main makes one bounded recheck; the late start result itself is never
 a stop receipt. Only fresh validated terminal evidence releases quarantine, and uncertainty from
-launch-capable discovery is retained. The Controller settles a canceled
+launch-capable discovery requires its own terminal evidence. The Controller settles a canceled
 start after cleanup even if an overlay or planner factory never returns, and reports an unconfirmed
 stop separately. Old overlay completions cannot unregister a newer session's shortcut.
 

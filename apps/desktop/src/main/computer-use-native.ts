@@ -237,7 +237,14 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
     reason: '',
     artifactPath: typeof value['artifactPath'] === 'string' ? value['artifactPath'] : null,
     artifactDigest,
-    capabilities: Object.freeze({ observe: true, control: true }),
+    capabilities: Object.freeze({
+      observe: true,
+      control: true,
+      ...(parsed.platform === 'win32' &&
+      nativeProbeCapabilities(probe.capabilities).cancellableWindowDiscovery === true
+        ? { cancellableWindowDiscovery: true }
+        : {}),
+    }),
   });
 }
 

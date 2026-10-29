@@ -188,7 +188,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
         .replaceAll('_', ''),
     );
     const observeTimeout = Number(
-      /operation === 'list_windows' \|\| operation === 'observe'\) return ([0-9_]+)/u
+      /operation === 'list_windows_cancellable' \|\| operation === 'observe'\) return ([0-9_]+)/u
         .exec(mainWindows)![1]!
         .replaceAll('_', ''),
     );

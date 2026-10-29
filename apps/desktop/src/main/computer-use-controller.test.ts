@@ -2680,14 +2680,10 @@ describe('ComputerUseController', () => {
       await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
       fixture.controller.taskClosed('task-1');
       release();
-      const started = await starting;
-      await fixture.controller.observe(started.sessionId);
-      await expect(
-        fixture.controller.act(started.sessionId, copy, 'copy-1'),
-      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      await expect(starting).rejects.toThrow(/canceled|stopped/u);
       expect(owners).toEqual([]);
-      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
-      await fixture.controller.stop(started.sessionId);
+      expect(fixture.statuses.at(-1)?.state).toBe('stopped');
+      expect(fixture.dispatchCount()).toBe(0);
     });
 
     it('keeps nothing when the Task was closed while the windows were being listed again', async () => {
@@ -2705,13 +2701,9 @@ describe('ComputerUseController', () => {
       await viWait();
       fixture.controller.taskClosed('task-1');
       release();
-      const started = await starting;
-      await fixture.controller.observe(started.sessionId);
-      await expect(
-        fixture.controller.act(started.sessionId, copy, 'copy-1'),
-      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      await expect(starting).rejects.toThrow('Task closed while starting');
+      expect(fixture.startSessionEnteredCount()).toBe(0);
       expect(owners).toEqual([]);
-      await fixture.controller.stop(started.sessionId);
     });
 
     it('notes the generation before the first await of every start path', () => {
@@ -2721,13 +2713,13 @@ describe('ComputerUseController', () => {
       );
       // startForAgent notes it first thing and hands it on; start notes it before startInternal.
       expect(source).toMatch(
-        /Promise<ComputerStartToolOutput> \{ \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
+        /Promise<ComputerStartToolOutput> \{ let signal: AbortSignal \| undefined = scope\.signal; \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
       );
       expect(source).toContain('signal, artifactGeneration, );');
       expect(source).toContain(
         'notedArtifactGeneration ?? this.artifactGenerations.get(input.taskId) ?? 0; if (this.disposed)',
       );
-      expect(source).toContain('this.startInternal(input, controller, artifactGeneration)');
+      expect(source).toContain('this.startInternal(input, controller, artifactGeneration, scope)');
     });
 
     it('lets a session started after the Task was closed and reopened copy', async () => {

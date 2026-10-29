@@ -18,6 +18,7 @@ import {
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   computerUseApprovalSchema,
+  type ComputerUseWindowCandidate,
   type ComputerUseAction,
   type ComputerUseApproval,
   type ComputerUseSessionStatus,
@@ -238,7 +239,18 @@ function captureComputerUseHandlers(): {
         updatedAt: '2026-08-29T00:00:00.000Z',
       }),
     ),
-    listWindows: vi.fn(async () => []),
+    listWindows: vi.fn(async (_profileId: string): Promise<ComputerUseWindowCandidate[]> => []),
+    beginWindowCandidates: vi.fn((profileId: string, _taskId: string, _actor: string) => {
+      let candidates: ComputerUseWindowCandidate[] = [];
+      const result = controller.listWindows(profileId).then((value) => {
+        candidates = value;
+      });
+      return {
+        result,
+        commit: <T>(publish: (value: ComputerUseWindowCandidate[]) => T): T => publish(candidates),
+        cancel: async () => undefined,
+      };
+    }),
     start: vi.fn(async () =>
       computerUseSessionStatusSchema.parse({
         sessionId: 'session-1',
@@ -657,7 +669,14 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     await expect(
-      windowHandler({ taskId: 'task-1', profileId: 'profile-1' }, {}, {}),
+      windowHandler(
+        { taskId: 'task-1', profileId: 'profile-1' },
+        {
+          sender: { id: 7, isDestroyed: () => false },
+          senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
+        },
+        {},
+      ),
     ).resolves.toMatchObject({
       profileId: 'profile-1',
     });
@@ -721,8 +740,8 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     const event = {
-      sender: { id: 7 },
-      senderFrame: { processId: 11, routingId: 13 },
+      sender: { id: 7, isDestroyed: () => false },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     fixture.controller.listWindows!.mockResolvedValue([quickStartCandidate]);
     fixture.activation.generation.mockReturnValue(3);
@@ -747,8 +766,8 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     const event = {
-      sender: { id: 7 },
-      senderFrame: { processId: 11, routingId: 13 },
+      sender: { id: 7, isDestroyed: () => false },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     fixture.controller.listWindows!.mockResolvedValue([quickStartCandidate]);
     fixture.persistence
@@ -777,8 +796,8 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     const event = {
-      sender: { id: 7 },
-      senderFrame: { processId: 11, routingId: 13 },
+      sender: { id: 7, isDestroyed: () => false },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     fixture.controller.listWindows!.mockResolvedValue([quickStartCandidate]);
     fixture.persistence
@@ -804,8 +823,8 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     const event = {
-      sender: { id: 7 },
-      senderFrame: { processId: 11, routingId: 13 },
+      sender: { id: 7, isDestroyed: () => false },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     fixture.controller.listWindows!.mockResolvedValue([quickStartCandidate]);
     fixture.activation.generation.mockReturnValue(3);
@@ -827,12 +846,12 @@ describe('Computer Use Main IPC integration', () => {
     const windowHandler = fixture.handlers.get(IPC_CHANNELS.computerUseWindowCandidates)!;
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
     const event = {
-      sender: { id: 7 },
-      senderFrame: { processId: 11, routingId: 13 },
+      sender: { id: 7, isDestroyed: () => false },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     const otherSenderEvent = {
       sender: { id: 8 },
-      senderFrame: { processId: 11, routingId: 13 },
+      senderFrame: { processId: 11, routingId: 13, isDestroyed: () => false },
     };
     fixture.controller.listWindows!.mockResolvedValue([quickStartCandidate]);
     fixture.activation.generation.mockReturnValue(3);

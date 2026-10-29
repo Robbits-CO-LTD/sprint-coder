@@ -1,6 +1,8 @@
 import { parseNativeHandshake } from './computer-use-native-handshake';
 import {
   computerUseNativeCloseReceiptSchema,
+  computerUseNativeDiscoveryResultSchema,
+  computerUseNativeDiscoveryStopReceiptSchema,
   type ComputerUseEligibility,
 } from '@sprint-coder/contracts';
 import { createHash, randomBytes } from 'node:crypto';
@@ -26,7 +28,10 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
 } from './computer-use-native-host';
 import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
-import type { ComputerUseNativeAddon } from './computer-use-native-types';
+import {
+  ComputerUseDiscoveryNotSubmittedError,
+  type ComputerUseNativeAddon,
+} from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
 export type WindowsComputerUseHelperTrust = Readonly<{
@@ -69,7 +74,8 @@ export function createWindowsComputerUseNativeAddon(
   probe: unknown,
   expectedTrust: WindowsComputerUseHelperTrust,
 ): ComputerUseNativeAddon {
-  const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust);
+  const discoverySupported = windowsDiscoveryCapability(probe);
+  const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
     probe: () => probe,
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
@@ -78,15 +84,15 @@ export function createWindowsComputerUseNativeAddon(
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
-    listWindows: (input) => {
+    discoverWindows: (input) => client.discoverWindows(input),
+    stopWindowDiscovery: (input) => {
       const value = record(input);
-      const identity = record(value['identity']);
-      value['identityDigest'] = value['identityDigest'] ?? identity['identityDigest'];
-      value['canonicalPath'] = value['canonicalPath'] ?? identity['executablePath'];
-      value['executableDigest'] = value['executableDigest'] ?? identity['executableDigest'];
-      value['signerDigest'] = identity['signerDigest'];
-      return client.call('probe', 'list_windows', value, undefined, undefined);
+      const id = stringField(value, 'discoveryId');
+      if (Object.keys(value).length !== 1 || !id || Buffer.byteLength(id, 'utf8') > 256)
+        throw new Error('Invalid discovery stop request');
+      return client.stopWindowDiscovery(id);
     },
+    cancelUnsubmittedDiscovery: (id) => client.cancelUnsubmittedDiscovery(id),
     startSession: (input) => {
       const value = record(input);
       const profile = record(value['profile']);
@@ -196,6 +202,16 @@ type StartTransmission = {
   attempts: Set<symbol>;
 };
 
+type DiscoveryTransmission = {
+  id: string;
+  stopped: boolean;
+  everSent: boolean;
+  closed: boolean;
+  helper: number | null;
+  launches: number;
+  attempts: Set<symbol>;
+};
+
 class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
@@ -206,10 +222,13 @@ class WindowsComputerUseHelperClient {
   private activityGeneration = 0;
   private helperGeneration = 0;
   private readonly starts = new Map<string, StartTransmission>();
+  private readonly discoveries = new Map<string, DiscoveryTransmission>();
+  private discoveryHandshakeSupported = false;
 
   constructor(
     private readonly helperPath: string,
     private readonly expectedTrust: WindowsComputerUseHelperTrust,
+    private readonly discoveryInitiallySupported: boolean,
   ) {}
 
   shutdown(): void {
@@ -250,23 +269,32 @@ class WindowsComputerUseHelperClient {
       )
         return;
     }
+    // Keep the close intent while discovery drains; shutdownIfIdle owns that wait.
     this.idleShutdownPending = true;
     this.shutdownIfIdle();
   }
 
   private shutdownIfIdle(): void {
+    for (const owner of this.discoveries.values())
+      if (
+        (owner.helper === null || owner.helper === this.helperGeneration) &&
+        !owner.closed &&
+        (owner.everSent || owner.attempts.size !== 0)
+      )
+        return;
     if (this.idleShutdownPending && this.pending.size === 0 && this.connecting === null)
       this.shutdown();
   }
 
+  private hasUnconfirmedDiscovery(): boolean {
+    return [...this.discoveries.values()].some(
+      (owner) => owner.helper === this.helperGeneration && owner.everSent && !owner.closed,
+    );
+  }
+
   private hasPendingStop(): boolean {
     for (const request of this.pending.values())
-      if (
-        request.stopsSession &&
-        request.activityGeneration === this.activityGeneration &&
-        request.helperGeneration === this.helperGeneration
-      )
-        return true;
+      if (request.stopsSession && request.helperGeneration === this.helperGeneration) return true;
     return false;
   }
 
@@ -281,6 +309,142 @@ class WindowsComputerUseHelperClient {
       this.starts.delete(sessionId);
     this.shutdownWhenIdle(this.activityGeneration, this.helperGeneration, sessionId);
     return 'never_sent';
+  }
+
+  cancelUnsubmittedDiscovery(id: string): 'never_sent' | 'may_have_been_sent' | 'unknown' {
+    const owner = this.discoveries.get(id);
+    if (owner === undefined) return 'unknown';
+    owner.stopped = true;
+    if (owner.everSent) return 'may_have_been_sent';
+    if (owner.attempts.size === 0 && this.discoveries.get(id) === owner)
+      this.discoveries.delete(id);
+    this.shutdownIfIdle();
+    return 'never_sent';
+  }
+
+  async discoverWindows(input: unknown): Promise<unknown> {
+    const raw = record(input);
+    const candidateId = raw['discoveryId'];
+    if (typeof candidateId === 'string' && this.discoveries.has(candidateId))
+      throw new Error('Discovery id was already used');
+    const value = windowsDiscoveryInput(raw);
+    const id = stringField(value, 'discoveryId');
+    if (!this.discoveryInitiallySupported)
+      throw new ComputerUseDiscoveryNotSubmittedError(
+        'Windows discovery capability is unavailable',
+      );
+    for (const [key, prior] of this.discoveries) {
+      if (this.discoveries.size < 16) break;
+      if (prior.closed && prior.attempts.size === 0) this.discoveries.delete(key);
+    }
+    if (this.discoveries.size >= 16)
+      throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed native discoveries remain');
+    const attempt = Symbol('native-discovery-query');
+    const owner: DiscoveryTransmission = {
+      id,
+      stopped: false,
+      everSent: false,
+      closed: false,
+      helper: null,
+      launches: 0,
+      attempts: new Set([attempt]),
+    };
+    this.discoveries.set(id, owner);
+    this.activityGeneration += 1;
+    this.idleShutdownPending = false;
+    try {
+      await this.ensureConnected();
+      if (!this.discoveryHandshakeSupported)
+        throw new ComputerUseDiscoveryNotSubmittedError(
+          'Windows discovery handshake capability is unavailable',
+        );
+      owner.helper = this.helperGeneration;
+      const result = await this.sendConnected(
+        'probe',
+        { ...value, operation: 'list_windows_cancellable' },
+        frameIdFromText(`discovery:${id}`),
+        newComputerUseNativeFrameId(),
+        operationTimeoutMilliseconds('list_windows_cancellable'),
+        false,
+        () => {
+          if (
+            owner.stopped ||
+            this.discoveries.get(id) !== owner ||
+            owner.helper !== this.helperGeneration
+          )
+            throw new ComputerUseDiscoveryNotSubmittedError('Discovery canceled before send');
+          owner.everSent = true;
+        },
+      );
+      const proof = computerUseNativeDiscoveryResultSchema.parse(result);
+      if (
+        proof.discoveryId !== id ||
+        proof.launchAttemptCount < owner.launches ||
+        (owner.closed && proof.launchAttemptCount !== owner.launches)
+      )
+        throw new Error('Invalid discovery completion binding');
+      owner.launches = proof.launchAttemptCount;
+      owner.closed = true;
+      return proof;
+    } catch (error) {
+      // The branded local proof is already sufficient for Main; no later cleanup call is required.
+      if (error instanceof ComputerUseDiscoveryNotSubmittedError && !owner.everSent)
+        owner.closed = true;
+      throw error;
+    } finally {
+      owner.attempts.delete(attempt);
+      // Stop may have consumed never_sent while preparation still owned this attempt.
+      if (
+        owner.stopped &&
+        !owner.everSent &&
+        owner.attempts.size === 0 &&
+        this.discoveries.get(id) === owner
+      )
+        this.discoveries.delete(id);
+      // Other unsuccessful unsent records remain until Main consumes their distinct proof.
+      this.shutdownIfIdle();
+    }
+  }
+
+  async stopWindowDiscovery(id: string): Promise<unknown> {
+    const owner = this.discoveries.get(id);
+    if (owner === undefined) throw new Error('Unknown discovery lifetime');
+    owner.stopped = true;
+    const attempt = Symbol('native-discovery-stop');
+    owner.attempts.add(attempt);
+    try {
+      if (!owner.everSent)
+        throw new ComputerUseDiscoveryNotSubmittedError('Discovery was never sent');
+      // Reconnecting would query a different helper, which cannot prove this operation ended.
+      if (this.socket === null || owner.helper !== this.helperGeneration)
+        throw new Error('Discovery helper generation is unavailable');
+      const result = await this.sendConnected(
+        'probe',
+        { operation: 'stop_window_discovery', discoveryId: id },
+        frameIdFromText(`discovery:${id}`),
+        newComputerUseNativeFrameId(),
+        operationTimeoutMilliseconds('stop_window_discovery'),
+        true,
+        () => {
+          if (this.discoveries.get(id) !== owner || owner.helper !== this.helperGeneration)
+            throw new Error('Discovery owner changed before Stop');
+        },
+      );
+      const proof = computerUseNativeDiscoveryStopReceiptSchema.parse(result);
+      if (
+        proof.discoveryId !== id ||
+        proof.launchAttemptCount < owner.launches ||
+        (owner.closed && proof.launchAttemptCount !== owner.launches)
+      )
+        throw new Error('Invalid discovery Stop binding');
+      owner.launches = proof.launchAttemptCount;
+      owner.closed = true;
+      return proof;
+    } finally {
+      owner.attempts.delete(attempt);
+      // This closes a discovery, not an active session. It never arms helper teardown.
+      this.shutdownIfIdle();
+    }
   }
 
   async call(
@@ -385,6 +549,7 @@ class WindowsComputerUseHelperClient {
 
   private async connect(): Promise<void> {
     this.helperGeneration += 1;
+    this.discoveryHandshakeSupported = false;
     const nonce = randomBytes(16).toString('hex');
     const pipePath = `\\\\.\\pipe\\sprint-coder-computer-use-${nonce}`;
     const child = spawn(
@@ -446,6 +611,7 @@ class WindowsComputerUseHelperClient {
           newComputerUseNativeFrameId(),
         );
         assertWindowsComputerUseHelperHandshake(handshake, this.expectedTrust);
+        this.discoveryHandshakeSupported = windowsDiscoveryCapability(handshake);
         return;
       } catch (error) {
         lastFailure = error;
@@ -495,11 +661,14 @@ class WindowsComputerUseHelperClient {
         // input quarantine, and requests that were already in flight when Stop began keep timers of
         // their own that would otherwise expire inside Stop's window and kill the helper the stop
         // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-        // the transport — the last stop to time out finds no stop pending and aborts here.
+        // the transport — the last stop normally aborts here. An unconfirmed discovery instead
+        // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
+        // the original launch unit ended. Its result timeout is not terminal evidence.
         if (
           activityGeneration === this.activityGeneration &&
           helperGeneration === this.helperGeneration &&
-          !this.hasPendingStop()
+          !this.hasPendingStop() &&
+          !this.hasUnconfirmedDiscovery()
         )
           this.abortTransport(error);
         else this.shutdownIfIdle();
@@ -833,6 +1002,46 @@ function frameIdFromText(value: string): ComputerUseNativeFrameId {
   });
 }
 
+function windowsDiscoveryCapability(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const capabilities = (value as NativeRecord)['capabilities'];
+  return (
+    typeof capabilities === 'object' &&
+    capabilities !== null &&
+    !Array.isArray(capabilities) &&
+    (capabilities as NativeRecord)['cancellableWindowDiscovery'] === true
+  );
+}
+
+function windowsDiscoveryInput(value: NativeRecord): NativeRecord {
+  try {
+    const profile = value['profile'] === undefined ? value : record(value['profile']);
+    const identity = profile['identity'] === undefined ? {} : record(profile['identity']);
+    const discoveryId = value['discoveryId'];
+    const canonicalPath = profile['canonicalPath'] ?? identity['executablePath'];
+    const identityDigest = profile['identityDigest'] ?? identity['identityDigest'];
+    const executableDigest = profile['executableDigest'] ?? identity['executableDigest'];
+    const signerDigest = identity['signerDigest'] ?? profile['signerDigest'] ?? '';
+    const digest = (input: unknown): input is string =>
+      typeof input === 'string' && /^[0-9a-f]{64}$/u.test(input);
+    if (
+      typeof discoveryId !== 'string' ||
+      discoveryId.length === 0 ||
+      Buffer.byteLength(discoveryId, 'utf8') > 256 ||
+      typeof canonicalPath !== 'string' ||
+      canonicalPath.length === 0 ||
+      Buffer.byteLength(canonicalPath, 'utf8') > 4096 ||
+      !digest(identityDigest) ||
+      !digest(executableDigest) ||
+      (signerDigest !== '' && !digest(signerDigest))
+    )
+      throw new Error('Invalid discovery input');
+    return { discoveryId, canonicalPath, identityDigest, executableDigest, signerDigest };
+  } catch {
+    throw new ComputerUseDiscoveryNotSubmittedError('Invalid Windows discovery input');
+  }
+}
+
 function record(value: unknown): NativeRecord {
   return { ...asRecord(value, 'Computer Use Windows request must be an object') };
 }
@@ -927,17 +1136,24 @@ export const COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS =
  */
 export function isComputerUseStopOperation(operation: string): boolean {
   return (
-    operation === 'cancel' || operation === 'close_session' || operation === 'stop_pending_start'
+    operation === 'cancel' ||
+    operation === 'close_session' ||
+    operation === 'stop_pending_start' ||
+    operation === 'stop_window_discovery'
   );
 }
 
 export function operationTimeoutMilliseconds(operation: string): number {
   if (operation === 'pick_application') return 5 * 60_000;
-  if (operation === 'list_windows' || operation === 'observe') return 30_000;
+  if (operation === 'list_windows_cancellable' || operation === 'observe') return 30_000;
   if (operation === 'start_session') return 15_000;
   // The helper answers a read within the lane's 500 ms hold; a longer wait is a helper that is stuck.
   if (operation === 'read_node_value') return 5_000;
-  if (operation === 'close_session' || operation === 'stop_pending_start')
+  if (
+    operation === 'close_session' ||
+    operation === 'stop_pending_start' ||
+    operation === 'stop_window_discovery'
+  )
     return COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
   return 10_000;
 }

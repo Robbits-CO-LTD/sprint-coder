@@ -1,4 +1,6 @@
+import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
 import { createHash, randomUUID } from 'node:crypto';
+import type { ComputerUseDiscoveryHandle } from './computer-use-native-discovery';
 import {
   bindComputerUsePolicyLanguage,
   bindComputerUseMaximumMode,
@@ -119,7 +121,10 @@ import {
   computerUseActionKind,
   computerUseActionRoute,
 } from './computer-use-action';
-import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
+import {
+  COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+  ComputerUseNativeUnavailableError,
+} from './computer-use-native-host';
 import type { ComputerUseNativeTargetList } from './computer-use-native-targets';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
@@ -287,6 +292,10 @@ export interface ComputerUseNativeHost {
     }>,
   ): Promise<ComputerAppIdentity | null>;
   listWindows(profile: ComputerAppProfileRecord): Promise<readonly ComputerUseNativeWindow[]>;
+  /** Windows: a result and an independently stoppable, Main-owned discovery lifetime. */
+  beginWindowDiscovery?(
+    profile: ComputerAppProfileRecord,
+  ): ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>;
   startSession(
     input: Readonly<{
       profile: ComputerAppProfileRecord;
@@ -884,6 +893,7 @@ export class ComputerUseController {
   private readonly startingSessions = new Map<string, StartingSession>();
   private readonly now: () => number;
   private disposed = false;
+  private readonly discoveryScopes = new Set<ComputerUseDiscoveryScope>();
   private startInProgress = false;
   private startingController: AbortController | null = null;
   private startingTaskId: string | null = null;
@@ -1042,43 +1052,128 @@ export class ComputerUseController {
     return this.registerProfile({ ...input.preferences, identity });
   }
 
-  async listWindows(profileId: string): Promise<ComputerUseWindowCandidate[]> {
-    let profile = this.deps.persistence.getComputerAppProfile(profileId);
-    for (const [token, permit] of this.windowCandidatePermits)
-      if (permit.profileId === profileId) this.windowCandidatePermits.delete(token);
-    const windows = await this.listNativeWindows(profile);
-    profile = this.refreshSignedWindowsProfile(profile, windows);
-    return windows.map((native) => {
-      const token = randomUUID();
-      this.windowCandidatePermits.set(
-        token,
-        Object.freeze({
-          profileId,
-          profileRevision: profile.revision,
-          native,
-          expiresAt: this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
-        }),
-      );
-      const {
-        platform: _platform,
-        executableDigest: _executableDigest,
-        windowId: _nativeWindowId,
-        screenBounds: _screenBounds,
-        ...candidate
-      } = native;
-      return computerUseWindowCandidateSchema.parse({
-        ...candidate,
-        windowId: token,
-        title: safeUntrustedDisplayText(candidate.title),
-      });
+  private discoveryScope(
+    taskId: string | null,
+    turnId: string | null = null,
+    signal?: AbortSignal,
+    cardId: string | null = null,
+    actor: string | null = null,
+  ): ComputerUseDiscoveryScope {
+    if (this.disposed) throw new Error('Computer Use controller is disposed');
+    const scope = new ComputerUseDiscoveryScope(
+      taskId,
+      turnId,
+      cardId,
+      actor,
+      this.deps.native,
+      () => this.discoveryScopes.delete(scope),
+      signal,
+    );
+    this.discoveryScopes.add(scope);
+    return scope;
+  }
+
+  private stopDiscoveriesWhere(
+    matches: (scope: ComputerUseDiscoveryScope) => boolean,
+  ): Promise<void> {
+    const stops = [...this.discoveryScopes].filter(matches).map((scope) => scope.stop());
+    return Promise.allSettled(stops).then((results) => {
+      if (results.some((result) => result.status === 'rejected'))
+        throw new Error('Computer Use native_stop_unconfirmed');
     });
+  }
+
+  beginWindowCandidates(profileId: string, taskId: string | null, actor: string | null = null) {
+    const priorStop =
+      actor === null
+        ? Promise.resolve()
+        : this.stopDiscoveriesWhere((scope) => scope.actor === actor);
+    void priorStop.catch(() => undefined);
+    let profile = this.deps.persistence.getComputerAppProfile(profileId);
+    const scope = this.discoveryScope(taskId, null, undefined, null, actor);
+    scope.profileIds.add(profileId);
+    let windows: ComputerUseNativeWindow[] | null = null;
+    const result = priorStop
+      .then(() => {
+        scope.check();
+        return this.listNativeWindows(profile, scope);
+      })
+      .then(
+        (value) => {
+          windows = value;
+        },
+        async (error: unknown) => {
+          try {
+            await scope.stop(false);
+          } finally {
+            scope.finish();
+          }
+          throw error;
+        },
+      );
+    void result.catch(() => undefined);
+    return {
+      result,
+      commit: <T>(publish: (candidates: ComputerUseWindowCandidate[]) => T): T => {
+        scope.check();
+        if (windows === null) throw new Error('Computer Use candidates are not ready');
+        try {
+          profile = this.refreshSignedWindowsProfile(profile, windows);
+          for (const [token, permit] of this.windowCandidatePermits)
+            if (permit.profileId === profileId) this.windowCandidatePermits.delete(token);
+          const candidates = windows.map((native) => {
+            const token = randomUUID();
+            this.windowCandidatePermits.set(
+              token,
+              Object.freeze({
+                profileId,
+                profileRevision: profile.revision,
+                native,
+                expiresAt: this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
+              }),
+            );
+            const {
+              platform: _platform,
+              executableDigest: _executableDigest,
+              windowId: _nativeWindowId,
+              screenBounds: _screenBounds,
+              ...candidate
+            } = native;
+            return computerUseWindowCandidateSchema.parse({
+              ...candidate,
+              windowId: token,
+              title: safeUntrustedDisplayText(candidate.title),
+            });
+          });
+          return publish(candidates);
+        } finally {
+          scope.finish();
+        }
+      },
+      cancel: async () => {
+        try {
+          await scope.stop(false);
+        } finally {
+          scope.finish();
+        }
+      },
+    };
+  }
+
+  async listWindows(profileId: string): Promise<ComputerUseWindowCandidate[]> {
+    const intent = this.beginWindowCandidates(profileId, null);
+    await intent.result;
+    return intent.commit((candidates) => candidates);
   }
 
   private async listNativeWindows(
     profile: ComputerAppProfileRecord,
+    scope: ComputerUseDiscoveryScope,
   ): Promise<ComputerUseNativeWindow[]> {
     const profileMaximumMode = maximumModeForProfile(profile);
-    return (await this.deps.native.listWindows(profile))
+    const windows = await scope.read(profile);
+    scope.check();
+    return windows
       .filter((window) => window.appIdentityDigest === profile.identityDigest)
       .map((window) => ({
         ...window,
@@ -1363,6 +1458,7 @@ export class ComputerUseController {
     // Starts in flight, before anything reaches `sessions`. A start that is waiting on native or on
     // the planner would otherwise finish and become a live session for an application the user has
     // just revoked — the same hole `policyEpochChanged` closes for a permission change.
+    const discoveryStop = this.stopDiscoveriesWhere((scope) => [...scope.profileIds].some(revoked));
     const pendingStops = this.stopStartingWhere(
       (starting) => revoked(starting.profileId),
       'policy_changed',
@@ -1370,6 +1466,7 @@ export class ComputerUseController {
     if (this.startingProfileId !== null && revoked(this.startingProfileId))
       this.startingController?.abort(new Error('Computer Use application grant was revoked'));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.values()]
         .filter(
@@ -1530,6 +1627,16 @@ export class ComputerUseController {
   async listTargets(
     input: Readonly<{ appToken?: string | undefined; refresh?: boolean | undefined }>,
     context: ToolExecutionContext,
+    signal?: AbortSignal,
+  ): Promise<ComputerListTargetsOutput> {
+    const scope = this.discoveryScope(context.taskId, context.turnId, signal);
+    return scope.run(() => this.listTargetsInScope(input, context, scope));
+  }
+
+  private async listTargetsInScope(
+    input: Readonly<{ appToken?: string | undefined; refresh?: boolean | undefined }>,
+    context: ToolExecutionContext,
+    scope: ComputerUseDiscoveryScope,
   ): Promise<ComputerListTargetsOutput> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     if (this.deps.agentDrivenEnabled?.() !== true)
@@ -1564,10 +1671,23 @@ export class ComputerUseController {
     const snapshots = new Map<string, TargetEnumerationSnapshot>();
     let truncated = false;
     let dropped = 0;
+    for (const profile of profiles)
+      if (selectedProfileId === null || profile.id === selectedProfileId)
+        scope.profileIds.add(profile.id);
     for (const profile of profiles) {
+      scope.check();
       if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
       // One unreachable application must not blank the whole list; the agent still needs the rest.
-      const windows = await this.listNativeWindows(profile).catch(() => []);
+      const windows = await this.listNativeWindows(profile, scope).catch((error: unknown) => {
+        if (
+          error instanceof ComputerUseNativeUnavailableError &&
+          error.reasonCode === 'native_stop_unconfirmed'
+        )
+          throw error;
+        scope.check();
+        return [];
+      });
+      scope.check();
       // Native took time to answer. A permission revoked meanwhile has already cleared this Task's
       // tokens, so minting new ones — or returning titles that were read under the old policy —
       // would let this call outlive the revocation. Nothing after this point awaits again.
@@ -1632,6 +1752,7 @@ export class ComputerUseController {
             expiresAt,
           }),
         );
+        scope.onCancel(() => this.targetTokens.delete(targetToken));
         issued = true;
         pending.push({
           profileId: profile.id,
@@ -1641,11 +1762,13 @@ export class ComputerUseController {
           target: row.data,
         });
       }
-      if (issued)
+      if (issued) {
+        scope.onCancel(() => this.targetAppTokens.delete(appToken));
         this.targetAppTokens.set(
           appToken,
           Object.freeze({ binding: appBinding, profileId: profile.id, expiresAt }),
         );
+      }
       if (truncated) break;
     }
     // Re-read every contributing application as the store has it now.
@@ -1854,6 +1977,32 @@ export class ComputerUseController {
   ): Promise<ComputerRequestAccessOutput> {
     if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
       return this.accessRefused('access_request_unavailable');
+    const scope = this.discoveryScope(context.taskId, context.turnId, signal);
+    try {
+      return await scope.run(async () => {
+        const outcome = await this.requestAccessInScope(input, context, scope);
+        // A settled card already owns its grant/refusal result; withdrawal must not rewrite it.
+        scope.finish();
+        return outcome;
+      });
+    } catch (error) {
+      if (error !== scope.signal.reason) throw error;
+      return this.accessRefused(
+        this.currentPolicyEpoch(context.taskId) !== context.policyEpoch
+          ? 'access_request_invalid_token'
+          : 'access_request_withdrawn',
+      );
+    }
+  }
+
+  private async requestAccessInScope(
+    input: Readonly<{ appToken: string; reason: string }>,
+    context: ToolExecutionContext,
+    scope: ComputerUseDiscoveryScope,
+  ): Promise<ComputerRequestAccessOutput> {
+    const signal = scope.signal;
+    if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
+      return this.accessRefused('access_request_unavailable');
     if (!this.availability().available) return this.accessRefused('access_request_unavailable');
     // Without a surface to show the card on, waiting would park the call until its timeout.
     if (this.deps.publishGrantRequest === undefined)
@@ -1903,7 +2052,8 @@ export class ComputerUseController {
       return this.accessRefused('access_request_rate_limited');
     // The same live enumeration the click will re-run, so both sides compute the ceiling from
     // native rather than one from native and one from the store.
-    const observed = await this.refetchAppGrantFacts(profile.id);
+    const observed = await this.refetchAppGrantFacts(profile.id, scope);
+    scope.check();
     if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
       return this.accessRefused('access_request_invalid_token');
     // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
@@ -1983,7 +2133,10 @@ export class ComputerUseController {
    * every eligible window therefore cannot pass. S4/S5 replace this with a pid-based signature
    * check without changing what the caller compares.
    */
-  private async refetchAppGrantFacts(profileId: string): Promise<Readonly<{
+  private async refetchAppGrantFacts(
+    profileId: string,
+    scope: ComputerUseDiscoveryScope,
+  ): Promise<Readonly<{
     profile: ComputerAppProfileRecord;
     identity: ComputerAppGrantIdentity;
     facts: ComputerAppGrantCardFacts;
@@ -1992,9 +2145,16 @@ export class ComputerUseController {
     let windows: readonly ComputerUseNativeWindow[];
     try {
       profile = this.deps.persistence.getComputerAppProfile(profileId);
-      windows = await this.listNativeWindows(profile);
+      windows = await this.listNativeWindows(profile, scope);
+      scope.check();
       profile = this.refreshSignedWindowsProfile(profile, windows);
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof ComputerUseNativeUnavailableError &&
+        error.reasonCode === 'native_stop_unconfirmed'
+      )
+        throw error;
+      scope.check();
       return null;
     }
     const identity = this.boundGrantIdentity(profile);
@@ -2145,6 +2305,9 @@ export class ComputerUseController {
   ): void {
     const pending = this.pendingAppGrantRequest;
     if (pending === null || pending.request.id !== requestId) return;
+    void this.stopDiscoveriesWhere((scope) => scope.cardId === pending.request.id).catch(
+      () => undefined,
+    );
     this.pendingAppGrantRequest = null;
     clearTimeout(pending.timer);
     const canceled = computerAppGrantRequestSchema.parse({
@@ -2180,6 +2343,27 @@ export class ComputerUseController {
     const pending = this.pendingAppGrantRequest;
     if (pending === null || pending.request.id !== input.requestId)
       throw new Error('Computer Use approval card not found');
+    const scope = this.discoveryScope(
+      pending.taskId,
+      pending.turnId,
+      undefined,
+      pending.request.id,
+    );
+    scope.profileIds.add(pending.profileId);
+    return scope.run(async () => {
+      await this.resolveAppGrantRequestInScope(input, activationIntent, scope);
+      scope.finish();
+    });
+  }
+
+  private async resolveAppGrantRequestInScope(
+    input: ComputerAppGrantResolveInput,
+    activationIntent: string | null,
+    scope: ComputerUseDiscoveryScope,
+  ): Promise<void> {
+    const pending = this.pendingAppGrantRequest;
+    if (pending === null || pending.request.id !== input.requestId)
+      throw new Error('Computer Use approval card not found');
     if (
       pending.request.revision !== input.expectedRevision ||
       pending.request.state !== 'pending' ||
@@ -2198,6 +2382,7 @@ export class ComputerUseController {
     )
       throw new Error('Computer Use approval card intent does not match');
     if (input.decision === 'deny') {
+      scope.finish();
       this.recordAppGrantDenial(pending);
       this.settleAppGrantCard(pending, input.decision, {
         granted: false,
@@ -2205,7 +2390,8 @@ export class ComputerUseController {
       });
       return;
     }
-    const observed = await this.refetchAppGrantFacts(pending.profileId);
+    const observed = await this.refetchAppGrantFacts(pending.profileId, scope);
+    scope.check();
     // The card may have been withdrawn while native was answering; nothing below may resurrect it.
     if (this.pendingAppGrantRequest !== pending) return;
     // Checked against the present rather than trusted to the withdrawal above: the intent digest
@@ -2242,6 +2428,7 @@ export class ComputerUseController {
         providerEgress: pending.providerEgress,
       });
     else this.createTaskScopedAppGrant(pending, observed);
+    scope.finish();
     this.settleAppGrantCard(pending, input.decision, { granted: true, reasonCode: null });
   }
 
@@ -2251,6 +2438,9 @@ export class ComputerUseController {
     outcome: ComputerRequestAccessOutput,
   ): void {
     if (this.pendingAppGrantRequest !== pending) return;
+    void this.stopDiscoveriesWhere((scope) => scope.cardId === pending.request.id).catch(
+      () => undefined,
+    );
     this.pendingAppGrantRequest = null;
     clearTimeout(pending.timer);
     this.deps.publishGrantRequest?.(
@@ -2387,6 +2577,22 @@ export class ComputerUseController {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<ComputerStartToolOutput> {
+    const scope = this.discoveryScope(context.taskId, context.turnId, signal);
+    return scope.run(() => this.startForAgentInScope(input, context, scope, signal));
+  }
+
+  private async startForAgentInScope(
+    input: Readonly<{
+      targetToken: string;
+      goal: string;
+      question?: ComputerStartQuestion | undefined;
+      carry?: readonly ComputerStartCarryItem[] | undefined;
+    }>,
+    context: ToolExecutionContext,
+    scope: ComputerUseDiscoveryScope,
+    externalSignal?: AbortSignal,
+  ): Promise<ComputerStartToolOutput> {
+    let signal: AbortSignal | undefined = scope.signal;
     // Noted before the first await of this call (the grant refetch, the window listing, the start
     // itself): a Task closed during any of them must not leave a session that noted a later value.
     const artifactGeneration = this.artifactGenerations.get(context.taskId) ?? 0;
@@ -2448,7 +2654,8 @@ export class ComputerUseController {
     // is the slow part of this path, and a Turn cancelled during it must not go on to focus a
     // window and start driving it.
     signal?.throwIfAborted();
-    const observed = await this.refetchAppGrantFacts(profile.id);
+    const observed = await this.refetchAppGrantFacts(profile.id, scope);
+    scope.check();
     signal?.throwIfAborted();
     if (
       observed === null ||
@@ -2456,7 +2663,8 @@ export class ComputerUseController {
       observed.profile.revision !== profile.revision
     )
       throw new Error('Computer Use app identity changed');
-    const windows = await this.listNativeWindows(observed.profile);
+    const windows = await this.listNativeWindows(observed.profile, scope);
+    scope.check();
     signal?.throwIfAborted();
     const candidate = windows.find(
       (window) =>
@@ -2561,6 +2769,10 @@ export class ComputerUseController {
         signal,
         artifactGeneration,
       );
+      // Discovery ownership ends at the session handoff. Session Stop keeps its existing result
+      // semantics; only the original tool signal cancels the caller waiting for that session.
+      scope.finish();
+      signal = externalSignal;
       // Only a session that actually started counts as use (§6.2.1).
       if (state.scope === 'grant') this.touchAppGrantUsed(observed.identity);
       // Nothing runs between `start` resolving and this line, so anything the session has already
@@ -2658,6 +2870,8 @@ export class ComputerUseController {
     this.startingTaskId = input.taskId;
     this.startingTurnId = input.turnId ?? null;
     this.startingProfileId = input.profileId;
+    const scope = this.discoveryScope(input.taskId, input.turnId ?? null, controller.signal);
+    scope.profileIds.add(input.profileId);
     // Linked to *this* start's own controller, never the other way round: an abort of the caller
     // cancels this start-up — the native session handshake's cleanup, the provider preflight, the
     // first planner call — and nothing here can abort anybody else's.
@@ -2672,7 +2886,8 @@ export class ComputerUseController {
       );
       if (starting === undefined) {
         const active = [...this.sessions.values()].find((entry) => entry.controller === controller);
-        if (active === undefined) rejectCanceled(controller.signal.reason);
+        if (active === undefined)
+          void scope.stop().then(() => rejectCanceled(controller.signal.reason), rejectCanceled);
         else
           void this.stop(active.status.sessionId, 'user_stop').then(
             () =>
@@ -2708,7 +2923,7 @@ export class ComputerUseController {
     try {
       controller.signal.throwIfAborted();
       return await Promise.race([
-        this.startInternal(input, controller, artifactGeneration),
+        this.startInternal(input, controller, artifactGeneration, scope),
         canceled,
       ]);
     } catch (error) {
@@ -2716,6 +2931,7 @@ export class ComputerUseController {
         controller.abort(error instanceof Error ? error : new Error('Computer Use start failed'));
       throw error;
     } finally {
+      scope.finish();
       externalSignal?.removeEventListener('abort', forward);
       controller.signal.removeEventListener('abort', cancelStart);
       // A canceled work promise may finish after a new start has acquired this slot.
@@ -2858,6 +3074,7 @@ export class ComputerUseController {
     input: ComputerUseStartRequest,
     controller: AbortController,
     artifactGeneration: number,
+    scope: ComputerUseDiscoveryScope,
   ): Promise<ComputerUseSessionStatus> {
     const availability = this.availability();
     if (!availability.available) throw new Error('Computer Use native boundary is unavailable');
@@ -2932,7 +3149,8 @@ export class ComputerUseController {
       this.now() >= permit.expiresAt
     )
       throw new Error('Computer Use window candidate is stale');
-    const candidates = await this.listNativeWindows(profile);
+    const candidates = await this.listNativeWindows(profile, scope);
+    scope.check();
     controller.signal.throwIfAborted();
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     const candidate = candidates.find(
@@ -3455,10 +3673,12 @@ export class ComputerUseController {
     taskId: string,
     reason: Extract<ComputerUseStopReason, 'task_changed' | 'turn_started'>,
   ): Promise<void> {
+    const discoveryStop = this.stopDiscoveriesWhere((scope) => scope.taskId === taskId);
     const pendingStops = this.stopStartingWhere((starting) => starting.taskId === taskId, reason);
     if (this.startingTaskId === taskId && this.startingController !== null)
       this.startingController.abort(new Error(`Computer Use stopped while starting: ${reason}`));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.values()]
         .filter((record) => record.status.taskId === taskId)
@@ -3467,6 +3687,7 @@ export class ComputerUseController {
   }
 
   async stopOutsideTask(selectedTaskId: string): Promise<void> {
+    const discoveryStop = this.stopDiscoveriesWhere((scope) => scope.taskId !== selectedTaskId);
     // The card lives in one Task's conversation. Once the user is looking somewhere else it is no
     // longer in front of them, and a card nobody can see must not keep a tool call waiting.
     this.withdrawAppGrantCardFor((pending) => pending.taskId !== selectedTaskId);
@@ -3477,6 +3698,7 @@ export class ComputerUseController {
     if (this.startingTaskId !== null && this.startingTaskId !== selectedTaskId)
       this.startingController?.abort(new Error('Computer Use Task selection changed'));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.values()]
         .filter((record) => record.status.taskId !== selectedTaskId)
@@ -3701,6 +3923,9 @@ export class ComputerUseController {
   }
 
   turnEnded(taskId: string, turnId: string): void {
+    void this.stopDiscoveriesWhere(
+      (scope) => scope.taskId === taskId && scope.turnId === turnId,
+    ).catch(() => undefined);
     // The Turn that asked is gone, so there is nobody left to answer to. The card is withdrawn
     // rather than left for the next Turn to inherit a decision it never asked for.
     this.withdrawAppGrantCardFor(
@@ -3735,6 +3960,14 @@ export class ComputerUseController {
    * conversation, and archiving is not the user changing their mind.
    */
   taskClosed(taskId: string): void {
+    for (const stopping of this.stopStartingWhere(
+      (starting) => starting.taskId === taskId,
+      'task_changed',
+    ))
+      void stopping.catch(() => undefined);
+    if (this.startingTaskId === taskId)
+      this.startingController?.abort(new Error('Computer Use Task closed while starting'));
+    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId).catch(() => undefined);
     this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
     this.taskScopedGrants.delete(taskId);
     this.revokeTargetTokens(taskId);
@@ -3843,6 +4076,7 @@ export class ComputerUseController {
   }
 
   policyEpochChanged(taskId: string): void {
+    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId).catch(() => undefined);
     // An artifact is bound to the epoch it was copied under; a changed epoch ends it (design 4.2).
     this.artifacts.dropTask(taskId);
     this.forgetCopiedArtifactReferences(taskId);
@@ -3872,32 +4106,38 @@ export class ComputerUseController {
    * new session can start; this ends what was already running or starting, as a policy change.
    */
   async featureDisabled(): Promise<void> {
+    const discoveryStop = this.stopDiscoveriesWhere(() => true);
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'policy_changed');
     this.startingController?.abort(new Error('Computer Use was turned off'));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'policy_changed')),
     ]);
   }
 
   async rendererInvalidated(): Promise<void> {
+    const discoveryStop = this.stopDiscoveriesWhere(() => true);
     // The window that was showing the card is gone, so the click it was waiting for can never come.
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'renderer_reloaded');
     this.startingController?.abort(new Error('Computer Use renderer was reloaded'));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'renderer_reloaded')),
     ]);
   }
 
   async dispose(): Promise<void> {
+    const discoveryStop = this.stopDiscoveriesWhere(() => true);
     this.disposed = true;
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
     this.startingController?.abort(new Error('Computer Use disposed while starting'));
     await Promise.all([
+      discoveryStop,
       ...pendingStops,
       ...[...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'app_closed')),
     ]);

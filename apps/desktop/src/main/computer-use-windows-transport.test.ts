@@ -1,3 +1,10 @@
+import type { ComputerAppProfileRecord } from './persistence';
+import {
+  ComputerUseController,
+  type ComputerUseControllerPersistence,
+} from './computer-use-controller';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { computerUseNativeDiscoveryResultSchema } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -161,6 +168,10 @@ class FakeWindowsHelper {
     this.refused.add(operation);
   }
 
+  allow(operation: string): void {
+    this.refused.delete(operation);
+  }
+
   release(operation: string): void {
     this.held.delete(operation);
     this.pump();
@@ -224,7 +235,14 @@ function responders(): Readonly<Record<string, Responder>> {
   return {
     handshake: () => [
       'handshake_result',
-      { protocolVersion: 1, apiVersion: 3, platform: 'win32', napiVersion: 10, sourceCommit },
+      {
+        protocolVersion: 1,
+        apiVersion: 3,
+        platform: 'win32',
+        napiVersion: 10,
+        sourceCommit,
+        capabilities: { cancellableWindowDiscovery: true },
+      },
     ],
     list_windows: () => [
       'probe_result',
@@ -314,7 +332,7 @@ function binding(addon: NonNullable<ComputerUseNativeBinding['addon']>): Compute
       reason: '',
       artifactPath: helperPath,
       artifactDigest: digest('1'),
-      capabilities: { observe: true, control: true },
+      capabilities: { observe: true, control: true, cancellableWindowDiscovery: true },
     },
     artifactPath: helperPath,
     addon,
@@ -352,6 +370,54 @@ const profile = Object.freeze({
   updatedAt: '2026-09-18T00:00:00.000Z',
 });
 
+let discoverySequence = 0;
+async function discoverRows(addon: ComputerUseNativeAddon) {
+  const value = await addon.discoverWindows!({
+    ...profile,
+    discoveryId: 'transport-test:' + ++discoverySequence,
+  });
+  const result = computerUseNativeDiscoveryResultSchema.parse(value);
+  if (result.result !== 'completed') throw new Error('Discovery not admitted');
+  return result.windows;
+}
+
+function discoveryResponders(): Readonly<Record<string, Responder>> {
+  const base = responders();
+  return {
+    ...base,
+    handshake: () => [
+      'handshake_result',
+      {
+        protocolVersion: 1,
+        apiVersion: 3,
+        platform: 'win32',
+        napiVersion: 10,
+        sourceCommit,
+        capabilities: { cancellableWindowDiscovery: true },
+      },
+    ],
+    list_windows_cancellable: (metadata) => [
+      'probe_result',
+      {
+        discoveryId: metadata['discoveryId'],
+        result: 'completed',
+        drained: true,
+        launchAttemptCount: 0,
+        windows: base['list_windows']!({})[1],
+      },
+    ],
+    stop_window_discovery: (metadata) => [
+      'probe_result',
+      {
+        discoveryId: metadata['discoveryId'],
+        result: 'stopped',
+        drained: true,
+        launchAttemptCount: 0,
+      },
+    ],
+  };
+}
+
 function createTarget(
   customResponders: Readonly<Record<string, Responder>> = responders(),
   configure?: (helper: FakeWindowsHelper) => void,
@@ -361,7 +427,27 @@ function createTarget(
   helper: () => FakeWindowsHelper;
 } {
   let helper: FakeWindowsHelper | null = null;
-  const table = customResponders;
+  // Legacy-named data fixtures supply rows; the wire itself uses only the new operation.
+  const table: Readonly<Record<string, Responder>> = {
+    ...discoveryResponders(),
+    ...customResponders,
+    list_windows_cancellable:
+      customResponders['list_windows_cancellable'] ??
+      ((metadata) => {
+        const [type, value] = customResponders['list_windows']!(metadata);
+        if (type !== 'probe_result') return [type, value];
+        return [
+          'probe_result',
+          {
+            discoveryId: metadata['discoveryId'],
+            result: 'completed',
+            drained: true,
+            launchAttemptCount: 0,
+            windows: value,
+          },
+        ];
+      }),
+  };
   // Every reconnect gets its own fake helper, the way a fresh child process would.
   onSocket = (socket) => {
     helper = new FakeWindowsHelper(socket, table);
@@ -375,7 +461,7 @@ function createTarget(
       apiVersion: 3,
       backend: 'test-native',
       reason: '',
-      capabilities: { observe: true, control: true },
+      capabilities: { observe: true, control: true, cancellableWindowDiscovery: true },
     },
     expectedTrust,
   );
@@ -390,6 +476,36 @@ function createTarget(
       return helper;
     },
   };
+}
+
+function controllerFor(
+  host: ReturnType<typeof createComputerUseNativeHost>,
+  profiles: ComputerAppProfileRecord[] = [profile],
+) {
+  const unused = (): never => {
+    throw new Error('Unexpected persistence call');
+  };
+  const persistence: ComputerUseControllerPersistence = {
+    ...createComputerAppGrantFixtureStore().api,
+    listComputerAppProfiles: () => profiles,
+    getComputerAppProfile: (id) => profiles.find((row) => row.id === id) ?? unused(),
+    createComputerAppProfile: unused,
+    updateComputerAppProfile: unused,
+    removeComputerAppProfile: unused,
+    recordComputerActionAudit: unused,
+    completeComputerActionAudit: unused,
+    recordComputerActionApprovalOutcome: unused,
+    listComputerActionAudits: () => [],
+    getActiveTurnId: () => null,
+    getPermissionPolicy: () => ({ policyEpoch: 0 }),
+  };
+  return new ComputerUseController({
+    persistence,
+    native: host,
+    featureEnabled: () => true,
+    agentDrivenEnabled: () => true,
+    repositionEmergencyStop: () => true,
+  });
 }
 
 async function startSession(
@@ -471,6 +587,353 @@ describe('Computer Use Windows helper transport', () => {
     onSocket = null;
   });
 
+  describe('cancellable discovery transport', () => {
+    const input = (id: string) => ({ ...profile, discoveryId: id });
+
+    it('sends a normalized, bound query and does not close a live session with discovery Stop', async () => {
+      const table = discoveryResponders();
+      const { addon, helper } = createTarget({
+        ...table,
+        list_windows_cancellable: (metadata) => {
+          expect(metadata).toEqual({
+            operation: 'list_windows_cancellable',
+            discoveryId: 'scope:1',
+            canonicalPath: profile.canonicalPath,
+            identityDigest: appIdentityDigest,
+            executableDigest,
+            signerDigest: profile.identity.signerDigest,
+          });
+          return table['list_windows_cancellable']!(metadata);
+        },
+      });
+      await addon.startSession!({ profile, sessionId: 'alive', windowId: '100', cancelEpoch: 0 });
+      await expect(addon.discoverWindows!(input('scope:1'))).resolves.toMatchObject({
+        result: 'completed',
+        discoveryId: 'scope:1',
+      });
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'scope:1' })).resolves.toMatchObject({
+        result: 'stopped',
+      });
+      expect(children[0]!.killed).toBe(false);
+      expect(helper().served).not.toContain('list_windows');
+      await addon.close!({ sessionId: 'alive', cancelEpoch: 1 });
+      expect(children[0]!.killed).toBe(true);
+    });
+
+    it('keeps a pending discovery reachable after another session closes', async () => {
+      const { addon, helper } = createTarget(discoveryResponders(), (h) =>
+        h.holdOnly('list_windows_cancellable'),
+      );
+      await addon.startSession!({ profile, sessionId: 'alive', windowId: '100', cancelEpoch: 0 });
+      const query = Promise.resolve(addon.discoverWindows!(input('scope:pending')));
+      await vi.advanceTimersByTimeAsync(0);
+      await addon.close!({ sessionId: 'alive', cancelEpoch: 1 });
+      expect(children[0]!.killed).toBe(false);
+      await expect(
+        addon.stopWindowDiscovery!({ discoveryId: 'scope:pending' }),
+      ).resolves.toMatchObject({ result: 'stopped' });
+      expect(children[0]!.killed).toBe(false);
+      await expect(addon.discoverWindows!(input('scope:pending'))).rejects.toThrow('already used');
+      helper().release('list_windows_cancellable');
+      await expect(query).resolves.toMatchObject({ result: 'completed' });
+      expect(helper().served.filter((x) => x === 'list_windows_cancellable')).toHaveLength(1);
+    });
+
+    it('does not submit when either the initial or pipe capability is absent', async () => {
+      const addon = createWindowsComputerUseNativeAddon(helperPath, {}, expectedTrust);
+      await expect(addon.discoverWindows!(input('no-initial-cap'))).rejects.toThrow('capability');
+      expect(children).toHaveLength(0);
+      const table = discoveryResponders();
+      const target = createTarget({
+        ...table,
+        handshake: () => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            capabilities: { cancellableWindowDiscovery: false },
+          },
+        ],
+      });
+      await expect(target.addon.discoverWindows!(input('no-pipe-cap'))).rejects.toThrow(
+        'capability',
+      );
+      expect(target.helper().served).toEqual(['handshake']);
+      expect(target.addon.cancelUnsubmittedDiscovery!('no-pipe-cap')).toBe('never_sent');
+    });
+
+    it('reclaims consumed unsent failures and recovers beyond the 16-owner capacity', async () => {
+      const { addon } = createTarget(discoveryResponders());
+      const spawn = transport.spawnHelper;
+      transport.spawnHelper = () => {
+        throw new Error('spawn unavailable');
+      };
+      try {
+        for (let index = 0; index < 20; index++) {
+          const id = 'unsent:' + index;
+          await expect(addon.discoverWindows!(input(id))).rejects.toThrow('spawn unavailable');
+          expect(addon.cancelUnsubmittedDiscovery!(id)).toBe('never_sent');
+        }
+      } finally {
+        transport.spawnHelper = spawn;
+      }
+      await expect(addon.discoverWindows!(input('recovered'))).resolves.toMatchObject({
+        result: 'completed',
+      });
+    });
+
+    it('recovers capacity after twenty cancellations during handshake preparation', async () => {
+      const { host, helper } = createTarget(discoveryResponders(), (helper) =>
+        helper.holdOnly('handshake'),
+      );
+      for (let index = 0; index < 20; index += 1) {
+        const discovery = host.beginWindowDiscovery!(profile);
+        const result = discovery.result.catch((error: Error) => error.message);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(children).toHaveLength(index + 1);
+        await expect(discovery.stop()).resolves.toEqual({ kind: 'not_submitted' });
+        helper().release('handshake');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await result).toMatch(/canceled/u);
+        expect(helper().served).not.toContain('list_windows_cancellable');
+        expect(host.availability().control).toBe(true);
+        sockets.at(-1)!.destroy();
+      }
+      const fresh = host.beginWindowDiscovery!(profile);
+      await vi.advanceTimersByTimeAsync(0);
+      helper().release('handshake');
+      await expect(fresh.result).resolves.toHaveLength(1);
+    });
+
+    it('recovers capacity after repeated locally proven handshake capability refusals', async () => {
+      let supported = false;
+      const { host } = createTarget({
+        ...discoveryResponders(),
+        handshake: () => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            capabilities: { cancellableWindowDiscovery: supported },
+          },
+        ],
+      });
+      for (let index = 0; index < 20; index += 1) {
+        await expect(host.listWindows(profile)).rejects.toThrow('handshake capability');
+        expect(host.availability().control).toBe(true);
+      }
+      supported = true;
+      sockets.at(-1)!.destroy();
+      await expect(host.listWindows(profile)).resolves.toHaveLength(1);
+    });
+
+    it('rejects wrong-owner evidence and never reconnects to prove an old discovery stopped', async () => {
+      const { addon, helper } = createTarget(
+        {
+          ...discoveryResponders(),
+          stop_window_discovery: () => [
+            'probe_result',
+            {
+              discoveryId: 'wrong',
+              result: 'stopped',
+              drained: true,
+              launchAttemptCount: 0,
+            },
+          ],
+        },
+        (h) => h.holdOnly('list_windows_cancellable'),
+      );
+      const query = Promise.resolve(addon.discoverWindows!(input('old'))).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'old' })).rejects.toThrow('binding');
+      sockets[0]!.destroy();
+      await vi.advanceTimersByTimeAsync(0);
+      await query;
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'old' })).rejects.toThrow(
+        'generation',
+      );
+      expect(children).toHaveLength(1);
+      expect(helper().served.filter((x) => x === 'stop_window_discovery')).toHaveLength(1);
+    });
+
+    it('refuses a launch counter change after a terminal Stop', async () => {
+      const { addon, helper } = createTarget(
+        {
+          ...discoveryResponders(),
+          list_windows_cancellable: (metadata) => [
+            'probe_result',
+            {
+              discoveryId: metadata['discoveryId'],
+              result: 'completed',
+              drained: true,
+              launchAttemptCount: 1,
+              windows: [],
+            },
+          ],
+        },
+        (helper) => helper.holdOnly('list_windows_cancellable'),
+      );
+      const query = Promise.resolve(addon.discoverWindows!(input('counter'))).catch(
+        (error: Error) => error.message,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'counter' })).resolves.toMatchObject({
+        launchAttemptCount: 0,
+      });
+      helper().release('list_windows_cancellable');
+      expect(await query).toMatch(/binding/u);
+    });
+
+    it.each(['completed', 'stopped'] as const)(
+      'remembers session teardown while discovery is pending until it is %s',
+      async (terminal) => {
+        const { addon, helper } = createTarget(discoveryResponders());
+        await addon.startSession!({ sessionId: 'closing-with-discovery', profile });
+        helper().holdOnly('list_windows_cancellable');
+        const query = addon.discoverWindows!(input('close-during-discovery'));
+        await vi.advanceTimersByTimeAsync(0);
+        await addon.close!({ sessionId: 'closing-with-discovery', cancelEpoch: 1 });
+        expect(children[0]!.killed).toBe(false);
+        if (terminal === 'stopped') {
+          await addon.stopWindowDiscovery!({ discoveryId: 'close-during-discovery' });
+          // The original query still owns a pending transport response.
+          expect(children[0]!.killed).toBe(false);
+        }
+        helper().release('list_windows_cancellable');
+        await query;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(children[0]!.killed).toBe(true);
+        expect(sockets[0]!.destroyed).toBe(true);
+      },
+    );
+
+    it('disarms deferred discovery teardown when a newer session starts', async () => {
+      const { addon, helper } = createTarget(discoveryResponders());
+      await addon.startSession!({ sessionId: 'older-session', profile });
+      helper().holdOnly('list_windows_cancellable');
+      const query = addon.discoverWindows!(input('overlapping-discovery'));
+      await vi.advanceTimersByTimeAsync(0);
+      await addon.close!({ sessionId: 'older-session', cancelEpoch: 1 });
+      await addon.startSession!({ sessionId: 'newer-session', profile });
+      helper().release('list_windows_cancellable');
+      await query;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(false);
+      await addon.close!({ sessionId: 'newer-session', cancelEpoch: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(true);
+    });
+
+    it('does not pin a new helper idle lifetime with an unconfirmed old-generation discovery', async () => {
+      const { addon, helper } = createTarget(discoveryResponders(), (helper) =>
+        helper.holdOnly('list_windows_cancellable'),
+      );
+      const lost = Promise.resolve(addon.discoverWindows!(input('lost-generation'))).catch(
+        () => 'lost',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.destroy();
+      await expect(lost).resolves.toBe('lost');
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'lost-generation' })).rejects.toThrow(
+        'generation',
+      );
+      await addon.startSession!({ sessionId: 'fresh-generation', profile });
+      expect(children).toHaveLength(2);
+      await addon.close!({ sessionId: 'fresh-generation', cancelEpoch: 1 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[1]!.killed).toBe(true);
+      await expect(addon.stopWindowDiscovery!({ discoveryId: 'lost-generation' })).rejects.toThrow(
+        'generation',
+      );
+      expect(helper().served).not.toContain('stop_window_discovery');
+    });
+
+    it('retains an unconfirmed launch owner through session Stop timeouts and recovers only on receipts', async () => {
+      const { host, helper } = createTarget();
+      const session = await startSession(host, 'active-before-discovery', 'turn-1');
+      helper().holdOnly('list_windows_cancellable');
+      helper().holdOnly('stop_window_discovery');
+      helper().holdOnly('close_session');
+      const discovery = host.beginWindowDiscovery!(profile);
+      const query = discovery.result.catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(0);
+      const discoveryStop = discovery.stop().catch((error: Error) => error.message);
+      const close = host.close(session).then(
+        () => 'closed',
+        (error: Error) => error.message,
+      );
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(await discoveryStop).toMatch(/unconfirmed/u);
+      expect(await close).toMatch(/unconfirmed/u);
+      expect(await query).toMatch(/unconfirmed/u);
+      expect(children[0]!.killed).toBe(false);
+      const before = helper().served.length;
+      await expect(host.observe(session, { requestId: 'blocked', cancelEpoch: 0 })).rejects.toThrow(
+        /unconfirmed/u,
+      );
+      expect(helper().served).toHaveLength(before);
+      helper().release('stop_window_discovery');
+      helper().release('close_session');
+      await discovery.stop();
+      await host.close(session);
+      expect(host.availability().control).toBe(true);
+      helper().release('list_windows_cancellable');
+    });
+
+    it('keeps late Stop proof after Main deadlines even when session close then exits the helper', async () => {
+      const { host, helper } = createTarget();
+      const session = await startSession(host, 'late-stop-session', 'turn-1');
+      helper().holdOnly('list_windows_cancellable');
+      helper().holdOnly('stop_window_discovery');
+      const discovery = host.beginWindowDiscovery!(profile);
+      const query = discovery.result.catch((error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(0);
+      const stopping = discovery.stop().catch((error: Error) => error.message);
+      helper().refuse('list_windows_cancellable');
+      helper().release('list_windows_cancellable');
+      await vi.advanceTimersByTimeAsync(20_001);
+      expect(await stopping).toMatch(/unconfirmed/u);
+      expect(await query).toMatch(/unconfirmed/u);
+      expect(host.availability().control).toBe(false);
+      expect(children[0]!.killed).toBe(false);
+      helper().release('stop_window_discovery');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.availability().control).toBe(true);
+      await expect(discovery.terminal).resolves.toMatchObject({ kind: 'stopped' });
+      await host.close(session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children[0]!.killed).toBe(true);
+      await expect(discovery.stop()).resolves.toMatchObject({ kind: 'stopped' });
+      expect(
+        helper().served.filter((operation) => operation === 'stop_window_discovery'),
+      ).toHaveLength(2);
+      expect(children).toHaveLength(1);
+    });
+
+    it('keeps the discovery Stop lane alive when an older query reaches its deadline', async () => {
+      const { addon, helper } = createTarget(discoveryResponders(), (h) => {
+        h.holdOnly('list_windows_cancellable');
+        h.holdOnly('stop_window_discovery');
+      });
+      const query = Promise.resolve(addon.discoverWindows!(input('deadline'))).catch(
+        () => 'query timed out',
+      );
+      await vi.advanceTimersByTimeAsync(29990);
+      const stop = Promise.resolve(addon.stopWindowDiscovery!({ discoveryId: 'deadline' }));
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(query).resolves.toBe('query timed out');
+      expect(children[0]!.killed).toBe(false);
+      helper().release('stop_window_discovery');
+      await expect(stop).resolves.toMatchObject({ result: 'stopped' });
+    });
+  });
+
   it('requests list_targets through the authenticated pipe without caller-supplied metadata', async () => {
     const value = { generation: 123_456_789, rulesetVersion: 2, truncated: false, targets: [] };
     const { addon, helper } = createTarget({
@@ -527,7 +990,7 @@ describe('Computer Use Windows helper transport', () => {
     'rejects list_targets on %s without returning evidence',
     async (failure) => {
       const { addon } = createTarget();
-      await addon.listWindows!(profile);
+      await discoverRows(addon);
       const socket = sockets[0]!;
       socket.onWrite = (encoded) => {
         const request = decodeComputerUseNativeFrame(encoded);
@@ -559,7 +1022,7 @@ describe('Computer Use Windows helper transport', () => {
 
   it('does not accept another request response and times out an unanswered list', async () => {
     const { addon } = createTarget();
-    await addon.listWindows!(profile);
+    await discoverRows(addon);
     const socket = sockets[0]!;
     socket.onWrite = (encoded) => {
       const request = decodeComputerUseNativeFrame(encoded);
@@ -593,10 +1056,10 @@ describe('Computer Use Windows helper transport', () => {
 
   it('waits for a valid handshake before parallel calls, including reconnect', async () => {
     const target = createTarget();
-    const invoke = () => Promise.resolve(target.addon.listWindows!({ identity: {} }));
+    const invoke = () => Promise.resolve(discoverRows(target.addon));
     for (let connection = 0; connection < 2; connection += 1) {
       onSocket = (socket) => {
-        const helper = new FakeWindowsHelper(socket, responders());
+        const helper = new FakeWindowsHelper(socket, discoveryResponders());
         helper.holdOnly('handshake');
         heldHelper = helper;
       };
@@ -608,7 +1071,11 @@ describe('Computer Use Windows helper transport', () => {
       expect(heldHelper!.served).toEqual([]);
       heldHelper!.release('handshake');
       await Promise.all([first, second]);
-      expect(heldHelper!.served).toEqual(['handshake', 'list_windows', 'list_windows']);
+      expect(heldHelper!.served).toEqual([
+        'handshake',
+        'list_windows_cancellable',
+        'list_windows_cancellable',
+      ]);
       sockets.at(-1)!.emit('close');
     }
   });
@@ -646,8 +1113,8 @@ describe('Computer Use Windows helper transport', () => {
       };
       for (let connection = 0; connection < 2; connection += 1) {
         const calls = Promise.allSettled([
-          Promise.resolve(target.addon.listWindows!({ identity: {} })),
-          Promise.resolve(target.addon.listWindows!({ identity: {} })),
+          Promise.resolve(discoverRows(target.addon)),
+          Promise.resolve(discoverRows(target.addon)),
         ]);
         await vi.advanceTimersByTimeAsync(5_100);
         expect((await calls).map((result) => result.status)).toEqual(['rejected', 'rejected']);
@@ -660,7 +1127,7 @@ describe('Computer Use Windows helper transport', () => {
     'reconnects the same addon after a frame is cut at byte %i',
     async (prefixBytes) => {
       const { addon } = createTarget();
-      const list = () => Promise.resolve(addon.listWindows!(profile));
+      const list = () => Promise.resolve(discoverRows(addon));
       await expect(list()).resolves.toBeInstanceOf(Array);
       const oldSocket = sockets[0]!;
       const oldChild = children[0]!;
@@ -669,7 +1136,13 @@ describe('Computer Use Windows helper transport', () => {
         const response = encodeComputerUseNativeFrame({
           ...request,
           messageType: 'probe_result',
-          metadata: Buffer.from(JSON.stringify(responders()['list_windows']!({})[1])),
+          metadata: Buffer.from(
+            JSON.stringify(
+              discoveryResponders()['list_windows_cancellable']!(
+                JSON.parse(request.metadata.toString('utf8')),
+              )[1],
+            ),
+          ),
           binary: Buffer.alloc(0),
         });
         oldSocket.emit('data', response.subarray(0, prefixBytes));
@@ -692,7 +1165,13 @@ describe('Computer Use Windows helper transport', () => {
         const response = encodeComputerUseNativeFrame({
           ...request,
           messageType: 'probe_result',
-          metadata: Buffer.from(JSON.stringify(responders()['list_windows']!({})[1])),
+          metadata: Buffer.from(
+            JSON.stringify(
+              discoveryResponders()['list_windows_cancellable']!(
+                JSON.parse(request.metadata.toString('utf8')),
+              )[1],
+            ),
+          ),
           binary: Buffer.alloc(0),
         });
         newSocket.emit('data', response.subarray(0, 64));
@@ -714,7 +1193,7 @@ describe('Computer Use Windows helper transport', () => {
     'rejects an invalid %s on its pipe and recovers on a fresh connection',
     async (invalid) => {
       const { addon } = createTarget();
-      const list = () => Promise.resolve(addon.listWindows!(profile));
+      const list = () => Promise.resolve(discoverRows(addon));
       await expect(list()).resolves.toBeInstanceOf(Array);
       sockets[0]!.onWrite = (encoded) => {
         const request = decodeComputerUseNativeFrame(encoded);
@@ -738,7 +1217,7 @@ describe('Computer Use Windows helper transport', () => {
 
   it('ignores a delayed write failure from an old socket even when the request id is reused', async () => {
     const { addon } = createTarget();
-    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    await expect(Promise.resolve(discoverRows(addon))).resolves.toBeInstanceOf(Array);
     const oldSocket = sockets[0]!;
     oldSocket.holdWriteCallbacks = true;
     oldSocket.onWrite = () => oldSocket.destroy();
@@ -748,7 +1227,7 @@ describe('Computer Use Windows helper transport', () => {
     await vi.advanceTimersByTimeAsync(0);
     await rejected;
     const oldCallback = oldSocket.writeCallbacks.at(-1)!;
-    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    await expect(Promise.resolve(discoverRows(addon))).resolves.toBeInstanceOf(Array);
     const newSocket = sockets.at(-1)!;
     let remainder: Buffer = Buffer.alloc(0);
     newSocket.onWrite = (encoded) => {
@@ -791,7 +1270,7 @@ describe('Computer Use Windows helper transport', () => {
         socket.destroy();
       };
     };
-    const listed = Promise.resolve(addon.listWindows!(profile));
+    const listed = Promise.resolve(discoverRows(addon));
     await vi.advanceTimersByTimeAsync(200);
     await expect(listed).resolves.toBeInstanceOf(Array);
     expect(sockets).toHaveLength(2);
@@ -801,7 +1280,7 @@ describe('Computer Use Windows helper transport', () => {
 
   it('preserves chunk splitting and coalesced frames for parallel requests', async () => {
     const { addon } = createTarget();
-    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    await expect(Promise.resolve(discoverRows(addon))).resolves.toBeInstanceOf(Array);
     const socket = sockets[0]!;
     const responses: Buffer[] = [];
     socket.onWrite = (encoded) => {
@@ -1000,9 +1479,12 @@ describe('Computer Use Windows helper transport', () => {
   );
 
   it.each(['success', 'native-error', 'timeout'] as const)(
-    'keeps a Stop during launch-capable discovery unconfirmed after late %s',
+    'requires bound discovery terminal evidence after late %s',
     async (ending) => {
-      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const { host, helper } = createTarget(responders(), (helper) => {
+        helper.holdOnly('list_windows_cancellable');
+        helper.refuse('stop_window_discovery');
+      });
       const starting = startSession(host, 'pending-discovery', 'turn-1').then(
         () => 'adopted',
         () => 'rejected',
@@ -1012,39 +1494,48 @@ describe('Computer Use Windows helper transport', () => {
       expect(host.availability().control).toBe(false);
       if (ending === 'timeout') await vi.advanceTimersByTimeAsync(60_000);
       else {
-        if (ending === 'native-error') helper().refuse('list_windows');
-        helper().release('list_windows');
+        if (ending === 'native-error') helper().refuse('list_windows_cancellable');
+        helper().release('list_windows_cancellable');
       }
       await expect(starting).resolves.toBe('rejected');
+      await vi.advanceTimersByTimeAsync(0);
       expect(helper().served).not.toContain('start_session');
       expect(helper().served).not.toContain('stop_pending_start');
-      expect(host.availability().control).toBe(false);
-      await expect(host.stopPendingStart!('pending-discovery')).rejects.toThrow(/unconfirmed/u);
-      expect(helper().served).not.toContain('stop_pending_start');
-      await expect(startSession(host, 'new-id', 'turn-2')).rejects.toThrow(/unconfirmed/u);
+      expect(host.availability().control).toBe(ending === 'success');
+      if (ending !== 'success') {
+        await expect(startSession(host, 'new-id', 'turn-2')).rejects.toThrow(/unconfirmed/u);
+        helper().allow('stop_window_discovery');
+      }
+      await expect(host.stopPendingStart!('pending-discovery')).resolves.toMatchObject({
+        kind: 'not_submitted',
+      });
+      expect(host.availability().control).toBe(true);
     },
   );
 
   it.each(['native-error', 'timeout'] as const)(
-    'distinguishes a completed discovery refusal from transport failure: %s',
+    'confirms failed discovery only through its own Stop receipt: %s',
     async (ending) => {
-      const { host, helper } = createTarget(responders(), (helper) => helper.hold('list_windows'));
+      const { host, helper } = createTarget(responders(), (helper) =>
+        helper.holdOnly('list_windows_cancellable'),
+      );
       const starting = startSession(host, 'failed-discovery', 'turn-1').then(
         () => 'adopted',
         () => 'rejected',
       );
       await vi.advanceTimersByTimeAsync(0);
       if (ending === 'native-error') {
-        helper().refuse('list_windows');
-        helper().release('list_windows');
+        helper().refuse('list_windows_cancellable');
+        helper().release('list_windows_cancellable');
       } else await vi.advanceTimersByTimeAsync(60_000);
       await expect(starting).resolves.toBe('rejected');
-      expect(host.availability().control).toBe(ending === 'native-error');
+      expect(host.availability().control).toBe(true);
+      expect(helper().served).toContain('stop_window_discovery');
       expect(helper().served).not.toContain('start_session');
     },
   );
 
-  it('does not repeat a valid session terminal query when discovery still prevents confirmation', async () => {
+  it('remembers the session proof while an independent discovery remains unconfirmed', async () => {
     const { host, helper } = createTarget(
       {
         ...responders(),
@@ -1066,32 +1557,35 @@ describe('Computer Use Windows helper transport', () => {
       () => 'rejected',
     );
     await vi.advanceTimersByTimeAsync(0);
-    helper().holdOnly('list_windows');
+    helper().holdOnly('list_windows_cancellable');
+    helper().refuse('stop_window_discovery');
     const second = startSession(host, 'mixed-discovery', 'turn-1').then(
       () => 'adopted',
       () => 'rejected',
     );
     await vi.advanceTimersByTimeAsync(0);
     await expect(host.stopPendingStart!('mixed-discovery')).rejects.toThrow(/unconfirmed/u);
-    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
-      1,
-    );
-    helper().release('start_session');
-    helper().release('list_windows');
-    await expect(Promise.all([first, second])).resolves.toEqual(['rejected', 'rejected']);
     expect(host.availability().control).toBe(false);
-    expect(helper().served.filter((operation) => operation === 'stop_pending_start')).toHaveLength(
-      1,
-    );
+    expect(helper().served.filter((op) => op === 'stop_pending_start')).toHaveLength(1);
+    helper().release('start_session');
+    helper().release('list_windows_cancellable');
+    await expect(Promise.all([first, second])).resolves.toEqual(['rejected', 'rejected']);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.availability().control).toBe(true);
+    await expect(host.stopPendingStart!('mixed-discovery')).resolves.toMatchObject({
+      kind: 'closed',
+    });
+    expect(helper().served.filter((op) => op === 'stop_pending_start')).toHaveLength(1);
   });
 
-  it('does not let active Close hide another launch-capable discovery of the same owner', async () => {
+  it('does not let active Close hide discovery, then combines a late discovery proof', async () => {
     const { host, helper } = createTarget(responders(), (helper) =>
       helper.holdOnly('start_session'),
     );
     const first = startSession(host, 'shared-discovery', 'turn-1');
     await vi.advanceTimersByTimeAsync(0);
-    helper().holdOnly('list_windows');
+    helper().holdOnly('list_windows_cancellable');
+    helper().refuse('stop_window_discovery');
     const second = startSession(host, 'shared-discovery', 'turn-1').then(
       () => 'adopted',
       () => 'rejected',
@@ -1101,10 +1595,12 @@ describe('Computer Use Windows helper transport', () => {
     const active = await first;
     await host.cancel(active, 1);
     await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
-    helper().release('list_windows');
-    await expect(second).resolves.toBe('rejected');
     expect(host.availability().control).toBe(false);
-    expect(helper().served.filter((operation) => operation === 'start_session')).toHaveLength(1);
+    helper().release('list_windows_cancellable');
+    await expect(second).resolves.toBe('rejected');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.availability().control).toBe(true);
+    expect(helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
   });
 
   it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
@@ -1143,7 +1639,16 @@ describe('Computer Use Windows helper transport', () => {
     const { addon } = createTarget();
     const windows = responders()['list_windows']!({})[1];
     const host = createComputerUseNativeHost(
-      binding({ ...addon, listWindows: () => windows }),
+      binding({
+        ...addon,
+        discoverWindows: (input) => ({
+          discoveryId: (input as { discoveryId: string }).discoveryId,
+          result: 'completed',
+          drained: true,
+          launchAttemptCount: 0,
+          windows,
+        }),
+      }),
       'win32',
       {
         windowsPhysicalBoundsToDip: (value) => value,
@@ -1289,9 +1794,7 @@ describe('Computer Use Windows helper transport', () => {
     sockets[0]!.emit('close');
     await expect(observed).resolves.toBe('rejected');
 
-    const listWindows = addon.listWindows;
-    if (listWindows === undefined) throw new Error('the Windows addon has to expose listWindows');
-    await expect(Promise.resolve(listWindows(profile))).resolves.toBeInstanceOf(Array);
+    await expect(discoverRows(addon)).resolves.toBeInstanceOf(Array);
     expect(children).toHaveLength(2);
     expect(children[1]!.killed).toBe(false);
   });
@@ -1419,9 +1922,7 @@ describe('Computer Use Windows helper transport', () => {
 
   it('accepts every message type the protocol defines and refuses one it does not', async () => {
     const target = createTarget();
-    await expect(
-      Promise.resolve(target.addon.listWindows!({ identity: {} })),
-    ).resolves.toBeDefined();
+    await expect(Promise.resolve(discoverRows(target.addon))).resolves.toBeDefined();
     const socket = sockets.at(-1)!;
     const typeNames = computerUseNativeMessageTypeNames();
     // The table, the C++ enum and the receiver have to name the same set of types.
@@ -1459,6 +1960,194 @@ describe('Computer Use Windows helper transport', () => {
     socket.emit('data', unknown);
     await vi.advanceTimersByTimeAsync(0);
     expect(socket.destroyed).toBe(true);
+  });
+
+  it('production Controller stops pre-session discovery before its delayed result', async () => {
+    const { host, helper } = createTarget();
+    const controller = controllerFor(host);
+    const [candidate] = await controller.listWindows(profile.id);
+    helper().holdOnly('list_windows_cancellable');
+    const starting = controller
+      .start({
+        taskId: 'task-a',
+        profileId: profile.id,
+        windowId: candidate!.windowId,
+        mode: profile.mode,
+        connectionId: profile.connectionId,
+        modelId: profile.modelId,
+        providerEgressConsent: true,
+        providerEgressConsentBinding: {
+          connectionId: profile.connectionId,
+          modelId: profile.modelId,
+        },
+        remember: false,
+        expectedPolicyEpoch: 0,
+        expectedWindowRevision: 1,
+        expectedProfileRevision: 1,
+      })
+      .then(
+        () => 'adopted',
+        (error: Error) => error.message,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    await controller.stopForTask('task-a', 'task_changed');
+    expect(await starting).toMatch(/canceled|stopped/u);
+    expect(helper().served).toContain('stop_window_discovery');
+    expect(helper().served).not.toContain('start_session');
+    helper().release('list_windows_cancellable');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(helper().served).not.toContain('start_session');
+    expect(host.availability().control).toBe(true);
+    await controller.dispose();
+  });
+
+  it('production Controller stops only the selected Task discovery on a shared profile', async () => {
+    const { host, helper } = createTarget(responders(), (helper) =>
+      helper.holdOnly('list_windows_cancellable'),
+    );
+    const controller = controllerFor(host);
+    const a = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    const b = controller.beginWindowCandidates(profile.id, 'task-b', 'frame-b');
+    const aResult = a.result.catch((error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(0);
+    await controller.stopOutsideTask('task-b');
+    expect(await aResult).toMatch(/canceled/u);
+    expect(helper().served.filter((op) => op === 'stop_window_discovery')).toHaveLength(1);
+    helper().release('list_windows_cancellable');
+    await b.result;
+    expect(b.commit((rows) => rows)).toHaveLength(1);
+    expect(() => a.commit(() => 'stale')).toThrow(/canceled/u);
+    await controller.dispose();
+  });
+
+  it('production Controller blocks commit in the native-result to IPC-result gap', async () => {
+    const { host } = createTarget();
+    const controller = controllerFor(host);
+    const intent = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    await intent.result;
+    await controller.rendererInvalidated();
+    const publish = vi.fn();
+    expect(() => intent.commit(publish)).toThrow(/canceled/u);
+    expect(publish).not.toHaveBeenCalled();
+    await intent.cancel();
+    await controller.dispose();
+  });
+
+  it('production Controller isolates Turn cancellation within the same Task', async () => {
+    const { host, helper } = createTarget(responders(), (helper) =>
+      helper.holdOnly('list_windows_cancellable'),
+    );
+    const controller = controllerFor(host);
+    const one = controller
+      .listTargets({}, { taskId: 'task-a', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 })
+      .then(
+        () => 'published',
+        (error: Error) => error.message,
+      );
+    const two = controller.listTargets(
+      {},
+      { taskId: 'task-a', turnId: 'turn-2', workspaceId: null, policyEpoch: 0 },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    controller.turnEnded('task-a', 'turn-1');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await one).toMatch(/canceled/u);
+    expect(helper().served.filter((op) => op === 'stop_window_discovery')).toHaveLength(1);
+    helper().release('list_windows_cancellable');
+    await expect(two).resolves.toHaveProperty('targets');
+    await controller.dispose();
+  });
+
+  it('production Controller reports unconfirmed discovery instead of an empty target list', async () => {
+    const { host, helper } = createTarget(responders(), (helper) => {
+      helper.refuse('list_windows_cancellable');
+      helper.refuse('stop_window_discovery');
+    });
+    const controller = controllerFor(host, [profile, { ...profile, id: 'profile-2' }]);
+    await expect(
+      controller.listTargets(
+        {},
+        {
+          taskId: 'task-a',
+          turnId: 'turn-a',
+          workspaceId: null,
+          policyEpoch: 0,
+        },
+      ),
+    ).rejects.toThrow(/native_stop_unconfirmed/u);
+    expect(helper().served.filter((op) => op === 'list_windows_cancellable')).toHaveLength(1);
+    expect(host.availability().control).toBe(false);
+    helper().allow('stop_window_discovery');
+    await controller.dispose();
+  });
+
+  it('production Controller never starts the next profile after tool cancellation', async () => {
+    const { host, helper } = createTarget(responders(), (helper) =>
+      helper.holdOnly('list_windows_cancellable'),
+    );
+    const controller = controllerFor(host, [profile, { ...profile, id: 'profile-2' }]);
+    const abort = new AbortController();
+    const listing = controller
+      .listTargets(
+        {},
+        {
+          taskId: 'task-a',
+          turnId: 'turn-a',
+          workspaceId: null,
+          policyEpoch: 0,
+        },
+        abort.signal,
+      )
+      .then(
+        () => 'published',
+        (error: Error) => error.message,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    abort.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await listing).toMatch(/canceled/u);
+    helper().release('list_windows_cancellable');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(helper().served.filter((op) => op === 'list_windows_cancellable')).toHaveLength(1);
+    expect(helper().served.filter((op) => op === 'stop_window_discovery')).toHaveLength(1);
+    await controller.dispose();
+  });
+
+  it('production Controller retains failed Stop, then consumes late bound proof without candidates', async () => {
+    const { host, helper } = createTarget(responders(), (helper) => {
+      helper.holdOnly('list_windows_cancellable');
+      helper.refuse('stop_window_discovery');
+    });
+    const controller = controllerFor(host);
+    const intent = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    const listing = intent.result.catch((error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(controller.stopForTask('task-a', 'task_changed')).rejects.toThrow(/unconfirmed/u);
+    expect(await listing).toMatch(/unconfirmed/u);
+    expect(helper().served.filter((op) => op === 'stop_window_discovery')).toHaveLength(2);
+    expect(host.availability().control).toBe(false);
+    helper().release('list_windows_cancellable');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.availability().control).toBe(true);
+    expect(() => intent.commit(() => 'stale')).toThrow(/canceled/u);
+    await controller.stopForTask('task-a', 'task_changed');
+    const fresh = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    await fresh.result;
+    expect(fresh.commit((rows) => rows)).toHaveLength(1);
+    await controller.dispose();
+  });
+
+  it('production Controller supersedes an old frame intent without old cleanup clearing the new one', async () => {
+    const { host, helper } = createTarget();
+    const controller = controllerFor(host);
+    const first = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    await first.result;
+    const next = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    await next.result;
+    await first.cancel();
+    expect(next.commit((rows) => rows)).toHaveLength(1);
+    expect(helper().served).not.toContain('start_session');
+    await controller.dispose();
   });
 
   it('budgets the close round trip beyond every close deadline Main can still be waiting on', () => {
