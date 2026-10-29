@@ -261,6 +261,11 @@ function instrumentedHost(): string {
   let semanticRun = source.slice(semanticRunFrom, semanticRunTo);
   semanticRun = replaceOnce(
     semanticRun,
+    '    std::thread([pending, snapshot, work = std::move(work)]() mutable {',
+    '    std::thread([pending, snapshot, work = std::move(work)]() mutable {\n      Sc820SemanticWorkerStarted();',
+  );
+  semanticRun = replaceOnce(
+    semanticRun,
     'DispatchWindowsSemanticActionOnWorker(*work, &accepted, &reason)',
     'Sc820SemanticMeasure(*work, &accepted, &reason)',
   );
@@ -274,6 +279,11 @@ function instrumentedHost(): string {
     '~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }',
     '~Apartment() { if (SUCCEEDED(result)) Sc820ReadCoUninitialize(); }',
   );
+  semanticRun = replaceOnce(
+    semanticRun,
+    '      std::lock_guard stop_lock(control.stop_mutex);\n      auto &lane = *windows_v1_uia_lane;',
+    '      Sc820SemanticBeforeAdopt(pending->done);\n      std::lock_guard stop_lock(control.stop_mutex);\n      auto &lane = *windows_v1_uia_lane;',
+  );
   source = source.slice(0, semanticRunFrom) + semanticRun + source.slice(semanticRunTo);
   const claimFrom = source.indexOf('template <class Call> HRESULT InvokeWindowsSemanticInput(');
   const claimTo = source.indexOf('struct WindowsSemanticWork', claimFrom);
@@ -285,6 +295,20 @@ function instrumentedHost(): string {
   );
   claim = replaceOnce(claim, '  return call();', '  Sc820SemanticBeforeApi();\n  return call();');
   source = source.slice(0, claimFrom) + claim + source.slice(claimTo);
+  const dispatchFrom = source.indexOf('bool DispatchWindowsAction(');
+  const dispatchTo = source.indexOf('  bool dispatched = false;', dispatchFrom);
+  let dispatch = source.slice(dispatchFrom, dispatchTo);
+  dispatch = replaceOnce(
+    dispatch,
+    'ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason)',
+    'Sc820SemanticBinding(session, metadata, &kind, &bounds, reason)',
+  );
+  dispatch = replaceOnce(
+    dispatch,
+    'WindowsInterlockRefusal(session, metadata, kind, &click_basis)',
+    'Sc820SemanticInterlock(session, metadata, kind, &click_basis)',
+  );
+  source = source.slice(0, dispatchFrom) + dispatch + source.slice(dispatchTo);
   const observeFrom = source.indexOf('bool ObserveWindowsWindow(');
   const observeTo = source.indexOf('\nstruct ArtifactReadPending', observeFrom);
   if (observeFrom < 0 || observeTo < observeFrom) throw new Error('Observe boundary changed');
@@ -615,14 +639,21 @@ const program = String.raw`
 #include <cstdint>
 #include <optional>
 #include <string>
+namespace sprint_coder::computer_use { struct InterlockEvaluation; }
 namespace {
 struct LockedWindowsExecutable;
 struct WindowsSession;
 struct WindowsSemanticWork;
+struct WindowsClickBasis;
+bool Sc820SemanticBinding(const WindowsSession&,const std::string&,std::string*,RECT*,std::string*);
+sprint_coder::computer_use::InterlockEvaluation Sc820SemanticInterlock(const WindowsSession&,const std::string&,const std::string&,WindowsClickBasis*);
+
 bool Sc820SemanticMeasure(const WindowsSemanticWork&,bool*,std::string*);
 bool Sc820SemanticValidate(const WindowsSession&,const RECT&,std::uint64_t);
 void Sc820SemanticBeforeClaim();
 void Sc820SemanticBeforeApi();
+void Sc820SemanticBeforeAdopt(bool);
+void Sc820SemanticWorkerStarted();
 HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern*);
 HRESULT Sc820SemanticSetValue(IUIAutomationValuePattern*,BSTR);
 HRESULT Sc820SemanticSelect(IUIAutomationSelectionItemPattern*);
@@ -1255,7 +1286,8 @@ void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 std::string classification_detail;
 std::string semantic_lifecycle;
-std::atomic<unsigned> semantic_method_calls{0}, semantic_validation_calls{0};
+std::atomic<unsigned> semantic_method_calls{0}, semantic_validation_calls{0}, semantic_worker_starts{0};
+void Sc820SemanticWorkerStarted(){semantic_worker_starts.fetch_add(1);}
 std::atomic<bool> semantic_validation_wrong_thread{false};
 
 std::atomic<unsigned> binding_acquired_refs{0};
@@ -1426,6 +1458,15 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
 }
 
+bool Sc820SemanticBinding(const WindowsSession& session,const std::string& metadata,std::string* kind,RECT* bounds,std::string* reason){
+  if(semantic_lifecycle!="interlock-close")return ValidateWindowsDispatchBinding(session,metadata,kind,bounds,reason);
+  *kind="invoke";*bounds=RECT{0,0,100,100};return true;
+}
+sprint_coder::computer_use::InterlockEvaluation Sc820SemanticInterlock(const WindowsSession& session,const std::string& metadata,const std::string& kind,WindowsClickBasis* basis){
+  if(semantic_lifecycle!="interlock-close")return WindowsInterlockRefusal(session,metadata,kind,basis);
+  Sc820DetailGate();
+  sprint_coder::computer_use::InterlockEvaluation result;result.no_verdict=sprint_coder::computer_use::InterlockNoVerdict::kCanceled;return result;
+}
 HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern* pattern){
   if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}
   return pattern->Invoke();
@@ -1442,6 +1483,7 @@ HRESULT Sc820SemanticExpansionState(IUIAutomationExpandCollapsePattern* pattern,
   if(SUCCEEDED(result)&&semantic_lifecycle=="source-collapse")*value=ExpandCollapseState_Expanded;
   return result;
 }
+void Sc820SemanticBeforeAdopt(bool done){if(done&&semantic_lifecycle=="adoption-close")Sc820DetailGate();}
 void Sc820SemanticBeforeClaim(){if(semantic_lifecycle=="preclaim-close")Sc820DetailGate();}
 void Sc820SemanticBeforeApi(){if(semantic_lifecycle=="claimed-gap-close")Sc820DetailGate();}
 bool Sc820SemanticValidate(const WindowsSession& session,const RECT& bounds,std::uint64_t epoch){
@@ -1471,9 +1513,11 @@ bool Sc820SemanticMeasure(const WindowsSemanticWork& work,bool* accepted,std::st
 }
 std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& metadata,std::optional<std::uint64_t> serial){
   const auto* owner=FindWindowsSession(request);Require(owner!=nullptr,"semantic_control_owner");
-  const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,serial);
+  bool fresh=false;ReadOptionalJsonBoolean(metadata,"fresh",&fresh);
+  const auto epoch=fresh?cancellation_epoch.load():1;
+  const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),epoch,serial);
   WindowsSession session;session.session_id=owner->session_id;session.input_api_attempts=owner->input_api_attempts;
-  session.pid=fixture_pids[0];session.window=fixture_windows[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
+  session.pid=fixture_pids[0];session.window=fixture_windows[0];session.active_window=fixture_windows[0];session.cancel_epoch=epoch;
   std::string request_metadata="{\"targetId\":\"controlled\"}",kind="invoke";
   if(semantic_lifecycle.starts_with("source-")){
     using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
@@ -1496,7 +1540,9 @@ std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& 
     request_metadata+="}";
   }
   bool accepted=false;std::string reason;
-  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,kind,request_metadata,&accepted,&reason);
+  std::string result;
+  const bool ok=semantic_lifecycle=="interlock-close" ? DispatchWindowsAction(session,request_metadata,&result,&reason,&accepted)
+      : DispatchWindowsSemanticAction(session,RECT{0,0,100,100},epoch,kind,request_metadata,&accepted,&reason);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
     ",\"attempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
 }
@@ -3515,22 +3561,31 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
 int DiagnoseSemanticLifecycle(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
   const bool cancel=semantic_lifecycle=="input-cancel";
+  const bool queued=semantic_lifecycle.starts_with("queued-");
+  const bool same_epoch=semantic_lifecycle=="queued-same-epoch-close";
+  const bool adoption=semantic_lifecycle=="adoption-close";
+  const bool interlock=semantic_lifecycle=="interlock-close";
+  const bool unstarted=queued||interlock;
   const bool in_flight=semantic_lifecycle=="input-close"||cancel||semantic_lifecycle=="claimed-gap-close";
   const bool source=semantic_lifecycle.starts_with("source-");
   const bool no_stop=semantic_lifecycle=="success"||semantic_lifecycle=="input-exception"||source;
-  const bool no_input=semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close"||semantic_lifecycle.ends_with("-noop");
+  const bool no_input=unstarted||semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close"||semantic_lifecycle.ends_with("-noop");
   RcaRun run;ULONGLONG stop_ms=0;
   try {
-    run.StartFixture(false,false,source);run.StartPipe(false);
+    run.StartFixture(false,false,source);run.StartPipe(same_epoch);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"semantic_life_handshake");
     classification_contact_held=true;
     if(source)classification_detail="semantic-source";
-    run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_semantic_lifecycle_probe\"}");
+    if(queued)hold_point=HoldPoint::kConsumer;
+    run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_semantic_lifecycle_probe\",\"fresh\":true}");
     if(!no_stop){
       Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"semantic_life_phase_entered");
       const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
       if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
-      Require(WaitStopSerial(before,1000)&&run.Wait(3,1000),"semantic_life_stop_reply");stop_ms=GetTickCount64()-started;
+      Require(WaitStopSerial(before,1000),"semantic_life_reader_latched");
+      if(unstarted||adoption){hold_point=HoldPoint::kNone;SetEvent(run.release.value);}
+      Require(run.Wait(3,1000),"semantic_life_stop_reply");stop_ms=GetTickCount64()-started;
+      if(same_epoch)Require(cancellation_epoch.load()==2,"semantic_life_same_global_epoch");
       if(in_flight){
         Require(run.Error(3,"semantic_input_in_flight"),"semantic_life_no_false_drained_receipt");
         run.Send(MessageType::kProbe,7,"{\"operation\":\"sc820_semantic_status_probe\"}");std::string status;bool present=false,closed=true;std::uint64_t epoch=0;
@@ -3542,9 +3597,10 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
     Require(run.Wait(2,1000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&ReadJsonUint64(body,"attempts",&attempts)&&ReadJsonString(body,"reason",&reason),"semantic_life_result_shape");
     Require(accepted==!no_input&&attempts==(no_input?0:1)&&ok==(semantic_lifecycle=="success"||source),"semantic_life_result_and_counter");
     if(in_flight)Require(reason=="semantic_input_in_flight","semantic_life_unknown_dispatch");
-    if(semantic_lifecycle=="cleanup-close"||semantic_lifecycle=="input-exception")Require(reason=="input_not_confirmed","semantic_life_returned_input_not_success");
+    if(semantic_lifecycle=="cleanup-close"||semantic_lifecycle=="input-exception"||adoption)Require(reason=="input_not_confirmed","semantic_life_returned_input_not_success");
     SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000),"semantic_life_worker_drained");
-    Require(run.ReplyCount(2)==1&&semantic_method_calls==(no_input?0:1)&&classification_apartments==1&&semantic_validation_calls==1&&!semantic_validation_wrong_thread.load(),"semantic_life_single_input_and_consumer_validation");
+    Require(run.ReplyCount(2)==1&&semantic_method_calls==(no_input?0:1)&&classification_apartments==(unstarted?0:1)&&semantic_worker_starts==(unstarted?0:1)&&semantic_validation_calls==(unstarted?0:1)&&!semantic_validation_wrong_thread.load(),"semantic_life_single_input_and_consumer_validation");
+    if(unstarted)Require(classification_contacts==0&&semantic_worker_starts==0,"semantic_life_prequeued_no_worker_or_contact");
     if(in_flight){
       // Same request id/epoch must be retryable after a nonterminal error, not cached forever.
       if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
@@ -3552,7 +3608,7 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
     }
     if(cancel||no_stop){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3,7,"sc940-control",no_input?0:1),"semantic_life_final_close");}
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"semantic_life_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":"<<(source?"false":"true")<<",\"sourceMeasure\":"<<(source?"true":"false")<<",\"controlledRevalidation\":true,\"controlledPatternApi\":true,\"controlledAncestorBoundary\":"<<(source?"true":"false")<<",\"controlledPatternState\":"<<(semantic_lifecycle=="source-collapse"?"true":"false")<<",\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":"<<(source?"false":"true")<<",\"sourceMeasure\":"<<(source?"true":"false")<<",\"controlledRevalidation\":true,\"controlledPatternApi\":true,\"controlledAncestorBoundary\":"<<(source?"true":"false")<<",\"controlledPatternState\":"<<(semantic_lifecycle=="source-collapse"?"true":"false")<<",\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":"<<(semantic_validation_calls==1?"true":"false")<<",\"validationCalls\":"<<semantic_validation_calls.load()<<",\"workerStarts\":"<<semantic_worker_starts.load()<<",\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4585,6 +4641,8 @@ describe.skipIf(
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
         if (scenario.startsWith('semantic-life-')) {
+          const unstarted =
+            scenario.includes('-queued-') || scenario === 'semantic-life-interlock-close';
           expect(metadata).toMatchObject({
             case: scenario,
             controlledSemanticMeasure: !scenario.startsWith('semantic-life-source-'),
@@ -4596,7 +4654,9 @@ describe.skipIf(
             actualGuiInput: false,
             stopMs: expect.any(Number),
             simulatedApiCalls: expect.any(Number),
-            consumerValidation: true,
+            consumerValidation: !unstarted,
+            validationCalls: unstarted ? 0 : 1,
+            workerStarts: unstarted ? 0 : 1,
             terminalReceiptVerified: true,
             childExited: true,
             workerIdle: true,
@@ -4792,6 +4852,10 @@ describe.skipIf(
       'semantic-life-source-expand',
       'semantic-life-source-collapse',
       'semantic-life-source-collapse-noop',
+      'semantic-life-queued-close',
+      'semantic-life-queued-same-epoch-close',
+      'semantic-life-adoption-close',
+      'semantic-life-interlock-close',
       'semantic-life-validation-close',
       'semantic-life-preclaim-close',
       'semantic-life-claimed-gap-close',
