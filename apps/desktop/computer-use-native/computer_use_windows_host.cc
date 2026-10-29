@@ -8248,7 +8248,7 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
     snapshot.stop_serial = WindowsValidationFrameStopSerial();
   std::shared_ptr<WindowsUiaReadPending<Result>> pending;
   try { pending = std::make_shared<WindowsUiaReadPending<Result>>(); }
-  catch (...) { WindowsV1UiaOk(kWindowsV1UiaTimeoutResult); return false; }
+  catch (...) { if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult); return false; }
   {
     std::lock_guard stop_lock(control.stop_mutex);
     if (parent_process_dead.load(std::memory_order_acquire) ||
@@ -8257,12 +8257,12 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
       return false;
     }
     if (WindowsUiaReadWorkerRunning().exchange(true, std::memory_order_acq_rel)) {
-      WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
+      if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       return false;
     }
   }
   try {
-    std::thread([pending, snapshot, measure = std::move(measure)]() mutable {
+    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {
       struct Progress {
         explicit Progress(WindowsUiaReadProgress *value) { windows_uia_read_progress = value; }
         ~Progress() { windows_uia_read_progress = nullptr; }
@@ -8275,10 +8275,10 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
           ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
         } apartment;
         if (SUCCEEDED(apartment.result) && WindowsV1UiaMayCall()) value = measure();
-        else if (FAILED(apartment.result)) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
+        else if (FAILED(apartment.result) && preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       } catch (...) {
         value.reset();
-        WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
+        if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       }
       // No result or free slot is published while Release/CoUninitialize can still be running.
       {
@@ -8294,7 +8294,7 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
     }).detach();
   } catch (...) {
     WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
-    WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
+    if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
     return false;
   }
   std::unique_lock lock(pending->mutex);

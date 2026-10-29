@@ -875,6 +875,7 @@ template <class Call> long long WhileStuck(HWND window, UINT message, WPARAM w, 
   call();
   const long long elapsed = Millis(start);
   Sleep(3300);
+  SeamCheck(!WindowsUiaReadWorkerRunning().load(), "owned_provider_recovered_and_read_worker_retired");
   return elapsed;
 }
 
