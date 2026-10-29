@@ -649,6 +649,19 @@ function run(file: string, args: string[], timeout: number, verbatim = false) {
   );
 }
 
+function captureEventFragment(): string {
+  const from = host.indexOf('    const HANDLE frame_event = CreateEventW(');
+  const to = host.indexOf('    const auto frame = frame_pool.TryGetNextFrame();', from);
+  if (from < 0 || to < from) throw new Error('Capture event source boundary changed');
+  return host
+    .slice(from, to)
+    .replace(
+      'CreateEventW(nullptr, TRUE, FALSE, nullptr)',
+      'Sc820EventCreated(CreateEventW(nullptr, TRUE, FALSE, nullptr))',
+    )
+    .replace('SetEvent(frame_event)', 'Sc820EventSignal(frame_event)');
+}
+
 const program = String.raw`
 #include "computer_use_protocol.h"
 #include <windows.h>
@@ -656,6 +669,7 @@ const program = String.raw`
 #include <UIAutomation.h>
 #include <cstdint>
 #include <optional>
+#include <functional>
 #include <string>
 namespace sprint_coder::computer_use { struct InterlockEvaluation; }
 namespace {
@@ -3791,6 +3805,58 @@ int DiagnoseBindingHealthy(){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+HANDLE capture_event_handle=nullptr;
+std::function<void()> capture_delayed_callback;
+bool capture_start_throws=false;
+std::atomic<bool> capture_signal_ok{false};
+std::atomic<DWORD> capture_signal_error{0};
+HANDLE Sc820EventCreated(HANDLE handle){capture_event_handle=handle;return handle;}
+BOOL Sc820EventSignal(HANDLE handle){
+  const BOOL ok=SetEvent(handle);capture_signal_ok=ok!=FALSE;
+  capture_signal_error=ok?ERROR_SUCCESS:GetLastError();return ok;
+}
+struct CaptureEventPool {
+  std::function<void()> registered;
+  template<class Callback> int FrameArrived(Callback callback){registered=[callback]{callback(0,0);};return 1;}
+  void FrameArrived(int){registered={};}
+};
+struct CaptureEventSession {
+  CaptureEventPool& pool;
+  void StartCapture(){
+    capture_delayed_callback=pool.registered;
+    if(capture_start_throws)throw std::runtime_error("controlled capture start fault");
+    pool.registered();
+  }
+};
+bool CaptureEventSourceFragment(){
+  CaptureEventPool frame_pool;CaptureEventSession session{frame_pool};
+  try {
+//@@CAPTURE_EVENT_FRAGMENT@@
+    return true;
+  }catch(...){return false;}
+}
+int DiagnoseCaptureEvent(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());capture_start_throws=scenario.ends_with(L"-exception");
+  const auto cleanup=[] {
+    capture_delayed_callback={};DWORD flags=0;
+    if(capture_event_handle!=nullptr&&GetHandleInformation(capture_event_handle,&flags))CloseHandle(capture_event_handle);
+  };
+  try {
+    const bool ok=CaptureEventSourceFragment();DWORD flags=0;
+    Require(ok!=capture_start_throws&&capture_event_handle!=nullptr&&capture_delayed_callback,"capture_event_probe_prerequisites");
+    const bool alive=GetHandleInformation(capture_event_handle,&flags)!=FALSE;
+    // Model a queued callback after scope exit without allocating another kernel handle that could
+    // accidentally recycle the closed event before the ownership assertion.
+    capture_delayed_callback();
+    capture_delayed_callback={};
+    const bool alive_after=GetHandleInformation(capture_event_handle,&flags)!=FALSE;
+    if(capture_start_throws)Require(alive&&alive_after&&capture_signal_ok.load(),"capture_event_exception_leak_reproduced");
+    else Require(!alive&&!alive_after&&!capture_signal_ok.load()&&capture_signal_error==ERROR_INVALID_HANDLE,"capture_event_callback_after_close_reproduced");
+    cleanup();Require(!GetHandleInformation(capture_event_handle,&flags),"capture_event_owned_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"actualKernelEvent\":true,\"controlledEventSource\":true,\"baselineProblemReproduced\":true,\"exceptionLeak\":"<<(capture_start_throws?"true":"false")<<",\"lateCallbackInvalidHandle\":"<<(capture_start_throws?"false":"true")<<",\"ownedHandleClosed\":true,\"actualCapture\":false}\n";return 0;
+  }catch(const std::exception& error){cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseCaptureStall(std::wstring_view scenario){
   const bool cancel=scenario.ends_with(L"-cancel");const std::string label(scenario.begin(),scenario.end());RcaRun run;
   try {
@@ -4315,6 +4381,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"capture-event-")) return DiagnoseCaptureEvent(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"capture-stall-")) return DiagnoseCaptureStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"preflight-stop-")) return DiagnosePreflightStop(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"semantic-life-")) return DiagnoseSemanticLifecycle(argv[1]);
@@ -4486,7 +4553,10 @@ describe.skipIf(
       const source = join(root, 'seam.cc');
       const binary = join(root, 'seam.exe');
       writeFileSync(join(root, 'instrumented-host.cc'), instrumentedHost());
-      writeFileSync(source, program);
+      writeFileSync(
+        source,
+        program.replace('//@@CAPTURE_EVENT_FRAGMENT@@', captureEventFragment()),
+      );
       const provenance = join(root, 'provenance.h');
       writeFileSync(
         provenance,
@@ -4754,6 +4824,20 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('capture-event-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            actualKernelEvent: true,
+            controlledEventSource: true,
+            baselineProblemReproduced: true,
+            exceptionLeak: scenario.endsWith('-exception'),
+            lateCallbackInvalidHandle: !scenario.endsWith('-exception'),
+            ownedHandleClosed: true,
+            actualCapture: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('capture-stall-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -4986,6 +5070,10 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('diagnoses capture event ownership across delayed callbacks and StartCapture exceptions', async () => {
+    await runScenarios(['capture-event-late', 'capture-event-exception']);
+  }, 700_000);
 
   it('diagnoses consumer Stop delay while Observe capture is held', async () => {
     await runScenarios(['capture-stall-cancel', 'capture-stall-close']);
