@@ -1338,24 +1338,25 @@ std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t> stop_serial){
   Require(SUCCEEDED(CreateWindowsV1Automation(&objects.automation))&&objects.automation,"binding_healthy_automation");
   Require(SUCCEEDED(objects.automation->ElementFromHandle(fixture_windows[0],&objects.element))&&objects.element,"binding_healthy_root");
   RECT bounds{};Require(SUCCEEDED(objects.element->get_CurrentBoundingRectangle(&bounds)),"binding_healthy_bounds");
-  std::string duplicate_id;unsigned duplicate_controls=0;
+  std::string duplicate_id,unique_id;unsigned duplicate_controls=0,unique_controls=0;
   for(HWND child=GetWindow(fixture_windows[0],GW_CHILD);child!=nullptr;child=GetWindow(child,GW_HWNDNEXT)){
-    if(GetDlgCtrlID(child)!=901)continue;
+    if(GetDlgCtrlID(child)!=901&&GetDlgCtrlID(child)!=902)continue;
     DWORD owner=0;Require(GetWindowThreadProcessId(child,&owner)!=0&&owner==fixture_pids[0],"binding_healthy_child_owner");
     struct Element {IUIAutomationElement* value=nullptr;~Element(){if(value)value->Release();}} element;
     Require(SUCCEEDED(objects.automation->ElementFromHandle(child,&element.value))&&element.value,"binding_healthy_child");
     std::string id;Require(ReadWindowsElementTargetId(element.value,&id)&&!id.empty(),"binding_healthy_child_id");
-    if(duplicate_controls==0)duplicate_id=id;else Require(id==duplicate_id,"binding_healthy_duplicate_id");
-    ++duplicate_controls;
+    if(GetDlgCtrlID(child)==902){unique_id=id;++unique_controls;}
+    else {if(duplicate_controls==0)duplicate_id=id;else Require(id==duplicate_id,"binding_healthy_duplicate_id");++duplicate_controls;}
   }
-  Require(duplicate_controls==2,"binding_healthy_duplicate_controls");
+  Require(duplicate_controls==2&&unique_controls==1&&!unique_id.empty()&&unique_id!=duplicate_id,"binding_healthy_duplicate_and_unique_controls");
   WindowsControlBindings baseline,first,second;
+  first.semantic.emplace("old-id","old-signature");first.visual.insert("old-visual");second=first;
   Require(CaptureWindowsControlBindingsOnWorker(fixture_pids[0],fixture_windows[0],&baseline),"binding_healthy_direct_capture");
-  const auto nodes=path.Nodes();Require(nodes>=3&&baseline.visual.size()>=3&&!baseline.semantic.contains(duplicate_id),"binding_healthy_duplicate_omitted");
+  const auto nodes=path.Nodes();Require(nodes>=3&&baseline.visual.size()>=3&&!baseline.semantic.contains(duplicate_id)&&baseline.semantic.contains(unique_id),"binding_healthy_duplicate_omitted_unique_preserved");
   Require(CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&first)&&
           CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&second),"binding_healthy_worker_capture");
   Require(first.semantic==baseline.semantic&&second.semantic==baseline.semantic&&first.visual==baseline.visual&&second.visual==baseline.visual&&path.Nodes()==3*nodes,"binding_healthy_values_and_cumulative_nodes");
-  std::string direct_signature,first_signature,second_signature;
+  std::string direct_signature,first_signature="old-signature",second_signature="old-signature";
   Require(WindowsFocusedElementSignatureOnWorker(fixture_pids[0],bounds,&direct_signature)&&
           WindowsFocusedElementSignature(fixture_pids[0],bounds,&first_signature)&&
           WindowsFocusedElementSignature(fixture_pids[0],bounds,&second_signature)&&direct_signature.size()==64&&
@@ -1374,11 +1375,15 @@ std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::ui
     return std::string("{\"recovered\":")+(recovered?"true":"false")+"}";
   }
   WindowsControlBindings bindings;std::string signature;
+  bool sentinel=false;ReadOptionalJsonBoolean(metadata,"sentinel",&sentinel);
+  if(sentinel){bindings.semantic.emplace("sentinel-id","sentinel-signature");bindings.visual.insert("sentinel-visual");signature="sentinel-signature";}
   // Controlled owned-window contact tests isolate lifetime from focus/coordinate acceptance.
   const RECT signature_bounds=classification_detail.starts_with("binding-")?RECT{-1000000,-1000000,1000000,1000000}:RECT{0,0,100,100};
   const bool ok=kind=="bindings" ? CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&bindings)
       : WindowsFocusedElementSignature(fixture_pids[0],signature_bounds,&signature);
-  return std::string("{\"ok\":")+(ok?"true":"false")+",\"empty\":"+
+  const bool output_unchanged=sentinel&&bindings.semantic==std::unordered_map<std::string,std::string>{{"sentinel-id","sentinel-signature"}}&&
+      bindings.visual==std::set<std::string>{"sentinel-visual"}&&signature=="sentinel-signature";
+  return std::string("{\"ok\":")+(ok?"true":"false")+",\"outputUnchanged\":"+(output_unchanged?"true":"false")+",\"empty\":"+
       (bindings.semantic.empty()&&bindings.visual.empty()&&signature.empty()?"true":"false")+
       ",\"canceled\":"+(path.Stop()==WindowsV1UiaStop::kCanceled?"true":"false")+
       ",\"timedOut\":"+(path.Stop()==WindowsV1UiaStop::kTimeout?"true":"false")+"}";
@@ -1515,9 +1520,9 @@ int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding
   HWND window = CreateWindowExW(0, wc.lpszClassName, L"RCA fixture", WS_OVERLAPPEDWINDOW,
                                 0, 0, 320, 200, nullptr, nullptr, wc.hInstance, nullptr);
   if (window == nullptr) { UnmapViewOfFile(shared); return 4; }
-  if(binding_controls)for(int i=0;i<2;++i){
-    HWND child=CreateWindowExW(0,L"BUTTON",L"Fixture duplicate",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
-      20,20+40*i,150,25,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(901)),wc.hInstance,nullptr);
+  if(binding_controls)for(int i=0;i<3;++i){
+    HWND child=CreateWindowExW(0,L"BUTTON",i==2?L"Fixture unique":L"Fixture duplicate",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
+      20,20+40*i,150,25,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(i==2?902:901)),wc.hInstance,nullptr);
     if(child==nullptr){UnmapViewOfFile(shared);DestroyWindow(window);return 5;}
   }
   ShowWindow(window, SW_SHOWNOACTIVATE);
@@ -3303,7 +3308,7 @@ int DiagnoseBindingDetails(std::wstring_view scenario){
     run.StartFixture(false,true);run.StartPipe(false);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"binding_detail_handshake");
     classification_contact_held=true;
-    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+kind+"\"}");
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+kind+"\",\"sentinel\":true}");
     if(stopping){
       Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&classification_contacts==1&&classification_returns==1&&classification_gate_calls==1,"binding_detail_noncontact_held");
       Require(!run.Wait(2,50),"binding_detail_result_not_published_while_held");
@@ -3313,8 +3318,8 @@ int DiagnoseBindingDetails(std::wstring_view scenario){
       stop_ms=GetTickCount64()-started;
       Require(stop_ms<1000&&WindowsUiaReadWorkerRunning().load()&&classification_apartments==0,"binding_detail_worker_retained");
     }
-    std::string body;bool ok=true,empty=false,canceled=false;
-    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadOptionalJsonBoolean(body,"canceled",&canceled)&&canceled==stopping,"binding_detail_refusal");
+    std::string body;bool ok=true,empty=true,canceled=false,unchanged=false;
+    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&!empty&&ReadOptionalJsonBoolean(body,"outputUnchanged",&unchanged)&&unchanged&&ReadOptionalJsonBoolean(body,"canceled",&canceled)&&canceled==stopping,"binding_detail_refusal");
     const auto original=body;
     if(stopping){SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000),"binding_detail_drained");}
     Require(run.ReplyCount(2)==1&&run.ProbeBody(2,&body)&&body==original,"binding_detail_no_late_reply");
@@ -3324,7 +3329,7 @@ int DiagnoseBindingDetails(std::wstring_view scenario){
     {std::lock_guard lock(classification_resource_mutex);Require(classification_bstrs.empty()&&classification_arrays.empty(),"binding_detail_no_value_residue");}
     if(!close){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"binding_detail_final_close");}
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"binding_detail_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"ownedHwndContact\":true,\"normalUiaAcceptance\":false,\"stopMs\":"<<stop_ms<<",\"resourceCleanupVerified\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"ownedHwndContact\":true,\"normalUiaAcceptance\":false,\"stopMs\":"<<stop_ms<<",\"resourceCleanupVerified\":true,\"failureOutputUnchanged\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -3343,7 +3348,7 @@ int DiagnoseBindingHealthy(){
     Require(uia_read_worker_starts==4&&classification_apartments==4&&!WindowsUiaReadWorkerRunning().load(),"binding_healthy_sequential_apartments");
     run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");Require(run.Wait(3,1000)&&run.Receipt(3,MessageType::kProbeResult,"closed",2),"binding_healthy_close");
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"binding_healthy_cleanup");
-    std::cout<<"{\"case\":\"binding-healthy\",\"ownedHwndContact\":true,\"normalFocusAcceptance\":false,\"equivalentValues\":true,\"duplicateOmitted\":true,\"nodes\":"<<nodes<<",\"sequentialWorkers\":4,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\"binding-healthy\",\"ownedHwndContact\":true,\"normalFocusAcceptance\":false,\"equivalentValues\":true,\"duplicateOmitted\":true,\"uniquePreserved\":true,\"oldOutputReplaced\":true,\"nodes\":"<<nodes<<",\"sequentialWorkers\":4,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4290,6 +4295,7 @@ describe.skipIf(
             normalUiaAcceptance: false,
             stopMs: expect.any(Number),
             resourceCleanupVerified: true,
+            failureOutputUnchanged: true,
             inputAttempts: 0,
             childExited: true,
             workerIdle: true,
@@ -4305,6 +4311,8 @@ describe.skipIf(
             normalFocusAcceptance: false,
             equivalentValues: true,
             duplicateOmitted: true,
+            uniquePreserved: true,
+            oldOutputReplaced: true,
             nodes: expect.any(Number),
             sequentialWorkers: 4,
             inputAttempts: 0,
