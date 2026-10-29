@@ -1314,6 +1314,80 @@ describe('Computer Use Windows helper transport', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each(['native-error', 'timeout'] as const)(
+    'retains an unconfirmed semantic input on the same helper after %s until Host confirms close',
+    async (ending) => {
+      let inFlight = true;
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: (metadata) =>
+          ending === 'native-error'
+            ? ['error', { code: 'semantic_input_in_flight', accepted: true }]
+            : [
+                'dispatch_result',
+                {
+                  result: 'completed',
+                  reasonCode: null,
+                  sessionId: metadata['sessionId'],
+                  cancelEpoch: metadata['cancelEpoch'],
+                  inputAttemptCount: 1,
+                },
+              ],
+        close_session: (metadata) =>
+          inFlight
+            ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
+            : [
+                'probe_result',
+                {
+                  result: 'closed',
+                  drained: true,
+                  sessionId: metadata['sessionId'],
+                  cancelEpoch: metadata['cancelEpoch'],
+                  inputAttemptCount: 1,
+                },
+              ],
+      });
+      const session = await startSession(host, 'semantic-owner', 'turn-1');
+      if (ending === 'timeout') helper().holdOnly('dispatch');
+      const dispatched = Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'semantic-request',
+          cancelEpoch: 0,
+          type: 'invoke',
+          targetId: 'owned-control',
+        }),
+      ).then(
+        () => 'completed',
+        () => 'unconfirmed',
+      );
+      await vi.advanceTimersByTimeAsync(ending === 'timeout' ? 10_001 : 0);
+      expect(await dispatched).toBe('unconfirmed');
+      if (ending === 'native-error')
+        await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      // An error/timeout is not proof that an already claimed native input has returned.
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(false);
+      expect(sockets[0]!.destroyed).toBe(false);
+      if (ending === 'timeout')
+        await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      inFlight = false;
+      if (ending === 'timeout') {
+        helper().release('dispatch');
+        await vi.advanceTimersByTimeAsync(0);
+        // A late dispatch result must not replace the Host's session-bound close proof.
+        expect(children[0]!.killed).toBe(false);
+        expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      }
+      await expect(host.close(session)).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(children).toHaveLength(1);
+      expect(children[0]!.killed).toBe(true);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+  );
+
   it('keeps the helper reachable so a close re-sent after the Main deadline is confirmed', async () => {
     const { host, helper } = createTarget();
     const session = await startSession(host, 'session-1', 'turn-1');

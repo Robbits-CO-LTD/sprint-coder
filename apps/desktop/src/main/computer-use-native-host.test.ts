@@ -122,6 +122,11 @@ describe('Computer Use native Main adapter', () => {
         Object.assign(new Error('accepted'), { code: 'STALE_TARGET', accepted: true }),
       ),
     ).toBeNull();
+    expect(
+      classifyComputerUseNativeDispatchFailure(
+        Object.assign(new Error('in flight'), { code: 'SEMANTIC_INPUT_IN_FLIGHT', accepted: true }),
+      ),
+    ).toBeNull();
     // #820: a V1 target that did not answer. Before any input (accepted false) it is a typed rejection
     // that a new observation can answer; once the action was sent (accepted true) a pattern call that
     // timed out is unconfirmed and stays an exception for the controller to book as an unknown effect,
