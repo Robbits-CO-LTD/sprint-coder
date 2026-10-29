@@ -176,12 +176,12 @@ function instrumentedHost(): string {
   source = source.slice(0, resumeFrom) + resume + source.slice(resumeTo);
   for (const [begin, end, call] of [
     [
-      'WindowsUiaRisk ClassifyWindowsPoint(',
-      '\nWindowsUiaRisk ClassifyWindowsFocusedElement(',
+      'WindowsUiaRisk ClassifyWindowsPointOnWorker(',
+      '\nWindowsUiaRisk ClassifyWindowsFocusedElementOnWorker(',
       'automation->ElementFromPoint(query, &element)',
     ],
     [
-      'WindowsUiaRisk ClassifyWindowsFocusedElement(',
+      'WindowsUiaRisk ClassifyWindowsFocusedElementOnWorker(',
       '\nbool ComputeWindowsControlSignature(',
       'automation->GetFocusedElement(&element)',
     ],
@@ -198,6 +198,16 @@ function instrumentedHost(): string {
       ) +
       source.slice(to);
   }
+  source = replaceOnce(
+    source,
+    '    std::thread([pending, snapshot, measure = std::move(measure)]() mutable {',
+    '    std::thread([pending, snapshot, measure = std::move(measure)]() mutable {\n      Sc820ReadWorkerStarted();',
+  );
+  source = replaceOnce(
+    source,
+    'HRESULT CreateWindowsV1Automation(IUIAutomation **automation) {',
+    'HRESULT CreateWindowsV1Automation(IUIAutomation **automation) {\n  Sc820AutomationCreated();',
+  );
   const readFrom = source.indexOf('bool ReadUiaObservationOnWorker(');
   const readTo = source.indexOf('bool ReadUiaObservation(', readFrom);
   if (readFrom < 0 || readTo < 0) throw new Error('Observation worker boundary changed');
@@ -431,6 +441,8 @@ void Sc940StartEpilogueGate();
 void Sc940StartWorkerAttempt();
 BOOL Sc940StartShow(HWND window, int command);
 BOOL Sc940StartForeground(HWND window);
+void Sc820AutomationCreated();
+void Sc820ReadWorkerStarted();
 bool Sc820ClassificationContactHeld();
 HRESULT Sc820HeldClassificationContact();
 std::string Sc820ClassificationProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial);
@@ -976,10 +988,15 @@ BOOL Sc940StartForeground(HWND window) {
 // A deterministic foreign-call stall, not a measurement of Windows UIA timing.
 // It returns a timeout without querying any desktop element after release.
 std::atomic<bool> classification_contact_held{false};
-std::atomic<unsigned> classification_contacts{0}, classification_returns{0};
+std::atomic<unsigned> classification_contacts{0}, classification_returns{0}, uia_read_worker_starts{0};
+std::atomic<ULONGLONG> classification_contact_started{0};
+std::atomic<unsigned> uia_factory_calls{0};
+void Sc820AutomationCreated(){uia_factory_calls.fetch_add(1);}
+void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 HRESULT Sc820HeldClassificationContact() {
   classification_contacts.fetch_add(1);
+  classification_contact_started.store(GetTickCount64());
   SetEvent(gate_entered);
   if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
   classification_returns.fetch_add(1);
@@ -988,25 +1005,39 @@ HRESULT Sc820HeldClassificationContact() {
 std::string Sc820ClassificationProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
   Require(fixture_count == 1, "classification_owned_fixture");
   std::string kind;
-  Require(ReadJsonString(metadata, "kind", &kind) && (kind == "point" || kind == "focused"),
+  Require(ReadJsonString(metadata, "kind", &kind) && (kind == "point" || kind == "focused" || kind == "recovery"),
           "classification_probe_kind");
-  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget, 1, stop_serial);
+  bool fresh=false;ReadOptionalJsonBoolean(metadata,"fresh",&fresh);
+  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget, fresh ? cancellation_epoch.load() : 1, stop_serial);
+  if(kind=="recovery") {
+    bool recovered=false;
+    RunWindowsUiaRead<bool>(true, []() -> std::optional<bool> { return true; },
+                           [&recovered](bool value){recovered=value;});
+    return std::string("{\"recovered\":")+(recovered?"true":"false")+"}";
+  }
   std::string signature;
   const WindowsUiaRisk risk = kind == "point"
       ? ClassifyWindowsPoint(POINT{}, fixture_pids[0], &signature)
       : ClassifyWindowsFocusedElement(fixture_pids[0]);
+  if(path.Stop()!=WindowsV1UiaStop::kNone) {
+    const auto factories=uia_factory_calls.load();std::string discarded_signature;
+    Require(!WindowsFocusedElementSignature(fixture_pids[0],RECT{0,0,100,100},&discarded_signature) &&
+                uia_factory_calls.load()==factories,"stopped_classification_prevents_following_signature_uia");
+  }
   return "{\"incomplete\":" + std::string(!risk.metadata_complete ? "true" : "false") +
-      ",\"signatureEmpty\":" + (signature.empty() ? "true" : "false") + "}";
+      ",\"signatureEmpty\":" + (signature.empty() ? "true" : "false") +
+      ",\"canceled\":" + (path.Stop()==WindowsV1UiaStop::kCanceled?"true":"false") +
+      ",\"timedOut\":" + (path.Stop()==WindowsV1UiaStop::kTimeout?"true":"false") + "}";
 }
 
 bool Sc820ContactGate(HWND window) {
-  if (fixture_count != 1 || window != fixture_windows[0] || windows_uia_observation_pending == nullptr) {
+  if (fixture_count != 1 || window != fixture_windows[0] || windows_uia_read_progress == nullptr) {
     wrong_measurement.store(true);
     return false;
   }
   {
-    std::lock_guard lock(windows_uia_observation_pending->mutex);
-    if (!windows_uia_observation_pending->contact_active) {
+    std::lock_guard lock(windows_uia_read_progress->mutex);
+    if (!windows_uia_read_progress->contact_active) {
       wrong_measurement.store(true);
       return false;
     }
@@ -1501,9 +1532,9 @@ struct RcaRun {
 
   bool WaitUiaWorkerIdle(DWORD milliseconds) {
     const ULONGLONG deadline = GetTickCount64() + milliseconds;
-    while (WindowsUiaObservationWorkerRunning().load(std::memory_order_acquire) && GetTickCount64() < deadline)
+    while (WindowsUiaReadWorkerRunning().load(std::memory_order_acquire) && GetTickCount64() < deadline)
       Sleep(1);
-    return !WindowsUiaObservationWorkerRunning().load(std::memory_order_acquire);
+    return !WindowsUiaReadWorkerRunning().load(std::memory_order_acquire);
   }
 
   unsigned ReplyCount(unsigned id) {
@@ -2820,34 +2851,47 @@ int DiagnoseClassificationStall(std::wstring_view scenario) {
     Require(classification_contacts.load() == 1 && classification_returns.load() == 0, "classification_contact_pending");
     const auto before = WindowsTargetListControl().stop_serial.load();
     const ULONGLONG started = GetTickCount64();
+    Require(started-classification_contact_started.load()<300,"classification_stop_sent_before_contact_deadline");
     if (cancel) run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
     else run.Send(MessageType::kProbe, 3, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
     Require(WaitStopSerial(before, 1000), "classification_stop_reader_progress");
-    // RCA control: the synchronous call prevents the actual receipt even after reader latch.
-    const bool early_receipt = run.Wait(3, 1100);
+    Require(GetTickCount64()-classification_contact_started.load()<470,"classification_stop_latched_before_contact_deadline");
+    Require(run.Wait(3, 1000), "classification_stop_receipt_before_release");
     const ULONGLONG held_ms = GetTickCount64() - started;
-    Require(!early_receipt && run.ReplyCount(2) == 0 && classification_returns.load() == 0 &&
-                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-            "classification_sync_stall_reproduced");
-    SetEvent(run.release.value);
-    Require(run.Wait(2, 5000), "classification_result_after_release");
+    Require(held_ms<1000 && classification_returns.load() == 0 && WindowsUiaReadWorkerRunning().load() &&
+                uia_read_worker_starts.load()==1 && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
+            "classification_stop_keeps_held_worker");
+    Require(run.Wait(2, 1000), "classification_result_before_release");
     std::string body;
-    bool incomplete = false, empty = false;
+    bool incomplete = false, empty = false, canceled = false;
     Require(run.ProbeBody(2, &body) && ReadOptionalJsonBoolean(body, "incomplete", &incomplete) && incomplete &&
-                ReadOptionalJsonBoolean(body, "signatureEmpty", &empty) && empty, "classification_fails_closed");
+                ReadOptionalJsonBoolean(body, "signatureEmpty", &empty) && empty &&
+                ReadOptionalJsonBoolean(body,"canceled",&canceled) && canceled, "classification_stop_not_contact_timeout");
+    const std::string original_body=body;
+    run.Send(MessageType::kProbe,5,std::string("{\"operation\":\"sc820_classification_probe\",\"kind\":\"")+kind+"\",\"fresh\":true}");
+    bool busy_timeout=false;
+    Require(run.Wait(5,1000)&&run.ProbeBody(5,&body)&&ReadOptionalJsonBoolean(body,"timedOut",&busy_timeout)&&busy_timeout &&
+                classification_contacts.load()==1&&uia_read_worker_starts.load()==1,"classification_busy_does_not_spawn");
     Require(run.Wait(3, 5000) && run.Receipt(3, cancel ? MessageType::kDispatchResult : MessageType::kProbeResult,
                 cancel ? "canceled" : "closed", 2), "classification_late_stop_receipt");
     if (cancel) {
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
       Require(run.Wait(4, 5000) && run.Receipt(4, MessageType::kProbeResult, "closed", 3), "classification_final_close");
     }
+    SetEvent(run.release.value);
+    Require(run.WaitUiaWorkerIdle(5000),"classification_worker_drained");
     Require(classification_returns.load() == 1 && !gate_timed_out.load(), "classification_contact_released");
+    Require(run.ReplyCount(2)==1&&run.ProbeBody(2,&body)&&body==original_body,"classification_late_result_discarded");
     classification_contact_held.store(false);
+    run.Send(MessageType::kProbe,6,"{\"operation\":\"sc820_classification_probe\",\"kind\":\"recovery\",\"fresh\":true}");
+    bool recovered=false;
+    Require(run.Wait(6,1000)&&run.ProbeBody(6,&body)&&ReadOptionalJsonBoolean(body,"recovered",&recovered)&&recovered &&
+                uia_read_worker_starts.load()==2&&!WindowsUiaReadWorkerRunning().load(),"classification_slot_recovered");
     run.Cleanup();
     Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "classification_cleanup");
     std::cout << "{\"case\":\"" << label << "\",\"syntheticContactStall\":true,\"actualUiaLatencyMeasured\":false"
-              << ",\"readerLatched\":true,\"receiptBeforeRelease\":false,\"heldMs\":" << held_ms
-              << ",\"lateReceiptConfirmed\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
+              << ",\"readerLatched\":true,\"receiptBeforeRelease\":true,\"heldMs\":" << held_ms
+              << ",\"lateReceiptConfirmed\":true,\"canceledByStop\":true,\"lateResultDiscarded\":true,\"slotRecovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
               << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
   } catch (const std::exception &error) {
@@ -2888,7 +2932,7 @@ int DiagnoseUia(std::wstring_view scenario) {
         run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
       Require(WaitStopSerial(before, 1000), "uia_stop_reader_progress");
       if (release_consumer) {
-        Require(!WindowsUiaObservationWorkerRunning().load() && uia_contacts.load() == 0 &&
+        Require(!WindowsUiaReadWorkerRunning().load() && uia_contacts.load() == 0 &&
                     cancellation_epoch.load() == 1,
                 "uia_prequeued_stop_before_worker");
         hold_point.store(HoldPoint::kNone);
@@ -2909,7 +2953,7 @@ int DiagnoseUia(std::wstring_view scenario) {
     if (!twice) {
       Require(WaitForSingleObject(run.entered.value, 5000) == WAIT_OBJECT_0, "uia_gate_entered");
       Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "uia_gate_held");
-      Require(WindowsUiaObservationWorkerRunning().load() == !queued, "uia_worker_ownership");
+      Require(WindowsUiaReadWorkerRunning().load() == !queued, "uia_worker_ownership");
     }
     if (cancel || close || queued) stop_control(cancel, queued);
     UiaReadResult result;
@@ -2935,10 +2979,10 @@ int DiagnoseUia(std::wstring_view scenario) {
                     GetTickCount64() - uia_held_since.load() < 1000, "uia_contact_deadline_bounded");
     }
     if (queued) {
-      Require(uia_contacts.load() == 0 && !WindowsUiaObservationWorkerRunning().load(),
+      Require(uia_contacts.load() == 0 && !WindowsUiaReadWorkerRunning().load(),
               "uia_prequeued_close_created_no_worker");
     } else if (!twice) {
-      Require(WindowsUiaObservationWorkerRunning().load() &&
+      Require(WindowsUiaReadWorkerRunning().load() &&
                   WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
                   WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT,
               "uia_response_precedes_gate_release");
@@ -2948,7 +2992,7 @@ int DiagnoseUia(std::wstring_view scenario) {
         UiaReadResult busy;
         Require(run.Wait(6, 1000) && run.UiaReply(6, &busy) && !busy.first && busy.empty &&
                     busy.first_nodes == 0 && uia_contacts.load() == before &&
-                    WindowsUiaObservationWorkerRunning().load(), "uia_busy_read_does_not_spawn");
+                    WindowsUiaReadWorkerRunning().load(), "uia_busy_read_does_not_spawn");
       }
       uia_hold_contact.store(0);
       SetEvent(run.release.value);
@@ -3639,7 +3683,10 @@ describe.skipIf(
             syntheticContactStall: true,
             actualUiaLatencyMeasured: false,
             readerLatched: true,
-            receiptBeforeRelease: false,
+            receiptBeforeRelease: true,
+            canceledByStop: true,
+            lateResultDiscarded: true,
+            slotRecovered: true,
             heldMs: expect.any(Number),
             lateReceiptConfirmed: true,
             inputAttempts: 0,
@@ -3702,7 +3749,7 @@ describe.skipIf(
     }
   }
 
-  it('demonstrates synchronous classification blocking Stop during a synthetic foreign-call stall', async () => {
+  it('bounds classification Stop during a held foreign call and retains worker ownership', async () => {
     await runScenarios([
       'classification-point-cancel',
       'classification-point-close',
