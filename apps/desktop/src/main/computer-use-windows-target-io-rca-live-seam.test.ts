@@ -309,6 +309,19 @@ function instrumentedHost(): string {
     'Sc820SemanticInterlock(session, metadata, kind, &click_basis)',
   );
   source = source.slice(0, dispatchFrom) + dispatch + source.slice(dispatchTo);
+  const preflightFrom = source.indexOf('bool HandleWindowsPreflight(');
+  const preflightTo = source.indexOf('bool ObserveWindowsWindow(', preflightFrom);
+  if (preflightFrom < 0 || preflightTo < preflightFrom)
+    throw new Error('Preflight boundary changed');
+  let preflight = source.slice(preflightFrom, preflightTo);
+  for (const [name, wrapper] of [
+    ['ValidateWindowsDispatchBinding(', 'Sc820PreflightBinding('],
+    ['WindowsInterlockRefusal(', 'Sc820PreflightInterlock('],
+    ['GenerateTicketToken(', 'Sc820PreflightToken('],
+  ] as const)
+    preflight = replaceOnce(preflight, name, wrapper);
+  preflight = preflight.replaceAll('ScheduleWindowsEffectShadow(', 'Sc820PreflightShadow(');
+  source = source.slice(0, preflightFrom) + preflight + source.slice(preflightTo);
   const observeFrom = source.indexOf('bool ObserveWindowsWindow(');
   const observeTo = source.indexOf('\nstruct ArtifactReadPending', observeFrom);
   if (observeFrom < 0 || observeTo < observeFrom) throw new Error('Observe boundary changed');
@@ -646,6 +659,10 @@ struct WindowsSession;
 struct WindowsSemanticWork;
 struct WindowsClickBasis;
 bool Sc820SemanticBinding(const WindowsSession&,const std::string&,std::string*,RECT*,std::string*);
+bool Sc820PreflightBinding(const WindowsSession&,const std::string&,std::string*,RECT*,std::string*);
+sprint_coder::computer_use::InterlockEvaluation Sc820PreflightInterlock(const WindowsSession&,const std::string&,const std::string&);
+bool Sc820PreflightToken(std::string*);
+void Sc820PreflightShadow(const WindowsSession&,const std::string&,const std::string&,bool,bool);
 sprint_coder::computer_use::InterlockEvaluation Sc820SemanticInterlock(const WindowsSession&,const std::string&,const std::string&,WindowsClickBasis*);
 
 bool Sc820SemanticMeasure(const WindowsSemanticWork&,bool*,std::string*);
@@ -1287,6 +1304,7 @@ bool Sc820ClassificationContactHeld() { return classification_contact_held.load(
 std::string classification_detail;
 std::string semantic_lifecycle;
 bool semantic_public_dispatch=false;
+std::string preflight_stop_phase;
 std::atomic<unsigned> semantic_method_calls{0}, semantic_validation_calls{0}, semantic_worker_starts{0};
 void Sc820SemanticWorkerStarted(){semantic_worker_starts.fetch_add(1);}
 std::atomic<bool> semantic_validation_wrong_thread{false};
@@ -1459,6 +1477,22 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
 }
 
+bool Sc820PreflightBinding(const WindowsSession& session,const std::string& metadata,std::string* kind,RECT* bounds,std::string* reason){
+  if(preflight_stop_phase.empty())return ValidateWindowsDispatchBinding(session,metadata,kind,bounds,reason);
+  *kind="invoke";*bounds=RECT{0,0,100,100};return true;
+}
+sprint_coder::computer_use::InterlockEvaluation Sc820PreflightInterlock(const WindowsSession& session,const std::string& metadata,const std::string& kind){
+  if(preflight_stop_phase.empty())return WindowsInterlockRefusal(session,metadata,kind);
+  if(preflight_stop_phase=="interlock")Sc820DetailGate();
+  return {};
+}
+bool Sc820PreflightToken(std::string* token){
+  if(preflight_stop_phase=="rng")Sc820DetailGate();
+  return GenerateTicketToken(token);
+}
+void Sc820PreflightShadow(const WindowsSession& session,const std::string& metadata,const std::string& kind,bool valid,bool ordinary){
+  if(preflight_stop_phase.empty())ScheduleWindowsEffectShadow(session,metadata,kind,valid,ordinary);
+}
 bool Sc820SemanticBinding(const WindowsSession& session,const std::string& metadata,std::string* kind,RECT* bounds,std::string* reason){
   if(!semantic_public_dispatch&&semantic_lifecycle!="interlock-close")return ValidateWindowsDispatchBinding(session,metadata,kind,bounds,reason);
   *kind="invoke";*bounds=RECT{0,0,100,100};return true;
@@ -2164,7 +2198,7 @@ struct RcaRun {
     return true;
   }
 
-  bool PreflightDenied(unsigned id) {
+  bool PreflightDenied(unsigned id, std::string_view expected_reason = "native_session_identity_changed") {
     std::lock_guard<std::mutex> lock(replies_mutex);
     const auto found = replies.find(id);
     if (found == replies.end()) return false;
@@ -2176,7 +2210,7 @@ struct RcaRun {
            frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
            frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() &&
            ReadJsonString(body, "decision", &decision) && decision == "denied" &&
-           ReadJsonString(body, "reasonCode", &reason) && reason == "native_session_identity_changed" &&
+           ReadJsonString(body, "reasonCode", &reason) && reason == expected_reason &&
            ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0 &&
            body.find("\"ticket\":null") != std::string::npos;
   }
@@ -3560,6 +3594,30 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+int DiagnosePreflightStop(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());
+  const bool cancel=scenario.ends_with(L"-cancel");
+  preflight_stop_phase=label.find("-rng-")!=std::string::npos?"rng":"interlock";
+  RcaRun run;
+  try {
+    run.StartFixture();run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"preflight_stop_handshake");
+    run.Send(MessageType::kPreflight,2,"{\"requestId\":\"preflight-held\",\"actionDigest\":\""+std::string(64,'a')+"\",\"type\":\"invoke\",\"targetId\":\"controlled\",\"cancelEpoch\":1,\"observationRevision\":1}");
+    Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"preflight_phase_entered");
+    const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+    Require(WaitStopSerial(before,1000),"preflight_reader_stop_latched");
+    Require(cancellation_epoch.load()==(cancel?2:1),"preflight_reader_epoch_policy");
+    SetEvent(run.release.value);
+    Require(run.Wait(2,1000)&&run.PreflightDenied(2,"native_ticket_unavailable"),"preflight_no_late_ticket");
+    Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"preflight_stop_receipt");
+    const auto stop_ms=GetTickCount64()-started;
+    if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"preflight_final_close");}
+    run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"preflight_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledBindingAndInterlock\":true,\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"lateTicket\":false,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseSemanticLifecycle(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
   semantic_public_dispatch=semantic_lifecycle.starts_with("public-");
@@ -4207,6 +4265,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"preflight-stop-")) return DiagnosePreflightStop(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"semantic-life-")) return DiagnoseSemanticLifecycle(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"semantic-stall-")) return DiagnoseSemanticStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"binding-detail-")) return DiagnoseBindingDetails(argv[1]);
@@ -4644,6 +4703,21 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('preflight-stop-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            controlledBindingAndInterlock: true,
+            actualGuiInput: false,
+            stopMs: expect.any(Number),
+            lateTicket: false,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('semantic-life-')) {
           const unstarted =
             scenario.includes('-queued-') || scenario === 'semantic-life-interlock-close';
@@ -4844,6 +4918,15 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('refuses late preflight tickets after reader Stop during interlock or token generation', async () => {
+    await runScenarios([
+      'preflight-stop-interlock-close',
+      'preflight-stop-interlock-cancel',
+      'preflight-stop-rng-close',
+      'preflight-stop-rng-cancel',
+    ]);
+  }, 700_000);
 
   it('orders semantic input claims, consumer validation and nonterminal Stop receipts', async () => {
     await runScenarios([
