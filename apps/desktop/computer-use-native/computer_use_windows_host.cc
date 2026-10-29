@@ -10261,9 +10261,9 @@ bool DispatchWindowsAction(const WindowsSession &session,
   }
   if (!dispatched) {
     if (*accepted) {
-      // A pattern call that timed out keeps its own reason (input_timeout_unconfirmed); every other
-      // input that was sent and not confirmed is input_not_confirmed.
-      if (*reason != "input_timeout_unconfirmed")
+      // Preserve whether the owned API is still in flight: Main must retain its original helper
+      // until a later Stop proves it returned. Other unconfirmed inputs keep the generic reason.
+      if (*reason != "input_timeout_unconfirmed" && *reason != "semantic_input_in_flight")
         *reason = "input_not_confirmed";
     } else if (cancellation_epoch.load(std::memory_order_acquire) !=
              expected_epoch)

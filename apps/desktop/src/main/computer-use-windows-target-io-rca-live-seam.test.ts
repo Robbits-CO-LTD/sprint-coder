@@ -1286,6 +1286,7 @@ void Sc820ReadWorkerStarted(){uia_read_worker_starts.fetch_add(1);}
 bool Sc820ClassificationContactHeld() { return classification_contact_held.load(); }
 std::string classification_detail;
 std::string semantic_lifecycle;
+bool semantic_public_dispatch=false;
 std::atomic<unsigned> semantic_method_calls{0}, semantic_validation_calls{0}, semantic_worker_starts{0};
 void Sc820SemanticWorkerStarted(){semantic_worker_starts.fetch_add(1);}
 std::atomic<bool> semantic_validation_wrong_thread{false};
@@ -1459,10 +1460,11 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
 }
 
 bool Sc820SemanticBinding(const WindowsSession& session,const std::string& metadata,std::string* kind,RECT* bounds,std::string* reason){
-  if(semantic_lifecycle!="interlock-close")return ValidateWindowsDispatchBinding(session,metadata,kind,bounds,reason);
+  if(!semantic_public_dispatch&&semantic_lifecycle!="interlock-close")return ValidateWindowsDispatchBinding(session,metadata,kind,bounds,reason);
   *kind="invoke";*bounds=RECT{0,0,100,100};return true;
 }
 sprint_coder::computer_use::InterlockEvaluation Sc820SemanticInterlock(const WindowsSession& session,const std::string& metadata,const std::string& kind,WindowsClickBasis* basis){
+  if(semantic_public_dispatch)return {};
   if(semantic_lifecycle!="interlock-close")return WindowsInterlockRefusal(session,metadata,kind,basis);
   Sc820DetailGate();
   sprint_coder::computer_use::InterlockEvaluation result;result.no_verdict=sprint_coder::computer_use::InterlockNoVerdict::kCanceled;return result;
@@ -1541,7 +1543,7 @@ std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& 
   }
   bool accepted=false;std::string reason;
   std::string result;
-  const bool ok=semantic_lifecycle=="interlock-close" ? DispatchWindowsAction(session,request_metadata,&result,&reason,&accepted)
+  const bool ok=semantic_public_dispatch||semantic_lifecycle=="interlock-close" ? DispatchWindowsAction(session,request_metadata,&result,&reason,&accepted)
       : DispatchWindowsSemanticAction(session,RECT{0,0,100,100},epoch,kind,request_metadata,&accepted,&reason);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
     ",\"attempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
@@ -3560,6 +3562,8 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
 
 int DiagnoseSemanticLifecycle(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
+  semantic_public_dispatch=semantic_lifecycle.starts_with("public-");
+  if(semantic_public_dispatch)semantic_lifecycle.erase(0,std::string("public-").size());
   const bool cancel=semantic_lifecycle=="input-cancel";
   const bool queued=semantic_lifecycle.starts_with("queued-");
   const bool same_epoch=semantic_lifecycle=="queued-same-epoch-close";
@@ -4861,6 +4865,8 @@ describe.skipIf(
       'semantic-life-claimed-gap-close',
       'semantic-life-input-close',
       'semantic-life-input-cancel',
+      'semantic-life-public-input-close',
+      'semantic-life-public-input-cancel',
       'semantic-life-cleanup-close',
       'semantic-life-input-exception',
     ]);

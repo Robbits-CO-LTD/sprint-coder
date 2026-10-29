@@ -10,7 +10,8 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeNet from 'node:net';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   computerUseNativeMessageTypeNames,
@@ -1408,6 +1409,108 @@ describe('Computer Use Windows helper transport', () => {
       expect(children[0]!.killed).toBe(true);
       expect(host.availability()).toMatchObject({ state: 'ready', control: true });
     },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retains the actual public dispatch error before a separately delivered Stop refusal',
+    async () => {
+      const native = readFileSync(
+        join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+        'utf8',
+      );
+      const start = native.indexOf(
+        '} else if (kind == "invoke"',
+        native.indexOf('bool DispatchWindowsAction('),
+      );
+      const end = native.indexOf('\nBackendProbe ProbeBackend()', start);
+      const errorStart = native.indexOf('std::string ErrorPayload(');
+      const errorEnd = native.indexOf('\nbool Respond(', errorStart);
+      expect(start).toBeGreaterThan(0);
+      expect(end).toBeGreaterThan(start);
+      expect(errorEnd).toBeGreaterThan(errorStart);
+      const root = mkdtempSync(join(tmpdir(), 'semantic-dispatch-wire-'));
+      let payload: unknown;
+      try {
+        const actual = await vi.importActual<typeof NodeChildProcess>('node:child_process');
+        const path = join(root, 'dispatch.cc');
+        const binary = join(root, 'dispatch');
+        writeFileSync(
+          path,
+          `
+#include <atomic>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+struct WindowsSession {};
+struct RECT {};
+std::atomic<std::uint64_t> cancellation_epoch{0};
+bool DispatchWindowsSemanticAction(const WindowsSession&, const RECT&, std::uint64_t,
+    const std::string&, const std::string&, bool* accepted, std::string* reason) {
+  *accepted = true; *reason = "semantic_input_in_flight"; return false;
+}
+bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t) { return true; }
+bool PublicDispatch(std::string* result, std::string* reason, bool* accepted) {
+  WindowsSession session; RECT bounds; std::uint64_t expected_epoch = 0;
+  std::string kind = "invoke", metadata = "{}"; bool dispatched = false;
+  ${native.slice(start + '} else '.length, end)}
+${native.slice(errorStart, errorEnd)}
+int main() {
+  std::string result, reason; bool accepted = false;
+  if (PublicDispatch(&result, &reason, &accepted)) return 1;
+  std::cout << ErrorPayload(reason, accepted);
+}
+`,
+        );
+        actual.execFileSync(
+          'clang++',
+          ['-std=c++20', '-Wall', '-Wextra', '-Werror', path, '-o', binary],
+          { timeout: 30_000 },
+        );
+        payload = JSON.parse(
+          actual.execFileSync(binary, [], { encoding: 'utf8', timeout: 5_000 }),
+        ) as unknown;
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+      const { addon, host, helper } = createTarget({
+        ...responders(),
+        dispatch: () => ['error', payload],
+        close_session: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+      });
+      const session = await startSession(host, 'public-semantic-wire', 'turn-1');
+      await expect(
+        Promise.resolve(
+          addon.dispatch!({
+            sessionId: session.sessionId,
+            requestId: 'public-semantic-input',
+            cancelEpoch: 0,
+            type: 'invoke',
+            targetId: 'owned-control',
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'semantic_input_in_flight', accepted: true });
+      // Let call().finally run before a later Stop response is delivered.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+      helper().refuse('close_session');
+      await expect(host.close(session)).rejects.toThrow('native_stop_unconfirmed');
+      expect(children[0]!.killed).toBe(false);
+      helper().allow('close_session');
+      await expect(host.close(session)).resolves.toBeUndefined();
+      expect(children).toHaveLength(1);
+      expect(host.availability()).toMatchObject({ state: 'ready', control: true });
+    },
+    60_000,
   );
 
   it.each(['native-error', 'timeout'] as const)(
