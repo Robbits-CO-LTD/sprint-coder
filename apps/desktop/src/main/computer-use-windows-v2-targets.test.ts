@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -286,6 +286,28 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
 type Build = Readonly<{
   wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
 }>;
+
+// A long synchronous compiler/native run prevents the worker from receiving Vitest RPC replies.
+function runNative(
+  file: string,
+  args: string[],
+  options: {
+    encoding: 'utf8';
+    timeout: number;
+    windowsVerbatimArguments?: boolean;
+    env?: NodeJS.ProcessEnv;
+  },
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error === null ? 0 : typeof error.code === 'number' ? error.code : null,
+        stdout,
+        stderr: stderr || error?.message || '',
+      });
+    });
+  });
+}
 
 function findBuild(): Build | null {
   if (process.platform !== 'win32') return null;
@@ -1054,7 +1076,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
       { v2: 1, built: 'v2' },
     ])(
       'judges processes it starts itself (built as $built)',
-      ({ v2 }) => {
+      async ({ v2 }) => {
         expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
         const scratch = mkdtempSync(join(tmpdir(), 'computer-use-v2-targets-'));
         // The general application root of decision A, under this user's own profile; removed below.
@@ -1091,7 +1113,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
             'comdlg32.lib',
             'shell32.lib',
           ]);
-          const fixtureBuild = spawnSync(fixtureCommand.file, fixtureCommand.args, {
+          const fixtureBuild = await runNative(fixtureCommand.file, fixtureCommand.args, {
             encoding: 'utf8',
             windowsVerbatimArguments: fixtureCommand.verbatim,
             timeout: 400_000,
@@ -1150,14 +1172,14 @@ ${fixtureBuild.stdout}`,
             'windowsapp.lib',
             'uuid.lib',
           ]);
-          const built = spawnSync(command.file, command.args, {
+          const built = await runNative(command.file, command.args, {
             encoding: 'utf8',
             windowsVerbatimArguments: command.verbatim,
             timeout: 500_000,
             env: { ...process.env, VSLANG: '1033' },
           });
           expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
-          const executed = spawnSync(binary, [fixtureExecutable, ci ? 'ci' : 'local'], {
+          const executed = await runNative(binary, [fixtureExecutable, ci ? 'ci' : 'local'], {
             encoding: 'utf8',
             timeout: 180_000,
           });
