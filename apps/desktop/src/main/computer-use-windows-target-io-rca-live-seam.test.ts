@@ -200,13 +200,13 @@ function instrumentedHost(): string {
   }
   for (const [begin, end, call, output] of [
     [
-      'bool CaptureWindowsControlBindings(',
-      '\nbool WindowsFocusedElementSignature(',
+      'bool CaptureWindowsControlBindingsOnWorker(',
+      '\nbool WindowsFocusedElementSignatureOnWorker(',
       'automation->ElementFromHandle(window, &root)',
       '&root',
     ],
     [
-      'bool WindowsFocusedElementSignature(',
+      'bool WindowsFocusedElementSignatureOnWorker(',
       '\nbool RejectWindowsRisk(',
       'automation->GetFocusedElement(&element)',
       '&element',
@@ -1173,13 +1173,20 @@ void Sc820ReadCoUninitialize(){
 
 std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
   Require(fixture_count==1,"binding_owned_fixture");
-  std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="bindings"||kind=="signature"),"binding_probe_kind");
-  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,1,stop_serial);
+  std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="bindings"||kind=="signature"||kind=="recovery"),"binding_probe_kind");
+  bool fresh=false;ReadOptionalJsonBoolean(metadata,"fresh",&fresh);
+  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,fresh?cancellation_epoch.load():1,stop_serial);
+  if(kind=="recovery") {
+    bool recovered=false;RunWindowsUiaRead<bool>(false, []() -> std::optional<bool> {return true;},[&](bool value){recovered=value;});
+    return std::string("{\"recovered\":")+(recovered?"true":"false")+"}";
+  }
   WindowsControlBindings bindings;std::string signature;
   const bool ok=kind=="bindings" ? CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&bindings)
       : WindowsFocusedElementSignature(fixture_pids[0],RECT{0,0,100,100},&signature);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"empty\":"+
-      (bindings.semantic.empty()&&bindings.visual.empty()&&signature.empty()?"true":"false")+"}";
+      (bindings.semantic.empty()&&bindings.visual.empty()&&signature.empty()?"true":"false")+
+      ",\"canceled\":"+(path.Stop()==WindowsV1UiaStop::kCanceled?"true":"false")+
+      ",\"timedOut\":"+(path.Stop()==WindowsV1UiaStop::kTimeout?"true":"false")+"}";
 }
 
 std::string Sc820ClassificationProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
@@ -3085,11 +3092,11 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
-// Diagnostic baseline: the test passes only when it reproduces the consumer stall.
-// This is not normal UIA latency or a corrected Stop contract.
 int DiagnoseBindingStall(std::wstring_view scenario) {
   const bool signature=scenario.starts_with(L"binding-read-signature-");
   const bool cancel=scenario.ends_with(L"-cancel");
+  const bool timeout=scenario.ends_with(L"-timeout");
+  const char* kind=signature?"signature":"bindings";
   const std::string label(scenario.begin(),scenario.end());
   RcaRun run;
   try {
@@ -3097,25 +3104,36 @@ int DiagnoseBindingStall(std::wstring_view scenario) {
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1,5000)&&run.ProbeReply(1,MessageType::kHandshakeResult),"binding_handshake");
     classification_contact_held=true;
-    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+(signature?"signature":"bindings")+"\"}");
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+kind+"\"}");
     Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"binding_contact_entered");
     Require(classification_contacts==1&&classification_returns==0,"binding_contact_held");
     const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
-    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");
-    else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
-    Require(WaitStopSerial(before,1000),"binding_reader_latched");
-    Require(!run.Wait(3,1100)&&!run.Wait(2,0)&&classification_returns==0,"baseline_consumer_still_blocked");
-    const auto held_ms=GetTickCount64()-started;
-    Require(held_ms>=1100&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"baseline_held_duration");
-    SetEvent(run.release.value);
-    Require(run.Wait(3,5000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"binding_receipt_after_release");
-    std::string body;bool ok=true,empty=false;
-    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty,"binding_refusal_after_release");
-    Require(classification_returns==1&&!gate_timed_out.load(),"binding_contact_returned");
+    if(!timeout){
+      Require(started-classification_contact_started.load()<300,"binding_stop_before_deadline");
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");
+      else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000),"binding_reader_latched");
+      Require(GetTickCount64()-classification_contact_started.load()<470,"binding_stop_latched_before_deadline");
+      Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"binding_receipt_before_release");
+    }
+    Require(run.Wait(2,1000),"binding_response_before_release");
+    const auto held_ms=GetTickCount64()-(timeout?classification_contact_started.load():started);
+    Require(held_ms<1000&&(!timeout||held_ms>=400)&&classification_returns==0&&WindowsUiaReadWorkerRunning().load()&&uia_read_worker_starts==1&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"binding_worker_retained_before_release");
+    std::string body;bool ok=true,empty=false,canceled=false,timed=false;
+    Require(run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&
+      ReadOptionalJsonBoolean(body,"canceled",&canceled)&&canceled==!timeout&&ReadOptionalJsonBoolean(body,"timedOut",&timed)&&timed==timeout,"binding_refusal_and_stop_reason");
+    const auto original=body;
+    run.Send(MessageType::kProbe,5,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+kind+"\",\"fresh\":true}");
+    Require(run.Wait(5,1000)&&run.ProbeBody(5,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&uia_read_worker_starts==1&&classification_contacts==1,"binding_busy_does_not_spawn");
+    if(timeout){run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");Require(run.Wait(3,1000)&&run.Receipt(3,MessageType::kProbeResult,"closed",2),"binding_timeout_final_close");}
     if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"binding_final_close");}
-    classification_contact_held=false;run.Cleanup();
-    Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"binding_final_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"baselineStallReproduced\":true,\"syntheticContactStall\":true,\"normalUiaAcceptance\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":true,\"receiptBeforeRelease\":false,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000)&&classification_returns==1&&!gate_timed_out.load(),"binding_worker_retired");
+    Require(run.ReplyCount(2)==1&&run.ProbeBody(2,&body)&&body==original,"binding_no_late_reply");
+    classification_contact_held=false;
+    run.Send(MessageType::kProbe,6,"{\"operation\":\"sc820_binding_probe\",\"kind\":\"recovery\",\"fresh\":true}");
+    bool recovered=false;Require(run.Wait(6,1000)&&run.ProbeBody(6,&body)&&ReadOptionalJsonBoolean(body,"recovered",&recovered)&&recovered&&uia_read_worker_starts==2,"binding_slot_recovered");
+    run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"binding_final_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"syntheticContactStall\":true,\"normalUiaAcceptance\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":"<<(timeout?"false":"true")<<",\"responseBeforeRelease\":true,\"contactDeadline\":"<<(timeout?"true":"false")<<",\"slotRecovered\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
@@ -3979,13 +3997,13 @@ describe.skipIf(
         if (scenario.startsWith('binding-read-')) {
           expect(metadata).toMatchObject({
             case: scenario,
-            baselineStallReproduced: true,
             syntheticContactStall: true,
             normalUiaAcceptance: false,
             heldMs: expect.any(Number),
-            readerLatched: true,
-            receiptBeforeRelease: false,
-            receiptAfterRelease: true,
+            readerLatched: !scenario.endsWith('-timeout'),
+            responseBeforeRelease: true,
+            contactDeadline: scenario.endsWith('-timeout'),
+            slotRecovered: true,
             inputAttempts: 0,
             childExited: true,
             workerIdle: true,
@@ -4082,12 +4100,14 @@ describe.skipIf(
     }
   }
 
-  it('diagnoses synchronous binding and focused signature Stop stalls on the merged baseline', async () => {
+  it('bounds binding and focused signature Stop without releasing held COM work', async () => {
     await runScenarios([
       'binding-read-bindings-cancel',
       'binding-read-bindings-close',
       'binding-read-signature-cancel',
       'binding-read-signature-close',
+      'binding-read-bindings-timeout',
+      'binding-read-signature-timeout',
     ]);
   }, 700_000);
 

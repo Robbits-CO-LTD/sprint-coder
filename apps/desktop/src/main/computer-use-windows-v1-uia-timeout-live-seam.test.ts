@@ -280,8 +280,8 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
     // began), and only the observe has a budget, with the session's epoch.
-    // The two classification entry points now share the read worker's inherited outer scope.
-    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(6);
+    // Classification, bindings and focus-signature entry points share the worker's inherited scope.
+    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(4);
     expect(c).toContain(
       'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, observe_stop_serial);',
     );
@@ -464,10 +464,16 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       'const bool name_read = WindowsV1UiaRead(name, [&] { return target->get_CurrentName(&name); });',
     );
     expect(c).toContain('if (!name_read) {');
-    // A child that a cut-off first-child call produced is released (no output pointer is leaked).
-    expect(c).toMatch(
-      /if \(!WindowsV1UiaOk\(first_result\)\) \{\s*if \(child != nullptr\)\s*child->Release\(\);\s*return false;/u,
+    // The binding walk owns both child outputs through early returns and exceptions.
+    const bindingWalk = c.slice(
+      c.indexOf('bool CollectWindowsControlBindings('),
+      c.indexOf('bool CaptureWindowsControlBindingsOnWorker('),
     );
+    expect(bindingWalk).toContain(
+      '~Children() { if (next != nullptr) next->Release(); if (child != nullptr) child->Release(); }',
+    );
+    expect(bindingWalk).toContain('if (!WindowsV1UiaOk(first_result)) { return false; }');
+    expect(bindingWalk).toContain('child = next; next = nullptr;');
     expect(readFileSync(join(nativeDirectory, 'computer_use_protocol_fuzz.cc'), 'utf8')).toContain(
       'v1-default-risk-is-unclassified',
     );
