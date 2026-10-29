@@ -2985,12 +2985,12 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   try {
     run.StartFixture();
     if(secure)Require(SetWindowTextW(fixture_windows[0],L"password fixture")!=FALSE,"owned_secure_caption_set");
-    run.StartPipe(false);
+    run.StartPipe(same_epoch);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1,5000)&&run.ProbeReply(1,MessageType::kHandshakeResult),"detail_handshake");
     classification_contact_held=true;
     if(queued)hold_point=HoldPoint::kConsumer;
-    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_classification_probe\",\"kind\":\"")+kind+"\",\"frameFallback\":true}");
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_classification_probe\",\"kind\":\"")+kind+"\",\"frameFallback\":true,\"fresh\":true}");
     if(stopping){
       Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"detail_gate_entered");
       if(!queued) {
@@ -2999,11 +2999,12 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
       if(internal)Require(!run.Wait(2,50),"internal_result_waits_for_cleanup");
       const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
       if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");
-      else run.Send(MessageType::kProbe,3,std::string("{\"operation\":\"close_session\",\"cancelEpoch\":")+(same_epoch?"1}":"2}"));
+      else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
       Require(WaitStopSerial(before,1000),"detail_reader_latched");
       if(queued){Require(uia_read_worker_starts==0&&classification_contacts==0,"prequeued_no_worker");hold_point=HoldPoint::kNone;SetEvent(run.release.value);}
-      Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",same_epoch?1:2),"detail_stop_receipt");
+      Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"detail_stop_receipt");
       stop_ms=GetTickCount64()-started;Require(stop_ms<1000,"detail_stop_budget");
+      if(same_epoch)Require(cancellation_epoch.load()==2,"same_epoch_close_kept_global_epoch");
       if(!queued)Require(WindowsUiaReadWorkerRunning().load()&&classification_apartments==0&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"detail_worker_still_held");
     }
     std::string body;bool incomplete=false,empty=false,is_secure=false,canceled=false,timed=false,rejected=false;
