@@ -198,6 +198,32 @@ function instrumentedHost(): string {
       ) +
       source.slice(to);
   }
+  for (const [begin, end, call, output] of [
+    [
+      'bool CaptureWindowsControlBindings(',
+      '\nbool WindowsFocusedElementSignature(',
+      'automation->ElementFromHandle(window, &root)',
+      '&root',
+    ],
+    [
+      'bool WindowsFocusedElementSignature(',
+      '\nbool RejectWindowsRisk(',
+      'automation->GetFocusedElement(&element)',
+      '&element',
+    ],
+  ] as const) {
+    const from = source.indexOf(begin);
+    const to = source.indexOf(end, from);
+    if (from < 0 || to < from) throw new Error('Binding read contact boundary changed');
+    source =
+      source.slice(0, from) +
+      replaceOnce(
+        source.slice(from, to),
+        call,
+        `(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, ${output}) : ${call})`,
+      ) +
+      source.slice(to);
+  }
   source = replaceOnce(
     source,
     '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
@@ -300,6 +326,14 @@ function instrumentedHost(): string {
         return Respond(pipe, request, MessageType::kProbeResult, Sc940ValidationProbe(metadata));
       } catch (...) {
         return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_validation_probe_failed"));
+      }
+    }
+    if (operation == "sc820_binding_probe") {
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult,
+                       Sc820BindingProbe(metadata, queued_stop_serial));
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc820_binding_probe_failed"));
       }
     }
     if (operation == "sc820_classification_probe") {
@@ -495,6 +529,7 @@ std::string Sc820SignatureHash(const std::string&);
 HRESULT Sc820UnaccessArray(SAFEARRAY*);
 HRESULT Sc820DestroyArray(SAFEARRAY*);
 void Sc820ReadCoUninitialize();
+std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial);
 std::string Sc820ClassificationProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial);
 bool Sc820ContactGate(HWND window);
 void Sc820ContactResult(bool succeeded, bool nonnull);
@@ -1134,6 +1169,17 @@ void Sc820ReadCoUninitialize(){
   if(tracked&&(classification_detail=="apartment-close"||classification_detail=="success-apartment-close"))Sc820DetailGate();
   if(tracked&&classification_detail=="healthy-consecutive")Sleep(30);
   CoUninitialize();if(tracked)classification_apartments.fetch_add(1);
+}
+
+std::string Sc820BindingProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
+  Require(fixture_count==1,"binding_owned_fixture");
+  std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="bindings"||kind=="signature"),"binding_probe_kind");
+  const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,1,stop_serial);
+  WindowsControlBindings bindings;std::string signature;
+  const bool ok=kind=="bindings" ? CaptureWindowsControlBindings(fixture_pids[0],fixture_windows[0],&bindings)
+      : WindowsFocusedElementSignature(fixture_pids[0],RECT{0,0,100,100},&signature);
+  return std::string("{\"ok\":")+(ok?"true":"false")+",\"empty\":"+
+      (bindings.semantic.empty()&&bindings.visual.empty()&&signature.empty()?"true":"false")+"}";
 }
 
 std::string Sc820ClassificationProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
@@ -3039,6 +3085,41 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+// Diagnostic baseline: the test passes only when it reproduces the consumer stall.
+// This is not normal UIA latency or a corrected Stop contract.
+int DiagnoseBindingStall(std::wstring_view scenario) {
+  const bool signature=scenario.starts_with(L"binding-read-signature-");
+  const bool cancel=scenario.ends_with(L"-cancel");
+  const std::string label(scenario.begin(),scenario.end());
+  RcaRun run;
+  try {
+    run.StartFixture();run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");
+    Require(run.Wait(1,5000)&&run.ProbeReply(1,MessageType::kHandshakeResult),"binding_handshake");
+    classification_contact_held=true;
+    run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_binding_probe\",\"kind\":\"")+(signature?"signature":"bindings")+"\"}");
+    Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"binding_contact_entered");
+    Require(classification_contacts==1&&classification_returns==0,"binding_contact_held");
+    const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");
+    else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+    Require(WaitStopSerial(before,1000),"binding_reader_latched");
+    Require(!run.Wait(3,1100)&&!run.Wait(2,0)&&classification_returns==0,"baseline_consumer_still_blocked");
+    const auto held_ms=GetTickCount64()-started;
+    Require(held_ms>=1100&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"baseline_held_duration");
+    SetEvent(run.release.value);
+    Require(run.Wait(3,5000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"binding_receipt_after_release");
+    std::string body;bool ok=true,empty=false;
+    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty,"binding_refusal_after_release");
+    Require(classification_returns==1&&!gate_timed_out.load(),"binding_contact_returned");
+    if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"binding_final_close");}
+    classification_contact_held=false;run.Cleanup();
+    Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"binding_final_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"baselineStallReproduced\":true,\"syntheticContactStall\":true,\"normalUiaAcceptance\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":true,\"receiptBeforeRelease\":false,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnoseClassificationStall(std::wstring_view scenario) {
   const bool focused = scenario.starts_with(L"classification-focused-");
   const bool cancel = scenario.ends_with(L"-cancel");
@@ -3463,6 +3544,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"binding-read-")) return DiagnoseBindingStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"classification-detail-")) return DiagnoseClassificationDetails(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"classification-")) return DiagnoseClassificationStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"validation-")) return DiagnoseValidation(argv[1]);
@@ -3894,6 +3976,24 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('binding-read-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            baselineStallReproduced: true,
+            syntheticContactStall: true,
+            normalUiaAcceptance: false,
+            heldMs: expect.any(Number),
+            readerLatched: true,
+            receiptBeforeRelease: false,
+            receiptAfterRelease: true,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('classification-detail-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -3981,6 +4081,15 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('diagnoses synchronous binding and focused signature Stop stalls on the merged baseline', async () => {
+    await runScenarios([
+      'binding-read-bindings-cancel',
+      'binding-read-bindings-close',
+      'binding-read-signature-cancel',
+      'binding-read-signature-close',
+    ]);
+  }, 700_000);
 
   it('preserves classification partial results and drains COM resources through noncontact stops and faults', async () => {
     await runScenarios([
