@@ -234,6 +234,17 @@ function instrumentedHost(): string {
     '(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, &root) : automation->ElementFromHandle(window, &root))',
   );
   source = source.slice(0, semanticFrom) + semantic + source.slice(semanticTo);
+  const semanticMeasureFrom = source.indexOf('bool DispatchWindowsSemanticActionOnWorker(');
+  const semanticMeasureTo = source.indexOf(
+    'bool DispatchWindowsSemanticAction(const WindowsSession &session,',
+    semanticMeasureFrom,
+  );
+  const semanticMeasure = replaceOnce(
+    source.slice(semanticMeasureFrom, semanticMeasureTo),
+    'pattern->Invoke()',
+    'Sc820SemanticInvoke(pattern)',
+  );
+  source = source.slice(0, semanticMeasureFrom) + semanticMeasure + source.slice(semanticMeasureTo);
   const semanticRunFrom = source.indexOf(
     'bool DispatchWindowsSemanticAction(const WindowsSession &session,',
   );
@@ -603,6 +614,7 @@ bool Sc820SemanticMeasure(const WindowsSemanticWork&,bool*,std::string*);
 bool Sc820SemanticValidate(const WindowsSession&,const RECT&,std::uint64_t);
 void Sc820SemanticBeforeClaim();
 void Sc820SemanticBeforeApi();
+HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern*);
 std::string Sc820SemanticLifecycleProbe(const sprint_coder::computer_use::Frame&,const std::string&,std::optional<std::uint64_t>);
 std::string Sc820SemanticStatusProbe(const sprint_coder::computer_use::Frame&);
 
@@ -1398,6 +1410,10 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
 }
 
+HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern* pattern){
+  if(semantic_lifecycle=="source-invoke"){semantic_method_calls.fetch_add(1);return S_OK;}
+  return pattern->Invoke();
+}
 void Sc820SemanticBeforeClaim(){if(semantic_lifecycle=="preclaim-close")Sc820DetailGate();}
 void Sc820SemanticBeforeApi(){if(semantic_lifecycle=="claimed-gap-close")Sc820DetailGate();}
 bool Sc820SemanticValidate(const WindowsSession& session,const RECT& bounds,std::uint64_t epoch){
@@ -1414,7 +1430,7 @@ bool Sc820SemanticValidate(const WindowsSession& session,const RECT& bounds,std:
   return true;
 }
 bool Sc820SemanticMeasure(const WindowsSemanticWork& work,bool* accepted,std::string* reason){
-  if(semantic_lifecycle.empty())return DispatchWindowsSemanticActionOnWorker(work,accepted,reason);
+  if(semantic_lifecycle.empty()||semantic_lifecycle=="source-invoke")return DispatchWindowsSemanticActionOnWorker(work,accepted,reason);
   Require(GetCurrentThreadId()!=rca_consumer_thread_id.load(),"semantic_measure_runs_on_worker");
   if(!AwaitWindowsSemanticValidation()){*reason="stale_target";return false;}
   const auto result=InvokeWindowsSemanticInput([&]() -> HRESULT {
@@ -1430,8 +1446,21 @@ std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& 
   const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,serial);
   WindowsSession session;session.session_id=owner->session_id;session.input_api_attempts=owner->input_api_attempts;
   session.pid=fixture_pids[0];session.window=fixture_windows[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
+  std::string request_metadata="{\"targetId\":\"controlled\"}";
+  if(semantic_lifecycle=="source-invoke"){
+    using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
+    ComRef<IUIAutomation> automation;ComRef<IUIAutomationElement> target;
+    Require(SUCCEEDED(CreateWindowsV1Automation(automation.Receive()))&&automation.Get(),"semantic_source_automation");
+    HWND child=GetDlgItem(fixture_windows[0],902);DWORD pid=0;
+    Require(child!=nullptr&&GetWindowThreadProcessId(child,&pid)!=0&&pid==fixture_pids[0],"semantic_source_owned_child");
+    Require(SUCCEEDED(automation.Get()->ElementFromHandle(child,target.Receive()))&&target.Get(),"semantic_source_element");
+    std::string id,signature;
+    Require(ReadWindowsElementTargetId(target.Get(),&id)&&!id.empty()&&ComputeWindowsControlSignature(target.Get(),fixture_pids[0],nullptr,&signature),"semantic_source_binding");
+    session.semantic_control_signatures.emplace(id,signature);
+    request_metadata="{\"targetId\":\""+JsonEscape(id)+"\"}";
+  }
   bool accepted=false;std::string reason;
-  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke","{\"targetId\":\"controlled\"}",&accepted,&reason);
+  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke",request_metadata,&accepted,&reason);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
     ",\"attempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
 }
@@ -3435,13 +3464,15 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
   const bool cancel=semantic_lifecycle=="input-cancel";
   const bool in_flight=semantic_lifecycle=="input-close"||cancel||semantic_lifecycle=="claimed-gap-close";
-  const bool no_stop=semantic_lifecycle=="success"||semantic_lifecycle=="input-exception";
+  const bool source=semantic_lifecycle=="source-invoke";
+  const bool no_stop=semantic_lifecycle=="success"||semantic_lifecycle=="input-exception"||source;
   const bool no_input=semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close";
   RcaRun run;ULONGLONG stop_ms=0;
   try {
-    run.StartFixture();run.StartPipe(false);
+    run.StartFixture(false,source);run.StartPipe(false);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"semantic_life_handshake");
     classification_contact_held=true;
+    if(source)classification_detail="semantic-source";
     run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_semantic_lifecycle_probe\"}");
     if(!no_stop){
       Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"semantic_life_phase_entered");
@@ -3457,7 +3488,7 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
     }
     std::string body,reason;bool ok=false,accepted=false;std::uint64_t attempts=99;
     Require(run.Wait(2,1000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&ReadJsonUint64(body,"attempts",&attempts)&&ReadJsonString(body,"reason",&reason),"semantic_life_result_shape");
-    Require(accepted==!no_input&&attempts==(no_input?0:1)&&ok==(semantic_lifecycle=="success"),"semantic_life_result_and_counter");
+    Require(accepted==!no_input&&attempts==(no_input?0:1)&&ok==(semantic_lifecycle=="success"||source),"semantic_life_result_and_counter");
     if(in_flight)Require(reason=="semantic_input_in_flight","semantic_life_unknown_dispatch");
     if(semantic_lifecycle=="cleanup-close"||semantic_lifecycle=="input-exception")Require(reason=="input_not_confirmed","semantic_life_returned_input_not_success");
     SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000),"semantic_life_worker_drained");
@@ -3469,7 +3500,7 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
     }
     if(cancel||no_stop){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3,7,"sc940-control",1),"semantic_life_final_close");}
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"semantic_life_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":true,\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":"<<(source?"false":"true")<<",\"sourceMeasure\":"<<(source?"true":"false")<<",\"controlledRevalidation\":true,\"controlledPatternApi\":true,\"controlledAncestorBoundary\":"<<(source?"true":"false")<<",\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4503,7 +4534,11 @@ describe.skipIf(
         if (scenario.startsWith('semantic-life-')) {
           expect(metadata).toMatchObject({
             case: scenario,
-            controlledSemanticMeasure: true,
+            controlledSemanticMeasure: scenario !== 'semantic-life-source-invoke',
+            sourceMeasure: scenario === 'semantic-life-source-invoke',
+            controlledRevalidation: true,
+            controlledPatternApi: true,
+            controlledAncestorBoundary: scenario === 'semantic-life-source-invoke',
             actualGuiInput: false,
             stopMs: expect.any(Number),
             simulatedApiCalls: expect.any(Number),
@@ -4695,6 +4730,7 @@ describe.skipIf(
   it('orders semantic input claims, consumer validation and nonterminal Stop receipts', async () => {
     await runScenarios([
       'semantic-life-success',
+      'semantic-life-source-invoke',
       'semantic-life-validation-close',
       'semantic-life-preclaim-close',
       'semantic-life-claimed-gap-close',
