@@ -305,6 +305,11 @@ struct WindowsSession {
   std::set<std::string> visual_control_signatures;
 };
 
+bool WindowsSemanticInputInFlightLocked();
+bool WindowsSemanticInputInFlight();
+bool StopWindowsSemanticInput(const WindowsSession &session, std::uint64_t *attempts);
+void DrainWindowsSemanticInputForExit();
+
 std::unordered_map<std::string, WindowsSession> sessions;
 
 // The ordinary dispatch ticket (ADR v2 S4-4 addendum 5). The Windows helper serves one frame at a
@@ -6397,7 +6402,7 @@ bool RunWindowsDiscovery(const std::string& metadata,
             };
             work.claim_launch = [owner, serial] {
               std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-              if (!WindowsDiscoveryCurrent(owner, serial) || owner->terminal || owner->launch_attempts != 0)
+              if (WindowsSemanticInputInFlightLocked() || !WindowsDiscoveryCurrent(owner, serial) || owner->terminal || owner->launch_attempts != 0)
                 return false;
               owner->launch_attempts = 1;
               owner->launch_in_flight = true;
@@ -6816,6 +6821,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
                          std::string *response, std::string *reason,
                          std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
                          std::shared_ptr<WindowsStartLease> start_lease = nullptr) {
+  if (WindowsSemanticInputInFlight()) { *reason = "semantic_input_in_flight"; return false; }
   const auto start_serial = queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
   WindowsStartParameters parsed;
   if (!ParseWindowsStartParameters(metadata, &parsed)) { *reason = "session_input_invalid"; return false; }
@@ -6968,7 +6974,7 @@ void MarkWindowsStartClosed(const std::string& key, const ClosedWindowsSessionRe
     registry.input_owner.reset();
 }
 
-bool CloseWindowsSession(const Frame &request, const std::string& metadata, std::string *response) {
+bool CloseWindowsSession(const Frame &request, const std::string& metadata, std::string *response, std::string *reason = nullptr) {
   const std::string session_key = FrameIdKey(request.header.session_id);
   std::uint64_t requested_epoch = 0;
   if (!ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch)) return false;
@@ -6986,13 +6992,17 @@ bool CloseWindowsSession(const Frame &request, const std::string& metadata, std:
     receipt = closed->second;
   } else {
     if (requested_epoch <= found->second.cancel_epoch) return false;
+    std::uint64_t attempts = 0;
+    if (!StopWindowsSemanticInput(found->second, &attempts)) {
+      if (reason != nullptr) *reason = "semantic_input_in_flight";
+      return false;
+    }
     found->second.cancel_epoch = requested_epoch;
     auto current = cancellation_epoch.load(std::memory_order_acquire);
     while (requested_epoch > current && !cancellation_epoch.compare_exchange_weak(
         current, requested_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
     receipt = ClosedWindowsSessionRecord{
-        found->second.session_id, requested_epoch,
-        found->second.input_api_attempts->load(std::memory_order_acquire)};
+        found->second.session_id, requested_epoch, attempts};
     last_closed_cancel_epoch =
         std::max(last_closed_cancel_epoch, found->second.cancel_epoch);
     RememberClosedWindowsSession(session_key, receipt);
@@ -7054,8 +7064,9 @@ bool StopPendingWindowsStart(const Frame& request, const std::string& metadata,
   }
   if (active) {
     const auto close_metadata = "{\"cancelEpoch\":" + std::to_string(epoch) + "}";
-    if (!CloseWindowsSession(request, close_metadata, response)) {
-      *reason = "native_close_unconfirmed"; return false;
+    if (!CloseWindowsSession(request, close_metadata, response, reason)) {
+      if (reason->empty()) *reason = "native_close_unconfirmed";
+      return false;
     }
     return true;
   }
@@ -8354,6 +8365,114 @@ bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
       });
 }
 
+// BEGIN windows semantic operation ownership
+struct WindowsSemanticPending : WindowsUiaReadProgress {
+  std::string session_id;
+  std::shared_ptr<std::atomic<std::uint64_t>> attempts;
+  // stop_mutex protects the claim and its terminal boundary.
+  bool input_in_flight = false;
+  bool ever_claimed = false;
+  // The pending mutex protects the consumer validation handshake and final result.
+  bool validation_requested = false;
+  bool validation_started = false;
+  std::optional<bool> validation;
+  bool succeeded = false;
+  std::string reason;
+};
+struct WindowsSemanticControl {
+  std::shared_ptr<WindowsSemanticPending> active;
+};
+WindowsSemanticControl &WindowsSemanticOperations() {
+  static auto *state = new WindowsSemanticControl;
+  return *state;
+}
+thread_local WindowsSemanticPending *windows_semantic_operation = nullptr;
+
+bool WindowsSemanticInputInFlightLocked() {
+  const auto &active = WindowsSemanticOperations().active;
+  return active != nullptr && active->input_in_flight;
+}
+bool WindowsSemanticInputInFlight() {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  return WindowsSemanticInputInFlightLocked();
+}
+bool StopWindowsSemanticInput(const WindowsSession &session, std::uint64_t *attempts) {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  const auto &active = WindowsSemanticOperations().active;
+  if (active != nullptr && active->session_id == session.session_id) {
+    auto expected = WindowsV1UiaStop::kNone;
+    active->abandoned.compare_exchange_strong(expected, WindowsV1UiaStop::kCanceled);
+    active->ready.notify_all();
+    if (active->input_in_flight) return false;
+  }
+  // The abandoned barrier forbids any later claim; other input runs on this same consumer.
+  *attempts = session.input_api_attempts->load(std::memory_order_acquire);
+  return true;
+}
+void DrainWindowsSemanticInputForExit() {
+  for (;;) {
+    {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      const auto &active = WindowsSemanticOperations().active;
+      if (active == nullptr) return;
+      auto expected = WindowsV1UiaStop::kNone;
+      active->abandoned.compare_exchange_strong(expected, WindowsV1UiaStop::kCanceled);
+      active->ready.notify_all();
+      if (!active->input_in_flight) return;
+    }
+    Sleep(10);
+  }
+}
+
+bool AwaitWindowsSemanticValidation() {
+  auto *pending = windows_semantic_operation;
+  if (pending == nullptr || !WindowsV1UiaMayCall()) return false;
+  std::unique_lock lock(pending->mutex);
+  pending->validation_requested = true;
+  pending->ready.notify_all();
+  while (!pending->validation.has_value()) {
+    if (!WindowsV1UiaMayCall()) return false;
+    pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  }
+  return *pending->validation && WindowsV1UiaMayCall();
+}
+
+template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *accepted) {
+  auto *pending = windows_semantic_operation;
+  if (pending == nullptr) return E_ABORT;
+  {
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    if (WindowsSemanticOperations().active.get() != pending || pending->session_id.empty() ||
+        pending->input_in_flight || pending->ever_claimed ||
+        pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone ||
+        !WindowsV1UiaMayCall()) return E_ABORT;
+    pending->input_in_flight = true;
+    pending->ever_claimed = true;
+    pending->attempts->fetch_add(1, std::memory_order_acq_rel);
+    *accepted = true;
+  }
+  struct Returned {
+    WindowsSemanticPending *pending;
+    ~Returned() {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      pending->input_in_flight = false;
+      pending->ready.notify_all();
+    }
+  } returned{pending};
+  return call();
+}
+
+struct WindowsSemanticWork {
+  std::uint32_t pid = 0;
+  HWND window = nullptr;
+  std::string target_id;
+  std::optional<std::string> observed_signature;
+  std::string kind;
+  std::string metadata;
+  ~WindowsSemanticWork() { std::fill(metadata.begin(), metadata.end(), '\0'); }
+};
+// END windows semantic operation ownership
+
 struct WindowsUiaRisk {
   bool classified = false;
   bool secure = false;
@@ -8955,16 +9074,13 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
     return false;
   ++*visited;
   WindowsV1UiaCountNode();
-  BSTR automation_id = nullptr;
-  BSTR name = nullptr;
+  using sprint_coder::computer_use::windows_uia_source_detail::BstrHolder;
+  BstrHolder automation_owner, name_owner;
+  BSTR &automation_id = *automation_owner.Receive(), &name = *name_owner.Receive();
   const bool attributes_read =
       WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
       WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); });
   if (!attributes_read) {
-    if (automation_id != nullptr)
-      SysFreeString(automation_id);
-    if (name != nullptr)
-      SysFreeString(name);
     return false;
   }
   const std::string automation_utf8 =
@@ -8976,10 +9092,6 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
       name == nullptr
           ? std::string{}
           : Utf8FromWide(std::wstring_view(name, SysStringLen(name)));
-  if (automation_id != nullptr)
-    SysFreeString(automation_id);
-  if (name != nullptr)
-    SysFreeString(name);
   if (automation_utf8 == target_id ||
       (automation_utf8.empty() && name_utf8 == target_id)) {
     if (*match == nullptr) {
@@ -8989,34 +9101,29 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
       *duplicate = true;
     }
   }
-  IUIAutomationElement *child = nullptr;
+  using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
+  ComRef<IUIAutomationElement> child_owner, next_owner;
+  IUIAutomationElement *&child = *child_owner.Receive(), *&next = *next_owner.Receive();
   if (!WindowsV1UiaOk(WindowsV1UiaCall(child, [&] { return walker->GetFirstChildElement(element, &child); }))) {
-    if (child != nullptr)
-      child->Release();
     return false;
   }
   while (child != nullptr && !*duplicate) {
     if (!FindUiaTargetRecursive(child, walker, target_id, depth + 1, visited,
                                 match, duplicate)) {
-      child->Release();
       return false;
     }
-    IUIAutomationElement *next = nullptr;
+    next = nullptr;
     if (!WindowsV1UiaOk(WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); }))) {
-      if (next != nullptr)
-        next->Release();
-      child->Release();
       return false;
     }
-    child->Release();
+    child_owner.Reset();
     child = next;
+    next = nullptr;
   }
-  if (child != nullptr)
-    child->Release();
   return !*duplicate;
 }
 
-bool FindWindowsSemanticTarget(const WindowsSession &session,
+bool FindWindowsSemanticTarget(HWND window,
                                std::string_view target_id,
                                IUIAutomationElement **output,
                                std::string *reason) {
@@ -9024,33 +9131,32 @@ bool FindWindowsSemanticTarget(const WindowsSession &session,
     *reason = "target_required";
     return false;
   }
-  IUIAutomation *automation = nullptr;
+  using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
+  ComRef<IUIAutomation> automation_owner;
+  ComRef<IUIAutomationElement> root_owner, match_owner;
+  ComRef<IUIAutomationTreeWalker> walker_owner;
+  IUIAutomation *&automation = *automation_owner.Receive();
+  IUIAutomationElement *&root = *root_owner.Receive(), *&match = *match_owner.Receive();
+  IUIAutomationTreeWalker *&walker = *walker_owner.Receive();
   if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr) {
     *reason = "accessibility_unavailable";
     return false;
   }
-  IUIAutomationElement *root = nullptr;
-  IUIAutomationTreeWalker *walker = nullptr;
   const WindowsV1UiaPath path;
   const bool initialized =
-      WindowsV1UiaOk(WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(session.active_window, &root); })) &&
+      WindowsV1UiaOk(WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); })) &&
       root != nullptr && SUCCEEDED(automation->get_RawViewWalker(&walker)) &&
       walker != nullptr;
   std::size_t visited = 0;
   bool duplicate = false;
-  IUIAutomationElement *match = nullptr;
   const bool searched =
       initialized && FindUiaTargetRecursive(root, walker, target_id, 0,
                                             &visited, &match, &duplicate);
-  if (root != nullptr)
-    root->Release();
-  if (walker != nullptr)
-    walker->Release();
-  automation->Release();
+  root_owner.Reset();
+  walker_owner.Reset();
+  automation_owner.Reset();
   if (!searched || duplicate || match == nullptr) {
-    if (match != nullptr)
-      match->Release();
     // A call that timed out is not "no such target": the target did not answer (transient).
     *reason = duplicate ? "target_ambiguous"
               : path.Stop() == WindowsV1UiaStop::kTimeout ? "accessibility_timeout"
@@ -9058,6 +9164,7 @@ bool FindWindowsSemanticTarget(const WindowsSession &session,
     return false;
   }
   *output = match;
+  match = nullptr;
   return true;
 }
 
@@ -9094,67 +9201,60 @@ bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **
   return true;
 }
 
-bool DispatchWindowsSemanticAction(const WindowsSession &session,
-                                   const RECT &expected,
-                                   std::uint64_t expected_epoch,
-                                   std::string_view kind,
-                                   const std::string &metadata, bool *accepted,
-                                   std::string *reason) {
-  std::string target_id;
-  if (!ReadJsonString(metadata, "targetId", &target_id)) {
-    *reason = "target_required";
-    return false;
-  }
-  IUIAutomationElement *target = nullptr;
-  if (!FindWindowsSemanticTarget(session, target_id, &target, reason))
+bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool *accepted,
+                                           std::string *reason) {
+  using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
+  using sprint_coder::computer_use::windows_uia_source_detail::BstrHolder;
+  const auto &target_id = work.target_id;
+  const auto &metadata = work.metadata;
+  const auto &kind = work.kind;
+  ComRef<IUIAutomationElement> target_owner;
+  IUIAutomationElement *&target = *target_owner.Receive();
+  if (!FindWindowsSemanticTarget(work.window, target_id, &target, reason))
     return false;
   std::string current_target_signature;
-  const auto observed_target = session.semantic_control_signatures.find(target_id);
-  if (observed_target == session.semantic_control_signatures.end() ||
-      !ComputeWindowsControlSignature(target, session.pid, nullptr,
+  if (!work.observed_signature.has_value() ||
+      !ComputeWindowsControlSignature(target, work.pid, nullptr,
                                       &current_target_signature) ||
-      current_target_signature != observed_target->second) {
-    target->Release();
+      current_target_signature != *work.observed_signature) {
     *reason = "stale_target";
     return false;
   }
   if (RejectWindowsRisk(ClassifyWindowsUiaElement(target), reason)) {
-    target->Release();
     return false;
   }
-  if (!RevalidateWindowsTarget(session, expected, expected_epoch)) {
-    target->Release();
+  if (!AwaitWindowsSemanticValidation()) {
     *reason = "stale_target";
     return false;
   }
 
   HRESULT action_result = E_FAIL;
   if (kind == "invoke") {
-    IUIAutomationInvokePattern *pattern = nullptr;
+    ComRef<IUIAutomationInvokePattern> pattern_owner;
+    IUIAutomationInvokePattern *&pattern = *pattern_owner.Receive();
     if (ReadWindowsV1Pattern(target, UIA_InvokePatternId, &pattern)) {
       // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
       // (a rejection before any input), never a call that cannot be confirmed.
       if (!WindowsV1UiaMayCall()) {
         *reason = WindowsV1UiaEndedReason();
       } else {
-        *accepted = true;
-        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-        action_result = pattern->Invoke();
+        action_result = InvokeWindowsSemanticInput([&] { return pattern->Invoke(); }, accepted);
       }
-      pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";
     }
   } else if (kind == "set_text") {
     std::string text;
     std::wstring wide_text;
-    IUIAutomationValuePattern *pattern = nullptr;
+    ComRef<IUIAutomationValuePattern> pattern_owner;
+    IUIAutomationValuePattern *&pattern = *pattern_owner.Receive();
     if (!ReadJsonString(metadata, "text", &text) ||
         !Utf16FromUtf8(text, &wide_text)) {
       *reason = "invalid_text";
     } else if (ReadWindowsV1Pattern(target, UIA_ValuePatternId, &pattern)) {
-      BSTR value = SysAllocStringLen(wide_text.data(),
-                                    static_cast<UINT>(wide_text.size()));
+      BstrHolder value_owner;
+      BSTR &value = *value_owner.Receive();
+      value = SysAllocStringLen(wide_text.data(), static_cast<UINT>(wide_text.size()));
       if (value == nullptr && !wide_text.empty()) {
         *reason = "semantic_action_failed";
       } else {
@@ -9163,28 +9263,23 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         if (!WindowsV1UiaMayCall()) {
           *reason = WindowsV1UiaEndedReason();
         } else {
-          *accepted = true;
-          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-          action_result = pattern->SetValue(value);
+          action_result = InvokeWindowsSemanticInput([&] { return pattern->SetValue(value); }, accepted);
         }
       }
-      if (value != nullptr)
-        SysFreeString(value);
-      pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";
     }
   } else if (kind == "select") {
     std::string selected_value;
-    IUIAutomationSelectionItemPattern *pattern = nullptr;
-    BSTR name = nullptr;
+    ComRef<IUIAutomationSelectionItemPattern> pattern_owner;
+    IUIAutomationSelectionItemPattern *&pattern = *pattern_owner.Receive();
+    BstrHolder name_owner;
+    BSTR &name = *name_owner.Receive();
     const bool name_read = WindowsV1UiaRead(name, [&] { return target->get_CurrentName(&name); });
     const std::string target_name =
         name == nullptr || !name_read
             ? std::string{}
             : Utf8FromWide(std::wstring_view(name, SysStringLen(name)));
-    if (name != nullptr)
-      SysFreeString(name);
     if (!name_read) {
       // The target did not answer: nothing is compared with a name that was not read, and nothing is sent.
       *reason = WindowsV1UiaEndedReason();
@@ -9197,11 +9292,8 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
       if (!WindowsV1UiaMayCall()) {
         *reason = WindowsV1UiaEndedReason();
       } else {
-        *accepted = true;
-        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-        action_result = pattern->Select();
+        action_result = InvokeWindowsSemanticInput([&] { return pattern->Select(); }, accepted);
       }
-      pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";
     }
@@ -9210,7 +9302,8 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         metadata.find("\"value\":true") != std::string::npos;
     const bool wants_false =
         metadata.find("\"value\":false") != std::string::npos;
-    IUIAutomationTogglePattern *pattern = nullptr;
+    ComRef<IUIAutomationTogglePattern> pattern_owner;
+    IUIAutomationTogglePattern *&pattern = *pattern_owner.Receive();
     if ((!wants_true && !wants_false) ||
         !ReadWindowsV1Pattern(target, UIA_TogglePatternId, &pattern) ||
         pattern == nullptr) {
@@ -9228,19 +9321,17 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         if (!WindowsV1UiaMayCall()) {
           *reason = WindowsV1UiaEndedReason();
         } else {
-          *accepted = true;
-          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-          action_result = pattern->Toggle();
+          action_result = InvokeWindowsSemanticInput([&] { return pattern->Toggle(); }, accepted);
         }
       }
-      pattern->Release();
     }
   } else if (kind == "expand_collapse") {
     const bool wants_expand =
         metadata.find("\"expanded\":true") != std::string::npos;
     const bool wants_collapse =
         metadata.find("\"expanded\":false") != std::string::npos;
-    IUIAutomationExpandCollapsePattern *pattern = nullptr;
+    ComRef<IUIAutomationExpandCollapsePattern> pattern_owner;
+    IUIAutomationExpandCollapsePattern *&pattern = *pattern_owner.Receive();
     if ((!wants_expand && !wants_collapse) ||
         !ReadWindowsV1Pattern(target, UIA_ExpandCollapsePatternId, &pattern) ||
         pattern == nullptr) {
@@ -9258,15 +9349,11 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         if (!WindowsV1UiaMayCall()) {
           *reason = WindowsV1UiaEndedReason();
         } else {
-          *accepted = true;
-          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-          action_result = wants_expand ? pattern->Expand() : pattern->Collapse();
+          action_result = InvokeWindowsSemanticInput([&] { return wants_expand ? pattern->Expand() : pattern->Collapse(); }, accepted);
         }
       }
-      pattern->Release();
     }
   }
-  target->Release();
   if (FAILED(action_result) && !*accepted &&
       WindowsV1UiaCurrentStop() == WindowsV1UiaStop::kTimeout)
     *reason = "accessibility_timeout";
@@ -9281,6 +9368,153 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
     return false;
   }
   return true;
+}
+
+bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &expected,
+                                   std::uint64_t expected_epoch, std::string_view kind,
+                                   const std::string &metadata, bool *accepted, std::string *reason) {
+  *accepted = false;
+  const WindowsV1UiaPath path;
+  if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); return false; }
+  WindowsV1UiaLane snapshot = *windows_v1_uia_lane;
+  snapshot.epoch = expected_epoch;
+  if (!snapshot.stop_serial.has_value()) snapshot.stop_serial = WindowsValidationFrameStopSerial();
+  auto work = std::make_unique<WindowsSemanticWork>();
+  if (!ReadJsonString(metadata, "targetId", &work->target_id) || work->target_id.empty() || work->target_id.size() > 128) {
+    *reason = "target_required"; return false;
+  }
+  work->pid = session.pid;
+  work->window = session.active_window;
+  const auto observed = session.semantic_control_signatures.find(work->target_id);
+  if (observed != session.semantic_control_signatures.end()) work->observed_signature = observed->second;
+  work->kind = std::string(kind);
+  work->metadata = metadata;
+  auto pending = std::make_shared<WindowsSemanticPending>();
+  pending->session_id = session.session_id;
+  pending->attempts = session.input_api_attempts;
+  auto &control = WindowsTargetListControl();
+  {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!WindowsValidationStillCurrent(snapshot.epoch, *snapshot.stop_serial)) {
+      *reason = "semantic_action_failed"; return false;
+    }
+    if (WindowsUiaReadWorkerRunning().exchange(true, std::memory_order_acq_rel)) {
+      *reason = "accessibility_unavailable"; return false;
+    }
+    WindowsSemanticOperations().active = pending;
+  }
+  try {
+    std::thread([pending, snapshot, work = std::move(work)]() mutable {
+      struct Progress {
+        explicit Progress(WindowsSemanticPending *value) {
+          windows_uia_read_progress = value;
+          windows_semantic_operation = value;
+        }
+        ~Progress() { windows_semantic_operation = nullptr; windows_uia_read_progress = nullptr; }
+      } progress(pending.get());
+      const WindowsV1UiaPath worker_path(snapshot);
+      bool succeeded = false, accepted = false;
+      std::string reason;
+      try {
+        struct Apartment {
+          HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+          ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+        } apartment;
+        if (SUCCEEDED(apartment.result) && WindowsV1UiaMayCall())
+          succeeded = DispatchWindowsSemanticActionOnWorker(*work, &accepted, &reason);
+        else reason = "accessibility_unavailable";
+      } catch (...) {
+        succeeded = false;
+        reason = accepted ? "input_not_confirmed" : "semantic_action_failed";
+      }
+      work.reset();
+      {
+        std::lock_guard lock(pending->mutex);
+        std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+        if (pending->abandoned.load(std::memory_order_acquire) == WindowsV1UiaStop::kNone) {
+          pending->succeeded = succeeded;
+          pending->reason = std::move(reason);
+          pending->stop.store(worker_path.Stop(), std::memory_order_release);
+        }
+        pending->done = true;
+        if (WindowsSemanticOperations().active == pending) WindowsSemanticOperations().active.reset();
+        WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
+      }
+      pending->ready.notify_all();
+    }).detach();
+  } catch (...) {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (WindowsSemanticOperations().active == pending) WindowsSemanticOperations().active.reset();
+    WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
+    *reason = "accessibility_unavailable";
+    return false;
+  }
+  struct Abandon {
+    std::shared_ptr<WindowsSemanticPending> pending;
+    ~Abandon() {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      auto none = WindowsV1UiaStop::kNone;
+      pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
+      pending->ready.notify_all();
+    }
+  } abandon{pending};
+  std::unique_lock lock(pending->mutex);
+  for (;;) {
+    bool validate = false;
+    {
+      std::lock_guard stop_lock(control.stop_mutex);
+      auto &lane = *windows_v1_uia_lane;
+      auto stop = lane.stop;
+      if (stop == WindowsV1UiaStop::kNone) stop = pending->abandoned.load(std::memory_order_acquire);
+      if (stop == WindowsV1UiaStop::kNone && !WindowsValidationStillCurrent(snapshot.epoch, *snapshot.stop_serial)) stop = WindowsV1UiaStop::kCanceled;
+      if (stop == WindowsV1UiaStop::kNone && lane.has_deadline && std::chrono::steady_clock::now() > lane.deadline) stop = WindowsV1UiaStop::kBudget;
+      if (stop == WindowsV1UiaStop::kNone && pending->contact_active &&
+          std::chrono::steady_clock::now() - pending->contact_started >= kWindowsV1UiaSlowContact) stop = WindowsV1UiaStop::kTimeout;
+      if (stop != WindowsV1UiaStop::kNone) {
+        auto none = WindowsV1UiaStop::kNone;
+        pending->abandoned.compare_exchange_strong(none, stop);
+        lane.stop = pending->stop.load(std::memory_order_acquire);
+        if (lane.stop == WindowsV1UiaStop::kNone) lane.stop = stop;
+        lane.nodes += pending->nodes.load(std::memory_order_acquire);
+        *accepted = pending->ever_claimed;
+        *reason = pending->input_in_flight ? "semantic_input_in_flight" : pending->ever_claimed ? "input_not_confirmed" :
+            stop == WindowsV1UiaStop::kTimeout ? "accessibility_timeout" : "semantic_action_failed";
+        return false;
+      }
+      if (pending->done) {
+        lane.stop = pending->stop.load(std::memory_order_acquire);
+        lane.nodes += pending->nodes.load(std::memory_order_acquire);
+        *accepted = pending->ever_claimed;
+        *reason = std::move(pending->reason);
+        return pending->succeeded;
+      }
+      if (pending->validation_requested && !pending->validation_started) {
+        pending->validation_started = true;
+        validate = true;
+      }
+    }
+    if (validate) {
+      lock.unlock();
+      const bool valid = RevalidateWindowsTarget(session, expected, expected_epoch);
+      lock.lock();
+      {
+        std::lock_guard stop_lock(control.stop_mutex);
+        const bool current = WindowsValidationStillCurrent(snapshot.epoch, *snapshot.stop_serial) &&
+            pending->abandoned.load(std::memory_order_acquire) == WindowsV1UiaStop::kNone;
+        pending->validation = valid && current;
+        if (!valid && current) {
+          auto none = WindowsV1UiaStop::kNone;
+          pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
+          windows_v1_uia_lane->nodes += pending->nodes.load(std::memory_order_acquire);
+          windows_v1_uia_lane->stop = pending->stop.load(std::memory_order_acquire);
+          *reason = "stale_target";
+          pending->ready.notify_all();
+          return false;
+        }
+      }
+      pending->ready.notify_all();
+    } else pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+  }
 }
 
 std::string ResponseCacheKey(const Frame &request) {
@@ -9382,7 +9616,7 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
-  if (!RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
+  if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
   return SendInput(count, events, sizeof(INPUT));
 }
@@ -9779,6 +10013,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
                            std::string *reason, bool *accepted) {
   *accepted = false;
+  if (WindowsSemanticInputInFlight()) { *reason = "semantic_input_in_flight"; return false; }
   const std::uint64_t expected_epoch = session.cancel_epoch;
   std::string kind;
   RECT bounds{};
@@ -10876,16 +11111,17 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
           // instead of holding the single-flight slot, which the interlock entry shares, for as long
           // as a large tree takes.
           const WindowsV1UiaPath uia_path(kInterlockLaneHoldLimit, expected_epoch);
-          IUIAutomationElement *target = nullptr;
+          sprint_coder::computer_use::windows_uia_source_detail::ComRef<IUIAutomationElement> target_owner;
+          IUIAutomationElement *&target = *target_owner.Receive();
           std::string why;
-          if (FindWindowsSemanticTarget(copy, target_id, &target, &why)) {
+          if (FindWindowsSemanticTarget(copy.active_window, target_id, &target, &why)) {
             std::string current;
             const bool same_control =
                 ComputeWindowsControlSignature(target, copy.pid, nullptr, &current) && current == signature;
             // The V1 risk of the element, as for every semantic action: a secure or high-impact
             // element is never read, whatever else says.
             const bool risky = RejectWindowsRisk(ClassifyWindowsUiaElement(target), &why);
-            target->Release();
+            target_owner.Reset();
             if (same_control && !risky) {
               std::unique_ptr<WindowsUiaShadowSource> source = WindowsUiaShadowSource::Create(
                   copy.active_window, POINT{0, 0}, still_valid,
@@ -11054,10 +11290,14 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     } else if (operation == "stop_pending_start") {
       succeeded = StopPendingWindowsStart(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
-      succeeded = CloseWindowsSession(request, metadata, &response);
-      if (!succeeded) reason = "native_close_unconfirmed";
+      succeeded = CloseWindowsSession(request, metadata, &response, &reason);
+      if (!succeeded && reason.empty()) reason = "native_close_unconfirmed";
     } else {
       reason = "unsupported_operation";
+    }
+    if (!succeeded && reason == "semantic_input_in_flight") {
+      if (!Respond(pipe, request, MessageType::kError, ErrorPayload(reason))) return false;
+      break;
     }
     if (!RespondAndCache(
             pipe, request,
@@ -11077,6 +11317,11 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
         return false;
       break;
     }
+    std::uint64_t attempts = 0;
+    if (!StopWindowsSemanticInput(*session, &attempts)) {
+      if (!Respond(pipe, request, MessageType::kError, ErrorPayload("semantic_input_in_flight"))) return false;
+      break;
+    }
     session->cancel_epoch = requested_epoch;
     InvalidateWindowsTicket(FrameIdKey(request.header.session_id));
     std::uint64_t current = cancellation_epoch.load(std::memory_order_acquire);
@@ -11092,7 +11337,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                          "{\"result\":\"canceled\",\"drained\":true,\"sessionId\":\"" +
                              JsonEscape(session->session_id) + "\",\"cancelEpoch\":" +
                              std::to_string(requested_epoch) + ",\"inputAttemptCount\":" +
-                             std::to_string(session->input_api_attempts->load(std::memory_order_acquire)) + "}"))
+                             std::to_string(attempts) + "}"))
       return false;
     break;
   }
@@ -11523,6 +11768,7 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   for (auto &entry : sessions)
     ReleaseWindowsSessionResources(&entry.second);
   sessions.clear();
+  DrainWindowsSemanticInputForExit();
   DrainWindowsDiscoveryLaunchesForExit();
   if (SUCCEEDED(initialized))
     CoUninitialize();

@@ -230,8 +230,8 @@ function instrumentedHost(): string {
     throw new Error('Semantic search contact boundary changed');
   const semantic = replaceOnce(
     source.slice(semanticFrom, semanticTo),
-    'automation->ElementFromHandle(session.active_window, &root)',
-    '(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, &root) : automation->ElementFromHandle(session.active_window, &root))',
+    'automation->ElementFromHandle(window, &root)',
+    '(Sc820ClassificationContactHeld() ? Sc820HeldClassificationContact(automation, &root) : automation->ElementFromHandle(window, &root))',
   );
   source = source.slice(0, semanticFrom) + semantic + source.slice(semanticTo);
   const observeFrom = source.indexOf('bool ObserveWindowsWindow(');
@@ -1349,10 +1349,10 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
 std::string Sc820SemanticStallProbe(const std::string& metadata,std::optional<std::uint64_t> stop_serial){
   const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,stop_serial);
   std::string kind;Require(ReadJsonString(metadata,"kind",&kind)&&(kind=="search"||kind=="dispatch"),"semantic_stall_kind");
-  WindowsSession session;session.pid=fixture_pids[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
+  WindowsSession session;session.session_id="sc940-control";session.pid=fixture_pids[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
   // No observed target signature is present: even an unexpected match cannot reach an input API.
   bool ok=false,accepted=false;std::string reason;IUIAutomationElement* target=nullptr;
-  if(kind=="search")ok=FindWindowsSemanticTarget(session,"sc820-absent-control",&target,&reason);
+  if(kind=="search")ok=FindWindowsSemanticTarget(session.active_window,"sc820-absent-control",&target,&reason);
   else ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke","{\"targetId\":\"sc820-absent-control\"}",&accepted,&reason);
   if(target!=nullptr)target->Release();
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
@@ -3326,10 +3326,10 @@ int DiagnoseClassificationDetails(std::wstring_view scenario){
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
-// A passing diagnostic here reproduces a broken Stop boundary; it is not a product PASS.
+// Direct resolver calls are worker-only controls. The public dispatch path must release the consumer.
 int DiagnoseSemanticStall(std::wstring_view scenario){
   const bool dispatch=scenario.starts_with(L"semantic-stall-dispatch-");
-  const bool cancel=scenario.ends_with(L"-cancel");const std::string label(scenario.begin(),scenario.end());RcaRun run;
+  const bool cancel=scenario.ends_with(L"-cancel");const bool timeout=scenario.ends_with(L"-timeout");const std::string label(scenario.begin(),scenario.end());RcaRun run;
   try {
     run.StartFixture();run.StartPipe(false);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000)&&run.ProbeReply(1,MessageType::kHandshakeResult),"semantic_stall_handshake");
@@ -3337,20 +3337,27 @@ int DiagnoseSemanticStall(std::wstring_view scenario){
     run.Send(MessageType::kProbe,2,std::string("{\"operation\":\"sc820_semantic_stall_probe\",\"kind\":\"")+(dispatch?"dispatch":"search")+"\"}");
     Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&classification_contacts==1&&classification_returns==0,"semantic_stall_contact_held");
     const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
-    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
-    Require(WaitStopSerial(before,1000),"semantic_stall_reader_latched");
-    Require(!run.Wait(3,1100)&&!run.Wait(2,0)&&classification_returns==0,"semantic_stall_consumer_blocked");
-    const auto held_ms=GetTickCount64()-started;
-    Require(held_ms>=1100&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"semantic_stall_duration");
-    SetEvent(run.release.value);
-    Require(run.Wait(3,5000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"semantic_stall_receipt_after_release");
+    if(!timeout){
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000),"semantic_stall_reader_latched");
+    }
+    if(dispatch){
+      if(!timeout)Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"semantic_dispatch_receipt_before_release");
+      Require(run.Wait(2,1000)&&classification_returns==0&&WindowsUiaReadWorkerRunning().load(),"semantic_dispatch_releases_consumer_keeps_worker");
+    }else Require(!run.Wait(3,1100)&&!run.Wait(2,0)&&classification_returns==0,"worker_only_resolver_control_still_blocked");
+    const auto held_ms=GetTickCount64()-(timeout?classification_contact_started.load():started);
+    Require((dispatch?(held_ms<1000&&(!timeout||held_ms>=400)):held_ms>=1100)&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"semantic_stall_duration");
+    if(!dispatch)SetEvent(run.release.value);
+    if(timeout)run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+    Require(run.Wait(3,5000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"semantic_stop_receipt");
     std::string body,reason;bool ok=true,accepted=true;std::uint64_t attempts=1;
     Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&!ok&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&!accepted&&
-      ReadJsonUint64(body,"inputAttempts",&attempts)&&attempts==0&&ReadJsonString(body,"reason",&reason)&&reason=="accessibility_timeout","semantic_stall_refusal_without_input");
+      ReadJsonUint64(body,"inputAttempts",&attempts)&&attempts==0&&ReadJsonString(body,"reason",&reason)&&reason==(dispatch&&!timeout?"semantic_action_failed":"accessibility_timeout"),"semantic_stall_refusal_without_input");
+    if(dispatch){SetEvent(run.release.value);Require(run.WaitUiaWorkerIdle(5000)&&run.ReplyCount(2)==1,"semantic_dispatch_late_result_discarded");}
     Require(classification_returns==1&&!gate_timed_out.load(),"semantic_stall_contact_returned");
     if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"semantic_stall_final_close");}
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"semantic_stall_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"baselineStallReproduced\":true,\"syntheticContactStall\":true,\"actualUiaLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":true,\"receiptBeforeRelease\":false,\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"baselineStallReproduced\":"<<(dispatch?"false":"true")<<",\"workerOnlyControl\":"<<(dispatch?"false":"true")<<",\"syntheticContactStall\":true,\"actualUiaLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"readerLatched\":"<<(timeout?"false":"true")<<",\"receiptBeforeRelease\":"<<(dispatch?"true":"false")<<",\"receiptAfterRelease\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4348,12 +4355,13 @@ describe.skipIf(
         if (scenario.startsWith('semantic-stall-')) {
           expect(metadata).toMatchObject({
             case: scenario,
-            baselineStallReproduced: true,
+            baselineStallReproduced: scenario.startsWith('semantic-stall-search-'),
+            workerOnlyControl: scenario.startsWith('semantic-stall-search-'),
             syntheticContactStall: true,
             actualUiaLatencyMeasured: false,
             heldMs: expect.any(Number),
-            readerLatched: true,
-            receiptBeforeRelease: false,
+            readerLatched: !scenario.endsWith('-timeout'),
+            receiptBeforeRelease: scenario.startsWith('semantic-stall-dispatch-'),
             receiptAfterRelease: true,
             inputAttempts: 0,
             childExited: true,
@@ -4520,12 +4528,13 @@ describe.skipIf(
     }
   }
 
-  it('diagnoses semantic search and dispatch Stop stalls before any input on the merged baseline', async () => {
+  it('bounds semantic dispatch Stop while retaining worker-only resolver stall controls', async () => {
     await runScenarios([
       'semantic-stall-search-cancel',
       'semantic-stall-search-close',
       'semantic-stall-dispatch-cancel',
       'semantic-stall-dispatch-close',
+      'semantic-stall-dispatch-timeout',
     ]);
   }, 700_000);
 

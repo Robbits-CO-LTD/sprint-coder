@@ -148,7 +148,7 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     const path = 'const WindowsV1UiaPath uia_path(kInterlockLaneHoldLimit, expected_epoch);';
     expect(body).toContain(path);
     expect(body.indexOf(path)).toBeLessThan(
-      body.indexOf('FindWindowsSemanticTarget(copy, target_id'),
+      body.indexOf('FindWindowsSemanticTarget(copy.active_window, target_id'),
     );
     expect(body.indexOf(path)).toBeGreaterThan(body.indexOf('std::thread([pending, copy'));
   });
@@ -182,7 +182,9 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
   it('resolves the node as a semantic action does, and reads it through the 250 ms source', () => {
     const body = squash(code(block));
     const binding = body.indexOf('ValidateWindowsDispatchBinding(');
-    const find = body.indexOf('FindWindowsSemanticTarget(copy, target_id, &target, &why)');
+    const find = body.indexOf(
+      'FindWindowsSemanticTarget(copy.active_window, target_id, &target, &why)',
+    );
     const signature = body.indexOf(
       'ComputeWindowsControlSignature(target, copy.pid, nullptr, &current) && current == signature',
     );
