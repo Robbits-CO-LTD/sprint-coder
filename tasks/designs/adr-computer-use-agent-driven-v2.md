@@ -1245,7 +1245,13 @@ tree 観測、point／focused 分類、control bindings、単独の focused sign
 
 bindings／単独 signature は観測と同じ早期拒否policyを使い、完全成功時だけ結果を採用する。失敗時はcallerの出力を変更しない。MSVCではcontainerのmove構築が確保を伴うため、bindingsは通常heapの値を所有するunique_ptrとして受け取り、engineのmutex解放後にnoexcept swapと旧値破棄を行う。COMやSession参照はthreadを跨がせない。重複semantic IDの除外、visual集合、signature材料、累積node数は維持する。busy／読取失敗時のpreflight・dispatchは既存のfocused_target_changedで拒否し、入力やticket発行へ進まない。元frameのserialを使うため、同じglobal epochのCloseでも古い要求からworkerを作らない。
 
-この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、semantic target／actionの同期経路、capture自体の待機、通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
+semantic dispatchも同じUIA slotを使うが、入力を許可する専用runnerで管理する。workerが検索・署名照合・risk判定を済ませ、consumerが元Sessionの再検証を行ってからgoを返す。元queued serial／epochが無効ならgoを渡さない。COM・patternはMTAに保持し、Session参照やprocess/exe HANDLEをworkerへ渡さない。artifactのnode読取りは既存MTA ownerを維持する。
+
+入力unitはstop mutex下でclaimとattempt記録を行い、mutexを解放してAPIを1回呼ぶ。claim前のStopは入力を拒否する。claim後はOS呼出前でもin-flightであり、Cancel／Closeはsemantic_input_in_flightを返してepoch・closed記録を更新しない。このStop拒否はuncached、dispatchの未確認結果は二重入力防止のためcachedとする。API return後は追加入力が無いのでStopを確認できるが、効果の成功とは区別する。cleanup中もslotを保持し、通常helper終了はclaim済APIのreturnを待つ。強制終了は停止の証明にしない。
+
+Mainは未確認semantic ownerと元helperを保持し、新たな入力・起動・launch可能な探索を拒否する。固定in-flightエラーだけを既存Stop期限内で50ms間隔に再試行し、期限後は新しい再送を行わない。wireのclosed応答は候補に留め、Hostがsession／epoch／単調counterと独立discoveryの完了を確認した後、private hookで解放する。元の受信objectをWeakMapで束縛し、新しい応答が来てもcachedな古い有効証拠を失わない。別helper・偽のobject・不正counter・不正frameではquarantineを解除しない。公開API/資格判定や有効化flagは変更しない。
+
+この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、consumerのWin32 session／dialog再検証、capture自体の待機、通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
 
 ## 付録: 参照した主なコード位置
 

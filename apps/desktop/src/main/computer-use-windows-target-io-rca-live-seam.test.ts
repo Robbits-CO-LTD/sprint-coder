@@ -239,11 +239,20 @@ function instrumentedHost(): string {
     'bool DispatchWindowsSemanticAction(const WindowsSession &session,',
     semanticMeasureFrom,
   );
-  const semanticMeasure = replaceOnce(
-    source.slice(semanticMeasureFrom, semanticMeasureTo),
-    'pattern->Invoke()',
-    'Sc820SemanticInvoke(pattern)',
-  );
+  let semanticMeasure = source.slice(semanticMeasureFrom, semanticMeasureTo);
+  for (const [call, replacement] of [
+    ['pattern->Invoke()', 'Sc820SemanticInvoke(pattern)'],
+    ['pattern->SetValue(value)', 'Sc820SemanticSetValue(pattern, value)'],
+    ['pattern->Select()', 'Sc820SemanticSelect(pattern)'],
+    ['pattern->Toggle()', 'Sc820SemanticToggle(pattern)'],
+    ['pattern->Expand()', 'Sc820SemanticExpand(pattern)'],
+    ['pattern->Collapse()', 'Sc820SemanticCollapse(pattern)'],
+    [
+      'pattern->get_CurrentExpandCollapseState(&current)',
+      'Sc820SemanticExpansionState(pattern, &current)',
+    ],
+  ] as const)
+    semanticMeasure = replaceOnce(semanticMeasure, call, replacement);
   source = source.slice(0, semanticMeasureFrom) + semanticMeasure + source.slice(semanticMeasureTo);
   const semanticRunFrom = source.indexOf(
     'bool DispatchWindowsSemanticAction(const WindowsSession &session,',
@@ -615,6 +624,13 @@ bool Sc820SemanticValidate(const WindowsSession&,const RECT&,std::uint64_t);
 void Sc820SemanticBeforeClaim();
 void Sc820SemanticBeforeApi();
 HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern*);
+HRESULT Sc820SemanticSetValue(IUIAutomationValuePattern*,BSTR);
+HRESULT Sc820SemanticSelect(IUIAutomationSelectionItemPattern*);
+HRESULT Sc820SemanticToggle(IUIAutomationTogglePattern*);
+HRESULT Sc820SemanticExpand(IUIAutomationExpandCollapsePattern*);
+HRESULT Sc820SemanticCollapse(IUIAutomationExpandCollapsePattern*);
+HRESULT Sc820SemanticExpansionState(IUIAutomationExpandCollapsePattern*,ExpandCollapseState*);
+
 std::string Sc820SemanticLifecycleProbe(const sprint_coder::computer_use::Frame&,const std::string&,std::optional<std::uint64_t>);
 std::string Sc820SemanticStatusProbe(const sprint_coder::computer_use::Frame&);
 
@@ -1411,8 +1427,20 @@ std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t> stop_serial)
 }
 
 HRESULT Sc820SemanticInvoke(IUIAutomationInvokePattern* pattern){
-  if(semantic_lifecycle=="source-invoke"){semantic_method_calls.fetch_add(1);return S_OK;}
+  if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}
   return pattern->Invoke();
+}
+HRESULT Sc820SemanticSetValue(IUIAutomationValuePattern* pattern,BSTR value){
+  if(semantic_lifecycle.starts_with("source-")){Require(std::wstring_view(value,SysStringLen(value))==L"fixture replacement","semantic_source_set_value_argument");semantic_method_calls.fetch_add(1);return S_OK;}return pattern->SetValue(value);
+}
+HRESULT Sc820SemanticSelect(IUIAutomationSelectionItemPattern* pattern){if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}return pattern->Select();}
+HRESULT Sc820SemanticToggle(IUIAutomationTogglePattern* pattern){if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}return pattern->Toggle();}
+HRESULT Sc820SemanticExpand(IUIAutomationExpandCollapsePattern* pattern){if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}return pattern->Expand();}
+HRESULT Sc820SemanticCollapse(IUIAutomationExpandCollapsePattern* pattern){if(semantic_lifecycle.starts_with("source-")){semantic_method_calls.fetch_add(1);return S_OK;}return pattern->Collapse();}
+HRESULT Sc820SemanticExpansionState(IUIAutomationExpandCollapsePattern* pattern,ExpandCollapseState* value){
+  const auto result=pattern->get_CurrentExpandCollapseState(value);
+  if(SUCCEEDED(result)&&semantic_lifecycle=="source-collapse")*value=ExpandCollapseState_Expanded;
+  return result;
 }
 void Sc820SemanticBeforeClaim(){if(semantic_lifecycle=="preclaim-close")Sc820DetailGate();}
 void Sc820SemanticBeforeApi(){if(semantic_lifecycle=="claimed-gap-close")Sc820DetailGate();}
@@ -1430,7 +1458,7 @@ bool Sc820SemanticValidate(const WindowsSession& session,const RECT& bounds,std:
   return true;
 }
 bool Sc820SemanticMeasure(const WindowsSemanticWork& work,bool* accepted,std::string* reason){
-  if(semantic_lifecycle.empty()||semantic_lifecycle=="source-invoke")return DispatchWindowsSemanticActionOnWorker(work,accepted,reason);
+  if(semantic_lifecycle.empty()||semantic_lifecycle.starts_with("source-"))return DispatchWindowsSemanticActionOnWorker(work,accepted,reason);
   Require(GetCurrentThreadId()!=rca_consumer_thread_id.load(),"semantic_measure_runs_on_worker");
   if(!AwaitWindowsSemanticValidation()){*reason="stale_target";return false;}
   const auto result=InvokeWindowsSemanticInput([&]() -> HRESULT {
@@ -1446,21 +1474,29 @@ std::string Sc820SemanticLifecycleProbe(const Frame& request,const std::string& 
   const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),1,serial);
   WindowsSession session;session.session_id=owner->session_id;session.input_api_attempts=owner->input_api_attempts;
   session.pid=fixture_pids[0];session.window=fixture_windows[0];session.active_window=fixture_windows[0];session.cancel_epoch=1;
-  std::string request_metadata="{\"targetId\":\"controlled\"}";
-  if(semantic_lifecycle=="source-invoke"){
+  std::string request_metadata="{\"targetId\":\"controlled\"}",kind="invoke";
+  if(semantic_lifecycle.starts_with("source-")){
     using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
     ComRef<IUIAutomation> automation;ComRef<IUIAutomationElement> target;
     Require(SUCCEEDED(CreateWindowsV1Automation(automation.Receive()))&&automation.Get(),"semantic_source_automation");
-    HWND child=GetDlgItem(fixture_windows[0],902);DWORD pid=0;
+    const int control=semantic_lifecycle=="source-set-text"?903:semantic_lifecycle.starts_with("source-toggle")?905:semantic_lifecycle.starts_with("source-expand")||semantic_lifecycle.starts_with("source-collapse")?906:902;
+    HWND child=GetDlgItem(fixture_windows[0],control);DWORD pid=0;
     Require(child!=nullptr&&GetWindowThreadProcessId(child,&pid)!=0&&pid==fixture_pids[0],"semantic_source_owned_child");
-    Require(SUCCEEDED(automation.Get()->ElementFromHandle(child,target.Receive()))&&target.Get(),"semantic_source_element");
+    if(semantic_lifecycle=="source-select"){
+      std::string why;Require(FindWindowsSemanticTarget(fixture_windows[0],"Fixture option one",target.Receive(),&why)&&target.Get(),"semantic_source_selection_item");
+    }else Require(SUCCEEDED(automation.Get()->ElementFromHandle(child,target.Receive()))&&target.Get(),"semantic_source_element");
     std::string id,signature;
     Require(ReadWindowsElementTargetId(target.Get(),&id)&&!id.empty()&&ComputeWindowsControlSignature(target.Get(),fixture_pids[0],nullptr,&signature),"semantic_source_binding");
     session.semantic_control_signatures.emplace(id,signature);
-    request_metadata="{\"targetId\":\""+JsonEscape(id)+"\"}";
+    request_metadata="{\"targetId\":\""+JsonEscape(id)+"\"";
+    if(semantic_lifecycle=="source-set-text"){kind="set_text";request_metadata+=",\"text\":\"fixture replacement\"";}
+    else if(semantic_lifecycle=="source-select"){kind="select";request_metadata+=",\"value\":\""+JsonEscape(id)+"\"";}
+    else if(semantic_lifecycle.starts_with("source-toggle")){kind="toggle";request_metadata+=semantic_lifecycle.ends_with("-noop")?",\"value\":false":",\"value\":true";}
+    else if(semantic_lifecycle.starts_with("source-expand")||semantic_lifecycle.starts_with("source-collapse")){kind="expand_collapse";request_metadata+=semantic_lifecycle.starts_with("source-expand")?",\"expanded\":true":",\"expanded\":false";}
+    request_metadata+="}";
   }
   bool accepted=false;std::string reason;
-  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,"invoke",request_metadata,&accepted,&reason);
+  const bool ok=DispatchWindowsSemanticAction(session,RECT{0,0,100,100},1,kind,request_metadata,&accepted,&reason);
   return std::string("{\"ok\":")+(ok?"true":"false")+",\"accepted\":"+(accepted?"true":"false")+
     ",\"attempts\":"+std::to_string(session.input_api_attempts->load())+",\"reason\":\""+JsonEscape(reason)+"\"}";
 }
@@ -1660,7 +1696,7 @@ BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
 
 struct FixtureReady { DWORD pid; UINT_PTR window; };
 
-int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding_controls = false) {
+int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding_controls = false, bool semantic_controls = false) {
   ScopedKernelHandle mapping(OpenFileMappingW(FILE_MAP_WRITE, FALSE, mapping_name));
   ScopedKernelHandle ready(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name));
   if (mapping.value == nullptr || ready.value == nullptr) return 2;
@@ -1672,12 +1708,27 @@ int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding
   wc.lpszClassName = L"Sc940OwnedFixture";
   RegisterClassW(&wc);
   HWND window = CreateWindowExW(0, wc.lpszClassName, L"RCA fixture", WS_OVERLAPPEDWINDOW,
-                                0, 0, 320, 200, nullptr, nullptr, wc.hInstance, nullptr);
+                                0, 0, semantic_controls?640:320, semantic_controls?400:200, nullptr, nullptr, wc.hInstance, nullptr);
   if (window == nullptr) { UnmapViewOfFile(shared); return 4; }
   if(binding_controls)for(int i=0;i<3;++i){
     HWND child=CreateWindowExW(0,L"BUTTON",i==2?L"Fixture unique":L"Fixture duplicate",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,
       20,20+40*i,150,25,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(i==2?902:901)),wc.hInstance,nullptr);
     if(child==nullptr){UnmapViewOfFile(shared);DestroyWindow(window);return 5;}
+  }
+  if(semantic_controls){
+    const auto create=[&](const wchar_t* cls,const wchar_t* text,DWORD style,int id,int x,int y,int width,int height){
+      return CreateWindowExW(0,cls,text,WS_CHILD|WS_VISIBLE|style,x,y,width,height,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),wc.hInstance,nullptr);
+    };
+    HWND invoke=create(L"BUTTON",L"Fixture invoke",BS_PUSHBUTTON,902,20,20,180,25);
+    HWND edit=create(L"EDIT",L"Fixture value",WS_BORDER|ES_AUTOHSCROLL,903,20,60,180,25);
+    HWND list=create(L"LISTBOX",L"",WS_BORDER|LBS_NOTIFY,904,230,20,180,100);
+    HWND toggle=create(L"BUTTON",L"Fixture check",BS_AUTOCHECKBOX,905,20,100,180,25);
+    HWND combo=create(L"COMBOBOX",L"",CBS_DROPDOWNLIST,906,230,150,180,100);
+    if(!invoke||!edit||!list||!toggle||!combo){UnmapViewOfFile(shared);DestroyWindow(window);return 6;}
+    SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Fixture option one"));
+    SendMessageW(list,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Fixture option two"));
+    SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Fixture choice"));
+    SendMessageW(combo,CB_SETCURSEL,0,0);
   }
   ShowWindow(window, SW_SHOWNOACTIVATE);
   shared->pid = GetCurrentProcessId();
@@ -1809,7 +1860,7 @@ struct RcaRun {
     });
   }
 
-  void StartFixture(bool canonical_executable = false, bool binding_controls = false) {
+  void StartFixture(bool canonical_executable = false, bool binding_controls = false, bool semantic_controls = false) {
     Require(fixture_count < fixture_pids.size(), "fixture_limit");
     const unsigned index = fixture_count;
     ScopedKernelHandle &child = children[index];
@@ -1836,6 +1887,7 @@ struct RcaRun {
     std::wstring command = L"\"" + fixture_executable + L"\" fixture \"" +
                            mapping_name + L"\" \"" + event_name + L"\"";
     if(binding_controls)command+=L" bindings";
+    else if(semantic_controls)command+=L" semantic";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -3464,12 +3516,12 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());semantic_lifecycle=label.substr(std::string("semantic-life-").size());
   const bool cancel=semantic_lifecycle=="input-cancel";
   const bool in_flight=semantic_lifecycle=="input-close"||cancel||semantic_lifecycle=="claimed-gap-close";
-  const bool source=semantic_lifecycle=="source-invoke";
+  const bool source=semantic_lifecycle.starts_with("source-");
   const bool no_stop=semantic_lifecycle=="success"||semantic_lifecycle=="input-exception"||source;
-  const bool no_input=semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close";
+  const bool no_input=semantic_lifecycle=="preclaim-close"||semantic_lifecycle=="validation-close"||semantic_lifecycle.ends_with("-noop");
   RcaRun run;ULONGLONG stop_ms=0;
   try {
-    run.StartFixture(false,source);run.StartPipe(false);
+    run.StartFixture(false,false,source);run.StartPipe(false);
     run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"semantic_life_handshake");
     classification_contact_held=true;
     if(source)classification_detail="semantic-source";
@@ -3498,9 +3550,9 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
       if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
       Require(run.WaitReplies(3,2,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2,7,"sc940-control",1,true),"semantic_life_uncached_stop_retry");
     }
-    if(cancel||no_stop){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3,7,"sc940-control",1),"semantic_life_final_close");}
+    if(cancel||no_stop){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3,7,"sc940-control",no_input?0:1),"semantic_life_final_close");}
     classification_contact_held=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"semantic_life_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":"<<(source?"false":"true")<<",\"sourceMeasure\":"<<(source?"true":"false")<<",\"controlledRevalidation\":true,\"controlledPatternApi\":true,\"controlledAncestorBoundary\":"<<(source?"true":"false")<<",\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledSemanticMeasure\":"<<(source?"false":"true")<<",\"sourceMeasure\":"<<(source?"true":"false")<<",\"controlledRevalidation\":true,\"controlledPatternApi\":true,\"controlledAncestorBoundary\":"<<(source?"true":"false")<<",\"controlledPatternState\":"<<(semantic_lifecycle=="source-collapse"?"true":"false")<<",\"actualGuiInput\":false,\"stopMs\":"<<stop_ms<<",\"simulatedApiCalls\":"<<semantic_method_calls.load()<<",\"consumerValidation\":true,\"terminalReceiptVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -4078,6 +4130,7 @@ int Diagnose(std::wstring_view scenario) {
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
   if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"bindings") return Fixture(argv[2],argv[3],true);
+  if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"semantic") return Fixture(argv[2],argv[3],false,true);
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
@@ -4534,11 +4587,12 @@ describe.skipIf(
         if (scenario.startsWith('semantic-life-')) {
           expect(metadata).toMatchObject({
             case: scenario,
-            controlledSemanticMeasure: scenario !== 'semantic-life-source-invoke',
-            sourceMeasure: scenario === 'semantic-life-source-invoke',
+            controlledSemanticMeasure: !scenario.startsWith('semantic-life-source-'),
+            sourceMeasure: scenario.startsWith('semantic-life-source-'),
             controlledRevalidation: true,
             controlledPatternApi: true,
-            controlledAncestorBoundary: scenario === 'semantic-life-source-invoke',
+            controlledAncestorBoundary: scenario.startsWith('semantic-life-source-'),
+            controlledPatternState: scenario === 'semantic-life-source-collapse',
             actualGuiInput: false,
             stopMs: expect.any(Number),
             simulatedApiCalls: expect.any(Number),
@@ -4731,6 +4785,13 @@ describe.skipIf(
     await runScenarios([
       'semantic-life-success',
       'semantic-life-source-invoke',
+      'semantic-life-source-set-text',
+      'semantic-life-source-select',
+      'semantic-life-source-toggle',
+      'semantic-life-source-toggle-noop',
+      'semantic-life-source-expand',
+      'semantic-life-source-collapse',
+      'semantic-life-source-collapse-noop',
       'semantic-life-validation-close',
       'semantic-life-preclaim-close',
       'semantic-life-claimed-gap-close',

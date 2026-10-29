@@ -368,7 +368,7 @@ start after cleanup even if an overlay or planner factory never returns, and rep
 stop separately. Old overlay completions cannot unregister a newer session's shortcut.
 
 Windows UIA tree observation, point/focused classification, control bindings and standalone focus
-signatures share a separate single-flight read worker. It owns its MTA, COM objects and temporary
+signatures share a single-flight UIA worker slot. Each job owns its MTA, COM objects and temporary
 values; only tree/risk/binding/signature values return to the consumer. The consumer checks the original frame Stop serial, cancellation epoch, parent death,
 inherited absolute deadline and the existing 470 ms first-contact limit every 20 ms. Stop and result
 adoption use the same mutex. Abandoned results cannot be adopted, and the slot remains occupied until
@@ -389,9 +389,35 @@ busy focus signature still rejects preflight/dispatch as `focused_target_changed
 original epoch/Stop serial and parent again after the signature read, so a Stop observed during that
 wait prevents subsequent capture. Queued same-epoch Close cannot admit a fresh worker for an old frame.
 
+Semantic dispatch owns the same UIA slot in a separate operation runner. Its worker resolves the
+target, verifies the observed signature and classifies risk, then requests validation from the
+consumer. The consumer revalidates the live session outside the pending/Stop locks and grants the
+worker permission to proceed only while the original queued serial and epoch remain current. The
+worker owns the COM target and pattern throughout; no Session, process/executable HANDLE or COM
+interface is handed across this boundary. Artifact-node reads retain their existing MTA owner.
+
+Every semantic input unit claims entry under the Stop mutex, records an attempt, releases the mutex,
+and calls the API once. A Stop that precedes that claim prevents entry. A claim already won is
+in-flight even before the OS call starts: Cancel/Close returns `semantic_input_in_flight`, without
+changing the session epoch or writing a closed record. Those Stop errors are uncached so the same
+request can be retried; an uncertain dispatch reply remains cached to prevent repeated input. An API
+return ends the in-flight unit, not a guarantee of its effect. Pure COM cleanup may outlive a drained
+Stop, but cannot claim another input and retains the slot until cleanup finishes. Normal helper exit
+latches abandonment and waits for an already claimed API to return; forced death is not proof.
+
+Windows transport retains uncertain semantic owners and their original helper across timeouts,
+rejects new input/start/launch-capable discovery, and never reconnects to prove the old operation
+ended. Host retries only the explicit in-flight Stop response every 50 ms inside its original Stop
+deadline. A closed wire response is a candidate: Host must validate session, epoch, monotonic attempt
+count and independent discovery completion before its private confirmation hook releases the owner.
+The original response object's identity binds that confirmation to received evidence, including an
+older cached proof when another reply has since arrived. Malformed responses or a lost helper keep
+input quarantined. These private hooks do not change the public protocol or eligibility rules.
+
 Slow nonempty property values and deep trees retain their existing semantics; there is no new short
 whole-path deadline. A stalled noncontact property or cleanup without Stop or an inherited deadline
-remains a #820 boundary, as do synchronous semantic target/action paths and capture itself. Native
+remains a #820 boundary. Consumer-side Win32 session/dialog validation and capture also retain their
+own remaining boundedness work. Native
 held-call tests establish cancellation and resource ownership, not normal GUI or real-AI acceptance.
 
 These ownership guarantees do not make every Windows V1 filesystem or UIA operation bounded. If
