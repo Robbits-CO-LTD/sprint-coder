@@ -1251,7 +1251,11 @@ semantic dispatchも同じUIA slotを使うが、入力を許可する専用runn
 
 Mainは未確認semantic ownerと元helperを保持し、新たな入力・起動・launch可能な探索を拒否する。固定in-flightエラーだけを既存Stop期限内で50ms間隔に再試行し、期限後は新しい再送を行わない。wireのclosed応答は候補に留め、Hostがsession／epoch／単調counterと独立discoveryの完了を確認した後、private hookで解放する。元の受信objectをWeakMapで束縛し、新しい応答が来てもcachedな古い有効証拠を失わない。別helper・偽のobject・不正counter・不正frameではquarantineを解除しない。公開API/資格判定や有効化flagは変更しない。
 
-この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、consumerのWin32 session／dialog再検証、capture自体の待機、通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
+capture と PNG decode／patch hash は UIA と別の単一 image worker 枠を共有する。PNG入力はscrubするownerへ移し、workerにはSessionやconsumerのbufferを借用させない。元frameのepoch／stop serialと既存の絶対期限を保持し、先行focus読取りのtimeoutだけはcaptureと同様に許容する。停止時はconsumerだけが待機を中止し、workerが遅れて終わっても出力を採用しない。PNG workerはCOMのMTAを使い、WinRT初期化はcaptureに限る。内部codecの全一時bufferをscrubする保証は追加しない。
+
+Observeはmetadata／binary／新しい観測stateをlockの外で準備し、reader Stop・親process終了のlatchと同じmutex下で元frameの有効性と絶対期限を再確認する。scalar更新とnoexcept swapだけでstateと出力を確定し、旧値の破棄はlock外で行う。Stopが先ならstateを変えず、commitが先なら確定済み結果の配送がStopより後になることは許容する。既存25秒Observe budgetはPNGと最終commitまで適用し、期限切れはobservation_timeoutとする。新しい短い総期限は設けない。focus署名は所有権移動前にserializeし、64桁digest／nullの契約を維持する。
+
+この変更は遅い非空 property や深い tree を短い総期限で拒否しない。Stop も既存の絶対期限もない場合の noncontact property／cleanup の停止、consumerのWin32 session／dialog再検証、実WGC captureと通常 fixture／メモ帳の受入は残件である。保持した foreign call を使う native 試験は停止・資源所有の証拠であり、通常 GUI／実 AI の受入には代用しない。#820 の全受入条件が満たされるまで close しない。
 
 ## 付録: 参照した主なコード位置
 

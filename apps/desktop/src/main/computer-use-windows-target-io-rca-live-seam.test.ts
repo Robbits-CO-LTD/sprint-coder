@@ -330,6 +330,11 @@ function instrumentedHost(): string {
   const observeTo = source.indexOf('\nstruct ArtifactReadPending', observeFrom);
   if (observeFrom < 0 || observeTo < observeFrom) throw new Error('Observe boundary changed');
   let observe = source.slice(observeFrom, observeTo);
+  observe = replaceOnce(
+    observe,
+    '  const char *commit_failure = nullptr;',
+    '  Sc820BeforeObserveCommit();\n  const char *commit_failure = nullptr;',
+  );
   for (const [name, wrapper, count] of [
     ['ValidateWindowsSession(', 'Sc820ObserveValidate(', 2],
     ['ReadUiaObservation(', 'Sc820ObserveTree(', 2],
@@ -343,6 +348,12 @@ function instrumentedHost(): string {
     observe = observe.replaceAll(name, wrapper);
   }
   source = source.slice(0, observeFrom) + observe + source.slice(observeTo);
+  const pngFrom = source.indexOf('bool ReadWindowsPng(std::vector');
+  const pngTo = source.indexOf('// BEGIN windows semantic operation ownership', pngFrom);
+  if (pngFrom < 0 || pngTo < pngFrom) throw new Error('PNG worker boundary changed');
+  let png = replaceOnce(source.slice(pngFrom, pngTo), 'ComputePngPatchGrid(', 'Sc820PngGrid(');
+  png = replaceOnce(png, 'ComputePngPatchDigest(', 'Sc820PngDigest(');
+  source = source.slice(0, pngFrom) + png + source.slice(pngTo);
   const captureFrom = source.indexOf('// BEGIN windows capture read ownership');
   const captureTo = source.indexOf('// END windows capture read ownership', captureFrom);
   if (captureFrom < 0 || captureTo < captureFrom)
@@ -773,9 +784,12 @@ WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 bool Sc820ObserveSignature(std::uint32_t,const RECT&,std::string*);
 bool Sc820ObserveCapture(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*);
+bool Sc820PngGrid(std::span<const std::uint8_t>,std::size_t,std::size_t,std::vector<std::string>*,std::size_t*,std::size_t*);
+bool Sc820PngDigest(std::span<const std::uint8_t>,std::size_t,std::size_t,double,double,std::string*,std::size_t*);
 void Sc820CaptureRuntimeInit();
 void Sc820CaptureRuntimeUninit();
 std::string Sc820CaptureStallProbe(std::optional<std::uint64_t>);
+void Sc820BeforeObserveCommit();
 std::string Sc820ObserveSignatureProbe(std::optional<std::uint64_t>);
 std::string Sc820BindingHealthyProbe(std::optional<std::uint64_t>);
 std::string Sc820SemanticStallProbe(const std::string&,std::optional<std::uint64_t>);
@@ -1538,6 +1552,10 @@ void Sc820ReadCoUninitialize(){
 // focused-signature worker execute normally; any downstream capture attempt is a test failure.
 bool observe_signature_mode=false;
 std::atomic<bool> observe_capture_mode{false};
+std::atomic<bool> png_stall_mode{false};
+bool png_healthy_control=false;
+std::string png_commit_mode;
+std::atomic<unsigned> png_stall_calls{0};
 std::atomic<bool> capture_real_mode{false};
 std::atomic<unsigned> capture_real_fault{0},capture_map_count{0},capture_unmap_count{0};
 std::array<std::atomic<unsigned>,3> capture_close_count{};
@@ -1598,12 +1616,14 @@ bool Sc820ObserveScreen(HWND window,RECT* bounds){
   observe_after_signature_calls.fetch_add(1);return false;
 }
 bool Sc820ObserveSignature(std::uint32_t pid,const RECT& bounds,std::string* signature){
+  if(png_stall_mode){*signature=std::string(64,'a');return true;}
   if(observe_capture_mode){*signature="controlled-capture-prerequisite";return true;}
   return WindowsFocusedElementSignature(pid,bounds,signature);
 }
 bool Sc820ObserveCapture(HWND window,std::vector<std::uint8_t>* output,std::size_t* width,std::size_t* height){
   if(!observe_capture_mode)return CaptureWindowWithGraphicsCaptureOnWorker(window,output,width,height);
   DWORD pid=0;Require(window==fixture_windows[0]&&GetWindowThreadProcessId(window,&pid)!=0&&pid==fixture_pids[0],"capture_owned_window");
+  if(png_stall_mode){*output={1,2,3,4};*width=100;*height=100;return true;}
   observe_capture_calls.fetch_add(1);Sc820DetailGate();output->clear();*width=0;*height=0;return false;
 }
 std::string Sc820CaptureStallProbe(std::optional<std::uint64_t> serial){
@@ -1611,8 +1631,31 @@ std::string Sc820CaptureStallProbe(std::optional<std::uint64_t> serial){
   std::string response,reason;std::vector<std::uint8_t> binary;
   observe_capture_mode=true;
   const bool ok=ObserveWindowsWindow(session,&response,&binary,&reason,serial);
+  if(png_commit_mode=="after")Sc820DetailGate();
   observe_capture_mode=false;
-  return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+"}";
+  std::string wire_signature;const bool wire_valid=ReadJsonString(response,"focusedElementSignature",&wire_signature)&&IsLowerHexDigest64(wire_signature);
+  return std::string("{\"ok\":")+(ok?"true":"false")+",\"reason\":\""+JsonEscape(reason)+"\",\"empty\":"+(response.empty()&&binary.empty()?"true":"false")+
+    ",\"revision\":"+std::to_string(session.observation_revision)+",\"hasObservation\":"+(session.has_observation?"true":"false")+
+    ",\"focusStoredValid\":"+(IsLowerHexDigest64(session.focused_element_signature)?"true":"false")+",\"focusWireValid\":"+(wire_valid?"true":"false")+"}";
+}
+void Sc820BeforeObserveCommit(){
+  if(png_commit_mode=="before")Sc820DetailGate();
+  else if(png_commit_mode=="deadline"){
+    Require(windows_v1_uia_lane!=nullptr,"commit_has_lane");
+    windows_v1_uia_lane->has_deadline=true;
+    windows_v1_uia_lane->deadline=std::chrono::steady_clock::now()-std::chrono::milliseconds(1);
+  }else if(png_commit_mode=="parent"){
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    parent_process_dead=true;cancellation_epoch.fetch_add(1);
+  }
+}
+bool Sc820PngGrid(std::span<const std::uint8_t> png,std::size_t width,std::size_t height,std::vector<std::string>* digests,std::size_t* columns,std::size_t* rows){
+  if(!png_stall_mode)return ComputePngPatchGrid(png,width,height,digests,columns,rows);
+  png_stall_calls.fetch_add(1);if(!png_healthy_control)Sc820DetailGate();*columns=2;*rows=2;digests->assign(4,std::string(64,'a'));return true;
+}
+bool Sc820PngDigest(std::span<const std::uint8_t> png,std::size_t width,std::size_t height,double x,double y,std::string* digest,std::size_t* index){
+  if(!png_stall_mode)return ComputePngPatchDigest(png,width,height,x,y,digest,index);
+  png_stall_calls.fetch_add(1);Sc820DetailGate();return false;
 }
 bool Sc820CaptureRevalidate(const WindowsSession& session,const RECT& bounds,std::uint64_t epoch){
   if(capture_visual_kind.empty())return RevalidateWindowsTarget(session,bounds,epoch);
@@ -4055,8 +4098,15 @@ int DiagnoseRealCapture(){
     Require(baseline&&captured&&stop==WindowsV1UiaStop::kNone,"capture_real_sta_and_mta_frames");
     Require(width==direct_width&&height==direct_height&&width>0&&height>0,"capture_real_same_geometry");
     std::vector<std::string> direct_grid,worker_grid;std::size_t dc=0,dr=0,wc=0,wr=0;
-    Require(ComputePngPatchGrid(direct,direct_width,direct_height,&direct_grid,&dc,&dr)&&ComputePngPatchGrid(worker,width,height,&worker_grid,&wc,&wr)&&
+    Require(ComputePngPatchGrid(direct,direct_width,direct_height,&direct_grid,&dc,&dr)&&ReadWindowsPngPatchGrid(&worker,width,height,cancellation_epoch.load(),frame.StopSerial(),&worker_grid,&wc,&wr,&stop)&&
       direct_grid==worker_grid&&dc==wc&&dr==wr&&!worker_grid.empty(),"capture_real_png_and_patch_equality");
+    std::string direct_digest,worker_digest;std::size_t direct_index=99,worker_index=88;
+    Require(ComputePngPatchDigest(direct,direct_width,direct_height,0.5,0.5,&direct_digest,&direct_index)&&
+      ReadWindowsPngPatchDigest(&worker,width,height,0.5,0.5,cancellation_epoch.load(),frame.StopSerial(),&worker_digest,&worker_index)&&
+      direct_digest==worker_digest&&direct_index==worker_index,"capture_real_png_digest_worker_equality");
+    std::vector<std::uint8_t> invalid_png{1,2};std::string sentinel="unchanged";std::size_t sentinel_index=77;
+    Require(!ReadWindowsPngPatchDigest(&invalid_png,1,1,0,0,cancellation_epoch.load(),frame.StopSerial(),&sentinel,&sentinel_index)&&
+      invalid_png.empty()&&sentinel=="unchanged"&&sentinel_index==77,"png_invalid_bytes_no_output_adoption");
     std::fill(direct.begin(),direct.end(),0);std::fill(worker.begin(),worker.end(),0);
     direct.clear();worker.clear();
     capture_real_fault=1;width=99;height=77;worker={7,9};
@@ -4070,7 +4120,7 @@ int DiagnoseRealCapture(){
     Require(close_fault_capture,"capture_real_close_fault_continues_cleanup");
     std::fill(worker.begin(),worker.end(),0);worker.clear();capture_real_fault=0;
     Require(capture_map_count==4&&capture_unmap_count==4&&capture_close_count[0]==4&&capture_close_count[1]==4&&capture_close_count[2]==4,"capture_real_all_mapped_resources_and_closers_retired");
-    Require(capture_worker_starts==3&&capture_runtime_inits==3&&capture_runtime_uninits==3,"capture_real_three_mta_workers_and_runtime_balance");
+    Require(capture_worker_starts==6&&capture_runtime_inits==3&&capture_runtime_uninits==3,"capture_real_image_workers_and_capture_runtime_balance");
     capture_real_mode=false;
     Require(run.WaitCaptureWorkerIdle(5000),"capture_real_worker_retired");run.Cleanup();
     Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_cleanup");
@@ -4079,6 +4129,101 @@ int DiagnoseRealCapture(){
   }catch(const std::exception& error){capture_real_mode=false;capture_real_fault=0;std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
   catch(...){capture_real_mode=false;capture_real_fault=0;std::cout<<"{\"failure\":\"capture_real_runtime_failure\"}\n";return 1;}
 #endif
+}
+
+
+int DiagnosePngCodec(){
+#if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  std::cout<<"{\"failure\":\"png_codec_sdk_unavailable\"}\n";return 1;
+#else
+  try {
+    Require(SUCCEEDED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)),"png_codec_sta");
+    struct Com {~Com(){CoUninitialize();}} com;
+    // Generated RGBA PNG: 65x65, four distinct 64px edge patches; no desktop capture.
+    const std::vector<std::uint8_t> original{137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,65,0,0,0,65,8,6,0,0,0,142,247,201,69,0,0,0,115,73,68,65,84,120,156,237,208,177,13,0,32,12,3,193,108,206,232,6,49,2,77,144,114,197,39,173,117,85,181,50,185,220,255,193,16,8,16,250,131,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,66,123,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,158,17,114,206,224,114,218,43,163,35,116,163,128,59,106,0,0,0,0,73,69,78,68,174,66,96,130};
+    std::vector<std::uint8_t> worker=original;std::vector<std::string> direct_grid,worker_grid;
+    std::size_t dc=0,dr=0,wc=0,wr=0;WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
+    Require(ComputePngPatchGrid(original,65,65,&direct_grid,&dc,&dr)&&
+      ReadWindowsPngPatchGrid(&worker,65,65,0,0,&worker_grid,&wc,&wr,&stop)&&
+      stop==WindowsV1UiaStop::kNone&&worker==original&&direct_grid==worker_grid&&dc==wc&&dr==wr&&wc==2&&wr==2,"png_codec_grid_equality");
+    for(double x:{0.0,1.0})for(double y:{0.0,1.0}){
+      std::string direct_digest,worker_digest;std::size_t direct_index=99,worker_index=88;
+      Require(ComputePngPatchDigest(original,65,65,x,y,&direct_digest,&direct_index)&&
+        ReadWindowsPngPatchDigest(&worker,65,65,x,y,0,0,&worker_digest,&worker_index)&&
+        worker==original&&direct_digest==worker_digest&&direct_index==worker_index&&worker_digest==worker_grid[worker_index],"png_codec_edge_digest_equality");
+    }
+    for(bool invalid_bytes:{false,true}){
+      auto input=invalid_bytes?std::vector<std::uint8_t>{1,2}:original;std::string digest="unchanged";std::size_t index=77;
+      Require(!ReadWindowsPngPatchDigest(&input,invalid_bytes?65:64,65,0.5,0.5,0,0,&digest,&index)&&input.empty()&&digest=="unchanged"&&index==77,"png_codec_invalid_input_no_adoption");
+    }
+    Require(!WindowsCaptureWorkerRunning(),"png_codec_worker_retired");
+    std::cout<<"{\"case\":\"png-codec\",\"actualWic\":true,\"generatedFixture\":true,\"gridAndFourEdgesEqual\":true,\"invalidInputsRejected\":true,\"workerIdle\":true,\"inputAttempts\":0,\"actualCapture\":false}\n";return 0;
+  }catch(const std::exception& error){std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+#endif
+}
+
+int DiagnoseObserveCommit(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());const bool cancel=scenario.ends_with(L"-cancel");
+  png_commit_mode=label.find("-after-")!=std::string::npos?"after":label.ends_with("-deadline")?"deadline":label.ends_with("-parent")?"parent":"before";
+  const bool stopping=png_commit_mode=="before"||png_commit_mode=="after";
+  RcaRun run;
+  try {
+    run.StartFixture();run.StartPipe(false);png_stall_mode=true;png_healthy_control=true;
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"commit_handshake");
+    run.Send(MessageType::kProbe,2,"{\"operation\":\"sc820_capture_stall_probe\"}");
+    if(stopping){
+      Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0,"commit_gate_entered");
+      const auto before=WindowsTargetListControl().stop_serial.load();
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000),"commit_reader_latched");SetEvent(run.release.value);
+    }
+    std::string body,reason;bool ok=false,empty=false,observed=false;std::uint64_t revision=99;
+    Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"empty",&empty)&&
+      ReadOptionalJsonBoolean(body,"hasObservation",&observed)&&ReadJsonUint64(body,"revision",&revision)&&ReadJsonString(body,"reason",&reason),"commit_result_shape");
+    const bool committed=png_commit_mode=="after";
+    Require(ok==committed&&observed==committed&&empty!=committed&&revision==(committed?1:0),"commit_order_matches_state_and_output");
+    if(!committed)Require(reason==(png_commit_mode=="deadline"?"observation_timeout":"observation_stale"),"commit_refusal_reason");
+    if(stopping)Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"commit_stop_receipt");
+    if(cancel||png_commit_mode=="deadline"){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"commit_final_close");}
+    png_stall_mode=false;png_commit_mode.clear();run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"commit_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledPreparation\":true,\"committedBeforeStop\":"<<(committed?"true":"false")<<",\"stateMatchesOrdering\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
+int DiagnosePngStall(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());const bool cancel=scenario.ends_with(L"-cancel");
+  const bool observe=label.find("-observe-")!=std::string::npos;
+  const std::string kind=label.find("-click-")!=std::string::npos?"click":"scroll";
+  RcaRun run;
+  try {
+    run.StartFixture();run.StartPipe(false);png_stall_mode=true;
+    png_healthy_control=scenario.ends_with(L"-healthy");
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"png_handshake");
+    run.Send(MessageType::kProbe,2,observe?"{\"operation\":\"sc820_capture_stall_probe\"}":"{\"operation\":\"sc820_capture_dispatch_probe\",\"kind\":\""+kind+"\"}");
+    if(png_healthy_control){
+      std::string body;bool ok=false,stored=false,wire=true;
+      Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ok&&
+        ReadOptionalJsonBoolean(body,"focusStoredValid",&stored)&&stored&&ReadOptionalJsonBoolean(body,"focusWireValid",&wire)&&wire,"observe_focus_wire_preserved");
+      run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");Require(run.Wait(3,1000)&&run.Receipt(3,MessageType::kProbeResult,"closed",2),"png_healthy_close");
+      png_stall_mode=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"png_healthy_cleanup");
+      std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"focusStoredValid\":true,\"focusWireValid\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true}\n";return 0;
+    }
+    Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&png_stall_calls==1,"png_consumer_entered");
+    const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+    if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+    Require(WaitStopSerial(before,1000)&&run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"png_stop_before_release");
+    const auto held_ms=GetTickCount64()-started;
+    std::string body,reason;bool ok=false;Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok),"png_result_shape");
+    if(observe){bool empty=true,observed=false;std::uint64_t revision=0;
+      Require(!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadOptionalJsonBoolean(body,"hasObservation",&observed)&&!observed&&ReadJsonUint64(body,"revision",&revision)&&revision==0,"png_no_late_observation_commit");
+    }else{bool accepted=true;std::uint64_t attempts=1;
+      Require(!ok&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&!accepted&&ReadJsonUint64(body,"attempts",&attempts)&&attempts==0&&ReadJsonString(body,"reason",&reason)&&reason=="native_visual_patch_changed","png_dispatch_no_input_control");}
+    Require(WindowsCaptureWorkerRunning().load()&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"png_worker_retained_after_consumer_stop");
+    if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"png_final_close");}
+    SetEvent(run.release.value);Require(run.WaitCaptureWorkerIdle(5000)&&run.ReplyCount(2)==1,"png_worker_retired_no_late_reply");
+    png_stall_mode=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"png_cleanup");
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"actualCodecLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"receiptBeforeRelease\":true,\"lateNativeObservationCommit\":false,\"mainAdoptionTested\":false,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
 int DiagnoseCaptureStall(std::wstring_view scenario){
@@ -4610,6 +4755,9 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1])==L"png-codec")return DiagnosePngCodec();
+  if (std::wstring_view(argv[1]).starts_with(L"observe-commit-"))return DiagnoseObserveCommit(argv[1]);
+  if (std::wstring_view(argv[1]).starts_with(L"png-stall-"))return DiagnosePngStall(argv[1]);
   if (std::wstring_view(argv[1])==L"capture-real")return DiagnoseRealCapture();
   if (std::wstring_view(argv[1]).starts_with(L"capture-event-")) return DiagnoseCaptureEvent(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"capture-stall-")) return DiagnoseCaptureStall(argv[1]);
@@ -5056,6 +5204,64 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario === 'png-codec') {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            actualWic: true,
+            generatedFixture: true,
+            gridAndFourEdgesEqual: true,
+            invalidInputsRejected: true,
+            workerIdle: true,
+            inputAttempts: 0,
+            actualCapture: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
+        if (scenario.startsWith('observe-commit-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            controlledPreparation: true,
+            committedBeforeStop: scenario.includes('-after-'),
+            stateMatchesOrdering: true,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
+        if (scenario.startsWith('png-stall-')) {
+          if (scenario.endsWith('-healthy')) {
+            expect(metadata).toMatchObject({
+              case: scenario,
+              controlledPngStage: true,
+              focusStoredValid: true,
+              focusWireValid: true,
+              inputAttempts: 0,
+              childExited: true,
+              workerIdle: true,
+            });
+            console.log(JSON.stringify(metadata));
+            continue;
+          }
+          expect(metadata).toMatchObject({
+            case: scenario,
+            controlledPngStage: true,
+            actualCodecLatencyMeasured: false,
+            heldMs: expect.any(Number),
+            receiptBeforeRelease: true,
+            lateNativeObservationCommit: false,
+            mainAdoptionTested: false,
+            inputAttempts: 0,
+            childExited: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario === 'capture-real') {
           const notRun =
             typeof metadata === 'object' &&
@@ -5341,6 +5547,33 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('matches raw and worker WIC PNG decoding without a desktop', async () => {
+    await runScenarios(['png-codec']);
+  }, 700_000);
+
+  it('orders final observation commit against Stop, parent death and deadline', async () => {
+    await runScenarios([
+      'observe-commit-before-cancel',
+      'observe-commit-before-close',
+      'observe-commit-after-cancel',
+      'observe-commit-after-close',
+      'observe-commit-deadline',
+      'observe-commit-parent',
+    ]);
+  }, 700_000);
+
+  it('keeps PNG Stop responsive and prevents late native observation commit', async () => {
+    await runScenarios([
+      'png-stall-observe-healthy',
+      'png-stall-observe-cancel',
+      'png-stall-observe-close',
+      'png-stall-click-cancel',
+      'png-stall-click-close',
+      'png-stall-scroll-cancel',
+      'png-stall-scroll-close',
+    ]);
+  }, 700_000);
 
   it('captures an owned WGC frame on STA and worker MTA with identical geometry and patches', async ({
     skip,

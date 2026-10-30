@@ -600,7 +600,7 @@ describe('Windows native helper compile boundary', () => {
     expect(visualSource).toContain('native_visual_patch_changed');
     expect(visualSource).toContain('8 * 1024 * 1024');
     expect(dispatchSource.match(/RevalidateVisualPatch\(session, x, y/gu)).toHaveLength(2);
-    expect(source).toContain('session.observation_patch_digests = std::move(patch_digests)');
+    expect(source).toContain('session.observation_patch_digests.swap(patch_digests)');
     expect(source).toContain('std::fill(digest.begin(), digest.end(),');
   });
 
@@ -626,7 +626,11 @@ describe('Windows native helper compile boundary', () => {
     expect(dialogSource).toContain('native_dialog_user_takeover');
     expect(source).toContain('ApplicationFrameHost.exe');
     expect(source).toContain('ApplicationFrameWindow');
-    expect(observeSource).toContain('session.dialog_set_revision += 1');
+    expect(observeSource).toContain(
+      'const auto next_dialog_revision = session.dialog_set_revision +',
+    );
+    expect(observeSource).toContain('(session.dialog_set_digest != dialogs.digest ? 1 : 0)');
+    expect(observeSource).toContain('session.dialog_set_revision = next_dialog_revision');
     expect(observeSource).toContain('stable_dialogs.digest != dialogs.digest');
     expect(source).toContain('dialogs.digest != session.dialog_set_digest');
     expect(source).toContain('dialogs.active_identity != session.active_window_identity');
