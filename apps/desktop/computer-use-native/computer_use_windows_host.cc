@@ -11282,8 +11282,8 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
       binary->swap(staged_binary);
     }
   }
-  if (commit_failure != nullptr) { *reason = commit_failure; return false; }
   for (auto &digest : patch_digests) std::fill(digest.begin(), digest.end(), '0');
+  if (commit_failure != nullptr) { *reason = commit_failure; return false; }
   reason->clear();
   return true;
 }
