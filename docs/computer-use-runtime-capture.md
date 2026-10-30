@@ -429,6 +429,27 @@ while they or the interlock are running, the prepared token is discarded without
 ticket. Healthy no-verdict and replay behavior is preserved. This prevents a late ticket commit;
 it does not bound the duration of a foreign RNG or interlock call itself.
 
+Graphics capture uses a separate single-flight slot through the read engine. Observe and visual
+patch revalidation pass their bound epoch and original frame serial. Capture copies the existing
+absolute deadline, but isolates its lane from a prior UIA focus timeout, so a missing focus signature
+does not itself suppress a screenshot. A second capture stays busy until foreign capture and Runtime
+cleanup retire; an outstanding UIA read does not consume that capture slot.
+
+WinRT, D3D and WIC objects remain on the capture MTA. Frame callbacks share ownership of their event
+handle because revocation is not a barrier for an already queued callback. Scoped guards revoke the
+handler, unmap textures and close frame/session/pool on normal and exceptional exits. The existing
+five-second frame wait cooperatively checks Stop. Only owned PNG bytes and dimensions leave the
+worker; adoption is ordered with Stop, and replaced or discarded buffers are scrubbed. Pure result
+bytes and a callback's kernel-event lease may retire after the slot's foreign cleanup has finished.
+
+Observe now applies its inherited 25-second budget to capture waiting as well as UIA: capture Stop
+maps to `observation_stale`, budget expiry to `observation_timeout`, and other capture failure to
+`graphics_capture_unavailable`. Visual patch failure keeps its existing refusal and sends no input.
+Consumer-side PNG decoding/patch calculation and final Observe state assembly remain separate
+boundaries. No-Stop capture calls without an inherited deadline are not given a new total timeout.
+Controlled native tests do not replace a real owned-window WGC frame/geometry check or normal
+product GUI acceptance; an unavailable desktop or rendering device must remain `NOT_RUN`.
+
 Slow nonempty property values and deep trees retain their existing semantics; there is no new short
 whole-path deadline. A stalled noncontact property or cleanup without Stop or an inherited deadline
 remains a #820 boundary. Consumer-side Win32 session/dialog validation and capture also retain their
