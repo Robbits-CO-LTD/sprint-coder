@@ -48,6 +48,45 @@ function instrumentedHost(): string {
     consumer,
     `    Sc940ConsumerGate(queued.frame.header.request_id.bytes[0]);\n${consumer}`,
   );
+  const pickerFrom = source.indexOf('bool PickWindowsExecutable(');
+  const pickerTo = source.indexOf('\nbool SameWindowsPath(', pickerFrom);
+  let picker = source.slice(pickerFrom, pickerTo);
+  const dialogFrom = picker.indexOf('  IFileOpenDialog *dialog = nullptr;');
+  const dialogTo = picker.indexOf('  if (path.size() < 5 ||', dialogFrom);
+  if (pickerFrom < 0 || pickerTo < pickerFrom || dialogFrom < 0 || dialogTo < dialogFrom)
+    throw new Error('Picker selection boundary changed');
+  const dialog = replaceOnce(
+    picker.slice(dialogFrom, dialogTo),
+    '  const std::wstring path(selected_path);',
+    '  path.assign(selected_path);',
+  );
+  picker =
+    picker.slice(0, dialogFrom) +
+    '  std::wstring path;\n  if (!Sc940PickerSelection(&path)) {\n' +
+    dialog +
+    '  }\n' +
+    picker.slice(dialogTo);
+  source = source.slice(0, pickerFrom) + picker + source.slice(pickerTo);
+  const digestFrom = source.indexOf('bool ReadFileDigest(');
+  const digestTo = source.indexOf('\nbool ', digestFrom + 5);
+  source =
+    source.slice(0, digestFrom) +
+    replaceOnce(
+      source.slice(digestFrom, digestTo),
+      'ReadFile(file, chunk.data(),',
+      'Sc940PickerRead(file, chunk.data(),',
+    ) +
+    source.slice(digestTo);
+  source = replaceOnce(
+    source,
+    '      CloseHandle(value);\n  }\n  HANDLE release()',
+    '      Sc940PickerClose(value);\n  }\n  HANDLE release()',
+  );
+  source = replaceOnce(
+    source,
+    '    CloseHandle(locked->file);',
+    '    Sc940PickerClose(locked->file);',
+  );
   const rejudgeFrom = source.indexOf('// BEGIN windows v2 rejudge');
   const rejudgeTo = source.indexOf('// END windows v2 rejudge', rejudgeFrom);
   if (rejudgeFrom < 0 || rejudgeTo < 0) throw new Error('Rejudge boundary changed');
@@ -857,6 +896,9 @@ bool Sc820ContactGate(HWND window);
 void Sc820ContactResult(bool succeeded, bool nonnull);
 void Sc820RootReleased();
 std::string Sc820ReadProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial);
+bool Sc940PickerSelection(std::wstring*);
+BOOL Sc940PickerRead(HANDLE,void*,DWORD,DWORD*,OVERLAPPED*);
+BOOL Sc940PickerClose(HANDLE);
 void Sc940MeasureGate(std::uint32_t pid);
 void Sc940ContextGate();
 void Sc940CompletionGate();
@@ -4132,6 +4174,52 @@ int DiagnoseRealCapture(){
 }
 
 
+
+std::atomic<bool> picker_diagnostic{false},picker_hold{false},picker_closed{false};
+std::atomic<unsigned> picker_selections{0},picker_reads{0},picker_successful_reads{0};
+std::atomic<HANDLE> picker_file{INVALID_HANDLE_VALUE};
+bool Sc940PickerSelection(std::wstring* path){
+  if(!picker_diagnostic)return false;
+  std::array<wchar_t,32768> self{};const DWORD length=GetModuleFileNameW(nullptr,self.data(),static_cast<DWORD>(self.size()));
+  Require(length>0&&length<self.size(),"picker_owned_executable_path");
+  path->assign(self.data(),length);picker_selections.fetch_add(1);return true;
+}
+BOOL Sc940PickerRead(HANDLE file,void* data,DWORD size,DWORD* count,OVERLAPPED* operation){
+  if(!picker_diagnostic)return ReadFile(file,data,size,count,operation);
+  const auto calls=picker_reads.fetch_add(1);
+  if(calls==0){picker_file=file;if(picker_hold)Sc820DetailGate();}
+  Require(file==picker_file.load()&&GetFileType(file)==FILE_TYPE_DISK,"picker_only_owned_file_read");
+  const BOOL ok=ReadFile(file,data,size,count,operation);
+  if(ok)picker_successful_reads.fetch_add(1);return ok;
+}
+BOOL Sc940PickerClose(HANDLE file){
+  const BOOL ok=CloseHandle(file);
+  if(picker_diagnostic&&file==picker_file.load())picker_closed=ok!=FALSE;
+  return ok;
+}
+int DiagnosePickerBaseline(std::wstring_view scenario){
+  const std::string label(scenario.begin(),scenario.end());const bool healthy=scenario.ends_with(L"healthy"),cancel=scenario.ends_with(L"cancel");RcaRun run;
+  try {
+    picker_diagnostic=true;picker_hold=!healthy;run.StartPipe(false);
+    run.Send(MessageType::kHandshake,1,"{\"protocolVersion\":1,\"apiVersion\":3}");Require(run.Wait(1,5000),"picker_handshake");
+    run.Send(MessageType::kProbe,2,"{\"operation\":\"pick_application\"}");
+    ULONGLONG held_ms=0;
+    if(!healthy){
+      Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&picker_reads==1,"picker_file_read_held");
+      const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
+      if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before,1000),"picker_reader_stop_latched");
+      Require(!run.Wait(3,1100)&&run.ReplyCount(2)==0&&picker_successful_reads==0,"baseline_picker_holds_stop_receipt");
+      held_ms=GetTickCount64()-started;SetEvent(run.release.value);
+    }
+    Require(run.Wait(2,10000)&&run.Error(2,"target_application_unsupported")&&picker_selections==1&&picker_successful_reads>0&&picker_closed,"picker_real_read_and_identity_refusal");
+    if(!healthy)Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"picker_stop_recovers_after_release");
+    if(healthy||cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"picker_final_close");}
+    run.Cleanup();Require(run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load()&&fixture_count==0,"picker_cleanup_no_gui");picker_diagnostic=false;
+    std::cout<<"{\"case\":\""<<label<<"\",\"baseline\":true,\"controlledSelection\":true,\"actualFileRead\":true,\"fileClosed\":true,\"receiptHeldUntilRelease\":"<<(healthy?"false":"true")<<",\"heldMs\":"<<held_ms<<",\"realPickerShown\":false,\"inputAttempts\":0,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+}
+
 int DiagnosePngCodec(){
 #if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
   std::cout<<"{\"failure\":\"png_codec_sdk_unavailable\"}\n";return 1;
@@ -4755,6 +4843,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"picker-baseline-"))return DiagnosePickerBaseline(argv[1]);
   if (std::wstring_view(argv[1])==L"png-codec")return DiagnosePngCodec();
   if (std::wstring_view(argv[1]).starts_with(L"observe-commit-"))return DiagnoseObserveCommit(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"png-stall-"))return DiagnosePngStall(argv[1]);
@@ -5204,6 +5293,22 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('picker-baseline-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            baseline: true,
+            controlledSelection: true,
+            actualFileRead: true,
+            fileClosed: true,
+            receiptHeldUntilRelease: !scenario.endsWith('healthy'),
+            realPickerShown: false,
+            inputAttempts: 0,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario === 'png-codec') {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -5547,6 +5652,14 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('diagnoses selected-file picker I/O holding shared Stop receipts', async () => {
+    await runScenarios([
+      'picker-baseline-healthy',
+      'picker-baseline-cancel',
+      'picker-baseline-close',
+    ]);
+  }, 700_000);
 
   it('matches raw and worker WIC PNG decoding without a desktop', async () => {
     await runScenarios(['png-codec']);
