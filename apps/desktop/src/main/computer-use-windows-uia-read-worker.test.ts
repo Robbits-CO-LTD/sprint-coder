@@ -154,20 +154,24 @@ function workerSource(): string {
 function focusReceiptSource(): string {
   const observe = cut('bool ObserveWindowsWindow(', '// BEGIN artifact read');
   const transfer =
-    /session\.focused_element_signature = [^\n]+\n\s*session\.has_focused_element_signature = [^\n]+/u.exec(
+    /session\.focused_element_signature(?: = [^\n]+|\.swap\(focused_element_signature\);)/u.exec(
       observe,
-    )?.[0];
-  const wire = /\(has_focused_element_signature\s*\?[\s\S]*?:\s*"null"\)/u.exec(observe)?.[0];
-  if (!transfer || !wire) throw new Error('Focus receipt source boundary changed');
+    );
+  const flag = /session\.has_focused_element_signature = [^\n]+/u.exec(observe);
+  const wire = /\(has_focused_element_signature\s*\?[\s\S]*?:\s*"null"\)/u.exec(observe);
+  if (!transfer || !flag || !wire) throw new Error('Focus receipt source boundary changed');
+  const take = `${transfer[0]}\n${flag[0]}`;
+  const serialize = `const std::string receipt=${wire[0]};`;
+  const ordered = wire.index < transfer.index ? `${serialize}\n${take}` : `${take}\n${serialize}`;
   return String.raw`
 void Check(bool,const char*);
 void FocusReceiptContract(){
   struct FocusBinding {std::string focused_element_signature;bool has_focused_element_signature=false;};
   for(bool has_focused_element_signature:{true,false}){
     FocusBinding session;
+    session.focused_element_signature=std::string(64,'b');
     std::string focused_element_signature=has_focused_element_signature?std::string(64,'a'):"";
-    ${transfer}
-    const std::string receipt=${wire};
+    ${ordered}
     std::cout<<"FOCUS_RECEIPT:"<<receipt<<"\n";
     Check(receipt==(has_focused_element_signature?"\""+std::string(64,'a')+"\"":"null"),"focus receipt retains digest after ownership transfer");
   }

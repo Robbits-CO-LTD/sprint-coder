@@ -337,20 +337,18 @@ function instrumentedHost(): string {
     ['ClassifyWindowsFocusedElement(', 'Sc820ObserveRisk(', 1],
     ['ScreenBoundsPhysicalForWindow(', 'Sc820ObserveScreen(', 1],
     ['WindowsFocusedElementSignature(', 'Sc820ObserveSignature(', 1],
-    ['ComputePngPatchGrid(', 'Sc820PngGrid(', 1],
   ] as const) {
     if (observe.split(name).length !== count + 1)
       throw new Error('Observe dependency boundary changed');
     observe = observe.replaceAll(name, wrapper);
   }
   source = source.slice(0, observeFrom) + observe + source.slice(observeTo);
-  const patchFrom = source.indexOf('bool RevalidateVisualPatch(const WindowsSession &session,');
-  const patchTo = source.indexOf('\n#else', patchFrom);
-  if (patchFrom < 0 || patchTo < patchFrom) throw new Error('Visual patch boundary changed');
-  source =
-    source.slice(0, patchFrom) +
-    replaceOnce(source.slice(patchFrom, patchTo), 'ComputePngPatchDigest(', 'Sc820PngDigest(') +
-    source.slice(patchTo);
+  const pngFrom = source.indexOf('bool ReadWindowsPng(std::vector');
+  const pngTo = source.indexOf('// BEGIN windows semantic operation ownership', pngFrom);
+  if (pngFrom < 0 || pngTo < pngFrom) throw new Error('PNG worker boundary changed');
+  let png = replaceOnce(source.slice(pngFrom, pngTo), 'ComputePngPatchGrid(', 'Sc820PngGrid(');
+  png = replaceOnce(png, 'ComputePngPatchDigest(', 'Sc820PngDigest(');
+  source = source.slice(0, pngFrom) + png + source.slice(pngTo);
   const captureFrom = source.indexOf('// BEGIN windows capture read ownership');
   const captureTo = source.indexOf('// END windows capture read ownership', captureFrom);
   if (captureFrom < 0 || captureTo < captureFrom)
@@ -4120,25 +4118,26 @@ int DiagnosePngStall(std::wstring_view scenario){
     if(png_healthy_control){
       std::string body;bool ok=false,stored=false,wire=true;
       Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ok&&
-        ReadOptionalJsonBoolean(body,"focusStoredValid",&stored)&&stored&&ReadOptionalJsonBoolean(body,"focusWireValid",&wire)&&!wire,"observe_focus_wire_moved_string_reproduced");
+        ReadOptionalJsonBoolean(body,"focusStoredValid",&stored)&&stored&&ReadOptionalJsonBoolean(body,"focusWireValid",&wire)&&wire,"observe_focus_wire_preserved");
       run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");Require(run.Wait(3,1000)&&run.Receipt(3,MessageType::kProbeResult,"closed",2),"png_healthy_close");
       png_stall_mode=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"png_healthy_cleanup");
-      std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"focusStoredValid\":true,\"focusWireValid\":false,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true}\n";return 0;
+      std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"focusStoredValid\":true,\"focusWireValid\":true,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true}\n";return 0;
     }
     Require(WaitForSingleObject(run.entered.value,5000)==WAIT_OBJECT_0&&png_stall_calls==1,"png_consumer_entered");
     const auto before=WindowsTargetListControl().stop_serial.load();const auto started=GetTickCount64();
     if(cancel)run.Send(MessageType::kCancel,3,"{\"cancelEpoch\":2}");else run.Send(MessageType::kProbe,3,"{\"operation\":\"close_session\",\"cancelEpoch\":2}");
-    Require(WaitStopSerial(before,1000)&&!run.Wait(3,1100)&&run.ReplyCount(2)==0,"png_reader_progress_consumer_blocked");
-    const auto held_ms=GetTickCount64()-started;SetEvent(run.release.value);
+    Require(WaitStopSerial(before,1000)&&run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"png_stop_before_release");
+    const auto held_ms=GetTickCount64()-started;
     std::string body,reason;bool ok=false;Require(run.Wait(2,5000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok),"png_result_shape");
     if(observe){bool empty=true,observed=false;std::uint64_t revision=0;
-      Require(ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&!empty&&ReadOptionalJsonBoolean(body,"hasObservation",&observed)&&observed&&ReadJsonUint64(body,"revision",&revision)&&revision==1,"png_late_observation_commit_reproduced");
+      Require(!ok&&ReadOptionalJsonBoolean(body,"empty",&empty)&&empty&&ReadOptionalJsonBoolean(body,"hasObservation",&observed)&&!observed&&ReadJsonUint64(body,"revision",&revision)&&revision==0,"png_no_late_observation_commit");
     }else{bool accepted=true;std::uint64_t attempts=1;
       Require(!ok&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&!accepted&&ReadJsonUint64(body,"attempts",&attempts)&&attempts==0&&ReadJsonString(body,"reason",&reason)&&reason=="native_visual_patch_changed","png_dispatch_no_input_control");}
-    Require(run.Wait(3,1000)&&run.Receipt(3,cancel?MessageType::kDispatchResult:MessageType::kProbeResult,cancel?"canceled":"closed",2),"png_stop_after_release");
+    Require(WindowsCaptureWorkerRunning().load()&&WaitForSingleObject(run.release.value,0)==WAIT_TIMEOUT,"png_worker_retained_after_consumer_stop");
     if(cancel){run.Send(MessageType::kProbe,4,"{\"operation\":\"close_session\",\"cancelEpoch\":3}");Require(run.Wait(4,1000)&&run.Receipt(4,MessageType::kProbeResult,"closed",3),"png_final_close");}
+    SetEvent(run.release.value);Require(run.WaitCaptureWorkerIdle(5000)&&run.ReplyCount(2)==1,"png_worker_retired_no_late_reply");
     png_stall_mode=false;run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load()&&!gate_timed_out.load(),"png_cleanup");
-    std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"actualCodecLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"receiptBeforeRelease\":false,\"lateNativeObservationCommit\":"<<(observe?"true":"false")<<",\"mainAdoptionTested\":false,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+    std::cout<<"{\"case\":\""<<label<<"\",\"controlledPngStage\":true,\"actualCodecLatencyMeasured\":false,\"heldMs\":"<<held_ms<<",\"receiptBeforeRelease\":true,\"lateNativeObservationCommit\":false,\"mainAdoptionTested\":false,\"inputAttempts\":0,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
   }catch(const std::exception& error){run.Cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
@@ -5124,7 +5123,7 @@ describe.skipIf(
               case: scenario,
               controlledPngStage: true,
               focusStoredValid: true,
-              focusWireValid: false,
+              focusWireValid: true,
               inputAttempts: 0,
               childExited: true,
               workerIdle: true,
@@ -5137,8 +5136,8 @@ describe.skipIf(
             controlledPngStage: true,
             actualCodecLatencyMeasured: false,
             heldMs: expect.any(Number),
-            receiptBeforeRelease: false,
-            lateNativeObservationCommit: scenario.includes('-observe-'),
+            receiptBeforeRelease: true,
+            lateNativeObservationCommit: false,
             mainAdoptionTested: false,
             inputAttempts: 0,
             childExited: true,
@@ -5434,7 +5433,7 @@ describe.skipIf(
     }
   }
 
-  it('diagnoses PNG consumer Stop delay and late native observation commit', async () => {
+  it('keeps PNG Stop responsive and prevents late native observation commit', async () => {
     await runScenarios([
       'png-stall-observe-healthy',
       'png-stall-observe-cancel',

@@ -7591,6 +7591,14 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
                                       std::vector<std::uint8_t> *output,
                                       std::size_t *width, std::size_t *height,
                                       WindowsV1UiaStop *stop = nullptr);
+bool ReadWindowsPngPatchGrid(std::vector<std::uint8_t> *png, std::size_t width,
+                             std::size_t height, std::uint64_t epoch, std::uint64_t serial,
+                             std::vector<std::string> *digests, std::size_t *columns,
+                             std::size_t *rows, WindowsV1UiaStop *stop);
+bool ReadWindowsPngPatchDigest(std::vector<std::uint8_t> *png, std::size_t width,
+                               std::size_t height, double x, double y,
+                               std::uint64_t epoch, std::uint64_t serial,
+                               std::string *digest, std::size_t *index);
 
 #if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
 bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
@@ -8082,9 +8090,10 @@ bool RevalidateVisualPatch(const WindowsSession &session, double normalized_x,
   }
   std::string current_digest;
   std::size_t current_patch_index = 0;
-  const bool decoded = ComputePngPatchDigest(
-      current_screenshot, current_width, current_height, normalized_x,
-      normalized_y, &current_digest, &current_patch_index);
+  const bool decoded = ReadWindowsPngPatchDigest(
+      &current_screenshot, current_width, current_height, normalized_x,
+      normalized_y, session.cancel_epoch, WindowsValidationFrameStopSerial(),
+      &current_digest, &current_patch_index);
   std::fill(current_screenshot.begin(), current_screenshot.end(), 0);
   if (!decoded || current_patch_index != patch_index ||
       current_digest != session.observation_patch_digests[patch_index]) {
@@ -8441,13 +8450,10 @@ private:
   WindowsV1UiaLane *previous_;
 };
 
-bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
-                                      std::uint64_t stop_serial,
-                                      std::vector<std::uint8_t> *output,
-                                      std::size_t *width, std::size_t *height,
-                                      WindowsV1UiaStop *stop) {
+template<class Result, class Measure, class Adopt>
+bool RunWindowsImageRead(std::uint64_t epoch, std::uint64_t stop_serial,
+                         Measure measure, Adopt adopt, WindowsV1UiaStop *stop) {
   if (stop != nullptr) *stop = WindowsV1UiaStop::kNone;
-#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
   WindowsV1UiaLane snapshot = windows_v1_uia_lane != nullptr
       ? *windows_v1_uia_lane : WindowsV1UiaLane{};
   snapshot.epoch = epoch;
@@ -8456,11 +8462,25 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
   // A failed focus read may omit a signature without invalidating a screenshot. Preserve the
   // caller's timeout state, but give capture its own lane and slot while retaining Stop/deadline.
   if (snapshot.stop == WindowsV1UiaStop::kTimeout) snapshot.stop = WindowsV1UiaStop::kNone;
-  std::unique_ptr<WindowsCaptureBytes> result;
-  bool captured = false;
+  bool read = false;
   {
     const WindowsCaptureLaneScope scope(&snapshot);
-    captured = RunWindowsUiaRead<std::unique_ptr<WindowsCaptureBytes>>(false,
+    read = RunWindowsUiaRead<Result>(false, std::move(measure), std::move(adopt),
+                                    WindowsCaptureWorkerRunning());
+  }
+  if (stop != nullptr) *stop = snapshot.stop;
+  return read;
+}
+
+bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
+                                      std::uint64_t stop_serial,
+                                      std::vector<std::uint8_t> *output,
+                                      std::size_t *width, std::size_t *height,
+                                      WindowsV1UiaStop *stop) {
+  if (stop != nullptr) *stop = WindowsV1UiaStop::kNone;
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  std::unique_ptr<WindowsCaptureBytes> result;
+  const bool captured = RunWindowsImageRead<std::unique_ptr<WindowsCaptureBytes>>(epoch, stop_serial,
         [window]() -> std::optional<std::unique_ptr<WindowsCaptureBytes>> {
           winrt::init_apartment(winrt::apartment_type::multi_threaded);
           struct Runtime { ~Runtime() { winrt::uninit_apartment(); } } runtime;
@@ -8471,9 +8491,7 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
           return value;
         }, [&result](std::unique_ptr<WindowsCaptureBytes> value) noexcept {
           result = std::move(value);
-        }, WindowsCaptureWorkerRunning());
-  }
-  if (stop != nullptr) *stop = snapshot.stop;
+        }, stop);
   if (captured) {
     output->swap(result->bytes);
     *width = result->width;
@@ -8488,6 +8506,68 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
   return false;
 }
 // END windows capture read ownership
+
+// PNG bytes are transferred into one image job, never borrowed from the consumer's output buffer.
+struct WindowsPngResult {
+  WindowsCaptureBytes image;
+  std::vector<std::string> digests;
+  std::string digest;
+  std::size_t columns = 0, rows = 0, index = 0;
+};
+
+bool ReadWindowsPng(std::vector<std::uint8_t> *png, std::size_t width, std::size_t height,
+                    std::uint64_t epoch, std::uint64_t serial, bool grid, double x, double y,
+                    std::unique_ptr<WindowsPngResult> *result, WindowsV1UiaStop *stop) {
+  if (stop != nullptr) *stop = WindowsV1UiaStop::kNone;
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  try {
+    if (!png->empty() && png->size() <= 8 * 1024 * 1024 && width > 0 && height > 0 &&
+        width <= 2'560 && height <= 1'600) {
+      auto work = std::make_unique<WindowsPngResult>();
+      work->image.bytes.swap(*png);
+      work->image.width = width; work->image.height = height;
+      return RunWindowsImageRead<std::unique_ptr<WindowsPngResult>>(epoch, serial,
+          [work = std::move(work), grid, x, y]() mutable -> std::optional<std::unique_ptr<WindowsPngResult>> {
+            if (!WindowsV1UiaMayCall()) return std::nullopt;
+            const bool ok = grid
+                ? ComputePngPatchGrid(work->image.bytes, work->image.width, work->image.height,
+                                      &work->digests, &work->columns, &work->rows)
+                : ComputePngPatchDigest(work->image.bytes, work->image.width, work->image.height,
+                                        x, y, &work->digest, &work->index);
+            if (!ok || !WindowsV1UiaMayCall()) return std::nullopt;
+            return std::move(work);
+          }, [result](std::unique_ptr<WindowsPngResult> value) noexcept {
+            *result = std::move(value);
+          }, stop);
+    }
+  } catch (...) {}
+#else
+  (void)width; (void)height; (void)epoch; (void)serial; (void)grid; (void)x; (void)y; (void)result;
+#endif
+  std::fill(png->begin(), png->end(), 0); png->clear();
+  return false;
+}
+
+bool ReadWindowsPngPatchGrid(std::vector<std::uint8_t> *png, std::size_t width,
+                             std::size_t height, std::uint64_t epoch, std::uint64_t serial,
+                             std::vector<std::string> *digests, std::size_t *columns,
+                             std::size_t *rows, WindowsV1UiaStop *stop) {
+  std::unique_ptr<WindowsPngResult> result;
+  if (!ReadWindowsPng(png, width, height, epoch, serial, true, 0, 0, &result, stop)) return false;
+  png->swap(result->image.bytes); digests->swap(result->digests);
+  *columns = result->columns; *rows = result->rows;
+  return true;
+}
+
+bool ReadWindowsPngPatchDigest(std::vector<std::uint8_t> *png, std::size_t width,
+                               std::size_t height, double x, double y,
+                               std::uint64_t epoch, std::uint64_t serial,
+                               std::string *digest, std::size_t *index) {
+  std::unique_ptr<WindowsPngResult> result;
+  if (!ReadWindowsPng(png, width, height, epoch, serial, false, x, y, &result, nullptr)) return false;
+  png->swap(result->image.bytes); digest->swap(result->digest); *index = result->index;
+  return true;
+}
 
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
@@ -11117,62 +11197,93 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   std::vector<std::string> patch_digests;
   std::size_t patch_columns = 0;
   std::size_t patch_rows = 0;
-  if (!ComputePngPatchGrid(*binary, width, height, &patch_digests,
-                           &patch_columns, &patch_rows)) {
+  WindowsV1UiaStop png_stop = WindowsV1UiaStop::kNone;
+  if (!ReadWindowsPngPatchGrid(binary, width, height, session.cancel_epoch,
+                              observe_stop_serial, &patch_digests, &patch_columns,
+                              &patch_rows, &png_stop)) {
     binary->clear();
-    *reason = "visual_binding_unavailable";
+    *reason = WindowsV1ObserveReason(png_stop, "visual_binding_unavailable");
     return false;
   }
-  binary->reserve(screenshot_bytes + tree_bytes);
-  binary->insert(binary->end(), tree.begin(), tree.end());
-  if (session.dialog_set_digest != dialogs.digest)
-    session.dialog_set_revision += 1;
-  session.observation_revision += 1;
-  session.active_window = dialogs.active_window;
-  session.active_window_identity = dialogs.active_identity;
-  session.active_window_kind = dialogs.active_kind;
-  session.dialog_set_digest = dialogs.digest;
-  session.observation_bounds = bounds;
-  session.observation_capture_width = width;
-  session.observation_capture_height = height;
-  session.observation_patch_columns = patch_columns;
-  session.observation_patch_rows = patch_rows;
-  for (auto &digest : session.observation_patch_digests)
-    std::fill(digest.begin(), digest.end(), '0');
-  session.observation_patch_digests = std::move(patch_digests);
-  session.focused_element_signature = std::move(focused_element_signature);
-  session.has_focused_element_signature = has_focused_element_signature;
-  session.semantic_control_signatures = std::move(stable_bindings.semantic);
-  session.visual_control_signatures = std::move(stable_bindings.visual);
-  session.has_observation = true;
+  std::vector<std::uint8_t> staged_binary;
+  staged_binary.swap(*binary);
+  struct StagedBytes {
+    std::vector<std::uint8_t> &bytes;
+    ~StagedBytes() { std::fill(bytes.begin(), bytes.end(), 0); }
+  } staged_bytes{staged_binary};
+  staged_binary.reserve(screenshot_bytes + tree_bytes);
+  staged_binary.insert(staged_binary.end(), tree.begin(), tree.end());
+  const auto next_revision = session.observation_revision + 1;
+  const auto next_dialog_revision = session.dialog_set_revision +
+      (session.dialog_set_digest != dialogs.digest ? 1 : 0);
   const auto window_value =
       static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(session.window));
-  *response =
+  std::string staged_response =
       "{\"result\":\"completed\",\"pid\":" + std::to_string(session.pid) +
       ",\"windowId\":\"" + std::to_string(window_value) +
       "\",\"captureWidth\":" + std::to_string(width) +
       ",\"captureHeight\":" + std::to_string(height) +
-      ",\"revision\":" + std::to_string(session.observation_revision) +
+      ",\"revision\":" + std::to_string(next_revision) +
       ",\"screenshotMimeType\":\"image/png\",\"screenshotBytes\":" +
       std::to_string(screenshot_bytes) +
       ",\"treeBytes\":" + std::to_string(tree_bytes) +
       ",\"treeNodeCount\":" + std::to_string(nodes) +
       ",\"dialogSetRevision\":" +
-      std::to_string(session.dialog_set_revision) +
-      ",\"dialogSetDigest\":\"" + session.dialog_set_digest +
+      std::to_string(next_dialog_revision) +
+      ",\"dialogSetDigest\":\"" + dialogs.digest +
       "\",\"activeWindowIdentityDigest\":\"" +
-      session.active_window_identity + "\",\"activeWindowKind\":\"" +
-      session.active_window_kind + "\"" +
+      dialogs.active_identity + "\",\"activeWindowKind\":\"" +
+      dialogs.active_kind + "\"" +
       ",\"policyLanguage\":\"" + session.policy_language + "\"" +
       ",\"maximumMode\":\"" + session.maximum_mode +
       "\",\"screenBounds\":" + RectJson(screen_bounds) +
       ",\"focusedElementSignature\":" +
       (has_focused_element_signature
-           ? "\"" + session.focused_element_signature + "\""
+           ? "\"" + focused_element_signature + "\""
            : "null") +
       ",\"focusedElementSecure\":" + (focused_risk.secure ? "true" : "false") +
       ",\"focusedElementHighImpact\":" +
       (focused_risk.high_impact ? "true" : "false") + "}";
+  static_assert(std::is_nothrow_swappable_v<std::string> &&
+      std::is_nothrow_swappable_v<decltype(session.observation_patch_digests)> &&
+      std::is_nothrow_swappable_v<decltype(session.semantic_control_signatures)> &&
+      std::is_nothrow_swappable_v<decltype(session.visual_control_signatures)>);
+  const char *commit_failure = nullptr;
+  {
+    // The consumer owns Session state. Reader Stop and parent-death latches use this same lock.
+    // All payload preparation and allocating work precede this publication boundary.
+    std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+    if (!WindowsValidationStillCurrent(session.cancel_epoch, observe_stop_serial)) {
+      commit_failure = "observation_stale";
+    }
+    else if (windows_v1_uia_lane != nullptr && windows_v1_uia_lane->has_deadline &&
+        std::chrono::steady_clock::now() > windows_v1_uia_lane->deadline) {
+      commit_failure = "observation_timeout";
+    }
+    if (commit_failure == nullptr) {
+    session.dialog_set_revision = next_dialog_revision;
+    session.observation_revision = next_revision;
+    session.active_window = dialogs.active_window;
+    session.active_window_identity.swap(dialogs.active_identity);
+    session.active_window_kind.swap(dialogs.active_kind);
+    session.dialog_set_digest.swap(dialogs.digest);
+    session.observation_bounds = bounds;
+    session.observation_capture_width = width;
+    session.observation_capture_height = height;
+    session.observation_patch_columns = patch_columns;
+    session.observation_patch_rows = patch_rows;
+    session.observation_patch_digests.swap(patch_digests);
+    session.focused_element_signature.swap(focused_element_signature);
+    session.has_focused_element_signature = has_focused_element_signature;
+    session.semantic_control_signatures.swap(stable_bindings.semantic);
+    session.visual_control_signatures.swap(stable_bindings.visual);
+    session.has_observation = true;
+    response->swap(staged_response);
+    binary->swap(staged_binary);
+    }
+  }
+  if (commit_failure != nullptr) { *reason = commit_failure; return false; }
+  for (auto &digest : patch_digests) std::fill(digest.begin(), digest.end(), '0');
   reason->clear();
   return true;
 }
@@ -11883,8 +11994,11 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     parent_watcher = std::thread([parent, pipe, &serving]() {
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {
-          parent_process_dead.store(true, std::memory_order_release);
-          cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+          {
+            std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+            parent_process_dead.store(true, std::memory_order_release);
+            cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+          }
           CancelIoEx(pipe, nullptr);
           DisconnectNamedPipe(pipe);
           break;
