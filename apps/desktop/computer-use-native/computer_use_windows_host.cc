@@ -11168,7 +11168,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
       "\",\"screenBounds\":" + RectJson(screen_bounds) +
       ",\"focusedElementSignature\":" +
       (has_focused_element_signature
-           ? "\"" + focused_element_signature + "\""
+           ? "\"" + session.focused_element_signature + "\""
            : "null") +
       ",\"focusedElementSecure\":" + (focused_risk.secure ? "true" : "false") +
       ",\"focusedElementHighImpact\":" +
