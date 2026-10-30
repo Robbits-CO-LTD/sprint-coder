@@ -4131,6 +4131,37 @@ int DiagnoseRealCapture(){
 #endif
 }
 
+
+int DiagnosePngCodec(){
+#if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  std::cout<<"{\"failure\":\"png_codec_sdk_unavailable\"}\n";return 1;
+#else
+  try {
+    Require(SUCCEEDED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)),"png_codec_sta");
+    struct Com {~Com(){CoUninitialize();}} com;
+    // Generated RGBA PNG: 65x65, four distinct 64px edge patches; no desktop capture.
+    const std::vector<std::uint8_t> original{137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,65,0,0,0,65,8,6,0,0,0,142,247,201,69,0,0,0,115,73,68,65,84,120,156,237,208,177,13,0,32,12,3,193,108,206,232,6,49,2,77,144,114,197,39,173,117,85,181,50,185,220,255,193,16,8,16,250,131,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,66,123,16,32,64,128,0,1,2,4,8,16,32,64,128,0,1,2,4,8,16,158,17,114,206,224,114,218,43,163,35,116,163,128,59,106,0,0,0,0,73,69,78,68,174,66,96,130};
+    std::vector<std::uint8_t> worker=original;std::vector<std::string> direct_grid,worker_grid;
+    std::size_t dc=0,dr=0,wc=0,wr=0;WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
+    Require(ComputePngPatchGrid(original,65,65,&direct_grid,&dc,&dr)&&
+      ReadWindowsPngPatchGrid(&worker,65,65,0,0,&worker_grid,&wc,&wr,&stop)&&
+      stop==WindowsV1UiaStop::kNone&&worker==original&&direct_grid==worker_grid&&dc==wc&&dr==wr&&wc==2&&wr==2,"png_codec_grid_equality");
+    for(double x:{0.0,1.0})for(double y:{0.0,1.0}){
+      std::string direct_digest,worker_digest;std::size_t direct_index=99,worker_index=88;
+      Require(ComputePngPatchDigest(original,65,65,x,y,&direct_digest,&direct_index)&&
+        ReadWindowsPngPatchDigest(&worker,65,65,x,y,0,0,&worker_digest,&worker_index)&&
+        worker==original&&direct_digest==worker_digest&&direct_index==worker_index&&worker_digest==worker_grid[worker_index],"png_codec_edge_digest_equality");
+    }
+    for(bool invalid_bytes:{false,true}){
+      auto input=invalid_bytes?std::vector<std::uint8_t>{1,2}:original;std::string digest="unchanged";std::size_t index=77;
+      Require(!ReadWindowsPngPatchDigest(&input,invalid_bytes?65:64,65,0.5,0.5,0,0,&digest,&index)&&input.empty()&&digest=="unchanged"&&index==77,"png_codec_invalid_input_no_adoption");
+    }
+    Require(!WindowsCaptureWorkerRunning(),"png_codec_worker_retired");
+    std::cout<<"{\"case\":\"png-codec\",\"actualWic\":true,\"generatedFixture\":true,\"gridAndFourEdgesEqual\":true,\"invalidInputsRejected\":true,\"workerIdle\":true,\"inputAttempts\":0,\"actualCapture\":false}\n";return 0;
+  }catch(const std::exception& error){std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+#endif
+}
+
 int DiagnoseObserveCommit(std::wstring_view scenario){
   const std::string label(scenario.begin(),scenario.end());const bool cancel=scenario.ends_with(L"-cancel");
   png_commit_mode=label.find("-after-")!=std::string::npos?"after":label.ends_with("-deadline")?"deadline":label.ends_with("-parent")?"parent":"before";
@@ -4724,6 +4755,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1])==L"png-codec")return DiagnosePngCodec();
   if (std::wstring_view(argv[1]).starts_with(L"observe-commit-"))return DiagnoseObserveCommit(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"png-stall-"))return DiagnosePngStall(argv[1]);
   if (std::wstring_view(argv[1])==L"capture-real")return DiagnoseRealCapture();
@@ -5172,6 +5204,20 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario === 'png-codec') {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            actualWic: true,
+            generatedFixture: true,
+            gridAndFourEdgesEqual: true,
+            invalidInputsRejected: true,
+            workerIdle: true,
+            inputAttempts: 0,
+            actualCapture: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('observe-commit-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -5501,6 +5547,10 @@ describe.skipIf(
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('matches raw and worker WIC PNG decoding without a desktop', async () => {
+    await runScenarios(['png-codec']);
+  }, 700_000);
 
   it('orders final observation commit against Stop, parent death and deadline', async () => {
     await runScenarios([

@@ -11261,25 +11261,25 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
       commit_failure = "observation_timeout";
     }
     if (commit_failure == nullptr) {
-    session.dialog_set_revision = next_dialog_revision;
-    session.observation_revision = next_revision;
-    session.active_window = dialogs.active_window;
-    session.active_window_identity.swap(dialogs.active_identity);
-    session.active_window_kind.swap(dialogs.active_kind);
-    session.dialog_set_digest.swap(dialogs.digest);
-    session.observation_bounds = bounds;
-    session.observation_capture_width = width;
-    session.observation_capture_height = height;
-    session.observation_patch_columns = patch_columns;
-    session.observation_patch_rows = patch_rows;
-    session.observation_patch_digests.swap(patch_digests);
-    session.focused_element_signature.swap(focused_element_signature);
-    session.has_focused_element_signature = has_focused_element_signature;
-    session.semantic_control_signatures.swap(stable_bindings.semantic);
-    session.visual_control_signatures.swap(stable_bindings.visual);
-    session.has_observation = true;
-    response->swap(staged_response);
-    binary->swap(staged_binary);
+      session.dialog_set_revision = next_dialog_revision;
+      session.observation_revision = next_revision;
+      session.active_window = dialogs.active_window;
+      session.active_window_identity.swap(dialogs.active_identity);
+      session.active_window_kind.swap(dialogs.active_kind);
+      session.dialog_set_digest.swap(dialogs.digest);
+      session.observation_bounds = bounds;
+      session.observation_capture_width = width;
+      session.observation_capture_height = height;
+      session.observation_patch_columns = patch_columns;
+      session.observation_patch_rows = patch_rows;
+      session.observation_patch_digests.swap(patch_digests);
+      session.focused_element_signature.swap(focused_element_signature);
+      session.has_focused_element_signature = has_focused_element_signature;
+      session.semantic_control_signatures.swap(stable_bindings.semantic);
+      session.visual_control_signatures.swap(stable_bindings.visual);
+      session.has_observation = true;
+      response->swap(staged_response);
+      binary->swap(staged_binary);
     }
   }
   if (commit_failure != nullptr) { *reason = commit_failure; return false; }

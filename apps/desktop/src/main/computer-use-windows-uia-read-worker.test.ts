@@ -144,6 +144,7 @@ function workerSource(): string {
     ) +
     engine +
     capture +
+    cut('// PNG bytes are transferred', '// BEGIN windows semantic operation ownership') +
     cut(
       '// BEGIN windows semantic operation ownership',
       '// END windows semantic operation ownership',
@@ -203,6 +204,9 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('PASS: UIA read engine policies and ownership');
     expect(result.stdout).toContain('PASS: capture slot, lane, output, Runtime and Stop policies');
+    expect(result.stdout).toContain(
+      'PASS: PNG owned bytes, image slot, failures and Stop policies',
+    );
     const receipts = [...result.stdout.matchAll(/^FOCUS_RECEIPT:(.*)$/gmu)].map(
       (match) => JSON.parse(match[1]!) as unknown,
     );
@@ -232,6 +236,7 @@ const preamble = String.raw`
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <span>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -247,6 +252,17 @@ std::function<bool(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*)> c
 void TestCaptureScrub(const std::vector<std::uint8_t>& bytes){
   if(!std::all_of(bytes.begin(),bytes.end(),[](auto value){return value==0;}))capture_scrubbed=false;
   capture_scrubs.fetch_add(1);capture_owned_values.fetch_sub(1);
+}
+std::function<bool()> png_measure=[] {return true;};
+std::atomic<unsigned> png_calls{0};
+bool ComputePngPatchGrid(std::span<const std::uint8_t> bytes,std::size_t width,std::size_t height,std::vector<std::string>* digests,std::size_t* columns,std::size_t* rows){
+  png_calls.fetch_add(1);if(!png_measure())return false;
+  if(bytes.size()!=4||bytes[0]!=1||width!=2||height!=2)throw std::runtime_error("PNG input ownership changed");
+  *digests={"grid"};*columns=2;*rows=3;return true;
+}
+bool ComputePngPatchDigest(std::span<const std::uint8_t> bytes,std::size_t width,std::size_t height,double x,double y,std::string* digest,std::size_t* index){
+  std::vector<std::string> grid;std::size_t c=0,r=0;if(!ComputePngPatchGrid(bytes,width,height,&grid,&c,&r))return false;
+  if(x!=0.25||y!=0.75)throw std::runtime_error("PNG coordinates changed");*digest="digest";*index=4;return true;
 }
 namespace winrt {
 enum class apartment_type {multi_threaded};
@@ -291,7 +307,7 @@ void Check(bool ok,const char* name){if(!ok)throw std::runtime_error(name);}
 bool Drain(){const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(WindowsUiaReadWorkerRunning().load()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(1));return !WindowsUiaReadWorkerRunning().load();}
 bool DrainCapture(){const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);while((WindowsCaptureWorkerRunning().load()||capture_owned_values.load()!=0)&&std::chrono::steady_clock::now()<until)Sleep(1);return !WindowsCaptureWorkerRunning().load()&&capture_owned_values==0;}
 bool CaptureValue(HWND,std::vector<std::uint8_t>* bytes,std::size_t* width,std::size_t* height){*bytes={1,2,3,4};*width=2;*height=2;return true;}
-void Reset(){ReleaseAll();Check(Drain()&&DrainCapture(),"previous worker drained");cleanup_gate.reset();adoption_gate.reset();all_gates.clear();initialized=0;cleanup_entered=0;cleaned=0;fail_thread=false;fail_init=false;cancellation_epoch=0;parent_process_dead=false;WindowsTargetListControl().stop_serial=0;capture_measure=CaptureValue;capture_calls=0;capture_scrubs=0;capture_scrubbed=true;runtime_inits=0;runtime_uninits=0;fail_runtime=false;}
+void Reset(){ReleaseAll();Check(Drain()&&DrainCapture(),"previous worker drained");cleanup_gate.reset();adoption_gate.reset();all_gates.clear();initialized=0;cleanup_entered=0;cleaned=0;fail_thread=false;fail_init=false;cancellation_epoch=0;parent_process_dead=false;WindowsTargetListControl().stop_serial=0;capture_measure=CaptureValue;capture_calls=0;capture_scrubs=0;capture_scrubbed=true;runtime_inits=0;runtime_uninits=0;fail_runtime=false;png_calls=0;png_measure=[] {return true;};}
 void Stop(bool epoch=true){auto& c=WindowsTargetListControl();std::lock_guard lock(c.stop_mutex);c.stop_serial.fetch_add(1);if(epoch)cancellation_epoch.fetch_add(1);}
 struct Sample {bool secure=false,complete=false;std::string signature;};
 struct Outcome {bool ok=false;Sample value;WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;std::size_t nodes=0;};
@@ -425,6 +441,50 @@ void CapturePolicies(){
     Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&out.bytes.empty()&&out.parent_preserved&&DrainCapture()&&capture_scrubbed,"Stop wins against complete capture before adoption");}
   Reset();std::cout<<"PASS: capture slot, lane, output, Runtime and Stop policies\n";
 }
+
+struct PngOutcome {
+  bool ok=false,parent_preserved=false;WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
+  std::vector<std::uint8_t> bytes{1,2,3,4};std::vector<std::string> grid{"unchanged"};
+  std::string digest="unchanged";std::size_t columns=99,rows=77,index=66;
+};
+bool ReadPng(PngOutcome& out,bool grid,std::size_t width=2){
+  return grid?ReadWindowsPngPatchGrid(&out.bytes,width,2,0,0,&out.grid,&out.columns,&out.rows,&out.stop):
+    ReadWindowsPngPatchDigest(&out.bytes,width,2,0.25,0.75,0,0,&out.digest,&out.index);
+}
+struct PngCall {
+  std::promise<PngOutcome> promise;std::future<PngOutcome> future=promise.get_future();std::thread thread;
+  PngCall(bool grid=true,int budget=0,WindowsV1UiaStop prior=WindowsV1UiaStop::kNone){thread=std::thread([this,grid,budget,prior]{try{
+    const WindowsValidationFrameScope frame(0);const WindowsV1UiaPath path(std::chrono::milliseconds(budget),0,0);
+    auto* parent=windows_v1_uia_lane;parent->stop=prior;parent->nodes=9;const auto before=*parent;
+    PngOutcome out;out.ok=ReadPng(out,grid);
+    out.parent_preserved=windows_v1_uia_lane==parent&&parent->stop==before.stop&&parent->nodes==before.nodes&&parent->has_deadline==before.has_deadline&&(!before.has_deadline||parent->deadline==before.deadline);
+    promise.set_value(std::move(out));
+  }catch(...){promise.set_exception(std::current_exception());}});}
+  bool Ready(int ms=1000){return future.wait_for(std::chrono::milliseconds(ms))==std::future_status::ready;}
+  PngOutcome Take(){Check(Ready(),"PNG consumer deadline");return future.get();}
+  ~PngCall(){ReleaseAll();if(thread.joinable())thread.join();}
+};
+void PngUnchanged(const PngOutcome& out){Check(!out.ok&&out.bytes.empty()&&out.grid==std::vector<std::string>{"unchanged"}&&out.digest=="unchanged"&&out.columns==99&&out.rows==77&&out.index==66,"PNG failure consumes bytes and preserves output sentinels");}
+void PngPolicies(){
+  for(bool grid:{true,false}){Reset();PngCall call(grid,1000,WindowsV1UiaStop::kTimeout);const auto out=call.Take();
+    Check(out.ok&&out.parent_preserved&&out.bytes==std::vector<std::uint8_t>({1,2,3,4})&&
+      (grid?(out.grid==std::vector<std::string>{"grid"}&&out.columns==2&&out.rows==3):(out.digest=="digest"&&out.index==4)),"PNG healthy input/result/lane contract");
+    Check(DrainCapture()&&runtime_inits==0&&capture_scrubbed,"PNG uses COM without WinRT and retires ownership");}
+  for(std::size_t width:{0u,2561u}){Reset();PngOutcome out;out.ok=ReadPng(out,true,width);PngUnchanged(out);Check(png_calls==0&&initialized==0,"invalid PNG dimensions rejected before worker");}
+  for(int fault=0;fault<4;++fault){Reset();if(fault==0)fail_thread=true;else if(fault==1)fail_init=true;else if(fault==2)png_measure=[] {return false;};else png_measure=[]()->bool {throw std::runtime_error("codec fault");};
+    PngCall call;const auto out=call.Take();PngUnchanged(out);Check(out.parent_preserved&&DrainCapture()&&capture_scrubbed,"PNG fault restores ownership and TLS");}
+  for(int ending=0;ending<3;++ending){Reset();auto gate=MakeGate();png_measure=[gate]{gate->Hold();return true;};{
+    PngCall call(true,ending==2?100:0);Check(gate->Wait(),"PNG worker held");
+    if(ending!=2){PngOutcome rejected;rejected.ok=ReadPng(rejected,true);PngUnchanged(rejected);
+      CaptureOutcome capture;capture.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&capture.bytes,&capture.width,&capture.height,&capture.stop);
+      Check(!capture.ok&&capture_calls==0&&png_calls==1&&WindowsCaptureWorkerRunning(),"busy image slot rejects PNG and capture");Stop(ending==0);}
+    const auto out=call.Take();PngUnchanged(out);Check(out.parent_preserved&&WindowsCaptureWorkerRunning(),"PNG Stop retains running worker ownership");
+    gate->Release();Check(DrainCapture()&&capture_scrubbed,"PNG late input/result scrub and slot retirement");
+  }}
+  Reset();adoption_gate=MakeGate();{PngCall call;Check(adoption_gate->Wait(),"PNG adoption gate");Stop(false);adoption_gate->Release();const auto out=call.Take();PngUnchanged(out);Check(DrainCapture()&&capture_scrubbed,"completed PNG cannot publish after Stop");}
+  Reset();std::cout<<"PASS: PNG owned bytes, image slot, failures and Stop policies\n";
+}
+
 int main(){try {
   FocusReceiptContract();
   // Same-epoch prequeued Close must use the frame's old serial, not the current global one.
@@ -491,6 +551,7 @@ int main(){try {
   Check(Drain()&&initialized==6&&cleaned==6,"all apartments retired");
   SemanticPolicies();
   CapturePolicies();
+  PngPolicies();
   std::cout<<"PASS: UIA read engine policies and ownership\n";return 0;
 } catch(const std::exception& error){ReleaseAll();std::cerr<<"FAIL: "<<error.what()<<"\n";return 1;}}
 `;
