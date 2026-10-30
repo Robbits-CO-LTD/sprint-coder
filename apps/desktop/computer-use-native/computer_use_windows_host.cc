@@ -7849,6 +7849,7 @@ bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
     *height = capture_height;
     return !output->empty();
   } catch (...) {
+    std::fill(output->begin(), output->end(), 0);
     output->clear();
     return false;
   }
