@@ -7296,6 +7296,12 @@ std::atomic<bool> &WindowsUiaReadWorkerRunning() {
   return *running;
 }
 
+std::atomic<bool> &WindowsCaptureWorkerRunning() {
+  // A stalled capture must not block a healthy UIA read, or inherit a timed-out UIA worker's slot.
+  static auto *running = new std::atomic<bool>{false};
+  return *running;
+}
+
 struct WindowsV1UiaLane {
   bool has_deadline = false;
   std::chrono::steady_clock::time_point deadline;
@@ -7580,11 +7586,17 @@ bool HasGraphicsCaptureFactory() {
 #endif
 }
 
+bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
+                                      std::uint64_t stop_serial,
+                                      std::vector<std::uint8_t> *output,
+                                      std::size_t *width, std::size_t *height,
+                                      WindowsV1UiaStop *stop = nullptr);
+
 #if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
-bool CaptureWindowWithGraphicsCapture(HWND window,
+bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
                                       std::vector<std::uint8_t> *output,
                                       std::size_t *width, std::size_t *height) {
-  if (window == nullptr || GetForegroundWindow() != window)
+  if (!WindowsV1UiaMayCall() || window == nullptr || GetForegroundWindow() != window)
     return false;
   try {
     RECT client_bounds{};
@@ -7673,21 +7685,58 @@ bool CaptureWindowWithGraphicsCapture(HWND window,
                                winrt::Windows::Graphics::DirectX::
                                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
                                1, source_size);
+    struct PoolLifetime {
+      decltype(frame_pool) value;
+      ~PoolLifetime() { try { value.Close(); } catch (...) {} }
+    } pool_lifetime{frame_pool};
     const auto session = frame_pool.CreateCaptureSession(capture_item);
-    const HANDLE frame_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (frame_event == nullptr)
+    struct SessionLifetime {
+      decltype(session) value;
+      ~SessionLifetime() { try { value.Close(); } catch (...) {} }
+    } session_lifetime{session};
+    // BEGIN windows capture event lease
+    // Revocation does not wait for an asynchronous callback already in flight.
+    const auto frame_event = std::make_shared<ScopedKernelHandle>();
+    frame_event->value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (frame_event->value == nullptr)
       return false;
     const auto event_token = frame_pool.FrameArrived(
-        [frame_event](auto const &, auto const &) { SetEvent(frame_event); });
+        [frame_event](auto const &, auto const &) { SetEvent(frame_event->value); });
+    struct Subscription {
+      decltype(frame_pool) pool;
+      decltype(event_token) token;
+      bool active = true;
+      void Revoke() {
+        if (!active) return;
+        active = false;
+        pool.FrameArrived(token);
+      }
+      ~Subscription() { try { Revoke(); } catch (...) {} }
+    } subscription{frame_pool, event_token};
+    if (!WindowsV1UiaMayCall()) return false;
     session.StartCapture();
-    const DWORD ready = WaitForSingleObject(frame_event, 5'000);
-    frame_pool.FrameArrived(event_token);
-    CloseHandle(frame_event);
-    if (ready != WAIT_OBJECT_0)
+    const auto frame_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5'000);
+    DWORD ready = WAIT_TIMEOUT;
+    while (WindowsV1UiaMayCall()) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          frame_deadline - std::chrono::steady_clock::now()).count();
+      if (remaining <= 0) break;
+      ready = WaitForSingleObject(frame_event->value,
+          static_cast<DWORD>(std::min<std::int64_t>(20, remaining)));
+      if (ready != WAIT_TIMEOUT) break;
+    }
+    subscription.Revoke();
+    if (ready != WAIT_OBJECT_0 || !WindowsV1UiaMayCall())
       return false;
+    // END windows capture event lease
     const auto frame = frame_pool.TryGetNextFrame();
     if (frame == nullptr)
       return false;
+    struct FrameLifetime {
+      decltype(frame) value;
+      ~FrameLifetime() { try { value.Close(); } catch (...) {} }
+    } frame_lifetime{frame};
+    if (!WindowsV1UiaMayCall()) return false;
     const auto surface = frame.Surface();
     auto surface_access = surface.as<::Windows::Graphics::DirectX::Direct3D11::
                                          IDirect3DDxgiInterfaceAccess>();
@@ -7710,15 +7759,21 @@ bool CaptureWindowWithGraphicsCapture(HWND window,
                                   crop_right, crop_bottom, 1};
     context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0,
                                    source_texture.Get(), 0, &client_box);
+    if (!WindowsV1UiaMayCall()) return false;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
       return false;
+    struct MappedLifetime {
+      ID3D11DeviceContext *context;
+      ID3D11Texture2D *texture;
+      ~MappedLifetime() { context->Unmap(texture, 0); }
+    } mapped_lifetime{context.Get(), staging.Get()};
+    if (!WindowsV1UiaMayCall()) return false;
 
     Microsoft::WRL::ComPtr<IWICImagingFactory> imaging;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                 CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&imaging)))) {
-      context->Unmap(staging.Get(), 0);
       return false;
     }
     Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
@@ -7788,19 +7843,19 @@ bool CaptureWindowWithGraphicsCapture(HWND window,
         }
       }
     }
-    context->Unmap(staging.Get(), 0);
-    if (!success)
+    if (!success || !WindowsV1UiaMayCall())
       return false;
     *width = capture_width;
     *height = capture_height;
     return !output->empty();
   } catch (...) {
+    std::fill(output->begin(), output->end(), 0);
     output->clear();
     return false;
   }
 }
 #else
-bool CaptureWindowWithGraphicsCapture(HWND, std::vector<std::uint8_t> *,
+bool CaptureWindowWithGraphicsCaptureOnWorker(HWND, std::vector<std::uint8_t> *,
                                       std::size_t *, std::size_t *) {
   return false;
 }
@@ -8016,7 +8071,8 @@ bool RevalidateVisualPatch(const WindowsSession &session, double normalized_x,
   std::size_t current_width = 0;
   std::size_t current_height = 0;
   if (!CaptureWindowWithGraphicsCapture(
-          session.active_window, &current_screenshot, &current_width,
+          session.active_window, session.cancel_epoch, WindowsValidationFrameStopSerial(),
+          &current_screenshot, &current_width,
           &current_height) ||
       current_width != session.observation_capture_width ||
       current_height != session.observation_capture_height) {
@@ -8248,7 +8304,8 @@ bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tre
 // the worker's partial risk/signature and first stop, once its COM cleanup has completed.
 // Both policies abandon immediately on consumer-side Stop, deadline or slow first contact.
 template <class Result, class Measure, class Adopt>
-bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adopt) {
+bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adopt,
+                       std::atomic<bool> &running = WindowsUiaReadWorkerRunning()) {
   static_assert(std::is_nothrow_move_constructible_v<Result> && std::is_nothrow_move_assignable_v<Result>,
                 "UIA read results must be publishable without throwing.");
   const WindowsV1UiaPath path;
@@ -8267,13 +8324,13 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
       windows_v1_uia_lane->stop = WindowsV1UiaStop::kCanceled;
       return false;
     }
-    if (WindowsUiaReadWorkerRunning().exchange(true, std::memory_order_acq_rel)) {
+    if (running.exchange(true, std::memory_order_acq_rel)) {
       if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
       return false;
     }
   }
   try {
-    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {
+    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {
       struct Progress {
         explicit Progress(WindowsUiaReadProgress *value) { windows_uia_read_progress = value; }
         ~Progress() { windows_uia_read_progress = nullptr; }
@@ -8299,12 +8356,12 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
           pending->stop.store(worker_path.Stop(), std::memory_order_release);
         }
         pending->done = true;
-        WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
+        running.store(false, std::memory_order_release);
       }
       pending->ready.notify_one();
     }).detach();
   } catch (...) {
-    WindowsUiaReadWorkerRunning().store(false, std::memory_order_release);
+    running.store(false, std::memory_order_release);
     if (preserve_stopped_result) WindowsV1UiaOk(kWindowsV1UiaTimeoutResult);
     return false;
   }
@@ -8364,6 +8421,73 @@ bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
         *nodes = value.nodes;
       });
 }
+
+// BEGIN windows capture read ownership
+struct WindowsCaptureBytes {
+  std::vector<std::uint8_t> bytes;
+  std::size_t width = 0;
+  std::size_t height = 0;
+  ~WindowsCaptureBytes() { std::fill(bytes.begin(), bytes.end(), 0); }
+};
+
+class WindowsCaptureLaneScope {
+public:
+  explicit WindowsCaptureLaneScope(WindowsV1UiaLane *lane)
+      : previous_(std::exchange(windows_v1_uia_lane, lane)) {}
+  ~WindowsCaptureLaneScope() { windows_v1_uia_lane = previous_; }
+  WindowsCaptureLaneScope(const WindowsCaptureLaneScope &) = delete;
+  WindowsCaptureLaneScope &operator=(const WindowsCaptureLaneScope &) = delete;
+private:
+  WindowsV1UiaLane *previous_;
+};
+
+bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
+                                      std::uint64_t stop_serial,
+                                      std::vector<std::uint8_t> *output,
+                                      std::size_t *width, std::size_t *height,
+                                      WindowsV1UiaStop *stop) {
+  if (stop != nullptr) *stop = WindowsV1UiaStop::kNone;
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  WindowsV1UiaLane snapshot = windows_v1_uia_lane != nullptr
+      ? *windows_v1_uia_lane : WindowsV1UiaLane{};
+  snapshot.epoch = epoch;
+  snapshot.stop_serial = stop_serial;
+  snapshot.nodes = 0;
+  // A failed focus read may omit a signature without invalidating a screenshot. Preserve the
+  // caller's timeout state, but give capture its own lane and slot while retaining Stop/deadline.
+  if (snapshot.stop == WindowsV1UiaStop::kTimeout) snapshot.stop = WindowsV1UiaStop::kNone;
+  std::unique_ptr<WindowsCaptureBytes> result;
+  bool captured = false;
+  {
+    const WindowsCaptureLaneScope scope(&snapshot);
+    captured = RunWindowsUiaRead<std::unique_ptr<WindowsCaptureBytes>>(false,
+        [window]() -> std::optional<std::unique_ptr<WindowsCaptureBytes>> {
+          winrt::init_apartment(winrt::apartment_type::multi_threaded);
+          struct Runtime { ~Runtime() { winrt::uninit_apartment(); } } runtime;
+          auto value = std::make_unique<WindowsCaptureBytes>();
+          if (!CaptureWindowWithGraphicsCaptureOnWorker(window, &value->bytes,
+                                                        &value->width, &value->height))
+            return std::nullopt;
+          return value;
+        }, [&result](std::unique_ptr<WindowsCaptureBytes> value) noexcept {
+          result = std::move(value);
+        }, WindowsCaptureWorkerRunning());
+  }
+  if (stop != nullptr) *stop = snapshot.stop;
+  if (captured) {
+    output->swap(result->bytes);
+    *width = result->width;
+    *height = result->height;
+    return true;
+  }
+#else
+  (void)window; (void)epoch; (void)stop_serial; (void)width; (void)height;
+#endif
+  std::fill(output->begin(), output->end(), 0);
+  output->clear();
+  return false;
+}
+// END windows capture read ownership
 
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
@@ -10956,9 +11080,11 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   std::size_t width = 0;
   std::size_t height = 0;
-  if (!CaptureWindowWithGraphicsCapture(dialogs.active_window, binary, &width,
-                                        &height)) {
-    *reason = "graphics_capture_unavailable";
+  WindowsV1UiaStop capture_stop = WindowsV1UiaStop::kNone;
+  if (!CaptureWindowWithGraphicsCapture(dialogs.active_window, session.cancel_epoch,
+                                        observe_stop_serial, binary, &width, &height,
+                                        &capture_stop)) {
+    *reason = WindowsV1ObserveReason(capture_stop, "graphics_capture_unavailable");
     return false;
   }
   RECT stable_bounds{};

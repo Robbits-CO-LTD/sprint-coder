@@ -105,11 +105,25 @@ function once(value: string, before: string, after: string): string {
   return value.replace(before, after);
 }
 function workerSource(): string {
+  let capture = cut(
+    '// BEGIN windows capture read ownership',
+    '// END windows capture read ownership',
+  );
+  capture = once(
+    capture,
+    'struct WindowsCaptureBytes {',
+    'struct WindowsCaptureBytes { WindowsCaptureBytes() { capture_owned_values.fetch_add(1); }',
+  );
+  capture = once(
+    capture,
+    '~WindowsCaptureBytes() { std::fill(bytes.begin(), bytes.end(), 0); }',
+    '~WindowsCaptureBytes() { std::fill(bytes.begin(), bytes.end(), 0); TestCaptureScrub(bytes); }',
+  );
   let engine = cut('// Observation rejects a worker timeout', 'struct WindowsUiaObservationResult');
   engine = once(
     engine,
-    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
-    '    TestBeforeSpawn();\n    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure)]() mutable {',
+    '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
+    '    TestBeforeSpawn();\n    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
   );
   engine = once(
     engine,
@@ -128,6 +142,7 @@ function workerSource(): string {
       host.indexOf('\n}', host.indexOf('void WindowsV1UiaCountNode()')) + 2,
     ) +
     engine +
+    capture +
     cut(
       '// BEGIN windows semantic operation ownership',
       '// END windows semantic operation ownership',
@@ -158,6 +173,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
     const result = await runNative(binary, [], { encoding: 'utf8', timeout: 20000 });
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('PASS: UIA read engine policies and ownership');
+    expect(result.stdout).toContain('PASS: capture slot, lane, output, Runtime and Stop policies');
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -187,6 +203,22 @@ const preamble = String.raw`
 using HRESULT=std::int32_t;
 using DWORD=std::uint32_t;
 using HWND=void*;
+#define SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE 1
+std::atomic<unsigned> capture_owned_values{0},capture_scrubs{0},capture_calls{0},runtime_inits{0},runtime_uninits{0};
+std::atomic<bool> capture_scrubbed{true},fail_runtime{false};
+std::function<bool(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*)> capture_measure;
+void TestCaptureScrub(const std::vector<std::uint8_t>& bytes){
+  if(!std::all_of(bytes.begin(),bytes.end(),[](auto value){return value==0;}))capture_scrubbed=false;
+  capture_scrubs.fetch_add(1);capture_owned_values.fetch_sub(1);
+}
+namespace winrt {
+enum class apartment_type {multi_threaded};
+void init_apartment(apartment_type){runtime_inits.fetch_add(1);if(fail_runtime)throw std::runtime_error("runtime init fault");}
+void uninit_apartment(){runtime_uninits.fetch_add(1);}
+}
+bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,std::vector<std::uint8_t>* bytes,std::size_t* width,std::size_t* height){
+  capture_calls.fetch_add(1);return capture_measure(window,bytes,width,height);
+}
 void Sleep(DWORD milliseconds){std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));}
 struct WindowsSession {std::string session_id;std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts=std::make_shared<std::atomic<std::uint64_t>>(0);};
 using BSTR=wchar_t*;
@@ -220,7 +252,9 @@ void TestBeforeAdoption(bool done){if(done&&adoption_gate)adoption_gate->Hold();
 const program = String.raw`
 void Check(bool ok,const char* name){if(!ok)throw std::runtime_error(name);}
 bool Drain(){const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(WindowsUiaReadWorkerRunning().load()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(1));return !WindowsUiaReadWorkerRunning().load();}
-void Reset(){ReleaseAll();Check(Drain(),"previous worker drained");cleanup_gate.reset();adoption_gate.reset();all_gates.clear();initialized=0;cleanup_entered=0;cleaned=0;fail_thread=false;fail_init=false;cancellation_epoch=0;parent_process_dead=false;WindowsTargetListControl().stop_serial=0;}
+bool DrainCapture(){const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);while((WindowsCaptureWorkerRunning().load()||capture_owned_values.load()!=0)&&std::chrono::steady_clock::now()<until)Sleep(1);return !WindowsCaptureWorkerRunning().load()&&capture_owned_values==0;}
+bool CaptureValue(HWND,std::vector<std::uint8_t>* bytes,std::size_t* width,std::size_t* height){*bytes={1,2,3,4};*width=2;*height=2;return true;}
+void Reset(){ReleaseAll();Check(Drain()&&DrainCapture(),"previous worker drained");cleanup_gate.reset();adoption_gate.reset();all_gates.clear();initialized=0;cleanup_entered=0;cleaned=0;fail_thread=false;fail_init=false;cancellation_epoch=0;parent_process_dead=false;WindowsTargetListControl().stop_serial=0;capture_measure=CaptureValue;capture_calls=0;capture_scrubs=0;capture_scrubbed=true;runtime_inits=0;runtime_uninits=0;fail_runtime=false;}
 void Stop(bool epoch=true){auto& c=WindowsTargetListControl();std::lock_guard lock(c.stop_mutex);c.stop_serial.fetch_add(1);if(epoch)cancellation_epoch.fetch_add(1);}
 struct Sample {bool secure=false,complete=false;std::string signature;};
 struct Outcome {bool ok=false;Sample value;WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;std::size_t nodes=0;};
@@ -293,6 +327,67 @@ void SemanticPolicies(){
   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);WindowsSemanticOperations().active.reset();}
   Reset();std::cout<<"PASS: semantic input claim, Stop, validation and exit ownership\n";
 }
+struct CaptureOutcome {
+  bool ok=false,parent_preserved=false;
+  WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
+  std::vector<std::uint8_t> bytes{7,9};std::size_t width=99,height=77;
+};
+struct CaptureCall {
+  std::promise<CaptureOutcome> promise;std::future<CaptureOutcome> future=promise.get_future();std::thread thread;
+  CaptureCall(WindowsV1UiaStop prior=WindowsV1UiaStop::kNone,int budget=0){
+    thread=std::thread([this,prior,budget]{try{
+      const WindowsValidationFrameScope frame(0);
+      const WindowsV1UiaPath path(std::chrono::milliseconds(budget),0,0);
+      auto* parent=windows_v1_uia_lane;parent->stop=prior;parent->nodes=7;
+      const auto before=*parent;CaptureOutcome out;
+      out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,frame.StopSerial(),&out.bytes,&out.width,&out.height,&out.stop);
+      out.parent_preserved=windows_v1_uia_lane==parent&&parent->stop==before.stop&&parent->nodes==before.nodes&&parent->has_deadline==before.has_deadline&&(!before.has_deadline||parent->deadline==before.deadline);
+      promise.set_value(std::move(out));
+    }catch(...){promise.set_exception(std::current_exception());}});
+  }
+  bool Ready(int ms=1000){return future.wait_for(std::chrono::milliseconds(ms))==std::future_status::ready;}
+  CaptureOutcome Take(){Check(Ready(),"capture consumer deadline");return future.get();}
+  ~CaptureCall(){ReleaseAll();if(thread.joinable())thread.join();}
+};
+void CapturePolicies(){
+  Reset();WindowsUiaReadWorkerRunning()=true;{
+    CaptureCall call(WindowsV1UiaStop::kTimeout,1000);const auto out=call.Take();
+    Check(out.ok&&out.bytes==std::vector<std::uint8_t>({1,2,3,4})&&out.width==2&&out.height==2&&out.parent_preserved,"capture independent of prior UIA timeout and busy slot");
+    Check(WindowsUiaReadWorkerRunning()&&!WindowsCaptureWorkerRunning()&&runtime_inits==1&&runtime_uninits==1&&capture_scrubbed,"capture released only its own slot and Runtime");
+  }WindowsUiaReadWorkerRunning()=false;
+  for(auto prior:{WindowsV1UiaStop::kCanceled,WindowsV1UiaStop::kBudget}){Reset();CaptureCall call(prior);const auto out=call.Take();
+    Check(!out.ok&&out.bytes.empty()&&out.width==99&&out.height==77&&out.stop==prior&&out.parent_preserved&&initialized==0,"capture preserves prior cancel/budget without spawn");}
+  for(bool implicit:{false,true}){Reset();const WindowsValidationFrameScope frame(implicit?std::nullopt:std::optional<std::uint64_t>{0});Stop(false);
+    CaptureOutcome out;out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,WindowsValidationFrameStopSerial(),&out.bytes,&out.width,&out.height,&out.stop);
+    Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&out.bytes.empty()&&initialized==0&&windows_v1_uia_lane==nullptr,"capture refuses original explicit or implicit frame before spawn");}
+  Reset();cancellation_epoch=1;{const WindowsV1UiaPath parent(std::chrono::milliseconds::zero(),1,0);CaptureOutcome out;
+    out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&out.bytes,&out.width,&out.height,&out.stop);
+    Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&initialized==0&&parent.Stop()==WindowsV1UiaStop::kNone,"capture does not replace old session epoch with newer global epoch");}
+  for(int ending=0;ending<3;++ending){Reset();auto gate=MakeGate();capture_measure=[gate](auto window,auto bytes,auto width,auto height){CaptureValue(window,bytes,width,height);gate->Hold();return true;};{
+    CaptureCall call(WindowsV1UiaStop::kNone,ending==2?100:0);Check(gate->Wait(),"capture held");
+    if(ending!=2){CaptureOutcome rejected;
+      rejected.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&rejected.bytes,&rejected.width,&rejected.height,&rejected.stop);
+      Check(!rejected.ok&&rejected.bytes.empty()&&windows_v1_uia_lane==nullptr&&capture_calls==1&&WindowsCaptureWorkerRunning(),"second capture busy without freeing first slot");
+      // Consumer's cleanup helper releases all gates; use the engine directly to leave the other
+      // capture's foreign-call gate held while checking independent UIA admission.
+      {const WindowsValidationFrameScope frame(0);const WindowsV1UiaPath path;bool adopted=false;
+        const bool ok=RunWindowsUiaRead<Sample>(true,[]{return std::optional<Sample>{Value()};},[&](Sample){adopted=true;});
+        Check(ok&&adopted,"UIA remains available while capture busy");}
+      Stop(ending==0);
+    }
+    const auto out=call.Take();Check(!out.ok&&out.bytes.empty()&&out.width==99&&out.height==77&&out.parent_preserved&&out.stop==(ending==2?WindowsV1UiaStop::kBudget:WindowsV1UiaStop::kCanceled),"capture Stop/deadline does not publish bytes");
+    Check(WindowsCaptureWorkerRunning()&&runtime_uninits==0,"capture owns Runtime until foreign work retires");gate->Release();Check(DrainCapture()&&runtime_inits==1&&runtime_uninits==1&&capture_scrubbed,"late capture bytes scrubbed and Runtime retired");
+  }}
+  Reset();capture_measure=[](auto w,auto b,auto x,auto y){Sleep(550);return CaptureValue(w,b,x,y);};{CaptureCall call;Check(call.Take().ok,"capture does not inherit UIA 470ms contact timeout");}
+  for(int fault=0;fault<4;++fault){Reset();if(fault==0)fail_thread=true;else if(fault==1)fail_init=true;else if(fault==2)fail_runtime=true;else capture_measure=[](auto w,auto b,auto x,auto y){CaptureValue(w,b,x,y);throw std::runtime_error("capture fault");return false;};
+    CaptureCall call;const auto out=call.Take();Check(!out.ok&&out.bytes.empty()&&out.width==99&&out.height==77&&out.parent_preserved&&DrainCapture(),"capture fault restores TLS and output/slot ownership");
+    Check(runtime_uninits==(fault==3?1u:0u),"only successful Runtime init is uninitialized");}
+  Reset();cleanup_gate=MakeGate();{CaptureCall call;Check(cleanup_gate->Wait()&&!call.Ready(30),"capture waits for apartment cleanup");Stop(false);const auto out=call.Take();
+    Check(!out.ok&&out.parent_preserved&&WindowsCaptureWorkerRunning(),"cleanup Stop retains capture slot");cleanup_gate->Release();Check(DrainCapture(),"capture cleanup eventually retires");}
+  Reset();adoption_gate=MakeGate();{CaptureCall call;Check(adoption_gate->Wait(),"capture adoption gate");Stop(false);adoption_gate->Release();const auto out=call.Take();
+    Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&out.bytes.empty()&&out.parent_preserved&&DrainCapture()&&capture_scrubbed,"Stop wins against complete capture before adoption");}
+  Reset();std::cout<<"PASS: capture slot, lane, output, Runtime and Stop policies\n";
+}
 int main(){try {
   // Same-epoch prequeued Close must use the frame's old serial, not the current global one.
   Reset();{WindowsValidationFrameScope frame(0);Stop(false);const WindowsV1UiaPath path;bool adopted=false;
@@ -357,6 +452,7 @@ int main(){try {
     cleanup_gate.reset();{Consumer next([]{return std::optional<Sample>{Value()};});Check(next.Take().ok,"consecutive classification not spuriously busy");}}
   Check(Drain()&&initialized==6&&cleaned==6,"all apartments retired");
   SemanticPolicies();
+  CapturePolicies();
   std::cout<<"PASS: UIA read engine policies and ownership\n";return 0;
 } catch(const std::exception& error){ReleaseAll();std::cerr<<"FAIL: "<<error.what()<<"\n";return 1;}}
 `;
