@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { computerUseObservationSchema } from '@sprint-coder/contracts';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
@@ -150,6 +151,30 @@ function workerSource(): string {
   );
 }
 
+function focusReceiptSource(): string {
+  const observe = cut('bool ObserveWindowsWindow(', '// BEGIN artifact read');
+  const transfer =
+    /session\.focused_element_signature = [^\n]+\n\s*session\.has_focused_element_signature = [^\n]+/u.exec(
+      observe,
+    )?.[0];
+  const wire = /\(has_focused_element_signature\s*\?[\s\S]*?:\s*"null"\)/u.exec(observe)?.[0];
+  if (!transfer || !wire) throw new Error('Focus receipt source boundary changed');
+  return String.raw`
+void Check(bool,const char*);
+void FocusReceiptContract(){
+  struct FocusBinding {std::string focused_element_signature;bool has_focused_element_signature=false;};
+  for(bool has_focused_element_signature:{true,false}){
+    FocusBinding session;
+    std::string focused_element_signature=has_focused_element_signature?std::string(64,'a'):"";
+    ${transfer}
+    const std::string receipt=${wire};
+    std::cout<<"FOCUS_RECEIPT:"<<receipt<<"\n";
+    Check(receipt==(has_focused_element_signature?"\""+std::string(64,'a')+"\"":"null"),"focus receipt retains digest after ownership transfer");
+  }
+}
+`;
+}
+
 it('preserves UIA result policy, stop ordering and resource retirement in the shared read engine', async ({
   skip,
 }) => {
@@ -163,7 +188,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
       skip();
       return;
     }
-    writeFileSync(source, preamble + workerSource() + program);
+    writeFileSync(source, preamble + workerSource() + focusReceiptSource() + program);
     const compiled = await runNative(compiler.file, compiler.args, {
       encoding: 'utf8',
       timeout: 120000,
@@ -174,6 +199,14 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
     expect(result.status, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain('PASS: UIA read engine policies and ownership');
     expect(result.stdout).toContain('PASS: capture slot, lane, output, Runtime and Stop policies');
+    const receipts = [...result.stdout.matchAll(/^FOCUS_RECEIPT:(.*)$/gmu)].map(
+      (match) => JSON.parse(match[1]!) as unknown,
+    );
+    expect(receipts).toEqual(['a'.repeat(64), null]);
+    for (const receipt of receipts)
+      expect(
+        computerUseObservationSchema.shape.focusedElementSignature.safeParse(receipt).success,
+      ).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -389,6 +422,7 @@ void CapturePolicies(){
   Reset();std::cout<<"PASS: capture slot, lane, output, Runtime and Stop policies\n";
 }
 int main(){try {
+  FocusReceiptContract();
   // Same-epoch prequeued Close must use the frame's old serial, not the current global one.
   Reset();{WindowsValidationFrameScope frame(0);Stop(false);const WindowsV1UiaPath path;bool adopted=false;
     Check(!RunWindowsUiaRead<Sample>(true,[]{return std::optional<Sample>{Value()};},[&](Sample){adopted=true;}),"stale frame refused");
