@@ -360,6 +360,35 @@ function instrumentedHost(): string {
   );
   capture = replaceOnce(capture, 'winrt::uninit_apartment()', 'Sc820CaptureRuntimeUninit()');
   source = source.slice(0, captureFrom) + capture + source.slice(captureTo);
+  const graphicsFrom = source.indexOf('bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,');
+  const graphicsTo = source.indexOf(
+    '\n#else\nbool CaptureWindowWithGraphicsCaptureOnWorker',
+    graphicsFrom,
+  );
+  if (graphicsFrom < 0 || graphicsTo < graphicsFrom)
+    throw new Error('Graphics capture body changed');
+  let graphics = source.slice(graphicsFrom, graphicsTo);
+  for (const [type, index] of [
+    ['PoolLifetime', 0],
+    ['SessionLifetime', 1],
+    ['FrameLifetime', 2],
+  ] as const)
+    graphics = replaceOnce(
+      graphics,
+      `~${type}() { try { value.Close(); } catch (...) {} }`,
+      `~${type}() { try { Sc820CaptureClose(value, ${index}); } catch (...) {} }`,
+    );
+  graphics = replaceOnce(
+    graphics,
+    'context->Unmap(texture, 0);',
+    'Sc820CaptureUnmap(context, texture);',
+  );
+  graphics = replaceOnce(
+    graphics,
+    '} mapped_lifetime{context.Get(), staging.Get()};',
+    '} mapped_lifetime{context.Get(), staging.Get()};\n    Sc820CaptureAfterMap();',
+  );
+  source = source.slice(0, graphicsFrom) + graphics + source.slice(graphicsTo);
   source = replaceOnce(
     source,
     '    std::thread([pending, snapshot, preserve_stopped_result, measure = std::move(measure), &running]() mutable {',
@@ -695,12 +724,17 @@ const program = String.raw`
 #include <optional>
 #include <functional>
 #include <string>
+struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
 namespace sprint_coder::computer_use { struct InterlockEvaluation; }
 namespace {
 struct LockedWindowsExecutable;
 struct WindowsSession;
 struct WindowsSemanticWork;
 struct WindowsClickBasis;
+template<class T> void Sc820CaptureClose(const T&,unsigned);
+void Sc820CaptureUnmap(::ID3D11DeviceContext*,::ID3D11Texture2D*);
+void Sc820CaptureAfterMap();
 bool Sc820SemanticBinding(const WindowsSession&,const std::string&,std::string*,RECT*,std::string*);
 bool Sc820PreflightBinding(const WindowsSession&,const std::string&,std::string*,RECT*,std::string*);
 sprint_coder::computer_use::InterlockEvaluation Sc820PreflightInterlock(const WindowsSession&,const std::string&,const std::string&);
@@ -1504,6 +1538,21 @@ void Sc820ReadCoUninitialize(){
 // focused-signature worker execute normally; any downstream capture attempt is a test failure.
 bool observe_signature_mode=false;
 std::atomic<bool> observe_capture_mode{false};
+std::atomic<bool> capture_real_mode{false};
+std::atomic<unsigned> capture_real_fault{0},capture_map_count{0},capture_unmap_count{0};
+std::array<std::atomic<unsigned>,3> capture_close_count{};
+template<class T> void Sc820CaptureClose(const T& value,unsigned kind){
+  value.Close();
+  if(capture_real_mode){capture_close_count[kind].fetch_add(1);if(capture_real_fault==2&&kind==1)throw std::runtime_error("controlled close fault");}
+}
+void Sc820CaptureAfterMap(){if(capture_real_mode){capture_map_count.fetch_add(1);if(capture_real_fault==1)throw std::runtime_error("controlled mapped fault");}}
+void Sc820CaptureUnmap(ID3D11DeviceContext* context,ID3D11Texture2D* texture){
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  context->Unmap(texture,0);if(capture_real_mode)capture_unmap_count.fetch_add(1);
+#else
+  (void)context;(void)texture;
+#endif
+}
 std::string capture_visual_kind;
 std::atomic<unsigned> observe_capture_calls{0};
 std::atomic<unsigned> capture_runtime_inits{0},capture_runtime_uninits{0};
@@ -1906,7 +1955,8 @@ BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
 
 struct FixtureReady { DWORD pid; UINT_PTR window; };
 
-int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding_controls = false, bool semantic_controls = false) {
+int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding_controls = false, bool semantic_controls = false, bool capture_pixels = false) {
+  if(capture_pixels&&!ConfigurePerMonitorDpiAwareness())return 7;
   ScopedKernelHandle mapping(OpenFileMappingW(FILE_MAP_WRITE, FALSE, mapping_name));
   ScopedKernelHandle ready(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name));
   if (mapping.value == nullptr || ready.value == nullptr) return 2;
@@ -1916,6 +1966,7 @@ int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding
   wc.lpfnWndProc = DefWindowProcW;
   wc.hInstance = GetModuleHandleW(nullptr);
   wc.lpszClassName = L"Sc940OwnedFixture";
+  if(capture_pixels){wc.hbrBackground=reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW+1));wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);}
   RegisterClassW(&wc);
   HWND window = CreateWindowExW(0, wc.lpszClassName, L"RCA fixture", WS_OVERLAPPEDWINDOW,
                                 0, 0, semantic_controls?640:320, semantic_controls?400:200, nullptr, nullptr, wc.hInstance, nullptr);
@@ -1940,7 +1991,8 @@ int Fixture(const wchar_t *mapping_name, const wchar_t *event_name, bool binding
     SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(L"Fixture choice"));
     SendMessageW(combo,CB_SETCURSEL,0,0);
   }
-  ShowWindow(window, SW_SHOWNOACTIVATE);
+  ShowWindow(window, capture_pixels?SW_SHOW:SW_SHOWNOACTIVATE);
+  if(capture_pixels){SetForegroundWindow(window);UpdateWindow(window);}
   shared->pid = GetCurrentProcessId();
   shared->window = reinterpret_cast<UINT_PTR>(window);
   SetEvent(ready.value);
@@ -2070,7 +2122,7 @@ struct RcaRun {
     });
   }
 
-  void StartFixture(bool canonical_executable = false, bool binding_controls = false, bool semantic_controls = false) {
+  void StartFixture(bool canonical_executable = false, bool binding_controls = false, bool semantic_controls = false, bool capture_pixels = false) {
     Require(fixture_count < fixture_pids.size(), "fixture_limit");
     const unsigned index = fixture_count;
     ScopedKernelHandle &child = children[index];
@@ -2098,6 +2150,7 @@ struct RcaRun {
                            mapping_name + L"\" \"" + event_name + L"\"";
     if(binding_controls)command+=L" bindings";
     else if(semantic_controls)command+=L" semantic";
+    else if(capture_pixels)command+=L" capture";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -3954,6 +4007,60 @@ int DiagnoseCaptureEvent(std::wstring_view scenario){
   }catch(const std::exception& error){cleanup();std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
 }
 
+int DiagnoseRealCapture(){
+  const auto not_run=[](const char* reason){std::cout<<"{\"case\":\"capture-real\",\"outcome\":\"not_run\",\"reason\":\""<<reason<<"\",\"actualCapture\":false}\n";return 0;};
+#if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+  return not_run("capture_sdk_unavailable");
+#else
+  struct Desktop {HDESK value=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS);~Desktop(){if(value)CloseDesktop(value);}} desktop;
+  wchar_t name[64]{};DWORD needed=0;
+  if(!desktop.value||!GetUserObjectInformationW(desktop.value,UOI_NAME,name,sizeof(name),&needed)||
+      std::wstring_view(name)!=L"Default"||GetForegroundWindow()==nullptr)
+    return not_run("interactive_desktop_unavailable");
+  try {
+    Require(ConfigurePerMonitorDpiAwareness(),"capture_real_dpi");
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+    struct Runtime {~Runtime(){winrt::uninit_apartment();}} runtime;
+    if(!HasGraphicsCaptureFactory()||!winrt::Windows::Graphics::Capture::GraphicsCaptureSession::IsSupported())return not_run("capture_api_unavailable");
+    {
+      Microsoft::WRL::ComPtr<ID3D11Device> device;Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
+      if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context)))return not_run("hardware_device_unavailable");
+    }
+    RcaRun run;run.StartFixture(false,false,false,true);
+    const auto until=GetTickCount64()+2000;
+    while(GetForegroundWindow()!=fixture_windows[0]&&GetTickCount64()<until)Sleep(10);
+    if(GetForegroundWindow()!=fixture_windows[0]){run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_unavailable_cleanup");return not_run("owned_fixture_foreground_unavailable");}
+    const WindowsValidationFrameScope frame;
+    const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,cancellation_epoch.load(),frame.StopSerial());
+    capture_real_mode=true;
+    std::vector<std::uint8_t> direct,worker;std::size_t direct_width=0,direct_height=0,width=0,height=0;
+    const bool baseline=CaptureWindowWithGraphicsCaptureOnWorker(fixture_windows[0],&direct,&direct_width,&direct_height);
+    WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
+    const bool captured=CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop);
+    Require(baseline&&captured&&stop==WindowsV1UiaStop::kNone,"capture_real_sta_and_mta_frames");
+    Require(width==direct_width&&height==direct_height&&width>0&&height>0,"capture_real_same_geometry");
+    std::vector<std::string> direct_grid,worker_grid;std::size_t dc=0,dr=0,wc=0,wr=0;
+    Require(ComputePngPatchGrid(direct,direct_width,direct_height,&direct_grid,&dc,&dr)&&ComputePngPatchGrid(worker,width,height,&worker_grid,&wc,&wr)&&
+      direct_grid==worker_grid&&dc==wc&&dr==wr&&!worker_grid.empty(),"capture_real_png_and_patch_equality");
+    std::fill(direct.begin(),direct.end(),0);std::fill(worker.begin(),worker.end(),0);
+    direct.clear();worker.clear();
+    capture_real_fault=1;width=99;height=77;worker={7,9};
+    Require(!CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop)&&
+      worker.empty()&&width==99&&height==77,"capture_real_map_fault_output");
+    capture_real_fault=2;
+    Require(CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop),"capture_real_close_fault_continues_cleanup");
+    std::fill(worker.begin(),worker.end(),0);worker.clear();capture_real_fault=0;
+    Require(capture_map_count==4&&capture_unmap_count==4&&capture_close_count[0]==4&&capture_close_count[1]==4&&capture_close_count[2]==4,"capture_real_all_mapped_resources_and_closers_retired");
+    capture_real_mode=false;
+    Require(run.WaitCaptureWorkerIdle(5000),"capture_real_worker_retired");run.Cleanup();
+    Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_cleanup");
+    std::cout<<"{\"case\":\"capture-real\",\"outcome\":\"passed\",\"actualCapture\":true,\"width\":"<<width<<",\"height\":"<<height
+      <<",\"sameGeometry\":true,\"samePatchDigests\":true,\"mappedFaultVerified\":true,\"closeFaultVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
+  }catch(const std::exception& error){std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+  catch(...){std::cout<<"{\"failure\":\"capture_real_runtime_failure\"}\n";return 1;}
+#endif
+}
+
 int DiagnoseCaptureStall(std::wstring_view scenario){
   const bool cancel=scenario.ends_with(L"-cancel");const std::string label(scenario.begin(),scenario.end());RcaRun run;
   const bool visual=scenario.starts_with(L"capture-dispatch-");
@@ -4466,6 +4573,7 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
   if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"bindings") return Fixture(argv[2],argv[3],true);
   if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"semantic") return Fixture(argv[2],argv[3],false,true);
+  if (argc == 5 && std::wstring_view(argv[1]) == L"fixture" && std::wstring_view(argv[4]) == L"capture") return Fixture(argv[2],argv[3],false,false,true);
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
@@ -4482,6 +4590,7 @@ int wmain(int argc, wchar_t **argv) {
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
   }
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1])==L"capture-real")return DiagnoseRealCapture();
   if (std::wstring_view(argv[1]).starts_with(L"capture-event-")) return DiagnoseCaptureEvent(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"capture-stall-")) return DiagnoseCaptureStall(argv[1]);
   if (std::wstring_view(argv[1]).starts_with(L"capture-dispatch-")) return DiagnoseCaptureStall(argv[1]);
@@ -4590,6 +4699,7 @@ describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
 )('Windows target I/O live seam (#940 and #820, bounded readers)', () => {
   async function runScenarios(scenarios: readonly string[]) {
+    let realCaptureNotRun = false;
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     let installed: string | undefined;
@@ -4926,6 +5036,39 @@ describe.skipIf(
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario === 'capture-real') {
+          const notRun =
+            typeof metadata === 'object' &&
+            metadata !== null &&
+            'outcome' in metadata &&
+            metadata.outcome === 'not_run';
+          if (notRun) {
+            expect(metadata).toMatchObject({
+              case: scenario,
+              actualCapture: false,
+              reason: expect.stringMatching(
+                /^(capture_sdk_unavailable|interactive_desktop_unavailable|capture_api_unavailable|hardware_device_unavailable|owned_fixture_foreground_unavailable)$/u,
+              ),
+            });
+            realCaptureNotRun = true;
+          } else
+            expect(metadata).toMatchObject({
+              case: scenario,
+              outcome: 'passed',
+              actualCapture: true,
+              width: expect.any(Number),
+              height: expect.any(Number),
+              sameGeometry: true,
+              samePatchDigests: true,
+              mappedFaultVerified: true,
+              closeFaultVerified: true,
+              childExited: true,
+              workerIdle: true,
+              watchdogFired: false,
+            });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('capture-event-')) {
           expect(metadata).toMatchObject({
             case: scenario,
@@ -5171,12 +5314,19 @@ describe.skipIf(
         [...startFailures, ...validationFailures, ...rejudgeFailures, ...resumeFailures],
         'Every native case must pass, including foreground prerequisites',
       ).toEqual([]);
+      return realCaptureNotRun;
     } finally {
       if (installed)
         rmSync(installed, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
   }
+
+  it('captures an owned WGC frame on STA and worker MTA with identical geometry and patches', async ({
+    skip,
+  }) => {
+    if (await runScenarios(['capture-real'])) skip();
+  }, 700_000);
 
   it('keeps capture event ownership across delayed callbacks and StartCapture exceptions', async () => {
     await runScenarios([
