@@ -439,7 +439,7 @@ WinRT, D3D and WIC objects remain on the capture MTA. Frame callbacks share owne
 handle because revocation is not a barrier for an already queued callback. Scoped guards revoke the
 handler, unmap textures and close frame/session/pool on normal and exceptional exits. The existing
 five-second frame wait cooperatively checks Stop. Only owned PNG bytes and dimensions leave the
-worker; adoption is ordered with Stop, and replaced or discarded buffers are scrubbed. Pure result
+worker; adoption is ordered with Stop, and replaced or discarded owned result buffers are scrubbed. Pure result
 bytes and a callback's kernel-event lease may retire after the slot's foreign cleanup has finished.
 
 Observe now applies its inherited 25-second budget to capture waiting as well as UIA: capture Stop

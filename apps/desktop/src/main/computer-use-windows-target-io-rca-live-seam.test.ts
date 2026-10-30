@@ -1560,7 +1560,7 @@ thread_local bool capture_runtime_tracked=false;
 void Sc820CaptureRuntimeInit(){
 #if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  capture_runtime_tracked=observe_capture_mode.load();
+  capture_runtime_tracked=observe_capture_mode.load()||capture_real_mode.load();
   if(capture_runtime_tracked){
     APTTYPE type;APTTYPEQUALIFIER qualifier;
     Require(SUCCEEDED(CoGetApartmentType(&type,&qualifier))&&type==APTTYPE_MTA,"capture_runtime_mta");
@@ -4030,13 +4030,28 @@ int DiagnoseRealCapture(){
     const auto until=GetTickCount64()+2000;
     while(GetForegroundWindow()!=fixture_windows[0]&&GetTickCount64()<until)Sleep(10);
     if(GetForegroundWindow()!=fixture_windows[0]){run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_unavailable_cleanup");return not_run("owned_fixture_foreground_unavailable");}
+    RECT client{};POINT cursor{};LASTINPUTINFO input_before{sizeof(LASTINPUTINFO)};
+    Require(ClientBoundsPhysical(fixture_windows[0],&client),"capture_real_client_bounds");
+    if(!GetCursorPos(&cursor)||!GetLastInputInfo(&input_before)||PtInRect(&client,cursor)){
+      run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_cursor_cleanup");
+      return not_run("owned_fixture_input_unavailable");
+    }
+    const auto stable_input=[&]{POINT now{};RECT bounds{};LASTINPUTINFO input{sizeof(LASTINPUTINFO)};
+      return GetForegroundWindow()==fixture_windows[0]&&GetCursorPos(&now)&&!PtInRect(&client,now)&&
+        GetLastInputInfo(&input)&&input.dwTime==input_before.dwTime&&ClientBoundsPhysical(fixture_windows[0],&bounds)&&
+        bounds.left==client.left&&bounds.top==client.top&&bounds.right==client.right&&bounds.bottom==client.bottom;};
     const WindowsValidationFrameScope frame;
     const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,cancellation_epoch.load(),frame.StopSerial());
     capture_real_mode=true;
     std::vector<std::uint8_t> direct,worker;std::size_t direct_width=0,direct_height=0,width=0,height=0;
+    const auto changed_input=[&]{std::fill(direct.begin(),direct.end(),0);std::fill(worker.begin(),worker.end(),0);
+      run.Cleanup();capture_real_mode=false;capture_real_fault=0;
+      Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_changed_input_cleanup");
+      return not_run("owned_fixture_input_changed");};
     const bool baseline=CaptureWindowWithGraphicsCaptureOnWorker(fixture_windows[0],&direct,&direct_width,&direct_height);
     WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
     const bool captured=CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop);
+    if(!stable_input())return changed_input();
     Require(baseline&&captured&&stop==WindowsV1UiaStop::kNone,"capture_real_sta_and_mta_frames");
     Require(width==direct_width&&height==direct_height&&width>0&&height>0,"capture_real_same_geometry");
     std::vector<std::string> direct_grid,worker_grid;std::size_t dc=0,dr=0,wc=0,wr=0;
@@ -4045,19 +4060,24 @@ int DiagnoseRealCapture(){
     std::fill(direct.begin(),direct.end(),0);std::fill(worker.begin(),worker.end(),0);
     direct.clear();worker.clear();
     capture_real_fault=1;width=99;height=77;worker={7,9};
-    Require(!CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop)&&
+    const bool map_fault_capture=CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop);
+    if(!stable_input())return changed_input();
+    Require(!map_fault_capture&&
       worker.empty()&&width==99&&height==77,"capture_real_map_fault_output");
     capture_real_fault=2;
-    Require(CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop),"capture_real_close_fault_continues_cleanup");
+    const bool close_fault_capture=CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop);
+    if(!stable_input())return changed_input();
+    Require(close_fault_capture,"capture_real_close_fault_continues_cleanup");
     std::fill(worker.begin(),worker.end(),0);worker.clear();capture_real_fault=0;
     Require(capture_map_count==4&&capture_unmap_count==4&&capture_close_count[0]==4&&capture_close_count[1]==4&&capture_close_count[2]==4,"capture_real_all_mapped_resources_and_closers_retired");
+    Require(capture_worker_starts==3&&capture_runtime_inits==3&&capture_runtime_uninits==3,"capture_real_three_mta_workers_and_runtime_balance");
     capture_real_mode=false;
     Require(run.WaitCaptureWorkerIdle(5000),"capture_real_worker_retired");run.Cleanup();
     Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_cleanup");
     std::cout<<"{\"case\":\"capture-real\",\"outcome\":\"passed\",\"actualCapture\":true,\"width\":"<<width<<",\"height\":"<<height
       <<",\"sameGeometry\":true,\"samePatchDigests\":true,\"mappedFaultVerified\":true,\"closeFaultVerified\":true,\"childExited\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";return 0;
-  }catch(const std::exception& error){std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
-  catch(...){std::cout<<"{\"failure\":\"capture_real_runtime_failure\"}\n";return 1;}
+  }catch(const std::exception& error){capture_real_mode=false;capture_real_fault=0;std::cout<<"{\"failure\":\""<<error.what()<<"\"}\n";return 1;}
+  catch(...){capture_real_mode=false;capture_real_fault=0;std::cout<<"{\"failure\":\"capture_real_runtime_failure\"}\n";return 1;}
 #endif
 }
 
@@ -5047,7 +5067,7 @@ describe.skipIf(
               case: scenario,
               actualCapture: false,
               reason: expect.stringMatching(
-                /^(capture_sdk_unavailable|interactive_desktop_unavailable|capture_api_unavailable|hardware_device_unavailable|owned_fixture_foreground_unavailable)$/u,
+                /^(capture_sdk_unavailable|interactive_desktop_unavailable|capture_api_unavailable|hardware_device_unavailable|owned_fixture_foreground_unavailable|owned_fixture_input_unavailable|owned_fixture_input_changed)$/u,
               ),
             });
             realCaptureNotRun = true;
