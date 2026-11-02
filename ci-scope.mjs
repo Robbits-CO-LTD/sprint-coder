@@ -27,6 +27,7 @@ const FULL_JOBS = [
   'package-tests',
   'computer-use-native-gate',
   'computer-use-windows-v2-harness',
+  'computer-use-hung-helper',
   'test-macos',
   'platform-tests',
   'electron-bridges',
