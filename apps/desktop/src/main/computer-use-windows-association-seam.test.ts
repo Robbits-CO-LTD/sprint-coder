@@ -1,5 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -98,7 +106,10 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
   beforeAll(() => {
     scratch = mkdtempSync(join(tmpdir(), 'computer-use-association-seam-'));
     binary = join(scratch, 'seam.exe');
-    const compiler = findBuild(join(nativeDirectory, 'computer_use_windows_association_seam.cc'), binary);
+    const compiler = findBuild(
+      join(nativeDirectory, 'computer_use_windows_association_seam.cc'),
+      binary,
+    );
     expect(compiler, 'MSVC is required; a missing compiler is not a passing seam').not.toBeNull();
     const built = spawnSync(compiler!.file, compiler!.args, {
       encoding: 'utf8',
@@ -181,14 +192,63 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       expect(plain.facts.get('prog_id')).toBe(progId);
       expect(plain.facts.get('verb')).toBe('open');
       expect(plain.facts.get('command_key_matches')).toBe('1');
-      for (const name of ['delegate_execute', 'drop_target', 'explorer_command_handler', 'dde', 'shell_extension'])
+      for (const name of [
+        'delegate_execute',
+        'drop_target',
+        'explorer_command_handler',
+        'dde',
+        'shell_extension',
+      ])
         expect(plain.facts.get(name), name).toBe('0');
       const flagged: ReadonlyArray<readonly [string, string[]]> = [
-        ['delegate_execute', ['add', `${keys[1]}\\shell\\open\\command`, '/v', 'DelegateExecute', '/d', '{00000000-0000-0000-0000-000000000991}', '/f']],
-        ['explorer_command_handler', ['add', `${keys[1]}\\shell\\open`, '/v', 'ExplorerCommandHandler', '/d', '{00000000-0000-0000-0000-000000000992}', '/f']],
-        ['drop_target', ['add', `${keys[1]}\\shell\\open\\DropTarget`, '/v', 'CLSID', '/d', '{00000000-0000-0000-0000-000000000993}', '/f']],
+        [
+          'delegate_execute',
+          [
+            'add',
+            `${keys[1]}\\shell\\open\\command`,
+            '/v',
+            'DelegateExecute',
+            '/d',
+            '{00000000-0000-0000-0000-000000000991}',
+            '/f',
+          ],
+        ],
+        [
+          'explorer_command_handler',
+          [
+            'add',
+            `${keys[1]}\\shell\\open`,
+            '/v',
+            'ExplorerCommandHandler',
+            '/d',
+            '{00000000-0000-0000-0000-000000000992}',
+            '/f',
+          ],
+        ],
+        [
+          'drop_target',
+          [
+            'add',
+            `${keys[1]}\\shell\\open\\DropTarget`,
+            '/v',
+            'CLSID',
+            '/d',
+            '{00000000-0000-0000-0000-000000000993}',
+            '/f',
+          ],
+        ],
         ['dde', ['add', `${keys[1]}\\shell\\open\\ddeexec`, '/ve', '/d', '[open("%1")]', '/f']],
-        ['shell_extension', ['add', `${keys[1]}\\shellex\\ContextMenuHandlers\\Synthetic`, '/ve', '/d', '{00000000-0000-0000-0000-000000000994}', '/f']],
+        [
+          'shell_extension',
+          [
+            'add',
+            `${keys[1]}\\shellex\\ContextMenuHandlers\\Synthetic`,
+            '/ve',
+            '/d',
+            '{00000000-0000-0000-0000-000000000994}',
+            '/f',
+          ],
+        ],
       ];
       for (const [name, args] of flagged) {
         expect(reg(...args), name).toBe(0);

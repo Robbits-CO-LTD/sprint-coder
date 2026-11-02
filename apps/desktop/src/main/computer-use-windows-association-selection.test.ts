@@ -60,7 +60,11 @@ describe('Windows association and selection measurement (N8-1b)', () => {
   });
   it('asks every handler question for the measured default verb through one resolution path', () => {
     const measurement = code(read('computer_use_windows_association_measurement.h'));
-    const reader = between(measurement, 'WindowsAssociationFacts ReadAssociation(', 'std::atomic<bool> &WindowsOpenMeasurementRunning()');
+    const reader = between(
+      measurement,
+      'WindowsAssociationFacts ReadAssociation(',
+      'std::atomic<bool> &WindowsOpenMeasurementRunning()',
+    );
     for (const kind of [
       'ASSOCSTR_EXECUTABLE',
       'ASSOCSTR_COMMAND',
@@ -75,19 +79,27 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       reader.indexOf('ASSOCSTR_EXECUTABLE'),
     );
     // The static command key must exist and equal the resolved command exactly.
-    expect(reader).toContain('facts.command_key_matches = command_present && command_key == command;');
+    expect(reader).toContain(
+      'facts.command_key_matches = command_present && command_key == command;',
+    );
     // No answer to a handler question is ignored.
     expect(reader).toMatch(
       /if \(facts\.delegate_execute \|\| facts\.drop_target \|\| facts\.dde \|\| facts\.explorer_command_handler \|\|\s*facts\.shell_extension \|\| !facts\.command_key_matches\) return facts;/u,
     );
     // Absent is only "no association"; any other failure is a failed read.
-    expect(measurement).toContain('if (result == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION)) { *present = false; return true; }');
+    expect(measurement).toContain(
+      'if (result == HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION)) { *present = false; return true; }',
+    );
   });
   it('judges by the effect and binds the selection to the measured file', () => {
     const core = code(read('computer_use_windows_association.h'));
     expect(core).not.toContain('requires_single_selection');
     expect(core).toContain('EffectClass effect = EffectClass::kUnclassified;');
-    const judge = between(core, 'WindowsOpenVerdict JudgeWindowsOpenFacts(', 'struct WindowsOpenMeasurementLimits');
+    const judge = between(
+      core,
+      'WindowsOpenVerdict JudgeWindowsOpenFacts(',
+      'struct WindowsOpenMeasurementLimits',
+    );
     expect(judge).toContain('if (!e2 && !e3) return WindowsOpenVerdict::kTakeover;');
     expect(judge).toContain('!SameWindowsOpenTarget(current.association, current.selection)');
     const same = between(core, 'bool SameWindowsOpenTarget(', 'JudgeWindowsAssociation(');
@@ -126,14 +138,20 @@ describe('Windows association and selection measurement (N8-1b)', () => {
   });
   it('cancels only a live worker, by its own handle, under the lock', () => {
     const measurement = code(read('computer_use_windows_association_measurement.h'));
-    const runner = between(measurement, 'Result RunWindowsOpenMeasurement(', 'MeasureWindowsAssociation(');
+    const runner = between(
+      measurement,
+      'Result RunWindowsOpenMeasurement(',
+      'MeasureWindowsAssociation(',
+    );
     expect(runner).not.toMatch(/OpenThread|thread_id|GetCurrentThreadId|THREAD_TERMINATE/u);
     expect(runner).toContain(
       'DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0,',
     );
     expect(runner).toContain('~Pending() { if (thread != nullptr) CloseHandle(thread); }');
     // A result done in time is only discarded; nothing is canceled for it.
-    expect(runner).toContain('if (pending->done && limits.MayRead()) return std::move(pending->result);');
+    expect(runner).toContain(
+      'if (pending->done && limits.MayRead()) return std::move(pending->result);',
+    );
     const cancel = between(runner, 'pending->abandoned.store(true);', 'return {};\n}');
     expect(cancel).toContain('if (!pending->done && pending->thread != nullptr) {');
     expect(cancel).toContain('CoCancelCall(GetThreadId(pending->thread), 0);');
@@ -143,7 +161,11 @@ describe('Windows association and selection measurement (N8-1b)', () => {
   });
   it('runs every measurement on one process-wide slot', () => {
     const measurement = code(read('computer_use_windows_association_measurement.h'));
-    const runner = between(measurement, 'Result RunWindowsOpenMeasurement(', 'MeasureWindowsAssociation(');
+    const runner = between(
+      measurement,
+      'Result RunWindowsOpenMeasurement(',
+      'MeasureWindowsAssociation(',
+    );
     expect(runner).not.toMatch(/\bstatic\b/u);
     expect(runner).toContain(
       'std::atomic<bool> &running = windows_association_detail::WindowsOpenMeasurementRunning();',
@@ -221,7 +243,9 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     const opens = calls(measurement, 'CreateFileW');
     expect(opens.length).toBe(2);
     for (const open of opens) {
-      expect(open).toMatch(/^\(path\.c_str\(\), (?:GENERIC_READ|FILE_READ_ATTRIBUTES), FILE_SHARE_READ, nullptr, OPEN_EXISTING,/u);
+      expect(open).toMatch(
+        /^\(path\.c_str\(\), (?:GENERIC_READ|FILE_READ_ATTRIBUTES), FILE_SHARE_READ, nullptr, OPEN_EXISTING,/u,
+      );
     }
     expect(opens.some((open) => open.includes('FILE_FLAG_OPEN_REPARSE_POINT'))).toBe(true);
     const keys = calls(measurement, 'RegOpenKeyExW');
@@ -329,7 +353,11 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     const input = between(source, 'struct WindowsApprovalMeasurementInput {', '};');
     expect(input).toMatch(/\bWindowsOpenFacts\s*\*\s*open_facts\b/u);
     expect(input).toContain('deliberately does not read it yet');
-    const body = between(source, 'MeasureWindowsApproval(const WindowsApprovalMeasurementInput', 'namespace');
+    const body = between(
+      source,
+      'MeasureWindowsApproval(const WindowsApprovalMeasurementInput',
+      'namespace',
+    );
     expect(code(body)).not.toContain('open_facts');
   });
   it('keeps capabilities and both effect gates closed', () => {

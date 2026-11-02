@@ -543,16 +543,41 @@ describe('Windows UI Automation source only reads', () => {
       [/->GetCount\(/gu, /selected\.Get\(\)->GetCount\(&array_count\)/gu, 1],
       [/->GetItemAt\(/gu, /selected\.Get\(\)->GetItemAt\(index, item\.Receive\(\)\)/gu, 1],
       [/->GetRuntimeId\(/gu, /target\.Get\(\)->GetRuntimeId\(&runtime\)/gu, 1],
-      [/->get_CurrentSelectionContainer\(/gu, /selection_item\.Get\(\)->get_CurrentSelectionContainer\(/gu, 1],
+      [
+        /->get_CurrentSelectionContainer\(/gu,
+        /selection_item\.Get\(\)->get_CurrentSelectionContainer\(/gu,
+        1,
+      ],
       [/->GetCurrentSelection\(/gu, /pattern\.Get\(\)->GetCurrentSelection\(/gu, 1],
       [/->get_Length\(/gu, /selection\.Get\(\)->get_Length\(&uia_count\)/gu, 1],
-      [/->GetElement\(/gu, /selection\.Get\(\)->GetElement\(0, selected_target\.Receive\(\)\)/gu, 1],
+      [
+        /->GetElement\(/gu,
+        /selection\.Get\(\)->GetElement\(0, selected_target\.Receive\(\)\)/gu,
+        1,
+      ],
       [/(?<![\w.>])GetWindowThreadProcessId\(/gu, /GetWindowThreadProcessId\(top, &owner\)/gu, 1],
       [/(?<![\w.>:])Utf8\(/gu, /^$/gu, 0],
-      [/windows_association_detail::Utf8\(/gu, /windows_association_detail::Utf8\((?:path|real|target_answer\.path)\)/gu, 3],
-      [/(?<![\w.>])ResolveRealFile\(/gu, /windows_association_detail::ResolveRealFile\(single_path, budget,/gu, 1],
-      [/RunWindowsOpenMeasurement</gu, /RunWindowsOpenMeasurement<WindowsSingleSelectionFacts>\(limits,/gu, 1],
-      [/\bArray\b/gu, /struct Array \{ SAFEARRAY \*value; ~Array\(\) \{ SafeArrayDestroy\(value\); \} \} runtime_owner\{runtime\};/gu, 2, 1],
+      [
+        /windows_association_detail::Utf8\(/gu,
+        /windows_association_detail::Utf8\((?:path|real|target_answer\.path)\)/gu,
+        3,
+      ],
+      [
+        /(?<![\w.>])ResolveRealFile\(/gu,
+        /windows_association_detail::ResolveRealFile\(single_path, budget,/gu,
+        1,
+      ],
+      [
+        /RunWindowsOpenMeasurement</gu,
+        /RunWindowsOpenMeasurement<WindowsSingleSelectionFacts>\(limits,/gu,
+        1,
+      ],
+      [
+        /\bArray\b/gu,
+        /struct Array \{ SAFEARRAY \*value; ~Array\(\) \{ SafeArrayDestroy\(value\); \} \} runtime_owner\{runtime\};/gu,
+        2,
+        1,
+      ],
     ];
     for (const [anywhere, site, count, sites = count] of pinned) {
       expect(code(source).match(anywhere)?.length ?? 0, anywhere.source).toBe(count);
