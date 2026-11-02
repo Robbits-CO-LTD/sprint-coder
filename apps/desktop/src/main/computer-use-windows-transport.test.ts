@@ -32,6 +32,7 @@ import {
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
+  operationTimeoutMilliseconds,
 } from './computer-use-native-windows';
 
 /**
@@ -588,6 +589,265 @@ describe('Computer Use Windows helper transport', () => {
   afterEach(() => {
     vi.useRealTimers();
     onSocket = null;
+  });
+
+  // Current behavior baseline, to be replaced by kill-stop (N3).
+  describe('kill-stop (N3) replacement baseline for current Stop timing', () => {
+    // The cancel budget is private; read its declaration without changing production exports.
+    const cancelDeclaration = /const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = ([\d_]+);/u.exec(
+      readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8'),
+    );
+    if (cancelDeclaration === null) throw new Error('Native cancel deadline declaration missing');
+    const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = Number(
+      cancelDeclaration[1]!.replaceAll('_', ''),
+    );
+    const stopAt =
+      COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS +
+      COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT;
+    const killAt =
+      COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS +
+      COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT - 1) +
+      COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+
+    async function startController(controller: ComputerUseController) {
+      const [candidate] = await controller.listWindows(profile.id);
+      return controller.start({
+        taskId: 'task-baseline',
+        profileId: profile.id,
+        windowId: candidate!.windowId,
+        mode: profile.mode,
+        connectionId: profile.connectionId,
+        modelId: profile.modelId,
+        providerEgressConsent: true,
+        providerEgressConsentBinding: {
+          connectionId: profile.connectionId,
+          modelId: profile.modelId,
+        },
+        remember: false,
+        expectedPolicyEpoch: 0,
+        expectedWindowRevision: 1,
+        expectedProfileRevision: 1,
+      });
+    }
+
+    function recordRequests() {
+      const sent: Array<{ operation: string; at: number }> = [];
+      const socket = sockets[0]!;
+      const write = socket.write.bind(socket);
+      const origin = Date.now();
+      vi.spyOn(socket, 'write').mockImplementation((chunk, callback) => {
+        const frame = decodeComputerUseNativeFrame(chunk);
+        const metadata = JSON.parse(frame.metadata.toString('utf8')) as Record<string, unknown>;
+        sent.push({ operation: String(metadata['operation']), at: Date.now() - origin });
+        return write(chunk, callback);
+      });
+      return sent;
+    }
+
+    it('stops at the Host deadline and kills only at the last close transport deadline', async () => {
+      const { host, helper } = createTarget();
+      const controller = controllerFor(host);
+      const session = await startController(controller);
+      const statuses: Array<{ state: string; stopReason: string | null }> = [];
+      controller.subscribe((status) => statuses.push(status));
+      helper().hold('cancel');
+      const sent = recordRequests();
+      let settled = false;
+      const stopping = controller.stopForTask('task-baseline', 'task_changed').then(() => {
+        settled = true;
+      });
+      let elapsed = 0;
+      const advanceTo = async (at: number) => {
+        if (at <= elapsed) throw new Error(`Expected time ${at} to be after ${elapsed}`);
+        await vi.advanceTimersByTimeAsync(at - elapsed);
+        elapsed = at;
+      };
+      await advanceTo(COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS - 1);
+      expect(sent).toEqual([{ operation: 'cancel', at: 0 }]);
+      for (let attempt = 0; attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT; attempt += 1) {
+        const at =
+          COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS +
+          attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS;
+        if (attempt > 0) await advanceTo(at - 1);
+        expect(sent.filter((request) => request.operation === 'close_session')).toHaveLength(
+          attempt,
+        );
+        await advanceTo(at);
+        expect(sent.at(-1)).toEqual({ operation: 'close_session', at });
+        if (attempt === 0) {
+          // The cancel transport deadline falls between the first and second close attempts.
+          await advanceTo(operationTimeoutMilliseconds('cancel') - 1);
+          expect(children[0]!.killed).toBe(false);
+          await advanceTo(operationTimeoutMilliseconds('cancel'));
+          expect(children[0]!.killed).toBe(false);
+        }
+      }
+      await advanceTo(stopAt - 1);
+      expect(settled).toBe(false);
+      expect(controller.getStatus(session.sessionId)?.state).toBe('stopping');
+      await advanceTo(stopAt);
+      expect(settled).toBe(true);
+      await stopping;
+      expect(statuses.at(-1)).toMatchObject({ state: 'stopped', stopReason: 'native_unavailable' });
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      const firstCloseTimeout =
+        COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS + COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+      // Host Stop settles before the first close transport deadline, which precedes the last.
+      await advanceTo(firstCloseTimeout - 1);
+      expect(children[0]!.killed).toBe(false);
+      await advanceTo(firstCloseTimeout);
+      expect(children[0]!.killed).toBe(false);
+      await advanceTo(killAt - 1);
+      expect(children[0]!.killed).toBe(false);
+      await advanceTo(killAt);
+      expect(children[0]!.killed).toBe(true);
+      expect(sent).toEqual([
+        { operation: 'cancel', at: 0 },
+        ...Array.from({ length: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT }, (_, attempt) => ({
+          operation: 'close_session',
+          at:
+            COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS +
+            attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+        })),
+      ]);
+      await controller.dispose();
+    });
+
+    it.each(['semantic', 'discovery'] as const)(
+      'retains the helper beyond the kill deadline for unconfirmed %s',
+      async (kind) => {
+        const { addon, host, helper } = createTarget({
+          ...responders(),
+          dispatch: () => ['error', { code: 'semantic_input_in_flight', accepted: true }],
+        });
+        const controller = controllerFor(host);
+        const session = await startController(controller);
+        let discovery: Promise<unknown> | undefined;
+        if (kind === 'semantic') {
+          await expect(
+            Promise.resolve(
+              addon.dispatch!({
+                sessionId: session.sessionId,
+                requestId: 'baseline-semantic',
+                cancelEpoch: 0,
+                type: 'invoke',
+                targetId: 'owned-control',
+              }),
+            ),
+          ).rejects.toMatchObject({ code: 'semantic_input_in_flight', accepted: true });
+        } else {
+          helper().holdOnly('list_windows_cancellable');
+          discovery = Promise.resolve(
+            addon.discoverWindows!({
+              ...profile,
+              discoveryId: 'baseline-unconfirmed',
+            }),
+          ).catch((error: Error) => error);
+          await vi.advanceTimersByTimeAsync(0);
+        }
+        helper().hold('cancel');
+        const sent = recordRequests();
+        const stopping = controller.stopForTask('task-baseline', 'task_changed');
+        await vi.advanceTimersByTimeAsync(stopAt);
+        await stopping;
+        expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+        await vi.advanceTimersByTimeAsync(killAt - stopAt - 1);
+        expect(children[0]!.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(children[0]!.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(killAt * 2);
+        expect(children[0]!.killed).toBe(false);
+        expect(sent.filter((request) => request.operation === 'close_session')).toHaveLength(
+          COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+        );
+        if (discovery !== undefined) expect(await discovery).toBeInstanceOf(Error);
+        await controller.dispose();
+      },
+    );
+
+    it('bounds pending-start Stop by both Host attempts and the final transport deadline', async () => {
+      const { host, helper } = createTarget();
+      const controller = controllerFor(host);
+      await controller.listWindows(profile.id);
+      helper().hold('start_session');
+      const starting = startController(controller).catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      const statuses: Array<{ state: string; stopReason: string | null }> = [];
+      controller.subscribe((status) => statuses.push(status));
+      const sent = recordRequests();
+      let settled = false;
+      const stopping = controller.stopForTask('task-baseline', 'task_changed').then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      for (let attempt = 0; attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT; attempt += 1) {
+        expect(sent).toHaveLength(attempt + 1);
+        expect(sent.at(-1)).toEqual({
+          operation: 'stop_pending_start',
+          at: attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+        });
+        await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS - 1);
+        expect(sent).toHaveLength(attempt + 1);
+        expect(settled).toBe(false);
+        expect(statuses.at(-1)?.state).toBe('stopping');
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(settled).toBe(true);
+      await stopping;
+      expect(await starting).toBeInstanceOf(Error);
+      expect(statuses.at(-1)).toMatchObject({ state: 'stopped', stopReason: 'native_unavailable' });
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      const pendingStopAt =
+        COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT;
+      // The timed-out start waits for the initial Stop, then rechecks with the same bounded
+      // Host retry loop. The last recheck's wire Stop owns the transport kill deadline.
+      // The start transport deadline is no later than pendingStopAt, so the first recheck is sent now.
+      const recheckAt = Math.max(operationTimeoutMilliseconds('start_session'), pendingStopAt);
+      const lastRecheckAt =
+        recheckAt +
+        COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT - 1);
+      const pendingKillAt = lastRecheckAt + COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+      expect(sent).toEqual(
+        Array.from({ length: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT + 1 }, (_, attempt) => ({
+          operation: 'stop_pending_start',
+          at:
+            attempt === COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT
+              ? recheckAt
+              : attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+        })),
+      );
+      let elapsed = pendingStopAt;
+      const advanceTo = async (at: number) => {
+        if (at <= elapsed) throw new Error(`Expected time ${at} to be after ${elapsed}`);
+        await vi.advanceTimersByTimeAsync(at - elapsed);
+        elapsed = at;
+      };
+      for (let attempt = 1; attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT; attempt += 1) {
+        const at = recheckAt + attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS;
+        await advanceTo(at - 1);
+        expect(sent).toHaveLength(COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT + attempt);
+        expect(children[0]!.killed).toBe(false);
+        await advanceTo(at);
+        expect(sent).toHaveLength(COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT + attempt + 1);
+        expect(sent.at(-1)).toEqual({ operation: 'stop_pending_start', at });
+        expect(children[0]!.killed).toBe(false);
+      }
+      // Earlier wire timeouts cannot reap the helper while the final recheck is pending.
+      for (const request of sent.slice(0, -1)) {
+        const timeoutAt = request.at + COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+        if (timeoutAt <= elapsed) continue;
+        await advanceTo(timeoutAt - 1);
+        expect(children[0]!.killed).toBe(false);
+        await advanceTo(timeoutAt);
+        expect(children[0]!.killed).toBe(false);
+      }
+      await advanceTo(pendingKillAt - 1);
+      expect(children[0]!.killed).toBe(false);
+      await advanceTo(pendingKillAt);
+      expect(sent).toHaveLength(COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT * 2);
+      expect(children[0]!.killed).toBe(true);
+      await controller.dispose();
+    });
   });
 
   describe('cancellable discovery transport', () => {
