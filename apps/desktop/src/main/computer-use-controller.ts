@@ -4298,7 +4298,11 @@ export class ComputerUseController {
         : null;
     if (action !== null && !action.success)
       return { decision: 'deny', reason: 'computer_action_invalid' };
-    const capability = request.entry.requiredCapabilities[0];
+    // Copy reads one node without input, but still follows the Task's observation permission.
+    const capability =
+      action?.success && action.data.type === 'copy'
+        ? 'computer.observe'
+        : request.entry.requiredCapabilities[0];
     if (capability !== 'computer.observe' && capability !== 'computer.control')
       return { decision: 'deny', reason: 'computer_capability_invalid' };
     if (capability === 'computer.control')
@@ -4310,10 +4314,7 @@ export class ComputerUseController {
       );
     // wait/finish never call the native input executor. They remain valid in observe-only mode
     // even though they share the action schema and ToolBroker entry with controlled actions.
-    if (
-      action?.success &&
-      (action.data.type === 'wait' || action.data.type === 'finish' || action.data.type === 'copy')
-    )
+    if (action?.success && (action.data.type === 'wait' || action.data.type === 'finish'))
       return { decision: 'allow', reason: 'computer_non_input_action' };
     if (capability === 'computer.control' && record.status.mode === 'observe_only')
       return { decision: 'deny', reason: 'computer_observe_only' };
