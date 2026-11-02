@@ -397,6 +397,14 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       return false;
     break;
   }
+  case MessageType::kCheckTargetIdentity: {
+    std::string response;
+    const bool succeeded = CheckWindowsTargetIdentities(metadata, &response);
+    if (!Respond(pipe, request,
+                 succeeded ? MessageType::kTargetIdentityResult : MessageType::kError,
+                 succeeded ? response : ErrorPayload("target_identity_input_invalid"))) return false;
+    break;
+  }
   case MessageType::kProbe: {
     std::string operation;
     if (!ReadJsonString(metadata, "operation", &operation))

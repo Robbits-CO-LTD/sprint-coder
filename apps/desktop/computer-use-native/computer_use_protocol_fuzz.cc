@@ -9488,7 +9488,8 @@ int main() {
     return 1;
 
   // The preflight pair (S5-a) is part of the wire vocabulary, and the next number is not.
-  for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult}) {
+  for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult,
+                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult}) {
     auto preflight_header = ValidHeader();
     preflight_header.message_type = static_cast<std::uint16_t>(type);
     if (!Check(!EncodeFrame(preflight_header, metadata).empty() &&
@@ -9498,7 +9499,7 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kPreflightResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kTargetIdentityResult) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
              "message-type-after-preflight-unknown"))

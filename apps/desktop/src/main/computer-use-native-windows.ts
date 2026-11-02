@@ -38,6 +38,67 @@ import {
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
+export type WindowsTargetIdentityResult =
+  | Readonly<{ result: 'alive' }>
+  | Readonly<{
+      result: 'terminated';
+      reason: 'signaled' | 'start_time_mismatch' | 'no_process';
+    }>
+  | Readonly<{ result: 'unverifiable'; reason: 'access_denied' | 'win32_error' }>;
+
+export type WindowsComputerUseNativeAddon = ComputerUseNativeAddon &
+  Readonly<{
+    checkTargetIdentity: (targets: unknown) => Promise<readonly WindowsTargetIdentityResult[]>;
+  }>;
+
+const MAX_TARGET_IDENTITIES = 64;
+
+function parseTargetIdentities(input: unknown): Array<{ pid: number; processStartTime: string }> {
+  const message = 'Invalid Windows target identity request';
+  if (!Array.isArray(input) || input.length > MAX_TARGET_IDENTITIES) throw new Error(message);
+  return Array.from(input, (entry: unknown) => {
+    const value = asRecord(entry, message);
+    const pid = value['pid'];
+    const processStartTime = value['processStartTime'];
+    if (
+      Object.keys(value).length !== 2 ||
+      typeof pid !== 'number' ||
+      !Number.isInteger(pid) ||
+      pid <= 0 ||
+      pid > 0xffff_ffff ||
+      typeof processStartTime !== 'string' ||
+      !/^[1-9][0-9]{0,19}$/u.test(processStartTime) ||
+      BigInt(processStartTime) > 0xffff_ffff_ffff_ffffn
+    )
+      throw new Error(message);
+    return { pid, processStartTime };
+  });
+}
+
+function parseTargetIdentityResults(input: unknown, count: number): WindowsTargetIdentityResult[] {
+  const message = 'Invalid Windows target identity response';
+  const value = asRecord(input, message);
+  const results = value['results'];
+  if (Object.keys(value).length !== 1 || !Array.isArray(results) || results.length !== count)
+    throw new Error(message);
+  return Array.from(results, (entry: unknown): WindowsTargetIdentityResult => {
+    const row = asRecord(entry, message);
+    const result = row['result'];
+    const reason = row['reason'];
+    const keys = Object.keys(row);
+    if (result === 'alive' && keys.length === 1) return { result };
+    if (keys.length === 2) {
+      if (
+        result === 'terminated' &&
+        (reason === 'signaled' || reason === 'start_time_mismatch' || reason === 'no_process')
+      )
+        return { result, reason };
+      if (result === 'unverifiable' && (reason === 'access_denied' || reason === 'win32_error'))
+        return { result, reason };
+    }
+    throw new Error(message);
+  });
+}
 export type WindowsComputerUseHelperTrust = Readonly<{
   binaryDigest: string;
   /**
@@ -79,7 +140,7 @@ export function createWindowsComputerUseNativeAddon(
   helperPath: string,
   probe: unknown,
   expectedTrust: WindowsComputerUseHelperTrust,
-): ComputerUseNativeAddon {
+): WindowsComputerUseNativeAddon {
   const discoverySupported = windowsDiscoveryCapability(probe);
   const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
@@ -88,6 +149,7 @@ export function createWindowsComputerUseNativeAddon(
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
+    checkTargetIdentity: (targets) => client.checkTargetIdentity(targets),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
     discoverWindows: (input) => client.discoverWindows(input),
@@ -545,6 +607,24 @@ class WindowsComputerUseHelperClient {
       // This closes a discovery, not an active session. It never arms helper teardown.
       this.shutdownIfIdle();
     }
+  }
+
+  async checkTargetIdentity(input: unknown): Promise<readonly WindowsTargetIdentityResult[]> {
+    const targets = parseTargetIdentities(input);
+    let response: unknown;
+    try {
+      response = await this.call(
+        'check_target_identity',
+        'check_target_identity',
+        { targets },
+        undefined,
+        undefined,
+      );
+    } catch {
+      // Neither helper error payloads nor JSON parser diagnostics may expose an identity.
+      throw new Error('Windows target identity check failed');
+    }
+    return parseTargetIdentityResults(response, targets.length);
   }
 
   async call(
@@ -1335,6 +1415,8 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
       return 'dispatch_result';
     case 'preflight':
       return 'preflight_result';
+    case 'check_target_identity':
+      return 'target_identity_result';
     default:
       throw new Error(`Unsupported Computer Use Windows request type: ${requestType}`);
   }
