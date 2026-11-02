@@ -147,13 +147,18 @@ describe('which body the flag selects', () => {
     expect(unsupported).not.toContain('class="settings-nav"');
   });
 
-  it('shows the MIT License information in both settings layouts', () => {
+  it('shows the Perimeter license and retained legacy MIT notice in both settings layouts', () => {
     stubBridge();
     for (const html of [workspace(), legacy()]) {
       expect(html).toContain('data-testid="settings-license"');
-      expect(html).toContain('MIT License');
+      expect(html).toContain('PolyForm Perimeter 1.0.1');
+      expect(html).toContain('競合製品・サービスの提供');
       expect(html).toContain('Copyright (c) 2026 株式会社Robbits');
       expect(html).toContain('data-testid="settings-license-details"');
+      expect(html).toContain('PolyForm Perimeter License 1.0.1');
+      expect(html).toContain('except for providing to others any product that competes');
+      expect(html).toContain('Required Notice: Copyright (c) 2026 株式会社Robbits');
+      expect(html).toContain('Previously MIT-licensed material');
       expect(html).toContain('Permission is hereby granted, free of charge');
       expect(html).toContain('THE SOFTWARE IS PROVIDED');
     }

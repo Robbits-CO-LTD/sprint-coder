@@ -5,7 +5,7 @@
   "description": "ローカルファーストのAIコーディング・デスクトップアプリ",
   "author": "Sprint Coder contributors",
   "private": true,
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "main": ".vite/build/index.js",
   "scripts": {
     "start": "electron-forge start",
