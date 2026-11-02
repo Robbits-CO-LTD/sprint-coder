@@ -5,7 +5,7 @@
 - Issue: #991（Refs #988, #500）
 - 関連: `tasks/designs/adr-computer-use-agent-driven-v2.md`（以下、V2 ADR）§3.2.3〜§3.2.5、§3.6、§4、§9 C5 / C6、S4-4 承認 ticket の契約と補遺、§10 Q1 / Q2
 - 接点: `tasks/designs/adr-computer-use-windows-kill-stop-20261102.md`（別 PR で進行中。現 checkout の実装済み契約とは扱わない）
-- 現状の照合基準: `1899ca3c187bdf4cc212e2dad1f282bbe1eeb6e5`。以下の `file:line` はこの版を指す。`main/` は `apps/desktop/src/main/`、`native/` は `apps/desktop/computer-use-native/`、`renderer/` は `apps/desktop/src/renderer/` の略記である。
+- 現状の照合基準: `1899ca3c187bdf4cc212e2dad1f282bbe1eeb6e5`。現 head `16598084` との差分は本 ADR の追加だけであり、今回も現コードで照合した。以下の `file:line` はこの版を指す。`main/` は `apps/desktop/src/main/`、`native/` は `apps/desktop/computer-use-native/`、`renderer/` は `apps/desktop/src/renderer/` の略記である。
 
 ## 1. 問題と範囲
 
@@ -26,7 +26,7 @@ Windows には ordinary ticket の経路があるが、人の承認を native �
 1. Main の pin、manifest、native handshake の platform 別 eligibility が一致し、パッケージ・署名・provenance の gate が開いている。classifier は正確に 2、`ticketRequired` と Windows V2 の `interlockEnforced` は true である。現在の比較関数が未実装の attest を検査済みだとは扱わない。`interlockEnforced` と版表の本番接続は N7 が担当する。
 2. Windows adapter と接続先 helper の双方に承認の全操作があり、wire 契約と版が一致する。TS に関数を置いただけでは能力の証明にならない。helper の承認能力を handshake で検査し、欠落・未知の版では閉じる。
 3. 現在の helper 世代に属する生きた session が route v2、実効 `v2-denylist` に束縛されている。route v1、未束縛、失敗した start、close 済み、旧 helper 世代では閉じる。
-4. control のある session で、操作 mode が `supervised` または `full_access_app` である。`observe_only` はカードから昇格できない。eligibility の mode と操作 mode は別の値として検査する。
+4. Windows の操作入口では、control のある session の操作 mode が `supervised` または `full_access_app` であることも検査する。これは Windows 専用の追加ガードであり、共有 `computerUseApprovalPathEnabled` の入力へ操作 mode を追加しない。現行の `effectiveMode` は eligibility mode である（`main/computer-use-eligibility.ts:143`）。darwin の入力と真偽表は変更しない。`observe_only` はカードから昇格できない。
 
 環境変数、Renderer、モデルの指定では開かない。force-v1 は閉じる方向だけに使う。承認経路が利用不能なら、C / 未署名の control は公開せず、拒否または `observe_only` に留める。
 
@@ -40,10 +40,15 @@ Windows には ordinary ticket の経路があるが、人の承認を native �
 
 **決めること・推奨案**: Windows native の preflight、承認交換、承認後 dispatch の各境界で、同じ capture と classifier により対象を測定する。N1 後の分割先は実装時に追跡するが、現在の `HandleWindowsPreflight` と `EvaluateWindowsInterlockOnLane` に相当する境界を正本とする。Main の文言やモデルの「文書である」という申告では判定しない。
 
+現行 `native/computer_use_effect_measurement.h:388` の `MeasureApproval` は AX 用の `BuildShadowFacts` を呼ぶ。一方、Windows は `native/computer_use_windows_interlock_capture.h:98` の `BuildWindowsShadowFacts` に、取消し・予算・完全性、実パス、chain のプロセス所有、非 web の追加規則を重ねる。N8-1 は測定関数を検証済み facts を受け取る核と OS 別の入口に分け、Windows の全承認境界でこの追加規則を通った同一 facts と decision を authority の生成にも使う。Windows から AX 用入口を呼ばない。macOS の既存入口・測定値は維持する。
+
 - E2 はダウンロード面の祖先と開くコントロール、E3 はファイルブラウザ面の項目と既定アクションに結び付ける。UIA の要素・祖先、面、対象ファイルの拡張子、操作種別を取得する。座標クリックもその位置の対象を解決する。表示名だけの拡張子推測、他の項目の filename の流用は不可である。
+- E3 は現在の選択集合が操作対象の 1 項目だけと一致することを、preflight / approve / approved dispatch の 3 境界で測り直す。`IUIAutomationSelectionPattern::GetCurrentSelection` または `IFolderView2` の選択数と選択項目を使い、UIA 対象と実パスへ結び付ける。複数選択、別項目の事前選択、選択なし、読取り不能、不一致は takeover とする。選択数と対象の実パスの digest を native authority に含め、外へ出さない。クリック後に選択が変わるという予測で事前条件を省略しない。
 - native が対象を一意に結び付けられない、読み切れない、拡張子が不明、origin / 面が不明なら takeover とし、確認カードを安全性の代用にしない。入力経路ごとの実測を通っていないものは閉じたままにする。
 - カードには対象アプリ（表示名はアプリ提供値と区別）、操作「ダウンロードを開く」または「ファイルを開く」、対象項目の安全に表示できるラベルと拡張子、外部アプリが開く可能性、残り期限を示す。入力本文やファイル内容は取得しない。対象ラベルが検証できなければ承認しない。内部 path / PID / HWND / token / authority digest は Renderer・モデル・会話・監査へ出さない。必要な表示情報は native の測定結果から専用の表示用データとして Main が検査・無害化し、命令として扱わない。
 - native のカードは `allow_once` / `deny` のみで、plan grant、今後も許可、タスク全体の許可を作らない。`full_access_app` も E2 / E3 を省略できない。
+
+**表示用の契約**: 現行 offer receipt は `approvalGeneration` / `remainingMs` / `effect` だけを追加し、余分な key を拒否する（`main/computer-use-native-host.ts:1554`, `:1602`）。N8-2 で Windows 用の receiptVersion 3 の offer receipt と strict schema を同時に追加し、native 測定由来の `display`（対象ラベル、拡張子、効果、外部アプリの可能性、未署名警告の区分）を運ぶ。文字列長・列挙値・必須欄・未知 key を検査し、欠落や不一致を拒否する。表示値を authority に結び付け、再測定で変われば拒否する。path や本文をラベルに転用せず、制御文字の除去と表示長制限を Main で行う。共有内部型と Renderer へ出す contracts も同じ PR で揃える。macOS の既存 receipt v1 / v2 は strict な旧形を維持し、内部の表示データの既定値を `null`（追加欄なし）とする。Windows の新 receipt にこの既定値を適用して不足を隠さない。receiptVersion 3 は Windows の能力宣言と route v2 に束縛し、darwin や能力未宣言の接続では拒否する。N8-4 で controller に接続し、N8-6 で欄を表示する。
 
 **ticket の共通契約**: V2 ADR S4-4 と補遺、および `native/computer_use_native_approval_ticket.h:36`、`native/computer_use_native_approval_flow.h:120` を引き継ぐ。
 
@@ -54,11 +59,14 @@ Windows には ordinary ticket の経路があるが、人の承認を native �
 5. `approvalApprove` は入力せず、intent を消費して execution ticket を作る。有効期間は最大 5 秒と intent の残りの短い方である。新しい request ID / revision / ticket generation / context digest に束縛する。交換後から `dispatchApproved` まで observe / preflight / refocus を挟まない。
 6. `dispatchApproved` は入力直前に再測定し、単発で ticket を消費する。再分類結果が同じ `kApproval` であること自体は拒否理由にしない。効果が普通の操作へ変わった場合も、承認した効果と異なるので拒否する。ordinary dispatch は承認 ticket を受け付けず、ticket 不備から旧 dispatch へ戻らない。
 7. 同じ approval generation の試行は成功・失敗とも使い切る。異なる世代の遅延応答で新しい slot を壊さない。replay / in-flight を消費より先に処理し、timeout 後に入力を再送しない。`approvalApprove` / discard の失敗は入力前の拒否、`dispatchApproved` 後の無応答は `unknown_effect` とする。
-8. 元の tool call、提示で拒否確定した native request、承認後の新しい native request を別の相関として監査する。本文・token・authority/context digest を記録しない。`type` は 1 Unicode scalar だけが承認単位であり、複数文字を包括許可しない。既存の先頭での `native_approval_multi_scalar_type`、途中での `partial_type` を維持する。
+
+   Windows の dispatch 再測定の期限は `min(execution ticket の期限, 測定開始 + 150 ms)` とする（N8 の新しい受入上限）。測定前に期限を検査し、UIA / shell / 関連付けの測定後かつ入力 claim 直前にも単調時計で検査する。待ち時間も 5 秒に含み、測定で期限を延長しない。上限に達した測定は失敗として slot を消費し、遅い結果を捨て、入力しない。OS 呼出しが戻らない場合の終了は N0〜N5 に委ね、Stop serial / epoch / helper 世代を claim 直前にも検査する。
+
+8. 元の tool call、提示で拒否確定した native request、承認後の新しい native request を別の相関として監査する。本文・token・authority/context digest を記録しない。`type` は 1 Unicode scalar だけが承認単位であり、複数文字を包括許可しない。既存の先頭での `native_approval_multi_scalar_type`、途中での `partial_type` を維持する。`main/computer-use-controller.ts:4815` は `type` だけを scalar に分割するため、supervised の 2 scalar 以上の `type` は先頭の offer で拒否される（`:4890`）。一方 `set_text` は全文と対象を payload digest に束縛した一回の原子操作であり、一回の承認で全文を書き込む。「複数文字を包括許可しない」は分割した `type` の複数入力をまとめて承認しない意味である。
 
 **代案・理由**: Main の一回限りフラグだけで ordinary ticket を再利用する案は、カード到達によるフォーカス・revision の変更と競合を扱えない。ファイル全体・フォルダ全体に許可する案は Q1 と単発性に反するため採らない。
 
-**N8 で作るもの**: native の private slot、承認測定、3 操作（approve / discard / approved dispatch）、版 2 receipt、Main のカードとの接続を作る。E2 / E3 の分類・ticket の試験は fixture で作るが、本番の効果 gate は §2.6 の C6 の根拠が揃うまで false にする。Explorer の適格化は N11 である。
+**N8 で作るもの**: native の private slot、承認測定、3 操作（approve / discard / approved dispatch）、Windows の版 3 receipt、Main のカードとの接続を作る。E2 / E3 の分類・ticket の試験は fixture で作るが、本番の効果 gate は §2.6 の C6 の根拠が揃うまで false にする。Explorer の適格化は N11 である。
 
 ### 2.3 上限クラス C の操作ごとの確認
 
@@ -78,9 +86,15 @@ V2 ADR §3.6 の「閲覧・選択・整理は無確認」は、将来適格に�
 
 upper 上限を一括で `supervised` にするとブラウザも上がるため、規則ごとの上限を表現し、複数一致では最も低い上限を採る。ブラウザ規則は `observe_only`、C / unsigned 規則は条件を満たすと `supervised` とする。表を正本に native と Main を同時生成し、golden vector を一致させる。承認経路が閉じた session の fallback は必ず低い側にする。
 
+上限の決定は二段階に分ける。N8-5 の native 列挙と Main 初回許可は、アプリごとの静的な潜在上限を生成表から計算し、Windows の build / handshake の承認能力がなければ提示上限を `observe_only` に下げる。この時点では session 述語を呼ばず、潜在上限を control の許可と解釈しない。start では native が route / eligibility / helper 世代を束縛した後、入力可能な session を返す前に Windows gate を評価し、C / unsigned の mode と maximumMode を、gate が開けば最大 `supervised`、閉じれば `observe_only` に下げる。Main host も start receipt と gate を照合し、controller がこの低い値を保存する。不一致は start 拒否とする。開始後に gate が閉じた場合は host と native が即座に入力を拒否し、controller はカード・plan を失効させ上限を下げる。gate の復旧だけで同じ session を昇格させない。
+
+表の意味変更に伴う Windows ruleset の版・content hash・ledger・native / TS の生成物の整合は N8-5 が担当する（現行の正本契約は `native/deny-ruleset.json:2`）。N7 は生成済みの値を platform × eligibility mode の manifest / Main pin / handshake の版表へ接続して公開する。N7 が古い hash を新しい意味へ流用することはない。classifier、effect lexicon、eligibility ruleset の版を混同せず、macOS の eligibility の版・hash は保持する。
+
 既存 session の `observe_only` を途中で上げない。新しい gate・identity・上限を取得した初回許可と新規 session から適用する。承認カードも mode を引き上げず、Main と native の単調束縛を保持する。
 
-**代案・理由**: スクロールを無確認にする案は、値を変更する wheel 操作を含み、Q1 の各操作確認と一致しない。アプリ単位の包括許可は採らない。V1 のカードと native のカードを一枚に統合する改善も今回は採らない。既存の二枚になり得る経路を維持し、V1 の plan grant は native の承認を省略しない。
+**代案・理由**: スクロールを無確認にする案は、値を変更する wheel 操作を含み、Q1 の各操作確認と一致しない。アプリ単位の包括許可は採らない。V1 のカードと native のカードを一枚に統合する改善も今回は採らない。V2 ADR S4-4 補遺 `:1054` の 2026-10-14 の決定 A（二枚カード）を維持する。supervised の許可可能な入力で V1 plan 対象外なら、V1 カードと native カードが毎回二枚になる（V1 判定は `main/computer-use-controller.ts:5782`）。V1 plan が適用されても native カードは毎回必要である。頻度が低いとは説明しない。複数 scalar の type はカードを出して一括許可するのでなく §2.2 の拒否になる。
+
+**native Document の接続**: 現行 `native/computer_use_native_interlock.h:419` は origin を解決した再分類が ordinary のときだけ例外を通し、approval は `kAnotherRuleRemains` の takeover になる（`:427`）。N8-1 は Windows 承認 gate が成立するときだけ、既存の例外条件（読取り可能、非 web の肯定的証拠、Document、origin unknown。`:339`）と Windows capture の所有・完全性を満たした facts の origin を ordinary に確定して再分類し、approval を offer 判定へ渡す。これにより C / unsigned の native Document の入力も `supervised_action` のカードになる。web / 不明 / 不完全、blocked、承認 gate 不成立は緩めない。再測定・authority も確定後の同じ facts を使い、ordinary ticket への落下を禁止する。共有 strict 写像の既定は変えず Windows の承認入口を追加し、macOS の期待値を維持する。
 
 **N8 で作るもの**: 上限の分離、契約型の supervised 対応、native / Main の一致試験、操作表と単調束縛の回帰試験を作る。darwin の規則・mode を変更せず、Windows の期待値を変える試験には変更理由を明示する。
 
@@ -90,7 +104,7 @@ upper 上限を一括で `supervised` にするとブラウザも上がるため
 
 **決めること・推奨案**: 「未署名」と「検証不能」を混同しない。native が unsigned と確定し、必須 facts、実行中イメージと検証ファイルの対応、root、ユーザー・integrity・session、禁止クラスの検査を通ったものだけを digest 完全一致の supervised にする。signature invalid、facts 欠落、W-UR は拒否のままであり、Main の unverified 表示を許可根拠にしない。
 
-native は file handle に結び付いた executable digest と実行中 identity を start / resume / 入力前、および承認交換・消費時に照合する。path 上の別ファイルを hash して一致したことだけでは通さない。digest、file identity、署名区分が変われば進行中の session・承認を失効させ、保存 grant も再利用しない。新しい digest のアプリとして、再列挙と初回許可カードから確認し直す。カードに「このアプリは署名で本人確認できません」「更新・変更後は再確認が必要」を表示する。
+native は file handle に結び付いた executable digest と実行中 identity を start / resume / 入力前、および承認交換・消費時に照合する。path 上の別ファイルを hash して一致したことだけでは通さない。digest、file identity、署名区分が変われば進行中の session・承認を失効させ、保存 grant も再利用しない。新しい digest のアプリとして、再列挙と初回許可カードから確認し直す。カードに「このアプリは署名で本人確認できません」「更新・変更後は再確認が必要」を表示する。加えて「確認するのは主実行ファイルの一致であり、DLL・プラグイン・スクリプト等の安全性は保証しない」と明示する。digest 束縛をアプリの全構成や挙動の検証と表現しない。
 
 **代案・理由**: path または表示名だけの束縛は、同名ファイルの置換を防げない。未署名をすべて許可する案は W-UR と Q2 を壊す。一律 observe_only を継続する案は安全だが、D-7 の目的を満たさない。
 
@@ -102,9 +116,15 @@ native は file handle に結び付いた executable digest と実行中 identit
 
 **決めること・推奨案**: アプリ適格性と操作効果を二重に検査する。W-SYS、W4、W6、W7、W8、W9、W10、W-PX、W-UR 等の拒否は最優先で、承認を発行しない。W6 の manifest / leaf / class、root の制限、署名の有効性は既存の拒否境界として維持する。署名が有効な installer、Microsoft 署名の実行物であっても E1 / E4 の例外にはしない。
 
-E1 の版管理辞書（`.exe .com .bat .cmd .ps1 .vbs .wsf .reg .lnk .scr .hta .jar` 等）と installer（`.msi .msix` 等）を開く操作は、preflight、approve、approved dispatch のすべてで拒否する。拡張子不明や別名・関連付けの根拠が足りない場合も、承認へ逃がさず takeover とする。無害な拡張子なら任意コード実行が絶対にない、という保証はしない。悪性文書や危険な関連付けは残存リスクであり、人は開く対象と効果を判断する。
+現行の辞書 `native/computer_use_effect_classifier.h:268` / `:277` には `.msu .msp .mst .appinstaller .application .scf .chm .diagcab .xll .iso .img .vhd .vhdx .library-ms .search-ms .searchconnector-ms .rdp` がない。N8-1 はこれらに加え `.ppkg .jnlp .wsc .sct .ws .ahk .au3 .rb .pl` を E1 に追加し、インストーラ型 `.msu .msp .mst .appinstaller .application .ppkg` を E4 にも追加する。既存の E1 内の `.appx` も E4 に揃える。辞書は閉じた完全リストによる安全証明ではなく拒否の最低線である。effect lexicon の版・digest と対応する fixture を同じ PR で更新し、classifier 2 というアルゴリズム版とは区別する（現行の版と digest は `:65`, `:318`）。共有辞書変更は macOS の既存拒否を維持し、既存の承認 fixture を壊さないことを検証する。
+
+preflight / approve / approved dispatch の 3 境界で、拡張子辞書に加え、解決した実パスに対する関連付けを fail-closed に検査する。`AssocIsDangerous`、`ASSOCSTR_EXECUTABLE` による handler、`PerceivedType=application` 等を組み合わせ、実行・インストール・スクリプト・遠隔起動に該当すれば拒否、照会失敗・未対応 handler・証拠不足なら takeover とする。handler が exe であるというだけでは文書 viewer と区別できないため、通常文書を表示する handler と証明できた組だけを扱い、それ以外を許可しない。API の false 一つを安全性の証明にしない。handler identity と関連付けの測定結果を authority に束縛し、変更を拒否する。未知の拡張子、曖昧な実パスも takeover とする。関連付けによる実行は拒否側に置き、この検査後に残るリスクは無害な型の悪性文書である。
+
+シェルビュー外（IDE のツリー等）でも E1 / E4 の拒否を省略しない。表示名の実行拡張子や install 語は拒否側の手掛かりとしてのみ使える。表示名が文書らしいことを承認の肯定根拠にしない。開く操作で実パスと関連付けを確定できなければ takeover とし、supervised の一般操作へ読み替えて逃がさない。
 
 `kApproval` を ordinary ticket に落としてはならない。Windows v2 preflight は classifier の元の decision を保持し、`kApproval` は有効な効果に限り offer、それ以外は拒否にする。ordinary dispatch 側も再分類で `kApproval` が出たら入力しない。承認後の専用経路だけが、同じ `kApproval` と execution ticket の一致を消費できる。共有 strict 写像を「承認済み」の証明と解釈しない。Main だけが見た highImpact と surface の拒否も維持する。
+
+**2-A の高リスク確定と V1**: Windows の現行 V1 は `native/computer_use_windows_host.cc:9254` で単一 high-impact bit を判定する。N8-1 で Windows の要素・祖先の risk を confirmation / other に分ける。macOS 相当の `native/computer_use_native_approved_risk.h:159` の契約を適用し、真正な execution ticket を検証した approved dispatch だけが、効果が `high_impact_confirmation`、confirmation の肯定的根拠があり other がない場合に、その high-impact 理由だけを緩める。secure、metadata 不完全、未分類、terminal / installer / 管理者等の other、Main の根拠だけの highImpact は拒否を維持する。他の三効果・ordinary dispatch は V1 と同じである。承認済みというだけで V1 全体を外さない。N8-2 が ticket 消費後の専用 dispatch へ接続する。語の混在、偽 ticket、未承認の確定、secure、本文未読の負例を固定する。
 
 **代案・理由**: 署名済みなら実行を認める案、人が許可すれば W クラスも解除する案は Q1 に反する。strict 写像だけを変更して macOS の正当な承認を一律拒否する案も採らない。
 
@@ -119,7 +139,7 @@ E1 の版管理辞書（`.exe .com .bat .cmd .ps1 .vbs .wsf .reg .lnk .scr .hta 
 | 段階 | 人が実機で確かめること | 自動試験で確かめること | 公開条件 |
 | --- | --- | --- | --- |
 | 2-A | IDE 等の一般操作と高リスク確定を正しい対象として表示すること。通常操作の過剰停止、統合ターミナル等の拒否、非自動フォーカス、承認・拒否・期限切れ・Stop、承認前後の対象復帰。UIA の測定待ちと Stop の体感・期限を対象 build で記録する | 判定表、ticket の寿命と束縛、入力 0 / 1 件、mode、未知 facts、cancel と競合、旧 helper 応答、receipt 検証 | Windows の根拠と N8 の試験が揃ってから N7 が platform 別版・attest を接続する |
-| C6 | ダウンロード面と Explorer の invoke、Enter、ダブルクリック、視覚クリック、メニュー、Open with、ドラッグについて、開く・選択・リネーム等の実際の効果、UIA の対象・祖先・拡張子、言語と関連付けを確認する。未対応経路も明記する | 各入力経路の fixture、E1 / E4 の優先、未知拡張子、対象すり替え、承認 replay、効果 gate が false の拒否 | N12 の実測と C6 の人の根拠を確認後、N11 が必要な対象・効果だけを有効化する |
+| C6 | ダウンロード面と Explorer の invoke、Enter、ダブルクリック、視覚クリック、メニュー、Open with、ドラッグについて、開く・選択・リネーム等の実際の効果、UIA の対象・祖先・拡張子、言語と関連付けを確認する。複数選択・別項目の事前選択でカードが出ず入力もないことを確かめる。未対応経路も明記する | 各入力経路の fixture、複数選択・事前選択・選択数取得失敗・三境界間の選択変化、E1 / E4 の優先、未知拡張子、対象すり替え、承認 replay、効果 gate が false の拒否 | N12 の実測と C6 の人の根拠を確認後、N11 が必要な対象・効果だけを有効化する |
 
 人の記録は OS / build / アプリ版 / 操作 / 期待と実際 / 証拠 / PASS・FAIL・SKIP・BLOCKED を持つ。合成文書を使い、秘密・本文をログや fixture に残さない。UIA tree が読めることだけで、入力効果や誤承認防止を PASS にしない。未証明の経路は閉じる。browser の sensitive origin（#777 の実測 6）は N12 / N11 の前提であり、N8 の完了だけで解除しない。
 
@@ -147,7 +167,7 @@ Stop の確定、終了確認の期限、未確認入力の対象隔離は N0〜
 
 **現状**: `renderer/components/ComputerUsePanel.tsx:1333` の承認 section は polite live region で、`:1395` の許可ボタンには autoFocus がない。`main/ipc.ts:4915` は非表示なら showInactive、pending の変化で flashFrame を呼ぶ。`renderer/components/ComputerUsePanel.interaction.test.tsx:438` はカード出現・解決時にキーボードフォーカスを奪わないことを試験する。`main/computer-use-controller.ts:4938` は native の残り時間以下にカード期限を制限し、`:4955` は plan 不可・allow_once / deny を固定する。
 
-**決めること・推奨案**: 同じカードと activation 経路を Windows に使う。カード生成時には許可にも拒否にも自動フォーカスを置かない。Windows でも Electron の showInactive と flashFrame により、前面で入力しているアプリからフォーカスを奪わず通知する。show + focus への fallback は作らない。通知が目立たない場合でも、無操作で許可しない。
+**決めること・推奨案**: 既存カードの枠と activation 経路を Windows に使い、表示欄は §2.2 の native 測定由来情報と §2.4 の警告を追加する。カードの表示内容まで現状のままとはしない。カード生成時には許可にも拒否にも自動フォーカスを置かない。Windows でも Electron の showInactive と flashFrame により、前面で入力しているアプリからフォーカスを奪わず通知する。show + focus への fallback は作らない。通知が目立たない場合でも、無操作で許可しない。
 
 人がアプリへ移り、Tab / Shift+Tab またはクリックで明示的にボタンへ到達した後、Enter / Space / クリックで決定する。trusted activation の消費と intent 一致を必須にし、カード出現直前から押されていたキーで許可されないことを確認する。拒否・期限切れ・Stop 後のボタンと古いカードは承認不能にする。polite の読み上げ、対象・効果のラベル、light / dark、フォーカス表示、Stop への到達を保持する。
 
@@ -161,12 +181,14 @@ N1 とオーナー承認の後、次の順で進める。各 PR は一つの境�
 
 | # | 境界と成果 | 依存 | 試験・完了の証拠 |
 | --- | --- | --- | --- |
-| N8-1 | native: Windows capture から approval authority を構成し、portable flow を接続する。preflight の kApproval を ordinary から分離する。通常 build の効果 gate は閉じる | N1、本 ADR 承認 | C++ harness / Windows seam。E1 / E4 優先、未知 facts、authority / payload 変更、ordinary 入力 0、四効果の gate 表 |
-| N8-2 | native: helper の approve / discard / approved dispatch と receipt、private slot、Stop claim・世代境界 | N8-1、停止側の世代契約 | Windows seam。60 秒 / 5 秒、境界時刻・逆行・overflow、replay、世代違い、競合、入力は一度以下、無応答の control 所有者 |
-| N8-3 | TS: contracts の wire と能力宣言、Windows transport / adapter、厳密な receipt 検査と gate。native と合う schema を同時に揃える | N8-2 | contracts / host / transport の単体・結合。欠落能力、版不一致、v1 / unbound、旧 helper、入力前失敗と unknown_effect の区別 |
-| N8-4 | TS: controller の既存 native カードへの接続、helper 世代失効、監査相関 | N8-3 | approval-path / native-host-approval / controller / activation / persistence の関連試験。承認後再観測、拒否、期限、Stop、二枚のカード、plan 不可、複数 scalar、本文・token 非露出 |
-| N8-5 | native・TS の共有表境界: C / unsigned と browser の上限分離、supervised 契約、digest 再確認。実際の本番適用は gate 成立時のみ | N8-4 | 同一 golden vector の native / Main 一致、browser observe_only、Explorer 不適格、unsigned digest 変更、invalid 署名拒否、旧 session 非昇格、grant identity |
-| N8-6 | UI: 効果・対象・未署名の表示、通知、キーボード。2-A / C6 の受入項目を揃える | N8-4、N8-5 | Renderer interaction / activation と Windows Computer Use。別アプリ入力中の通知、明示 Tab、キー継続、拒否・Stop・期限、light / dark。結果と artifact を残す |
+| N8-1 | native の測定・判定核: Windows facts 入力への分離、Document の条件付き再分類、E1 / E4 辞書と lexicon 版更新、実パスの関連付け・E3 単一選択の測定、V1 approved-risk の限定緩和。能力は未公開 | N1、本 ADR 承認 | C++ harness / Windows seam。四効果の gate 表、authority / payload 変更、AX 入口の誤用、chain 所有不明、非 web 不明、Document approval の takeover 落ち、複数選択・別項目の事前選択・選択読取り失敗・三境界での変化、追加拡張子全件、危険・不明・変更された関連付け、IDE の未知実パス、confirmation / other 混在、secure の負例 |
+| N8-2 | wire 契約の一体変更: C++ MessageType と TS MessageType、能力宣言、Windows の新 offer receipt / strict schema、内部型と表示 contracts を同一 PR で追加する。helper の approve / discard / approved dispatch、private slot、世代・Stop claim、N8-1 の再測定と approved-risk を接続する。本番 gate は閉じる | N8-1、停止側の世代契約 | MessageType の名前・数値の完全一致、receipt の不明欄・欠落・不正表示値、macOS の旧 receipt と既定表示 null、60 秒 / 5 秒、境界時刻・逆行・overflow、150 ms 超過・測定中期限切れ、replay、世代違い、Stop 競合、無応答の control 所有者、kApproval の ordinary ticket 発行・dispatch 拒否、ordinary 入力 0、approved 入力は一度以下 |
+| N8-3 | TS の実行接続: N8-2 の確定済み wire を使う Windows transport / adapter / host と gate。MessageType の片側追加や schema の後追いをしない | N8-2 | contracts / host / transport の単体・結合。欠落能力、版不一致、v1 / unbound、darwin の述語不変、旧 helper、入力前失敗と unknown_effect の区別 |
+| N8-4 | TS: controller の既存 native カードへの接続、表示情報の転送、helper 世代失効、監査相関 | N8-3 | approval-path / native-host-approval / controller / activation / persistence。承認後再観測、拒否、期限、Stop、plan 対象外で毎回二枚、native plan 不可、複数 scalar type 拒否、set_text 全文の単発束縛、本文・token 非露出 |
+| N8-5 | native・TS の上限表: C / unsigned と browser の分離、Windows ruleset の版・hash・ledger と生成物、列挙・初回許可・start・開始後の低下、digest 再確認。本番適用は gate 成立時のみ | N8-4 | 同一 golden vector の native / Main 一致、開始前能力なし・start route v1・開始後 gate 消失、browser observe_only、Explorer 不適格、unsigned digest 変更、invalid 署名拒否、旧 session 非昇格、grant identity |
+| N8-6 | UI: 既存 activation 経路のまま表示欄を追加し、通知・キーボードと 2-A / C6 の受入項目を揃える | N8-4、N8-5 | Renderer interaction / activation と Windows Computer Use。測定情報・主イメージ限定の警告、別アプリ入力中の通知、明示 Tab、キー継続、拒否・Stop・期限、light / dark。結果と artifact を残す |
+
+現行 `main/computer-use-windows-transport.test.ts:2518` は TS の全 MessageType と C++ enum の名前・数値の完全一致を強制する。したがって N8-2 を native だけの変更にはしない。N8-2 の wire 定義・producer・parser・fixture を一体で緑にし、N8-3 はそれを呼び出す接続だけを追加する。各スライスは後続 PR を待たず単独で検証可能である。
 
 各スライスで対象 typecheck と直接関連テストを実施する。native の Windows 試験と実機受入は、対応した実行環境で行い、未実行を PASS にしない。共有変更では既存 macOS の approval-path、native-host-approval、native-classifier-route、approved-risk、preflight-offer、grant-identity、controller、Renderer interaction と portable harness の関連ケースを維持する。Windows を常に拒否する旧テストだけは、新しい条件付き gate の真偽表として意図を明示して更新する。darwin の期待を緩めて通さない。
 
@@ -174,13 +196,34 @@ N7 は N8-1〜6 と Windows の 2-A の根拠を確認し、platform × mode の
 
 ## 4. オーナーに判断してもらうこと
 
-1. §2.1 の全条件を満たした Windows session にだけ承認経路を開き、N8 は不活性な準備、N7 は 2-A の有効化とする分担でよいか。
-2. §2.2 の native 内の単発 ticket と最大 60 秒 / 5 秒、同一効果の再測定、カードの対象情報でよいか。E2 / E3 の本番公開は C6 / N12 の証拠を待つことを確認する。
-3. §2.3 の全入力操作（選択・スクロールを含む）を supervised の確認対象にし、既存の二枚になり得る承認経路を維持するか。browser の observe_only を個別に残す表の分離でよいか。
-4. §2.4 の unsigned と invalid / 不明の区別、digest 変更後の再列挙・初回許可からのやり直しでよいか。検証不能を人の承認だけで解除しないことを確認する。
-5. §2.5 の Q1 の拒否優先と、悪性文書・関連付け等を完全に防げない残存リスクを、§2.6 の人の根拠と合わせて受け入れるか。
-6. §2.7 の helper 世代失効を停止側の確定契約へ接続し、対象隔離の解除と操作承認を別に保つ方針でよいか。停止期限や終了証明自体はこの ADR で決めない。
-7. §2.8 の非自動フォーカスと、§3 の PR 分割・実機受入を承認するか。自動試験の成功だけで人の判断を完了扱いしないことを確認する。
+D-7、Q1 の実行物拒否、C5 の 2-A → C6 の公開順序、S4-4 補遺（V2 ADR `:1054`、2026-10-14）の二枚カードは既決事項であり、再承認を質問しない。supervised の plan 対象外の入力では毎回二枚、複数 scalar の type は拒否されるという前提で、次の設計上の判断だけを求める。
+
+1. §2.1 の Windows gate を採用するか。
+2. §2.2 の E3 の選択集合を対象一項目へ限定する方針を採用するか。
+3. §2.2 の approved dispatch 再測定を ticket 残時間内かつ最大 150 ms とするか。
+4. §2.2 の Windows 用表示 receipt と macOS の旧形を維持する契約分岐を採用するか。
+5. §2.3 の選択・スクロールを含む入力操作ごとの native 確認を採用するか。
+6. §2.3 の条件を満たす native Document の再分類 approval をカードへ接続する案を採用するか。
+7. §2.4 の digest 変更時に初回許可からやり直す方式を採用するか。
+8. §2.5 の関連付けの fail-closed 検査後にも残る、無害な型の悪性文書のリスクを受け入れるか。関連付けによる実行の受け入れは求めない。
+9. §2.7 の ticket と helper 世代の束縛を停止側の確定契約へ接続する案を採用するか。
+10. §2.8 の既存非自動フォーカス経路を Windows に適用するか。
+11. §2.8 の追加表示欄を採用するか。
+12. §2.3 の二段階の上限決定を採用するか。
+13. §3 の PR 分割を採用するか。
+
+### 4.1 承認後に V2 ADR へ反映する箇所
+
+今回は V2 ADR を編集しない。オーナー承認後、以下を別の文書変更で更新する。設計承認を実装済み・有効化済みと記述しない。
+
+| 箇所 | 更新内容 |
+| --- | --- |
+| §3.2.4 mode の bullet（現行 `:252`） | C / unsigned の一律 observe_only を、本 ADR の gate が開いた新規 session では supervised、閉じていれば observe_only とする設計へ置換する |
+| §4 Windows 注記 (1)（`:446`） | 同じ条件付き上限と主イメージ digest の束縛を参照する。(2) browser と (3) Explorer の制限は N11 / N12 まで保持する |
+| §10 S5-c-3 判断 C（`:1174`）、Q2 の Windows との関係 | 「承認経路ができるまで」の条件を本 ADR に接続し、実装・有効化の状態は N8 / N7 の証拠に従って記録する |
+| §9 C5 / C6（`:841`）、S4-4 補遺 | Windows の gate・表示 receipt・Document・approved-risk の接続と platform 別の人の根拠を追記する。darwin の入力・真偽表と ticket 契約を維持する |
+| S4-4 補遺の二枚カードの頻度（`:1054`） | 決定 A は維持し、supervised の plan 対象外では毎回二枚になることを明記する |
+| 冒頭の変更概要の判断 C と改訂履歴 | 本 ADR 承認による設計変更と N8 / N7 の実装・公開を区別して記録する |
 
 ## 5. 受入と未確認事項
 
@@ -191,3 +234,5 @@ N7 は N8-1〜6 と Windows の 2-A の根拠を確認し、platform × mode の
 ## 6. 改訂履歴
 
 - 2026-11-02: #991 N8a 段 A・1 周目の Draft。base 1899ca3c の承認 gate、native ticket、Windows preflight、上限規則、grant identity、controller、Renderer と通知を照合した。実装・有効化・設計承認は行っていない。
+
+- 2026-11-02（段 A・1 周目・修正 1 回目）: 採用指摘 WS-H1 / H2、MI-F1〜F5、DC-F1 / F2 / F4〜F7、WS-M1 / M3 / L1 / L2 を反映した。WS-M2 と DC-F3 は依頼どおり変更対象にしない。辞書・関連付け、単一選択、Windows facts、Document、V1 の限定緩和、表示契約、二段階の上限、版・hash、実装スライス、既決事項と承認後の V2 ADR 更新先を明文化した。
