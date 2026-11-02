@@ -80,6 +80,9 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/verify-computer-use-acceptance-build.mjs --expect present
 
+      - name: Reject test hang hooks in Windows acceptance artifacts
+        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
+
       - name: Summarize the acceptance build
         working-directory: apps/desktop
         shell: pwsh

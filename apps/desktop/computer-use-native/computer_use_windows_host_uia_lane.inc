@@ -273,6 +273,9 @@ HRESULT WindowsV1UiaTimed(std::chrono::milliseconds slow, bool output_proves_ans
     return E_ABORT;
   const auto start = std::chrono::steady_clock::now();
   WindowsUiaReadContact contact(!output_proves_answer, start);
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::UiaCall);
+#endif
   HRESULT result = call();
   if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow &&
       (!output_proves_answer || WindowsV1UiaEmpty(output)))

@@ -155,6 +155,10 @@ jobs:
       - name: Compile and manifest native artifact
         run: npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}
 
+      - name: Reject test hang hooks in the Windows helper
+        if: runner.os == 'Windows'
+        run: node verify-computer-use-test-hang-absent.mjs --require
+
       - name: Verify the built artifact attests what its manifest declares
         run: node verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require --report=${{ runner.temp }}/computer-use-eligibility-report.json
 

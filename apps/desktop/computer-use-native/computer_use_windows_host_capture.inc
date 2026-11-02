@@ -164,6 +164,9 @@ bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
     if (ready != WAIT_OBJECT_0 || !WindowsV1UiaMayCall())
       return false;
     // END windows capture event lease
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+    WindowsTestHang(WindowsTestHangPoint::Capture);
+#endif
     const auto frame = frame_pool.TryGetNextFrame();
     if (frame == nullptr)
       return false;
