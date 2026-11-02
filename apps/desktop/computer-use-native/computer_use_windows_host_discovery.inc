@@ -863,14 +863,34 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
   const std::wstring working_directory =
       separator == std::wstring::npos ? std::wstring{}
                                       : canonical_path.substr(0, separator);
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
   PROCESS_INFORMATION information{};
   if (claim && !claim()) return false;
   struct LaunchUnit {
     const std::function<void()>& retire;
     ~LaunchUnit() { if (retire) retire(); }
   } unit{retire};
+  ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
+  if (!job.value) return false;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+      JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
+                               &limits, sizeof(limits))) return false;
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  if (attribute_bytes == 0) return false;
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+  if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_bytes))
+    return false;
+  struct AttributeList {
+    LPPROC_THREAD_ATTRIBUTE_LIST value;
+    ~AttributeList() { DeleteProcThreadAttributeList(value); }
+  } attributes{startup.lpAttributeList};
+  if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                                 &job.value, sizeof(job.value), nullptr, nullptr)) return false;
   struct OwnedChild {
     ScopedKernelHandle process, thread;
     bool verified = false;
@@ -886,9 +906,9 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
   } child;
   const BOOL created = CreateProcessW(
           canonical_path.c_str(), nullptr, nullptr, nullptr, FALSE,
-          CREATE_UNICODE_ENVIRONMENT, nullptr,
+          CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr,
           working_directory.empty() ? nullptr : working_directory.c_str(),
-          &startup, &information);
+          &startup.StartupInfo, &information);
   child.process.value = information.hProcess;
   child.thread.value = information.hThread;
   if (!created) return false;
@@ -904,6 +924,10 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
       launched_image.identity.signer_digest == locked.identity.signer_digest;
   CloseLockedWindowsExecutable(&launched_image);
   if (!image_matches) return false;
+  limits.BasicLimitInformation.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
+                               &limits, sizeof(limits))) return false;
+  if (ResumeThread(child.thread.value) == static_cast<DWORD>(-1)) return false;
   child.verified = true;
   *process = child.process.release();
   return true;

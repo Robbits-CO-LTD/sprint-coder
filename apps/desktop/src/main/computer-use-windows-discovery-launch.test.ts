@@ -149,6 +149,14 @@ it('keeps launch guards and real image/exit work while limiting qualification to
   expect(generated).toContain('WaitForSingleObject(process.value, INFINITE)');
   expect(program).toContain('flags | CREATE_NO_WINDOW');
   expect(program).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
+  expect(generated).toContain('PROC_THREAD_ATTRIBUTE_JOB_LIST');
+  expect(generated).toContain('CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT');
+  const launch = generated.slice(
+    generated.indexOf('bool LaunchVerifiedExecutable('),
+    generated.indexOf('// BEGIN windows v2 targets'),
+  );
+  expect(launch.indexOf('FixtureCreate(')).toBeLessThan(launch.indexOf('FixtureImage('));
+  expect(launch.indexOf('FixtureImage(')).toBeLessThan(launch.indexOf('ResumeThread('));
 });
 
 describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime component', () => {
@@ -233,6 +241,8 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         'helper-exit-control',
         'helper-exit-mismatch',
         'helper-exit-verified',
+        'helper-exit-kill-before-verify',
+        'breakaway',
       ]) {
         const result = await runNative(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
@@ -246,13 +256,13 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         }
         if (mode === 'helper-exit-control') {
           expect(result.stdout).toContain(
-            'CONTROL: normal helper exit abandoned held unverified child; observer cleaned it',
+            'CONTROL: normal helper exit removed held unverified child',
           );
           const state = result.stdout
             .split(/\r?\n/u)
             .find((line) => line.startsWith('CONTROLSTATE:'));
           const facts: unknown = JSON.parse(state!.slice('CONTROLSTATE:'.length));
-          expect(facts).toEqual({ helperExit: 0, childAlive: true, reads: 0, terminations: 0 });
+          expect(facts).toEqual({ helperExit: 0, childAlive: false, reads: 0, terminations: 0 });
           console.log(JSON.stringify({ kind: 'native_discovery_helper_exit_control', facts }));
           continue;
         }
