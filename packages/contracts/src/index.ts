@@ -6208,6 +6208,118 @@ export const computerUsePlanEligibleActionKinds = [
 export function computerUseActionKindIsPlanEligible(kind: ComputerUseActionKind): boolean {
   return (computerUsePlanEligibleActionKinds as readonly ComputerUseActionKind[]).includes(kind);
 }
+export const computerUseNativeExtensionSchema = z.string().regex(/^[a-z0-9_+-]{1,32}$/u);
+// Keep these sets identical to the native classifier and the Main sanitizer.
+const nativeDisplayWhitespaceRanges: readonly (readonly [number, number])[] = [
+  [0x09, 0x09],
+  [0x0a, 0x0a],
+  [0x0b, 0x0b],
+  [0x0c, 0x0c],
+  [0x0d, 0x0d],
+  [0x20, 0x20],
+  [0x85, 0x85],
+  [0xa0, 0xa0],
+  [0x1680, 0x1680],
+  [0x2000, 0x200a],
+  [0x2028, 0x2028],
+  [0x2029, 0x2029],
+  [0x202f, 0x202f],
+  [0x205f, 0x205f],
+  [0x3000, 0x3000],
+];
+const nativeDisplayIgnorableRanges: readonly (readonly [number, number])[] = [
+  [0x00ad, 0x00ad],
+  [0x034f, 0x034f],
+  [0x061c, 0x061c],
+  [0x115f, 0x115f],
+  [0x1160, 0x1160],
+  [0x17b4, 0x17b4],
+  [0x17b5, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff0, 0xfff8],
+  [0x1bca0, 0x1bca3],
+  [0x1d173, 0x1d17a],
+  [0xe0000, 0xe0fff],
+];
+
+// Accept only sanitized values. N8-2b must parse in sanitizer -> schema order.
+const computerUseNativeDisplayLabelSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) &&
+      [...value].every((character) => {
+        const code = character.codePointAt(0)!;
+        return (
+          !nativeDisplayIgnorableRanges.some(([first, last]) => code >= first && code <= last) &&
+          (code === 0x20 ||
+            !nativeDisplayWhitespaceRanges.some(([first, last]) => code >= first && code <= last))
+        );
+      }) &&
+      !/^ | $| {2}/u.test(value),
+    'Native display label must already be sanitized',
+  )
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= 512,
+    'Native display label exceeds 512 UTF-8 bytes',
+  );
+const computerUseWindowsDisplayFields = {
+  targetLabel: computerUseNativeDisplayLabelSchema.nullable(),
+  extension: z.null(),
+  externalApplication: z.literal('not_applicable'),
+  unsignedWarning: z.enum(['none', 'main_image_only']),
+};
+const computerUseWindowsOpenDisplayFields = {
+  ...computerUseWindowsDisplayFields,
+  operation: z.enum(['click', 'double_click', 'invoke', 'key']),
+  targetLabel: computerUseNativeDisplayLabelSchema,
+  extension: computerUseNativeExtensionSchema,
+  externalApplication: z.literal('may_open'),
+};
+/** Native-measured display only; never an authority or a source of action payloads. */
+export const computerUseWindowsApprovalDisplaySchema = z.discriminatedUnion('effect', [
+  z
+    .object({
+      ...computerUseWindowsDisplayFields,
+      effect: z.literal('supervised_action'),
+      operation: z.enum([
+        'click',
+        'double_click',
+        'invoke',
+        'set_text',
+        'type',
+        'key',
+        'scroll',
+        'select',
+        'toggle',
+        'expand_collapse',
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      ...computerUseWindowsDisplayFields,
+      effect: z.literal('high_impact_confirmation'),
+      operation: z.enum(['click', 'double_click', 'invoke', 'toggle', 'select', 'key']),
+    })
+    .strict(),
+  z.object({ ...computerUseWindowsOpenDisplayFields, effect: z.literal('download_open') }).strict(),
+  z
+    .object({ ...computerUseWindowsOpenDisplayFields, effect: z.literal('file_manager_open') })
+    .strict(),
+]);
+export type ComputerUseWindowsApprovalDisplay = z.infer<
+  typeof computerUseWindowsApprovalDisplaySchema
+>;
+
 export const computerUseApprovalSchema = z
   .object({
     id: computerUseIdSchema,
@@ -6219,6 +6331,8 @@ export const computerUseApprovalSchema = z
     actionDigest: computerUseDigestSchema,
     targetLabel: computerUseLabelSchema,
     preview: computerUsePreviewSchema,
+    /** Absent on legacy cards; Windows display is connected by the approval controller later. */
+    display: computerUseWindowsApprovalDisplaySchema.nullable().optional(),
     /** Present only for a paste of an artifact (#785 T15-7b). Optional: older cards have none. */
     transfer: computerUseApprovalTransferSchema.optional(),
     risk: toolRiskSchema,
@@ -6236,6 +6350,11 @@ export const computerUseApprovalSchema = z
   })
   .strict()
   .superRefine((approval, context) => {
+    if (
+      approval.display != null &&
+      (approval.eligibleForPlan || approval.allowedDecisions.includes('allow_plan'))
+    )
+      context.addIssue({ code: 'custom', message: 'Native display approvals are allow_once only' });
     if (new Set(approval.allowedDecisions).size !== approval.allowedDecisions.length)
       context.addIssue({ code: 'custom', message: 'Approval decisions must be unique' });
     if (!approval.allowedDecisions.includes('allow_once'))
@@ -6320,6 +6439,16 @@ export const COMPUTER_USE_LEGACY_ELIGIBILITY = Object.freeze({
   lexiconVersion: 1,
 } as const);
 
+export const computerUseWindowsDocumentViewersSchema = z
+  .object({
+    version: z.number().int().positive().max(0xffffffff),
+    digest: z.string().regex(/^[0-9a-f]{16}$/u),
+  })
+  .strict();
+export type ComputerUseWindowsDocumentViewers = z.infer<
+  typeof computerUseWindowsDocumentViewersSchema
+>;
+
 export const computerUseNativeManifestSchema = z
   .object({
     version: z.literal(1),
@@ -6335,9 +6464,12 @@ export const computerUseNativeManifestSchema = z
     capabilities: z.array(computerUseNativeCapabilitySchema).min(1).max(4),
     // Absent on a manifest written before D7 (read as the legacy allow-list).
     eligibility: computerUseEligibilitySchema.optional(),
+    windowsDocumentViewers: computerUseWindowsDocumentViewersSchema.optional(),
   })
   .strict()
   .superRefine((manifest, context) => {
+    if (manifest.platform !== 'win32' && Object.hasOwn(manifest, 'windowsDocumentViewers'))
+      context.addIssue({ code: 'custom', message: 'Document viewers are Windows-only' });
     if (new Set(manifest.capabilities).size !== manifest.capabilities.length)
       context.addIssue({ code: 'custom', message: 'Native capabilities must be unique' });
     if (manifest.platform === 'win32' && manifest.eligibility?.mode === 'v2-denylist')

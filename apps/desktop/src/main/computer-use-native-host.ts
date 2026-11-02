@@ -1657,6 +1657,7 @@ function parseNativePreflightReceipt(
         approvalGeneration,
         remainingMs,
         effect: effect as ComputerUseNativeApprovalOffer['effect'],
+        display: null,
       },
     };
   }

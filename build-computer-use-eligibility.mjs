@@ -19,6 +19,26 @@ const table = JSON.parse(
 
 const MODES = Object.freeze({ v1: 'v1-allowlist', v2: 'v2-denylist' });
 
+/** Windows-only metadata; the native header remains the source of the pinned table. */
+export function windowsDocumentViewerDeclaration(platform) {
+  if (platform !== 'win32') return {};
+  const header = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      'apps',
+      'desktop',
+      'computer-use-native',
+      'computer_use_windows_document_viewers.h',
+    ),
+    'utf8',
+  );
+  const version = header.match(/kWindowsDocumentViewerVersion = (\d+);/u)?.[1];
+  const digest = header.match(/kWindowsDocumentViewerDigestPinned = 0x([0-9a-f]{16})ULL;/u)?.[1];
+  if (version === undefined || digest === undefined)
+    throw new Error('Computer Use Windows document viewer declaration is unavailable');
+  return { windowsDocumentViewers: { version: Number(version), digest } };
+}
+
 export function parseEligibilityMode(argv, target) {
   const claims = argv.filter(
     (argument) => argument === '--eligibility' || argument.startsWith('--eligibility='),
