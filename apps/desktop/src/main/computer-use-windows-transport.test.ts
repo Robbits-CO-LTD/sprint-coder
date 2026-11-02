@@ -658,6 +658,7 @@ describe('Computer Use Windows helper transport', () => {
       });
       let elapsed = 0;
       const advanceTo = async (at: number) => {
+        if (at <= elapsed) throw new Error(`Expected time ${at} to be after ${elapsed}`);
         await vi.advanceTimersByTimeAsync(at - elapsed);
         elapsed = at;
       };
@@ -674,6 +675,7 @@ describe('Computer Use Windows helper transport', () => {
         await advanceTo(at);
         expect(sent.at(-1)).toEqual({ operation: 'close_session', at });
         if (attempt === 0) {
+          // The cancel transport deadline falls between the first and second close attempts.
           await advanceTo(operationTimeoutMilliseconds('cancel') - 1);
           expect(children[0]!.killed).toBe(false);
           await advanceTo(operationTimeoutMilliseconds('cancel'));
@@ -690,6 +692,7 @@ describe('Computer Use Windows helper transport', () => {
       expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
       const firstCloseTimeout =
         COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS + COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+      // Host Stop settles before the first close transport deadline, which precedes the last.
       await advanceTo(firstCloseTimeout - 1);
       expect(children[0]!.killed).toBe(false);
       await advanceTo(firstCloseTimeout);
@@ -698,9 +701,15 @@ describe('Computer Use Windows helper transport', () => {
       expect(children[0]!.killed).toBe(false);
       await advanceTo(killAt);
       expect(children[0]!.killed).toBe(true);
-      expect(sent.filter((request) => request.operation === 'close_session')).toHaveLength(
-        COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
-      );
+      expect(sent).toEqual([
+        { operation: 'cancel', at: 0 },
+        ...Array.from({ length: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT }, (_, attempt) => ({
+          operation: 'close_session',
+          at:
+            COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS +
+            attempt * COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+        })),
+      ]);
       await controller.dispose();
     });
 
@@ -737,6 +746,7 @@ describe('Computer Use Windows helper transport', () => {
           await vi.advanceTimersByTimeAsync(0);
         }
         helper().hold('cancel');
+        const sent = recordRequests();
         const stopping = controller.stopForTask('task-baseline', 'task_changed');
         await vi.advanceTimersByTimeAsync(stopAt);
         await stopping;
@@ -747,6 +757,9 @@ describe('Computer Use Windows helper transport', () => {
         expect(children[0]!.killed).toBe(false);
         await vi.advanceTimersByTimeAsync(killAt * 2);
         expect(children[0]!.killed).toBe(false);
+        expect(sent.filter((request) => request.operation === 'close_session')).toHaveLength(
+          COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+        );
         if (discovery !== undefined) expect(await discovery).toBeInstanceOf(Error);
         await controller.dispose();
       },
@@ -788,6 +801,7 @@ describe('Computer Use Windows helper transport', () => {
         COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT;
       // The timed-out start waits for the initial Stop, then rechecks with the same bounded
       // Host retry loop. The last recheck's wire Stop owns the transport kill deadline.
+      // The start transport deadline is no later than pendingStopAt, so the first recheck is sent now.
       const recheckAt = Math.max(operationTimeoutMilliseconds('start_session'), pendingStopAt);
       const lastRecheckAt =
         recheckAt +
@@ -804,6 +818,7 @@ describe('Computer Use Windows helper transport', () => {
       );
       let elapsed = pendingStopAt;
       const advanceTo = async (at: number) => {
+        if (at <= elapsed) throw new Error(`Expected time ${at} to be after ${elapsed}`);
         await vi.advanceTimersByTimeAsync(at - elapsed);
         elapsed = at;
       };
