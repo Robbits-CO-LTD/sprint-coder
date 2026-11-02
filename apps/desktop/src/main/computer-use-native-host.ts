@@ -78,8 +78,15 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  /** Adds quarantines; an existing quarantine for the same target keeps its first reason. */
   restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
-  /** Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent. */
+  /**
+   * Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent.
+   * Quarantines are never removed here, and an existing quarantine keeps its first reason, matching
+   * the core (a late receipt's response_lost must not replace an exit's exit_suspect). Receipt and
+   * exit transfers of one generation can run concurrently.
+   * TODO(PR4): pin both rules with a contract test shared by every store implementation.
+   */
   transferReceipt?(
     rows: readonly WindowsLedgerRow[],
     quarantines: readonly WindowsTargetQuarantine[],
