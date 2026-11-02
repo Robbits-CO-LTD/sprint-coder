@@ -3,6 +3,9 @@
 // Association probe:   seam.exe association <real-path> <blocked|takeover>   (prints the facts)
 // Identity probe:      seam.exe identity <path>                              (prints the resolver's answer)
 // The parent prepares Explorer's selection (including offscreen items) before each probe.
+// The live selection probe is MANUAL evidence: no automated test runs it (it needs a prepared
+// Explorer window). The association and identity probes run in
+// src/main/computer-use-windows-association-seam.test.ts.
 #include "computer_use_windows_association_measurement.h"
 #include "computer_use_windows_uia_source.h"
 #include "computer_use_windows_association_fixture.h"
@@ -37,6 +40,10 @@ void PrintAssociation(const WindowsAssociationFacts &facts) {
             << "explorer_command_handler=" << flag(facts.explorer_command_handler) << '\n'
             << "dde=" << flag(facts.dde) << '\n'
             << "shell_extension=" << flag(facts.shell_extension) << '\n'
+            << "verb_restricted=" << flag(facts.verb_restricted) << '\n'
+            << "executable=" << facts.executable << '\n'
+            << "signature_valid=" << flag(facts.signature_valid) << '\n'
+            << "complete=" << flag(facts.complete) << '\n'
             << "dangerous=" << flag(facts.dangerous) << '\n';
 }
 bool Identity(const wchar_t *path) {
@@ -105,6 +112,12 @@ int wmain(int argc, wchar_t **argv) {
     const auto result = RunWindowsOpenMeasurement<int>(expired,
         [&calls](const WindowsOpenMeasurementLimits &) { ++calls; return 1; });
     ok = ok && Check(result == 0 && calls == 0, "expired-no-os-call");
+    // Measurements back to back (association, then the E3 selection, at each boundary): the slot
+    // is free once a result is returned, so the next one is never answered empty.
+    int back_to_back = 0;
+    for (int round = 0; round < 500; ++round)
+      back_to_back += RunWindowsOpenMeasurement<int>(Limits(), [](const WindowsOpenMeasurementLimits &) { return 1; });
+    ok = ok && Check(back_to_back == 500, "measurement-back-to-back-slot-free");
     auto cancelled = Limits();
     cancelled.still_valid = [] { return false; };
     ok = ok && Check(!MeasureWindowsAssociation(L"C:\\synthetic\\missing.txt", cancelled).complete,

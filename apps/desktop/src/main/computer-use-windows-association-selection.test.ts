@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 const dir = join(__dirname, '../../computer-use-native');
@@ -84,7 +84,62 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     );
     // No answer to a handler question is ignored.
     expect(reader).toMatch(
-      /if \(facts\.delegate_execute \|\| facts\.drop_target \|\| facts\.dde \|\| facts\.explorer_command_handler \|\|\s*facts\.shell_extension \|\| !facts\.command_key_matches\) return facts;/u,
+      /if \(facts\.delegate_execute \|\| facts\.drop_target \|\| facts\.dde \|\| facts\.explorer_command_handler \|\|\s*facts\.shell_extension \|\| facts\.verb_restricted \|\| !facts\.command_key_matches\) return facts;/u,
+    );
+    // What the registry says is recorded before the handler questions, so a failed one cannot hide it.
+    expect(reader.indexOf('facts.verb_restricted = verb_restricted;')).toBeLessThan(
+      reader.indexOf('ASSOCSTR_EXECUTABLE'),
+    );
+    // Values that demote the verb from the UI default or give it another command source, on the
+    // verb key and on its command key, of any type (the data is not read).
+    const compact = reader.replace(/\s+/gu, ' ');
+    expect(compact).toContain('for (const auto *value_key : {&key, &command_path})');
+    for (const name of [
+      'LegacyDisable',
+      'ProgrammaticAccessOnly',
+      'Extended',
+      'AppliesTo',
+      'CommandStateHandler',
+      'CommandStateSync',
+      'IsolatedCommand',
+      'command',
+    ])
+      expect(compact).toContain(`L"${name}"`);
+    expect(compact).toContain(
+      'if (!RegistryValuePresent(*value_key, value_name, limits, &restricted)) return facts;',
+    );
+    const present = between(measurement, 'bool RegistryValuePresent(', 'bool AssociationString(');
+    expect(present).toContain(
+      'RegQueryValueExW(key.value, name, nullptr, &type, nullptr, nullptr)',
+    );
+    expect(present).toContain(
+      'if (read != ERROR_SUCCESS && read != ERROR_MORE_DATA) return false;',
+    );
+    // Shell extensions of every layer specific to this type (not "*" / AllFilesystemObjects).
+    for (const layer of [
+      'prog_id + L"\\\\shellex\\\\ContextMenuHandlers"',
+      'extension + L"\\\\shellex\\\\ContextMenuHandlers"',
+      'L"SystemFileAssociations\\\\" + extension + L"\\\\shellex\\\\ContextMenuHandlers"',
+      'L"SystemFileAssociations\\\\" + perceived + L"\\\\shellex\\\\ContextMenuHandlers"',
+    ])
+      expect(reader.replace(/\s+/gu, ' ')).toContain(`!ShellHandlersPresent(${layer}`);
+    // Every layer by the same rule: a handler (a subkey or any value) is a shell extension; an empty
+    // key left behind is not; a key that cannot be counted is a failed read.
+    expect(reader.match(/ShellHandlersPresent\(/gu)?.length).toBe(4);
+    expect(reader).not.toMatch(/RegistryKeyPresent\([^)]*ContextMenuHandlers/u);
+    const handlers = between(
+      measurement,
+      'bool ShellHandlersPresent(',
+      'bool RegistryValuePresent(',
+    );
+    expect(handlers).toContain('&subkeys, nullptr, nullptr,');
+    expect(handlers.replace(/\s+/gu, ' ')).toContain(
+      '&values, nullptr, nullptr, nullptr, nullptr);',
+    );
+    expect(handlers).toContain('if (counted != ERROR_SUCCESS || !limits.MayRead()) return false;');
+    expect(handlers).toContain('*present = subkeys > 0 || values > 0;');
+    expect(reader).toContain(
+      'facts.dde = WindowsDdeConfigured(dde_command, dde_application, dde_value, executable, ddeexec);',
     );
     // Absent is only "no association"; any other failure is a failed read.
     expect(measurement).toContain(
@@ -97,10 +152,13 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     expect(core).toContain('EffectClass effect = EffectClass::kUnclassified;');
     const judge = between(
       core,
-      'WindowsOpenVerdict JudgeWindowsOpenFacts(',
+      'WindowsOpenVerdict JudgeOpenFactsWith(',
       'struct WindowsOpenMeasurementLimits',
     );
     expect(judge).toContain('if (!e2 && !e3) return WindowsOpenVerdict::kTakeover;');
+    expect(judge).toContain(
+      'JudgeWindowsSingleSelection(current.selection) != WindowsOpenVerdict::kVerified',
+    );
     expect(judge).toContain('!SameWindowsOpenTarget(current.association, current.selection)');
     const same = between(core, 'bool SameWindowsOpenTarget(', 'JudgeWindowsAssociation(');
     expect(same).toContain('association.file_id == selection.target_file_id');
@@ -171,6 +229,15 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'std::atomic<bool> &running = windows_association_detail::WindowsOpenMeasurementRunning();',
     );
     expect(measurement.match(/static std::atomic<bool> \*const running/gu)?.length).toBe(1);
+    // The worker frees the slot inside the locked section, before `done`: a caller that sees
+    // `done` and starts the next measurement finds the slot free.
+    expect(runner.replace(/\s+/gu, ' ')).toContain(
+      'pending->result = std::move(result); running.store(false); pending->done = true; }',
+    );
+    expect(runner.match(/running\.store\(false\)/gu)?.length).toBe(2);
+    expect(read('computer_use_windows_association_seam.cc')).toContain(
+      '"measurement-back-to-back-slot-free"',
+    );
     expect(read('computer_use_windows_association_measurement.h')).toContain(
       'So at most ONE detached worker thread can ever be stuck.',
     );
@@ -191,6 +258,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'RegCloseKey',
       'RegOpenKeyExW',
       'RegQueryValueExW',
+      'RegQueryInfoKeyW',
       'AssocQueryStringW',
       'AssocIsDangerous',
       'HRESULT_FROM_WIN32',
@@ -223,6 +291,9 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'RegistryString',
       'AssociationString',
       'RequiredAssociationString',
+      'RegistryValuePresent',
+      'ShellHandlersPresent',
+      'WindowsDdeConfigured',
       'VerifiedSigner',
       'HexBytes',
       'ResolveRealFile',
@@ -249,7 +320,44 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     }
     expect(opens.some((open) => open.includes('FILE_FLAG_OPEN_REPARSE_POINT'))).toBe(true);
     const keys = calls(measurement, 'RegOpenKeyExW');
-    expect(keys.length).toBe(2);
+    expect(keys.length).toBe(4);
+    // The trust check shows no UI, fetches nothing over the network and only verifies and closes.
+    const signer = between(measurement, 'bool VerifiedSigner(', 'std::string HexBytes(');
+    expect(signer).toContain('trust.dwUIChoice = WTD_UI_NONE;');
+    expect(signer).toContain('trust.fdwRevocationChecks = WTD_REVOKE_NONE;');
+    expect(signer).toContain('trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_SAFER_FLAG;');
+    expect(calls(measurement, 'WinVerifyTrust')).toEqual([
+      '(nullptr, &policy, &trust)',
+      '(nullptr, &policy, &trust)',
+    ]);
+    expect(calls(signer, 'WinVerifyTrust').length).toBe(2);
+    expect(signer.indexOf('WTD_STATEACTION_VERIFY')).toBeLessThan(
+      signer.indexOf('WTD_STATEACTION_CLOSE'),
+    );
+    expect(measurement.match(/dwStateAction = /gu)?.length).toBe(2);
+    // The lane's thread calls: its own thread is duplicated once; the cancels go only to that handle.
+    const runner = between(
+      measurement,
+      'Result RunWindowsOpenMeasurement(',
+      'MeasureWindowsAssociation(',
+    );
+    const pinned: ReadonlyArray<readonly [string, string[]]> = [
+      [
+        'DuplicateHandle',
+        [
+          '(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, FALSE, DUPLICATE_SAME_ACCESS)',
+        ],
+      ],
+      ['CoCancelCall', ['(GetThreadId(pending->thread), 0)']],
+      ['GetThreadId', ['(pending->thread)']],
+      ['CancelSynchronousIo', ['(pending->thread)']],
+    ];
+    for (const [name, expected] of pinned) {
+      const flat = (text: string): string[] =>
+        calls(text, name).map((call) => call.replace(/\s+/gu, ' '));
+      expect(flat(measurement), name).toEqual(expected);
+      expect(flat(runner), name).toEqual(expected);
+    }
     for (const key of keys) expect(key).toMatch(/, 0, KEY_QUERY_VALUE, &key\.value\)$/u);
   });
   it('keeps the portable fixture independent of Windows OS headers', () => {
@@ -293,10 +401,38 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'computer_use_windows_approval_measurement.h',
     ])
       expect(read(name), name).not.toContain('WindowsTestViewerRowFor');
-    // The judge takes the table as a parameter whose default is the production table.
-    expect(read('computer_use_windows_association.h')).toContain(
-      'std::span<const WindowsDocumentViewer> viewers = kWindowsDocumentViewers',
+    // Only the detail forms take a table; the public forms are bound to the production table, whose
+    // version and digest the boundary digest carries.
+    const core = code(read('computer_use_windows_association.h'));
+    expect(core).toContain(
+      'return windows_open_detail::JudgeAssociationWith(facts, kWindowsDocumentViewers);',
     );
+    expect(core).toContain(
+      'return windows_open_detail::JudgeOpenFactsWith(current, previous, kWindowsDocumentViewers);',
+    );
+    expect(core.match(/JudgeAssociationWith\(/gu)?.length).toBe(3);
+    expect(core.match(/JudgeOpenFactsWith\(/gu)?.length).toBe(2);
+    expect(core.match(/std::span<const WindowsDocumentViewer>/gu)?.length).toBe(2);
+    expect(core).not.toMatch(/std::span<const WindowsDocumentViewer> \w+ =/u);
+    const digest = between(
+      core,
+      'std::string WindowsOpenFactsDigest(',
+      'bool SameWindowsOpenFacts(',
+    );
+    expect(digest).toContain('append(std::to_string(kWindowsDocumentViewerVersion));');
+    expect(digest).toContain('append(std::to_string(kWindowsDocumentViewerDigest));');
+    // No production source reaches the table-taking forms.
+    for (const name of readdirSync(dir)) {
+      if (!/\.(?:h|cc|inc|mm|cpp)$/u.test(name)) continue;
+      if (
+        name === 'computer_use_windows_association.h' ||
+        name === 'computer_use_windows_association_fixture.h'
+      )
+        continue;
+      expect(code(read(name)), name).not.toMatch(
+        /windows_open_detail|JudgeAssociationWith|JudgeOpenFactsWith/u,
+      );
+    }
   });
   it('reads the complete shell selection and cross-checks SelectionPattern', () => {
     const source = read('computer_use_windows_uia_source.h');
@@ -334,6 +470,12 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'open-effect-not-e2-e3',
       'open-e3-requires-selection',
       'open-identity-mismatch',
+      'open-e3-selection-identity-kept',
+      'open-e3-selection-required',
+      'open-e2-selection-not-used',
+      'association-dde-explicit',
+      'boundary-identical-verified',
+      'boundary-digest-field',
       'boundary-changed-takeover',
       'boundary-changed-verdict',
       'measurement-deadline',

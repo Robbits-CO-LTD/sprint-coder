@@ -18,7 +18,7 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
   using V = WindowsOpenVerdict;
   const auto with_own_row = [](const WindowsAssociationFacts &facts) {
     const std::array<WindowsDocumentViewer, 1> rows{WindowsTestViewerRowFor(facts)};
-    return JudgeWindowsAssociation(facts, rows);
+    return windows_open_detail::JudgeAssociationWith(facts, rows);
   };
   // What the resolver returns: GetFinalPathNameByHandleW's "\\?\" form, and the handle's file id.
   WindowsAssociationFacts association;
@@ -51,7 +51,7 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
       if (field == 4) changed.executable = "C:\\synthetic\\other.exe";
       if (field == 5) changed.command += " /execute";
       if (field == 6) changed.signer_sha256[0] = 'b';
-      if (!check(JudgeWindowsAssociation(changed, rows) == V::kTakeover, "association-row-field-mismatch"))
+      if (!check(windows_open_detail::JudgeAssociationWith(changed, rows) == V::kTakeover, "association-row-field-mismatch"))
         return false;
     }
   }
@@ -67,7 +67,7 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
     if (!check(with_own_row(changed) == V::kBlocked, "association-rlo-real-executable")) return false;
   }
   // Each defect alone, with a row built from the defective facts themselves.
-  for (int defect = 0; defect < 15; ++defect) {
+  for (int defect = 0; defect < 16; ++defect) {
     auto changed = association;
     if (defect == 0) changed.complete = false;
     if (defect == 1) changed.delegate_execute = true;
@@ -86,6 +86,7 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
     if (defect == 12) changed.prog_id.clear();
     if (defect == 13) changed.verb.clear();
     if (defect == 14) changed.real_path.clear();
+    if (defect == 15) changed.verb_restricted = true;
     if (!check(with_own_row(changed) == V::kTakeover, "association-defect-with-row")) return false;
   }
   for (int defect = 0; defect < 3; ++defect) {
@@ -131,22 +132,22 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
   const std::array<WindowsDocumentViewer, 1> rows{WindowsTestViewerRowFor(association)};
   WindowsOpenFacts first{EffectClass::kE3FileManagerOpen, association, selected};
   if (!check(JudgeWindowsOpenFacts(first) == V::kTakeover, "open-production-table-empty")) return false;
-  if (!check(JudgeWindowsOpenFacts(first, nullptr, rows) == V::kVerified, "open-e3-verified")) return false;
+  if (!check(windows_open_detail::JudgeOpenFactsWith(first, nullptr, rows) == V::kVerified, "open-e3-verified")) return false;
   {
     WindowsOpenFacts e2{EffectClass::kE2DownloadOpen, association, {}};
-    if (!check(JudgeWindowsOpenFacts(e2, nullptr, rows) == V::kVerified, "open-e2-association-only")) return false;
+    if (!check(windows_open_detail::JudgeOpenFactsWith(e2, nullptr, rows) == V::kVerified, "open-e2-association-only")) return false;
   }
   // Only E2 / E3 are opens; the effect, not a caller's flag, decides that E3 checks the selection.
   for (const auto effect : {EffectClass::kUnclassified, EffectClass::kOrdinary, EffectClass::kE1ExecutableOpen,
                             EffectClass::kE4InstallerLaunch}) {
     auto changed = first;
     changed.effect = effect;
-    if (!check(JudgeWindowsOpenFacts(changed, nullptr, rows) == V::kTakeover, "open-effect-not-e2-e3")) return false;
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, nullptr, rows) == V::kTakeover, "open-effect-not-e2-e3")) return false;
   }
   {
     auto changed = first;
     changed.selection = {};
-    if (!check(JudgeWindowsOpenFacts(changed, nullptr, rows) == V::kTakeover, "open-e3-requires-selection"))
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, nullptr, rows) == V::kTakeover, "open-e3-requires-selection"))
       return false;
   }
   // The selected file must be the file whose association was measured.
@@ -167,10 +168,86 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
     // A spelling that differs only in case is not the resolver's spelling of this file: not equal.
     if (defect == 5) changed.selection.target_real_path = "\\\\?\\C:\\SYNTHETIC\\document.txt";
     const std::array<WindowsDocumentViewer, 1> own{WindowsTestViewerRowFor(changed.association)};
-    if (!check(JudgeWindowsOpenFacts(changed, nullptr, own) == V::kTakeover, "open-identity-mismatch"))
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, nullptr, own) == V::kTakeover, "open-identity-mismatch"))
       return false;
   }
+  // E3 requires the single selection by itself: the association is verified by a row and the
+  // selected file is the measured one, yet each selection defect alone is takeover for E3, while
+  // the very same facts are verified for E2 (which has no selection).
+  for (int defect = 0; defect < 5; ++defect) {
+    auto changed = first;
+    if (defect == 0) {
+      changed.selection.shell_count = 2;
+      changed.selection.uia_count = 2;
+      changed.selection.shell_paths.push_back("C:\\synthetic\\other.txt");
+    }
+    if (defect == 1) changed.selection.uia_target_matches = false;
+    if (defect == 2) changed.selection.uia_complete = false;
+    if (defect == 3) changed.selection.shell_complete = false;
+    if (defect == 4) changed.selection.shell_paths[0] = "C:\\synthetic\\other.txt";
+    if (!check(SameWindowsOpenTarget(changed.association, changed.selection), "open-e3-selection-identity-kept"))
+      return false;
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, nullptr, rows) == V::kTakeover,
+               "open-e3-selection-required")) return false;
+    changed.effect = EffectClass::kE2DownloadOpen;
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, nullptr, rows) == V::kVerified,
+               "open-e2-selection-not-used")) return false;
+  }
+  // DDE: a command or a ddeexec key always is; DDEAPPLICATION only with a name other than the
+  // handler's stem, which the shell answers by itself.
+  if (!check(!WindowsDdeConfigured(false, true, L"viewer", L"C:\\synthetic\\viewer.exe", false) &&
+                 !WindowsDdeConfigured(false, false, L"", L"C:\\synthetic\\viewer.exe", false) &&
+                 WindowsDdeConfigured(false, true, L"OtherServer", L"C:\\synthetic\\viewer.exe", false) &&
+                 WindowsDdeConfigured(true, true, L"viewer", L"C:\\synthetic\\viewer.exe", false) &&
+                 WindowsDdeConfigured(false, true, L"viewer", L"C:\\synthetic\\viewer.exe", true) &&
+                 WindowsDdeConfigured(false, true, L"Viewer", L"C:\\synthetic\\viewer.exe", false),
+             "association-dde-explicit")) return false;
   if (!check(SameWindowsOpenFacts(first, first), "boundary-identical")) return false;
+  if (!check(windows_open_detail::JudgeOpenFactsWith(first, &first, rows) == V::kVerified,
+             "boundary-identical-verified")) return false;
+  // Every field of the boundary digest is in it: changing any one changes the digest.
+  {
+    using Change = void (*)(WindowsOpenFacts &);
+    const Change changes[] = {
+        [](WindowsOpenFacts &f) { f.effect = EffectClass::kE2DownloadOpen; },
+        [](WindowsOpenFacts &f) { f.association.complete = !f.association.complete; },
+        [](WindowsOpenFacts &f) { f.association.real_path_verified = !f.association.real_path_verified; },
+        [](WindowsOpenFacts &f) { f.association.dangerous = !f.association.dangerous; },
+        [](WindowsOpenFacts &f) { f.association.delegate_execute = !f.association.delegate_execute; },
+        [](WindowsOpenFacts &f) { f.association.drop_target = !f.association.drop_target; },
+        [](WindowsOpenFacts &f) { f.association.explorer_command_handler = !f.association.explorer_command_handler; },
+        [](WindowsOpenFacts &f) { f.association.dde = !f.association.dde; },
+        [](WindowsOpenFacts &f) { f.association.shell_extension = !f.association.shell_extension; },
+        [](WindowsOpenFacts &f) { f.association.verb_restricted = !f.association.verb_restricted; },
+        [](WindowsOpenFacts &f) { f.association.command_key_matches = !f.association.command_key_matches; },
+        [](WindowsOpenFacts &f) { f.association.signature_valid = !f.association.signature_valid; },
+        [](WindowsOpenFacts &f) { f.association.real_path += "x"; },
+        [](WindowsOpenFacts &f) { f.association.file_id += "0"; },
+        [](WindowsOpenFacts &f) { f.association.extension = "md"; },
+        [](WindowsOpenFacts &f) { f.association.perceived_type = "image"; },
+        [](WindowsOpenFacts &f) { f.association.user_choice = "Synthetic.Changed"; },
+        [](WindowsOpenFacts &f) { f.association.prog_id += "2"; },
+        [](WindowsOpenFacts &f) { f.association.verb = "edit"; },
+        [](WindowsOpenFacts &f) { f.association.executable += "x"; },
+        [](WindowsOpenFacts &f) { f.association.command += " "; },
+        [](WindowsOpenFacts &f) { f.association.signer_sha256[0] = 'b'; },
+        [](WindowsOpenFacts &f) { f.selection.shell_complete = !f.selection.shell_complete; },
+        [](WindowsOpenFacts &f) { f.selection.uia_complete = !f.selection.uia_complete; },
+        [](WindowsOpenFacts &f) { f.selection.uia_target_matches = !f.selection.uia_target_matches; },
+        [](WindowsOpenFacts &f) { f.selection.shell_count += 1; },
+        [](WindowsOpenFacts &f) { f.selection.uia_count += 1; },
+        [](WindowsOpenFacts &f) { f.selection.target_path += "x"; },
+        [](WindowsOpenFacts &f) { f.selection.target_real_path += "x"; },
+        [](WindowsOpenFacts &f) { f.selection.target_file_id += "0"; },
+        [](WindowsOpenFacts &f) { f.selection.shell_paths.push_back("C:\\synthetic\\other.txt"); },
+        [](WindowsOpenFacts &f) { f.selection.shell_paths[0] += "x"; },
+    };
+    for (const auto change : changes) {
+      auto changed = first;
+      change(changed);
+      if (!check(!SameWindowsOpenFacts(first, changed), "boundary-digest-field")) return false;
+    }
+  }
   for (int defect = 0; defect < 8; ++defect) {
     auto changed = first;
     if (defect == 0) changed.association.command += " /execute";
@@ -184,7 +261,7 @@ template <class Check> bool CheckWindowsAssociationSelection(Check check) {
     if (!check(!SameWindowsOpenFacts(first, changed), "boundary-changed-takeover")) return false;
     // A row for the changed facts exists, so only the boundary comparison refuses them.
     const std::array<WindowsDocumentViewer, 1> own{WindowsTestViewerRowFor(changed.association)};
-    if (!check(JudgeWindowsOpenFacts(changed, &first, own) == V::kTakeover,
+    if (!check(windows_open_detail::JudgeOpenFactsWith(changed, &first, own) == V::kTakeover,
                "boundary-changed-verdict")) return false;
   }
   if (!check(WindowsOpenMeasurementDeadline(100, 200) == 200 &&

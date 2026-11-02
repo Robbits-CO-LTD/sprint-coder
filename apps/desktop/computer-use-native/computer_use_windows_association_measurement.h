@@ -68,6 +68,40 @@ struct Key {
   *present = true;
   return true;
 }
+// Whether a ContextMenuHandlers key holds any handler: a subkey or any value (the default one
+// included). An empty key left behind after a handler was removed holds none. A missing key is
+// absent; a key that cannot be opened or counted is a failed read (takeover).
+[[nodiscard]] inline bool ShellHandlersPresent(const std::wstring &path,
+                                               const WindowsOpenMeasurementLimits &limits, bool *present) {
+  if (!limits.MayRead()) return false;
+  Key key;
+  const auto opened = RegOpenKeyExW(HKEY_CLASSES_ROOT, path.c_str(), 0, KEY_QUERY_VALUE, &key.value);
+  if (opened == ERROR_FILE_NOT_FOUND) { *present = false; return limits.MayRead(); }
+  if (opened != ERROR_SUCCESS || !limits.MayRead()) return false;
+  DWORD subkeys = 0, values = 0;
+  const auto counted = RegQueryInfoKeyW(key.value, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr,
+                                        &values, nullptr, nullptr, nullptr, nullptr);
+  if (counted != ERROR_SUCCESS || !limits.MayRead()) return false;
+  *present = subkeys > 0 || values > 0;
+  return true;
+}
+// Whether a named value exists, whatever its type (a REG_MULTI_SZ 'command' counts). Its data is
+// not read. A missing key or value is absent; any other failure is a failed read.
+[[nodiscard]] inline bool RegistryValuePresent(const std::wstring &path, const wchar_t *name,
+                                               const WindowsOpenMeasurementLimits &limits, bool *present) {
+  if (!limits.MayRead()) return false;
+  Key key;
+  const auto opened = RegOpenKeyExW(HKEY_CLASSES_ROOT, path.c_str(), 0, KEY_QUERY_VALUE, &key.value);
+  if (opened == ERROR_FILE_NOT_FOUND) { *present = false; return limits.MayRead(); }
+  if (opened != ERROR_SUCCESS || !limits.MayRead()) return false;
+  DWORD type = 0;
+  const auto read = RegQueryValueExW(key.value, name, nullptr, &type, nullptr, nullptr);
+  if (!limits.MayRead()) return false;
+  if (read == ERROR_FILE_NOT_FOUND) { *present = false; return true; }
+  if (read != ERROR_SUCCESS && read != ERROR_MORE_DATA) return false;
+  *present = true;
+  return true;
+}
 // One association string through the shell's own resolution order, for `verb` when given (the
 // same pszExtra for every query, so every answer comes from the same registry layer). "No such
 // association" is absent; any other failure is a failed read.
@@ -189,14 +223,60 @@ struct Key {
   bool present = false;
   if (!RequiredAssociationString(ASSOCSTR_PROGID, extension, nullptr, limits, &prog_id) ||
       !RegistryString(HKEY_CLASSES_ROOT, extension, L"PerceivedType", limits, &perceived, &present) ||
-      !present) return facts;
+      !present || perceived.empty() || perceived.find_first_of(L"\\/") != std::wstring::npos) return facts;
   if (!RegistryString(HKEY_CURRENT_USER,
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" + extension + L"\\UserChoice",
         L"ProgId", limits, &user_choice, &present)) return facts;
   if (present && user_choice != prog_id) return facts;
-  // The default verb the input actually invokes: the ProgID's named default, and only that one.
+  // The verb measured is the ProgID's named default, and only that one. It is taken for the verb
+  // the input invokes only when (below) the verb key exists with a static command equal to the
+  // resolved one, and neither the verb key nor its command key carries a value that demotes the
+  // verb from the UI default or supplies another command source; anything else is takeover.
   if (!RegistryString(HKEY_CLASSES_ROOT, prog_id + L"\\shell", nullptr, limits, &verb, &present) ||
       !present || verb.empty() || verb.find_first_of(L"\\/;,\"") != std::wstring::npos) return facts;
+  // The same verb's keys under the ProgID: the static command must exist and be the very command
+  // the shell resolved; a COM verb handler, a delegate, a drop target or DDE is not a static command.
+  const auto key = prog_id + L"\\shell\\" + verb;
+  const auto command_path = key + L"\\command";
+  bool command_present = false, delegate_key = false, drop_key = false, explorer_command = false;
+  bool ddeexec = false, progid_shellex = false, extension_shellex = false;
+  bool system_extension_shellex = false, system_perceived_shellex = false;
+  if (!RegistryString(HKEY_CLASSES_ROOT, command_path, nullptr, limits, &command_key, &command_present) ||
+      !RegistryString(HKEY_CLASSES_ROOT, command_path, L"DelegateExecute", limits, &value, &delegate_key) ||
+      !RegistryString(HKEY_CLASSES_ROOT, key, L"ExplorerCommandHandler", limits, &value, &explorer_command) ||
+      !RegistryKeyPresent(key + L"\\DropTarget", limits, &drop_key) ||
+      !RegistryKeyPresent(key + L"\\ddeexec", limits, &ddeexec) ||
+      // A shell extension's context menu handler may supply the default item: the ProgID, the
+      // extension and the SystemFileAssociations layers of the extension and the perceived type
+      // are looked at. "*" and AllFilesystemObjects are not: they hold handlers for every file, so
+      // looking there would take over every type alike and tell nothing about this one.
+      !ShellHandlersPresent(prog_id + L"\\shellex\\ContextMenuHandlers", limits, &progid_shellex) ||
+      !ShellHandlersPresent(extension + L"\\shellex\\ContextMenuHandlers", limits, &extension_shellex) ||
+      !ShellHandlersPresent(L"SystemFileAssociations\\" + extension + L"\\shellex\\ContextMenuHandlers",
+                            limits, &system_extension_shellex) ||
+      !ShellHandlersPresent(L"SystemFileAssociations\\" + perceived + L"\\shellex\\ContextMenuHandlers",
+                            limits, &system_perceived_shellex))
+    return facts;
+  // Values that take the verb out of the UI default (LegacyDisable, ProgrammaticAccessOnly,
+  // Extended, AppliesTo, CommandStateHandler / CommandStateSync) or give it another command source
+  // (IsolatedCommand, a named 'command' value such as MSI's REG_MULTI_SZ descriptor), on the verb
+  // key or its command key, of any type.
+  bool verb_restricted = false;
+  for (const auto *value_key : {&key, &command_path})
+    for (const wchar_t *value_name : {L"LegacyDisable", L"ProgrammaticAccessOnly", L"Extended", L"AppliesTo",
+                                L"CommandStateHandler", L"CommandStateSync", L"IsolatedCommand", L"command"}) {
+      bool restricted = false;
+      if (!RegistryValuePresent(*value_key, value_name, limits, &restricted)) return facts;
+      verb_restricted = verb_restricted || restricted;
+    }
+  // What the registry says is recorded now, so a later failed read cannot hide it.
+  facts.delegate_execute = delegate_key;
+  facts.drop_target = drop_key;
+  facts.dde = ddeexec;
+  facts.explorer_command_handler = explorer_command;
+  facts.shell_extension = progid_shellex || extension_shellex || system_extension_shellex ||
+                          system_perceived_shellex;
+  facts.verb_restricted = verb_restricted;
   // Every handler answer for that verb, through the same resolution path.
   bool delegate = false, drop = false, dde_command = false, dde_application = false;
   if (!RequiredAssociationString(ASSOCSTR_EXECUTABLE, extension, verb.c_str(), limits, &executable) ||
@@ -206,36 +286,15 @@ struct Key {
       !AssociationString(ASSOCSTR_DDECOMMAND, extension, verb.c_str(), limits, &value, &dde_command) ||
       !AssociationString(ASSOCSTR_DDEAPPLICATION, extension, verb.c_str(), limits, &dde_value, &dde_application))
     return facts;
-  // The same verb's keys under the ProgID: the static command must exist and be the very command
-  // the shell resolved; a COM verb handler, a delegate, a drop target or DDE is not a static command.
-  const auto key = prog_id + L"\\shell\\" + verb;
-  bool command_present = false, delegate_key = false, drop_key = false, explorer_command = false;
-  bool ddeexec = false, progid_shellex = false, extension_shellex = false;
-  if (!RegistryString(HKEY_CLASSES_ROOT, key + L"\\command", nullptr, limits, &command_key, &command_present) ||
-      !RegistryString(HKEY_CLASSES_ROOT, key + L"\\command", L"DelegateExecute", limits, &value, &delegate_key) ||
-      !RegistryString(HKEY_CLASSES_ROOT, key, L"ExplorerCommandHandler", limits, &value, &explorer_command) ||
-      !RegistryKeyPresent(key + L"\\DropTarget", limits, &drop_key) ||
-      !RegistryKeyPresent(key + L"\\ddeexec", limits, &ddeexec) ||
-      // A shell extension's context menu handler may supply the default item.
-      !RegistryKeyPresent(prog_id + L"\\shellex\\ContextMenuHandlers", limits, &progid_shellex) ||
-      !RegistryKeyPresent(extension + L"\\shellex\\ContextMenuHandlers", limits, &extension_shellex))
-    return facts;
-  facts.delegate_execute = delegate || delegate_key;
-  facts.drop_target = drop || drop_key;
-  // The shell answers DDEAPPLICATION even without DDE, with the handler's file name stem (measured:
-  // "notepad++" for notepad++.exe). Only another name is an explicit DDE application.
-  const auto separator = executable.find_last_of(L"\\/");
-  const std::wstring leaf = separator == std::wstring::npos ? executable : executable.substr(separator + 1);
-  const bool dde_application_explicit = dde_application && dde_value != leaf.substr(0, leaf.rfind(L'.'));
-  facts.dde = dde_command || dde_application_explicit || ddeexec;
-  facts.explorer_command_handler = explorer_command;
-  facts.shell_extension = progid_shellex || extension_shellex;
+  facts.delegate_execute = facts.delegate_execute || delegate;
+  facts.drop_target = facts.drop_target || drop;
+  facts.dde = WindowsDdeConfigured(dde_command, dde_application, dde_value, executable, ddeexec);
   facts.command_key_matches = command_present && command_key == command;
   facts.perceived_type = Utf8(perceived); facts.user_choice = Utf8(user_choice);
   facts.prog_id = Utf8(prog_id); facts.verb = Utf8(verb);
   facts.executable = Utf8(executable); facts.command = Utf8(command);
   if (facts.delegate_execute || facts.drop_target || facts.dde || facts.explorer_command_handler ||
-      facts.shell_extension || !facts.command_key_matches) return facts;
+      facts.shell_extension || facts.verb_restricted || !facts.command_key_matches) return facts;
   facts.signature_valid = VerifiedSigner(executable, limits, &facts.signer_sha256);
   facts.complete = limits.MayRead() && facts.signature_valid;
   return facts;
@@ -302,9 +361,11 @@ template <class Result, class Read>
       {
         std::lock_guard lock(pending->mutex);
         if (!pending->abandoned.load()) pending->result = std::move(result);
+        // The slot is free BEFORE `done` is seen: a caller that returns on `done` can start the
+        // next measurement at once. The OS call has returned, so at most one worker is still stuck.
+        running.store(false);
         pending->done = true;
       }
-      running.store(false);
       pending->ready.notify_one();
     }).detach();
   } catch (...) { running.store(false); return {}; }

@@ -25,6 +25,9 @@ struct WindowsAssociationFacts {
   bool explorer_command_handler = false;
   bool dde = false;
   bool shell_extension = false;
+  // The verb or its command key carries a value that demotes it from the UI default or supplies
+  // another command source (LegacyDisable, Extended, IsolatedCommand, a named 'command', ...).
+  bool verb_restricted = false;
   bool command_key_matches = false;
   bool signature_valid = false;
   std::string real_path;
@@ -79,11 +82,24 @@ struct WindowsOpenFacts {
          !association.file_id.empty() && association.file_id == selection.target_file_id;
 }
 
-// `viewers` is the production table; only the fixture passes a synthetic one, so each protection
-// below is shown to hold even when a row would otherwise match.
-[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsAssociation(
-    const WindowsAssociationFacts &facts,
-    std::span<const WindowsDocumentViewer> viewers = kWindowsDocumentViewers) {
+// Whether the measured verb is configured for DDE. The shell answers DDEAPPLICATION even without
+// DDE, with the handler's file name stem (measured: "notepad++" for notepad++.exe), so only another
+// name is an explicit DDE application; a DDE command or a ddeexec key always is DDE.
+[[nodiscard]] inline bool WindowsDdeConfigured(bool command_present, bool application_present,
+                                               std::wstring_view application, std::wstring_view executable,
+                                               bool ddeexec_key) {
+  const auto separator = executable.find_last_of(L"\\/");
+  const auto leaf = separator == std::wstring_view::npos ? executable : executable.substr(separator + 1);
+  const auto stem = leaf.substr(0, leaf.rfind(L'.'));
+  return command_present || ddeexec_key || (application_present && application != stem);
+}
+
+// The table-taking forms are the fixture's only (source-checked): it passes a synthetic row so each
+// protection is shown to hold while a row would otherwise match. Production calls the public forms
+// below, bound to kWindowsDocumentViewers, whose version and digest WindowsOpenFactsDigest carries.
+namespace windows_open_detail {
+[[nodiscard]] inline WindowsOpenVerdict JudgeAssociationWith(const WindowsAssociationFacts &facts,
+                                                             std::span<const WindowsDocumentViewer> viewers) {
   using namespace effect_detail;
   // Display labels never enter this decision. The extension comes from the verified path.
   if (facts.real_path_verified &&
@@ -94,7 +110,8 @@ struct WindowsOpenFacts {
   if (!facts.complete || !facts.real_path_verified || CanonicalWindowsRealPath(facts.real_path).empty() ||
       facts.file_id.empty() || !IsPlainExtension(facts.extension) || facts.delegate_execute ||
       facts.drop_target || facts.explorer_command_handler || facts.dde || facts.shell_extension ||
-      !facts.command_key_matches || !facts.signature_valid || facts.prog_id.empty() || facts.verb.empty())
+      facts.verb_restricted || !facts.command_key_matches || !facts.signature_valid ||
+      facts.prog_id.empty() || facts.verb.empty())
     return WindowsOpenVerdict::kTakeover;
   for (const auto &row : viewers)
     if (row.extension == facts.extension && row.perceived_type == facts.perceived_type &&
@@ -103,6 +120,10 @@ struct WindowsOpenFacts {
         row.signer_sha256 == facts.signer_sha256)
       return WindowsOpenVerdict::kVerified;
   return WindowsOpenVerdict::kTakeover;
+}
+} // namespace windows_open_detail
+[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsAssociation(const WindowsAssociationFacts &facts) {
+  return windows_open_detail::JudgeAssociationWith(facts, kWindowsDocumentViewers);
 }
 
 [[nodiscard]] inline WindowsOpenVerdict JudgeWindowsSingleSelection(const WindowsSingleSelectionFacts &facts) {
@@ -116,7 +137,7 @@ struct WindowsOpenFacts {
 // Native-only framing for comparison at preflight, approve and approved dispatch.
 // Counts and every path are included; UIA viewport truncation cannot hide an extra selection.
 [[nodiscard]] inline std::string WindowsOpenFactsDigest(const WindowsOpenFacts &facts) {
-  std::string frame = "windows-open-facts-v2";
+  std::string frame = "windows-open-facts-v3";
   const auto append = [&frame](std::string_view value) {
     frame += std::to_string(value.size()) + ":";
     frame.append(value);
@@ -129,7 +150,7 @@ struct WindowsOpenFacts {
                             &a.prog_id, &a.verb, &a.executable, &a.command, &a.signer_sha256}) append(*value);
   for (const bool value : {a.complete, a.real_path_verified, a.dangerous, a.delegate_execute,
                            a.drop_target, a.explorer_command_handler, a.dde, a.shell_extension,
-                           a.command_key_matches, a.signature_valid,
+                           a.verb_restricted, a.command_key_matches, a.signature_valid,
                            facts.selection.shell_complete, facts.selection.uia_complete,
                            facts.selection.uia_target_matches}) append(value ? "1" : "0");
   append(std::to_string(facts.selection.shell_count));
@@ -144,11 +165,12 @@ struct WindowsOpenFacts {
 [[nodiscard]] inline bool SameWindowsOpenFacts(const WindowsOpenFacts &before, const WindowsOpenFacts &after) {
   return WindowsOpenFactsDigest(before) == WindowsOpenFactsDigest(after);
 }
-[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsOpenFacts(
-    const WindowsOpenFacts &current, const WindowsOpenFacts *previous = nullptr,
-    std::span<const WindowsDocumentViewer> viewers = kWindowsDocumentViewers) {
+namespace windows_open_detail {
+[[nodiscard]] inline WindowsOpenVerdict JudgeOpenFactsWith(const WindowsOpenFacts &current,
+                                                           const WindowsOpenFacts *previous,
+                                                           std::span<const WindowsDocumentViewer> viewers) {
   if (previous && !SameWindowsOpenFacts(*previous, current)) return WindowsOpenVerdict::kTakeover;
-  const auto association = JudgeWindowsAssociation(current.association, viewers);
+  const auto association = JudgeAssociationWith(current.association, viewers);
   if (association == WindowsOpenVerdict::kBlocked) return association;
   const bool e2 = current.effect == EffectClass::kE2DownloadOpen;
   const bool e3 = current.effect == EffectClass::kE3FileManagerOpen;
@@ -160,6 +182,11 @@ struct WindowsOpenFacts {
       !SameWindowsOpenTarget(current.association, current.selection))
     return WindowsOpenVerdict::kTakeover;
   return WindowsOpenVerdict::kVerified;
+}
+} // namespace windows_open_detail
+[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsOpenFacts(const WindowsOpenFacts &current,
+                                                              const WindowsOpenFacts *previous = nullptr) {
+  return windows_open_detail::JudgeOpenFactsWith(current, previous, kWindowsDocumentViewers);
 }
 
 // `still_valid` and `now_ns` are copied into a worker thread that can outlive the caller (a

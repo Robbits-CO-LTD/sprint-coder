@@ -167,95 +167,196 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     expect(through.facts.get('file_id')).toBe(direct.facts.get('file_id'));
   });
 
+  it('rejects a file that is itself a reparse point (a file symbolic link)', (context) => {
+    const target = join(scratch, 'symlink-target.txt');
+    const link = join(scratch, 'symlink.txt');
+    writeFileSync(target, '');
+    try {
+      symlinkSync(target, link, 'file');
+    } catch (error) {
+      // Creating a file symbolic link needs the privilege or Developer Mode: skipped, stated.
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+        context.skip('file symbolic links need SeCreateSymbolicLinkPrivilege or Developer Mode');
+        return;
+      }
+      throw error;
+    }
+    const identity = probe('identity', link);
+    expect(identity.status, identity.output).toBe(1);
+    expect(identity.output).toContain('live-identity');
+    const association = probe('association', link, 'takeover');
+    expect(association.status, association.output).toBe(0);
+    expect(association.facts.get('real_path_verified')).toBe('0');
+    // The target itself resolves: only the reparse point is refused.
+    expect(probe('identity', target).status).toBe(0);
+  });
+
   it('reads a temporary HKCU association and takes over on every non-static handler', () => {
     const extension = `scgt991x${process.pid}`;
     const progId = `ScgT991.Document${process.pid}`;
+    const perceived = `scgp991x${process.pid}`;
     const classes = 'HKCU\\Software\\Classes';
-    const command = '"C:\\Windows\\System32\\notepad.exe" "%1"';
+    // An executable with an embedded Authenticode signature (System32's notepad is catalog-signed).
+    const handler = process.execPath;
+    const command = `"${handler}" "%1"`;
     const reg = (...args: string[]): number | null =>
       spawnSync('reg.exe', args, { encoding: 'utf8', timeout: 30_000 }).status;
-    const keys = [`${classes}\\.${extension}`, `${classes}\\${progId}`];
+    const extensionKey = `${classes}\\.${extension}`;
+    const progIdKey = `${classes}\\${progId}`;
+    const verbKey = `${progIdKey}\\shell\\open`;
+    const commandKey = `${verbKey}\\command`;
+    const keys = [
+      extensionKey,
+      progIdKey,
+      `${classes}\\SystemFileAssociations\\.${extension}`,
+      `${classes}\\SystemFileAssociations\\${perceived}`,
+      `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.${extension}`,
+    ];
     const file = join(scratch, `document.${extension}`);
     writeFileSync(file, '');
+    const measure = (): Probe => {
+      const measured = probe('association', file, 'takeover');
+      expect(measured.status, measured.output).toBe(0);
+      return measured;
+    };
+    const flags = [
+      'delegate_execute',
+      'drop_target',
+      'explorer_command_handler',
+      'dde',
+      'shell_extension',
+      'verb_restricted',
+    ];
     let failure: unknown = null;
     try {
-      expect(reg('add', keys[0]!, '/ve', '/d', progId, '/f')).toBe(0);
-      expect(reg('add', keys[0]!, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
-      expect(reg('add', `${keys[1]}\\shell`, '/ve', '/d', 'open', '/f')).toBe(0);
-      expect(reg('add', `${keys[1]}\\shell\\open\\command`, '/ve', '/d', command, '/f')).toBe(0);
-      const plain = probe('association', file, 'takeover');
-      expect(plain.status, plain.output).toBe(0);
+      expect(reg('add', extensionKey, '/ve', '/d', progId, '/f')).toBe(0);
+      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
+      expect(reg('add', `${progIdKey}\\shell`, '/ve', '/d', 'open', '/f')).toBe(0);
+      expect(reg('add', commandKey, '/ve', '/d', command, '/f')).toBe(0);
+      const plain = measure();
       expect(plain.facts.get('real_path_verified')).toBe('1');
       expect(plain.facts.get('file_id_known')).toBe('1');
       expect(plain.facts.get('extension')).toBe(extension);
       expect(plain.facts.get('perceived_type')).toBe('text');
       expect(plain.facts.get('prog_id')).toBe(progId);
       expect(plain.facts.get('verb')).toBe('open');
+      expect(plain.facts.get('executable')).toBe(handler);
       expect(plain.facts.get('command_key_matches')).toBe('1');
-      for (const name of [
-        'delegate_execute',
-        'drop_target',
-        'explorer_command_handler',
-        'dde',
-        'shell_extension',
-      ])
-        expect(plain.facts.get(name), name).toBe('0');
-      const flagged: ReadonlyArray<readonly [string, string[]]> = [
-        [
-          'delegate_execute',
-          [
+      for (const name of flags) expect(plain.facts.get(name), name).toBe('0');
+      // Every check passed and the signer was measured; the empty viewer table still takes over.
+      expect(plain.facts.get('signature_valid')).toBe('1');
+      expect(plain.facts.get('complete')).toBe('1');
+
+      // Each case alone: added, measured, removed, and the plain association measured again.
+      type Case = Readonly<{ flag: string; add: string[]; remove: string[] }>;
+      const value = (
+        key: string,
+        name: string,
+        data = '{00000000-0000-0000-0000-000000000991}',
+      ): Case => ({
+        flag: '',
+        add: ['add', key, '/v', name, '/d', data, '/f'],
+        remove: ['delete', key, '/v', name, '/f'],
+      });
+      const subkey = (key: string, data = '{00000000-0000-0000-0000-000000000992}'): Case => ({
+        flag: '',
+        add: ['add', key, '/ve', '/d', data, '/f'],
+        remove: ['delete', key, '/f'],
+      });
+      const cases: ReadonlyArray<Case> = [
+        { ...value(commandKey, 'DelegateExecute'), flag: 'delegate_execute' },
+        { ...value(verbKey, 'ExplorerCommandHandler'), flag: 'explorer_command_handler' },
+        { ...subkey(`${verbKey}\\DropTarget`), flag: 'drop_target' },
+        // AssocQueryString reads DDECOMMAND from this same ddeexec key, so the key check and the
+        // DDECOMMAND query cannot be told apart here; the DDE decision itself is in the fixture.
+        { ...subkey(`${verbKey}\\ddeexec`, '[open("%1")]'), flag: 'dde' },
+        {
+          ...subkey(`${progIdKey}\\shellex\\ContextMenuHandlers\\Synthetic`),
+          flag: 'shell_extension',
+        },
+        {
+          ...subkey(`${extensionKey}\\shellex\\ContextMenuHandlers\\Synthetic`),
+          flag: 'shell_extension',
+        },
+        {
+          ...subkey(`${keys[2]}\\shellex\\ContextMenuHandlers\\Synthetic`),
+          flag: 'shell_extension',
+        },
+        ...['LegacyDisable', 'ProgrammaticAccessOnly', 'Extended', 'CommandStateSync'].map(
+          (name) => ({
+            ...value(verbKey, name, ''),
+            flag: 'verb_restricted',
+          }),
+        ),
+        { ...value(verbKey, 'AppliesTo', 'System.Kind:=document'), flag: 'verb_restricted' },
+        { ...value(verbKey, 'CommandStateHandler'), flag: 'verb_restricted' },
+        { ...value(verbKey, 'IsolatedCommand', command), flag: 'verb_restricted' },
+        { ...value(commandKey, 'Extended', ''), flag: 'verb_restricted' },
+        {
+          flag: 'verb_restricted',
+          add: [
             'add',
-            `${keys[1]}\\shell\\open\\command`,
+            commandKey,
             '/v',
-            'DelegateExecute',
+            'command',
+            '/t',
+            'REG_MULTI_SZ',
             '/d',
-            '{00000000-0000-0000-0000-000000000991}',
+            'descriptor\\0',
             '/f',
           ],
-        ],
-        [
-          'explorer_command_handler',
-          [
-            'add',
-            `${keys[1]}\\shell\\open`,
-            '/v',
-            'ExplorerCommandHandler',
-            '/d',
-            '{00000000-0000-0000-0000-000000000992}',
-            '/f',
-          ],
-        ],
-        [
-          'drop_target',
-          [
-            'add',
-            `${keys[1]}\\shell\\open\\DropTarget`,
-            '/v',
-            'CLSID',
-            '/d',
-            '{00000000-0000-0000-0000-000000000993}',
-            '/f',
-          ],
-        ],
-        ['dde', ['add', `${keys[1]}\\shell\\open\\ddeexec`, '/ve', '/d', '[open("%1")]', '/f']],
-        [
-          'shell_extension',
-          [
-            'add',
-            `${keys[1]}\\shellex\\ContextMenuHandlers\\Synthetic`,
-            '/ve',
-            '/d',
-            '{00000000-0000-0000-0000-000000000994}',
-            '/f',
-          ],
-        ],
+          remove: ['delete', commandKey, '/v', 'command', '/f'],
+        },
       ];
-      for (const [name, args] of flagged) {
-        expect(reg(...args), name).toBe(0);
-        const flaggedProbe = probe('association', file, 'takeover');
-        expect(flaggedProbe.status, flaggedProbe.output).toBe(0);
-        expect(flaggedProbe.facts.get(name), name).toBe('1');
+      for (const entry of cases) {
+        const label = `${entry.flag} ${entry.add.join(' ')}`;
+        expect(reg(...entry.add), label).toBe(0);
+        const flagged = measure();
+        expect(flagged.facts.get(entry.flag), label).toBe('1');
+        expect(flagged.facts.get('complete'), label).toBe('0');
+        expect(reg(...entry.remove), label).toBe(0);
+        // Removing the handler leaves an empty ContextMenuHandlers key behind: it holds no handler.
+        if (entry.remove[1]!.endsWith('\\ContextMenuHandlers\\Synthetic'))
+          expect(reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(0);
+        expect(measure().facts.get('complete'), `${label} removed`).toBe('1');
       }
+
+      // The perceived type's SystemFileAssociations layer (a type of its own, not the user's "text").
+      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', perceived, '/f')).toBe(0);
+      expect(measure().facts.get('shell_extension')).toBe('0');
+      expect(
+        reg(
+          'add',
+          `${keys[3]}\\shellex\\ContextMenuHandlers\\Synthetic`,
+          '/ve',
+          '/d',
+          '{00000000-0000-0000-0000-000000000993}',
+          '/f',
+        ),
+      ).toBe(0);
+      expect(measure().facts.get('shell_extension')).toBe('1');
+      expect(reg('delete', keys[3]!, '/f')).toBe(0);
+      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
+      expect(measure().facts.get('complete')).toBe('1');
+
+      // A UserChoice whose ProgId is not the resolved ProgID stops the measurement.
+      expect(
+        reg(
+          'add',
+          `${keys[4]}\\UserChoice`,
+          '/v',
+          'ProgId',
+          '/d',
+          `ScgT991.Missing${process.pid}`,
+          '/f',
+        ),
+      ).toBe(0);
+      const mismatch = measure();
+      expect(mismatch.facts.get('real_path_verified')).toBe('1');
+      expect(mismatch.facts.get('prog_id')).toBe('');
+      expect(mismatch.facts.get('complete')).toBe('0');
+      expect(reg('delete', keys[4]!, '/f')).toBe(0);
+
       const unknown = join(scratch, `document.scgu991x${process.pid}`);
       writeFileSync(unknown, '');
       const unregistered = probe('association', unknown, 'takeover');
