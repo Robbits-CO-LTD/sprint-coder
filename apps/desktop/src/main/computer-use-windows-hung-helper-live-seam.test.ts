@@ -609,15 +609,26 @@ async function prepare(context: TestContext, binary = hung, startPoint?: string)
   // replaces the native windowId with randomUUID()). Find the owned window by HWND in the Host's
   // native list, then pick the Controller candidate with the same window identity digest (derived
   // from the app identity, process start and HWND) and start with that candidate's token.
+  // A missing or empty digest, or more than one matching candidate, is an implementation mix-up and
+  // fails; only a window that is not listed at all (e.g. a Store hand-off) is a counted NOT_RUN.
+  // In CI too this whole path is normally NOT_RUN, because classic Notepad was not eligible even on
+  // windows-2022; every such skip appears with its reason in HUNG_HELPER_NOT_RUN_SUMMARY.
   let candidate: Awaited<ReturnType<typeof controller.listWindows>>[number] | undefined;
   for (let attempt = 0; attempt < 5 && candidate === undefined; attempt += 1) {
     const native = (await host.listWindows(profile)).find(
       (window) => window.windowId === notepadWindowId,
     );
-    if (native !== undefined)
-      candidate = (await controller.listWindows(profile.id)).find(
-        (window) => window.windowIdentityDigest === native.windowIdentityDigest,
+    if (native !== undefined) {
+      const digest: unknown = native.windowIdentityDigest;
+      if (typeof digest !== 'string' || digest.length === 0)
+        throw new Error('Native window for the owned HWND has no window identity digest');
+      const matches = (await controller.listWindows(profile.id)).filter(
+        (window) => window.windowIdentityDigest === digest,
       );
+      if (matches.length > 1)
+        throw new Error(`${matches.length} Controller candidates share the owned window digest`);
+      candidate = matches[0];
+    }
     if (candidate === undefined) await delay(200);
   }
   if (candidate === undefined)
