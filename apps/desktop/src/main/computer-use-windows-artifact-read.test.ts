@@ -211,13 +211,17 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     );
   });
 
-  it('is exposed by the Windows addon as its own method, and the host adapter does not make it a capability', () => {
+  it('is exposed by the Windows addon and gated by the ready win32 attest in the host', () => {
     const windows = squash(main('computer-use-native-windows.ts'));
     expect(windows).toContain(
       "readNodeValue: (input) => { const value = record(input); return client.call( 'probe', 'read_node_value', value, stringField(value, 'sessionId'), `readNodeValue:${stringField(value, 'requestId')}`, ); },",
     );
-    // Production never reports the capability: only a fake does, until T15-E enables it.
-    expect(main('computer-use-native-host.ts')).not.toMatch(/artifactReadSupported\s*[:(=]/u);
+    const host = squash(main('computer-use-native-host.ts'));
+    expect(host).toContain(
+      "platform === 'win32' && handshakeReady && probeReady && binding.probe.capabilities.artifactRead === true && hasMethod(addon, 'readNodeValue')",
+    );
+    expect(host).toContain('artifactReadSupported: () => true');
+    expect(host).toContain('artifactPasteSupported: () => true');
     expect(main('computer-use-native-windows.ts')).not.toMatch(/artifactReadSupported\s*[:(=]/u);
     // The planner and the controller still ask the capability, not the method.
     expect(main('computer-use-controller.ts')).toContain(

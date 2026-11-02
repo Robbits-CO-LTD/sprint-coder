@@ -35,6 +35,7 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"graphicsCapture\":" + (probe.graphics_capture ? "true" : "false") +
          ",\"sendInput\":" + (probe.send_input ? "true" : "false") +
          ",\"cancellableWindowDiscovery\":true" +
+         ",\"artifactRead\":true" +
          "},\"eligibility\":{\"mode\":\"" +
          std::string(sprint_coder::computer_use::kNativeEligibilityModeName) +
          "\",\"rulesetVersion\":" +

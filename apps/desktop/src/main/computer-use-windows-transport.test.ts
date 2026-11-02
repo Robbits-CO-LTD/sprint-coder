@@ -260,7 +260,7 @@ function responders(): Readonly<Record<string, Responder>> {
         platform: 'win32',
         napiVersion: 10,
         sourceCommit,
-        capabilities: { cancellableWindowDiscovery: true },
+        capabilities: { cancellableWindowDiscovery: true, artifactRead: true },
       },
     ],
     list_windows: () => [
@@ -1465,6 +1465,44 @@ describe('Computer Use Windows helper transport', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await outcome).toBe('rejected');
   });
+
+  it.each([false, undefined, true])(
+    'gates node reads on each pipe artifactRead attest: %s',
+    async (artifactRead) => {
+      let claim: boolean | undefined = true;
+      const { addon, helper } = createTarget({
+        ...responders(),
+        handshake: () => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            capabilities: {
+              cancellableWindowDiscovery: true,
+              ...(claim === undefined ? {} : { artifactRead: claim }),
+            },
+          },
+        ],
+        read_node_value: () => ['probe_result', { ok: true, text: 'Synthetic value' }],
+      });
+      await expect(
+        addon.readNodeValue!({ sessionId: 'artifact-session', requestId: 'first-read' }),
+      ).resolves.toEqual({ ok: true, text: 'Synthetic value' });
+      sockets.at(-1)!.emit('close');
+      claim = artifactRead;
+      await expect(
+        addon.readNodeValue!({ sessionId: 'artifact-session', requestId: 'artifact-read' }),
+      ).resolves.toEqual(
+        artifactRead === true ? { ok: true, text: 'Synthetic value' } : { ok: false },
+      );
+      expect(helper().served).toEqual(
+        artifactRead === true ? ['handshake', 'read_node_value'] : ['handshake'],
+      );
+    },
+  );
 
   it('waits for a valid handshake before parallel calls, including reconnect', async () => {
     const target = createTarget();

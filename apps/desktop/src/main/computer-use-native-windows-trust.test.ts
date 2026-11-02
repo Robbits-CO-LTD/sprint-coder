@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WindowsComputerUseHelperTrust } from './computer-use-native-windows';
+import { assertWindowsComputerUseHelperHandshake } from './computer-use-native-windows';
+import { parseNativeHandshake } from './computer-use-native-handshake';
 
 const captured: WindowsComputerUseHelperTrust[] = [];
 
@@ -43,7 +45,10 @@ const V1 = {
   ticketRequired: false,
 };
 
-function load(eligibility: Record<string, unknown> | undefined) {
+function load(
+  eligibility: Record<string, unknown> | undefined,
+  capabilities: Record<string, unknown> = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'sprint-coder-computer-use-trust-'));
   roots.push(root);
   const resources = join(root, 'resources');
@@ -92,6 +97,7 @@ function load(eligibility: Record<string, unknown> | undefined) {
         uiAutomation: true,
         graphicsCapture: true,
         sendInput: true,
+        ...capabilities,
       },
       ...(eligibility === undefined ? {} : { eligibility }),
     }),
@@ -100,6 +106,48 @@ function load(eligibility: Record<string, unknown> | undefined) {
 }
 
 describe('the Windows helper trust the loader hands to the pipe client (D7)', () => {
+  it.each([true, false, 'true', 1, null, undefined])(
+    'validates artifactRead in both probe and pipe handshakes: %s',
+    (artifactRead) => {
+      const binding = load(V1, { artifactRead });
+      const valid = typeof artifactRead === 'boolean';
+      expect(binding.probe.available).toBe(valid);
+      expect(binding.probe.capabilities.artifactRead).toBe(
+        artifactRead === true ? true : undefined,
+      );
+      if (!valid) expect(binding.probe.reason).toBe('HANDSHAKE_INVALID');
+      const handshake = {
+        protocolVersion: 1,
+        apiVersion: 3,
+        napiVersion: 10,
+        platform: 'win32',
+        sourceCommit: 'f'.repeat(40),
+        capabilities: { artifactRead },
+      };
+      const trust = {
+        sourceCommit: 'f'.repeat(40),
+        binaryDigest: 'a'.repeat(64),
+        signerDigest: 'b'.repeat(64),
+      };
+      if (valid)
+        expect(() => assertWindowsComputerUseHelperHandshake(handshake, trust)).not.toThrow();
+      else
+        expect(() => assertWindowsComputerUseHelperHandshake(handshake, trust)).toThrow(
+          'HANDSHAKE_INVALID',
+        );
+      const macHandshake = {
+        protocolVersion: 1,
+        apiVersion: 3,
+        napiVersion: 10,
+        platform: 'darwin',
+      };
+      expect(() => parseNativeHandshake(macHandshake, 'darwin')).not.toThrow();
+      expect(() =>
+        parseNativeHandshake({ ...macHandshake, capabilities: { artifactRead } }, 'darwin'),
+      ).toThrow('HANDSHAKE_INVALID');
+    },
+  );
+
   it('carries the manifest eligibility, so the pipe handshake is checked against it', () => {
     const binding = load(V1);
     expect(binding.probe.available).toBe(true);

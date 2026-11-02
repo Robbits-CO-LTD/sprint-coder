@@ -25,7 +25,7 @@
 // (Chrome_WidgetWin_*, a Document in a browser) is a browser window for the judgement (R14 / N22b).
 // A browser executable is refused by name as well (the table mirrors Main's browser identity table).
 //
-// Nothing enables it: `artifactReadSupported` stays false in production until T15-E.
+// T15-E: Main enables artifact transfer only with the ready Windows helper's artifactRead attest.
 
 #include "computer_use_artifact_read_judgement.h"
 #include "computer_use_windows_shadow.h"

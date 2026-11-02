@@ -1096,9 +1096,16 @@ export function createComputerUseNativeHost(
 
     nativeApprovalPathEnabled: (sessionId: string): boolean => approvalPathEnabled(sessionId),
 
-    // #785 T15-4w: the read of one node's value (Windows helper). Present only when the native has it.
-    // It is NOT a capability: `artifactReadSupported` is not defined here, so `copy` stays closed in
-    // production until T15-E enables it. Every way of not reading is the same `{ ok: false }`.
+    // T15-E: only a ready Windows helper with the read attest opens artifact transfer.
+    ...(platform === 'win32' &&
+    handshakeReady &&
+    probeReady &&
+    binding.probe.capabilities.artifactRead === true &&
+    hasMethod(addon, 'readNodeValue')
+      ? { artifactReadSupported: () => true, artifactPasteSupported: () => true }
+      : {}),
+
+    // The method alone grants no capability. Every way of not reading is `{ ok: false }`.
     ...(hasMethod(addon, 'readNodeValue')
       ? {
           readNodeValue: async (input: {

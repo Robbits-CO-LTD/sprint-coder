@@ -222,13 +222,18 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   // Only now is the package fully verified, so the native probe's own refusal is the most specific
   // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
   // observe/control stay false either way.
-  if (probe.available !== true)
+  if (probe.available !== true) {
+    const { artifactRead, ...capabilities } = nativeProbeCapabilities(probe.capabilities);
     return DENIED_PROBE(
       knownNativeProbeReason(probe.reason) ?? 'NATIVE_PROBE_UNAVAILABLE',
       null,
       null,
-      nativeProbeCapabilities(probe.capabilities),
+      {
+        ...capabilities,
+        ...(parsed.platform === 'win32' && artifactRead === true ? { artifactRead: true } : {}),
+      },
     );
+  }
   return Object.freeze({
     available: true,
     protocolVersion: 1,
@@ -240,6 +245,10 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
     capabilities: Object.freeze({
       observe: true,
       control: true,
+      ...(parsed.platform === 'win32' &&
+      nativeProbeCapabilities(probe.capabilities).artifactRead === true
+        ? { artifactRead: true }
+        : {}),
       ...(parsed.platform === 'win32' &&
       nativeProbeCapabilities(probe.capabilities).cancellableWindowDiscovery === true
         ? { cancellableWindowDiscovery: true }

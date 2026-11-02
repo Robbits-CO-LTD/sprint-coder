@@ -29,6 +29,8 @@ export type ComputerUseNativeProbe = Readonly<{
     screenCaptureKit?: boolean;
     /** Private Windows protocol extension; absence never enables its query/Stop methods. */
     cancellableWindowDiscovery?: boolean;
+    /** Private Windows attest for reading one node; absence keeps artifact transfer closed. */
+    artifactRead?: boolean;
   }>;
 }>;
 
@@ -69,7 +71,7 @@ export type ComputerUseNativeAddon = Readonly<{
   /**
    * Windows helper only (#785 T15-4w; macOS is T15-4m). Reads the value of the one node a `copy`
    * names and answers `{ ok: true, text }` or `{ ok: false }`. No input capability. The host adapter
-   * exposes it, but the capability `artifactReadSupported` stays false until T15-E.
+   * exposes it; artifact capabilities require a ready Windows handshake and an artifactRead attest.
    */
   readNodeValue?(input: unknown): unknown;
   cancel?(input: unknown): unknown;

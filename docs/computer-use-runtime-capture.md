@@ -323,6 +323,13 @@ Windows requires the private `cancellableWindowDiscovery: true` capability in bo
 probe and each pipe handshake. API 3 / frame 1 remain unchanged; the legacy Windows `list_windows`
 operation is retired, with no fallback. macOS keeps its existing discovery path.
 
+Windows also reports the private `artifactRead: true` capability in probe and pipe handshake
+responses. Main exposes artifact read and paste capabilities only for an available Windows probe,
+a ready handshake, the probe’s literal attest and a `readNodeValue` method. Each pipe handshake must
+also report literal `artifactRead: true` before Main sends `read_node_value`; otherwise the read is
+refused locally. macOS remains closed. Every artifact paste
+still requires the Main approval card with `allow_once` / `deny`; no additional flag enables it.
+
 Each Windows query has a Main-issued nonce/counter identity and one original wire request. Native
 binds it to all 16 header bytes and retains at most 16 owners; terminal owners may be evicted only
 after their leases and launch work end. Main never reuses an issued ID. Replay rejection after native
