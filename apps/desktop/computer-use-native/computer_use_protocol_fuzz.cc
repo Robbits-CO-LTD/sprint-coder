@@ -9,6 +9,7 @@
 #include "computer_use_windows_shadow.h"
 #include "computer_use_windows_risk_terms.h"
 #include "computer_use_windows_approval_measurement.h"
+#include "computer_use_windows_association_fixture.h"
 #include "computer_use_windows_shadow_reader.h"
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_effect_measurement.h"
@@ -9432,6 +9433,7 @@ int main() {
   if (!CheckWindowsArtifactRead()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckWindowsApprovalCore()) return 1;
+  if (!sprint_coder::computer_use::CheckWindowsAssociationSelection(Check)) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;
   if (!CheckEffectPageScroll()) return 1;
