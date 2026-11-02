@@ -132,6 +132,7 @@ type PendingRequest = Readonly<{
   sessionId: ComputerUseNativeFrameId;
   /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
   stopsSession: boolean;
+  retainAfterKill: boolean;
   activityGeneration: number;
   helperGeneration: number;
   responseType: ComputerUseNativeMessageType;
@@ -376,6 +377,8 @@ class WindowsComputerUseHelperClient {
       if (owner.helper !== null) continue;
       owner.helper = generation;
       this.sessionGenerations.set(owner.sessionId, generation);
+      if (this.sessionGenerations.size > 128)
+        this.sessionGenerations.delete(this.sessionGenerations.keys().next().value!);
       this.termination.owned?.(generation, 'session', owner.sessionId);
     }
     for (const owner of this.discoveries.values()) {
@@ -523,6 +526,7 @@ class WindowsComputerUseHelperClient {
       if (proof.lifetime !== undefined) this.persistedLifetimes.add(proof.lifetime);
       if (proof.lifetime !== undefined) {
         this.lifetimes.delete(receipt.sessionId);
+        this.sessionGenerations.delete(receipt.sessionId);
         this.completedLifetimes.set(receipt.sessionId, proof.lifetime);
         // Match the bounded start-owner history; evicted receipts cannot confirm a lifetime.
         if (this.completedLifetimes.size > 128)
@@ -790,6 +794,8 @@ class WindowsComputerUseHelperClient {
       if (!owner.everSent)
         throw new ComputerUseDiscoveryNotSubmittedError('Discovery was never sent');
       // Reconnecting would query a different helper, which cannot prove this operation ended.
+      if (owner.helper !== null && this.generations.get(owner.helper)?.killRequested)
+        throw new Error('native_stop_unconfirmed');
       if (this.socket === null || owner.helper !== this.helperGeneration)
         throw new Error('Discovery helper generation is unavailable');
       const result = await this.sendConnected(
@@ -1269,6 +1275,9 @@ class WindowsComputerUseHelperClient {
           timeout,
           sessionId,
           stopsSession,
+          retainAfterKill:
+            metadata['operation'] === 'close_session' ||
+            metadata['operation'] === 'stop_pending_start',
           activityGeneration,
           helperGeneration,
           responseType: responseTypeFor(messageType),
@@ -1465,7 +1474,7 @@ class WindowsComputerUseHelperClient {
     this.idleShutdownPending = false;
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
-      if (retainStops && pending.stopsSession) continue;
+      if (retainStops && pending.retainAfterKill) continue;
       this.markSemanticUncertain(pending);
       pending.dispatchCallbacks?.unconfirmed(cause);
       clearTimeout(pending.timeout);

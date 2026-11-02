@@ -24,7 +24,10 @@ const stopped = (id: string) => ({
   drained: true,
   launchAttemptCount: 1,
 });
-function setup() {
+function setup(
+  generationAvailable?: (generation: number) => boolean,
+  generationKillRequested?: (generation: number) => boolean,
+) {
   const query = vi.fn(
     async (id: string, _input: Readonly<Record<string, unknown>>): Promise<unknown> =>
       completed(id),
@@ -40,12 +43,70 @@ function setup() {
     timeoutMs: 10,
     attemptLimit: 2,
     unconfirmedError: () => new Error('native_stop_unconfirmed'),
+    ...(generationAvailable === undefined ? {} : { generationAvailable }),
+    ...(generationKillRequested === undefined ? {} : { generationKillRequested }),
   });
   return { manager, query, stop, cancelUnsubmitted };
 }
 afterEach(() => vi.useRealTimers());
 
 describe('owned Main window discovery', () => {
+  it('does not accept a Stop receipt after kill before exit transfer', async () => {
+    let killed = false;
+    const { manager, query, stop } = setup(
+      () => true,
+      () => killed,
+    );
+    query.mockImplementation(() => new Promise(() => {}));
+    const reply = deferred<unknown>();
+    stop.mockImplementation(() => reply.promise);
+    const handle = manager.begin({});
+    manager.bindGeneration(handle.id, 1);
+    await Promise.resolve();
+    const stopping = handle.stop();
+    await Promise.resolve();
+    killed = true;
+    reply.resolve(stopped(handle.id));
+    await expect(stopping).rejects.toThrow('native_stop_unconfirmed');
+    expect(manager.quarantined()).toBe(true);
+    manager.terminateGeneration(1);
+    await expect(handle.terminal).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(manager.quarantined()).toBe(false);
+  });
+  it('rejects completion from an exited generation until transfer terminates it', async () => {
+    let available = true;
+    const { manager, query, stop } = setup(() => available);
+    const reply = deferred<unknown>();
+    query.mockImplementation(() => reply.promise);
+    const handle = manager.begin({});
+    manager.bindGeneration(handle.id, 1);
+    await Promise.resolve();
+    available = false;
+    expect(manager.resultAvailable(handle.id)).toBe(false);
+    reply.resolve(completed(handle.id));
+    await expect(handle.result).rejects.toThrow('native_stop_unconfirmed');
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(manager.quarantined()).toBe(true);
+    manager.terminateGeneration(1);
+    await expect(handle.terminal).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(manager.quarantined()).toBe(false);
+  });
+  it('uses termination evidence when exit races an in-flight Stop', async () => {
+    const { manager, query, stop } = setup();
+    query.mockImplementation(() => new Promise(() => {}));
+    const reply = deferred<unknown>();
+    stop.mockImplementation(() => reply.promise);
+    const handle = manager.begin({});
+    manager.bindGeneration(handle.id, 1);
+    await Promise.resolve();
+    const stopping = handle.stop();
+    await Promise.resolve();
+    manager.terminateGeneration(1);
+    await expect(stopping).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    reply.resolve(stopped(handle.id));
+    await expect(handle.terminal).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(manager.quarantined()).toBe(false);
+  });
   it('releases a never-sent owner still waiting for query settlement after its generation exits', async () => {
     const { manager, query, cancelUnsubmitted } = setup();
     query.mockImplementation(() => new Promise(() => {}));

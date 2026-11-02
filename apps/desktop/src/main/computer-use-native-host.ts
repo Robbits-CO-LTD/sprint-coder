@@ -801,7 +801,10 @@ export function createComputerUseNativeHost(
     attemptLimit: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
     unconfirmedError: () => new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
     ...(terminationEnabled
-      ? { generationAvailable: (generation: number) => !ledgerState(generation).exitConfirmed }
+      ? {
+          generationAvailable: (generation: number) => !ledgerState(generation).exitConfirmed,
+          generationKillRequested: (generation: number) => ledgerState(generation).killRequested,
+        }
       : {}),
   });
   const semanticUnconfirmed = (): boolean => addon?.hasUnconfirmedSemanticInputs?.() === true;
@@ -1034,7 +1037,8 @@ export function createComputerUseNativeHost(
         terminationEnabled &&
         !owner.receiptConfirmed &&
         owner.helperGeneration !== null &&
-        ledgerState(owner.helperGeneration).killRequested
+        (ledgerState(owner.helperGeneration).killRequested ||
+          ledgerState(owner.helperGeneration).exitConfirmed)
       )
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       owner.nativeTerminalEvidence = null;
@@ -1126,11 +1130,13 @@ export function createComputerUseNativeHost(
       stopOwnerDiscoveries(owner),
       completeNativePendingStop(owner),
     ]);
+    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     if (owner.terminal !== null) return owner.terminal;
     if (discovery.status === 'rejected' || native.status === 'rejected')
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     const finishing = finishStartOwner(owner, native.value);
     if (finishing !== undefined) await finishing;
+    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     return native.value;
   };
 
@@ -2231,7 +2237,8 @@ export function createComputerUseNativeHost(
         terminationEnabled &&
         !owner?.receiptConfirmed &&
         owner?.helperGeneration != null &&
-        ledgerState(owner.helperGeneration).killRequested
+        (ledgerState(owner.helperGeneration).killRequested ||
+          ledgerState(owner.helperGeneration).exitConfirmed)
       )
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       sessions.delete(session.sessionId);

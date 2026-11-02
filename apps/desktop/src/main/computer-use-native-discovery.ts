@@ -43,6 +43,7 @@ export function createComputerUseDiscoveryManager(
     attemptLimit: number;
     unconfirmedError: () => Error;
     generationAvailable?: (generation: number) => boolean;
+    generationKillRequested?: (generation: number) => boolean;
   }>,
 ) {
   const nonce = randomBytes(16).toString('hex');
@@ -61,7 +62,8 @@ export function createComputerUseDiscoveryManager(
     if (
       !owner.terminated &&
       owner.helperGeneration !== null &&
-      options.generationAvailable?.(owner.helperGeneration) === false
+      (options.generationAvailable?.(owner.helperGeneration) === false ||
+        options.generationKillRequested?.(owner.helperGeneration) === true)
     )
       throw options.unconfirmedError();
     owner.terminal = proof;
