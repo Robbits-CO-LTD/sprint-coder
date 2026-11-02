@@ -14,6 +14,17 @@ export type WindowsDispatchCallbacks = Readonly<{
   response(accepted: boolean): Promise<void>;
 }>;
 
+export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
+export type WindowsCloseCallbacks = Readonly<{
+  received(generation: number, sessionId: string): void;
+  blocked(generation: number): boolean;
+  verified(
+    generation: number,
+    sessionId: string,
+    persisted: () => void,
+  ): Promise<WindowsCloseConfirmation>;
+}>;
+
 /** Local transport proof only. A native error response can never create this instance. */
 export class ComputerUseDiscoveryNotSubmittedError extends Error {}
 
@@ -61,7 +72,12 @@ export type ComputerUseNativeAddon = Readonly<{
   /** Main-only Windows lifetime state, never native wire data or a public tool. */
   hasUnconfirmedSemanticInputs?(): boolean;
   /** Host has validated this exact native response, including epoch/counter and discovery Stop. */
-  confirmSessionClosed?(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void;
+  confirmSessionClosed?(
+    receipt: ComputerUseNativeInputReceipt,
+    evidence: unknown,
+  ): void | Promise<WindowsCloseConfirmation>;
+  configureCloseLedger?(callbacks: WindowsCloseCallbacks): void;
+  reevaluateIdle?(): void;
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
   preflight?(input: unknown): unknown;

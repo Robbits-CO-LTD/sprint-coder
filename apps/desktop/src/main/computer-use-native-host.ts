@@ -56,13 +56,17 @@ import {
 import { computerUseActionDigest } from './computer-use-action';
 import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
-import type { WindowsDispatchCallbacks } from './computer-use-native-types';
+import type {
+  WindowsDispatchCallbacks,
+  WindowsCloseConfirmation,
+} from './computer-use-native-types';
 import {
   decideWindowsStop,
   windowsTargetMayStart,
   type WindowsLedgerRow,
   type WindowsStopState,
   type WindowsStopEvent,
+  type WindowsStopDecision,
   type WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 
@@ -71,6 +75,11 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
   restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
+  /** Atomically persist quarantines and delete receipt rows; retries must be idempotent. */
+  transferReceipt?(
+    rows: readonly WindowsLedgerRow[],
+    quarantines: readonly WindowsTargetQuarantine[],
+  ): boolean | Promise<boolean>;
 }>;
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
@@ -219,9 +228,15 @@ export function createComputerUseNativeHost(
   let holdSequence = 0;
   const pendingWrites = new Map<
     string,
-    { generation: number; write: () => boolean | Promise<boolean> }
+    {
+      generation: number;
+      write: () => boolean | Promise<boolean>;
+      reflect?: (written: boolean, uncertain: boolean) => WindowsStopDecision;
+    }
   >();
   const writing = new Set<string>();
+  const receiptCompletions = new Map<string, () => void>();
+  const receiptRows = new Set<string>();
   const uncertainWrites = new Set<WindowsLedgerRow>();
   const ledgerState = (generation: number): WindowsStopState => {
     let state = ledgerStates.get(generation);
@@ -291,33 +306,50 @@ export function createComputerUseNativeHost(
       )
       .then(async ({ written, uncertain }) => {
         settled = true;
-        const decision = ledgerEvent(pending.generation, {
-          kind: 'retry_storage',
-          holdId,
-          status: written ? 'written' : 'failed',
-          ...(uncertain ? { uncertain: true } : {}),
-        });
+        const decision =
+          pending.reflect?.(written, uncertain) ??
+          ledgerEvent(pending.generation, {
+            kind: 'retry_storage',
+            holdId,
+            status: written ? 'written' : 'failed',
+            ...(uncertain ? { uncertain: true } : {}),
+          });
         const restoration = retainRestoration(pending.generation, holdId);
-        if (written && decision.awaitingHoldId === null && !restoration)
+        if (written && decision.awaitingHoldId === null && !restoration) {
           pendingWrites.delete(holdId);
+          const complete = receiptCompletions.get(holdId);
+          receiptCompletions.delete(holdId);
+          complete?.();
+        }
         writing.delete(holdId);
+        if (decision.idleTeardown === 'allowed') addon?.reevaluateIdle?.();
         // A late obsolete release must land before its compensating quarantine write.
         if (restoration && pendingWrites.get(holdId)?.write !== pending.write && written)
           await writePending(holdId);
         return written;
       });
     await tryWrite(() => completion);
-    if (!settled)
-      ledgerEvent(pending.generation, {
-        kind: 'retry_storage',
-        holdId,
-        status: 'failed',
-        uncertain: true,
-      });
+    if (!settled) {
+      if (pending.reflect !== undefined) pending.reflect(false, true);
+      else
+        ledgerEvent(pending.generation, {
+          kind: 'retry_storage',
+          holdId,
+          status: 'failed',
+          uncertain: true,
+        });
+    }
   };
   const retryLedger = async (): Promise<void> => {
     for (const [holdId, pending] of pendingWrites) {
       if (writing.has(holdId)) continue;
+      if (
+        pending.reflect !== undefined &&
+        !ledgerState(pending.generation).holds.some((hold) => hold.id === holdId)
+      ) {
+        await writePending(holdId);
+        continue;
+      }
       const gate = ledgerEvent(pending.generation, {
         kind: 'retry_storage',
         holdId,
@@ -384,6 +416,9 @@ export function createComputerUseNativeHost(
     const reflect = async (status: 'success' | 'rejected' | 'effect_unconfirmed' | 'canceled') => {
       const current = row;
       if (current === undefined) return;
+      // A validated receipt owns these rows until its write (or retry) completes. A late
+      // dispatch response must not race that transaction and recreate a deleted source row.
+      if (receiptRows.has(`${current.helperGeneration}:${current.requestId}`)) return;
       if (
         !ledgerState(current.helperGeneration).rows.some(
           (item) => item.requestId === current.requestId,
@@ -657,32 +692,132 @@ export function createComputerUseNativeHost(
   const confirmSessionClosed = (
     receipt: ComputerUseNativeInputReceipt,
     evidence: unknown,
-  ): void => {
+  ): void | Promise<WindowsCloseConfirmation> => {
     try {
-      addon?.confirmSessionClosed?.(receipt, evidence);
+      return addon?.confirmSessionClosed?.(receipt, evidence);
     } catch {
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     }
   };
 
-  const finishStartOwner = (owner: StartOwner, result: ComputerUsePendingStartStop): void => {
-    if (result.kind === 'closed')
-      confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence);
-    owner.nativeTerminalEvidence = null;
-    sessions.delete(owner.sessionId);
-    classifierBindings.delete(owner.sessionId);
-    inputAttemptsBySession.delete(owner.sessionId);
-    stopEpochs.delete(owner.sessionId);
-    revisionsBySession.delete(owner.sessionId);
-    activeStopQuarantines.delete(owner.sessionId);
-    owner.terminal = result;
-    owner.unconfirmed = false;
-    confirmedClosed.add(owner.sessionId);
-    if (confirmedClosed.size > 128) {
-      const oldest = confirmedClosed.values().next().value;
-      if (oldest !== undefined) confirmedClosed.delete(oldest);
-    }
-    trimStartOwners();
+  if (ledger !== undefined) {
+    addon?.configureCloseLedger?.({
+      received: (generation, sessionId) => {
+        const state = ledgerState(generation);
+        ledgerStates.set(generation, {
+          ...state,
+          stopOwnerId: sessionId,
+          nativeBlockers: state.nativeBlockers.some((blocker) => blocker.ownerId === sessionId)
+            ? state.nativeBlockers
+            : [
+                ...state.nativeBlockers,
+                { helperGeneration: generation, ownerId: sessionId, kind: 'activeStopQuarantines' },
+              ],
+        });
+        ledgerEvent(generation, {
+          kind: 'receipt',
+          helperGeneration: generation,
+          status: 'received',
+          closeDeadlineExceeded: false,
+          storage: { status: 'written' },
+        });
+      },
+      blocked: (generation) => {
+        const state = ledgerState(generation);
+        return (
+          state.rows.length !== 0 ||
+          state.holds.length !== 0 ||
+          state.nativeBlockers.length !== 0 ||
+          [...pendingWrites.values()].some((pending) => pending.generation === generation)
+        );
+      },
+      verified: async (generation, sessionId, persisted) => {
+        await retryLedger();
+        const state = ledgerState(generation);
+        const rows = state.rows.filter((row) => row.sessionId === sessionId);
+        const quarantines: WindowsTargetQuarantine[] = rows
+          .filter((row) => row.inputPath === 'background_semantic')
+          .map((row) => ({
+            identity: row.identity,
+            reason: row.state === 'effect_unconfirmed' ? 'effect_unconfirmed' : 'response_lost',
+          }));
+        const holdId = `receipt-${++holdSequence}`;
+        for (const row of rows) receiptRows.add(`${generation}:${row.requestId}`);
+        receiptCompletions.set(holdId, () => {
+          for (const row of rows) receiptRows.delete(`${generation}:${row.requestId}`);
+          activeStopQuarantines.delete(sessionId);
+          persisted();
+        });
+        pendingWrites.set(holdId, {
+          generation,
+          reflect: (written, uncertain) => {
+            const current = ledgerState(generation);
+            if (current.holds.some((hold) => hold.id === holdId))
+              return ledgerEvent(generation, {
+                kind: 'retry_storage',
+                holdId,
+                status: written ? 'written' : 'failed',
+                ...(uncertain ? { uncertain: true } : {}),
+              });
+            ledgerStates.set(generation, { ...current, stopOwnerId: sessionId });
+            return ledgerEvent(generation, {
+              kind: 'receipt',
+              helperGeneration: generation,
+              status: 'verified',
+              closeDeadlineExceeded: false,
+              storage: written ? { status: 'written' } : { status: 'failed', holdId },
+            });
+          },
+          write: async () => {
+            // Older response writes must finish before receipt deletes their rows.
+            if (
+              ledgerState(generation).holds.some(
+                (hold) =>
+                  hold.id !== holdId &&
+                  hold.changes.some((change) => change.row.sessionId === sessionId),
+              )
+            )
+              return false;
+            if (rows.length === 0) return true;
+            if (ledger.transferReceipt !== undefined)
+              return ledger.transferReceipt(rows, quarantines);
+            if (quarantines.length !== 0) return false;
+            for (const row of rows) if (!(await ledger.delete(row))) return false;
+            return true;
+          },
+        });
+        await writePending(holdId);
+        return { status: pendingWrites.has(holdId) ? 'pending' : 'confirmed' };
+      },
+    });
+  }
+
+  const finishStartOwner = (
+    owner: StartOwner,
+    result: ComputerUsePendingStartStop,
+  ): void | Promise<void> => {
+    const confirmation =
+      result.kind === 'closed'
+        ? confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence)
+        : undefined;
+    const finish = (confirmed: void | WindowsCloseConfirmation): void => {
+      owner.nativeTerminalEvidence = null;
+      sessions.delete(owner.sessionId);
+      classifierBindings.delete(owner.sessionId);
+      inputAttemptsBySession.delete(owner.sessionId);
+      stopEpochs.delete(owner.sessionId);
+      revisionsBySession.delete(owner.sessionId);
+      if (confirmed?.status !== 'pending') activeStopQuarantines.delete(owner.sessionId);
+      owner.terminal = result;
+      owner.unconfirmed = false;
+      confirmedClosed.add(owner.sessionId);
+      if (confirmedClosed.size > 128) {
+        const oldest = confirmedClosed.values().next().value;
+        if (oldest !== undefined) confirmedClosed.delete(oldest);
+      }
+      trimStartOwners();
+    };
+    return confirmation === undefined ? finish(undefined) : confirmation.then(finish);
   };
 
   const completeNativePendingStop = async (
@@ -758,7 +893,8 @@ export function createComputerUseNativeHost(
     if (owner.terminal !== null) return owner.terminal;
     if (discovery.status === 'rejected' || native.status === 'rejected')
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-    finishStartOwner(owner, native.value);
+    const finishing = finishStartOwner(owner, native.value);
+    if (finishing !== undefined) await finishing;
     return native.value;
   };
 
@@ -1090,7 +1226,7 @@ export function createComputerUseNativeHost(
       owner.discoveries.delete(discovery);
       owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
       if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
-        finishStartOwner(owner, owner.nativeTerminal);
+        return finishStartOwner(owner, owner.nativeTerminal);
     });
     const value = await discovery.result;
     assertStartOwner(owner);
@@ -1838,7 +1974,8 @@ export function createComputerUseNativeHost(
         if (owner !== undefined) owner.unconfirmed = true;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
-      confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
+      const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
+      const confirmation = confirming === undefined ? undefined : await confirming;
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
@@ -1849,7 +1986,7 @@ export function createComputerUseNativeHost(
         confirmedClosed.delete(confirmedClosed.values().next().value!);
       // Only a verified close releases the process-local quarantine. Late/failed completion
       // leaves the old session tracked and cannot open a new input lane.
-      activeStopQuarantines.delete(session.sessionId);
+      if (confirmation?.status !== 'pending') activeStopQuarantines.delete(session.sessionId);
       if (owner !== undefined) {
         owner.terminal = terminal;
         owner.nativeTerminalEvidence = null;

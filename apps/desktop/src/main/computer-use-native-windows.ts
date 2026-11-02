@@ -36,6 +36,8 @@ import {
   ComputerUseDiscoveryNotSubmittedError,
   type ComputerUseNativeAddon,
   type WindowsDispatchCallbacks,
+  type WindowsCloseCallbacks,
+  type WindowsCloseConfirmation,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
@@ -265,6 +267,8 @@ export function createWindowsComputerUseNativeAddon(
     cancelUnsubmittedStart: (sessionId) => client.cancelUnsubmittedStart(sessionId),
     hasUnconfirmedSemanticInputs: () => client.hasUnconfirmedSemanticInputs(),
     confirmSessionClosed: (receipt, evidence) => client.confirmSessionClosed(receipt, evidence),
+    configureCloseLedger: (callbacks) => client.configureCloseLedger(callbacks),
+    reevaluateIdle: () => client.reevaluateIdle(),
   });
 }
 
@@ -301,7 +305,8 @@ type SemanticAttempt = {
   submitted: boolean;
 };
 type SemanticCloseProof = {
-  owner: SemanticTransmission;
+  owner: SemanticTransmission | undefined;
+  lifetime: object | undefined;
   receipt: ComputerUseNativeInputReceipt;
   helper: number;
   activity: number;
@@ -338,6 +343,18 @@ class WindowsComputerUseHelperClient {
   // Object identity binds Host's confirmation to a received response. A later close reply must not
   // overwrite the earlier evidence that Host cached while independent discovery was still stopping.
   private readonly semanticCloseProofs = new WeakMap<object, SemanticCloseProof>();
+  private closeLedger: WindowsCloseCallbacks | undefined;
+  private readonly lifetimes = new Map<string, object>();
+  private readonly closeConfirmations = new WeakMap<object, Promise<WindowsCloseConfirmation>>();
+  private readonly persistedLifetimes = new WeakSet<object>();
+
+  configureCloseLedger(callbacks: WindowsCloseCallbacks): void {
+    this.closeLedger = callbacks;
+  }
+
+  reevaluateIdle(): void {
+    this.shutdownIfIdle();
+  }
 
   hasUnconfirmedSemanticInputs(): boolean {
     return [...this.semantic.values()].some(
@@ -345,9 +362,12 @@ class WindowsComputerUseHelperClient {
     );
   }
 
-  confirmSessionClosed(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void {
+  confirmSessionClosed(
+    receipt: ComputerUseNativeInputReceipt,
+    evidence: unknown,
+  ): void | Promise<WindowsCloseConfirmation> {
     const owner = this.semantic.get(receipt.sessionId);
-    if (owner === undefined) return;
+    if (owner === undefined && this.closeLedger === undefined) return;
     const proof =
       typeof evidence === 'object' && evidence !== null
         ? this.semanticCloseProofs.get(evidence)
@@ -355,17 +375,41 @@ class WindowsComputerUseHelperClient {
     if (
       proof === undefined ||
       proof.owner !== owner ||
-      proof.helper !== owner.helper ||
+      (owner !== undefined && proof.helper !== owner.helper) ||
+      (this.closeLedger !== undefined &&
+        (proof.lifetime === undefined ||
+          proof.lifetime !== this.lifetimes.get(receipt.sessionId))) ||
       proof.helper !== this.helperGeneration ||
       proof.receipt.sessionId !== receipt.sessionId ||
       proof.receipt.cancelEpoch !== receipt.cancelEpoch ||
       proof.receipt.inputAttemptCount !== receipt.inputAttemptCount
     )
       throw new Error('native_stop_unconfirmed');
-    owner.confirmed = true;
-    owner.uncertain = false;
-    if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
-    this.shutdownWhenIdle(proof.activity, proof.helper, owner.sessionId);
+    const persisted = () => {
+      if (
+        this.closeLedger !== undefined &&
+        proof.lifetime !== this.lifetimes.get(receipt.sessionId)
+      )
+        return;
+      if (proof.lifetime !== undefined) this.persistedLifetimes.add(proof.lifetime);
+      if (owner !== undefined) {
+        owner.confirmed = true;
+        owner.uncertain = false;
+        if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
+      }
+      this.shutdownWhenIdle(proof.activity, proof.helper, receipt.sessionId);
+    };
+    if (this.closeLedger !== undefined && proof.lifetime !== undefined) {
+      if (this.persistedLifetimes.has(proof.lifetime))
+        return Promise.resolve({ status: 'confirmed' });
+      let confirmation = this.closeConfirmations.get(proof.lifetime);
+      if (confirmation === undefined) {
+        confirmation = this.closeLedger.verified(proof.helper, receipt.sessionId, persisted);
+        this.closeConfirmations.set(proof.lifetime, confirmation);
+      }
+      return confirmation;
+    }
+    persisted();
   }
 
   private markSemanticUncertain(pending: PendingRequest): void {
@@ -435,6 +479,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private shutdownIfIdle(): void {
+    if (this.closeLedger?.blocked(this.helperGeneration)) return;
     if (this.hasUnconfirmedSemanticInputs()) return;
     for (const owner of this.discoveries.values())
       if (
@@ -658,6 +703,7 @@ class WindowsComputerUseHelperClient {
           attempts: new Set(),
         };
         this.starts.set(sessionKey, owner);
+        if (this.closeLedger !== undefined) this.lifetimes.set(sessionKey, {});
       }
       attempt = Symbol('native-start-send');
       owner.attempts.add(attempt);
@@ -752,22 +798,25 @@ class WindowsComputerUseHelperClient {
         const closing = this.starts.get(sessionKey);
         const inputOwner = this.semantic.get(sessionKey);
         if (
-          inputOwner !== undefined &&
-          !inputOwner.confirmed &&
+          ((inputOwner !== undefined && !inputOwner.confirmed) || this.closeLedger !== undefined) &&
           receipt.success &&
           receipt.data.sessionId === sessionKey &&
           (operation !== 'close_session' || receipt.data.cancelEpoch === input['cancelEpoch']) &&
-          inputOwner.helper === helper &&
+          (inputOwner === undefined || inputOwner.helper === helper) &&
           typeof result === 'object' &&
           result !== null
         ) {
-          inputOwner.closeCandidate = true;
+          if (inputOwner !== undefined) inputOwner.closeCandidate = true;
           this.semanticCloseProofs.set(result, {
             owner: inputOwner,
+            lifetime: this.lifetimes.get(sessionKey),
             receipt: receipt.data,
             helper,
             activity,
           });
+          const lifetime = this.lifetimes.get(sessionKey);
+          if (lifetime === undefined || !this.persistedLifetimes.has(lifetime))
+            this.closeLedger?.received(helper, sessionKey);
         }
         if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
           closing.closed = true;

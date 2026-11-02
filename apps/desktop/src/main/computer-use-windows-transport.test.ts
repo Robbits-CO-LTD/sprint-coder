@@ -32,7 +32,10 @@ import {
   createComputerUseNativeHost,
   type ComputerUseNativeHostOptions,
 } from './computer-use-native-host';
-import type { WindowsLedgerRow } from './computer-use-windows-stop-outcome';
+import type {
+  WindowsLedgerRow,
+  WindowsTargetQuarantine,
+} from './computer-use-windows-stop-outcome';
 import * as stopKernel from './computer-use-windows-stop-outcome';
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
@@ -3089,8 +3092,9 @@ int main() {
     await result;
     expect(settledWithoutWrapper).toBe(true);
   });
-  function ledgerTarget() {
+  function ledgerTarget(withTransfer = false) {
     const rows = new Map<string, WindowsLedgerRow>();
+    const quarantines: WindowsTargetQuarantine[] = [];
     const written: WindowsLedgerRow[] = [];
     const control = {
       failWrite: false,
@@ -3100,13 +3104,29 @@ int main() {
       response: null as HelperResponse | null,
       wait: null as Promise<void> | null,
       reflectWait: null as Promise<void> | null,
+      updateWait: null as Promise<void> | null,
       deleteEffect: () => undefined as void,
       restoreQuarantines: vi.fn(() => true),
+      failTransfer: false,
+      transferWait: null as Promise<void> | null,
+      transfers: 0,
+      closeResponse: null as HelperResponse | null,
     };
     const base = responders();
     const target = createTarget(
       {
         ...base,
+        close_session: (metadata) =>
+          control.closeResponse ?? [
+            'probe_result',
+            {
+              result: 'closed',
+              drained: true,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: 1,
+            },
+          ],
         stop_pending_start: (metadata) => [
           'probe_result',
           {
@@ -3165,6 +3185,7 @@ int main() {
             return true;
           },
           update: async (row) => {
+            if (control.updateWait !== null) await control.updateWait;
             if (control.failReflect) return false;
             rows.set(row.requestId, row);
             return true;
@@ -3177,6 +3198,21 @@ int main() {
             return true;
           },
           restoreQuarantines: () => control.restoreQuarantines(),
+          ...(withTransfer
+            ? {
+                transferReceipt: async (
+                  removed: readonly WindowsLedgerRow[],
+                  added: readonly WindowsTargetQuarantine[],
+                ) => {
+                  control.transfers += 1;
+                  if (control.transferWait !== null) await control.transferWait;
+                  if (control.failTransfer) return false;
+                  quarantines.push(...added);
+                  for (const row of removed) rows.delete(row.requestId);
+                  return true;
+                },
+              }
+            : {}),
         },
       },
     );
@@ -3205,10 +3241,285 @@ int main() {
             accepted: error instanceof Error && 'accepted' in error ? error.accepted : undefined,
           }),
         );
-    return { ...target, rows, written, control, dispatch };
+    return { ...target, rows, written, control, dispatch, quarantines };
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it.each(ledgerActions)(
+    'PR6 receipt clears the retained $name row before idle teardown',
+    async (sample) => {
+      const target = ledgerTarget();
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session, sample);
+      expect(target.rows.size).toBe(1);
+      await target.host.close(session);
+      expect(target.rows.size).toBe(0);
+    },
+  );
+  it('PR6 closes a session with no ledger rows', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await expect(target.host.close(session)).resolves.toBeUndefined();
+    expect(children[0]!.killed).toBe(true);
+  });
+  it.each(['close', 'stopPendingStart'] as const)(
+    'PR6 %s waits for persistence before releasing native blockers or idle teardown',
+    async (entry) => {
+      const target = ledgerTarget();
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      let release!: () => void;
+      target.control.reflectWait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let settled = false;
+      const closing = (
+        entry === 'close'
+          ? target.host.close(session)
+          : target.host.stopPendingStart!(session.sessionId)
+      ).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(target.rows.size).toBe(1);
+      expect(children[0]!.killed).toBe(false);
+      expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      release();
+      await closing;
+      expect(target.rows.size).toBe(0);
+      expect(children[0]!.killed).toBe(true);
+    },
+  );
+  it('PR6 storage failure retains rows and blockers until retry succeeds', async () => {
+    const target = ledgerTarget();
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await target.dispatch(session);
+    target.control.failReflect = true;
+    await expect(target.host.close(session)).resolves.toBeUndefined();
+    expect(target.rows.size).toBe(1);
+    expect(children[0]!.killed).toBe(false);
+    expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    target.control.failReflect = false;
+    await target.host.listTargets!().catch(() => undefined);
+    expect(target.rows.size).toBe(0);
+    expect(children[0]!.killed).toBe(true);
+    expect(target.host.availability()).toMatchObject({ state: 'ready' });
+  });
+  it('PR6 rejects cloned and changed non-semantic receipt evidence before persistence', async () => {
+    const target = ledgerTarget();
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await target.dispatch(session);
+    const evidence = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    expect(() =>
+      target.addon.confirmSessionClosed!(receipt, { ...receipt, result: 'closed', drained: true }),
+    ).toThrow('native_stop_unconfirmed');
+    expect(() =>
+      target.addon.confirmSessionClosed!({ ...receipt, inputAttemptCount: 2 }, evidence),
+    ).toThrow('native_stop_unconfirmed');
+    expect(target.rows.size).toBe(1);
+    expect(children[0]!.killed).toBe(false);
+    await expect(target.addon.confirmSessionClosed!(receipt, evidence)).resolves.toEqual({
+      status: 'confirmed',
+    });
+    expect(target.rows.size).toBe(0);
+  });
+  it.each(['background_semantic', 'foreground'] as const)(
+    'PR6 transfers %s rows atomically and retries without dropping blockers',
+    async (path) => {
+      const decide = stopKernel.decideWindowsStop;
+      // PR5b/N9 create these paths later; inject their rows at the receipt boundary.
+      const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+        if (event.kind === 'receipt' && event.status === 'received')
+          state = {
+            ...state,
+            rows: state.rows.map((row) =>
+              path === 'foreground'
+                ? { ...row, kind: 'foreground', inputPath: 'foreground' }
+                : { ...row, kind: 'semantic', inputPath: 'background_semantic' },
+            ),
+          };
+        return decide(state, event);
+      });
+      try {
+        const target = ledgerTarget(true);
+        target.control.response = ['error', { code: 'semantic_input_in_flight', accepted: true }];
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        await target.dispatch(
+          session,
+          path === 'background_semantic' ? ledgerActions[4] : ledgerActions[0],
+        );
+        target.control.failTransfer = true;
+        await expect(target.host.close(session)).resolves.toBeUndefined();
+        expect(target.rows.size).toBe(1);
+        expect(target.quarantines).toHaveLength(0);
+        expect(children[0]!.killed).toBe(false);
+        expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+        expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(path === 'background_semantic');
+        if (path === 'background_semantic')
+          expect(
+            spy.mock.results.some(
+              (result) =>
+                result.type === 'return' &&
+                result.value.state.holds.some(
+                  (hold: stopKernel.WindowsStorageHold) => hold.operation === 'receipt_transfer',
+                ),
+            ),
+          ).toBe(true);
+        target.control.failTransfer = false;
+        await target.host.listTargets!().catch(() => undefined);
+        expect(target.control.transfers).toBe(2);
+        expect(target.rows.size).toBe(0);
+        expect(target.quarantines).toHaveLength(path === 'background_semantic' ? 1 : 0);
+        expect(children[0]!.killed).toBe(true);
+        expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+  it('PR6 emits verified only after storage finishes and keeps in-flight rows', async () => {
+    const spy = vi.spyOn(stopKernel, 'decideWindowsStop');
+    try {
+      const target = ledgerTarget(true);
+      target.control.response = ['error', { code: 'semantic_input_in_flight', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      target.control.closeResponse = [
+        'error',
+        { code: 'semantic_input_in_flight', accepted: false },
+      ];
+      let release!: () => void;
+      target.control.transferWait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const closing = target.host.close(session);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(target.rows.size).toBe(1);
+      expect(children[0]!.killed).toBe(false);
+      expect(target.control.transfers).toBe(0);
+      target.control.closeResponse = null;
+      await vi.advanceTimersByTimeAsync(50);
+      const statuses = () =>
+        spy.mock.calls.flatMap(([, event]) => (event.kind === 'receipt' ? [event.status] : []));
+      expect(statuses()).toEqual(['received']);
+      expect(target.control.transfers).toBe(1);
+      expect(children[0]!.killed).toBe(false);
+      release();
+      await closing;
+      expect(statuses()).toEqual(['received', 'verified']);
+      expect(target.rows.size).toBe(0);
+      expect(children[0]!.killed).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it.each(['lifetime', 'generation'] as const)(
+    'PR6 rejects evidence from an older %s with the same session id',
+    async (boundary) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.addon.startSession!({ sessionId: 'other-session', profile });
+      const evidence = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+      const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+      await target.addon.confirmSessionClosed!(receipt, evidence);
+      if (boundary === 'generation') {
+        children[0]!.emit('exit', 0, null);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      await target.addon.startSession!({ sessionId: session.sessionId, profile });
+      expect(() => target.addon.confirmSessionClosed!(receipt, evidence)).toThrow(
+        'native_stop_unconfirmed',
+      );
+    },
+  );
+  it('PR6 duplicate valid receipts cannot reinstall a released blocker', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await target.addon.startSession!({ sessionId: 'other-session', profile });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    const first = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    await target.addon.confirmSessionClosed!(receipt, first);
+    const second = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    await target.addon.confirmSessionClosed!(receipt, second);
+    const other = await target.addon.close!({ sessionId: 'other-session', cancelEpoch: 1 });
+    await target.addon.confirmSessionClosed!({ ...receipt, sessionId: 'other-session' }, other);
+    expect(children[0]!.killed).toBe(true);
+  });
+  it('PR6 Host rejection keeps the row and never invokes receipt storage', async () => {
+    const target = ledgerTarget(true);
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await target.dispatch(session);
+    target.control.closeResponse = [
+      'probe_result',
+      {
+        result: 'closed',
+        drained: true,
+        sessionId: session.sessionId,
+        cancelEpoch: 1,
+        inputAttemptCount: 0,
+      },
+    ];
+    await expect(target.host.close(session)).rejects.toThrow('native_input_receipt_unconfirmed');
+    expect(target.control.transfers).toBe(0);
+    expect(target.rows.size).toBe(1);
+    expect(children[0]!.killed).toBe(false);
+  });
+  it('PR6 a late receipt write completes its pending confirmation without retrying I/O', async () => {
+    const target = ledgerTarget(true);
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await target.dispatch(session);
+    let release!: () => void;
+    target.control.transferWait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const evidence = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    const confirming = target.addon.confirmSessionClosed!(receipt, evidence);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(confirming).resolves.toEqual({ status: 'pending' });
+    expect(target.rows.size).toBe(1);
+    expect(children[0]!.killed).toBe(false);
+    await target.host.listTargets!().catch(() => undefined);
+    expect(target.control.transfers).toBe(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.rows.size).toBe(0);
+    expect(children[0]!.killed).toBe(true);
+  });
+  it('PR6 a response arriving during receipt storage cannot recreate a deleted row', async () => {
+    const target = ledgerTarget(true);
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.helper().holdOnly('dispatch');
+    const dispatch = target.dispatch(session);
+    await vi.advanceTimersByTimeAsync(0);
+    let receiptWritten!: () => void;
+    let responseWritten!: () => void;
+    target.control.transferWait = new Promise<void>((resolve) => {
+      receiptWritten = resolve;
+    });
+    target.control.updateWait = new Promise<void>((resolve) => {
+      responseWritten = resolve;
+    });
+    const closing = target.host.close(session);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.control.transfers).toBe(1);
+    target.helper().release('dispatch');
+    await vi.advanceTimersByTimeAsync(0);
+    receiptWritten();
+    await closing;
+    responseWritten();
+    await dispatch;
+    expect(target.rows.size).toBe(0);
+  });
   it.each(ledgerActions)('R5/R6 keeps $name rows for each transport loss', async (sample) => {
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     for (const loss of ['timeout', 'failAll', 'abortTransport'] as const) {
