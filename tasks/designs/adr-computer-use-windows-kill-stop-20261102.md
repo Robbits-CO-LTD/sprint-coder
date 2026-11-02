@@ -81,7 +81,7 @@ Main が起こしていない helper の終了（crash、Stop 以外の `abortTr
 2. 今ある隔離元（`activeStopQuarantines`、client の semantic owner と `discoveries`、host の `discoveryManager.quarantined()` と `startOwners`）は、どれも host 全体を止める（Host の `inputQuarantined` → `requireMethod`、client の `assertSemanticAvailable` / `ensureConnected`）。`terminated_target_suspect` では、台帳の行が持つ identity をキーにした新しい「対象の隔離」へ永続的に移してから、これらを解除する。startSession・resume・discovery の入口で、その対象だけを拒否する。対象の隔離に入れるのは台帳の行の identity だけである。identity を持たない隔離元（client の `discoveries`、host の `discoveryManager.quarantined()` と `startOwners`）は、suspect でも対象の隔離へ移さず、helper の終了の確認で解除する。discovery の launch は対象への入力ではなく、launch の子は §3.3 で扱う。
 3. 対象の終了の確認は、新しい世代の helper が `OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)` と `GetProcessTimes` の照合で行う。次の 3 つを対象の終了とみなす: handle が signaled、作成時刻が一致しない（pid が再利用された）、pid が存在しない（`OpenProcess` が `ERROR_INVALID_PARAMETER`）。この照合は §3.1 の 3（新しい helper の最初の操作は `list_targets` か再観測）の例外として許す。それ以外の失敗（アクセス拒否など）では照合できないので、隔離を保つ。
 4. 承認カードでの再開は、新しい経路として N3 で作る（今の Controller の `resume` は paused のセッションのためのもので、この用途には使えない）。helper 終了後の再開の ticket は新しい世代で新規に発行する。例外は K-5 の receipt で Stop した後の新しいセッションで、helper の世代は変わらなくてよい。§3.1 の 2 で失効させた古い ticket は使わない。
-5. 対象の隔離も、台帳の行と同じ永続ストアに保存し、Main の再起動をまたいで保つ（N3 の範囲）。v2 の grant は永続（installation-wide・無期限）で、再起動の後は承認カード無しで開始できるので、メモリだけに持つと再起動が D-2 に無い解除の経路になるためである。台帳の行は上の全項目（helper の世代、session id、request id、種類、経路（`inputPath`）、対象の identity、状態）を持つ。対象の隔離の行が持つのは pid、作成時刻、隔離の理由だけで、台帳の行を対象の隔離へ移すときは世代・session id・request id を捨てる。どちらの行にも target の名前・パス・AI に見せる情報は入れない（session id と request id はこの禁止の対象外）。Main の起動時に永続ストアに残っている台帳の行は、K-4 の前面化行を除いて対象の隔離へ移す。前面化の行も、他の行と同じく送信前に種類を前面化として永続化する。応答で結果が確定したら（成功・検証済みの失敗）行を消す。結果が未確認ならセッションを pause し、行は「効果未確認」のまま残すが、終了時の clean / suspect の判定と起動時の対象の隔離への移行からは除く。その helper の世代の exit を確認したら、その世代の前面化の行を対象の隔離を作らずに消す。receipt で Stop を確定したときも、当該 Stop の前面化の行を同じく消す。Main の起動時に残った前面化の行は対象の隔離へ移さずに破棄し、最小の診断（行の種類と破棄の理由。理由は前面化行の起動時破棄を示す値）を残す。前面化が遅れて効いた場合の残余リスクは N9a の ADR の Q21 のとおり受け入れる。照合（3）は、起動後の最初の helper の起動時に行う（helper は `ensureConnected` まで起動しないので、照合のためだけに先に起動はしない）。照合が済むまでは、永続化された対象への開始を拒否する。解除するのは、この照合か新しい helper の世代の開始時の照合で対象の終了を確かめたとき、または 4・K-5 の承認カードで新しく開始するときで、照合できないものは保つ。保存先は未決（オーナーの判断待ち、N15 の Q23）であり、下の両案から決定後、PR4 で具体的な保存の形を決める。ストア自体の読み書きに失敗したときは fail-closed とし、その対象の開始を拒否する（対象が特定できなければ、その世代では新しい開始を拒否する）。応答後の行の消去・書換え、K-3 の移管、exit 後の隔離への移管の失敗にもこの fail-closed を適用する。新しい開始の拒否を解除するのは、ストアの読み書きが回復し、残った行の移管が済んだときとする（前面化行は上の規則で消去する）。既存の対象の隔離の解除には、別途 3・4・K-5 の条件を要する。ストアが読めた上で個々の行が不正なとき（読めない行、identity の無い行）は、対象を守れないので破棄し、診断ログに構造化した最小限の metadata（行の種類と破棄の理由。理由は形式の不一致と identity の欠落を区別する値にする。pid・作成時刻・名前・パスは入れない）を残す。host 全体を永久に止める状態にはしない。ローカルの DB の書換えと、行の形式の変更・不整合による破損は対象外として受け入れる（§5 の 9）。行の削除による解除も検出できない（§5 の 9）。
+5. 対象の隔離も、台帳の行と同じ永続ストアに保存し、Main の再起動をまたいで保つ（N3 の範囲）。v2 の grant は永続（installation-wide・無期限）で、再起動の後は承認カード無しで開始できるので、メモリだけに持つと再起動が D-2 に無い解除の経路になるためである。台帳の行は上の全項目（helper の世代、session id、request id、種類、経路（`inputPath`）、対象の identity、状態）を持つ。対象の隔離の行が持つのは pid、作成時刻、隔離の理由だけで、台帳の行を対象の隔離へ移すときは世代・session id・request id を捨てる。どちらの行にも target の名前・パス・AI に見せる情報は入れない（session id と request id はこの禁止の対象外）。Main の起動時に永続ストアに残っている台帳の行は、K-4 の前面化行を除いて対象の隔離へ移す。前面化の行も、他の行と同じく送信前に種類を前面化として永続化する。応答で結果が確定したら（成功・検証済みの失敗）行を消す。結果が未確認ならセッションを pause し、行は「効果未確認」のまま残すが、終了時の clean / suspect の判定と起動時の対象の隔離への移行からは除く。その helper の世代の exit を確認したら、その世代の前面化の行を対象の隔離を作らずに消す。receipt で Stop を確定したときも、当該 Stop の前面化の行を同じく消す。Main の起動時に残った前面化の行は対象の隔離へ移さずに破棄し、最小の診断（行の種類と破棄の理由。理由は前面化行の起動時破棄を示す値）を残す。前面化が遅れて効いた場合の残余リスクは N9a の ADR の Q21 のとおり受け入れる。照合（3）は、起動後の最初の helper の起動時に行う（helper は `ensureConnected` まで起動しないので、照合のためだけに先に起動はしない）。照合が済むまでは、永続化された対象への開始を拒否する。解除するのは、この照合か新しい helper の世代の開始時の照合で対象の終了を確かめたとき、または 4・K-5 の承認カードで新しく開始するときで、照合できないものは保つ。保存先は未決（オーナーの判断待ち、N15 の Q23）であり、N15 の Q23 の決定の後、PR4 の着手の前に具体的な保存の形を決める。ストア自体の読み書きに失敗したときは fail-closed とする。応答後の行の消去・書換え（R19a）、K-3 の移管（R19b）、exit 後の隔離への移管（R19c）の失敗にも適用する。保留中の書込み・移管は Host が持ち、開始・再開・discovery の入口ごとと Main の起動時に再試行する。Main の実行中（世代を問わず）、保留が解けるまで、影響する対象への開始・dispatch を拒否し、対象が特定できなければ新しい開始を全体で拒否する。拒否の理由は native_unavailable 相当とし、Stop の結果型は通常どおりで、保存の障害を Stop の結果に混ぜない。R19a の拒否を解除するのは、ストアが回復し、応答の結果どおりに行を反映したとき（効果確定なら消去、効果未確認なら状態の書換え）とする。R19b・R19c は、ストアが回復し、残った行の対象の隔離への移管が済んだときに解除する（前面化行は上の規則で消去する）。再試行が成功してこの条件を満たした時点で解除する。R19c は移管が済むまで、新しい世代でもその対象（特定できなければ全体）への開始を拒否し、helper の世代の隔離の解除より移管を先に行う。既存の対象の隔離の解除には、別途 3・4・K-5 の条件を要する。ストアが読めた上で個々の行が不正なとき（読めない行、identity の無い行）は、対象を守れないので破棄し、診断ログに構造化した最小限の metadata（行の種類と破棄の理由。理由は形式の不一致と identity の欠落を区別する値にする。pid・作成時刻・名前・パスは入れない）を残す。host 全体を永久に止める状態にはしない。ローカルの DB の書換えと、行の形式の変更・不整合による破損は対象外として受け入れる（§5 の 9）。行の削除による解除も検出できない（§5 の 9）。
 
 保存先の両案（どちらも未採用）:
 
@@ -153,21 +153,23 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 | R10 | 未確認 discovery と未確認 control が同居、exit 確認 | `terminated_target_suspect` | control の identity だけ隔離 | discovery も終了。対象不明として host 全体を残さない | §2.2 の 2、§3.1 の 5 |
 | R11 | Stop 外の crash／abortTransport、exit 確認 | exit 時に R4 / R5 と同じ判定 | 同じ台帳規則 | 全 owner を後始末。Stop 外の理由値・通知表現は未決 | §2.2、§2.5、§6.1 の 8 |
 | R12 | A の Stop で共有 helper 終了、B／picker／開始待ちも存在 | 同じ exit に結び付ける | 全 session の未確認行を対象別に判定 | 全 owner と token を失効。B に「別の操作の停止のため…」 | §2.5、§3.1 の 2・5 |
-| R13 | 古い世代の exit の確認後に、その古い世代の receipt／応答が遅着 | 新世代の証拠にしない | 古い世代だけ処理 | 新世代の owner・ticket・隔離を誤解除しない | §3.1 の 2・6 |
-| R14 | 応答待ち／効果未確認／R7 のまま Main 再起動 | 再起動を exit 証拠にしない | 残存行を対象隔離へ復元 | 最初の helper で照合。同対象は照合・承認まで不可 | §2.2 の 5、§3.3 |
+| R13 | 古い世代の exit の確認後に、その古い世代の receipt／応答が遅着 | 新世代の証拠にしない。分類を変えない | 台帳の行を消さず、対象の隔離を変えない | 旧 session・ticket を変えず、新世代の owner・ticket・隔離も誤解除しない。N9a の「遅い成功 receipt だけで旧 ticket や旧世代の session を復活させない」と同じ | §3.1 の 2・6、N9a §2.5 |
+| R14 | 応答待ち／効果未確認／R7 のまま Main 再起動 | 再起動を exit 証拠にしない | 残った行（前面化を除く）を対象の隔離へ復元。前面化の行は R23 のとおり破棄 | 最初の helper で照合。同対象は照合・承認まで不可 | §2.2 の 5、§3.3 |
 | R15 | 隔離対象の照合：signaled／作成時刻不一致／PID 不在 | 過去 Stop の判定とは別 | 対象隔離を解除。照合は起動後の最初の helper と新世代の開始時に行う | 新しい観測・ticket の規則を満たして開始可 | §2.2 の 3 |
 | R16 | 照合：同じ生存対象／アクセス拒否等 | 終了を証明できない | 隔離維持 | 同対象不可。他対象可。承認カードは別の解除手段 | §2.2 の 3・4 |
 | R17 | 隔離対象を trusted activation を伴う承認カードで明示再開 | 承認時に解除 | 対象隔離を永続的に解除 | 終了後は新世代・新 ticket、再観測後に開始。receipt で Stop 後の同世代での新しいセッションは K-5（R24） | §2.2 の 4、§3.1 の 2・3 |
 | R18 | 送信前に identity 不足／台帳書込み失敗 | dispatch 自体を送らない | 不完全な送信行を正常扱いしない | fail-closed。これだけを理由に kill する仕様ではない | §2.2 の台帳 |
 | R19 | 起動・移管時にストア全体の読書き失敗 | 安全な復元・移管を完了できない | 消去して成功扱いしない | 対象が判明なら対象を、特定不能なら新規開始を拒否 | §2.2 の 5 |
-| R19a | 応答後の行の消去・書換えに失敗 | 応答と保存の成功を混同しない | 残った行を失わない | fail-closed。その対象の開始を拒否し、対象が特定できなければその世代では新しい開始を拒否。解除はストアの読み書きの回復と残った行の移管完了後（前面化は消去） | §2.2 の 5 |
-| R19b | K-3 の対象隔離への移管に失敗 | receipt の検証と移管の成功を混同しない | 台帳の行を先に消さない | R19a と同じ拒否範囲・解除条件 | §2.2 の 5、K-3 |
-| R19c | exit 後の対象隔離への移管に失敗 | exit の確認と移管の成功を混同しない | 台帳の行を先に消さない | R19a と同じ拒否範囲・解除条件 | §2.2 の 5、§3.1 の 5 |
+| R19a | 応答後の行の消去・書換えに失敗 | 応答と保存の成功を混同しない | 残った行を失わない | fail-closed。Main の実行中（世代を問わず）、保留が解けるまで影響する対象への開始・dispatch を拒否（対象が特定できなければ新しい開始を全体で拒否）。理由は native_unavailable 相当。解除はストアが回復し、応答の結果どおりに行を反映したとき（効果確定なら消去、効果未確認なら状態の書換え） | §2.2 の 5 |
+| R19b | K-3 の対象隔離への移管に失敗 | receipt の検証と移管の成功を混同しない | 台帳の行を先に消さない | R19a と同じ拒否範囲・理由。解除はストアが回復し、残った行の対象の隔離への移管が済んだとき | §2.2 の 5、K-3 |
+| R19c | exit 後の対象隔離への移管に失敗 | exit の確認と移管の成功を混同しない | 台帳の行を先に消さない | R19a と同じ拒否範囲・理由。解除はストアが回復し、残った行の対象の隔離への移管が済んだとき。それまでは新しい世代でもその対象（特定できなければ全体）への開始を拒否し、helper の世代の隔離の解除より移管を先に行う | §2.2 の 5、§3.1 の 5 |
 | R20 | ストアは読めるが行の形式不正／identity 欠損 | その行で対象を守れない | 行を破棄、最小診断 | 永久 host 隔離にはしない。失われた隔離は受容済み | §2.2 の 5、§5 の 9 |
 | R21 | 背景経路 K-1、helper 生存・セッション実行中 | Stop の確定とは独立 | 直ちに対象を永続隔離。書けなければ fail-closed | セッションを pause。開始・通常 resume・discovery に加え、同対象への dispatch・承認交換・前面引渡しも拒否。同じプロセスの別窓・別 session・前面入力でも迂回不可 | §2.2 の K-1・K-2 |
 | R22 | background_semantic で receipt で確定していない応答待ち・効果未確認の行があり、正常 close receipt（R21 の後に限らない） | Stop は Host の receipt 検証で確定可能。kill 開始後は exit を優先 | 背景の応答待ち・効果未確認の行を一括消去せず、同じ transaction で対象隔離へ移管 | semantic owner の uncertain が戻っても隔離を保つ。他対象はほかの拒否条件がなければ可、同対象は不可 | §2.2 の K-3、§2.3、§3.1 の 1 |
 | R23 | 前面化（SetForegroundWindow）だけ結果未確認 | 未確認なら pause。終了時は他の行も判定 | 送信前に種類を前面化として記録。成功・検証済みの失敗で消去。未確認は効果未確認として保持。exit 確認でその世代の行を消し、receipt で Stop 確定でも当該行を消す。起動時の残存行は破棄し、行の種類と破棄の理由だけ診断に残す。いずれも対象隔離を作らない | 前面化は clean / suspect の判定と起動時の隔離移行から除く。遅れて効く残余リスクは N9a の ADR の Q21 のとおり受け入れる | §2.2 の 5・K-4、§5 の 2 |
 | R24 | K-1 の対象を receipt で Stop した後、新しいセッションの開始でカード承認 | helper の世代は変わらなくてよい。同じセッションは再開しない | 承認した対象の隔離を解除 | 新しい session id・ticket・cancel epoch、新規観測（背景は現在の interaction epoch に束縛）。カードは uncertain / closeCandidate・activeStopQuarantines・native in-flight を解除しない | §2.2 の K-5、§2.3 |
+
+R19a〜R19c の保留中の書込み・移管は Host が持ち、開始・再開・discovery の入口ごとと Main の起動時に再試行し、各行の解除条件を満たした時点で解除する。Stop の結果型は通常どおりとし、保存の障害を Stop の結果に混ぜない（§2.2 の 5）。
 
 対象隔離の解除の契機（R15〜R17・R24）は、起動後の最初の helper での照合、新しい helper 世代の開始時の照合、helper 終了後の承認カード、receipt で Stop 後の K-5 の承認カードに限る。照合は対象の終了を証明した場合だけ解除し、カードは trusted activation を要する。clean な終了や時間の経過だけでは解除しない。
 
@@ -181,6 +183,8 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 | 同じ Main で旧 helper の終了待ち中に新 helper を起動 | §3.1 の 6 が禁止。Main 再起動後の R14 とは別 |
 | accepted=false の検証済み拒否を効果未確認として隔離 | §2.2 では効果なしとして行を消す。不正・未受信の応答はこの扱いにしない |
 
+R13 の遅着は古い世代の exit の確認の後にしか起きず、新しい世代の起動の前後は問わないため、同じ Main で古い世代の終了待ち中に新しい helper を起動しないという上の規則と両立する。
+
 R8・R11 とセッションが無い E4 の通知先・理由値、settle の具体的な時間は未決で、§6.1 の 8・9 に従って実装 PR で決める。
 
 ## 3. 変更
@@ -193,7 +197,7 @@ R8・R11 とセッションが無い E4 の通知先・理由値、settle の具
    - 終了を起こすのは Host の Stop の入口（`close`、`stopPendingStart`、セッションに属さない discovery の Stop）で、契機は、期限 C の切れと、Stop の入口が期限 C より前に検証済みの receipt を得られずに失敗したとき（close の `semantic_input_in_flight` を除く helper の error 応答、receipt の parse・identity（sessionId / discoveryId を含む）・epoch・count の検証の失敗、discovery の停止の失敗、`confirmSessionClosed` の失敗のどれでも）とする。今のコードでの例は、Host の `close` での receipt の parse か `inputReceipt` の検証の失敗、`discoveryUnconfirmed` か discovery の停止の失敗、`confirmSessionClosed` の proof の不一致、`completeNativePendingStop` での receipt の parse の失敗や epoch・count の後退、`completePendingStop` での discovery の停止の失敗、discovery manager の `completeStop` での receipt の parse か `discoveryId` の不一致である。この例外以外で失敗したときは再送せず、すぐに helper を終了して §2.2 の判定へ進む（§2.2 の (c)）。今は、検証の失敗の多くで終了の契機が無い（parse の失敗などでは close の応答の後の idle teardown が偶然 helper を終了させ、semantic の proof の不一致や discovery の停止の失敗では helper が残る）。§2.2 の (b) はその idle teardown も止める。child の終了と `exit` の観測は addon の client が受け持つ。Controller は終了を起こさず、Stop の結果として §2.2 の状態を受け取る。今の Host の `close` は `Promise<void>` を返すので、`close` と `stopPendingStart` が §2.2 の状態を返すように型を変える。
    - Controller の扱い: `terminated_clean` と `terminated_target_suspect` は Stop の確定として `nativeAcknowledged` を真にし（固まった helper では cancel の ack が先に失敗するが、その失敗は終了による確定で上書きする。開始待ちの経路も同じ）、停止理由は要求された理由のままにする。今のように `native_unavailable` に置き換えない。`terminated_target_suspect` の UI は「停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない」とする。`termination_requested` は今と同じ `native_unavailable` とし、UI は §2.2 の文言にする。R8 の遅い exit、R11 の Stop 外の終了、E4 のセッションが無い場合の通知先・理由値は未決で、PR7・PR11 で決めて本 ADR に書き戻す。終了で確定した場合の `stop_acknowledged` の capture には、receipt の代わりに終了の種別を記録する。
    - discovery の結果は `ComputerUseDiscoveryStop`、scope の `stop`、Controller の `stopDiscoveriesWhere`、通知まで通す。`terminated_clean` / `terminated_target_suspect` は停止成功、`termination_requested` は `native_stop_unconfirmed` とする。
-   - kill を始めた後に正常な receipt が届いても終了処理は取り消さず、結果を確定する証拠は exit の確認を優先する。Host が receipt を検証したときに限り通常の台帳行を効果確定として消す（K-3 の背景行は隔離へ移管する）。clean / suspect は exit の時点の台帳で決め、旧 ticket や session を復活させない。
+   - kill を始めた後に正常な receipt が届いても終了処理は取り消さず、結果を確定する証拠は exit の確認を優先する。exit 確認前に Host が receipt を検証したときに限り通常の台帳行を効果確定として消す（K-3 の背景行は隔離へ移管する）。exit 確認後の遅着は R13 に従い、行・分類・対象の隔離・旧 session・ticket を変えない。clean / suspect は exit の時点の台帳で決め、旧 ticket や session を復活させない。
    - C の上限は 10 秒とする。Host の `stopWithDeadline` と discovery manager は 10 秒を超える期限を拒否するので、S1 の実測で 10 秒を超える C が要るなら、N3 でこの 2 つの上限も変える。
 2. 終了で確定したセッションは、その helper に結び付く token（target / app / session / artifact）と承認 ticket をすべて失効させる。Main の token と session id は `randomUUID` で発行されるが、それだけでは古い token は失効しない。Windows の client には `helperGeneration` があるが、host と controller はそれを token の失効に使っていない。**これを広げて、host・controller の token と ticket を世代に束縛する**（親 ADR §10 は既存の契約のように書いているが、helper 終了に連動した失効の実装は無い）。helper 終了後の再開の承認カードの ticket は、新しい世代で新規に発行する（§2.2 の 4）。receipt で Stop した後の新しいセッションは K-5 の例外に従う。
 3. 新しい helper の最初の操作は `list_targets` か再観測にする。例外は、§2.2 の 3 の対象の終了の照合だけである。終了の後の最初の観測は、短い待ち（settle。具体的な時間は未決で、PR7 で実測して決める）の後に行う（§3.3 の、job で止められない起動の窓が開きうるため）。
@@ -235,7 +239,7 @@ N4-2 の実装（2026-11-02）: `WindowsTargetRenameFollows` は、継承しな�
 | #（#988 のノード） | 内容 | 依存 | 試験 |
 | --- | --- | --- | --- |
 | S1（N2） | 応答しない helper の試験装置。テスト用の build flag で、指定した要求の中で永久に待つ（UIA 呼出し、`CreateFileW`、capture、WinVerifyTrust の各所）。Main の Stop がどこで止まるかを固定する | この ADR 内ではなし | CI の Windows live seam。cancel と close 2 回が期限切れになると Host の `native_stop_unconfirmed` を受け、Controller が約 21 秒の native 待機（start owner に処理中の discovery が無い場合）の後に `native_unavailable` とすることを固定する。transport は §1 の条件下で最初の close から約 40 秒で kill し、未確認の semantic 入力や discovery がある場合は kill しないことも固定する。あわせて、健全で忙しい helper の close の所要時間を、負荷とキューのある状態で測る |
-| S2（N3） | §2.2〜§2.6・§3.1 の kill-stop、台帳・対象隔離、世代後始末と K-1〜K-5。保存先は N15 の Q23 待ち。詳細は §4.1 の PR1〜PR11 | S1（N2）・S3（N4）。PR4 は N15 の Q23 の決定後 | E1〜E4 と R0〜R24。E1 / E2 は Stop 開始から最大 1 + C + T、E3 / E4 は最大 C + T で結果を返す。exit 未確認は停止確定でなく termination_requested。全停止点、送信前保存の失敗、保存費用、復元・移管失敗、不正行診断、Main 再起動、receipt の検証順序、背景例外、承認カード・再観測を §4.1 の各 PR で検証する |
+| S2（N3） | §2.2〜§2.6・§3.1 の kill-stop、台帳・対象隔離、世代後始末と K-1〜K-5。保存先は N15 の Q23 待ち。詳細は §4.1 の PR1〜PR11 | S1（N2）・S3（N4）。PR4 は N15 の Q23 の決定後 | E1〜E4 と R0〜R24（R1a・R19a〜R19c を含む）。E1 / E2 は Stop 開始から最大 1 + C + T、E3 / E4 は最大 C + T で結果を返す。exit 未確認は停止確定でなく termination_requested。全停止点、送信前保存の失敗、保存費用、復元・移管失敗、不正行診断、Main 再起動、receipt の検証順序、背景例外、承認カード・再観測を §4.1 の各 PR で検証する |
 | S3（N4） | helper: §3.3 に従い、起動ごとの job（作成時から KILL_ON_JOB_CLOSE・BREAKAWAY_OK・SILENT_BREAKAWAY_OK、handle は継承させない）に `CREATE_SUSPENDED` と `PROC_THREAD_ATTRIBUTE_JOB_LIST` で子を作成時点から入れる。検証後に KILL_ON_JOB_CLOSE だけを外して resume する。probe も作成時から job に入れ、resume せずに終了を確認する。一時フォルダを helper ごとにする。着手時に、§3.3 の libuv の job のフラグ（強い推定）を、同梱の Electron の libuv の実装か実機で確かめ、結果をこの ADR に追記する | この ADR 内ではなし（S2 より前） | launch の検証前に helper が終了しても未検証の子が残らず、検証済みの子は巻き戻されないこと。検証済みの子が `CREATE_BREAKAWAY_FROM_JOB` で子を作れること。helper の子が libuv の job に入らないこと（Main を終了しても、検証済みの子が殺されないこと） |
 | S4（N5） | helper: Stop のためだけの仕組みの整理（#940 の残り、#820 の残件のコード側を扱う）。§2.4 のサロゲートペアを 1 回の `SendInput` にまとめる。親 ADR §10 リスク 10 と「#820」の、Stop のためだけの仕組み（worker、slot、alias など）の説明を、整理後の実装に合わせて同じ PR で更新する | S2（N3）・S3（N4） | 既存の native seam の入力安全の試験が全部通ること。停止応答用の worker を除いた後も、応答しない helper の Stop が §3.1 の 1 の経路で終了へ届き、E1 / E2 は Stop 開始から 1 + C + T、E3 / E4 は C + T 以内に結果を返すこと（exit 未確認は `termination_requested`） |
 
@@ -247,21 +251,21 @@ N4-2 の実装（2026-11-02）: `WindowsTargetRenameFollows` は、継承しな�
 
 | 順序 | PR の内容 | 主な試験・受入 |
 |---|---|---|
-| PR1 | N3-0 の状態表・決定を前提とする結果型と世代イベントの契約 | 型チェック、結果型の網羅。E1–E4 と R0–R24 の対応を確定 |
+| PR1 | N3-0 の状態表・決定を前提とする結果型と世代イベントの契約 | 型チェック、結果型の網羅。E1–E4 と R0〜R24（R1a・R19a〜R19c を含む）の対応を確定 |
 | PR2 | C++ 開始応答への作成時刻追加。新規開始・既存開始の両経路、Main での保持 | native start seam、応答の型検証、AI・Renderer へ漏れないこと |
 | PR3 | C++ 対象 identity 照合命令 | signaled、PID 再利用、PID 不在、アクセス拒否。同一 PID だけで解除しない |
 | PR4 | N15 の Q23 のオーナー決定を前提とする、決定した保存先の台帳・隔離ストア、起動復元 | 永続往復、読書き失敗、不正行、identity 欠損、Main 再起動相当 |
-| PR5 | 全 dispatch の beforeWrite 台帳と応答処理、台帳の inputPath 列と前面化の種類・寿命 | 保存失敗なら未送信、timeout／failAll 後も残存、accepted=false は削除、SendInput／paste |
-| PR6 | receipt proof の全 session 化、idle teardown の順序 | R1–R3、偽 object、別世代、検証前終了防止、K-3 の背景行の原子的な隔離への移管、K-4 の除外 |
-| PR7 | child の世代別保持、exit 分類、Host/client の全 owner 後始末 | kill 戻り値・pipe 切断は確定にしない、T 超過、遅い exit、crash、二重通知。R8・R11 の通知先・理由値と settle の時間を決めて ADR に書き戻す |
+| PR5 | 全 dispatch の beforeWrite 台帳と応答処理、台帳の inputPath 列と前面化の種類・寿命 | 保存失敗なら未送信、timeout／failAll 後も残存、accepted=false は削除、SendInput／paste、R19a |
+| PR6 | receipt proof の全 session 化、idle teardown の順序 | R1–R3、偽 object、別世代、検証前終了防止、K-3 の背景行の原子的な隔離への移管、K-4 の除外、R19b |
+| PR7 | child の世代別保持、exit 分類、Host/client の全 owner 後始末 | kill 戻り値・pipe 切断は確定にしない、T 超過、遅い exit、crash、二重通知、R19c と R1a（有効化は PR10・PR11）。R8・R11 の通知先・理由値と settle の時間を決めて ADR に書き戻す |
 | PR8 | 対象隔離による start/resume/discovery 拒否、世代 token 失効 | 同対象拒否・他対象許可、古い ticket 不可、最初の照合と再観測 |
 | PR9 | 承認カード再開、K-1〜K-5、N9 が呼ぶ K-1 の隔離の入口 | 終了後の新世代／receipt で Stop 後の同世代での新しいセッション（K-5）、背景 receipt 例外、前面化除外、承認後再観測 |
-| PR10 | E1/E2 と Stop 外の終了（R11〜R13）の kill-stop 有効化、transport の close 期限と stopWithDeadline の上限の調整（§3.1 の 1）、Controller 結果・UI・capture・全セッション後始末 | fake timer で最大1＋C＋T、cancel 失敗の上書き、B の通知、artifact 破棄 |
-| PR11 | E3/E4 の有効化、全再送経路の廃止、transport と stopWithDeadline・discovery manager の上限の調整を含む期限統一（§3.1 の 1） | 最大C＋T、開始 catch の再確認なし、Scope/manager 再送なし、discovery 結果伝達。E4 で session が無い通知先・理由値を決めて ADR に書き戻す |
+| PR10 | E1 / E2 と、その Stop による共有 helper の終了（R12）、Stop の外の終了（R11）、遅着（R13）の kill-stop 有効化、transport の close 期限と stopWithDeadline の上限の調整（§3.1 の 1）、Controller 結果・UI・capture・全セッション後始末 | fake timer で最大1＋C＋T、cancel 失敗の上書き、B の通知、artifact 破棄 |
+| PR11 | E3 / E4 と、それらが起点の共有 helper の終了（R12）の有効化、全再送経路の廃止、transport と stopWithDeadline・discovery manager の上限の調整を含む期限統一（§3.1 の 1） | 最大C＋T、開始 catch の再確認なし、Scope/manager 再送なし、discovery 結果伝達。E4 で session が無い通知先・理由値を決めて ADR に書き戻す |
 
 表の順序で安全の前提を積み上げる。**中間の PR で、helper の隔離は消したが対象の隔離はまだ無い、という状態を作らない。新しい kill-stop の有効化は最後の PR10・PR11 とする。PR7 の共通の終了処理は PR8・PR9 が揃うまで内部でも有効化しない。** PR4 は保存先のオーナー判断（N15 の Q23）が前提である。
 
-PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とする。E1 / E2 と Stop の外の終了（R11〜R13）の有効化は PR10、E3 / E4 は PR11 とする。PR10 の後 PR11 の前の E3 / E4 は今の挙動のままにする。Controller 側の後始末（承認の失効・artifact の破棄・B への通知）は PR10 で一緒に有効化し、PR7 だけで有効にしない。
+PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とする。E1 / E2 と、その Stop による共有 helper の終了（R12）、Stop の外の終了（R11）、遅着（R13）の有効化は PR10 とする。E3 / E4 と、それらが起点の R12 は PR11 で有効化する。PR10 の後 PR11 の前の E3 / E4 は今の挙動のままにする。Controller 側の後始末（承認の失効・artifact の破棄・B への通知）は PR10 で一緒に有効化し、PR7 だけで有効にしない。PR8 の対象の隔離による拒否と PR9 の承認カードでの再開は、PR10 で E1 / E2 と一緒に有効化する。対象の隔離は kill-stop の結果と K-1 からしか生まれないためである。K-1〜K-5 の実行中の隔離の入口は PR9 で作り、有効になるのは N9 が背景入力を公開するときとする。N9 は N3 の後であり、それまでは background_semantic の行は生まれない。
 
 各実装 PR は対象 typecheck と関連 Vitest、C++ 変更では native seam を行う。最終受入は N2 の装置の全停止点、保存費用、Main 再起動、承認カードを含む。UI 操作は Computer Use で確認し、未実施の session 必須 live は NOT_RUN / BLOCKED のまま扱う。S4（N5）の worker 整理・サロゲートペア変更、一時フォルダの起動時掃除（§5 の 13）は N3 に混ぜない。
 
@@ -309,7 +313,7 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 4. Controller の 2 回目の close、Host の pending-stop、discovery manager、discovery scope、start の catch の再確認を廃止し、同じ終端処理へ寄せる（§3.1 の 1）。
 5. receipt の parse の失敗、identity / epoch / count / proof の不一致、discovery の失敗を同じ終端処理へ入れる（§2.2 の (c)、§3.1 の 1）。
 6. close が `semantic_input_in_flight` を返した場合だけ C 内で 50 ms ごとに再試行し、期限を延長しない。それ以外の失敗は即時に終端処理へ入る。「C を待つ」は応答待ちとこの例外に適用する（§2.5、§3.1 の 1）。
-7. kill 開始後の正常 receipt で終了処理を取り消さず、結果の確定は exit を優先する。Host が検証した receipt でのみ通常行を効果確定として消す。K-3 の背景行は隔離へ移管する。clean / suspect は exit 時点の台帳で決める（§3.1 の 1）。
+7. kill 開始後の正常 receipt で終了処理を取り消さず、結果の確定は exit を優先する。exit 確認前に Host が検証した receipt でのみ通常行を効果確定として消す。exit 確認後の遅着は R13 に従う。K-3 の背景行は隔離へ移管する。clean / suspect は exit 時点の台帳で決める（§3.1 の 1）。
 8. R8 の遅い exit、R11 の Stop 外の終了、E4 の session が無い場合の通知先と理由値は未決。N3 の PR7・PR11 で決め、本 ADR に書き戻す（§4.1）。
 9. settle の具体的な時間は未決。PR7 で実測して決めるまでは「短い待ち」とする（§3.1 の 3）。
 10. N-W1 は、現在の libuv の job の採用経路では代替策を足さない。将来その前提を外すときに再設計する（§5 の 11・12）。
