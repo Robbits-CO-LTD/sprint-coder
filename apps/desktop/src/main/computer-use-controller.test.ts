@@ -1118,7 +1118,13 @@ describe('ComputerUseController', () => {
     ): ComputerUseNativeActionResult => ({
       result: 'paused',
       reasonCode: 'native_single_use_approval_unavailable',
-      approvalOffer: { kind: 'approval_required', approvalGeneration, remainingMs, effect },
+      approvalOffer: {
+        kind: 'approval_required',
+        approvalGeneration,
+        remainingMs,
+        effect,
+        display: null,
+      },
     });
     const sha = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
     const pendingCard = (fixture: ReturnType<typeof createFixture>) =>
@@ -3324,6 +3330,7 @@ describe('ComputerUseController', () => {
             reasonCode: 'native_single_use_approval_unavailable',
             approvalOffer: {
               kind: 'approval_required',
+              display: null,
               approvalGeneration: 7,
               remainingMs: 30_000,
               effect: 'supervised_action',
@@ -3486,6 +3493,7 @@ describe('ComputerUseController', () => {
             reasonCode: 'native_single_use_approval_unavailable',
             approvalOffer: {
               kind: 'approval_required',
+              display: null,
               approvalGeneration: 7,
               remainingMs: 30_000,
               effect: 'supervised_action',

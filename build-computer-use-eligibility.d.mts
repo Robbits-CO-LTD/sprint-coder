@@ -15,3 +15,6 @@ export function eligibilityDeclaration(
   platform: string,
 ): ComputerUseEligibilityBuildDeclaration;
 export function eligibilityBuildHeader(declaration: ComputerUseEligibilityBuildDeclaration): string;
+export function windowsDocumentViewerDeclaration(platform: string): {
+  windowsDocumentViewers?: { version: number; digest: string };
+};

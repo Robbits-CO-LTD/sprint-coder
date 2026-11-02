@@ -48,6 +48,7 @@ import {
   type SelectableComputerTarget,
   type ComputerAppProfile,
   type ComputerUseAction,
+  type ComputerUseWindowsApprovalDisplay,
   type ComputerUseApprovalTransfer,
   type ComputerUseArtifactAction,
   type ComputerUsePlannedAction,
@@ -261,6 +262,7 @@ export type ComputerUseNativeApprovalOffer = Readonly<{
   approvalGeneration: number;
   remainingMs: number;
   effect: 'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
+  display: ComputerUseWindowsApprovalDisplay | null;
 }>;
 
 /**

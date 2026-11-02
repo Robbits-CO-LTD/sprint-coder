@@ -6208,6 +6208,63 @@ export const computerUsePlanEligibleActionKinds = [
 export function computerUseActionKindIsPlanEligible(kind: ComputerUseActionKind): boolean {
   return (computerUsePlanEligibleActionKinds as readonly ComputerUseActionKind[]).includes(kind);
 }
+export const computerUseNativeExtensionSchema = z.string().regex(/^[a-z0-9_+-]{1,32}$/u);
+const computerUseNativeDisplayLabelSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= 512,
+    'Native display label exceeds 512 UTF-8 bytes',
+  );
+const computerUseWindowsDisplayFields = {
+  targetLabel: computerUseNativeDisplayLabelSchema.nullable(),
+  extension: z.null(),
+  externalApplication: z.literal('not_applicable'),
+  unsignedWarning: z.enum(['none', 'main_image_only']),
+};
+const computerUseWindowsOpenDisplayFields = {
+  ...computerUseWindowsDisplayFields,
+  operation: z.enum(['click', 'double_click', 'invoke', 'key']),
+  targetLabel: computerUseNativeDisplayLabelSchema,
+  extension: computerUseNativeExtensionSchema,
+  externalApplication: z.literal('may_open'),
+};
+/** Native-measured display only; never an authority or a source of action payloads. */
+export const computerUseWindowsApprovalDisplaySchema = z.discriminatedUnion('effect', [
+  z
+    .object({
+      ...computerUseWindowsDisplayFields,
+      effect: z.literal('supervised_action'),
+      operation: z.enum([
+        'click',
+        'double_click',
+        'invoke',
+        'set_text',
+        'type',
+        'key',
+        'scroll',
+        'select',
+        'toggle',
+        'expand_collapse',
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      ...computerUseWindowsDisplayFields,
+      effect: z.literal('high_impact_confirmation'),
+      operation: z.enum(['click', 'double_click', 'invoke', 'toggle', 'select', 'key']),
+    })
+    .strict(),
+  z.object({ ...computerUseWindowsOpenDisplayFields, effect: z.literal('download_open') }).strict(),
+  z
+    .object({ ...computerUseWindowsOpenDisplayFields, effect: z.literal('file_manager_open') })
+    .strict(),
+]);
+export type ComputerUseWindowsApprovalDisplay = z.infer<
+  typeof computerUseWindowsApprovalDisplaySchema
+>;
+
 export const computerUseApprovalSchema = z
   .object({
     id: computerUseIdSchema,
@@ -6219,6 +6276,8 @@ export const computerUseApprovalSchema = z
     actionDigest: computerUseDigestSchema,
     targetLabel: computerUseLabelSchema,
     preview: computerUsePreviewSchema,
+    /** Absent on legacy cards; Windows display is connected by the approval controller later. */
+    display: computerUseWindowsApprovalDisplaySchema.nullable().optional(),
     /** Present only for a paste of an artifact (#785 T15-7b). Optional: older cards have none. */
     transfer: computerUseApprovalTransferSchema.optional(),
     risk: toolRiskSchema,
@@ -6320,6 +6379,16 @@ export const COMPUTER_USE_LEGACY_ELIGIBILITY = Object.freeze({
   lexiconVersion: 1,
 } as const);
 
+export const computerUseWindowsDocumentViewersSchema = z
+  .object({
+    version: z.number().int().positive().max(0xffffffff),
+    digest: z.string().regex(/^[0-9a-f]{16}$/u),
+  })
+  .strict();
+export type ComputerUseWindowsDocumentViewers = z.infer<
+  typeof computerUseWindowsDocumentViewersSchema
+>;
+
 export const computerUseNativeManifestSchema = z
   .object({
     version: z.literal(1),
@@ -6335,9 +6404,12 @@ export const computerUseNativeManifestSchema = z
     capabilities: z.array(computerUseNativeCapabilitySchema).min(1).max(4),
     // Absent on a manifest written before D7 (read as the legacy allow-list).
     eligibility: computerUseEligibilitySchema.optional(),
+    windowsDocumentViewers: computerUseWindowsDocumentViewersSchema.optional(),
   })
   .strict()
   .superRefine((manifest, context) => {
+    if (manifest.platform !== 'win32' && Object.hasOwn(manifest, 'windowsDocumentViewers'))
+      context.addIssue({ code: 'custom', message: 'Document viewers are Windows-only' });
     if (new Set(manifest.capabilities).size !== manifest.capabilities.length)
       context.addIssue({ code: 'custom', message: 'Native capabilities must be unique' });
     if (manifest.platform === 'win32' && manifest.eligibility?.mode === 'v2-denylist')

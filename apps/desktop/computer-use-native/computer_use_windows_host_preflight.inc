@@ -13,6 +13,11 @@ BackendProbe ProbeBackend() {
 }
 
 std::string ProbeJson(const BackendProbe &probe) {
+  std::string viewer_digest(16, '0');
+  for (std::size_t index = 0; index < viewer_digest.size(); ++index)
+    viewer_digest[index] = "0123456789abcdef"[
+        (sprint_coder::computer_use::kWindowsDocumentViewerDigestPinned >>
+         ((15 - index) * 4)) & 0xf];
   const bool backend_ready = probe.os_supported && probe.ui_automation &&
                              probe.graphics_capture && probe.send_input;
   const char *reason = !probe.os_supported    ? "WINDOWS_BUILD_UNSUPPORTED"
@@ -27,6 +32,9 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"backend\":\"windows-uia-graphics-capture-sendinput\"" +
          ",\"platform\":\"win32\",\"architecture\":\"x64\",\"napiVersion\":10" +
          ",\"available\":" + (backend_ready ? "true" : "false") +
+         ",\"windowsDocumentViewers\":{\"version\":" +
+         std::to_string(sprint_coder::computer_use::kWindowsDocumentViewerVersion) +
+         ",\"digest\":\"" + viewer_digest + "\"}" +
          ",\"capabilities\":{"
          "\"observe\":" +
          (backend_ready ? "true" : "false") +
@@ -36,6 +44,7 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"sendInput\":" + (probe.send_input ? "true" : "false") +
          ",\"cancellableWindowDiscovery\":true" +
          ",\"artifactRead\":true" +
+         ",\"approval\":false" +
          "},\"eligibility\":{\"mode\":\"" +
          std::string(sprint_coder::computer_use::kNativeEligibilityModeName) +
          "\",\"rulesetVersion\":" +
