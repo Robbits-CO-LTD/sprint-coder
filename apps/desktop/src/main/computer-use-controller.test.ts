@@ -2528,9 +2528,13 @@ describe('ComputerUseController', () => {
       return { store, owners };
     }
 
-    it.each(['allow', 'deny'] as const)(
-      'decided (T15-E (1)): observe-only copy follows the Task %s for computer.observe',
-      async (decision) => {
+    it.each(
+      (['observe_only', 'supervised', 'full_access_app'] as const).flatMap((mode) =>
+        (['allow', 'deny', 'approval_required'] as const).map((decision) => ({ mode, decision })),
+      ),
+    )(
+      'decided (T15-E (1)): $mode copy follows the Task $decision without an approval card',
+      async ({ mode, decision }) => {
         const authorize = vi.fn<NonNullable<ComputerUseControllerDeps['authorize']>>(
           async (request) => ({
             decision: request.action?.type === 'copy' ? decision : 'allow',
@@ -2538,21 +2542,22 @@ describe('ComputerUseController', () => {
           }),
         );
         const fixture = createFixture({
-          mode: 'observe_only',
+          mode,
           observationOverrides: withNode,
           artifactRead: {},
           authorize,
         });
-        const started = await start(fixture, 'observe_only');
+        const started = await start(fixture, mode);
         await fixture.controller.observe(started.sessionId);
         authorize.mockClear();
         const acting = fixture.controller.act(started.sessionId, copy, 'copy-task-policy');
-        if (decision === 'deny') {
+        if (decision !== 'allow') {
           await expect(acting).rejects.toThrow();
           expect([...fixture.audits.values()]).toEqual([
             expect.objectContaining({ state: 'rejected', reasonCode: 'authorization_denied' }),
           ]);
           expect(fixture.readInputs).toHaveLength(0);
+          expect(fixture.statuses.at(-1)).toMatchObject({ state: 'paused' });
           expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
         } else {
           await expect(acting).resolves.toMatchObject({ result: 'completed' });
@@ -2561,6 +2566,7 @@ describe('ComputerUseController', () => {
         expect(authorize).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({ capability: 'computer.observe', action: copy }),
         );
+        expect(fixture.approvals).toEqual([]);
         expect(fixture.dispatchCount()).toBe(0);
         await fixture.controller.stop(started.sessionId);
       },

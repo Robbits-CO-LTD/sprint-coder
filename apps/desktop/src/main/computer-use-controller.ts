@@ -4332,6 +4332,9 @@ export class ComputerUseController {
     });
     if (result !== undefined) {
       let authorized = await result;
+      // Copy never asks for action approval or gains permission from the session mode.
+      if (action?.success && action.data.type === 'copy' && authorized.decision !== 'allow')
+        authorized = { decision: 'deny', reason: authorized.reason };
       // A paste is shown to a person every time: the Task's permission may still say no, but no
       // permission, grant or mode says yes in the person's place (§4.4, N21).
       if (paste !== undefined && action?.success && authorized.decision !== 'deny') {

@@ -952,13 +952,13 @@ const INSTRUCTION =
 describe('C6 acceptance: decided agent-start eligibility (T15-E (2))', () => {
   // Route selection is fixed by computer-use-agent-access.test.ts:
   // "binds an agent session to the %s route" (effective V1 / V2, default V1).
+  // A disabled agent-start flag rejects agent start before planning can reach copy.
   // Eligible agent V1 transfers remain covered throughout this C6 suite; panel V1 copy by
   // "keeps a value in observe-only mode without input" in computer-use-controller.test.ts.
-  it('refuses copy before a session starts when the agent-driven flag is disabled', async () => {
+  it('rejects agent start before agent copy is reachable when the agent-driven flag is disabled', async () => {
     let enabled = true;
     const run = c6Acceptance({ agentDrivenEnabled: () => enabled });
     run.screen('A', [{ id: 'note', role: 'AXTextArea', value: 'Total 42' }]);
-    run.script('A', { type: 'copy', targetId: 'note' }, { type: 'finish' });
     const token = await run.tokenFor('A');
     expect(token).toEqual(expect.any(String));
     enabled = false;
@@ -975,7 +975,6 @@ describe('C6 acceptance: decided agent-start eligibility (T15-E (2))', () => {
     const { id } = await copyInA(run, 'Total 42');
     expect(id).toEqual(expect.any(String));
     run.screen('B', [{ id: 'field', role: 'AXTextField', value: '' }]);
-    run.script('B', { type: 'set_text', targetId: 'field', artifactRef: id }, { type: 'finish' });
     const token = await run.tokenFor('B');
     expect(token).toEqual(expect.any(String));
     const sessions = run.sessionsStarted();
