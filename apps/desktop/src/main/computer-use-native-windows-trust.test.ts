@@ -106,6 +106,43 @@ function load(
 }
 
 describe('the Windows helper trust the loader hands to the pipe client (D7)', () => {
+  it('accepts the complete Windows ProbeJson shape and rejects it on darwin', () => {
+    const handshake = {
+      protocolVersion: 1,
+      apiVersion: 3,
+      sourceCommit: 'f'.repeat(40),
+      backend: 'windows-uia-graphics-capture-sendinput',
+      platform: 'win32',
+      architecture: 'x64',
+      napiVersion: 10,
+      available: true,
+      windowsDocumentViewers: { version: 1, digest: '10adf348d184174e' },
+      capabilities: {
+        observe: true,
+        control: true,
+        uiAutomation: true,
+        graphicsCapture: true,
+        sendInput: true,
+        cancellableWindowDiscovery: true,
+        artifactRead: true,
+        approval: false,
+      },
+      eligibility: V1,
+      reason: 'READY',
+    };
+    expect(parseNativeHandshake(handshake, 'win32')).toEqual(V1);
+    expect(() =>
+      assertWindowsComputerUseHelperHandshake(handshake, {
+        sourceCommit: 'f'.repeat(40),
+        binaryDigest: 'a'.repeat(64),
+        signerDigest: 'b'.repeat(64),
+        eligibility: { ...V1, mode: 'v1-allowlist' },
+      }),
+    ).not.toThrow();
+    expect(() => parseNativeHandshake({ ...handshake, platform: 'darwin' }, 'darwin')).toThrow(
+      'HANDSHAKE_INVALID',
+    );
+  });
   it.each([true, false, 'true', 1, null, undefined])(
     'validates artifactRead in both probe and pipe handshakes: %s',
     (artifactRead) => {

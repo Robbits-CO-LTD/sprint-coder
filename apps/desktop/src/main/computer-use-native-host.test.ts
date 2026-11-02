@@ -1222,6 +1222,7 @@ describe('Computer Use native Main adapter', () => {
         ...pausedUnavailable,
         approvalOffer: {
           kind: 'approval_required',
+          display: null,
           approvalGeneration: 1,
           remainingMs: 60_000,
           effect,
@@ -1274,6 +1275,8 @@ describe('Computer Use native Main adapter', () => {
       expect(dispatchCalls()).toBe(before + 1);
     }
     const invalidV2: Array<Record<string, unknown>> = [
+      { display: null },
+      { display: { effect: 'supervised_action' } },
       { effect: 'invalid' },
       { effect: 'open_anything' },
       { effect: null },
@@ -1320,6 +1323,7 @@ describe('Computer Use native Main adapter', () => {
     // Approval-offer keys never appear on another decision or on a version 1 receipt, and version 2
     // other decisions never use classifier version 2.
     for (const overrides of [
+      { receiptVersion: undefined, display: null },
       { receiptVersion: undefined, ...approvalV2 },
       { decision: 'ordinary', approvalGeneration: 1 },
       { decision: 'ordinary', remainingMs: 1000 },

@@ -1,4 +1,8 @@
-import { computerUseEligibilitySchema, type ComputerUseEligibility } from '@sprint-coder/contracts';
+import {
+  computerUseEligibilitySchema,
+  computerUseWindowsDocumentViewersSchema,
+  type ComputerUseEligibility,
+} from '@sprint-coder/contracts';
 
 /**
  * Validates the native handshake and returns the eligibility the native attests, or null when it
@@ -15,7 +19,15 @@ export function parseNativeHandshake(
   // native could otherwise make before the coordinated mode/ruleset handshake is implemented.
   const keys = ['protocolVersion', 'apiVersion', 'platform', 'napiVersion', 'eligibility'];
   if (platform === 'win32')
-    keys.push('sourceCommit', 'backend', 'architecture', 'available', 'capabilities', 'reason');
+    keys.push(
+      'sourceCommit',
+      'backend',
+      'architecture',
+      'available',
+      'capabilities',
+      'reason',
+      'windowsDocumentViewers',
+    );
   if (Reflect.ownKeys(handshake).some((key) => typeof key !== 'string' || !keys.includes(key)))
     throw new Error('HANDSHAKE_INVALID');
   if (
@@ -26,6 +38,12 @@ export function parseNativeHandshake(
   )
     throw new Error('HANDSHAKE_INVALID');
   if (platform === 'win32') {
+    if (
+      Object.hasOwn(handshake, 'windowsDocumentViewers') &&
+      !computerUseWindowsDocumentViewersSchema.safeParse(handshake['windowsDocumentViewers'])
+        .success
+    )
+      throw new Error('HANDSHAKE_INVALID');
     if (
       (handshake['sourceCommit'] !== undefined &&
         (typeof handshake['sourceCommit'] !== 'string' ||
@@ -56,7 +74,10 @@ export function parseNativeHandshake(
               'sendInput',
               'cancellableWindowDiscovery',
               'artifactRead',
-            ].includes(key) || typeof enabled !== 'boolean',
+              'approval',
+            ].includes(key) ||
+            typeof enabled !== 'boolean' ||
+            (key === 'approval' && enabled !== false),
         )
       )
         throw new Error('HANDSHAKE_INVALID');

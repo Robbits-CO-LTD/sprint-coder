@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
   computerUseEligibilitySchema,
+  computerUseWindowsDocumentViewersSchema,
+  type ComputerUseWindowsDocumentViewers,
   type ComputerUseEligibility,
   type ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
@@ -17,6 +19,7 @@ export type ComputerUseNativeCompiledPin = Readonly<{
    * manifest (ADR v2 D7). Absent on a pin built before D7, which means the legacy allow-list.
    */
   eligibility?: ComputerUseEligibility;
+  windowsDocumentViewers?: ComputerUseWindowsDocumentViewers;
 }>;
 
 export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManifest): string {
@@ -44,6 +47,9 @@ export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManif
             manifest.eligibility.ticketRequired,
           ],
         ]),
+    ...(manifest.windowsDocumentViewers === undefined
+      ? []
+      : [[manifest.windowsDocumentViewers.version, manifest.windowsDocumentViewers.digest]]),
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -61,6 +67,9 @@ export function computerUseNativeCompiledPin(
     artifactDigest: manifest.platform === 'darwin' ? manifest.moduleDigest : manifest.binaryDigest,
     manifestDigest: computerUseNativeManifestDigest(manifest),
     ...(manifest.eligibility === undefined ? {} : { eligibility: manifest.eligibility }),
+    ...(manifest.windowsDocumentViewers === undefined
+      ? {}
+      : { windowsDocumentViewers: manifest.windowsDocumentViewers }),
   });
 }
 
@@ -83,6 +92,13 @@ export function parseComputerUseNativeCompiledPin(value: unknown): ComputerUseNa
   )
     throw new Error('Computer Use native compile pin is invalid');
   let eligibility: ComputerUseEligibility | undefined;
+  let windowsDocumentViewers: ComputerUseWindowsDocumentViewers | undefined;
+  if (Object.hasOwn(pin, 'windowsDocumentViewers')) {
+    const parsed = computerUseWindowsDocumentViewersSchema.safeParse(pin['windowsDocumentViewers']);
+    if (pin['platform'] !== 'win32' || !parsed.success)
+      throw new Error('Computer Use native compile pin is invalid');
+    windowsDocumentViewers = parsed.data;
+  }
   if (pin['eligibility'] !== undefined) {
     const parsed = computerUseEligibilitySchema.safeParse(pin['eligibility']);
     if (!parsed.success) throw new Error('Computer Use native compile pin is invalid');
@@ -96,6 +112,7 @@ export function parseComputerUseNativeCompiledPin(value: unknown): ComputerUseNa
     artifactDigest: pin['artifactDigest'],
     manifestDigest: pin['manifestDigest'],
     ...(eligibility === undefined ? {} : { eligibility }),
+    ...(windowsDocumentViewers === undefined ? {} : { windowsDocumentViewers }),
   });
 }
 

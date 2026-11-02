@@ -516,7 +516,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
     const ok = await run({ attested: true }, 'v2', withClassifier(2));
     expect(ok.result).toMatchObject({ result: 'completed' });
     const offer = await run({ attested: true }, 'v2', offerReceipt);
-    expect(offer.result).toMatchObject({ approvalOffer: { approvalGeneration: 3 } });
+    expect(offer.result).toMatchObject({ approvalOffer: { approvalGeneration: 3, display: null } });
     // A classifier 1 receipt on a v2 route is a mismatch.
     const old = await run({ attested: true }, 'v2', withClassifier(1));
     expect(old.result).toMatchObject(invalid);

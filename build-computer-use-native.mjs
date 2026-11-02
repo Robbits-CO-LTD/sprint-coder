@@ -13,6 +13,7 @@ import {
   eligibilityBuildHeader,
   eligibilityDeclaration,
   parseEligibilityMode,
+  windowsDocumentViewerDeclaration,
 } from './build-computer-use-eligibility.mjs';
 
 const repositoryDirectory = dirname(fileURLToPath(import.meta.url));
@@ -321,6 +322,7 @@ if (sanitizerSelfCheckOnly) {
     capabilities: ['observe', 'capture', 'accessibility', 'input'],
     // Main compiles the same value in (from this manifest) and the native attests it at handshake.
     eligibility: declaration,
+    ...windowsDocumentViewerDeclaration(target),
   };
   const manifestPath = join(outputDirectory, 'computer-use-native.manifest.json');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });

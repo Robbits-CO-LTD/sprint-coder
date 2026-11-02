@@ -2232,6 +2232,33 @@ describe('Computer Use contracts', () => {
     expect(approval.allowedDecisions).toContain('deny');
     // A card from before transfers existed has none (#785 T15-7b).
     expect(approval.transfer).toBeUndefined();
+    expect(approval).not.toHaveProperty('display');
+    const display = {
+      effect: 'supervised_action',
+      operation: 'invoke',
+      targetLabel: null,
+      extension: null,
+      externalApplication: 'not_applicable',
+      unsignedWarning: 'none',
+    };
+    expect(() => contracts.computerUseApprovalSchema.parse({ ...approval, display })).toThrow();
+    expect(
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        display,
+        eligibleForPlan: false,
+        allowedDecisions: ['allow_once', 'deny'],
+      }).display,
+    ).toEqual(display);
+    expect(
+      contracts.computerUseApprovalSchema.parse({ ...approval, display: null }).display,
+    ).toBeNull();
+    expect(() =>
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        display: { ...display, path: 'synthetic' },
+      }),
+    ).toThrow();
     expect(() =>
       contracts.computerUseApprovalSchema.parse({
         ...approval,
