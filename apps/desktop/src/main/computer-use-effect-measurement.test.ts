@@ -106,9 +106,11 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     ])
       expect(judge, needle).toContain(needle);
     // The Main projection can only strengthen: nothing grants from it.
-    expect(
-      functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval('),
-    ).not.toContain('kMainProjection');
+    for (const signature of [
+      'inline NativeApprovalMeasurement MeasureApproval(',
+      'MeasureApprovalFromFacts(',
+    ])
+      expect(functionBody(measurement, signature)).not.toContain('kMainProjection');
     // The order is the contract: the route, then the attest, then the decision.
     expect(judge.indexOf('ClassifierRoute::kV2')).toBeLessThan(
       judge.indexOf('attested_classifier_version != kEffectClassifierVersion'),
@@ -124,11 +126,21 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
       'decision.approval_effect != NativeApprovalEffect::kHighImpactConfirmation) return derived;',
     );
     expect(derive).toContain('NormalizeOrigin(capture.web_area_url)');
-    const measure = functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval(');
-    const order = [
+    const entry = functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval(');
+    const preprocessing = [
       'input.capture == nullptr',
       'input.route != ClassifierRoute::kV2',
       'BuildShadowFacts(',
+      'return MeasureApprovalFromFacts(input, built.facts);',
+    ].map((needle) => entry.indexOf(needle));
+    expect(preprocessing.every((index) => index >= 0)).toBe(true);
+    expect([...preprocessing].sort((a, b) => a - b)).toEqual(preprocessing);
+    const measure = functionBody(measurement, 'MeasureApprovalFromFacts(');
+    expect(measure).not.toContain('BuildShadowFacts(');
+    const order = [
+      'input.capture == nullptr',
+      'input.route != ClassifierRoute::kV2',
+      'ClassifyEffect(facts, input.ruleset)',
       'DecisionKind::kTakeover',
       'AuthorityIdentityIsWhole(input.identity)',
       'JudgeIntentOffer(',

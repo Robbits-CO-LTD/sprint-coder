@@ -120,85 +120,9 @@ std::string LowercaseAscii(std::string value) {
   return value;
 }
 
-bool IsWindowsRiskWordCharacter(char character) {
-  return (character >= 'a' && character <= 'z') ||
-         (character >= '0' && character <= '9');
-}
-
-bool ContainsBoundedWindowsRiskTerm(std::string_view text,
-                                    std::string_view term) {
-  std::size_t offset = 0;
-  while ((offset = text.find(term, offset)) != std::string_view::npos) {
-    const bool left_bounded =
-        offset == 0 || !IsWindowsRiskWordCharacter(text[offset - 1]);
-    const std::size_t end = offset + term.size();
-    const bool right_bounded =
-        end == text.size() || !IsWindowsRiskWordCharacter(text[end]);
-    if (left_bounded && right_bounded)
-      return true;
-    offset = end;
-  }
-  return false;
-}
-
 bool ContainsWindowsRiskText(std::string_view text) {
-  static constexpr std::array<std::string_view, 36> terms = {
-      "payment",
-      "checkout",
-      "purchase",
-      "billing",
-      "credit card",
-      "card number",
-      "wire transfer",
-      "contract",
-      "agreement",
-      "sign agreement",
-      "installer",
-      "install application",
-      "administrator",
-      "admin privileges",
-      "sudo",
-      "root access",
-      "security settings",
-      "privacy settings",
-      "firewall",
-      "accessibility permission",
-      "screen recording permission",
-      "決済",
-      "支払い",
-      "支払う",
-      "購入",
-      "注文を確定",
-      "注文する",
-      "請求",
-      "送金",
-      "契約",
-      "署名",
-      "インストール",
-      "管理者",
-      "セキュリティ",
-      "プライバシー",
-      "ファイアウォール",
-  };
-  for (const auto term : terms)
-    if (text.find(term) != std::string_view::npos)
-      return true;
-  static constexpr std::array<std::string_view, 15> payment_terms = {
-      "pay",          "pay now",        "place order", "submit order",
-      "complete order", "buy now",      "pagar",       "comprar",
-      "acheter",      "bestellen",      "bezahlen",    "pagare",
-      "acquistare",   "betalen",        "kopen"};
-  for (const auto term : payment_terms)
-    if (ContainsBoundedWindowsRiskTerm(text, term))
-      return true;
-  static constexpr std::array<std::string_view, 9> shell_terms = {
-      "integrated terminal", "terminal", "console", "shell", "powershell",
-      "command prompt",      "cmd.exe",  "pwsh",    "wsl",
-  };
-  for (const auto term : shell_terms)
-    if (ContainsBoundedWindowsRiskTerm(text, term))
-      return true;
-  return false;
+  const auto bits = sprint_coder::computer_use::ClassifyWindowsRiskText(text);
+  return bits.confirmation || bits.other;
 }
 
 WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {

@@ -826,7 +826,7 @@ NativeApprovalMeasurement GoodMeasurement() {
   good.authority_digest = std::string(64, 'c');
   good.classifier_version = 2;
   good.ruleset_version = 2;
-  good.lexicon_version = 2;
+  good.lexicon_version = 3;
   return good;
 }
 // An intent the production facts of this input will match: the digests are the ones the production

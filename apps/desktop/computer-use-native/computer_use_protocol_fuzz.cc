@@ -7,6 +7,8 @@
 #include "computer_use_effect_classifier.h"
 #include "computer_use_effect_shadow.h"
 #include "computer_use_windows_shadow.h"
+#include "computer_use_windows_risk_terms.h"
+#include "computer_use_windows_approval_measurement.h"
 #include "computer_use_windows_shadow_reader.h"
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_effect_measurement.h"
@@ -4450,7 +4452,7 @@ bool CheckEffectMeasurement() {
     const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(capture));
     if (!Check(measured.eligible && !measured.takeover && measured.effect == NativeApprovalEffect::kHighImpactConfirmation &&
                    measured.authority_digest.size() == 64 && measured.classifier_version == 2 &&
-                   measured.ruleset_version == 2 && measured.lexicon_version == 2,
+                   measured.ruleset_version == 2 && measured.lexicon_version == 3,
                "measure-eligible")) return false;
     // The same capture measures the same.
     if (!Check(MeasureApproval(MeasureInput(capture)).authority_digest == measured.authority_digest, "measure-deterministic"))
@@ -5315,7 +5317,7 @@ bool CheckEffectClassifierCore() {
 
   // Candidate versions the enabling change will attest. The attested versions are still 1.
   if (!Check(kEffectClassifierVersion == 2 && kEffectRulesetVersion == 2 &&
-                 kEffectLexiconVersion == 2 && kNativePreflightClassifierVersion == 1,
+                 kEffectLexiconVersion == 3 && kNativePreflightClassifierVersion == 1,
              "effect-versions-not-yet-attested")) return false;
 
   // An ordinary click is ordinary; reading is ordinary even when nothing could be classified.
@@ -7313,6 +7315,287 @@ bool HighImpact(std::string_view text) {
 
 } // namespace frozen_v1
 
+namespace frozen_windows_v1 {
+// Independent snapshots: moving a word between sides must fail even if the union is unchanged.
+inline constexpr std::array<std::u8string_view, 20> kConfirmationSubstring = {
+    u8"payment", u8"checkout", u8"purchase", u8"billing", u8"credit card", u8"card number",
+    u8"wire transfer", u8"contract", u8"agreement", u8"sign agreement", u8"決済", u8"支払い", u8"支払う",
+    u8"購入", u8"注文を確定", u8"注文する", u8"請求", u8"送金", u8"契約", u8"署名"};
+inline constexpr std::array<std::u8string_view, 16> kOtherSubstring = {
+    u8"installer", u8"install application", u8"administrator", u8"admin privileges", u8"sudo",
+    u8"root access", u8"security settings", u8"privacy settings", u8"firewall",
+    u8"accessibility permission", u8"screen recording permission", u8"インストール", u8"管理者", u8"セキュリティ",
+    u8"プライバシー", u8"ファイアウォール"};
+inline constexpr std::array<std::u8string_view, 36> kSubstring = {
+    u8"payment", u8"checkout", u8"purchase", u8"billing", u8"credit card", u8"card number",
+    u8"wire transfer", u8"contract", u8"agreement", u8"sign agreement", u8"installer",
+    u8"install application", u8"administrator", u8"admin privileges", u8"sudo", u8"root access",
+    u8"security settings", u8"privacy settings", u8"firewall", u8"accessibility permission",
+    u8"screen recording permission", u8"決済", u8"支払い", u8"支払う", u8"購入", u8"注文を確定", u8"注文する", u8"請求",
+    u8"送金", u8"契約", u8"署名", u8"インストール", u8"管理者", u8"セキュリティ", u8"プライバシー", u8"ファイアウォール"};
+inline constexpr std::array<std::u8string_view, 15> kPayment = {
+    u8"pay", u8"pay now", u8"place order", u8"submit order", u8"complete order", u8"buy now",
+    u8"pagar", u8"comprar", u8"acheter", u8"bestellen", u8"bezahlen", u8"pagare", u8"acquistare",
+    u8"betalen", u8"kopen"};
+inline constexpr std::array<std::u8string_view, 9> kShell = {
+    u8"integrated terminal", u8"terminal", u8"console", u8"shell", u8"powershell",
+    u8"command prompt", u8"cmd.exe", u8"pwsh", u8"wsl"};
+
+bool Bounded(std::string_view text, std::string_view term) {
+  const auto word = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+  std::size_t offset = 0;
+  while ((offset = text.find(term, offset)) != std::string_view::npos) {
+    const std::size_t end = offset + term.size();
+    if ((offset == 0 || !word(text[offset - 1])) && (end == text.size() || !word(text[end]))) return true;
+    offset = end;
+  }
+  return false;
+}
+bool Contains(std::string_view text) {
+  using sprint_coder::computer_use::high_impact_terms::Bytes;
+  for (const auto term : kSubstring) if (text.find(Bytes(term)) != std::string_view::npos) return true;
+  for (const auto term : kPayment) if (Bounded(text, Bytes(term))) return true;
+  for (const auto term : kShell) if (Bounded(text, Bytes(term))) return true;
+  return false;
+}
+} // namespace frozen_windows_v1
+
+// ADR section 2.2 is checked against these positive classifier cases by the TS source test.
+struct ApprovalOperationCase {
+  sprint_coder::computer_use::NativeApprovalEffect effect;
+  std::vector<ActionKind> actions;
+};
+const ApprovalOperationCase kApprovalOperationCases[] = {
+    {sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction,
+     {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
+      ActionKind::kType, ActionKind::kKey, ActionKind::kScroll, ActionKind::kSelect,
+      ActionKind::kToggle, ActionKind::kExpandCollapse}},
+    {sprint_coder::computer_use::NativeApprovalEffect::kHighImpactConfirmation,
+     {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kToggle,
+      ActionKind::kSelect, ActionKind::kKey}},
+    {sprint_coder::computer_use::NativeApprovalEffect::kDownloadOpen,
+     {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kKey}},
+    {sprint_coder::computer_use::NativeApprovalEffect::kFileManagerOpen,
+     {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kKey}},
+};
+
+bool CheckWindowsApprovalCore() {
+  using namespace sprint_coder::computer_use;
+  using namespace windows_risk_terms;
+  using high_impact_terms::Bytes;
+  // Multisets preserve duplicates as well as each matching mode.
+  const auto words = [](const auto &table) {
+    std::multiset<std::u8string_view> result;
+    for (const auto word : table) result.insert(word);
+    return result;
+  };
+  const auto confirmation_words = words(kConfirmationSubstring);
+  const auto other_words = words(kOtherSubstring);
+  if (!Check(confirmation_words == words(frozen_windows_v1::kConfirmationSubstring),
+             "windows-risk-confirmation-substring-set")) return false;
+  if (!Check(other_words == words(frozen_windows_v1::kOtherSubstring),
+             "windows-risk-other-substring-set")) return false;
+  for (const auto word : confirmation_words) {
+    if (!Check(other_words.count(word) == 0, "windows-risk-substring-disjoint")) return false;
+  }
+  auto substring = words(kConfirmationSubstring);
+  substring.insert(kOtherSubstring.begin(), kOtherSubstring.end());
+  if (!Check(substring == words(frozen_windows_v1::kSubstring) &&
+                 words(kConfirmationBounded) == words(frozen_windows_v1::kPayment) &&
+                 words(kOtherBounded) == words(frozen_windows_v1::kShell),
+             "windows-risk-frozen-v1")) return false;
+  for (const auto &table : {std::span<const std::u8string_view>(frozen_windows_v1::kSubstring),
+                           std::span<const std::u8string_view>(frozen_windows_v1::kPayment),
+                           std::span<const std::u8string_view>(frozen_windows_v1::kShell)}) {
+    for (const auto term : table) {
+      for (const auto prefix : {"", "a", "0", "_", " ", "-"}) {
+        for (const auto suffix : {"", "z", "9", "_", " ", "-"}) {
+          const std::string text = std::string(prefix) + std::string(Bytes(term)) + suffix;
+          const auto bits = ClassifyWindowsRiskText(text);
+          if (!Check((bits.confirmation || bits.other) == frozen_windows_v1::Contains(text),
+                     "windows-risk-frozen-v1")) return false;
+        }
+      }
+    }
+  }
+  // With no approved confirmation every bit combination keeps V1's answer, including priority.
+  for (unsigned flags = 0; flags < 64; ++flags) {
+    const bool complete = (flags & 1) != 0;
+    const NativeRiskBits bits{(flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0,
+                              (flags & 16) != 0, (flags & 32) != 0};
+    const auto v1 = ClassifyNativePreflightFacts({complete, bits.classified, bits.secure, bits.high_impact});
+    for (const auto effect : {NativeApprovalEffect::kInvalid, NativeApprovalEffect::kSupervisedAction,
+                              NativeApprovalEffect::kDownloadOpen, NativeApprovalEffect::kFileManagerOpen}) {
+      const auto actual = ClassifyWindowsNativeRisk(bits, complete, effect);
+      if (!Check(actual.kind == v1.kind && actual.reason == v1.reason,
+                 "windows-risk-v1-truth-table")) return false;
+    }
+  }
+  const NativeRiskBits confirmation{true, false, true, true, false};
+  const auto approved = NativeApprovalEffect::kHighImpactConfirmation;
+  if (!Check(NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk(confirmation, true, approved)),
+             "windows-risk-confirmation-approved")) return false;
+  if (!Check(!NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk(confirmation, false, approved)),
+             "windows-risk-incomplete-confirmation")) return false;
+  if (!Check(!NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk({true, true, true, true, false}, true, approved)),
+             "windows-risk-secure")) return false;
+  if (!Check(!NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk({false, false, true, true, false}, true, approved)),
+             "windows-risk-unclassified")) return false;
+  for (const auto text : {"wsl pay", "pwsh checkout", "administrator pay", "checkout installer"}) {
+    const auto bits = ClassifyWindowsRiskText(text);
+    if (!Check(bits.confirmation && bits.other &&
+                   !NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk(
+                       {true, false, true, bits.confirmation, bits.other}, true, approved)),
+               "windows-risk-other-mixed")) return false;
+  }
+
+  ShadowUiaCapture capture = UiaBase();
+  capture.chain[0] = UiaNode("Document", "Text editor");
+  for (auto &node : capture.chain) {
+    node.process_id = 4242;
+    node.framework_read = true;
+    node.framework_id = "Win32";
+  }
+  WindowsApprovalMeasurementInput input;
+  input.capture = &capture;
+  input.request = UiaRequest("type");
+  input.request.maximum_mode = "supervised";
+  input.identity = MeasureIdentity();
+  input.target_frame = {true, 30, 60, 100, 24};
+  input.strict = {true, 4242, true};
+  input.route = ClassifierRoute::kV2;
+  input.attested_classifier_version = 2;
+  input.approval_gate = true;
+  const auto measured = MeasureWindowsApproval(input);
+  if (!Check(measured.eligible && measured.effect == NativeApprovalEffect::kSupervisedAction &&
+                 !measured.authority_digest.empty(), "windows-document-approval")) return false;
+  // Authority and classification use the settled facts, not the original unknown origin.
+  ShadowFacts settled = BuildWindowsShadowFacts(capture, input.request);
+  settled.facts.target_not_web = true;
+  settled.facts.origin = OriginState::kOrdinary;
+  ShadowAxCapture binding;
+  ApprovalMeasurementInput shared;
+  shared.capture = &binding;
+  shared.identity = input.identity;
+  shared.target_frame = input.target_frame;
+  shared.route = input.route;
+  shared.attested_classifier_version = 2;
+  if (!Check(MeasureApprovalFromFacts(shared, settled.facts).authority_digest == measured.authority_digest,
+             "windows-document-settled-authority")) return false;
+  input.approval_gate = false;
+  if (!Check(!MeasureWindowsApproval(input).eligible, "windows-document-closed")) return false;
+  input.approval_gate = true;
+  for (int defect = 0; defect < 19; ++defect) {
+    auto changed = capture;
+    auto bad = input;
+    bad.capture = &changed;
+    if (defect == 0) changed.chain[0].process_id = 0;
+    if (defect == 1) changed.chain[1].process_id = 777;
+    if (defect == 2) changed.chain[0].framework_id = "Chrome";
+    if (defect == 3) changed.chain[0].framework_read = false;
+    if (defect == 4) changed.read_failed = true;
+    if (defect == 5) changed.budget_exhausted = true;
+    if (defect == 6) bad.stopped_by_cancel = true;
+    if (defect == 7) bad.strict.target_not_web = std::nullopt;
+    if (defect == 8) changed.chain[0].is_password = true;
+    if (defect == 9) changed.neighbors_complete = false;
+    if (defect == 10) bad.request.maximum_mode = "observe_only";
+    if (defect == 11) bad.route = ClassifierRoute::kV1;
+    if (defect == 12) bad.attested_classifier_version = 0;
+    if (defect == 13) bad.identity.app_identity.present = false;
+    if (defect == 14) changed.chain_reached_root = false;
+    if (defect == 15) changed.window_class_read = false;
+    if (defect == 16) changed.item_kind = ShadowItemKind::kFile;
+    if (defect == 17) bad.capture = nullptr;
+    if (defect == 18) bad.strict.asked = false;
+    if (!Check(!MeasureWindowsApproval(bad).eligible, "windows-document-unsafe")) return false;
+  }
+  auto file_capture = capture;
+  file_capture.item_kind = ShadowItemKind::kFile;
+  file_capture.item_name = "C:\\synthetic\\document.txt";
+  file_capture.item_name_read = true;
+  auto file_input = input;
+  file_input.capture = &file_capture;
+  file_capture.item_name_is_real_path = false;
+  const auto display_name = MeasureWindowsApproval(file_input);
+  if (!Check(!display_name.eligible && display_name.takeover,
+             "windows-file-display-name-refused")) return false;
+  file_capture.item_name_is_real_path = true;
+  const auto real_path = MeasureWindowsApproval(file_input);
+  if (!Check(real_path.eligible && !real_path.takeover &&
+                 real_path.effect == NativeApprovalEffect::kSupervisedAction,
+             "windows-file-real-path-approved")) return false;
+  auto confirm_capture = capture;
+  confirm_capture.chain.insert(confirm_capture.chain.begin(), UiaNode("Button", "Pay now"));
+  confirm_capture.chain[0].process_id = 4242;
+  input.capture = &confirm_capture;
+  input.request = UiaRequest("invoke");
+  const auto confirmed = MeasureWindowsApproval(input);
+  if (!Check(confirmed.eligible && confirmed.effect == NativeApprovalEffect::kHighImpactConfirmation,
+             "windows-document-confirmation")) return false;
+  input.target_frame.present = false;
+  if (!Check(!MeasureWindowsApproval(input).eligible, "windows-confirmation-needs-frame")) return false;
+
+  // Shared tables intentionally add refusals on macOS too (all other AX expectations stay).
+  for (const auto extension : {"msu", "msp", "mst", "appinstaller", "application", "scf", "chm",
+                               "diagcab", "xll", "iso", "img", "vhd", "vhdx", "library-ms", "search-ms",
+                               "searchconnector-ms", "rdp", "ppkg", "jnlp", "wsc", "sct", "ws", "ahk", "au3", "rb", "pl"}) {
+    auto ax = MeasureCapture();
+    ax.filename = std::string("synthetic.") + extension;
+    const auto built = BuildShadowFacts(ax, ShadowRequest("invoke"));
+    const auto decision = ClassifyEffect(built.facts, EffAllEnabled());
+    if (!Check(decision.kind == DecisionKind::kBlocked &&
+                   decision.reason == DecisionReason::kExecutionTrigger &&
+                   !MeasureApproval(MeasureInput(ax)).eligible, "macos-new-extension-refused")) return false;
+  }
+  using namespace effect_detail;
+  for (const auto extension : {"msu", "msp", "mst", "appinstaller", "application", "ppkg", "appx"}) {
+    auto facts = EffBase();
+    facts.action = ActionKind::kInvoke;
+    facts.extension_known = true;
+    facts.extension = extension;
+    const auto decision = ClassifyEffect(facts, EffAllEnabled());
+    if (!Check(decision.effect_class == EffectClass::kE4InstallerLaunch &&
+                   decision.kind == DecisionKind::kBlocked &&
+                   decision.reason == DecisionReason::kExecutionTrigger &&
+                   InSet(extension, kExecutableExtensions),
+               "approval-installer-extension-literals")) return false;
+  }
+  for (const auto extension : kInstallerExtensions) {
+    if (!Check(InSet(extension, kExecutableExtensions), "approval-installer-subset")) return false;
+  }
+  for (const auto extension : {"c++", "x_t", " .C++. ", " .X_T. "}) {
+    if (!Check(IsPlainExtension(NormalizeExtension(extension)), "approval-extension-boundary")) return false;
+  }
+  if (!Check(NormalizeExtension(" .C++. ") == "c++" && NormalizeExtension(" .X_T. ") == "x_t" &&
+                 IsPlainExtension(std::string(32, 'a')) && !IsPlainExtension(std::string(33, 'a')) &&
+                 !IsPlainExtension("") && !IsPlainExtension("x/y") && !IsPlainExtension("x.y"),
+             "approval-extension-boundary")) return false;
+  // Derive the actual action set by running every input, rather than testing only selected positives.
+  for (const auto &row : kApprovalOperationCases) {
+    std::set<ActionKind> actual;
+    for (const auto action : kEffAllInputs) {
+      EffectFacts facts = EffBase();
+      facts.action = action;
+      facts.key_is_activation = true;
+      if (row.effect == NativeApprovalEffect::kSupervisedAction) facts.mode = SessionMode::kSupervised;
+      if (row.effect == NativeApprovalEffect::kHighImpactConfirmation) facts.chain[0].label = "pay now";
+      if (row.effect == NativeApprovalEffect::kDownloadOpen || row.effect == NativeApprovalEffect::kFileManagerOpen) {
+        facts.surface = row.effect == NativeApprovalEffect::kDownloadOpen
+                            ? SurfaceKind::kDownloadPanel : SurfaceKind::kFileBrowser;
+        facts.target_is_file_item = true;
+        facts.extension_known = true;
+        facts.extension = "txt";
+      }
+      const auto decision = ClassifyEffect(facts, EffAllEnabled());
+      if (decision.kind == DecisionKind::kApproval && decision.approval_effect == row.effect) actual.insert(action);
+    }
+    if (!Check(actual == std::set<ActionKind>(row.actions.begin(), row.actions.end()),
+               "approval-operation-table")) return false;
+  }
+  return true;
+}
+
 bool CheckNativeApprovedRisk() {
   using namespace sprint_coder::computer_use;
 
@@ -9148,6 +9431,7 @@ int main() {
   if (!CheckWindowsInterlockJourneys()) return 1;
   if (!CheckWindowsArtifactRead()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
+  if (!CheckWindowsApprovalCore()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;
   if (!CheckEffectPageScroll()) return 1;

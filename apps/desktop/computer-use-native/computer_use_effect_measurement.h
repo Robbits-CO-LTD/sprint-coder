@@ -365,7 +365,7 @@ struct ApprovalMeasurementInput {
   std::uint32_t attested_classifier_version = 0;
 };
 
-// Builds the facts, asks the core, and states the result the way the approval flow compares it.
+// Uses the platform's validated facts and states the result the way the approval flow compares it.
 // The order is the contract:
 //   1. no capture: a person's (takeover);
 //   2. a session on route v1: not eligible, whatever the capture says (no takeover, no effect);
@@ -378,15 +378,15 @@ struct ApprovalMeasurementInput {
 //   7. otherwise an approval the offer rules allow: eligible, with its effect, the authority digest
 //      and the core's three versions. Everything that is not an approval (an ordinary control, a
 //      refusal) is not eligible, with no effect and no digest.
-[[nodiscard]] inline NativeApprovalMeasurement MeasureApproval(const ApprovalMeasurementInput &input) {
+[[nodiscard]] inline NativeApprovalMeasurement
+MeasureApprovalFromFacts(const ApprovalMeasurementInput &input, const EffectFacts &facts) {
   NativeApprovalMeasurement measured;
   if (input.capture == nullptr) {
     measured.takeover = true;
     return measured;
   }
   if (input.route != ClassifierRoute::kV2) return measured;
-  const ShadowFacts built = BuildShadowFacts(*input.capture, input.request);
-  const EffectDecision decision = ClassifyEffect(built.facts, input.ruleset);
+  const EffectDecision decision = ClassifyEffect(facts, input.ruleset);
   if (decision.kind == DecisionKind::kTakeover) {
     measured.takeover = true;
     return measured;
@@ -399,7 +399,7 @@ struct ApprovalMeasurementInput {
                                                  input.attested_classifier_version);
   if (!verdict.offer) return measured;
   const DerivedAuthorityBinding derived = DeriveAuthorityBinding(
-      *input.capture, input.identity, input.target_frame, built.facts, decision);
+      *input.capture, input.identity, input.target_frame, facts, decision);
   if (!derived.complete) {
     measured.takeover = true;
     return measured;
@@ -407,11 +407,23 @@ struct ApprovalMeasurementInput {
   measured.eligible = true;
   measured.effect = verdict.effect;
   measured.authority_digest =
-      ApprovalAuthorityDigest(input.identity, derived.binding, built.facts, decision);
+      ApprovalAuthorityDigest(input.identity, derived.binding, facts, decision);
   measured.classifier_version = decision.classifier_version;
   measured.ruleset_version = decision.ruleset_version;
   measured.lexicon_version = decision.lexicon_version;
   return measured;
+}
+
+// AX keeps its original preprocessing; the common core never rebuilds platform facts.
+[[nodiscard]] inline NativeApprovalMeasurement MeasureApproval(const ApprovalMeasurementInput &input) {
+  NativeApprovalMeasurement measured;
+  if (input.capture == nullptr) {
+    measured.takeover = true;
+    return measured;
+  }
+  if (input.route != ClassifierRoute::kV2) return measured;
+  const ShadowFacts built = BuildShadowFacts(*input.capture, input.request);
+  return MeasureApprovalFromFacts(input, built.facts);
 }
 
 } // namespace sprint_coder::computer_use

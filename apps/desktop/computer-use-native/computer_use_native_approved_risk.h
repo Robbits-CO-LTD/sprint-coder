@@ -166,4 +166,14 @@ ClassifyNativeRisk(NativeRiskBits bits,
   return ClassifyNativePreflightFacts({true, bits.classified, bits.secure, high_impact});
 }
 
+// Windows measures completeness separately. A missing value has no default and cannot borrow
+// Darwin's implicit completeness (already included in its classified bit).
+[[nodiscard]] constexpr NativePreflightDecision
+ClassifyWindowsNativeRisk(NativeRiskBits bits, bool metadata_complete,
+                          NativeApprovalEffect approved_effect = NativeApprovalEffect::kInvalid) noexcept {
+  if (!metadata_complete)
+    return ClassifyNativePreflightFacts({false, bits.classified, bits.secure, bits.high_impact});
+  return ClassifyNativeRisk(bits, approved_effect);
+}
+
 } // namespace sprint_coder::computer_use

@@ -63,7 +63,7 @@ namespace sprint_coder::computer_use {
 // raises the attested versions (eligibility.json) to these numbers.
 constexpr std::uint32_t kEffectClassifierVersion = 2;
 constexpr std::uint32_t kEffectRulesetVersion = 2;
-constexpr std::uint32_t kEffectLexiconVersion = 2;
+constexpr std::uint32_t kEffectLexiconVersion = 3;
 
 // Bounds the caller must respect; anything larger is a takeover rather than a slow scan.
 constexpr std::size_t kEffectMaxChainNodes = 9;
@@ -271,11 +271,14 @@ inline constexpr std::string_view kExecutableExtensions[] = {
     "msix",    "msixbundle", "appx", "appxbundle", "ps1", "vbs", "vbe", "wsf", "wsh",
     "reg",     "lnk",  "scr",   "hta",  "js",   "jse",  "msc",  "cpl",  "pif",
     "appref-ms", "url", "settingcontent-ms", "py", "pyw", "terminal", "workflow", "action",
-    "fileloc", "inetloc"};
+    "fileloc", "inetloc", "msu", "msp", "mst", "appinstaller", "application", "scf", "chm",
+    "diagcab", "xll", "iso", "img", "vhd", "vhdx", "library-ms", "search-ms",
+    "searchconnector-ms", "rdp", "ppkg", "jnlp", "wsc", "sct", "ws", "ahk", "au3", "rb", "pl"};
 
 // The subset of E1 that is an installer (E4).
 inline constexpr std::string_view kInstallerExtensions[] = {
-    "pkg", "mpkg", "dmg", "msi", "msix", "msixbundle", "appxbundle"};
+    "pkg", "mpkg", "dmg", "msi", "msix", "msixbundle", "appxbundle", "appx",
+    "msu", "msp", "mst", "appinstaller", "application", "ppkg"};
 
 inline constexpr std::array<std::span<const std::string_view>, 2> kEffectExtensionTables = {
     std::span<const std::string_view>(kExecutableExtensions),
@@ -325,7 +328,7 @@ inline constexpr std::uint64_t kEffectTablesDigest = ComputeEffectTablesDigest()
 // The reviewed value. Editing a table or raising a version without updating this pin is a compile
 // error in every translation unit that includes the header, and so is reading the CJK terms with a
 // wrong character set: the build fails closed instead of matching nothing.
-inline constexpr std::uint64_t kEffectTablesDigestPinned = 0x9d3ac3d7ac1f9012ULL;
+inline constexpr std::uint64_t kEffectTablesDigestPinned = 0x21d3b29e52a45895ULL;
 static_assert(kEffectTablesDigest == kEffectTablesDigestPinned,
               "The effect classifier tables changed: review them, bump the lexicon / ruleset "
               "version, and update kEffectTablesDigestPinned.");

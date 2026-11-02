@@ -1,0 +1,64 @@
+#pragma once
+
+// Portable Windows approval entry. No producer is wired until the approval path is enabled.
+// The same validated, possibly settled facts reach classification and authority construction.
+#include "computer_use_effect_measurement.h"
+#include "computer_use_windows_interlock_capture.h"
+
+namespace sprint_coder::computer_use {
+
+struct WindowsApprovalMeasurementInput {
+  const ShadowUiaCapture *capture = nullptr;
+  ShadowRequestInfo request;
+  ApprovalAuthorityIdentity identity;
+  ApprovalTargetFrame target_frame;
+  EffectRuleset ruleset;
+  WindowsStrictCaptureIdentity strict;
+  ClassifierRoute route = ClassifierRoute::kV1;
+  std::uint32_t attested_classifier_version = 0;
+  bool approval_gate = false;
+  bool stopped_by_cancel = false;
+};
+
+[[nodiscard]] inline NativeApprovalMeasurement
+MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input) {
+  NativeApprovalMeasurement measured;
+  if (!input.approval_gate || input.route != ClassifierRoute::kV2) return measured;
+  if (input.capture == nullptr || input.stopped_by_cancel || input.capture->budget_exhausted) {
+    measured.takeover = true;
+    return measured;
+  }
+  const auto &capture = *input.capture;
+  ShadowFacts built = BuildWindowsShadowFacts(capture, input.request);
+  built.facts.target_not_web = WindowsCaptureTargetNotWeb(capture, input.strict.target_not_web);
+  if (!input.strict.asked || !WindowsCaptureChainOwnedBy(capture, input.strict.process_id) ||
+      !interlock_detail::FactsAreComplete(built.facts) ||
+      (capture.item_kind == ShadowItemKind::kFile &&
+       !(capture.item_name_read && capture.item_name_is_real_path))) {
+    measured.takeover = true;
+    return measured;
+  }
+  auto decision = ClassifyEffect(built.facts, input.ruleset);
+  if (interlock_detail::NativeDocumentExceptionFor(
+          built.facts, decision, interlock_detail::StrictTextReadable(built.facts)) ==
+      NativeDocumentException::kApplied) {
+    built.facts.origin = OriginState::kOrdinary;
+    decision = ClassifyEffect(built.facts, input.ruleset);
+  }
+  // Only the origin is used from this binding capture; no AX fact builder is called here.
+  ShadowAxCapture binding_capture;
+  binding_capture.web_area_url_read = capture.document_url_read;
+  binding_capture.web_area_url = capture.document_url;
+  ApprovalMeasurementInput shared;
+  shared.capture = &binding_capture;
+  shared.identity = input.identity;
+  shared.target_frame = input.target_frame;
+  shared.ruleset = input.ruleset;
+  shared.route = input.route;
+  shared.attested_classifier_version = input.attested_classifier_version;
+  shared.source = decision.approval_effect == NativeApprovalEffect::kHighImpactConfirmation
+                      ? HighImpactSource::kNativeFacts : HighImpactSource::kNone;
+  return MeasureApprovalFromFacts(shared, built.facts);
+}
+
+} // namespace sprint_coder::computer_use
