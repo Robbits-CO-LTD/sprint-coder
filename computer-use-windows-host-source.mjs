@@ -31,5 +31,7 @@ export function readWindowsHostSource(directory = windowsHostNativeDirectory) {
     if (/^computer_use_windows_host_.*\.inc$/u.test(name) && !included.has(name))
       throw new Error(`Unreferenced Windows host fragment: ${name}`);
   }
+  if (/^[\t ]*#[\t ]*include[\t ]*"[^"\n]*computer_use_windows_host[^"\n]*"/mu.test(expanded))
+    throw new Error('Unexpanded Windows host include');
   return expanded;
 }

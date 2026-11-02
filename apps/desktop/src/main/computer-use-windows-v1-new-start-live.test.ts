@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { computerUseNativeCloseReceiptSchema } from '@sprint-coder/contracts';
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 type Build = Readonly<{
@@ -53,7 +54,7 @@ function findBuild(): Build | null {
   };
 }
 
-const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const source = readWindowsHostSource();
 const program = readFileSync(
   join(nativeDirectory, 'computer_use_windows_v1_start_live_test.cc'),
   'utf8',

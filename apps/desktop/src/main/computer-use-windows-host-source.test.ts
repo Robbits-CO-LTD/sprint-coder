@@ -26,6 +26,28 @@ afterEach(() => {
 });
 
 describe('Windows host source structure', () => {
+  it('routes host source reads in tests and the offline verifier through the helper', () => {
+    const root = join(__dirname, '../../../..');
+    // Only these readers inspect the unexpanded file to implement or verify expansion.
+    const allowedReaders = new Set([
+      join(root, 'computer-use-windows-host-source.mjs'),
+      join(__dirname, 'computer-use-windows-host-source.test.ts'),
+    ]);
+    const files = [
+      ...readdirSync(__dirname)
+        .filter((name) => name.endsWith('.test.ts'))
+        .map((name) => join(__dirname, name)),
+      join(root, 'verify-computer-use-native-offline.mjs'),
+      join(root, 'computer-use-windows-host-source.mjs'),
+    ];
+    for (const file of files) {
+      if (allowedReaders.has(file)) continue;
+      expect(readFileSync(file, 'utf8'), file).not.toMatch(
+        /readFileSync\s*\([^;]*['"`]computer_use_windows_host\.cc['"`]/u,
+      );
+    }
+  });
+
   it('includes every real fragment exactly once, without nesting or changed line endings', () => {
     const host = readFileSync(join(windowsHostNativeDirectory, hostName), 'utf8');
     const parts = readdirSync(windowsHostNativeDirectory)
@@ -59,7 +81,7 @@ describe('Windows host source structure', () => {
   });
 
   it('preserves an unsplit source and only expands exact include lines', () => {
-    const source = `#include <string>\n// ${include}\n ${include}\n${include} // comment\n`;
+    const source = `#include <string>\n// ${include}\n`;
     expect(readWindowsHostSource(fixture(source))).toBe(source);
   });
 
@@ -68,6 +90,22 @@ describe('Windows host source structure', () => {
   });
 
   it.each([
+    ['indented include', ` ${include}\n`, {}, /Unexpanded/u],
+    ['include with trailing comment', `${include} // comment\n`, {}, /Unexpanded/u],
+    [
+      'subdirectory include',
+      '#include "host/computer_use_windows_host_part.inc"\n',
+      {},
+      /Unexpanded/u,
+    ],
+    ['relative include', '#include "./computer_use_windows_host_part.inc"\n', {}, /Unexpanded/u],
+    ['header include', '#include "computer_use_windows_host_part.h"\n', {}, /Unexpanded/u],
+    [
+      'unexpanded include in fragment',
+      `${include}\n`,
+      { [partName]: '#include "host/computer_use_windows_host_part.inc"\n' },
+      /Unexpanded/u,
+    ],
     ['duplicate include', `${include}\n${include}\n`, { [partName]: 'part\n' }, /Duplicate/u],
     ['nested include', `${include}\n`, { [partName]: `${include}\n` }, /Nested/u],
     ['CR in host', 'host\r\n', {}, /CR/u],
