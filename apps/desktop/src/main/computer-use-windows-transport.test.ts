@@ -3581,6 +3581,169 @@ int main() {
       expect(target.rows.size).toBe(0);
     },
   );
+  it.each([
+    { sameProcess: false, late: 'success' },
+    { sameProcess: false, late: 'false' },
+    { sameProcess: false, late: 'exception' },
+    { sameProcess: true, late: 'success' },
+    { sameProcess: true, late: 'false' },
+    { sameProcess: true, late: 'exception' },
+  ] as const)(
+    'PR6 AC-4 scopes a timed-out write (same process: $sameProcess, late: $late)',
+    async ({ sameProcess, late }) => {
+      const target = ledgerTarget();
+      const sessionA = await startSession(target.host, 'session-a', 'turn-a');
+      target.control.pid = sameProcess ? 42 : 43;
+      const sessionB = await startSession(target.host, 'session-b', 'turn-b');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(sessionA, ledgerActions[0], 'retained-a');
+      const rowA = structuredClone([...target.rows.values()][0]!);
+      expect(rowA).toMatchObject({ sessionId: 'session-a', state: 'effect_unconfirmed' });
+      target.control.response = null;
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      target.control.wait = new Promise<void>((resolve, rejectWrite) => {
+        release = resolve;
+        reject = rejectWrite;
+      });
+      let settled = false;
+      const pending = target.dispatch(sessionB, ledgerActions[0], 'uncertain-b').then((result) => {
+        settled = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const denied = {
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      };
+      expect(await pending).toMatchObject(denied);
+      const rowB = target.written.at(-1)!;
+      expect(rowB.identity).toEqual({
+        pid: sameProcess ? 42 : 43,
+        creationTime: rowA.identity.creationTime,
+      });
+      // Only B's already-running storage call retains the deferred promise.
+      target.control.wait = null;
+      const wireCount = dispatchWrites(sockets.at(-1)!).length;
+      expect(await target.dispatch(sessionB, ledgerActions[0], 'blocked-b')).toMatchObject(denied);
+      await expect(startSession(target.host, 'session-b', 'turn-b')).rejects.toMatchObject({
+        reasonCode: 'native_unavailable',
+      });
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(wireCount);
+      target.control.pid = 42;
+      if (sameProcess) {
+        expect(await target.dispatch(sessionA, ledgerActions[0], 'blocked-a')).toMatchObject(
+          denied,
+        );
+        await expect(startSession(target.host, 'session-a', 'turn-a')).rejects.toMatchObject({
+          reasonCode: 'native_unavailable',
+        });
+        expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(wireCount);
+      } else {
+        expect(await target.dispatch(sessionA, ledgerActions[0], 'allowed-a')).toMatchObject({
+          outcome: 'resolved',
+          value: { result: 'completed' },
+        });
+        await expect(startSession(target.host, 'session-a', 'turn-a')).resolves.toMatchObject({
+          sessionId: 'session-a',
+        });
+        expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(wireCount + 1);
+      }
+      // A fresh profile has no cached PID: the public start reaches ledgerBlocked(undefined).
+      const served = [...target.helper().served];
+      await expect(
+        target.host.startSession({
+          profile: { ...profile, identityDigest: digest('d') },
+          windowId: '100',
+          sessionId: 'unknown-pid',
+          taskId: 'task-1',
+          turnId: 'turn-unknown',
+          cancelEpoch: 0,
+        }),
+      ).rejects.toMatchObject({ reasonCode: 'native_unavailable' });
+      expect(target.helper().served).toEqual(served);
+      expect(target.rows.get(ledgerKey(rowA))).toEqual(rowA);
+      expect(target.deleted.some((row) => ledgerKey(row) === ledgerKey(rowA))).toBe(false);
+
+      target.control.failWrite = late === 'false';
+      if (late === 'exception') reject(new Error('synthetic storage failure'));
+      else release();
+      await vi.advanceTimersByTimeAsync(0);
+      target.control.failWrite = false;
+      expect(target.rows.has(ledgerKey(rowB))).toBe(false);
+      expect(target.deleted.filter((row) => ledgerKey(row) === ledgerKey(rowB))).toEqual(
+        late === 'success' ? [rowB] : [],
+      );
+      // Successful starts and sends prove that the uncertain-write hold has been released.
+      for (const [session, pid] of [
+        [sessionA, 42],
+        [sessionB, sameProcess ? 42 : 43],
+      ] as const) {
+        target.control.pid = pid;
+        await expect(
+          startSession(
+            target.host,
+            session.sessionId,
+            session.sessionId === 'session-a' ? 'turn-a' : 'turn-b',
+          ),
+        ).resolves.toMatchObject({
+          sessionId: session.sessionId,
+        });
+        expect(await target.dispatch(session, ledgerActions[0], 'recovered')).toMatchObject({
+          outcome: 'resolved',
+          value: { result: 'completed' },
+        });
+      }
+      expect([...target.rows.values()]).toEqual([rowA]);
+    },
+  );
+
+  it.each(['false', 'exception'] as const)(
+    'PR6 AC-4 a settled write %s refuses only that dispatch',
+    async (failure) => {
+      const target = ledgerTarget();
+      const sessionA = await startSession(target.host, 'session-a', 'turn-a');
+      target.control.pid = 43;
+      const sessionB = await startSession(target.host, 'session-b', 'turn-b');
+      target.control.failWrite = failure === 'false';
+      // PR4 will revisit exceptions: today they are treated as confirmed non-writes (L4).
+      if (failure === 'exception') {
+        target.control.wait = Promise.reject(new Error('synthetic storage failure'));
+      }
+      expect(await target.dispatch(sessionB)).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+      expect(target.rows.size).toBe(0);
+      expect(target.deleted).toEqual([]);
+      target.control.failWrite = false;
+      target.control.wait = null;
+      for (const [session, pid] of [
+        [sessionB, 43],
+        [sessionA, 42],
+      ] as const) {
+        target.control.pid = pid;
+        await expect(
+          startSession(
+            target.host,
+            session.sessionId,
+            session.sessionId === 'session-a' ? 'turn-a' : 'turn-b',
+          ),
+        ).resolves.toMatchObject({
+          sessionId: session.sessionId,
+        });
+        expect(await target.dispatch(session, ledgerActions[0], 'next')).toMatchObject({
+          outcome: 'resolved',
+          value: { result: 'completed' },
+        });
+      }
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(2);
+      expect(target.rows.size).toBe(0);
+    },
+  );
   it.each(['success', 'rejected', 'unconfirmed', 'invalid'] as const)(
     'R19a reflects only verified %s responses',
     async (outcome) => {
