@@ -612,7 +612,7 @@ describe('Computer Use Windows helper transport', () => {
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
   const identityTargets = [{ pid: 4242, processStartTime: '133000000000000001' }];
 
-  it('checks target identities as the first operation without exposing identities in results', async () => {
+  it('checks target identities as the first operation with mixed results in request order and no identities', async () => {
     const results = [
       { result: 'alive' },
       { result: 'terminated', reason: 'signaled' },
@@ -630,12 +630,18 @@ describe('Computer Use Windows helper transport', () => {
       },
     });
     const output = await addon.checkTargetIdentity(targets);
+    // Results carry no identity: each position must correspond to the same request position.
     expect(output).toEqual(results);
     expect(JSON.stringify(output)).not.toMatch(/pid|processStartTime|133000000000000001/u);
     expect(helper().served).toEqual(['handshake', 'check_target_identity']);
   });
 
   it.each([
+    { results: 'x' },
+    { results: [1] },
+    { results: [{ result: 'terminated', reason: 'access_denied' }] },
+    { results: [{ result: 'unverifiable', reason: 'start_time_mismatch' }] },
+    { results: [{ result: 'terminated', reason: 'signaled', extra: true }] },
     { results: [{ result: 'unknown' }] },
     { results: [{ result: 'terminated', reason: 'unknown' }] },
     { results: [{ result: 'unverifiable', reason: 'no_process' }] },
@@ -2082,6 +2088,7 @@ int main() {
                   inputAttemptCount: 1,
                 },
               ],
+        check_target_identity: () => ['target_identity_result', { results: [{ result: 'alive' }] }],
         close_session: (metadata) =>
           inFlight
             ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
@@ -2112,6 +2119,11 @@ int main() {
       );
       await vi.advanceTimersByTimeAsync(ending === 'timeout' ? 10_001 : 0);
       expect(await dispatched).toBe('unconfirmed');
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(addon.checkTargetIdentity(identityTargets)).resolves.toEqual([
+        { result: 'alive' },
+      ]);
+      expect(helper().served).toContain('check_target_identity');
       expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
       if (ending === 'native-error') {
         const closing = host.close(session).then(

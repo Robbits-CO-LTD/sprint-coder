@@ -135,6 +135,9 @@ describe.skipIf(process.platform !== 'win32')('Windows target identity component
         timeout: 45000,
       });
       if (result.error) throw result.error;
+      for (const line of result.stdout.split(/\r?\n/u)) {
+        if (line.startsWith('SKIP:')) console.info(line);
+      }
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain('PASS: target identity component');
     } finally {

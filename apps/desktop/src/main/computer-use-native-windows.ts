@@ -634,7 +634,8 @@ class WindowsComputerUseHelperClient {
     sessionKey: string | undefined,
     requestKey: string | undefined,
   ): Promise<unknown> {
-    if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
+    if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
+      this.assertSemanticAvailable();
     let owner: StartTransmission | undefined;
     let attempt: symbol | undefined;
     if (operation === 'start_session') {
@@ -698,7 +699,8 @@ class WindowsComputerUseHelperClient {
       helper = this.helperGeneration;
       if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
         return { ok: false };
-      if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
+      if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
+        this.assertSemanticAvailable();
       if (semantic !== undefined) {
         if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
           throw semanticNotSubmitted();
@@ -720,7 +722,8 @@ class WindowsComputerUseHelperClient {
         operationTimeoutMilliseconds(operation),
         isComputerUseStopOperation(operation),
         () => {
-          if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
+          if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
+            this.assertSemanticAvailable();
           if (owner !== undefined) {
             if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
               throw new Error('Computer Use start canceled before send');

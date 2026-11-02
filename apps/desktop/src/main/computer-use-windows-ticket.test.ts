@@ -25,9 +25,16 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
   it('names the preflight pair in the wire protocol on both sides', () => {
     expect(protocolHeader).toMatch(/kPreflight = 11,/u);
     expect(protocolHeader).toMatch(/kPreflightResult = 12,/u);
-    expect(protocolHeader).toContain('MessageType::kPreflightResult);');
     expect(computerUseNativeMessageTypeValue('preflight')).toBe(11);
     expect(computerUseNativeMessageTypeValue('preflight_result')).toBe(12);
+  });
+
+  it('bounds known message types by the final target identity result', () => {
+    expect(protocolHeader).toMatch(/kTargetIdentityResult = 14,/u);
+    expect(computerUseNativeMessageTypeValue('target_identity_result')).toBe(14);
+    expect(
+      between(protocolHeader, 'inline bool IsKnownMessageType(', 'inline bool ValidateHeader('),
+    ).toContain('value <= static_cast<std::uint16_t>(MessageType::kTargetIdentityResult);');
   });
 
   it('sends the Windows preflight as its own message under its own request key', () => {
