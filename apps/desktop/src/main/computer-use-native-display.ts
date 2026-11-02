@@ -50,6 +50,7 @@ export type NativeDisplayLabel =
   | Readonly<{ kind: 'rejected' }>;
 
 export function sanitizeNativeDisplayLabel(value: string): NativeDisplayLabel {
+  if (/\p{Cs}/u.test(value)) return { kind: 'rejected' };
   const spaced = [...value]
     .map((character) => (inRanges(character, nativeDisplayWhitespaceRanges) ? ' ' : character))
     .join('')

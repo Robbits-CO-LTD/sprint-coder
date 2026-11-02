@@ -2241,9 +2241,15 @@ describe('Computer Use contracts', () => {
       externalApplication: 'not_applicable',
       unsignedWarning: 'none',
     };
-    expect(contracts.computerUseApprovalSchema.parse({ ...approval, display }).display).toEqual(
-      display,
-    );
+    expect(() => contracts.computerUseApprovalSchema.parse({ ...approval, display })).toThrow();
+    expect(
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        display,
+        eligibleForPlan: false,
+        allowedDecisions: ['allow_once', 'deny'],
+      }).display,
+    ).toEqual(display);
     expect(
       contracts.computerUseApprovalSchema.parse({ ...approval, display: null }).display,
     ).toBeNull();

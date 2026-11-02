@@ -261,9 +261,13 @@ export type ComputerUseNativeApprovalOffer = Readonly<{
   kind: 'approval_required';
   approvalGeneration: number;
   remainingMs: number;
-  effect: 'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
-  display: ComputerUseWindowsApprovalDisplay | null;
-}>;
+}> &
+  {
+    [E in ComputerUseWindowsApprovalDisplay['effect']]: Readonly<{
+      effect: E;
+      display: Extract<ComputerUseWindowsApprovalDisplay, { effect: E }> | null;
+    }>;
+  }[ComputerUseWindowsApprovalDisplay['effect']];
 
 /**
  * The typed, pre-input outcome of `approvalApprove` (ADR v2 S4-4 addendum, section 4). It has no

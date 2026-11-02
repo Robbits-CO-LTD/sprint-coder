@@ -6209,9 +6209,64 @@ export function computerUseActionKindIsPlanEligible(kind: ComputerUseActionKind)
   return (computerUsePlanEligibleActionKinds as readonly ComputerUseActionKind[]).includes(kind);
 }
 export const computerUseNativeExtensionSchema = z.string().regex(/^[a-z0-9_+-]{1,32}$/u);
+// Keep these sets identical to the native classifier and the Main sanitizer.
+const nativeDisplayWhitespaceRanges: readonly (readonly [number, number])[] = [
+  [0x09, 0x09],
+  [0x0a, 0x0a],
+  [0x0b, 0x0b],
+  [0x0c, 0x0c],
+  [0x0d, 0x0d],
+  [0x20, 0x20],
+  [0x85, 0x85],
+  [0xa0, 0xa0],
+  [0x1680, 0x1680],
+  [0x2000, 0x200a],
+  [0x2028, 0x2028],
+  [0x2029, 0x2029],
+  [0x202f, 0x202f],
+  [0x205f, 0x205f],
+  [0x3000, 0x3000],
+];
+const nativeDisplayIgnorableRanges: readonly (readonly [number, number])[] = [
+  [0x00ad, 0x00ad],
+  [0x034f, 0x034f],
+  [0x061c, 0x061c],
+  [0x115f, 0x115f],
+  [0x1160, 0x1160],
+  [0x17b4, 0x17b4],
+  [0x17b5, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xfff0, 0xfff8],
+  [0x1bca0, 0x1bca3],
+  [0x1d173, 0x1d17a],
+  [0xe0000, 0xe0fff],
+];
+
+// Accept only sanitized values. N8-2b must parse in sanitizer -> schema order.
 const computerUseNativeDisplayLabelSchema = z
   .string()
   .min(1)
+  .refine(
+    (value) =>
+      !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) &&
+      [...value].every((character) => {
+        const code = character.codePointAt(0)!;
+        return (
+          !nativeDisplayIgnorableRanges.some(([first, last]) => code >= first && code <= last) &&
+          (code === 0x20 ||
+            !nativeDisplayWhitespaceRanges.some(([first, last]) => code >= first && code <= last))
+        );
+      }) &&
+      !/^ | $| {2}/u.test(value),
+    'Native display label must already be sanitized',
+  )
   .refine(
     (value) => new TextEncoder().encode(value).byteLength <= 512,
     'Native display label exceeds 512 UTF-8 bytes',
@@ -6295,6 +6350,11 @@ export const computerUseApprovalSchema = z
   })
   .strict()
   .superRefine((approval, context) => {
+    if (
+      approval.display != null &&
+      (approval.eligibleForPlan || approval.allowedDecisions.includes('allow_plan'))
+    )
+      context.addIssue({ code: 'custom', message: 'Native display approvals are allow_once only' });
     if (new Set(approval.allowedDecisions).size !== approval.allowedDecisions.length)
       context.addIssue({ code: 'custom', message: 'Approval decisions must be unique' });
     if (!approval.allowedDecisions.includes('allow_once'))
