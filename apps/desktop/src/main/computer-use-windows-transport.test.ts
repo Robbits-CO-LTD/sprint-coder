@@ -3407,6 +3407,22 @@ int main() {
     ).resolves.toMatchObject({ result: 'closed' });
     expect(spawn).toHaveBeenCalledTimes(1);
   });
+  it('PR7b never evicts a live session generation, so Stop still reaches it', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    await target.addon.startSession!({ sessionId: 'keeper', profile });
+    for (let index = 0; index < 130; index += 1) {
+      const sessionId = `finished-${index}`;
+      await target.addon.startSession!({ sessionId, profile });
+      await target.addon.close!({ sessionId, cancelEpoch: 1 });
+    }
+    await expect(
+      target.addon.close!({ sessionId: 'keeper', cancelEpoch: 1 }),
+    ).resolves.toMatchObject({ result: 'closed' });
+    await expect(target.addon.close!({ sessionId: 'finished-0', cancelEpoch: 2 })).rejects.toThrow(
+      'native_stop_unconfirmed',
+    );
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
   it('PR7b holds Host close through exit transfer and absorbs late verification without writes', async () => {
     let release!: () => void;
     let closeLedger!: WindowsCloseCallbacks;

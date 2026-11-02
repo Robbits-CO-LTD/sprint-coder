@@ -377,8 +377,14 @@ class WindowsComputerUseHelperClient {
       if (owner.helper !== null) continue;
       owner.helper = generation;
       this.sessionGenerations.set(owner.sessionId, generation);
+      // Evict only finished sessions: a live start owner must keep its generation so Stop reaches it.
+      // Live owners are capped at 16 starts, so an evictable entry always exists past 128.
       if (this.sessionGenerations.size > 128)
-        this.sessionGenerations.delete(this.sessionGenerations.keys().next().value!);
+        for (const sessionId of this.sessionGenerations.keys())
+          if (!this.starts.has(sessionId)) {
+            this.sessionGenerations.delete(sessionId);
+            break;
+          }
       this.termination.owned?.(generation, 'session', owner.sessionId);
     }
     for (const owner of this.discoveries.values()) {
