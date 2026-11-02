@@ -795,6 +795,12 @@ export function createComputerUseNativeHost(
         request,
         options.windowsPhysicalBoundsToDip,
       );
+      if (
+        existing.platform === 'win32' &&
+        typeof existing.raw.processStartTime === 'string' &&
+        session.raw.processStartTime !== existing.raw.processStartTime
+      )
+        throw new ComputerUseNativeUnavailableError('native_session_identity_mismatch');
       assertStartOwner(owner);
       owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
       sessions.set(session.sessionId, session);
@@ -1925,8 +1931,7 @@ function parseWindowsProcessStartTime(raw: Readonly<Record<string, unknown>>): s
   if (value === undefined) return null;
   if (
     typeof value !== 'string' ||
-    !/^(0|[1-9][0-9]{0,19})$/u.test(value) ||
-    value.trim() !== value ||
+    !/^[1-9][0-9]{0,19}$/u.test(value) ||
     BigInt(value) > 18_446_744_073_709_551_615n
   )
     throw new ComputerUseNativeUnavailableError('native_session_invalid');
