@@ -1,7 +1,8 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMPUTER_USE_NATIVE_FEATURE_FLAG,
@@ -117,10 +118,7 @@ describe('Computer Use native compiled provenance', () => {
   });
 
   it('keeps Windows maximum mode positive-only and emits authoritative display bounds', () => {
-    const source = readFileSync(
-      resolve(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
 
     expect(source).toContain('sprint-coder-computer-use-fixture.exe');
     expect(source).toContain('Microsoft Corporation');
@@ -143,10 +141,7 @@ describe('Computer Use native compiled provenance', () => {
   });
 
   it('rejects an arbitrary signed-looking Acme executable at every Windows attach boundary', () => {
-    const source = readFileSync(
-      resolve(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const picker = source.slice(
       source.indexOf('bool PickWindowsExecutable('),
       source.indexOf('bool SameWindowsPath('),

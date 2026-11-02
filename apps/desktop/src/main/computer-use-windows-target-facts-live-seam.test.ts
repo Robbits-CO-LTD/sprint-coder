@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,7 @@ import { describe, expect, it } from 'vitest';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const fixtureDirectory = join(nativeDirectory, 'fixtures', 'win32-acceptance');
-const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const host = readWindowsHostSource();
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 
 function cut(start: string, end: string): string {

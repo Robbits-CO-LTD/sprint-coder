@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -36,7 +37,7 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
   it('is not wired: only the measurement parts include it, and nothing calls those yet', () => {
     // Windows does not know it. The macOS addon includes it for the C4-2a measurement parts, whose
     // only caller does not exist yet (see computer-use-approval-capture-parts.test.ts).
-    const windows = read('computer_use_windows_host.cc');
+    const windows = readWindowsHostSource();
     expect(windows).not.toContain('computer_use_effect_measurement.h');
     expect(windows).not.toContain('computer_use_sha256.h');
     const macos = read('computer_use_macos.mm');

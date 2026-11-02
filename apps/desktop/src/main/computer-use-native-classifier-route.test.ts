@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const macos = readFileSync(join(nativeDirectory, 'computer_use_macos.mm'), 'utf8');
-const windows = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const windows = readWindowsHostSource();
 
 function between(start: string, end: string): string {
   const from = macos.indexOf(start);

@@ -1,5 +1,6 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -21,7 +22,7 @@ import { describe, expect, it } from 'vitest';
 // to a temporary directory and has no .pdb.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const hostSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const hostSource = readWindowsHostSource();
 
 function block(name: string): string {
   const begin = hostSource.indexOf(`// BEGIN ${name}`);

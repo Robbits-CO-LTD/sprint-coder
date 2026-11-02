@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -14,7 +15,10 @@ import {
 // decision word, and the receipt words and bounds are the ones Main parses.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
+const read = (name: string): string =>
+  name === 'computer_use_windows_host.cc'
+    ? readWindowsHostSource()
+    : readFileSync(join(nativeDirectory, name), 'utf8');
 const risk = read('computer_use_native_approved_risk.h');
 const offer = read('computer_use_native_approval_offer.h');
 const decisions = read('computer_use_preflight_classifier.h');

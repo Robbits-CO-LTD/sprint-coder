@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +9,10 @@ import { describe, expect, it } from 'vitest';
 // names no approval or version, and its refusal conditions stay written out.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
+const read = (name: string): string =>
+  name === 'computer_use_windows_host.cc'
+    ? readWindowsHostSource()
+    : readFileSync(join(nativeDirectory, name), 'utf8');
 const name = 'computer_use_artifact_read_judgement.h';
 const header = read(name);
 const harness = read('computer_use_protocol_fuzz.cc');

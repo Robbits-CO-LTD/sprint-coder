@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -9,7 +10,7 @@ import { computerUseNativeMessageTypeValue } from './computer-use-native-protoco
 // does not survive a session boundary.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const host = readWindowsHostSource();
 const protocolHeader = readFileSync(join(nativeDirectory, 'computer_use_protocol.h'), 'utf8');
 
 function between(source: string, from: string, to: string): string {

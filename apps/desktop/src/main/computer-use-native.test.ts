@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -340,10 +341,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('keeps the trusted picker, identity, pipe, WGC, session, and input gates in source', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     expect(source.indexOf('#include <ole2.h>')).toBeGreaterThanOrEqual(0);
     expect(source.indexOf('#include <ole2.h>')).toBeLessThan(
       source.indexOf('#include <UIAutomation.h>'),
@@ -397,10 +395,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('publishes parent death into the shared input gate before disconnecting the pipe', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const watcherSource = source.slice(
       source.indexOf('parent_watcher = std::thread'),
       source.indexOf('ServePipe(pipe, probe)'),
@@ -452,10 +447,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('uses bounded payment labels in both native risk classifiers', () => {
-    const windows = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const windows = readWindowsHostSource();
     const macos = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
       'utf8',
@@ -517,10 +509,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('holds a canonical no-write/no-delete executable handle across launch and revalidates the running image', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const openSource = source.slice(
       source.indexOf('bool OpenLockedWindowsExecutable('),
       source.indexOf('bool BuildWindowsExecutableIdentity('),
@@ -547,10 +536,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('allows only same-path same-signer Windows updates to refresh the executable digest', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const listSource = source.slice(
       source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
@@ -579,10 +565,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('binds visual actions to recaptured local image patches and keeps bounded digests only', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const visualStart = source.indexOf('constexpr std::size_t kVisualPatchSize');
     const visualSource = source.slice(
       visualStart,
@@ -605,10 +588,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('revisions safe same-owner dialogs but yields for native prompts and unsupported proxy hosts', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const dialogSource = source.slice(
       source.indexOf('bool IsOwnedByRootWindow('),
       source.indexOf('BOOL CALLBACK CollectTopLevelWindow('),
@@ -639,10 +619,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('refocuses an existing session to its observation-bound safe dialog without rebinding the set', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const resolverSource = source.slice(
       source.indexOf('bool ResolveWindowsSessionRefocusTarget('),
       source.indexOf('BOOL CALLBACK CollectTopLevelWindow('),
@@ -675,10 +652,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('rebinds only an explicit resume to the current safe dialog set and requires a fresh observation', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const invalidationSource = source.slice(
       source.indexOf('void InvalidateWindowsObservation('),
       source.indexOf('bool IsProcessElevated('),
@@ -734,10 +708,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('initializes explicit-resume in the shared admission and start parser', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const listSource = source.slice(
       source.indexOf('bool MeasureWindowsDiscovery('),
       source.indexOf('std::string FrameIdKey('),
@@ -761,10 +732,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('carries an OS-evidenced target policy language through every Windows response boundary', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
 
     expect(source).toContain('PolicyLanguageForWindowsExecutable');
     expect(source).toContain('GetFileMUIPath');
@@ -773,10 +741,7 @@ describe('Windows native helper compile boundary', () => {
   });
 
   it('rejects exact common remote desktop executable identities without blocking ordinary apps', () => {
-    const source = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const source = readWindowsHostSource();
     const classifier = source.slice(
       source.indexOf('bool IsDisallowedTargetExecutable('),
       source.indexOf('bool EnumerateWindowsForExecutable('),
@@ -1425,10 +1390,7 @@ describe('macOS native capture boundary', () => {
     expect(hostSource).toContain(
       "NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable'",
     );
-    const windowsHost = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const windowsHost = readWindowsHostSource();
     // S5-a: the Windows helper uses the same portable ticket slot, and never the approval vocabulary.
     expect(windowsHost).toContain('#include "computer_use_native_ticket.h"');
     expect(windowsHost).toContain('NativeOrdinaryTicketSlot');
@@ -1577,10 +1539,7 @@ describe('macOS native capture boundary', () => {
     // intent except through `Offer`.
     expect(flow).not.toMatch(/#import|CoreGraphics|napi|<chrono>|<random>|Sec[A-Z]/u);
     // The Windows host knows none of it.
-    const windowsHost = readFileSync(
-      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-      'utf8',
-    );
+    const windowsHost = readWindowsHostSource();
     expect(windowsHost).not.toMatch(/approvalApprove|dispatchApproved|NativeApprovalFlow/u);
   });
 

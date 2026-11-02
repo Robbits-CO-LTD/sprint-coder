@@ -1,6 +1,7 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 // compiler can be found the test is skipped rather than failed.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const source = readWindowsHostSource();
 
 function between(start: string, end: string): string {
   const from = source.indexOf(start);

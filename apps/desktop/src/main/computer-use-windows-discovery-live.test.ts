@@ -1,12 +1,6 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFile, spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -80,7 +74,7 @@ function findBuild(): Build | null {
 // Native integration: a cancellable discovery reads only its own executable; a separate control lifetime stays alive.
 // No public Start/grant or target-app acceptance is claimed. Reads name only this process
 // with a deliberately wrong path; focus/input calls are replaced with failing tripwires.
-const nativeSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const nativeSource = readWindowsHostSource();
 
 function instrumentPendingHost(source: string): string {
   const from = source.indexOf('bool MeasureWindowsDiscovery(');

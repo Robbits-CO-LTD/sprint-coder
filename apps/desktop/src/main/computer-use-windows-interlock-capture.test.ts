@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const header = read('computer_use_windows_interlock_capture.h');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const harness = read('computer_use_protocol_fuzz.cc');
 
 const BEGIN = '// BEGIN sync interlock entry (classifier v2 S5-c-1)';

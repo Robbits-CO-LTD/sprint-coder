@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -152,7 +153,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
 
   it('is built into macOS only, and the Windows host does not know it', () => {
     expect(macos).toContain('#include "computer_use_effect_shadow.h"');
-    const windows = read('computer_use_windows_host.cc');
+    const windows = readWindowsHostSource();
     expect(windows).not.toContain('computer_use_effect_shadow.h');
     expect(windows).not.toContain('computer_use_effect_classifier.h');
     expect(harness).toContain('#include "computer_use_effect_shadow.h"');

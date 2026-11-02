@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -11,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const classifier = read('computer_use_effect_classifier.h');
 
 function quotedTerms(text: string, from: string, prefix: string): string[] {

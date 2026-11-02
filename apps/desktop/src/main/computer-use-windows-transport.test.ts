@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type { ComputerAppProfileRecord } from './persistence';
 import {
   ComputerUseController,
@@ -1414,10 +1415,7 @@ describe('Computer Use Windows helper transport', () => {
   it.skipIf(process.platform === 'win32')(
     'retains the actual public dispatch error before a separately delivered Stop refusal',
     async () => {
-      const native = readFileSync(
-        join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-        'utf8',
-      );
+      const native = readWindowsHostSource();
       const start = native.indexOf(
         '} else if (kind == "invoke"',
         native.indexOf('bool DispatchWindowsAction('),

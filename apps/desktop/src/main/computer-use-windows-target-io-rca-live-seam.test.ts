@@ -1,5 +1,6 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 // delay Stop/Close, publish stale results, or admit another synchronous target operation.
 // Gates are injected only into generated test source; only our own fixture windows are enumerated.
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const host = readWindowsHostSource();
 const measurement = '  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);';
 const enumeration = 'EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows))';
 const contextFactory =
