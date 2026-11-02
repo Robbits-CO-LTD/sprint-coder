@@ -46,6 +46,45 @@ function setup() {
 afterEach(() => vi.useRealTimers());
 
 describe('owned Main window discovery', () => {
+  it('releases a never-sent owner still waiting for query settlement after its generation exits', async () => {
+    const { manager, query, cancelUnsubmitted } = setup();
+    query.mockImplementation(() => new Promise(() => {}));
+    cancelUnsubmitted.mockReturnValue('never_sent');
+    const handle = manager.begin({});
+    manager.bindGeneration(handle.id, 1);
+    await Promise.resolve();
+    await expect(handle.stop()).resolves.toEqual({ kind: 'not_submitted' });
+    expect(manager.quarantined()).toBe(true);
+    manager.terminateGeneration(1);
+    expect(manager.quarantined()).toBe(false);
+  });
+  it('terminates only the exited generation and never adopts its late windows', async () => {
+    const { manager, query, stop } = setup();
+    const oldReply = deferred<unknown>();
+    const newReply = deferred<unknown>();
+    query
+      .mockImplementationOnce(() => oldReply.promise)
+      .mockImplementationOnce(() => newReply.promise);
+    const old = manager.begin({});
+    const fresh = manager.begin({});
+    manager.bindGeneration(old.id, 1);
+    manager.bindGeneration(fresh.id, 2);
+    const terminal = vi.fn();
+    void old.terminal.then(terminal);
+    await Promise.resolve();
+    manager.terminateGeneration(1);
+    manager.terminateGeneration(1);
+    await expect(old.result).rejects.toThrow('canceled');
+    await expect(old.stop()).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(terminal).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
+    expect(manager.quarantined()).toBe(false);
+    oldReply.resolve(completed(old.id, [{ stale: true }]));
+    newReply.resolve(completed(fresh.id, [{ fresh: true }]));
+    await expect(fresh.result).resolves.toEqual([{ fresh: true }]);
+    await expect(old.terminal).resolves.toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(stop).not.toHaveBeenCalled();
+  });
   it('publishes one shared Stop before any deferred query can run', async () => {
     const { manager, query, stop } = setup();
     const handle = manager.begin({});

@@ -277,6 +277,7 @@ export function createWindowsComputerUseNativeAddon(
 }
 
 type StartTransmission = {
+  helper: number | null;
   sessionId: string;
   stopped: boolean;
   everSent: boolean;
@@ -365,6 +366,37 @@ class WindowsComputerUseHelperClient {
   private readonly persistedLifetimes = new WeakSet<object>();
   private termination: WindowsTerminationCallbacks | undefined;
   private readonly generations = new Map<number, HelperGeneration>();
+  private readonly sessionGenerations = new Map<string, number>();
+
+  private bindOwners(generation: number): void {
+    if (this.termination === undefined) return;
+    const record = this.generations.get(generation);
+    if (record === undefined || record.exited || record.killRequested) return;
+    for (const owner of this.starts.values()) {
+      if (owner.helper !== null) continue;
+      owner.helper = generation;
+      this.sessionGenerations.set(owner.sessionId, generation);
+      this.termination.owned?.(generation, 'session', owner.sessionId);
+    }
+    for (const owner of this.discoveries.values()) {
+      if (owner.helper !== null) continue;
+      owner.helper = generation;
+      this.termination.owned?.(generation, 'discovery', owner.id);
+    }
+  }
+
+  private assertSessionGeneration(sessionId: string): void {
+    if (this.termination === undefined) return;
+    const generation = this.sessionGenerations.get(sessionId);
+    const record = generation === undefined ? undefined : this.generations.get(generation);
+    if (
+      record === undefined ||
+      record.exited ||
+      record.killRequested ||
+      generation !== this.helperGeneration
+    )
+      throw new Error('native_stop_unconfirmed');
+  }
 
   configureWindowsTermination(callbacks: WindowsTerminationCallbacks): void {
     this.termination = callbacks;
@@ -379,6 +411,30 @@ class WindowsComputerUseHelperClient {
   cleanupWindowsGeneration(generation: number): void {
     const record = this.generations.get(generation);
     if (record === undefined || !record.exited) return;
+    for (const [id, owner] of this.starts) {
+      if (owner.helper !== generation) continue;
+      owner.stopped = true;
+      owner.closed = true;
+      this.starts.delete(id);
+    }
+    for (const [id, owner] of this.discoveries) {
+      if (owner.helper !== generation) continue;
+      owner.stopped = true;
+      owner.closed = true;
+      this.discoveries.delete(id);
+    }
+    for (const [id, owner] of this.semantic) {
+      if (owner.helper !== generation) continue;
+      owner.confirmed = true;
+      owner.uncertain = false;
+      this.semantic.delete(id);
+    }
+    for (const [id, helper] of this.sessionGenerations) {
+      if (helper !== generation) continue;
+      this.sessionGenerations.delete(id);
+      this.lifetimes.delete(id);
+      this.completedLifetimes.delete(id);
+    }
     clearTimeout(record.timer);
     record.socket?.destroy();
     record.decoder.readBuffer = Buffer.alloc(0);
@@ -399,9 +455,12 @@ class WindowsComputerUseHelperClient {
     record.timer = setTimeout(() => {
       if (!record.exited) this.termination!.event(record.id, 'exit_wait_exceeded');
     }, 2_000);
-    this.failAll(error, 'abortTransport');
-    record.socket?.destroy();
-    if (this.socket === record.socket) this.socket = null;
+    // A valid close already in flight may still refine the exit ledger (R1a).
+    this.failAll(error, 'abortTransport', cause === 'stop');
+    if (cause !== 'stop') {
+      record.socket?.destroy();
+      if (this.socket === record.socket) this.socket = null;
+    }
     // Neither a successful kill nor a failed kill proves that the process has exited.
     try {
       record.child.kill();
@@ -451,6 +510,12 @@ class WindowsComputerUseHelperClient {
       throw new Error('native_stop_unconfirmed');
     const persisted = () => {
       if (
+        this.termination !== undefined &&
+        (this.generations.get(proof.helper)?.killRequested !== false ||
+          this.generations.get(proof.helper)?.exited !== false)
+      )
+        return;
+      if (
         this.closeLedger !== undefined &&
         proof.lifetime !== this.lifetimes.get(receipt.sessionId)
       )
@@ -477,7 +542,12 @@ class WindowsComputerUseHelperClient {
       if (confirmation === undefined) {
         confirmation = this.closeLedger.verified(proof.helper, receipt.sessionId, persisted).then(
           (result) => {
-            if (owner !== undefined) {
+            if (
+              owner !== undefined &&
+              (this.termination === undefined ||
+                (this.generations.get(proof.helper)?.killRequested === false &&
+                  this.generations.get(proof.helper)?.exited === false))
+            ) {
               owner.confirmed = true;
               owner.uncertain = false;
               owner.closeCandidate = false;
@@ -643,10 +713,17 @@ class WindowsComputerUseHelperClient {
       attempts: new Set([attempt]),
     };
     this.discoveries.set(id, owner);
+    if (this.socket !== null) this.bindOwners(this.helperGeneration);
     this.activityGeneration += 1;
     this.idleShutdownPending = false;
     try {
       await this.ensureConnected();
+      this.bindOwners(this.helperGeneration);
+      if (
+        this.termination !== undefined &&
+        (owner.closed || owner.helper !== this.helperGeneration)
+      )
+        throw new ComputerUseDiscoveryNotSubmittedError('Discovery generation ended');
       if (this.hasUnconfirmedSemanticInputs())
         throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed semantic input remains');
       if (!this.discoveryHandshakeSupported)
@@ -770,6 +847,8 @@ class WindowsComputerUseHelperClient {
     requestKey: string | undefined,
     dispatchCallbacks?: WindowsDispatchCallbacks,
   ): Promise<unknown> {
+    if (sessionKey !== undefined && operation !== 'start_session')
+      this.assertSessionGeneration(sessionKey);
     if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
       this.assertSemanticAvailable();
     let owner: StartTransmission | undefined;
@@ -781,6 +860,7 @@ class WindowsComputerUseHelperClient {
       if (owner === undefined) {
         if (this.starts.size >= 16) throw new Error('Unconfirmed native starts remain');
         owner = {
+          helper: null,
           sessionId: sessionKey,
           stopped: false,
           everSent: false,
@@ -788,6 +868,7 @@ class WindowsComputerUseHelperClient {
           attempts: new Set(),
         };
         this.starts.set(sessionKey, owner);
+        if (this.socket !== null) this.bindOwners(this.helperGeneration);
         if (this.closeLedger !== undefined) {
           this.completedLifetimes.delete(sessionKey);
           this.lifetimes.set(sessionKey, {});
@@ -837,6 +918,8 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
+      this.bindOwners(helper);
+      if (sessionKey !== undefined) this.assertSessionGeneration(sessionKey);
       if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
         return { ok: false };
       if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
@@ -881,6 +964,8 @@ class WindowsComputerUseHelperClient {
         semantic,
         dispatchCallbacks,
       );
+      if (this.termination !== undefined && this.generations.get(helper)?.exited !== false)
+        throw new Error('native_stop_unconfirmed');
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
@@ -903,7 +988,11 @@ class WindowsComputerUseHelperClient {
             activity,
           });
           const lifetime = this.lifetimes.get(sessionKey);
-          if (lifetime !== undefined && !this.persistedLifetimes.has(lifetime))
+          if (
+            lifetime !== undefined &&
+            !this.persistedLifetimes.has(lifetime) &&
+            !this.closeConfirmations.has(lifetime)
+          )
             this.closeLedger?.received(helper, sessionKey);
         }
         if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
@@ -1000,6 +1089,7 @@ class WindowsComputerUseHelperClient {
     if (generation !== undefined) {
       this.generations.set(generation.id, generation);
       this.termination!.started(generation.id);
+      this.bindOwners(generation.id);
     }
     child.once('error', () => {
       // A failed spawn has no process and does not emit exit.
@@ -1365,12 +1455,17 @@ class WindowsComputerUseHelperClient {
     }
   }
 
-  private failAll(error: unknown, cause: 'failAll' | 'abortTransport' = 'failAll'): void {
+  private failAll(
+    error: unknown,
+    cause: 'failAll' | 'abortTransport' = 'failAll',
+    retainStops = false,
+  ): void {
     // Whatever armed the idle teardown is being failed right here, and the next request connects a
     // fresh helper that the old session's teardown has no claim on.
     this.idleShutdownPending = false;
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
+      if (retainStops && pending.stopsSession) continue;
       this.markSemanticUncertain(pending);
       pending.dispatchCallbacks?.unconfirmed(cause);
       clearTimeout(pending.timeout);

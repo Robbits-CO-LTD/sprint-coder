@@ -645,6 +645,36 @@ describe('Computer Use native Main adapter', () => {
       >().toEqualTypeOf<never>();
     },
   );
+  it('keeps Windows process identity out of observe output', async () => {
+    const processStartTime = '133000000000000001';
+    const { host, session } = await win32TicketScenario(
+      true,
+      undefined,
+      {
+        observe: () => ({
+          pid: 42,
+          processStartTime,
+          captureWidth: 1,
+          captureHeight: 1,
+          screenshot: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            'base64',
+          ),
+          screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+          maximumMode: 'full_access_app',
+        }),
+      },
+      { processStartTime },
+    );
+    const observation = await host.observe(session, {
+      requestId: 'observe-identity',
+      cancelEpoch: 0,
+    });
+    expect(observation.images).toHaveLength(1);
+    expect(observation).not.toHaveProperty('pid');
+    expect(observation).not.toHaveProperty('processStartTime');
+    expect(JSON.stringify(observation)).not.toContain(processStartTime);
+  });
 
   it.each([undefined, '9007199254740994'])(
     'rejects a missing or changed creation time on existing start (%s)',

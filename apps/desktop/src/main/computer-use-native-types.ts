@@ -18,6 +18,7 @@ export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending
 export type WindowsTerminationCallbacks = Readonly<{
   prepare(): Promise<void>;
   started(generation: number): void;
+  owned?(generation: number, kind: 'session' | 'discovery', id: string): void;
   event(generation: number, kind: 'kill_requested' | 'pipe_closed' | 'exit_wait_exceeded'): void;
   exited(generation: number, cause: 'stop' | 'crash' | 'abortTransport'): void;
 }>;

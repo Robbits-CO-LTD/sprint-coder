@@ -3314,6 +3314,321 @@ int main() {
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it('PR7b R12 removes both sessions after the shared generation exits', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const first = await startSession(target.host, 'session-a', 'turn-a');
+    const second = await startSession(target.host, 'session-b', 'turn-b');
+    target.addon.requestWindowsTermination!();
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(target.host.close(first)).resolves.toBeUndefined();
+    await expect(target.host.close(second)).resolves.toBeUndefined();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(target.quarantines).toEqual([]);
+    await expect(startSession(target.host, 'session-c', 'turn-c')).resolves.toMatchObject({
+      sessionId: 'session-c',
+    });
+    const count = sockets[1]!.writes.length;
+    await expect(target.addon.close!({ sessionId: 'session-a', cancelEpoch: 2 })).rejects.toThrow();
+    expect(sockets[1]!.writes).toHaveLength(count);
+  });
+  it('PR7b binds a start created while the helper pipe is connecting', async () => {
+    const connect = transport.connectPipe;
+    const target = ledgerTarget(true, undefined, true);
+    let starting: Promise<string> | undefined;
+    try {
+      transport.connectPipe = () => {
+        const socket = connect!();
+        starting = Promise.resolve(
+          target.addon.startSession!({ sessionId: 'during-connect', profile }),
+        ).then(
+          () => 'resolved',
+          () => 'rejected',
+        );
+        return socket;
+      };
+      await target.addon.listTargets!({});
+      expect(await starting).toBe('resolved');
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      transport.connectPipe = connect;
+    }
+  });
+  it('PR7b semantic quarantine clears only after the exit transfer succeeds', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'session-a', 'turn-a');
+    target.control.response = ['error', { code: 'semantic_input_in_flight', accepted: true }];
+    await target.dispatch(session, ledgerActions[4]);
+    target.control.failTransfer = true;
+    target.addon.requestWindowsTermination!();
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(true);
+    expect(target.host.availability().observe).toBe(false);
+    target.control.failTransfer = false;
+    await target.host.listTargets!().catch(() => undefined);
+    expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
+    await expect(target.host.close(session)).resolves.toBeUndefined();
+    expect(target.quarantines).toHaveLength(1);
+  });
+  it('PR7b R1a verifies a close receipt after kill and before exit without closing the session early', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-a', 'turn-a');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      target.helper().holdOnly('close_session');
+      const close = target.host.close(session).then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      target.addon.requestWindowsTermination!();
+      target.helper().releaseLast('close_session');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.rows.size).toBe(0);
+      expect(target.host.availability().control).toBe(false);
+      expect(child.killCalls).toBe(1);
+      expect(await close).toBe('rejected');
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.results.at(-1)!.value.state.result).toBe('terminated_clean');
+      expect(target.quarantines).toEqual([]);
+      await expect(target.host.close(session)).resolves.toBeUndefined();
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it('PR7b R13 does not write a receipt verified after exit while transfer is pending', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'session-a', 'turn-a');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(session);
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    const evidence = await target.addon.close!(receipt);
+    target.control.failTransfer = true;
+    children[0]!.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    const transfers = target.control.transfers;
+    await expect(target.addon.confirmSessionClosed!(receipt, evidence)).resolves.toEqual({
+      status: 'pending',
+    });
+    expect(target.control.transfers).toBe(transfers);
+    expect(target.rows.size).toBe(1);
+    expect(target.quarantines).toEqual([]);
+  });
+  it('PR7b R13 ignores a valid late dispatch response and duplicate exit in a new generation', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    const old = await startSession(target.host, 'old-session', 'old-turn');
+    const oldHelper = target.helper();
+    oldHelper.holdOnly('dispatch');
+    const pending = target.dispatch(old);
+    await vi.advanceTimersByTimeAsync(0);
+    const oldChild = children[0]!;
+    oldChild.emit('exit', 1, null);
+    expect((await pending).outcome).toBe('rejected');
+    await vi.advanceTimersByTimeAsync(0);
+    const quarantines = [...target.quarantines];
+    target.control.pid = 43;
+    const fresh = await startSession(target.host, 'fresh-session', 'fresh-turn');
+    oldHelper.releaseLast('dispatch');
+    oldChild.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.quarantines).toEqual(quarantines);
+    expect(target.rows.size).toBe(0);
+    const writes = sockets[1]!.writes.length;
+    await expect(
+      target.host.observe(old, { requestId: 'old-observe', cancelEpoch: 0 }),
+    ).rejects.toThrow('native_session_missing');
+    expect(sockets[1]!.writes).toHaveLength(writes);
+    expect((await target.dispatch(fresh)).outcome).toBe('resolved');
+    expect(children[1]!.killed).toBe(false);
+  });
+  it('PR7b duplicate receipts do not reinstall a blocker during R19b', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    try {
+      const target = ledgerTarget(true);
+      const session = await startSession(target.host, 'session-a', 'turn-a');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      target.control.failTransfer = true;
+      const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+      const evidence = await target.addon.close!(receipt);
+      await target.addon.confirmSessionClosed!(receipt, evidence);
+      const receivedCount = () =>
+        decide.mock.calls.filter(
+          ([, event]) => event.kind === 'receipt' && event.status === 'received',
+        ).length;
+      expect(receivedCount()).toBe(1);
+      await target.addon.close!(receipt);
+      expect(receivedCount()).toBe(1);
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it('PR7b bounds each entry to two storage retries and retains the remaining hold', async () => {
+    const target = ledgerTarget();
+    const sessions = [];
+    for (let index = 0; index < 3; index += 1) {
+      target.control.pid = 42 + index;
+      sessions.push(await startSession(target.host, `session-${index}`, `turn-${index}`));
+    }
+    target.control.failReflect = true;
+    for (const session of sessions) await target.dispatch(session);
+    expect(target.rows.size).toBe(3);
+    let finish!: () => void;
+    target.control.reflectWait = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let settled = false;
+    const entry = target.host.listTargets!()
+      .catch(() => undefined)
+      .then(() => {
+        settled = true;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(settled).toBe(true);
+      expect(target.rows.size).toBe(3);
+    } finally {
+      finish();
+      await entry;
+    }
+  });
+  it.each(['start_session', 'list_windows_cancellable', 'pick_application'] as const)(
+    'PR7b R9/R10 ends pending %s without manufacturing target identity',
+    async (operation) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.helper().holdOnly(operation);
+      const work =
+        operation === 'pick_application'
+          ? target.host.pickApplication({
+              activationToken: 'synthetic-activation',
+              pickerKind: 'application',
+            })
+          : startSession(target.host, 'pending', 'turn-pending');
+      const result = work.then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      target.addon.requestWindowsTermination!();
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await result).toBe('rejected');
+      expect(target.host.availability().control).toBe(true);
+      expect(target.quarantines).toEqual([]);
+      await expect(startSession(target.host, 'new-session', 'new-turn')).resolves.toMatchObject({
+        sessionId: 'new-session',
+      });
+      const writes = sockets[1]!.writes.length;
+      await target.host.stopPendingStart!('pending').catch(() => undefined);
+      expect(sockets[1]!.writes).toHaveLength(writes);
+    },
+  );
+  it('PR7b does not carry discovery PID evidence into the next generation', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    await target.host.listWindows(profile);
+    children[0]!.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await target.host.listWindows(profile);
+    const requests = sockets[1]!.writes.map(
+      (bytes) =>
+        JSON.parse(decodeComputerUseNativeFrame(bytes).metadata.toString('utf8')) as Record<
+          string,
+          unknown
+        >,
+    );
+    expect(
+      requests.find((value) => value['operation'] === 'list_windows_cancellable'),
+    ).not.toHaveProperty('pid');
+  });
+  it.each(['client', 'manager'] as const)(
+    'PR7b does not adopt a discovery response in the exit-to-transfer gap (%s)',
+    async (boundary) => {
+      let exitOnDiscovery = false;
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          discoverWindows: async (input) => {
+            const value = await addon.discoverWindows!(input);
+            if (exitOnDiscovery && boundary === 'client') {
+              exitOnDiscovery = false;
+              child.emit('exit', 1, null);
+            }
+            return value;
+          },
+        }),
+        true,
+      );
+      const session = await startSession(target.host, 'keeper', 'turn-keeper');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      target.control.failTransfer = true;
+      exitOnDiscovery = true;
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      if (boundary === 'manager') void discovery.terminal.then(() => child.emit('exit', 1, null));
+      const result = discovery.result.then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await result).toBe('rejected');
+      expect(target.rows.size).toBe(1);
+      if (boundary === 'client') expect(target.host.availability().control).toBe(false);
+      target.control.failTransfer = false;
+      await target.host.listTargets!().catch(() => undefined);
+      await expect(discovery.terminal).resolves.toMatchObject(
+        boundary === 'client' ? { kind: 'terminated', helperGeneration: 1 } : { kind: 'completed' },
+      );
+    },
+  );
+  it.each([true, false])(
+    'PR7b hides process identity in dispatch failure (accepted=%s)',
+    async (accepted) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-a', 'turn-a');
+      target.control.response = [
+        'error',
+        {
+          code: 'input_not_confirmed',
+          accepted,
+          pid: 42,
+          processStartTime: '133000000000000001',
+        },
+      ];
+      const result = await target.dispatch(session);
+      expect(result.outcome).toBe(accepted ? 'rejected' : 'resolved');
+      expect(JSON.stringify(result)).not.toContain('"pid"');
+      expect(JSON.stringify(result)).not.toContain('processStartTime');
+      expect(JSON.stringify(result)).not.toContain('133000000000000001');
+      if (result.outcome === 'rejected' && result.error instanceof Error)
+        expect(result.error.message).toBe('input_not_confirmed');
+    },
+  );
   it.each([true, false])(
     'PR7a retries PID-less spawn without kill (termination=%s)',
     async (termination) => {

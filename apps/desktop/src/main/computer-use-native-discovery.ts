@@ -6,6 +6,7 @@ import {
 import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-types';
 
 export type ComputerUseDiscoveryStop =
+  | Readonly<{ kind: 'terminated'; helperGeneration: number }>
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'completed' | 'stopped'; launchAttemptCount: 0 | 1 }>;
 export type ComputerUseDiscoveryHandle<T> = Readonly<{
@@ -17,6 +18,8 @@ export type ComputerUseDiscoveryHandle<T> = Readonly<{
 }>;
 
 type Owner = {
+  helperGeneration: number | null;
+  terminated: boolean;
   id: string;
   stopped: boolean;
   cancelRequested: boolean;
@@ -39,6 +42,7 @@ export function createComputerUseDiscoveryManager(
     timeoutMs: number;
     attemptLimit: number;
     unconfirmedError: () => Error;
+    generationAvailable?: (generation: number) => boolean;
   }>,
 ) {
   const nonce = randomBytes(16).toString('hex');
@@ -48,12 +52,18 @@ export function createComputerUseDiscoveryManager(
   const trim = () => {
     for (const [id, owner] of owners) {
       if (owners.size < 128) break;
-      if (owner.terminal !== null && !owner.pending) owners.delete(id);
+      if (owner.terminated || (owner.terminal !== null && !owner.pending)) owners.delete(id);
     }
   };
   const finish = (owner: Owner, proof: ComputerUseDiscoveryStop) => {
     if (owner.terminal !== null) return owner.terminal;
     if (owners.get(owner.id) !== owner) throw options.unconfirmedError();
+    if (
+      !owner.terminated &&
+      owner.helperGeneration !== null &&
+      options.generationAvailable?.(owner.helperGeneration) === false
+    )
+      throw options.unconfirmedError();
     owner.terminal = proof;
     owner.unconfirmed = false;
     owner.resolveTerminal(proof);
@@ -128,12 +138,39 @@ export function createComputerUseDiscoveryManager(
   const quarantined = (): boolean =>
     [...owners.values()].some(
       (owner) =>
-        owner.unconfirmed ||
-        (owner.stopped && owner.terminal === null) ||
-        (owner.stopped && owner.terminal?.kind === 'not_submitted' && owner.pending),
+        !owner.terminated &&
+        (owner.unconfirmed ||
+          (owner.stopped && owner.terminal === null) ||
+          (owner.stopped && owner.terminal?.kind === 'not_submitted' && owner.pending)),
     );
   return Object.freeze({
     quarantined,
+    resultAvailable(id: string): boolean {
+      const owner = owners.get(id);
+      return (
+        owner !== undefined &&
+        !owner.stopped &&
+        (owner.helperGeneration === null ||
+          options.generationAvailable?.(owner.helperGeneration) !== false)
+      );
+    },
+    bindGeneration(id: string, generation: number): void {
+      const owner = owners.get(id);
+      if (owner === undefined || owner.terminated) return;
+      if (owner.helperGeneration !== null && owner.helperGeneration !== generation)
+        throw options.unconfirmedError();
+      owner.helperGeneration = generation;
+    },
+    terminateGeneration(generation: number): void {
+      for (const owner of owners.values()) {
+        if (owner.helperGeneration !== generation || owner.terminated) continue;
+        owner.terminated = true;
+        owner.stopped = true;
+        owner.cancelRequested = true;
+        finish(owner, { kind: 'terminated', helperGeneration: generation });
+        owner.rejectCanceled(canceledError());
+      }
+    },
     begin(
       input: Readonly<Record<string, unknown>>,
     ): ComputerUseDiscoveryHandle<readonly unknown[]> {
@@ -154,6 +191,8 @@ export function createComputerUseDiscoveryManager(
       });
       void canceled.catch(() => undefined);
       const owner: Owner = {
+        helperGeneration: null,
+        terminated: false,
         id,
         stopped: false,
         cancelRequested: false,
