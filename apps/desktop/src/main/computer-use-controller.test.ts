@@ -2528,6 +2528,72 @@ describe('ComputerUseController', () => {
       return { store, owners };
     }
 
+    it.each(
+      (['observe_only', 'supervised', 'full_access_app'] as const).flatMap((mode) =>
+        (['allow', 'deny', 'approval_required'] as const).map((decision) => ({ mode, decision })),
+      ),
+    )(
+      'decided (T15-E (1)): $mode copy follows the Task $decision without an approval card',
+      async ({ mode, decision }) => {
+        const authorize = vi.fn<NonNullable<ComputerUseControllerDeps['authorize']>>(
+          async (request) => ({
+            decision: request.action?.type === 'copy' ? decision : 'allow',
+            reason: 'computer_task_policy',
+          }),
+        );
+        const fixture = createFixture({
+          mode,
+          observationOverrides: withNode,
+          artifactRead: {},
+          authorize,
+        });
+        const started = await start(fixture, mode);
+        await fixture.controller.observe(started.sessionId);
+        authorize.mockClear();
+        const acting = fixture.controller.act(started.sessionId, copy, 'copy-task-policy');
+        if (decision !== 'allow') {
+          await expect(acting).rejects.toThrow();
+          expect([...fixture.audits.values()]).toEqual([
+            expect.objectContaining({ state: 'rejected', reasonCode: 'authorization_denied' }),
+          ]);
+          expect(fixture.readInputs).toHaveLength(0);
+          expect(fixture.statuses.at(-1)).toMatchObject({ state: 'paused' });
+          expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+        } else {
+          await expect(acting).resolves.toMatchObject({ result: 'completed' });
+          expect(fixture.readInputs).toHaveLength(1);
+        }
+        expect(authorize).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ capability: 'computer.observe', action: copy }),
+        );
+        expect(fixture.approvals).toEqual([]);
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it.each([{ type: 'wait', milliseconds: 0 }, { type: 'finish' }] as const)(
+      'decided (T15-E (1)): $type still bypasses Task authorization in observe-only mode',
+      async (action) => {
+        const authorize = vi.fn<NonNullable<ComputerUseControllerDeps['authorize']>>(
+          async (request) => ({
+            decision: request.action === undefined ? 'allow' : 'deny',
+            reason: 'computer_task_policy',
+          }),
+        );
+        const fixture = createFixture({ mode: 'observe_only', authorize });
+        const started = await start(fixture, 'observe_only');
+        await fixture.controller.observe(started.sessionId);
+        authorize.mockClear();
+        await expect(
+          fixture.controller.act(started.sessionId, action, 'non-input'),
+        ).resolves.toMatchObject({ result: 'completed' });
+        expect(authorize).not.toHaveBeenCalled();
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
     it('keeps a value in observe-only mode without input, and leaves no text in the audit', async () => {
       const { store, owners } = spiedStore();
       const fixture = createFixture({
