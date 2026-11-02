@@ -10,6 +10,18 @@ export function readWindowsHostSource(directory = windowsHostNativeDirectory) {
   const read = (name) => {
     const source = readFileSync(join(directory, name), 'utf8');
     if (source.includes('\r')) throw new Error(`CR in Windows host source: ${name}`);
+    for (const match of source.matchAll(
+      /^[\t ]*#[\t ]*include[\t ]*(?:"([^"\n]+)"|<([^>\n]+)>)/gmu,
+    )) {
+      const [, quoted, angled] = match;
+      if (
+        (quoted &&
+          !quoted.endsWith('.h') &&
+          !/^computer_use_windows_host_[a-z0-9_]+\.inc$/u.test(quoted)) ||
+        (angled && /\.(inc|cc)$/u.test(angled))
+      )
+        throw new Error(`Unsupported Windows host include (Unexpanded): ${name}`);
+    }
     return source;
   };
   const included = new Set();

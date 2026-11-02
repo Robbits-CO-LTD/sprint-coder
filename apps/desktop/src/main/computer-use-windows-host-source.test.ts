@@ -1,6 +1,7 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import * as ts from 'typescript';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   readWindowsHostSource,
@@ -20,6 +21,58 @@ function fixture(host: string, parts: Record<string, string> = {}): string {
   return directory;
 }
 
+function unroutedReaders(root: string): string[] {
+  const desktop = join(root, 'apps/desktop');
+  const allowedReaders = new Set([
+    // These files implement or verify expansion of the raw host source.
+    join(root, 'computer-use-windows-host-source.mjs'),
+    join(desktop, 'src/main/computer-use-windows-host-source.test.ts'),
+    // The build passes the original translation unit to the compiler.
+    join(root, 'build-computer-use-native.mjs'),
+    // These harnesses include the complete host in C++; the compiler resolves fragments.
+    join(desktop, 'src/main/computer-use-windows-v2-targets.test.ts'),
+    join(desktop, 'src/main/computer-use-windows-v1-uia-timeout-live-seam.test.ts'),
+  ]);
+  const files = [
+    ...readdirSync(join(desktop, 'src'), { recursive: true, encoding: 'utf8' })
+      .filter((name) => name.endsWith('.test.ts'))
+      .map((name) => join(desktop, 'src', name)),
+    ...readdirSync(root)
+      .filter((name) => /^verify-.*\.mjs$/u.test(name) || name.endsWith('.test.mjs'))
+      .map((name) => join(root, name)),
+    ...readdirSync(desktop)
+      .filter((name) => name.endsWith('.test.mjs'))
+      .map((name) => join(desktop, name)),
+  ];
+  const printer = ts.createPrinter({ removeComments: true });
+  return files.filter((file) => {
+    if (allowedReaders.has(file)) return false;
+    const source = ts.createSourceFile(
+      file,
+      readFileSync(file, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    if (!printer.printFile(source).includes(hostName)) return false;
+    return !source.statements.some(
+      (statement) =>
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteral(statement.moduleSpecifier) &&
+        /(?:^|\/)computer-use-windows-host-source\.mjs$/u.test(statement.moduleSpecifier.text) &&
+        !statement.importClause?.isTypeOnly &&
+        statement.importClause?.namedBindings &&
+        (ts.isNamespaceImport(statement.importClause.namedBindings) ||
+          statement.importClause.namedBindings.elements.some(
+            (element) =>
+              !element.isTypeOnly &&
+              ['readWindowsHostSource', 'windowsHostNativeDirectory'].includes(
+                (element.propertyName ?? element.name).text,
+              ),
+          )),
+    );
+  });
+}
+
 afterEach(() => {
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
@@ -27,25 +80,52 @@ afterEach(() => {
 
 describe('Windows host source structure', () => {
   it('routes host source reads in tests and the offline verifier through the helper', () => {
-    const root = join(__dirname, '../../../..');
-    // Only these readers inspect the unexpanded file to implement or verify expansion.
-    const allowedReaders = new Set([
-      join(root, 'computer-use-windows-host-source.mjs'),
-      join(__dirname, 'computer-use-windows-host-source.test.ts'),
-    ]);
-    const files = [
-      ...readdirSync(__dirname)
-        .filter((name) => name.endsWith('.test.ts'))
-        .map((name) => join(__dirname, name)),
-      join(root, 'verify-computer-use-native-offline.mjs'),
-      join(root, 'computer-use-windows-host-source.mjs'),
-    ];
-    for (const file of files) {
-      if (allowedReaders.has(file)) continue;
-      expect(readFileSync(file, 'utf8'), file).not.toMatch(
-        /readFileSync\s*\([^;]*['"`]computer_use_windows_host\.cc['"`]/u,
-      );
-    }
+    expect(unroutedReaders(join(__dirname, '../../../..'))).toEqual([]);
+  });
+
+  it.each([
+    'apps/desktop/src/main/direct.test.ts',
+    'apps/desktop/src/renderer/nested/direct.test.ts',
+    'verify-other.mjs',
+    'direct.test.mjs',
+    'apps/desktop/direct.test.mjs',
+  ])('detects indirect host reads in %s', (name) => {
+    const root = fixture('');
+    mkdirSync(join(root, 'apps/desktop/src/main'), { recursive: true });
+    const file = join(root, name);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `const path = '/native/${hostName}'; readFile(path);`);
+    expect(unroutedReaders(root)).toEqual([file]);
+  });
+
+  it.each([
+    [`const path = '${hostName}';`, false],
+    [`const path = 'native\\\\${hostName}';`, false],
+    [`// ${hostName}\n/* ${hostName} */`, true],
+    [
+      `// import { readWindowsHostSource } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
+      false,
+    ],
+    [
+      `import { readWindowsHostSource as read } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
+      true,
+    ],
+    [
+      `import { windowsHostNativeDirectory } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
+      true,
+    ],
+    [`import { readWindowsHostSource } from './other.mjs';\nconst path = '${hostName}';`, false],
+    [`import './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`, false],
+    [
+      `import type { readWindowsHostSource } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
+      false,
+    ],
+  ])('checks helper imports without treating comments as code: %s', (source, allowed) => {
+    const root = fixture('');
+    mkdirSync(join(root, 'apps/desktop/src/main'), { recursive: true });
+    const file = join(root, 'direct.test.mjs');
+    writeFileSync(file, source);
+    expect(unroutedReaders(root)).toEqual(allowed ? [] : [file]);
   });
 
   it('includes every real fragment exactly once, without nesting or changed line endings', () => {
@@ -90,6 +170,24 @@ describe('Windows host source structure', () => {
   });
 
   it.each([
+    ...[
+      '#include "computer_use_windows_input.inc"',
+      '#include "windows_host_part.cc"',
+      '#include "Computer_Use_Windows_Host_Part.inc"',
+      '#include <computer_use_windows_host_part.inc>',
+      '#include <windows_host_part.cc>',
+    ].flatMap(
+      (directive) =>
+        [
+          [directive, `${directive}\n`, {}, /Unsupported/u],
+          [
+            `fragment ${directive}`,
+            `${include}\n`,
+            { [partName]: `${directive}\n` },
+            /Unsupported/u,
+          ],
+        ] as const,
+    ),
     ['indented include', ` ${include}\n`, {}, /Unexpanded/u],
     ['include with trailing comment', `${include} // comment\n`, {}, /Unexpanded/u],
     [
