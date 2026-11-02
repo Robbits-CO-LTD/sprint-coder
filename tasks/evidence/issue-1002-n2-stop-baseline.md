@@ -25,11 +25,17 @@
 
 ## close の所要時間の目安（proxy、close_session の実測までの参考値）
 
-session が要るので close_session そのものは測れない。代わりに、healthy な helper に session の要らない discovery 8 件と fixture の start を流し（queue 10 frame、64 未満）、どの返事も読む前にその start への stop_pending_start を送って、往復を 30 回測った。負荷の 8 件は Main で発行して未応答のまま Stop より先に書き（`min_unanswered_at_send` は Main の側の見え方で、いつも 8）、helper が FIFO で負荷の後に Stop を処理した。その根拠は応答の順で、Stop の返事を読んだ時点までに負荷の返事が 8 件すべて来ていた回（`load_answered_before_stop` が 8）だけを数える。負荷の返事が Stop の返事より後に来た回（`stop_before_load`）や start が届かなかった回（`start_not_sent`）は数えずにやり直し、件数を `uncounted` に出す。cancel の段階と session の後始末は含まない。
+session が要るので close_session そのものは測れない。代わりに、healthy な helper に session の要らない discovery 8 件と fixture の start を流し（queue 10 frame、64 未満）、どの返事も読む前にその start への stop_pending_start を送って、往復を 30 回測った。負荷の 8 件は Main で発行して未応答のまま Stop より先に書く（`min_unanswered_at_send` は Main の側の見え方で、8 であることを assert する）。`load_answered_before_stop` は、Stop の返事と同じ pipe の読み取りまでに届いた負荷の返事の数。それだけでは helper の処理順の証明にはならず、同じ chunk の中の返事の順番は helper の直列の処理（consumer が discovery を待ってから次の frame に進む）に依る。数えるのは、Stop を送った時に負荷が 8 件とも未応答で（`no_load_at_send` でない）、その読み取りまでに 8 件とも返事が来ていて（`stop_before_load` でない）、start が helper に届いた（`start_not_sent` でない）回だけ。数えない回はやり直し、件数を `uncounted` に出す。数える回では、負荷の結果がどれも helper の返事（解決した結果か helper の error frame。Main で作った切断などの Error ではない）であることも確かめ、その内訳を `load_replies` に出す。cancel の段階と session の後始末は含まない。
+
+2026-11-02 に数え方を上の条件に変えた後、この PC で 2 回回した値:
 
 ```
-HUNG_HELPER_STOP_LATENCY_PROXY {"proxy_for":"close_session","reference_until":"close_session measured in N13b","operation":"stop_pending_start","n":30,"p50_ms":13.18,"p95_ms":15.70,"max_ms":17.81,"load_frames":8,"queued_frames":10,"load_answered_before_stop":8,"min_unanswered_at_send":8,"attempts":30,"uncounted":{"stop_before_load":0,"start_not_sent":0}}
-HUNG_HELPER_STOP_LATENCY_PROXY {"proxy_for":"close_session","reference_until":"close_session measured in N13b","operation":"stop_pending_start","n":30,"p50_ms":12.27,"p95_ms":13.32,"max_ms":13.64,"load_frames":8,"queued_frames":10,"load_answered_before_stop":8,"min_unanswered_at_send":8,"attempts":30,"uncounted":{"stop_before_load":0,"start_not_sent":0}}
+HUNG_HELPER_STOP_LATENCY_PROXY {"proxy_for":"close_session","reference_until":"close_session measured in N13b","operation":"stop_pending_start","n":30,"p50_ms":13.24,"p95_ms":14.63,"max_ms":15.87,"load_frames":8,"queued_frames":10,"load_answered_before_stop":8,"min_unanswered_at_send":8,"attempts":30,"uncounted":{"no_load_at_send":0,"stop_before_load":0,"start_not_sent":0},"load_replies":{"error:app_identity_changed":240}}
+HUNG_HELPER_STOP_LATENCY_PROXY {"proxy_for":"close_session","reference_until":"close_session measured in N13b","operation":"stop_pending_start","n":30,"p50_ms":12.91,"p95_ms":13.65,"max_ms":14.34,"load_frames":8,"queued_frames":10,"load_answered_before_stop":8,"min_unanswered_at_send":8,"attempts":30,"uncounted":{"no_load_at_send":0,"stop_before_load":0,"start_not_sent":0},"load_replies":{"error:app_identity_changed":240}}
 ```
 
 この値は close_session の実測（N13b）までの参考値であり、N3 の期限 C を決める根拠にはしない。C は実測まで今の 10 秒のまま。
+
+## CI だけで起きた attestation の期限切れの診断（`HUNG_HELPER_ATTEST_DIAG`）
+
+CI（head a832a1c3）では、暖機（`HUNG_HELPER_ATTEST_WARMUP`）は速いのに、helper を起動する 5 件すべてで製品の attestation（PowerShell、期限 10 秒）が ETIMEDOUT になった。attestation の間は Main の event loop が止まるので、seam は helper を起動する case ごとに別プロセスの見張り役（fixture の `--watch-attest`）を先に起こし、case の後に 1 行の `HUNG_HELPER_ATTEST_DIAG` を出す。中身は、helper ごとの現れた時刻と作成時刻（seam の spawn からの ms）、スレッドの状態と待ちの理由（Suspended かどうか）、セッション、job への所属、MainModule と同じ native の問い合わせの各段の ms、製品と同じ順の段（Import-Module、Get-Process、MainModule、File.Open＋SHA256、Get-AuthenticodeSignature）を製品と同じ環境の PowerShell で測った各段の ms（全体 60 秒）、見えた製品の attestation の PowerShell の PID と生存時間。見張り役は観察だけで、製品の attestation と期限は変えない（静的な case で確認）。この PC では、製品の attestation の生存時間は約 350〜430 ms、見張り役の段は Import-Module 約 28 ms、Get-Process 約 40 ms、MainModule 約 1 ms、SHA256 約 6〜15 ms、Authenticode 約 14〜24 ms。CI の値は次の CI の実行で取る。

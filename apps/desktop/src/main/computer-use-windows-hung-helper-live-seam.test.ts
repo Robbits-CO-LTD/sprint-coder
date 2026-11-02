@@ -3,7 +3,7 @@ import type * as NodeChildProcess from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type TestContext } from 'vitest';
 import { computerAppIdentitySchema, computerUseEligibilitySchema } from '@sprint-coder/contracts';
@@ -22,8 +22,13 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
   operationTimeoutMilliseconds,
+  windowsHelperEnvironment,
 } from './computer-use-native-windows';
-import type { ComputerUseNativeAddon, ComputerUseNativeBinding } from './computer-use-native-types';
+import {
+  ComputerUseDiscoveryNotSubmittedError,
+  type ComputerUseNativeAddon,
+  type ComputerUseNativeBinding,
+} from './computer-use-native-types';
 import type { ComputerAppProfileRecord } from './persistence';
 
 // Pass through every OS operation. The observer owns only the child/exit/kill timestamps and cleanup;
@@ -92,11 +97,30 @@ function errorCode(value: unknown): string | null {
   return value instanceof Error ? String(Reflect.get(value, 'code') ?? value.message) : null;
 }
 const settle = (value: unknown) => Promise.resolve(value).catch((error: unknown) => error);
+// What a settled request carries when the helper answered it: a resolved result, or the Error the
+// transport builds from the helper's error frame (message and own code are the helper's code, with
+// an own boolean accepted). Any other Error was made in Main (a disconnect, a timeout, a never-sent
+// discovery) and is null here.
+function helperReply(value: unknown): string | null {
+  if (!(value instanceof Error))
+    return typeof value === 'object' && value !== null ? 'result' : null;
+  const code: unknown = Reflect.get(value, 'code');
+  return !(value instanceof ComputerUseDiscoveryNotSubmittedError) &&
+    Object.hasOwn(value, 'code') &&
+    typeof Reflect.get(value, 'accepted') === 'boolean' &&
+    typeof code === 'string' &&
+    value.message === code &&
+    /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(code)
+    ? `error:${code}`
+    : null;
+}
 type ChildEvidence = {
   child: ChildProcess;
   exited: boolean;
   kills: number[];
   exitAt: number | null;
+  // Epoch ms (the clock of the attestation watcher), read right after the spawn returned.
+  spawnedAt: number;
   temp?: string;
 };
 const children: ChildEvidence[] = [];
@@ -352,6 +376,209 @@ beforeAll(async () => {
   ready = true;
 }, 650_000);
 
+// ---- Attestation diagnosis (begin) ----
+// In the CI live job every production attestation of a spawned helper expired at its 10 s deadline
+// (spawnSync ETIMEDOUT) although the warm-up above ran the same steps fast on the same images. The
+// attestation is a synchronous child process that blocks this process's event loop, so nothing here can look
+// while it runs. A separate watcher (the fixture's --watch-attest mode) is therefore started before
+// a live case spawns a helper. It polls the system process list, and for each transport helper this
+// process spawns (hung.exe or healthy.exe with --pipe) records when it appeared and was created,
+// its thread states and wait reasons (suspended or not), its session and job membership; it times
+// the native module query MainModule makes, and runs the product's attestation steps in the
+// product's order in its own Windows PowerShell (each stage timed, 60 s in all); and it records each
+// product attestation PowerShell it sees (a powershell.exe child of this process whose environment
+// carries SPRINT_CODER_COMPUTER_USE_HELPER_PID) with its lifetime. The watcher is started with the
+// product's helper environment (windowsHelperEnvironment; libuv completes both blocks the same way),
+// so its stage runner sees what the product's PowerShell sees. It runs only with the seam enabled,
+// is stopped and reaped after every case that started it (afterEach), and only observes: the
+// product attestation, its process and its 10 s deadline are untouched (static case below). One
+// HUNG_HELPER_ATTEST_DIAG line per case; times are ms from the seam's spawn of that helper.
+const attestStageScript = [
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+  'function Emit([string]$name, [long]$ms, [string]$note) { [Console]::Out.WriteLine(($name, $ms, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(), $note) -join "`t"); [Console]::Out.Flush() }',
+  '$stage = [System.Diagnostics.Stopwatch]::StartNew()',
+  "$current = 'start'",
+  "Emit 'start' 0 ''",
+  'try {',
+  "  $current = 'import'",
+  '  Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"',
+  "  Emit $current $stage.ElapsedMilliseconds ''; $stage.Restart(); $current = 'get_process'",
+  '  $process = Get-Process -Id ([int]$env:SPRINT_CODER_COMPUTER_USE_HELPER_PID) -ErrorAction Stop',
+  "  Emit $current $stage.ElapsedMilliseconds ''; $stage.Restart(); $current = 'main_module'",
+  '  $imagePath = $process.MainModule.FileName',
+  "  Emit $current $stage.ElapsedMilliseconds ''; $stage.Restart(); $current = 'sha256'",
+  '  $stream = [System.IO.File]::Open($imagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)',
+  '  try {',
+  '    $sha = [System.Security.Cryptography.SHA256]::Create()',
+  '    try { $null = $sha.ComputeHash($stream) } finally { $sha.Dispose() }',
+  "    Emit $current $stage.ElapsedMilliseconds ''; $stage.Restart(); $current = 'authenticode'",
+  '    $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $imagePath',
+  '    Emit $current $stage.ElapsedMilliseconds $signature.Status.ToString()',
+  '  } finally { $stream.Dispose() }',
+  '} catch {',
+  "  Emit $current $stage.ElapsedMilliseconds ('failed: ' + ($_.Exception.GetType().Name + ' ' + $_.Exception.Message -replace \"[`t`r`n]\", ' '))",
+  '  exit 1',
+  '} finally { if ($process) { $process.Dispose() } }',
+].join('\n');
+const attestWatchExitTimeout = 15_000;
+type AttestWatch = {
+  case: string;
+  child: ChildProcess;
+  output: string;
+  exited: boolean;
+};
+let attestWatch: AttestWatch | null = null;
+function attestDiag(detail: Record<string, unknown>) {
+  console.log(`HUNG_HELPER_ATTEST_DIAG ${JSON.stringify(detail)}`);
+}
+async function watchAttestation(context: TestContext) {
+  if (!enabled || !scratch || attestWatch !== null) return;
+  // The real spawn, so the watcher is never one of the seam's observed children.
+  const actual = await vi.importActual<typeof NodeChildProcess>('node:child_process');
+  const output = join(scratch, `attest-diag-${randomUUID()}.json`);
+  const child = actual.spawn(
+    healthy,
+    [
+      '--watch-attest',
+      output,
+      String(process.pid),
+      basename(hung),
+      basename(healthy),
+      Buffer.from(attestStageScript, 'utf16le').toString('base64'),
+    ],
+    {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...windowsHelperEnvironment(process.env) },
+    },
+  );
+  const watch: AttestWatch = { case: context.task.name, child, output, exited: false };
+  attestWatch = watch;
+  let stdout = '';
+  child.stdout?.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString('utf8');
+  });
+  child.once('exit', () => {
+    watch.exited = true;
+  });
+  child.once('error', () => {
+    if (child.pid === undefined) watch.exited = true;
+  });
+  await until(() => stdout.includes('ready') || watch.exited, 10_000, 'watcher ready').catch(
+    () => undefined,
+  );
+  // A watcher that did not start is reported, not a case failure; afterEach still reaps it.
+  if (!stdout.includes('ready')) attestDiag({ case: watch.case, error: 'watcher_not_ready' });
+}
+const ms = (value: unknown, origin: number | undefined) =>
+  typeof value === 'number' && origin !== undefined ? Math.round((value - origin) * 10) / 10 : null;
+function stageSteps(output: unknown, origin: number | undefined) {
+  return String(output ?? '')
+    .split(/\r?\n/u)
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [stage, elapsed, at, note] = line.split('\t');
+      return {
+        stage,
+        ms: Number(elapsed),
+        at_ms: ms(Number(at), origin),
+        ...(note ? { note } : {}),
+      };
+    });
+}
+function attestDiagSummary(
+  name: string,
+  raw: Record<string, unknown>,
+  spawned: Map<number, number>,
+) {
+  const list = (value: unknown) => (Array.isArray(value) ? value.map(record) : []);
+  const samples = (value: unknown, origin: number | undefined) =>
+    list(value).map((sample) => ({ ms: ms(sample['at'], origin), ...record(sample['threads']) }));
+  const helpers = list(raw['helpers']).map((helper) => {
+    const origin = spawned.get(Number(helper['pid']));
+    const stages = helper['stages'] === null ? null : record(helper['stages']);
+    return {
+      pid: helper['pid'],
+      image: helper['image'],
+      seam_spawned: origin !== undefined,
+      session_id: helper['session_id'],
+      in_job: helper['in_job'],
+      appeared_ms: ms(helper['detected_at'], origin),
+      created_ms: ms(helper['created_at'], origin),
+      gone_ms: ms(helper['gone_at'], origin),
+      threads: samples(helper['samples'], origin),
+      native: helper['native'],
+      stages:
+        stages === null
+          ? null
+          : {
+              spawned_ms: ms(stages['spawned_at'], origin),
+              ended_ms: ms(stages['ended_at'], origin),
+              outcome: stages['outcome'],
+              exit_code: stages['exit_code'],
+              steps: stageSteps(stages['output'], origin),
+            },
+    };
+  });
+  const attestations = list(raw['attestations']).map((attestation) => {
+    const origin = spawned.get(Number(attestation['helper_pid']));
+    const created = attestation['created_at'];
+    const gone = attestation['gone_at'];
+    return {
+      pid: attestation['pid'],
+      helper_pid: attestation['helper_pid'],
+      created_ms: ms(created, origin),
+      seen_ms: ms(attestation['detected_at'], origin),
+      lifetime_ms:
+        typeof gone === 'number' && typeof created === 'number' ? ms(gone, created) : null,
+      threads: samples(attestation['samples'], origin),
+    };
+  });
+  return {
+    case: name,
+    watcher: raw['watcher'],
+    helpers: helpers.filter((helper) => helper.native !== null),
+    helpers_not_detailed: helpers
+      .filter((helper) => helper.native === null)
+      .map((helper) => ({ pid: helper.pid, appeared_ms: helper.appeared_ms })),
+    attestations: attestations.slice(0, 4),
+    attestation_lifetimes_ms: attestations.map((attestation) => attestation.lifetime_ms),
+  };
+}
+async function stopAttestationWatch() {
+  const watch = attestWatch;
+  attestWatch = null;
+  if (watch === null) return;
+  const spawned = new Map<number, number>();
+  for (const row of children)
+    if (row.child.pid !== undefined) spawned.set(row.child.pid, row.spawnedAt);
+  try {
+    watch.child.stdin?.end();
+    try {
+      await until(() => watch.exited, attestWatchExitTimeout, 'attestation watcher exit');
+    } catch {
+      attestDiag({ case: watch.case, error: 'watcher_stop_timeout' });
+      watch.child.kill();
+      await until(() => watch.exited, 5_000, 'attestation watcher killed');
+    }
+    let raw: Record<string, unknown> | null = null;
+    try {
+      raw = record(JSON.parse(readFileSync(watch.output, 'utf8')) as unknown);
+    } catch {
+      attestDiag({
+        case: watch.case,
+        error: 'watcher_output_unreadable',
+        exit: watch.child.exitCode,
+      });
+    }
+    if (raw !== null) attestDiag(attestDiagSummary(watch.case, raw, spawned));
+  } finally {
+    rmSync(watch.output, { force: true });
+  }
+}
+// ---- Attestation diagnosis (end) ----
+
 function live(context: TestContext) {
   if (ready) return;
   if (ci && enabled) throw new Error(unavailable);
@@ -384,6 +611,7 @@ function observeChildren() {
       exited: false,
       kills: [],
       exitAt: null,
+      spawnedAt: performance.timeOrigin + performance.now(),
       ...(temp ? { temp } : {}),
     };
     children.push(evidence);
@@ -419,6 +647,8 @@ afterEach(async () => {
   await step(() =>
     until(() => children.every((row) => row.exited), 10_000, 'all seam children exited'),
   );
+  // After the helpers exited (so their exit times are seen) and before the children are dropped.
+  await step(stopAttestationWatch);
   observer.spawned = null;
   await step(() =>
     until(
@@ -451,6 +681,8 @@ function sessionNotRunMismatch() {
     : { expected: sessionCaseNames.length, not_run: notRun.length, unexpected, missing };
 }
 afterAll(async () => {
+  // Normally already stopped by afterEach; a watcher must never outlive the scratch directory.
+  await stopAttestationWatch();
   const mismatch = enabled ? sessionNotRunMismatch() : null;
   if (notRun.length > 0) {
     const reasons = [...new Set(notRun.map((row) => row.reason))];
@@ -732,6 +964,7 @@ async function classicProfile(context: TestContext) {
 }
 async function prepare(context: TestContext, binary = hung, startPoint?: string) {
   const profile = await classicProfile(context);
+  await watchAttestation(context);
   const { addon, binding } = addonFor(binary);
   const { controller, host } = controllerFor(binding, profile, startPoint);
   // Controller candidates carry a one-time token, never the HWND (beginWindowCandidates().commit()
@@ -925,6 +1158,65 @@ describe('hung helper seam static contracts (#1002)', () => {
     expect(image!.index).toBeLessThan(send);
     expect(age!.index).toBeLessThan(send);
   }, 5_000);
+
+  it('diagnoses the attestation from a separate watcher without replacing it or its deadline', () => {
+    const seam = readFileSync(
+      join(__dirname, 'computer-use-windows-hung-helper-live-seam.test.ts'),
+      'utf8',
+    );
+    // The only module mock is node:child_process, and it replaces spawn alone (an observer that
+    // passes every call through); execFileSync, which the product attestation uses, is the real one.
+    const mock = ['vi', 'mock('].join('.');
+    expect(seam.split(mock)).toHaveLength(2);
+    expect(seam.split(['vi', 'doMock('].join('.'))).toHaveLength(1);
+    const factory = seam.slice(seam.indexOf(mock), seam.indexOf('\n});', seam.indexOf(mock)));
+    expect(factory).toContain("'node:child_process'");
+    expect(factory).toMatch(
+      /return \{\s*\.\.\.actual,\s*spawn: \(file: string, args: string\[\], options: SpawnOptions\) => \{\s*const child = actual\.spawn\(file, args, options\);/u,
+    );
+    expect(factory).not.toMatch(/execFileSync|spawnSync|execFile\b/u);
+    // The diagnosis block starts the watcher and reads its file; it never calls the attestation,
+    // execFileSync or the transport's deadlines.
+    const begin = seam.indexOf('// ---- Attestation diagnosis (begin) ----');
+    const end = seam.indexOf('// ---- Attestation diagnosis (end) ----');
+    expect(begin).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(begin);
+    const diagnosis = seam.slice(begin, end);
+    expect(diagnosis).toContain("'--watch-attest'");
+    expect(diagnosis).not.toMatch(
+      /attestSpawnedWindowsComputerUseHelper\(|execFileSync|operationTimeoutMilliseconds|createWindowsComputerUseNativeAddon|vi\.spyOn/u,
+    );
+    // The product attestation keeps its process and its 10 s deadline.
+    const product = readFileSync(join(__dirname, 'computer-use-native-windows.ts'), 'utf8');
+    const head = product.indexOf('function attestSpawnedWindowsComputerUseHelper(');
+    const attestation = product.slice(head, product.indexOf('\n}\n', head));
+    expect(head).toBeGreaterThan(0);
+    expect(attestation).toContain(
+      "execFileSync(\n    'C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe',",
+    );
+    expect(attestation).toMatch(/\n {6}timeout: 10_000,\n/u);
+    // The watcher only observes: every process it opens is opened for query, read or wait alone,
+    // and what it ends is its own stage runner (TerminateJobObject/TerminateProcess on child.hProcess).
+    const fixture = readFileSync(source, 'utf8');
+    const watcher = fixture.slice(
+      fixture.indexOf('namespace attest_watch {'),
+      fixture.indexOf('} // namespace attest_watch'),
+    );
+    expect(watcher.length).toBeGreaterThan(1_000);
+    const opens = [...watcher.matchAll(/OpenProcess\(([^,]+),/gu)].map((match) => match[1]!);
+    expect(opens.length).toBeGreaterThan(0);
+    for (const access of opens)
+      expect(access).toMatch(
+        /^(?:PROCESS_QUERY_(?:LIMITED_)?INFORMATION|PROCESS_VM_READ|SYNCHRONIZE|\s|\|)+$/u,
+      );
+    expect(watcher.match(/TerminateProcess\(([^,]+),/gu)).toEqual([
+      'TerminateProcess(child.hProcess,',
+    ]);
+    expect(watcher.match(/TerminateJobObject\(([^,]+),/gu)).toEqual(['TerminateJobObject(job,']);
+    expect(watcher).not.toMatch(
+      /SuspendThread|NtSuspendProcess|WriteProcessMemory|DebugActiveProcess/u,
+    );
+  }, 5_000);
 });
 
 describe('real hung helper / transport / Host / Controller (#1002)', () => {
@@ -935,6 +1227,7 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         live(context);
         observeChildren();
         arm('');
+        await watchAttestation(context);
         const window = await startFixture();
         const { addon } = addonFor(hung);
         arm(point);
@@ -990,6 +1283,7 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     async (context) => {
       live(context);
       observeChildren();
+      await watchAttestation(context);
       arm('CreateFileW');
       const { addon } = addonFor(hung);
       const discovery = settle(
@@ -1026,6 +1320,7 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       live(context);
       observeChildren();
       arm('');
+      await watchAttestation(context);
       const identity = await run(healthy, ['--identity', healthy], 30_000);
       expect(identity.status).toBe(0);
       const profile = profileFor(
@@ -1209,6 +1504,7 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     observeChildren();
     arm('');
     const profile = await classicProfile(context);
+    await watchAttestation(context);
     const times: number[] = [];
     const unansweredAtSend: number[] = [];
     for (let index = 0; index < 30; index += 1) {
@@ -1281,23 +1577,30 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
   // fixture start are issued in Main in that order, and stop_pending_start for that start is sent
   // before any reply can be read. Between issuing and Stop only promise jobs run (no timer, no I/O
   // callback), so the connected client writes the load and the start ahead of Stop while every
-  // load is still unanswered in Main (min_unanswered_at_send; a client-side view only). What shows
-  // that the helper served the load first, in FIFO order, and only then Stop is the reply order:
-  // load_answered_before_stop counts the load replies read no later than the Stop reply (after
-  // Stop settles, a promise-job-only drain runs the callbacks of replies already read and reads no
-  // more pipe data). A round counts only when it equals proxyLoadFrames; a round with a load reply
-  // after Stop's (stop_before_load) or whose start never reached the helper (start_not_sent) is
-  // not counted and is retried, up to proxyAttemptLimit rounds; the uncounted rounds are reported.
+  // load is still unanswered in Main (min_unanswered_at_send; a client-side view only).
+  // load_answered_before_stop is the number of load replies that had arrived by the pipe read that
+  // delivered Stop's reply (after Stop settles, a promise-job-only drain runs the callbacks of
+  // replies already read and reads no more pipe data). It does not by itself prove the helper's
+  // order: replies read in one chunk settle together, and their order inside a chunk rests on the
+  // helper's serial processing (its consumer waits for each discovery before the next frame).
+  // A round counts only when all proxyLoadFrames were unanswered at send and had answered by that
+  // read, and every load result is a helper reply (a resolved result or the helper's error frame),
+  // never an Error made in Main (a disconnect, a never-sent discovery). A round with load answered
+  // before Stop was sent (no_load_at_send), a load reply after that read (stop_before_load) or a
+  // start that never reached the helper (start_not_sent) is not counted and is retried, up to
+  // proxyAttemptLimit rounds; the uncounted rounds are reported.
   it(`measures a sessionless Stop round trip behind ${proxyLoadFrames} queued discoveries as a close latency proxy`, async (context) => {
     live(context);
     observeChildren();
     arm('');
+    await watchAttestation(context);
     const window = await startFixture();
     const query = { ...syntheticIdentity, canonicalPath: healthy };
     const times: number[] = [];
     const unansweredAtSend: number[] = [];
     const answeredBeforeStop: number[] = [];
-    const uncounted = { stop_before_load: 0, start_not_sent: 0 };
+    const uncounted = { no_load_at_send: 0, stop_before_load: 0, start_not_sent: 0 };
+    const loadReplies: Record<string, number> = {};
     let attempts = 0;
     while (times.length < proxyIterations && attempts < proxyAttemptLimit) {
       attempts += 1;
@@ -1326,15 +1629,24 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       // and reads no later reply.
       for (let turn = 0; turn < 200; turn += 1) await Promise.resolve();
       const loadAnsweredBeforeStop = answered;
-      await Promise.all(load);
+      const loadResults = await Promise.all(load);
       const started = await starting;
       expect(started).toBeInstanceOf(Error);
       if (errorCode(started) === 'Computer Use start canceled before send') {
         uncounted.start_not_sent += 1;
+      } else if (unanswered !== proxyLoadFrames) {
+        uncounted.no_load_at_send += 1;
       } else if (loadAnsweredBeforeStop !== proxyLoadFrames) {
         uncounted.stop_before_load += 1;
       } else {
         expect(stopped).toMatchObject({ result: 'closed' });
+        const replies = loadResults.map(helperReply);
+        expect(
+          replies,
+          'every load result is a helper reply, not an Error made in Main',
+        ).not.toContain(null);
+        for (const reply of replies)
+          if (reply !== null) loadReplies[reply] = (loadReplies[reply] ?? 0) + 1;
         times.push(elapsed);
         unansweredAtSend.push(unanswered);
         answeredBeforeStop.push(loadAnsweredBeforeStop);
@@ -1367,10 +1679,13 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       min_unanswered_at_send: unansweredAtSend.length > 0 ? Math.min(...unansweredAtSend) : null,
       attempts,
       uncounted,
+      load_replies: loadReplies,
     };
     console.log(`HUNG_HELPER_STOP_LATENCY_PROXY ${JSON.stringify(summary)}`);
     expect(times, 'loaded rounds measured within the attempt limit').toHaveLength(proxyIterations);
-    // Every counted round: the helper answered the whole load before Stop (FIFO behind the load).
+    // Every counted round: the whole load was unanswered when Stop was sent, and its helper replies
+    // had all arrived by the pipe read that delivered Stop's reply.
+    expect(summary.min_unanswered_at_send).toBe(proxyLoadFrames);
     expect(summary.load_answered_before_stop).toBe(proxyLoadFrames);
     expect(summary.max_ms).toBeLessThan(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
   }, 600_000);
