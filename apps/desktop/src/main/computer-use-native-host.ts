@@ -82,10 +82,11 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
   /**
    * Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent.
-   * Quarantines are never removed here, and an existing quarantine keeps its first reason, matching
-   * the core (a late receipt's response_lost must not replace an exit's exit_suspect). Receipt and
-   * exit transfers of one generation can run concurrently.
-   * TODO(PR4): pin both rules with a contract test shared by every store implementation.
+   * Quarantines are never removed here, and an existing quarantine keeps its first committed reason.
+   * Receipt and exit transfers of one generation can run concurrently, so commit order may differ
+   * from the core's order (a late receipt's response_lost can land before an exit's exit_suspect).
+   * TODO(PR4): decide the reason precedence under concurrent commits (for example exit_suspect wins)
+   * and pin it, with the no-removal rule, in a contract test shared by every store implementation.
    */
   transferReceipt?(
     rows: readonly WindowsLedgerRow[],
@@ -168,7 +169,10 @@ type ComputerUseNativeBounds = Readonly<{
 export type ComputerUseNativeHostOptions = Readonly<{
   /** PR5a opt-in only. Persistence implementation and foreground handoffs belong to PR4/PR5b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
-  /** Internal PR7 seam. Production enables termination only after the remaining safety slices. */
+  /**
+   * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
+   * them, a helper whose exit never arrives keeps refusing connections with no user notification.
+   */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
    * Whether the build attests classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). Production sets
