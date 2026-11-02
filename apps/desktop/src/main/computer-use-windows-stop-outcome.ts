@@ -564,7 +564,17 @@ function persist(
       ? {}
       : { freshSessionRequirements: input.freshSessionRequirements }),
   };
-  return { state: { ...state, holds: [...state.holds, hold] }, applied: false, holdId: hold.id };
+  // R19b: verified receipt releases native ownership; the hold fences only its targets.
+  const held =
+    input.operation === 'receipt_transfer'
+      ? applyWritten(state, {
+          changes: [],
+          ...(input.releaseBlockers === undefined
+            ? {}
+            : { releaseBlockers: input.releaseBlockers }),
+        })
+      : state;
+  return { state: { ...held, holds: [...held.holds, hold] }, applied: false, holdId: hold.id };
 }
 
 function foregroundDiscards(changes: readonly RowChange[]): WindowsStopDiagnostic[] {

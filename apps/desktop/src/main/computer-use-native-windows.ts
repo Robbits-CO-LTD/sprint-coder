@@ -345,6 +345,7 @@ class WindowsComputerUseHelperClient {
   private readonly semanticCloseProofs = new WeakMap<object, SemanticCloseProof>();
   private closeLedger: WindowsCloseCallbacks | undefined;
   private readonly lifetimes = new Map<string, object>();
+  private readonly completedLifetimes = new Map<string, object>();
   private readonly closeConfirmations = new WeakMap<object, Promise<WindowsCloseConfirmation>>();
   private readonly persistedLifetimes = new WeakSet<object>();
 
@@ -374,11 +375,13 @@ class WindowsComputerUseHelperClient {
         : undefined;
     if (
       proof === undefined ||
-      proof.owner !== owner ||
+      (proof.owner !== owner && !(owner === undefined && proof.owner?.confirmed)) ||
       (owner !== undefined && proof.helper !== owner.helper) ||
       (this.closeLedger !== undefined &&
         (proof.lifetime === undefined ||
-          proof.lifetime !== this.lifetimes.get(receipt.sessionId))) ||
+          proof.lifetime !==
+            (this.lifetimes.get(receipt.sessionId) ??
+              this.completedLifetimes.get(receipt.sessionId)))) ||
       proof.helper !== this.helperGeneration ||
       proof.receipt.sessionId !== receipt.sessionId ||
       proof.receipt.cancelEpoch !== receipt.cancelEpoch ||
@@ -392,6 +395,13 @@ class WindowsComputerUseHelperClient {
       )
         return;
       if (proof.lifetime !== undefined) this.persistedLifetimes.add(proof.lifetime);
+      if (proof.lifetime !== undefined) {
+        this.lifetimes.delete(receipt.sessionId);
+        this.completedLifetimes.set(receipt.sessionId, proof.lifetime);
+        // Match the bounded start-owner history; evicted receipts cannot confirm a lifetime.
+        if (this.completedLifetimes.size > 128)
+          this.completedLifetimes.delete(this.completedLifetimes.keys().next().value!);
+      }
       if (owner !== undefined) {
         owner.confirmed = true;
         owner.uncertain = false;
@@ -404,7 +414,21 @@ class WindowsComputerUseHelperClient {
         return Promise.resolve({ status: 'confirmed' });
       let confirmation = this.closeConfirmations.get(proof.lifetime);
       if (confirmation === undefined) {
-        confirmation = this.closeLedger.verified(proof.helper, receipt.sessionId, persisted);
+        confirmation = this.closeLedger.verified(proof.helper, receipt.sessionId, persisted).then(
+          (result) => {
+            if (owner !== undefined) {
+              owner.confirmed = true;
+              owner.uncertain = false;
+              owner.closeCandidate = false;
+              if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
+            }
+            return result;
+          },
+          (error: unknown) => {
+            if (proof.lifetime !== undefined) this.closeConfirmations.delete(proof.lifetime);
+            throw error;
+          },
+        );
         this.closeConfirmations.set(proof.lifetime, confirmation);
       }
       return confirmation;
@@ -703,7 +727,10 @@ class WindowsComputerUseHelperClient {
           attempts: new Set(),
         };
         this.starts.set(sessionKey, owner);
-        if (this.closeLedger !== undefined) this.lifetimes.set(sessionKey, {});
+        if (this.closeLedger !== undefined) {
+          this.completedLifetimes.delete(sessionKey);
+          this.lifetimes.set(sessionKey, {});
+        }
       }
       attempt = Symbol('native-start-send');
       owner.attempts.add(attempt);
@@ -809,13 +836,13 @@ class WindowsComputerUseHelperClient {
           if (inputOwner !== undefined) inputOwner.closeCandidate = true;
           this.semanticCloseProofs.set(result, {
             owner: inputOwner,
-            lifetime: this.lifetimes.get(sessionKey),
+            lifetime: this.lifetimes.get(sessionKey) ?? this.completedLifetimes.get(sessionKey),
             receipt: receipt.data,
             helper,
             activity,
           });
           const lifetime = this.lifetimes.get(sessionKey);
-          if (lifetime === undefined || !this.persistedLifetimes.has(lifetime))
+          if (lifetime !== undefined && !this.persistedLifetimes.has(lifetime))
             this.closeLedger?.received(helper, sessionKey);
         }
         if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
@@ -897,6 +924,8 @@ class WindowsComputerUseHelperClient {
     child.once('exit', (code, signal) => {
       removeHelperTemp();
       if (this.child !== child) return;
+      this.lifetimes.clear();
+      this.completedLifetimes.clear();
       this.failAll(
         new Error(`Computer Use Windows helper exited: ${String(code ?? signal ?? 'unknown')}`),
       );
@@ -1221,6 +1250,8 @@ class WindowsComputerUseHelperClient {
   }
 
   private abortTransport(error: Error): void {
+    this.lifetimes.clear();
+    this.completedLifetimes.clear();
     this.failAll(error, 'abortTransport');
     this.socket?.destroy();
     this.socket = null;

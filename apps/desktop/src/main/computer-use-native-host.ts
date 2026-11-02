@@ -326,7 +326,8 @@ export function createComputerUseNativeHost(
           complete?.();
         }
         writing.delete(holdId);
-        if (decision.idleTeardown === 'allowed') addon?.reevaluateIdle?.();
+        // Response/cancellation writes can remove the final hold without an idle signal.
+        addon?.reevaluateIdle?.();
         // A late obsolete release must land before its compensating quarantine write.
         if (restoration && pendingWrites.get(holdId)?.write !== pending.write && written)
           await writePending(holdId);
@@ -422,7 +423,8 @@ export function createComputerUseNativeHost(
       if (current === undefined) return;
       // A validated receipt owns these rows until its write (or retry) completes. A late
       // dispatch response must not race that transaction and recreate a deleted source row.
-      if (receiptRows.has(`${current.helperGeneration}:${current.requestId}`)) return;
+      if (receiptRows.has(`${current.helperGeneration}:${current.sessionId}:${current.requestId}`))
+        return;
       if (
         !ledgerState(current.helperGeneration).rows.some(
           (item) =>
@@ -712,7 +714,9 @@ export function createComputerUseNativeHost(
     evidence: unknown,
   ): void | Promise<WindowsCloseConfirmation> => {
     try {
-      return addon?.confirmSessionClosed?.(receipt, evidence);
+      return addon?.confirmSessionClosed?.(receipt, evidence)?.catch(() => {
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      });
     } catch {
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     }
@@ -760,9 +764,10 @@ export function createComputerUseNativeHost(
             reason: row.state === 'effect_unconfirmed' ? 'effect_unconfirmed' : 'response_lost',
           }));
         const holdId = `receipt-${++holdSequence}`;
-        for (const row of rows) receiptRows.add(`${generation}:${row.requestId}`);
+        for (const row of rows) receiptRows.add(`${generation}:${row.sessionId}:${row.requestId}`);
         receiptCompletions.set(holdId, () => {
-          for (const row of rows) receiptRows.delete(`${generation}:${row.requestId}`);
+          for (const row of rows)
+            receiptRows.delete(`${generation}:${row.sessionId}:${row.requestId}`);
           activeStopQuarantines.delete(sessionId);
           persisted();
         });
@@ -818,14 +823,14 @@ export function createComputerUseNativeHost(
       result.kind === 'closed'
         ? confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence)
         : undefined;
-    const finish = (confirmed: void | WindowsCloseConfirmation): void => {
+    const finish = (): void => {
       owner.nativeTerminalEvidence = null;
       sessions.delete(owner.sessionId);
       classifierBindings.delete(owner.sessionId);
       inputAttemptsBySession.delete(owner.sessionId);
       stopEpochs.delete(owner.sessionId);
       revisionsBySession.delete(owner.sessionId);
-      if (confirmed?.status !== 'pending') activeStopQuarantines.delete(owner.sessionId);
+      activeStopQuarantines.delete(owner.sessionId);
       owner.terminal = result;
       owner.unconfirmed = false;
       confirmedClosed.add(owner.sessionId);
@@ -835,7 +840,7 @@ export function createComputerUseNativeHost(
       }
       trimStartOwners();
     };
-    return confirmation === undefined ? finish(undefined) : confirmation.then(finish);
+    return confirmation === undefined ? finish() : confirmation.then(finish);
   };
 
   const completeNativePendingStop = async (
@@ -1209,7 +1214,8 @@ export function createComputerUseNativeHost(
     };
   };
   const beginRawDiscovery = (input: Readonly<Record<string, unknown>>) => {
-    requireMethod('discoverWindows');
+    // The ledger-enabled query retries storage before checking native availability.
+    if (ledger === undefined) requireMethod('discoverWindows');
     return discoveryManager.begin(input);
   };
   const beginWindowDiscovery = (
@@ -1240,12 +1246,16 @@ export function createComputerUseNativeHost(
     assertStartOwner(owner);
     const discovery = beginRawDiscovery(input);
     owner.discoveries.add(discovery);
-    void discovery.terminal.then(() => {
-      owner.discoveries.delete(discovery);
-      owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
-      if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
-        return finishStartOwner(owner, owner.nativeTerminal);
-    });
+    void discovery.terminal
+      .then(() => {
+        owner.discoveries.delete(discovery);
+        owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
+        if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
+          return finishStartOwner(owner, owner.nativeTerminal);
+      })
+      .catch(() => {
+        owner.unconfirmed = true;
+      });
     const value = await discovery.result;
     assertStartOwner(owner);
     return value;
@@ -1492,7 +1502,7 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
-      requireMethod('startSession');
+      if (ledger === undefined) requireMethod('startSession');
       const { classifierRoute, ...input } = startInput;
       if (!Number.isSafeInteger(input.cancelEpoch) || input.cancelEpoch < 0)
         throw new ComputerUseNativeUnavailableError('native_session_invalid');
@@ -1558,6 +1568,7 @@ export function createComputerUseNativeHost(
         if (ledger !== undefined) {
           await retryLedger();
           assertStartOwner(owner);
+          requireMethod('startSession');
           const existing = sessions.get(startInput.sessionId);
           if (
             ledgerBlocked(
@@ -1993,7 +2004,7 @@ export function createComputerUseNativeHost(
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
       const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
-      const confirmation = confirming === undefined ? undefined : await confirming;
+      if (confirming !== undefined) await confirming;
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
@@ -2004,7 +2015,7 @@ export function createComputerUseNativeHost(
         confirmedClosed.delete(confirmedClosed.values().next().value!);
       // Only a verified close releases the process-local quarantine. Late/failed completion
       // leaves the old session tracked and cannot open a new input lane.
-      if (confirmation?.status !== 'pending') activeStopQuarantines.delete(session.sessionId);
+      activeStopQuarantines.delete(session.sessionId);
       if (owner !== undefined) {
         owner.terminal = terminal;
         owner.nativeTerminalEvidence = null;

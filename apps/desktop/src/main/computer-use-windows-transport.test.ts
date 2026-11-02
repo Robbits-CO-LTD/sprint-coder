@@ -24,7 +24,11 @@ import {
   type ComputerUseNativeFrame,
   type ComputerUseNativeMessageType,
 } from './computer-use-native-protocol';
-import type { ComputerUseNativeAddon, ComputerUseNativeBinding } from './computer-use-native-types';
+import type {
+  ComputerUseNativeAddon,
+  ComputerUseNativeBinding,
+  WindowsCloseCallbacks,
+} from './computer-use-native-types';
 import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
@@ -449,6 +453,7 @@ function createTarget(
   customResponders: Readonly<Record<string, Responder>> = responders(),
   configure?: (helper: FakeWindowsHelper) => void,
   options: ComputerUseNativeHostOptions = {},
+  adaptAddon: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon = (addon) => addon,
 ): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
@@ -493,7 +498,7 @@ function createTarget(
     },
     expectedTrust,
   );
-  const host = createComputerUseNativeHost(binding(addon), 'win32', {
+  const host = createComputerUseNativeHost(binding(adaptAddon(addon)), 'win32', {
     windowsPhysicalBoundsToDip: (value) => value,
     ...options,
   });
@@ -2770,6 +2775,39 @@ int main() {
     },
   );
 
+  it('PR6 retains a late discovery verification rejection for a subsequent Stop retry', async () => {
+    const { host, helper } = createTarget(
+      responders(),
+      (helper) => helper.holdOnly('start_session'),
+      {},
+      (addon) => ({
+        ...addon,
+        confirmSessionClosed: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('synthetic verification failure'))
+          .mockResolvedValue({ status: 'confirmed' }),
+      }),
+    );
+    const first = startSession(host, 'shared-discovery', 'turn-1');
+    await vi.advanceTimersByTimeAsync(0);
+    helper().holdOnly('list_windows_cancellable');
+    helper().refuse('stop_window_discovery');
+    const second = startSession(host, 'shared-discovery', 'turn-1').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    helper().release('start_session');
+    const active = await first;
+    await host.cancel(active, 1);
+    await expect(host.close(active)).rejects.toThrow(/unconfirmed/u);
+    helper().release('list_windows_cancellable');
+    await second;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await expect(host.stopPendingStart!(active.sessionId)).resolves.toMatchObject({
+      kind: 'closed',
+    });
+    expect(host.availability().control).toBe(true);
+  });
+
   it('closes through the real Host before a delayed native start reply and never adopts it', async () => {
     const { addon, host, helper } = createTarget(
       {
@@ -3095,7 +3133,10 @@ int main() {
   // The storage key is the ledger row key: (helper generation, session, request).
   const ledgerKey = (row: WindowsLedgerRow) =>
     `${row.helperGeneration}/${row.sessionId}/${row.requestId}`;
-  function ledgerTarget(withTransfer = false) {
+  function ledgerTarget(
+    withTransfer = false,
+    adaptAddon?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon,
+  ) {
     const rows = new Map<string, WindowsLedgerRow>();
     const quarantines: WindowsTargetQuarantine[] = [];
     const written: WindowsLedgerRow[] = [];
@@ -3220,6 +3261,7 @@ int main() {
             : {}),
         },
       },
+      adaptAddon,
     );
     const dispatch = (
       session: Awaited<ReturnType<typeof startSession>>,
@@ -3250,6 +3292,168 @@ int main() {
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it.each(['response', 'dispatch_canceled'] as const)(
+    'PR6 reevaluates idle when the final %s storage hold completes',
+    async (eventKind) => {
+      const target = ledgerTarget();
+      let closeLedger!: WindowsCloseCallbacks;
+      let teardown = false;
+      const reevaluate = vi.fn(() => {
+        if (!closeLedger.blocked(1)) teardown = true;
+      });
+      const abort = new AbortController();
+      const host = createComputerUseNativeHost(
+        binding({
+          ...target.addon,
+          configureCloseLedger: (callbacks) => {
+            closeLedger = callbacks;
+            target.addon.configureCloseLedger!(callbacks);
+          },
+          reevaluateIdle: reevaluate,
+        }),
+        'win32',
+        {
+          windowsPhysicalBoundsToDip: (value) => value,
+          windowsLedger: {
+            write: () => {
+              if (eventKind === 'dispatch_canceled') abort.abort();
+              return true;
+            },
+            update: () => true,
+            delete: () => deletion,
+          },
+        },
+      );
+      let finish!: (written: boolean) => void;
+      const deletion = new Promise<boolean>((resolve) => {
+        finish = resolve;
+      });
+      const active = await startSession(host, 'session-2', 'turn-2');
+      const callbacksSpy = vi.spyOn(stopKernel, 'decideWindowsStop');
+      const request = {
+        session: active,
+        requestId: 'idle-row',
+        action: ledgerActions[0].action,
+        observationRevision: 1,
+        cancelEpoch: 0,
+        signal: abort.signal,
+      };
+      const result = host.dispatch(request).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closeLedger.blocked(1)).toBe(true);
+      expect(teardown).toBe(false);
+      finish(true);
+      await result;
+      expect(callbacksSpy.mock.calls.some(([, event]) => event.kind === eventKind)).toBe(true);
+      expect(reevaluate).toHaveBeenCalled();
+      expect(closeLedger.blocked(1)).toBe(false);
+      expect(teardown).toBe(true);
+      callbacksSpy.mockRestore();
+    },
+  );
+  it('PR6 normalizes a rejected verification and retries the same lifetime through Host', async () => {
+    const target = ledgerTarget();
+    const verified = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('synthetic verification failure'))
+      .mockImplementation(async (_generation, _sessionId, persisted: () => void) => {
+        persisted();
+        return { status: 'confirmed' as const };
+      });
+    target.addon.configureCloseLedger!({
+      received: () => undefined,
+      blocked: () => true,
+      verified,
+    });
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await expect(target.host.close(session)).rejects.toMatchObject({
+      reasonCode: 'native_stop_unconfirmed',
+    });
+    await expect(target.host.close(session)).resolves.toBeUndefined();
+    expect(verified).toHaveBeenCalledTimes(2);
+  });
+  it('PR6 bounds completed lifetimes to 128 without reinstalling evicted blockers', async () => {
+    const target = ledgerTarget();
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    const receipt = { sessionId: 'closed-0', cancelEpoch: 1, inputAttemptCount: 1 };
+    let first: unknown;
+    for (let index = 0; index <= 128; index += 1) {
+      const sessionId = `closed-${index}`;
+      await target.addon.startSession!({ sessionId, profile });
+      const evidence = await target.addon.close!({ sessionId, cancelEpoch: 1 });
+      await target.addon.confirmSessionClosed!({ ...receipt, sessionId }, evidence);
+      if (index === 0) first = evidence;
+      if (index === 127)
+        await expect(target.addon.confirmSessionClosed!(receipt, first)).resolves.toEqual({
+          status: 'confirmed',
+        });
+    }
+    expect(() => target.addon.confirmSessionClosed!(receipt, first)).toThrow(
+      'native_stop_unconfirmed',
+    );
+    const duplicate = await target.addon.close!({ sessionId: receipt.sessionId, cancelEpoch: 1 });
+    expect(() => target.addon.confirmSessionClosed!(receipt, duplicate)).toThrow(
+      'native_stop_unconfirmed',
+    );
+    const keeper = await target.addon.close!({ sessionId: 'keeper', cancelEpoch: 1 });
+    await target.addon.confirmSessionClosed!({ ...receipt, sessionId: 'keeper' }, keeper);
+    expect(children[0]!.killed).toBe(true);
+  });
+  it('PR6 receipt ownership does not swallow another session response with the same request id', async () => {
+    const target = ledgerTarget(true);
+    const sessionA = await startSession(target.host, 'session-a', 'turn-a');
+    target.control.pid = 43;
+    const sessionB = await startSession(target.host, 'session-b', 'turn-b');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(sessionA, ledgerActions[0], 'shared-request');
+    target.control.failTransfer = true;
+    await target.host.close(sessionA);
+    target.control.response = null;
+    expect(await target.dispatch(sessionB, ledgerActions[0], 'shared-request')).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'completed' },
+    });
+    expect([...target.rows.values()].map((row) => row.sessionId)).toEqual(['session-a']);
+    target.control.failTransfer = false;
+    await target.host.close(sessionB);
+  });
+  it.each(ledgerActions.filter((sample) => ['paste', 'click', 'semantic'].includes(sample.name)))(
+    'PR6 R19b scopes $name persistence failure to its target',
+    async (sample) => {
+      const target = ledgerTarget(true);
+      const sessionA = await startSession(target.host, 'session-a', 'turn-a');
+      const sameTarget = await startSession(target.host, 'same-target', 'turn-same');
+      target.control.pid = 43;
+      const otherTarget = await startSession(target.host, 'other-target', 'turn-other');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(sessionA, sample);
+      target.control.failTransfer = true;
+      await target.host.close(sessionA);
+      expect(children[0]!.killed).toBe(false);
+      expect(target.rows.size).toBe(1);
+      target.control.response = null;
+      expect(await target.dispatch(sameTarget, sample)).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
+      await expect(startSession(target.host, 'same-target', 'turn-same')).rejects.toMatchObject({
+        reasonCode: 'native_unavailable',
+      });
+      await expect(startSession(target.host, 'other-target', 'turn-other')).resolves.toMatchObject({
+        sessionId: 'other-target',
+      });
+      expect(await target.dispatch(otherTarget, sample)).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'completed' },
+      });
+      target.control.failTransfer = false;
+      await target.host.close(otherTarget);
+      target.control.pid = 42;
+      await target.host.close(sameTarget);
+      expect(target.rows.size).toBe(0);
+      expect(children[0]!.killed).toBe(true);
+    },
+  );
   it.each(ledgerActions)(
     'PR6 receipt clears the retained $name row before idle teardown',
     async (sample) => {
@@ -3268,13 +3472,19 @@ int main() {
     await expect(target.host.close(session)).resolves.toBeUndefined();
     expect(children[0]!.killed).toBe(true);
   });
-  it.each(['close', 'stopPendingStart'] as const)(
-    'PR6 %s waits for persistence before releasing native blockers or idle teardown',
-    async (entry) => {
+  it.each(
+    (['close', 'stopPendingStart'] as const).flatMap((entry) =>
+      ledgerActions
+        .filter((sample) => sample.name === 'click' || sample.name === 'paste')
+        .map((sample) => ({ entry, sample })),
+    ),
+  )(
+    'PR6 $entry $sample.name waits for persistence before releasing native blockers or idle teardown',
+    async ({ entry, sample }) => {
       const target = ledgerTarget();
       target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
       const session = await startSession(target.host, 'session-1', 'turn-1');
-      await target.dispatch(session);
+      await target.dispatch(session, sample);
       let release!: () => void;
       target.control.reflectWait = new Promise<void>((resolve) => {
         release = resolve;
@@ -3298,22 +3508,63 @@ int main() {
       expect(children[0]!.killed).toBe(true);
     },
   );
-  it('PR6 storage failure retains rows and blockers until retry succeeds', async () => {
-    const target = ledgerTarget();
-    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
-    const session = await startSession(target.host, 'session-1', 'turn-1');
-    await target.dispatch(session);
-    target.control.failReflect = true;
-    await expect(target.host.close(session)).resolves.toBeUndefined();
-    expect(target.rows.size).toBe(1);
-    expect(children[0]!.killed).toBe(false);
-    expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
-    target.control.failReflect = false;
-    await target.host.listTargets!().catch(() => undefined);
-    expect(target.rows.size).toBe(0);
-    expect(children[0]!.killed).toBe(true);
-    expect(target.host.availability()).toMatchObject({ state: 'ready' });
-  });
+  it.each(['controller', 'start', 'discovery'] as const)(
+    'PR6 storage failure retains rows while %s retries persistence',
+    async (entry) => {
+      const target = ledgerTarget();
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      target.control.failReflect = true;
+      await expect(target.host.close(session)).resolves.toBeUndefined();
+      expect(target.rows.size).toBe(1);
+      expect(children[0]!.killed).toBe(false);
+      expect(target.host.availability()).toMatchObject({ state: 'ready' });
+      target.control.failReflect = false;
+      if (entry === 'controller')
+        await controllerFor(target.host).listTargets(
+          {},
+          {
+            taskId: 'task-1',
+            turnId: 'turn-1',
+            workspaceId: null,
+            policyEpoch: 0,
+          },
+        );
+      else if (entry === 'start') await startSession(target.host, 'recovered', 'turn-recovered');
+      else await target.host.listWindows(profile);
+      expect(target.rows.size).toBe(0);
+      expect(children[0]!.killed).toBe(true);
+      expect(target.host.availability()).toMatchObject({ state: 'ready' });
+    },
+  );
+  it.each(['start', 'discovery'] as const)(
+    'PR6 %s retries receipt storage before the availability guard',
+    async (entry) => {
+      let unavailable = false;
+      const target = ledgerTarget(true, (addon) => ({
+        ...addon,
+        hasUnconfirmedSemanticInputs: () => unavailable || addon.hasUnconfirmedSemanticInputs!(),
+      }));
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      target.control.failTransfer = true;
+      await target.host.close(session);
+      expect(target.rows.size).toBe(1);
+      target.control.failTransfer = false;
+      // An independent native blocker must still refuse work, but cannot prevent storage recovery.
+      unavailable = true;
+      await expect(
+        entry === 'start'
+          ? startSession(target.host, 'recovered', 'turn-recovered')
+          : target.host.listWindows(profile),
+      ).rejects.toThrow();
+      expect(target.rows.size).toBe(0);
+      expect(target.control.transfers).toBe(2);
+      expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    },
+  );
   it('PR6 rejects cloned and changed non-semantic receipt evidence before persistence', async () => {
     const target = ledgerTarget();
     target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
@@ -3364,8 +3615,8 @@ int main() {
         expect(target.rows.size).toBe(1);
         expect(target.quarantines).toHaveLength(0);
         expect(children[0]!.killed).toBe(false);
-        expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
-        expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(path === 'background_semantic');
+        expect(target.host.availability()).toMatchObject({ state: 'ready' });
+        expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
         if (path === 'background_semantic')
           expect(
             spy.mock.results.some(
@@ -3381,6 +3632,16 @@ int main() {
         expect(target.control.transfers).toBe(2);
         expect(target.rows.size).toBe(0);
         expect(target.quarantines).toHaveLength(path === 'background_semantic' ? 1 : 0);
+        if (path === 'background_semantic')
+          expect(target.quarantines).toEqual([
+            {
+              identity: { pid: 42, creationTime: '133000000000000001' },
+              reason: 'effect_unconfirmed',
+            },
+          ]);
+        await target.host.listTargets!().catch(() => undefined);
+        expect(target.control.transfers).toBe(2);
+        expect(target.quarantines).toHaveLength(path === 'background_semantic' ? 1 : 0);
         expect(children[0]!.killed).toBe(true);
         expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
       } finally {
@@ -3388,6 +3649,44 @@ int main() {
       }
     },
   );
+  it('PR6 R22 transfers identity and reason once and removes the original row', async () => {
+    const decide = stopKernel.decideWindowsStop;
+    // PR5b/N9 create background rows later; inject one at the receipt boundary.
+    const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      if (event.kind === 'receipt' && event.status === 'received')
+        state = {
+          ...state,
+          rows: state.rows.map((row) => ({
+            ...row,
+            kind: 'semantic',
+            inputPath: 'background_semantic',
+          })),
+        };
+      return decide(state, event);
+    });
+    try {
+      const target = ledgerTarget(true);
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session, ledgerActions[4]);
+      await target.host.close(session);
+      expect(target.rows.size).toBe(0);
+      expect(target.quarantines).toEqual([
+        {
+          identity: { pid: 42, creationTime: '133000000000000001' },
+          reason: 'effect_unconfirmed',
+        },
+      ]);
+      await target.host.close(session);
+      await target.host.listTargets!().catch(() => undefined);
+      expect(target.control.transfers).toBe(1);
+      expect(target.quarantines).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  // ADR §4.1 assigns target quarantine admission (including creation time) to PR8.
+  it.todo('PR8: reject a new session for the target after receipt transfer');
   it('PR6 emits verified only after storage finishes and keeps in-flight rows', async () => {
     const spy = vi.spyOn(stopKernel, 'decideWindowsStop');
     try {
@@ -3456,6 +3755,32 @@ int main() {
     await target.addon.confirmSessionClosed!({ ...receipt, sessionId: 'other-session' }, other);
     expect(children[0]!.killed).toBe(true);
   });
+  it.each(['clone', 'lifetime', 'generation'] as const)(
+    'PR6 Host rejects independently invalid %s evidence before storage',
+    async (boundary) => {
+      let evidence: unknown;
+      const target = ledgerTarget(true, (addon) => ({ ...addon, close: () => evidence }));
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.addon.startSession!({ sessionId: 'keeper', profile });
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      evidence = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+      if (boundary === 'clone') evidence = structuredClone(evidence);
+      if (boundary === 'lifetime')
+        await target.addon.startSession!({ sessionId: session.sessionId, profile });
+      if (boundary === 'generation') {
+        children[0]!.emit('exit', 0, null);
+        // Reconnect through discovery, without starting a second lifetime of this session.
+        await discoverRows(target.addon);
+      }
+      await expect(target.host.close(session)).rejects.toMatchObject({
+        reasonCode: 'native_stop_unconfirmed',
+      });
+      expect(target.control.transfers).toBe(0);
+      expect(target.rows.size).toBe(1);
+      expect(target.host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    },
+  );
   it('PR6 Host rejection keeps the row and never invokes receipt storage', async () => {
     const target = ledgerTarget(true);
     target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
@@ -3588,12 +3913,19 @@ int main() {
     { sameProcess: true, late: 'success' },
     { sameProcess: true, late: 'false' },
     { sameProcess: true, late: 'exception' },
+    { sameProcess: false, reusedPid: true, late: 'success' },
+    { sameProcess: false, reusedPid: true, late: 'false' },
+    { sameProcess: false, reusedPid: true, late: 'exception' },
   ] as const)(
     'PR6 AC-4 scopes a timed-out write (same process: $sameProcess, late: $late)',
-    async ({ sameProcess, late }) => {
+    async (sample) => {
+      const { sameProcess, late } = sample;
+      const reusedPid = 'reusedPid' in sample;
       const target = ledgerTarget();
       const sessionA = await startSession(target.host, 'session-a', 'turn-a');
-      target.control.pid = sameProcess ? 42 : 43;
+      const pidB = sameProcess || reusedPid ? 42 : 43;
+      target.control.pid = pidB;
+      if (reusedPid) target.control.creationTime = '133000000000000002';
       const sessionB = await startSession(target.host, 'session-b', 'turn-b');
       target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
       await target.dispatch(sessionA, ledgerActions[0], 'retained-a');
@@ -3621,8 +3953,8 @@ int main() {
       expect(await pending).toMatchObject(denied);
       const rowB = target.written.at(-1)!;
       expect(rowB.identity).toEqual({
-        pid: sameProcess ? 42 : 43,
-        creationTime: rowA.identity.creationTime,
+        pid: pidB,
+        creationTime: reusedPid ? '133000000000000002' : rowA.identity.creationTime,
       });
       // Only B's already-running storage call retains the deferred promise.
       target.control.wait = null;
@@ -3633,6 +3965,7 @@ int main() {
       });
       expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(wireCount);
       target.control.pid = 42;
+      target.control.creationTime = rowA.identity.creationTime;
       if (sameProcess) {
         expect(await target.dispatch(sessionA, ledgerActions[0], 'blocked-a')).toMatchObject(
           denied,
@@ -3679,9 +4012,11 @@ int main() {
       // Successful starts and sends prove that the uncertain-write hold has been released.
       for (const [session, pid] of [
         [sessionA, 42],
-        [sessionB, sameProcess ? 42 : 43],
+        [sessionB, pidB],
       ] as const) {
         target.control.pid = pid;
+        target.control.creationTime =
+          session === sessionA ? rowA.identity.creationTime : rowB.identity.creationTime;
         await expect(
           startSession(
             target.host,

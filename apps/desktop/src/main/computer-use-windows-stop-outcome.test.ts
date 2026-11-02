@@ -1038,7 +1038,10 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       ...receipt,
       storage: failed,
     });
-    expect(held.state.nativeBlockers).toEqual(blockers);
+    expect(held.state.nativeBlockers).toEqual([]);
+    expect(windowsTargetMayStart(held.state, target)).toBe(false);
+    expect(windowsTargetMayStart(held.state, otherTarget)).toBe(true);
+    expect(held.state.rows).toEqual([background]);
     expect(held).toMatchObject({ idleTeardown: 'defer', awaitingHoldId: failed.holdId });
     const recovered = decideWindowsStop(held.state, {
       kind: 'retry_storage',
