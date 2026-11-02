@@ -6,7 +6,12 @@
 #error "Test hang hooks must not be compiled into a production Computer Use helper"
 #endif
 
+#if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+#error "Test hang hooks require Windows Graphics Capture headers"
+#endif
+
 #include <windows.h>
+#include <cstdio>
 #include <string>
 #include <string_view>
 
@@ -16,15 +21,21 @@ extern "C" __declspec(dllexport) inline const char sprint_coder_test_hang_marker
 
 enum class WindowsTestHangPoint { UiaCall, SemanticPattern, Capture, WinVerifyTrust, CreateFileW };
 
+// UiaCall hangs at the first contact; the existing 470 ms watchdog returns accessibility_timeout.
+// Stop is not held up by this hang, and the occupied worker makes later UIA reads unavailable.
 inline void WindowsTestHang(WindowsTestHangPoint point) {
-  wchar_t executable[32768]{};
-  const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
-  if (length == 0 || length >= 32768) return;
-  std::wstring sidecar(executable, length);
-  const auto separator = sidecar.find_last_of(L"\\/");
-  if (separator == std::wstring::npos) return;
-  sidecar.resize(separator + 1);
-  sidecar += L"sprint-coder-test-hang.txt";
+  static const std::wstring sidecar = [] {
+    wchar_t executable[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
+    if (length == 0 || length >= 32768) return std::wstring{};
+    std::wstring path(executable, length);
+    const auto separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return std::wstring{};
+    path.resize(separator + 1);
+    path += L"sprint-coder-test-hang.txt";
+    return path;
+  }();
+  if (sidecar.empty()) return;
   HANDLE file = CreateFileW(sidecar.c_str(), GENERIC_READ,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -33,11 +44,26 @@ inline void WindowsTestHang(WindowsTestHangPoint point) {
   DWORD count = 0;
   const BOOL read = ReadFile(file, bytes, sizeof(bytes), &count, nullptr);
   CloseHandle(file);
-  if (!read || count == sizeof(bytes)) return;
+  if (!read) return;
+  const auto invalid_selection = [] {
+    constexpr const char *message = "Computer Use test hang: invalid sidecar selection; use a known ASCII name without BOM.\n";
+    OutputDebugStringA(message);
+    std::fputs(message, stderr);
+    std::fflush(stderr);
+  };
+  if (count == sizeof(bytes)) {
+    invalid_selection();
+    return;
+  }
   std::string_view selected(bytes, count);
   const auto first = selected.find_first_not_of(" \t\r\n");
   if (first == std::string_view::npos) return;
   selected = selected.substr(first, selected.find_last_not_of(" \t\r\n") - first + 1);
+  if (selected != "UiaCall" && selected != "SemanticPattern" && selected != "Capture" &&
+      selected != "WinVerifyTrust" && selected != "CreateFileW") {
+    invalid_selection();
+    return;
+  }
   const char *name = nullptr;
   switch (point) {
   case WindowsTestHangPoint::UiaCall: name = "UiaCall"; break;

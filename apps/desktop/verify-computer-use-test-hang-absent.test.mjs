@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../../verify-computer-use-test-hang-absent.mjs';
 
@@ -35,6 +37,30 @@ function artifact(dir, bytes = Buffer.from('synthetic helper'), overrides = {}) 
 const run = (...args) => main([`--dir=${directory}`, ...args], 'win32');
 
 describe('test-hang artifact exclusion', () => {
+  it('runs the CLI entry point and fails for a missing required directory', () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../../verify-computer-use-test-hang-absent.mjs', import.meta.url)),
+        '--require',
+        `--dir=${join(directory, 'missing')}`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('[verify-test-hang] FAIL:');
+  });
+  it('rejects the UTF-16LE sidecar signature without the exported marker', () => {
+    const bytes = Buffer.from('sprint-coder-test-hang.txt', 'utf16le');
+    artifact(directory, bytes);
+    expect(run('--require')).toBe(1);
+    expect(errors.join('\n')).toContain('test-hang marker');
+    artifact(directory);
+    const out = join(directory, 'out');
+    artifact(join(out, 'app', 'resources'), bytes);
+    expect(run('--require', `--out=${out}`)).toBe(1);
+  });
   it('accepts an unmarked helper pinned by its manifest', () => {
     artifact(directory);
     expect(run('--require')).toBe(0);

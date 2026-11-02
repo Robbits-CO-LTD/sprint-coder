@@ -18,7 +18,11 @@ function verifyDirectory(directory) {
   const bytes = readFileSync(join(directory, helperName));
   const digest = createHash('sha256').update(bytes).digest('hex');
   if (manifest.binaryDigest !== digest) throw new Error('manifest digest does not match helper');
-  if (bytes.includes(Buffer.from(marker)) || bytes.includes(Buffer.from(marker, 'utf16le')))
+  if (
+    bytes.includes(Buffer.from(marker)) ||
+    bytes.includes(Buffer.from(marker, 'utf16le')) ||
+    bytes.includes(Buffer.from('sprint-coder-test-hang.txt', 'utf16le'))
+  )
     throw new Error('test-hang marker found in helper');
 }
 

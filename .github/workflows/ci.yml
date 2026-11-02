@@ -788,6 +788,8 @@ jobs:
       - name: Seal the package for this checkout
         id: package-artifact
         run: node ci-windows-package.mjs create
+      - name: Reject test hang hooks in Windows package artifacts
+        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
       - name: Upload the shared Windows production package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -849,6 +851,8 @@ jobs:
       - name: Make Windows wizard installer
         working-directory: apps/desktop
         run: npx electron-forge make --platform=win32 --arch=x64
+      - name: Reject test hang hooks in Windows package artifacts
+        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
       - name: Verify Windows wizard artifact
         shell: pwsh
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1

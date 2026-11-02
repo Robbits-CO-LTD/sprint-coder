@@ -8,6 +8,16 @@ import {
 
 const flag = 'SPRINT_CODER_COMPUTER_USE_TEST_HANG';
 const root = join(__dirname, '../../../..');
+function job(source: string, name: string) {
+  const block = source.split(`\n  ${name}:\n`)[1];
+  if (block === undefined) throw new Error(`Missing job: ${name}`);
+  return block.split(/\n  [\w-]+:\n/u)[0] ?? '';
+}
+function step(source: string, name: string) {
+  const block = source.split(`      - name: ${name}\n`)[1];
+  if (block === undefined) throw new Error(`Missing step: ${name}`);
+  return block.split('      - name: ')[0] ?? '';
+}
 const hooks = [
   ['WindowsV1UiaTimed(', 'UiaCall', 'HRESULT result = call();'],
   ['InvokeWindowsSemanticInput(', 'SemanticPattern', 'struct Returned {'],
@@ -58,6 +68,7 @@ describe('Windows test-only hang hooks', () => {
     );
     expect(header).toContain('SPRINT_CODER_COMPUTER_USE_TEST_HANG_MARKER');
     expect(header).toContain('__declspec(dllexport)');
+    expect(header).toMatch(/#if !SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE\s*\n#error/u);
     expect(header).toContain('GetModuleFileNameW(nullptr,');
     expect(header).toContain('sprint-coder-test-hang.txt');
     expect(header).toContain('WaitForSingleObject(event, INFINITE)');
@@ -68,16 +79,52 @@ describe('Windows test-only hang hooks', () => {
     expect(source.indexOf('#include "computer_use_windows_test_hang.h"')).toBeLessThan(
       source.indexOf('namespace {'),
     );
+    for (const value of [0, 1]) {
+      const define = source.indexOf(`#define SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE ${value}`);
+      expect(define).toBeGreaterThan(-1);
+      expect(define).toBeLessThan(source.indexOf('#include "computer_use_windows_test_hang.h"'));
+    }
     expect(source.match(/#if defined\(SPRINT_CODER_COMPUTER_USE_TEST_HANG\)/gu)).toHaveLength(5);
+  });
+
+  it('caches the sidecar path but rereads selections and diagnoses unknown nonempty names', () => {
+    const header = readFileSync(
+      join(windowsHostNativeDirectory, 'computer_use_windows_test_hang.h'),
+      'utf8',
+    );
+    const initialization = header
+      .split('static const std::wstring sidecar = [] {')[1]
+      ?.split('}();')[0];
+    expect(initialization).toContain('GetModuleFileNameW');
+    expect(initialization).toContain('wchar_t executable[32768]');
+    expect(initialization).toContain('sprint-coder-test-hang.txt');
+    expect(header.indexOf('ReadFile(')).toBeGreaterThan(header.indexOf('}();'));
+    for (const [, point] of hooks) expect(header).toContain(`selected != "${point}"`);
+    expect(header).toContain('OutputDebugStringA(');
+    expect(header).toContain('std::fputs(message, stderr)');
+    expect(header).toContain('count == sizeof(bytes)');
+    expect(header).toContain('470 ms');
+    expect(header).toContain('accessibility_timeout');
   });
 
   it('never enables the flag in production build inputs or any workflow', () => {
     const files = [
       'build-computer-use-native.mjs',
+      'native-build-environment.mjs',
+      'build-computer-use-eligibility.mjs',
+      'apps/desktop/forge.config.ts',
+      'apps/desktop/computer-use-native/binding.gyp',
+      ...readdirSync(join(root, 'apps/desktop/scripts')).map(
+        (name) => `apps/desktop/scripts/${name}`,
+      ),
       ...readdirSync(join(root, '.github/workflows')).map((name) => `.github/workflows/${name}`),
     ];
     for (const file of files)
       expect(readFileSync(join(root, file), 'utf8'), file).not.toContain(flag);
+    for (const file of ['package.json', 'apps/desktop/package.json']) {
+      const { scripts } = JSON.parse(readFileSync(join(root, file), 'utf8'));
+      expect(JSON.stringify(scripts), file).not.toContain(flag);
+    }
   });
 
   it('checks the native gate, release builds and both packaged release paths', () => {
@@ -92,9 +139,60 @@ describe('Windows test-only hang hooks', () => {
     expect(ci.indexOf(command)).toBeGreaterThan(
       ci.indexOf('run: npm run build:computer-use-native'),
     );
-    expect(release.split(command)).toHaveLength(4);
-    expect(release.split(`${command} --out=apps/desktop/out`)).toHaveLength(3);
+    for (const [jobName, buildName, checkName, buildCommand, packaged] of [
+      [
+        'make',
+        'Build Computer Use native artifact for Gate 0',
+        'Reject test hang hooks in the Windows helper',
+        'npm run build:computer-use-native',
+        false,
+      ],
+      [
+        'make',
+        'Make and verify unsigned Windows release artifacts',
+        'Reject test hang hooks in Windows release artifacts',
+        'npm run make:windows',
+        true,
+      ],
+      [
+        'make-windows-signed',
+        'Make signed Windows gate artifacts',
+        'Reject test hang hooks in signed Windows release artifacts',
+        'npm run make:windows',
+        true,
+      ],
+    ] as const) {
+      const block = job(release, jobName);
+      expect(step(block, buildName)).toContain(buildCommand);
+      const check = step(block, checkName);
+      expect(check).toContain("if: runner.os == 'Windows'");
+      expect(check).toContain(`run: ${command}${packaged ? ' --out=apps/desktop/out' : ''}\n`);
+      expect(block.indexOf(`- name: ${checkName}\n`)).toBeGreaterThan(
+        block.indexOf(`- name: ${buildName}\n`),
+      );
+    }
     expect(acceptance).toContain(`${command} --out=apps/desktop/out`);
     expect(acceptance.indexOf(command)).toBeGreaterThan(acceptance.indexOf('npm run make:windows'));
+  });
+
+  it('checks CI Windows packages after packaging and before upload', () => {
+    const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+    for (const [jobName, buildName] of [
+      ['package-windows-build', 'Build the shared Windows production package'],
+      ['package-windows', 'Make Windows wizard installer'],
+    ] as const) {
+      const block = job(ci, jobName);
+      const checkName = 'Reject test hang hooks in Windows package artifacts';
+      expect(step(block, checkName)).toContain(
+        'run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out',
+      );
+      expect(step(block, checkName)).not.toMatch(/\bif:|working-directory:/u);
+      expect(block.indexOf(checkName)).toBeGreaterThan(block.indexOf(buildName));
+      if (jobName === 'package-windows-build') {
+        expect(block.indexOf(checkName)).toBeLessThan(
+          block.indexOf('Upload the shared Windows production package'),
+        );
+      }
+    }
   });
 });
