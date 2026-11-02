@@ -9487,21 +9487,22 @@ int main() {
   if (!Check(!EncodeFrame(cancel_header, metadata).empty(), "cancel-id-valid"))
     return 1;
 
-  // The preflight pair (S5-a) is part of the wire vocabulary, and the next number is not.
-  for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult}) {
-    auto preflight_header = ValidHeader();
-    preflight_header.message_type = static_cast<std::uint16_t>(type);
-    if (!Check(!EncodeFrame(preflight_header, metadata).empty() &&
-                   DecodeFrame(EncodeFrame(preflight_header, metadata)).has_value(),
-               "preflight-message-type-known"))
+  // The preflight and target identity pairs are known; the number after target identity is not.
+  for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult,
+                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult}) {
+    auto known_type_header = ValidHeader();
+    known_type_header.message_type = static_cast<std::uint16_t>(type);
+    if (!Check(!EncodeFrame(known_type_header, metadata).empty() &&
+                   DecodeFrame(EncodeFrame(known_type_header, metadata)).has_value(),
+               "preflight-and-target-identity-message-types-known"))
       return 1;
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kPreflightResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kTargetIdentityResult) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-preflight-unknown"))
+             "message-type-after-target-identity-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');

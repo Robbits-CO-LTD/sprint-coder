@@ -72,6 +72,15 @@ afterEach(() => {
 });
 
 describe('Windows host source structure', () => {
+  it('returns the same decimal processStartTime field in both Windows start responses', () => {
+    const source = readWindowsHostSource();
+    expect(source.split(String.raw`\"processStartTime\":\"`).length - 1).toBe(2);
+    expect(source.match(/JsonEscape\(session\.process_start\)/gu)).toHaveLength(2);
+    expect(source).toContain('*output = std::to_string(ticks.QuadPart);');
+    const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    expect(host).toContain("raw['processStartTime']");
+  });
+
   it('routes host source reads in tests and the offline verifier through the helper', () => {
     expect(unroutedReaders(join(__dirname, '../../../..'))).toEqual([]);
   });

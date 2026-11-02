@@ -495,12 +495,14 @@ describe('full CI partition contract', () => {
     const required = workflow.jobs.required;
     expect(required.needs).toContain('computer-use-native-gate');
     expect(required.needs).toContain('computer-use-windows-v2-harness');
+    expect(required.needs).toContain('computer-use-hung-helper');
     const scope = classifyChanges([], { eventName: 'push' });
     const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
     expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
     for (const dependency of [
       'computer-use-native-gate',
       'computer-use-windows-v2-harness',
+      'computer-use-hung-helper',
       'test-macos',
       'package-macos',
       'electron-bridges',

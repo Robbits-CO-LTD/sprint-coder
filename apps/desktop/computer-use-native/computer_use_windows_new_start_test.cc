@@ -176,6 +176,9 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(session.eligibility_basis == input.eligibility_basis && session.cancel_epoch == epoch && cancellation_epoch.load() == epoch, "basis and epoch");
     Check(session.maximum_mode == (config.v2 ? "observe_only" : "full_access_app") && session.policy_language == "en", "mode and language");
     Check(!session.not_web_file, "no invented not-web key");
+    std::string process_start;
+    Check(ReadJsonString(response, "processStartTime", &process_start) && process_start == created &&
+          process_start == session.process_start, "bound process creation time");
     std::uint64_t reply_epoch = 0, count = 1;
     Check(ReadJsonUint64(response, "cancelEpoch", &reply_epoch) && reply_epoch == epoch &&
           ReadJsonUint64(response, "inputAttemptCount", &count) && count == 0, "bound receipt fields");
