@@ -34,10 +34,10 @@
 
 セッションは次の二つの形のどちらかにある。形は native が測定し、Main が状態として持つ。
 
-- **背景セッション**: 対象が前面でなく、背景能力（下記の対応表）がある対象で始める。開始・再開は前面化しない。使えるのは `background_semantic` だけである。他の経路が要る操作は §2.4 の `awaiting_foreground_handoff` へ移る。
+- **背景セッション**: 対象が前面でなく、背景能力がある対象で始める。開始の判定は**対象の単位**で行う。対象の窓が下記の背景対象の条件を満たし、対象の provider の種別（とアプリの identity・版）について下記の対応表に背景能力のある組が一組以上載っていれば、背景セッションで始められる。操作ごとの判定（その要素・control・pattern の組が対応表にあり、§2.2 の束縛が成り立つか）はこれとは別に、入力のたびに行う。開始・再開は前面化しない。使えるのは `background_semantic` だけである。他の経路が要る操作は §2.4 の `awaiting_foreground_handoff` へ移る。
 - **前面セッション**: 今の形を保つ。前面での UIA 呼出し（`foreground_semantic`）と SendInput（`foreground_input`）を続けて送ってよく、focus の喪失は今どおり pause である（§2.4 の承認の往復だけを例外とする）。#988 の方針どおり、pattern がある操作は `foreground_semantic` を先に使い、使えない操作だけ `foreground_input` にする。
 
-前面セッションになるのは、(a) 開始時に対象がすでに前面にある場合（人が前面にしたものであり、製品は focus を変えない）、(b) 背景セッションから §2.4 の人の引渡しを経た場合、(c) 背景能力の gate が閉じている場合（旧 helper、能力宣言の欠落・版不一致）だけである。(c) は今の挙動そのものであり、gate が閉じている間は開始時の自動前面化（`:5652` / `:6140`）も今のまま残す。gate が開いた後に、前面でもなく背景能力も無い対象を開始する場合は、背景セッションにはできない（背景セッションは背景能力のある対象でしか始めない）。この場合は**開始を拒否する**（理由は前面が要ることを示す値にし、名前は N9-1 で決める）。製品は自動で前面化せず、自動の引渡しカードも出さない。人が対象を自分で前面にしてから開始し直せば、(a) の前面セッションになる。前面セッションとして自動で前面化して始める案は、別アプリで入力中の人のキーを対象へ流す D14 と同じ危険があるので採らない。背景セッションの途中で前面が要る操作になった場合だけが §2.4 の引渡しである。背景セッションへ戻るのは、前面セッションの pause の後に人が再開し、その時点で対象が前面でなく背景能力がある場合だけで、新規観測から始める。
+前面セッションになるのは、(a) 開始時に対象がすでに前面にある場合（人が前面にしたものであり、製品は focus を変えない）、(b) 背景セッションから §2.4 の人の引渡しを経た場合、(c) 背景能力の gate が閉じている場合（旧 helper、能力宣言の欠落・版不一致）だけである。(c) は今の挙動そのものであり、gate が閉じている間は開始時の自動前面化（`:5652` / `:6140`）も今のまま残す。gate が開いた後に、前面でもなく背景能力も無い対象を開始する場合は、背景セッションにはできない（背景セッションは背景能力のある対象でしか始めない）。この場合は**開始を拒否する**（理由は前面が要ることを示す値にし、名前は N9-1 で決める）。この拒否の対象は、人の明示の操作を伴わない新しい開始だけである。人が押した §2.4 の引渡し、§2.4 の承認の往復の復帰、人による前面セッションの再開の前面化（今の `resume`（`main/computer-use-controller.ts:2948`）と承認後の `refocusAndReobserve` が呼ぶ `startSession` の自動前面化、native `:5652` / `:6140`）は対象外とし、それぞれ trusted activation と §2.4 の条件で守る。製品は自動で前面化せず、自動の引渡しカードも出さない。人が対象を自分で前面にしてから開始し直せば、(a) の前面セッションになる。前面セッションとして自動で前面化して始める案は、別アプリで入力中の人のキーを対象へ流す D14 と同じ危険があるので採らない。背景セッションの途中で前面が要る操作になった場合だけが §2.4 の引渡しである。背景セッションへ戻るのは、前面セッションの pause の後に人が再開し、その時点で対象が前面でなく背景能力がある場合だけで、新規観測から始める。
 
 `inputPath` は監査の既存の route とは別の欄とする。route は操作の種類の分類（semantic / visual / none）のまま残し、`inputPath` は実際に通った経路を記録する。route が semantic の操作のうち、pattern 入力の invoke / set_text / select / toggle / expand_collapse は `background_semantic` か `foreground_semantic` になる。同じく route が semantic の copy は対象への入力ではない別の経路（`main/computer-use-controller.ts:4576` の `executeCopy`、native は `:11321` の copy の分岐）で、`inputPath` を持たない。route が visual の操作は `foreground_input`、none（wait / finish）は `inputPath` を持たない。下記の semantic scroll は新しい閉じた操作として route を semantic にし、`computerUseActionRoute` を N9-1 で同時に直す。新しい操作なので、N8 の承認の operation の列挙（承認経路 ADR §2.2 の表と、§3 の N8-1 の classifier の正例との連動試験、N8-2 の strict schema）にも semantic scroll を足す必要がある。この拡張は N9-1 で N8 の契約を拡張する変更として行い、N8 の列挙に無いまま背景で承認しない。kill-stop の台帳には §2.5 の K-4 のとおり `inputPath` の列を足すことを求める。
 
@@ -45,7 +45,7 @@
 
 | 操作・pattern | 背景で行う条件 | 完了と効果の確認 | 制限 |
 | --- | --- | --- | --- |
-| Invoke | 一意の対象に InvokePattern があり、効果分類・承認が成立する | 今の前面での semantic Invoke と同じ基準とする（`:9445` の呼出しが成功し、呼出し後の窓の単位の再検証を通れば completed。今は `:10459` の `RevalidateWindowsTarget`、背景では §2.2 の 7 の窓の単位の再検証）。要素の祖先・内容の指紋の照合は呼出し前だけに行い、呼出し後には行わない（Name や兄弟の数を変えるのが Invoke の通常の効果だからである）。これより強い効果の確認（UI 状態の変化の期待値）は要求しない | `unknown_effect` になるのは timeout、error、呼出し後の再検証の失敗のときだけである（下記） |
+| Invoke | 一意の対象に InvokePattern があり、効果分類・承認が成立する | 今の前面での semantic Invoke と同じ基準とする（`:9445` の呼出しが成功し、呼出し後の窓の単位の再検証を通れば completed。今は `:10459` の `RevalidateWindowsTarget`、背景では §2.2 の 7 の窓の単位の再検証）。要素の祖先・内容の指紋の照合は呼出し前だけに行い、呼出し後には行わない（Name や兄弟の数を変えるのが Invoke の通常の効果だからである）。これより強い効果の確認（UI 状態の変化の期待値）は要求しない | `unknown_effect` になるのは timeout、error、呼出し後の再検証の失敗のときだけである（下記）。dialog を開く Invoke（保存・開く・設定など）は、窓の単位の再検証の dialog 集合の変化で、背景では毎回 `unknown_effect` と対象の隔離（§2.5 の K-1）になり、続けるには Stop の後に K-5 のカードで新しいセッションを始める必要がある。背景入力の範囲の判断材料として Q1 に書く |
 | Toggle | 現在値と希望値を読み、異なる場合だけ Toggle を一度呼ぶ | ToggleState を読み直し、希望値であることを確かめる | Indeterminate、読取り不能、複数回 Toggle が必要な操作は背景実行しない。同値なら入力なしの完了 |
 | SelectionItem.Select | 観測した単一要素を Select する。選択集合・効果分類も束縛する | IsSelected を読み直す | AddToSelection / RemoveFromSelection、複数選択への拡張は N9 に含めない |
 | Value.SetValue | enabled、書込み可能、非 secure の ValuePattern に全文を一度渡す | 値を読み直し、渡した全文と一致することを native の中で確かめる | 本文をログに出さない。TextPattern を文字入力用の代替としない。Value 不在なら §2.4 の前面入力候補 |
@@ -104,19 +104,20 @@ T5 の誤配防止は、背景経路では OS の前面への配送を使わず�
 
 キー入力は前面のスレッドの focus へ配送されるので、前面でない対象へのキー入力は対象の前面化（2 行目）を伴う（確度: 強い推定。global hotkey は 5 行目で扱う）。このため所属の監視に低レベルのキーボード hook は使わない。
 
-native は背景セッションの開始前から、前面の変化（`EVENT_SYSTEM_FOREGROUND`）、対象プロセスの WinEvent、mouse の対象所属を監視し、単調増加の interaction epoch と不明状態を保持する。mouse の所属には低レベル mouse hook（`WH_MOUSE_LL`）を使う案を推奨する。hook は背景セッションがある間だけ、専用の message pump スレッドに入れ、セッションの終了で外す。callback は最小の metadata（時刻、hit target が対象に属するか）だけを記録し、座標の列・他アプリの名前・入力本文を保存しない。自分の注入に付けた目印だけを根拠にユーザー入力を無視しない（背景経路は入力を注入しない）。大域の低レベル入力 hook の採否は §4 の Q10 で問う。
+native は背景セッションの開始前から、前面の変化（`EVENT_SYSTEM_FOREGROUND`）、対象プロセスの WinEvent、mouse の対象所属を監視し、単調増加の interaction epoch と不明状態を保持する。mouse の所属には低レベル mouse hook（`WH_MOUSE_LL`）を使う案を推奨する。hook は背景セッションがある間だけ、専用の message pump スレッドに入れ、セッションの終了で外す。callback は最小の metadata（時刻、hit target が対象に属するか）だけを記録し、座標の列・他アプリの名前・入力本文を保存しない。自分の注入に付けた目印だけを根拠にユーザー入力を無視しない（背景経路は入力を注入しない）。低レベル mouse hook の採否は §4 の Q10 で問う。
 
 監視の生存は次で確かめ、どれかに失敗したら背景経路を閉じる（新規 claim の gate を閉じ、pause する）。
 
 - **hook の外れ**: 低レベル hook は callback が `LowLevelHooksTimeout` を超えると OS に通知なく外されうる。外れの検出には、mouse hook と独立した**マウス由来の信号**を使う。推奨は、マウスに限った Raw Input（`RIDEV_INPUTSINK`。前面でなくても受けられる）を hook とは別のスレッドで受け、マウスの Raw Input が来たのに対応する hook の event が一定時間内に無ければ失明とみなす案である。代案は、`GetCursorPos` の座標の変化を一定間隔で読み、変化に対応する hook の event が無ければ失明とみなす案である（クリックや wheel だけの入力は拾えない）。`GetLastInputInfo` はキー入力でも進むので、マウスだけの hook との照合に使うと、別アプリでの文字入力のたびに失明と誤判定する。このため `GetLastInputInfo` を失明の単独の根拠にしない。照合の時間の上限は N9-3 の実測で決める。
-- **pump の停止・遅延**: message pump スレッドは一定間隔で自分宛ての心拍を投げ、その到着の遅れを測る。上限を超える遅れ、または心拍の欠落を遅延・失明とみなす。間隔と上限は N9-3 の実測で決める。
+- **pump の停止・遅延**: hook の message pump スレッドと Raw Input の受信スレッドは、それぞれ一定間隔で自分宛ての心拍を投げ、その到着の遅れを測る。どちらかで上限を超える遅れ、または心拍の欠落があれば、遅延・失明とみなす。間隔と上限は N9-3 の実測で決める。
+- **Raw Input の最小 metadata**: Raw Input の受信も hook と同じく最小の metadata だけを扱う。保存・照合に使うのは到着の時刻と件数だけで、座標・移動量・ボタンの状態を保存しない。
 - **初期化・再登録の失敗**: hook・WinEvent の登録失敗、スレッドの異常終了。外れた後に再登録できても、それだけで自動再開しない。
 
 観測から最後の claim まで interaction epoch が同じこと、監視が生きていることを検査する。イベント取りこぼしを完全に証明できるとはしない。
 
 **takeover の通知路と epoch の同期**: 今の protocol には native → Main の非同期の通知路が無いので、次を要件とする（N9-3）。
 
-1. 新しい非要求の event frame（名前は N9-3 で決める）を足す。C++ と TS の MessageType を名前・数値で一致させ（`main/computer-use-windows-transport.test.ts:2518` の完全一致の試験に載せる）、helperGeneration・sessionId・単調増加の event 番号に束縛する。event の種類は二つである。(i) 背景セッションの takeover（理由と、その時点の interaction epoch だけを運ぶ）。(ii) 前面セッションの `approval_round_trip` 中の前面の移動（§2.4。移った先が「対象とその owned window」「Sprint Coder の窓」「その他」のどれかと、前面の変化の番号だけを運び、窓の名前・HWND・PID は運ばない。判定は native が行い、Sprint Coder の窓の特定に要る値は Main が往復の開始のときに渡す）。
+1. 新しい非要求の event frame（名前は N9-3 で決める）を足す。C++ と TS の MessageType を名前・数値で一致させ（`main/computer-use-windows-transport.test.ts:2518` の完全一致の試験に載せる）、helperGeneration・sessionId・単調増加の event 番号に束縛する。event の種類は二つである。(i) 背景セッションの takeover（理由と、その時点の interaction epoch だけを運ぶ）。(ii) 前面セッションの `approval_round_trip` 中の前面の移動（§2.4。往復の id と、移った先が「対象とその owned window」「Sprint Coder の窓」「その他」のどれかと、前面の変化の番号だけを運び、窓の名前・HWND・PID は運ばない。判定は native が行い、Sprint Coder の窓の特定に要る値は Main が往復の開始のときに渡す）。
 2. native は takeover を検出したら、Main を待たずに自分の claim gate を閉じ、interaction epoch を進めてから event を送る。**native は cancel epoch を自分で進めない。** cancel epoch の所有は今どおり Main だけとし、interaction epoch は native だけが進める別の値とする。
 3. Main は takeover の event を受けたら、`cancelPendingApprovals`、ordinary ticket と execution ticket の失効、paused の emit（pause の理由つき）を行い、cancel（`cancelEpoch + 1`）を送る。今の pause（`main/computer-use-controller.ts:4516` の `userTakeover`）は状態を paused にして emit するだけで cancel を送らず、今の cancel は、Stop（`:3597` の `completeStop`）、開始待ちの Stop（`:3526`）、中断された再開（`:3028` の `resume`）と承認後の復帰（`:3889` の `cleanupAbandonedRefocus`）の後始末から、どれも close とともに送られる。したがって、close を伴わない「pause のための cancel」は新しい経路として N9-3 で作る。この cancel は session を閉じず、native の claim gate と取消し状態を Main の epoch に揃えるためのものである。人の再開のときは、Main が持つ進めた後の cancel epoch をそのまま使い、新規観測をその epoch で取り直す（旧 epoch に戻さない。旧 epoch の要求・ticket は失効したままである）。interaction epoch は再開の新規観測の時点の値を新しい束縛にする。
 4. 要求は期待する interaction epoch を運び、native は一致しなければ takeover として拒否する（`invalid_action` にしない）。event が失われても、次の要求はこの照合で拒否されるので、入力は出ない。event と応答の順序が入れ替わっても、epoch の照合で後の要求は拒否される。transport の破損は今の helper の失敗の扱いに従う。
@@ -148,14 +149,15 @@ native は背景セッションの開始前から、前面の変化（`EVENT_SYS
 
 **承認の往復**: 前面セッションで N8 のカード（supervised の操作ごとの確認、E2 / E3、二枚カード）が要る操作では、人はカードを操作するために Sprint Coder へ移り、承認後は対象へ戻る必要がある。この往復を、通常の focus の喪失と区別する次の状態 `approval_round_trip` として定義する。
 
-- 入る条件: その操作の承認カードが pending になった時点で、Main が native に往復の開始を伝える（既存の要求に載せる。名前は N9-5 で決める）。開始を伝えた後に前面が対象から Sprint Coder の窓へ移るのは、往復の中の許す移動である。
+- 入る条件と要求: その操作の承認カードが pending になった時点で、Main が native に往復の開始を新しい要求で伝える。V1 カードの間は Main から native への要求が今は無いので、既存の要求には載せない。往復の開始の要求は、往復の id（Main が発行し、session・Task・Turn・helper 世代・cancel epoch に束縛する）、Sprint Coder の窓の特定に要る値、上限の時刻を運ぶ。往復の終わり（承認・拒否・期限・Stop）も同じ id を持つ新しい要求で伝える。名前と形は N9-1 の契約で決める。native はこの id で往復を識別し、id の違う終わりの要求・復帰の指示を拒否する。開始を伝えた後に前面が対象から Sprint Coder の窓へ移るのは、往復の中の許す移動である。
 - Sprint Coder の窓の特定: 窓の所有プロセスの PID と、そのプロセスの作成時刻・実行中の image identity で特定し、窓のタイトルや表示文字列では判定しない。Main は往復の開始のときに、自分のプロセスの PID・作成時刻・image identity を native に渡す（この値は Main と native の外に出さない。V2 ADR §8 の「PID を Main/native の外に出さない」と同じ）。
-- 監視と受け渡し: 前面の移動の判定は native が行う。native は §2.3 と同じ前面の変化の監視（`EVENT_SYSTEM_FOREGROUND`）で、移った先を「対象とその owned window」「Sprint Coder の窓」「その他」の三つに分け、§2.3 の event frame の (ii) で Main に伝える。Main は「その他」を受けたら下の第三の窓の扱いにする。往復の開始を伝える前の前面の移動は、今どおり前面セッションの focus の喪失である。
-- 許す窓: 対象（とその owned window）と Sprint Coder の窓だけである。この状態の間は入力の claim を閉じる。第三の窓へ前面が移ったら、通常の focus の喪失として pause し、カードを失効させる。
+- 監視と受け渡し: 前面の移動の判定は native が行う。native は §2.3 と同じ前面の変化の監視（`EVENT_SYSTEM_FOREGROUND`）で、移った先を「対象とその owned window」「Sprint Coder の窓」「その他」の三つに分け、§2.3 の event frame の (ii) で Main に伝える。Main は「その他」を受けたら下の第三の窓の扱いにする。native は「その他」を検出したら、Main を待たずにその往復の失敗を自分で保持し、その往復の id による復帰の前面化の指示と、ticket の交換（approvalApprove）を拒否する。このため、event frame の (ii) の「その他」が Main に届かなかった・遅れた場合も、入力は出ない。往復の開始を伝える前の前面の移動は、今どおり前面セッションの focus の喪失である。
+- 許す窓: 対象（とその owned window）と Sprint Coder の窓だけである。この状態の間は入力の claim を閉じる。第三の窓へ前面が移ったら、通常の focus の喪失として pause し、カードを失効させる。File Explorer のフォルダの窓とデスクトップも第三の窓であり、pause する。往復の間に拒否した入力は、往復が終わった後も旧 ticket・旧 observation で再実行しない。往復の後の入力は、復帰の後の新しい観測と、そこから得た ticket だけで行う。
+- 往復の間に生きている規則: 往復は前面セッションの中の状態である。前面セッションでは §2.3 の背景セッションの監視（低レベル mouse hook、interaction epoch）を動かさず、takeover は今どおり focus の喪失・dialog の変化・対象の変更・Stop・世代失効で扱う。往復が例外にするのは、Sprint Coder の窓への前面の移動と、それによる下の focus の喪失の検知だけである。それ以外の規則（第三の窓、対象の変更・新しい dialog、Stop、世代失効、カードの期限）は往復の間も生きている。
 - 往復の間の native の focus の喪失の扱い: 前面セッションの native は、今は前面が対象でも対象の dialog でもないことを dialog 集合の取得で `focus_required`（`native/computer_use_windows_host.cc:3599`）として検知し、入力を拒否する。往復の間、Sprint Coder の窓への移動によるこの検知は、入力の拒否（claim を閉じたまま）にとどめ、claim gate を takeover として閉じる処理や interaction epoch を進める処理を起こさない。第三の窓への移動、期限切れは pause にする。
-- 対象が最大化されていてカードが背後に出た場合: カードは showInactive で出るので、対象の背後に隠れうる。人がタスクバーの点滅などから Sprint Coder を前面にするのは、対象から Sprint Coder の窓への許す移動である。カードに届くまでの間も往復の状態にあり、claim は閉じたまま、時間はカードの期限で数える。タスクバーの click でシェルの窓が一時的に前面になる場合は、シェルのプロセス（`GetShellWindow` の窓の所有プロセス。PID と image identity で特定する）の窓に限って移動の途中として許し、claim は閉じたままにする。この挙動は N9-5 の実機で確かめる（未確認）。Sprint Coder を前面にする操作の途中で第三の窓（タスクバーの一覧から選んだ別アプリなど）が前面になれば pause する。
-- 時間の上限: そのカードの期限（native の単調時計で最大 60 秒の intent の残り。承認経路 ADR §2.2 の 3）とする。期限・拒否・Stop・世代失効で状態を終え、pause する。二枚カードでは往復が二回起こりうる。それぞれが同じ条件を満たす必要がある。
-- 対象への復帰: trusted activation を Main が消費した後だけ、上記と同じく helper の pid に `AllowSetForegroundWindow` を一度許して対象へ戻す（`refocusAndReobserve` に当たる）。戻った後、identity（PID + 作成時刻）、HWND、geometry、dialog 集合、要素の署名と内容の指紋、interaction epoch、cancel epoch、Stop serial、helper 世代を再検証し、新しい観測と再分類が承認した内容と一致する場合だけ execution ticket へ進む。不一致は再承認を自動発行せず拒否する。exchange 後に observe / refocus を挟まない制約（承認経路 ADR §2.2 の 5）は維持する。
+- 対象が最大化されていてカードが背後に出た場合: カードは showInactive で出るので、対象の背後に隠れうる。人がタスクバーの点滅などから Sprint Coder を前面にするのは、対象から Sprint Coder の窓への許す移動である。カードに届くまでの間も往復の状態にあり、claim は閉じたまま、時間はカードの期限で数える。タスクバーの click でシェルの窓が一時的に前面になる場合を「移動の途中」として許す例外は、**未確定事項**とする。N9-5 の実機確認で、その窓を窓の class（`Shell_TrayWnd` など）とプロセス（PID と image identity）の組で特定できると確かめるまでは、シェルの窓も「その他」として pause する（fail-closed）。確かめた後に例外を開くかは、その結果とともに改めて決める。Sprint Coder を前面にする操作の途中で第三の窓（タスクバーの一覧から選んだ別アプリなど）が前面になれば pause する。
+- 時間の上限: native カードではそのカードの期限（native の単調時計で最大 60 秒の intent の残り。承認経路 ADR §2.2 の 3）とする。二枚カードの 1 枚目の V1 カードは、今の期限が 60 分（`main/computer-use-controller.ts:4466` の `expiresAt`、`:4502` の timer）で native の intent を持たないので、V1 カードの往復の上限は往復の開始から 60 秒に固定し、往復の開始の要求で native に渡す。期限・拒否・Stop・世代失効で状態を終え、pause する。二枚カードでは往復が二回起こりうる。それぞれが同じ条件を満たす必要がある。
+- 対象への復帰: trusted activation を Main が消費した後だけ、上記と同じく helper の pid に `AllowSetForegroundWindow` を一度許して対象へ戻す（`refocusAndReobserve` に当たる）。native は往復の id が失敗を保持していないことを確かめてから前面化する。戻った後、identity（PID + 作成時刻）、HWND、geometry、dialog 集合、要素の署名と内容の指紋、cancel epoch、Stop serial、helper 世代を再検証し（前面セッションは interaction epoch を持たないので、復帰の再検証には入れない）、新しい観測と再分類が承認した内容と一致する場合だけ execution ticket へ進む。不一致は再承認を自動発行せず拒否する。exchange 後に observe / refocus を挟まない制約（承認経路 ADR §2.2 の 5）は維持する。
 - 背景セッションのカードは、Sprint Coder への移動が §2.3 の表の 1 行目の「無関係な通常アプリ」に当たるので往復の状態は要らない。承認後に対象を前面化せず、§2.6 の背景の再観測で進める。
 
 対象を前面に出すこと自体も取消しと競合する control intent として記録する（§2.5 の K-4）。引渡し中の Stop は未消費の許可を失効させる。すでに前面化を発行した場合の結果は記録するが、ユーザーの focus を復元する追加操作はしない。
@@ -180,19 +182,19 @@ native は背景セッションの開始前から、前面の変化（`EVENT_SYS
 | 隔離中の対象への、実行中のセッションの dispatch・承認交換・引渡し | 隔離が拒否するのは開始・再開・discovery の入口だけ | 実行中のセッションでも新しい claim を拒否する（K-2） |
 | receipt で確定した、応答待ち・効果未確認の背景の行 | receipt の時点で消す | 消さずに対象の隔離へ移す（K-3） |
 | 経路・前面化の記録 | 台帳に経路の列・前面化の種類が無い | 列と種類を足し、前面化の種類を終了時の判定から除く（K-4） |
-| 実行中のセッションで隔離した対象からの、同じ世代のままの再開 | 承認カードでの再開（同 §2.2 の 4）は helper の終了の後の新しい世代で新しい ticket を発行する前提で、世代が変わらない実行中のセッションの経路が無い | 同じ世代のまま承認カードで再開する経路を足す（K-5） |
+| K-1 で隔離した対象への、receipt で Stop した後の新しいセッションの開始 | 承認カードでの再開（同 §2.2 の 4）は helper の終了の後の新しい世代で新しい ticket を発行する前提で、helper の世代が変わらないまま receipt で Stop した後の経路が無い | Stop の後に新しいセッションを始めるときに、承認カードで対象の隔離を解く経路を足す（K-5） |
 
 今のコードでは、semantic owner の uncertain は `main/computer-use-native-windows.ts:301` の `markSemanticUncertain` が立てる。呼ぶのは要求の timeout（`:829`）、write の失敗（`:887`、`:896`）、応答の binding の不一致（`:945`）、`semantic_input_in_flight` の error 応答（`:970`）、不正な応答（`:1003`）、`failAll`（`:1009` の中の `:1015`。`abortTransport` は `:1023` で `failAll` を呼ぶ）である。検証済みの close の proof を受けた `confirmSessionClosed`（`:278`）は `:296` で uncertain を false に戻す。kill-stop ADR §2.2 のとおり `pending` と semantic owner は判定の情報源にしてはならない（semantic でない dispatch には残らず、対象の identity も持たない）ので、K-1 の判定の情報源は台帳の行（応答待ち／効果未確認の 2 値）とし、上の出来事は隔離を作る契機としてだけ使う。
 
 **決めること・推奨案**: 背景操作も kill-stop の control 要求として同じ所有・台帳に登録する。新しい「背景専用 Stop」は作らない。そのうえで、次を **kill-stop への追加の要求** とし、その追加を N3（kill-stop の実装、kill-stop ADR §4 の S2）の範囲に入れることを求める（§4 の Q15）。
 
 - **K-1（実行中の隔離の入口）**: `inputPath` が `background_semantic` の台帳の行について、次のどれかが起きたとき、Main は Stop や helper の終了を待たずに、その行の対象（pid + 作成時刻）の隔離を作る。(a) dispatch が accepted=true の効果未確認（`input_timeout_unconfirmed`、`input_not_confirmed`、`semantic_input_in_flight`）で返った。(b) 応答が無いまま、その要求が transport timeout・`failAll`・`abortTransport` で終わった（§2.4 の表の「応答消失」）。(c) その要求で semantic owner が uncertain になった。(d) takeover と claim が競合して結果未確認になった。隔離の行は kill-stop ADR §2.2 の 5 と同じ SQLite のストアに書き、再起動をまたいで保つ。書けなければセッションを pause し、その対象の開始を拒否する（fail-closed）。隔離の行が持つのは同 §2.2 の 5 と同じく pid、作成時刻、隔離の理由だけである。
-- **K-2（隔離の効く範囲）**: 隔離は startSession・resume・discovery の入口に加え、実行中のセッションのその対象への dispatch・承認交換・前面への引渡しを拒否する。K-1 で隔離したセッションは pause し、Controller の通常の resume（paused のための再開）では再開できない。再開は、helper の世代が変わった後なら kill-stop ADR §2.2 の 4 の承認カードでの再開、世代が変わらないなら K-5 による。隔離は PID + 作成時刻の対象プロセスに掛け、同じプロセスの別窓・別 session・前面入力からも迂回できない。
+- **K-2（隔離の効く範囲）**: 隔離は startSession・resume・discovery の入口に加え、実行中のセッションのその対象への dispatch・承認交換・前面への引渡しを拒否する。K-1 で隔離したセッションは pause し、Controller の通常の resume（paused のための再開）では再開できない。同じセッションをそのまま再開する経路は作らない。セッションを Stop した後、helper の世代が変わった後なら kill-stop ADR §2.2 の 4 の承認カードでの再開、世代が変わらないまま receipt で Stop した後なら K-5 の新しいセッションの開始による。隔離は PID + 作成時刻の対象プロセスに掛け、同じプロセスの別窓・別 session・前面入力からも迂回できない。
 - **K-3（receipt で確定した行を消さない例外）**: `inputPath` が `background_semantic` で、receipt で確定していない応答待ち・効果未確認の行は、検証済みの close receipt で Stop を確定しても消さず、同じ SQLite の transaction で対象の隔離へ移す。`confirmSessionClosed` が semantic owner の uncertain を戻しても、この行の扱いは変わらない。K-1 の隔離の書込みと応答の処理の間に Main が crash した場合も、残った行が起動時に隔離へ移る（kill-stop ADR §2.2 の 5）。
 - **K-4（台帳の列と種類、終了時の判定の例外）**: 台帳の行に `inputPath` の列を足す。前面への引渡し（helper の `SetForegroundWindow`）も control の種類（前面化）として台帳に記録する。前面化は対象の内容への入力ではなく、win32k の短い呼出しで完了するので、その結果未確認は隔離を作らず pause にする。kill-stop ADR §2.2 の終了時の判定は、応答の無い・効果未確認の行が残る世代を `terminated_target_suspect` として対象を隔離するので、これと食い違わないよう、前面化の種類の行をこの判定と起動時の隔離への移行（同 §2.2 の 5）の対象から除く例外を、kill-stop 側の判定の例外として N3 に入れる。前面化が遅れて効いた場合の残余リスクは Q21 に含める。
-- **K-5（実行中のセッションの隔離からの再開）**: K-1 で隔離した対象を、helper の世代が同じまま承認カードで再開する経路を足す。カードは、対象（検証済みのラベル）、隔離の理由（応答消失・効果未確認・takeover との競合の別）、「最後の操作が後から反映される可能性がある」を示し、trusted activation を必須にする。再開の ticket は、同じ世代でも新しく発行し（隔離の前の ordinary ticket・execution ticket・承認 intent は失効したまま）、新しい cancel epoch と、再開の時点の interaction epoch に束縛する。再開の後は新規観測から始め、隔離の前の観測・要素参照を使わない。対象の隔離の行は、このカードの承認で解除する。
+- **K-5（Stop の後の新しいセッションの開始での隔離の解除）**: K-1 で隔離した対象について、そのセッションを receipt で Stop した後、同じ対象に新しいセッションを始めるときに、承認カードで対象の隔離を解く経路を足す。同じセッションをそのまま再開はしない。カードは、対象（検証済みのラベル）、隔離の理由（応答消失・効果未確認・takeover との競合の別）、「最後の操作が後から反映される可能性がある」を示し、trusted activation を必須にする。新しいセッションは新しい session id・ticket・cancel epoch で始め、新規観測から始める（背景セッションなら、その時点の interaction epoch を束縛する）。隔離の前の観測・要素参照・ticket・承認 intent は使わない。対象の隔離の行は、このカードの承認で解除する。**K-5 のカードの承認は、client の semantic owner の uncertain / closeCandidate、host の `activeStopQuarantines`、native の in-flight を外す根拠にしない。** 今のコードでは、これらは host 全体の入力を拒否する。client は `hasUnconfirmedSemanticInputs`（`main/computer-use-native-windows.ts:272`）が uncertain・closeCandidate の owner を見て、`assertSemanticAvailable`（`:312`、呼出しは `:554`）で Stop 以外の操作を拒否する。host は `inputQuarantined`（`main/computer-use-native-host.ts:247`）で semantic の未確認と `activeStopQuarantines` を見て入力を拒否する。native は in-flight の間 dispatch を拒否する（`native/computer_use_windows_host.cc:10220`）。これらは kill-stop ADR の receipt・helper の終了による確定でだけ外れる。カードを承認しても、これらが残る間は dispatch は拒否される。
 
-隔離の解除は kill-stop ADR §2.2 の 3（対象の終了の照合）と同 §2.2 の 4（承認カードでの再開）に従う。人の再開でも、遅延呼出しを消せた保証はない。カードは「最後の操作が後から反映される可能性がある」を示す。単に画面が変わっていない、待ち時間が過ぎたことを解除根拠にしない。helper の終了確認は「helper から新しい入力が出ない」の証拠であり、「対象が最後の操作を実行しない」の証拠ではない。遅い成功 receipt だけで、旧 ticket や旧世代の session を復活させない。
+隔離の解除は、kill-stop ADR §2.2 の 3（対象の終了の照合）、同 §2.2 の 4（helper の世代が変わった後の承認カードでの再開）、K-5（Stop の後の新しいセッションの開始での承認カード）に従う。人の再開でも、遅延呼出しを消せた保証はない。カードは「最後の操作が後から反映される可能性がある」を示す。単に画面が変わっていない、待ち時間が過ぎたことを解除根拠にしない。helper の終了確認は「helper から新しい入力が出ない」の証拠であり、「対象が最後の操作を実行しない」の証拠ではない。遅い成功 receipt だけで、旧 ticket や旧世代の session を復活させない。
 
 helper 世代の失効では、背景 observation、要素参照、引渡し許可、承認 intent、execution ticket を一括失効させる。再接続後は対象の隔離を検査し、新規観測から始める。旧要求を新 helper へ再送しない。provider が固まったときの期限・helper 終了・台帳の recovery は kill-stop の責務である。N9 は timeout を成功に変換せず、未確認の対象と要求を渡す。
 
@@ -230,10 +232,10 @@ N8 の authority に `inputPath`・pattern・対象祖先・内容の指紋・in
 | BG-2 別アプリでの作業 | 別アプリで合成の文を入力しながら背景操作する。文字がそのアプリだけへ届き、カード出現が keyboard focus を変えない。ユーザーによる cursor 移動は別の区間として記録し、背景操作による移動と混同しない。背景操作の副作用の popup が前面アプリの作業を妨げない |
 | BG-3 takeover | 対象の前面化、対象プロセスの owner の無い窓の前面化、非アクティブ wheel、click、resize、capture、対象由来で自分の呼出しと対応しない WinEvent（別の UIA client・global hotkey）を各々行う。次の claim が拒否され、人の再開まで停止する。claim 前・直後・provider 内停止中を別々に試験し、発行済みは未確認として K-1 で隔離される。event frame の欠落・順序の入替えでも interaction epoch の照合で入力が出ない |
 | BG-4 対象差替え | PID / HWND 再利用、runtime id / ancestor 変更、同名重複、geometry / DPI 変化、dialog 発生、最小化、secure desktop、別の仮想デスクトップ、cloak された窓、仮想デスクトップの切替を境界 fixture で作る。**同じ index・同じ runtime id・中身が違う項目**（並べ替え・挿入・再読込み）と、**仮想化コンテナの再利用**（スクロールで同じ要素が別の項目を表す）の負例を含める。index 由来の runtime id の proxy は背景能力なしと判定される。入力前の失敗は API attempt が 0、発行後は未確認となり fallback しない |
-| BG-5 fallback と承認の往復 | pattern 不在ではカードが出ても focus は動かない。明示引渡し後だけ前面化し、新しい観測・必要な承認・ticket で操作する。拒否、期限、Stop、前面化失敗（foreground lock を含む）、直後の別アプリへの移動で入力が出ない。supervised の前面 fallback の通し試験として、Sprint Coder への往復で承認を完了でき、第三の窓への移動・期限切れ・復帰後の対象変更では入力が出ない。`AllowSetForegroundWindow` は helper の pid に限られ `ASFW_ANY` を使わない。対象が最大化されカードが背後に出た場合に、タスクバーから Sprint Coder を前面にしても pause しない。往復の間の Sprint Coder への移動で claim gate が takeover として閉じず、interaction epoch も進まない。往復の前面の移動を native が判定し、event frame で Main に届く |
-| BG-6 遅延と再起動 | provider を呼出し前・呼出し中・呼出し後の確認前で停止させる。Stop を伴わない実行中の `input_timeout_unconfirmed` で K-1 の隔離が作られ、その後の receipt による Stop で隔離が消えない（K-3）。**応答消失**（transport timeout・`failAll`・`abortTransport`、semantic owner の uncertain）の後に receipt で Stop を確定しても、`confirmSessionClosed` が uncertain を戻しても隔離が消えない。K-1 で隔離した対象を同じ世代のまま K-5 の承認カードで再開すると、新しい ticket と新規観測から始まり、隔離の前の ticket・観測は使えない。前面化の行だけが残った世代の helper の終了は `terminated_target_suspect` にならない（K-4）。helper 終了、Main 再起動を行い対象の隔離と世代失効を検証する。provider を後で解放し、遅延効果が起こり得ることと二重入力がないことを確認する。隔離のストアに書けないときは入力が出ない |
+| BG-5 fallback と承認の往復 | pattern 不在ではカードが出ても focus は動かない。明示引渡し後だけ前面化し、新しい観測・必要な承認・ticket で操作する。拒否、期限、Stop、前面化失敗（foreground lock を含む）、直後の別アプリへの移動で入力が出ない。supervised の前面 fallback の通し試験として、Sprint Coder への往復で承認を完了でき、第三の窓への移動・期限切れ・復帰後の対象変更では入力が出ない。`AllowSetForegroundWindow` は helper の pid に限られ `ASFW_ANY` を使わない。対象が最大化されカードが背後に出た場合に、タスクバーから Sprint Coder を前面にしても pause しない。往復の間の Sprint Coder への移動で claim gate が takeover として閉じず、interaction epoch も進まない。往復の前面の移動を native が判定し、event frame で Main に届く。(ii) の「その他」が欠けた・遅れた場合も、native が保持した往復の失敗で復帰の前面化と ticket の交換が拒否され、入力が出ない。id の違う終わりの要求・復帰の指示は拒否される。往復の間に拒否した入力が、往復の後に旧 ticket・旧 observation で再実行されない。シェルの窓（未確定の例外）、File Explorer のフォルダの窓、デスクトップへの移動は pause する。V1 カードの往復は 60 秒で終わる。開始の拒否の境界として、人が押した引渡し・往復の復帰の前面化は拒否されない |
+| BG-6 遅延と再起動 | provider を呼出し前・呼出し中・呼出し後の確認前で停止させる。Stop を伴わない実行中の `input_timeout_unconfirmed` で K-1 の隔離が作られ、その後の receipt による Stop で隔離が消えない（K-3）。**応答消失**（transport timeout・`failAll`・`abortTransport`、semantic owner の uncertain）の後に receipt で Stop を確定しても、`confirmSessionClosed` が uncertain を戻しても隔離が消えない。K-1 で隔離した対象について、receipt で Stop した後に新しいセッションを K-5 の承認カードで始めると、新しい session id・ticket と新規観測から始まり、隔離の前の ticket・観測は使えない。前面化の行だけが残った世代の helper の終了は `terminated_target_suspect` にならない（K-4）。K-5 は receipt で Stop した後の新しいセッションの開始でだけ使え、同じセッションの再開には使えない。**uncertain・closeCandidate・`activeStopQuarantines`・native の in-flight が残る状態で K-5 のカードを承認しても、dispatch が拒否される**負例を含める。helper 終了、Main 再起動を行い対象の隔離と世代失効を検証する。provider を後で解放し、遅延効果が起こり得ることと二重入力がないことを確認する。隔離のストアに書けないときは入力が出ない |
 | BG-7 承認 UI | 背景 / 前面の経路表示、supervised の操作ごとの確認、二枚カード（背景では前面化 API が 0 回）、trusted activation、期限・拒否・Stop、Tab / click、キー継続、light / dark、loading / error / disabled を確認する。別アプリ入力中の出現では承認も focus 移動も起こらない |
-| BG-8 回帰と非対応 | 前面セッションの focus 喪失拒否と連続入力、危険面・E1 / E4 拒否、旧 helper / 未知能力の gate 閉鎖と今の前面セッションの維持、監視の失明（hook の外れ、心拍の欠落）での gate 閉鎖、**キーボードだけの別アプリの入力では失明と判定しない**正例、**hook の除去の後のマウスの移動で gate が閉じる**負例、gate が開いた後の前面でも背景能力も無い対象の開始の拒否（自動前面化 0）、macOS の既存承認契約を境界試験で維持する。未確認 provider が背景能力ありと表示されない |
+| BG-8 回帰と非対応 | 前面セッションの focus 喪失拒否と連続入力、危険面・E1 / E4 拒否、旧 helper / 未知能力の gate 閉鎖と今の前面セッションの維持、監視の失明（hook の外れ、心拍の欠落）での gate 閉鎖、**キーボードだけの別アプリの入力では失明と判定しない**正例、**hook の除去の後のマウスの移動で gate が閉じる**負例、gate が開いた後の前面でも背景能力も無い対象の、人の明示の操作を伴わない新しい開始の拒否（自動前面化 0）と、人による前面セッションの再開の前面化が拒否されない境界、macOS の既存承認契約を境界試験で維持する。未確認 provider が背景能力ありと表示されない |
 
 計測はテスト用の受動 observer による foreground WinEvent、cursor 位置のイベント記録と補助 sampling、製品の API attempt カウンタ、fixture の入力回数・効果を相関させる。観測器は入力を生成しない。event 欠落や計測不足があれば BLOCKED とし、sampling だけで一瞬の移動がなかったと断定しない。最小 metadata と合成 fixture の結果だけを証拠に残す。provider の非活性化特性は OS・アプリ / provider 版・control・pattern ごとに記録し、対応表へ反映する。
 
@@ -249,11 +251,11 @@ N8 の authority に `inputPath`・pattern・対象祖先・内容の指紋・in
 
 | # | PR の単位・成果 | 依存 | 試験 |
 | --- | --- | --- | --- |
-| N9-1 | 契約: `inputPath` の三値、セッションの形、能力宣言と対応表の版、authority の拡張（interaction epoch と内容の指紋は欄だけを予約し、値は N9-2 / N9-3 が入れるまで固定の「無し」で背景能力を閉じる）、監査の `inputPath` 欄と `computerUseActionRoute` の semantic scroll、N8 の承認の operation の列挙と strict schema への semantic scroll の追加。native / TS / schema / fixture の一体変更。旧 helper を閉じる | 本 ADR 承認、N8-4 | 経路差替え、未知欄・版、replay、旧 ticket / 世代、ordinary と承認の取り違え、route と `inputPath` の対応。macOS 契約の維持 |
+| N9-1 | 契約: `inputPath` の三値、セッションの形、能力宣言と対応表の版、authority の拡張（interaction epoch と内容の指紋は欄だけを予約し、値は N9-2 / N9-3 が入れるまで固定の「無し」で背景能力を閉じる）、監査の `inputPath` 欄と `computerUseActionRoute` の semantic scroll、N8 の承認の operation の列挙と strict schema への semantic scroll の追加、往復の開始と終わりの新しい要求（往復の id、上限の時刻、Sprint Coder の窓の特定の値）。native / TS / schema / fixture の一体変更。旧 helper を閉じる | 本 ADR 承認、N8-4 | 経路差替え、未知欄・版、replay、旧 ticket / 世代、ordinary と承認の取り違え、route と `inputPath` の対応。macOS 契約の維持 |
 | N9-2 | native の背景の観測と検証: 背景 start / resume / observe、window / dialog / root / ancestor / 内容の指紋の検証、index 由来の proxy の判定、仮想デスクトップ・cloak、背景の capture（最初に遮蔽窓の capture の成否を実機で確認）。入力能力は未公開 | N9-1 | 前面化 API 0、BG-4 の入力前拒否、対象由来の観測と classifier、focused 欄の欠落の扱い |
 | N9-3 | 入力所属の監視と通知: 専用の message pump、低レベル mouse hook（Q10 の判断に従う）、WinEvent、生存確認、interaction epoch、native → Main の event frame（C++ / TS の MessageType の一致。takeover と、往復の前面の移動の二種類）、Main の pause・失効と close を伴わない cancel の新しい経路 | N9-2 | BG-3 の入力前拒否、hook の外れ・心拍の欠落・キーボードだけの入力での誤判定 0、event の欠落・順序、cancel と claim の競合、再開時の epoch |
 | N9-4 | semantic executor と semantic scroll、§2.1 の完了と読み直し、台帳への記録（`inputPath`）と K-1 の隔離の契機、未知効果・世代失効。試験用 gate のみ | N9-3、N3（K-1〜K-5 を含む） | pattern 全件の正負例、同値 no-op、最後の検証後の変更、呼出し失敗・遅延・Main 再起動、BG-6、二重発行 0 |
-| N9-5 | Main の承認と引渡しの接続: V1 カードと native カードの経路別の復帰、背景の再観測・ticket 交換・dispatch、前面引渡し intent と消費、`AllowSetForegroundWindow`（addon と Main）、`approval_round_trip`（往復の開始の通知、Sprint Coder の PID・作成時刻・image identity の受け渡し、event frame の (ii) の処理） | N9-4、N8-4 | BG-5 の境界部分、カード中の takeover、期限・Stop・旧世代、経路変更による失効、発行後 fallback 0、二枚カードの前面化 API 0 |
+| N9-5 | Main の承認と引渡しの接続: V1 カードと native カードの経路別の復帰、背景の再観測・ticket 交換・dispatch、前面引渡し intent と消費、`AllowSetForegroundWindow`（addon と Main）、`approval_round_trip`（往復の開始と終わりの要求の送信、Sprint Coder の PID・作成時刻・image identity の受け渡し、native の往復の失敗の保持、event frame の (ii) の処理、V1 カードの往復の 60 秒の上限） | N9-4、N8-4 | BG-5 の境界部分、カード中の takeover、期限・Stop・旧世代、経路変更による失効、発行後 fallback 0、二枚カードの前面化 API 0 |
 | N9-6 | Renderer の UI: 背景 / 前面の経路表示、引渡しカード、残余リスクの表示 | N9-5、N8-6 | BG-7、Renderer interaction / activation |
 | N9-7 | 実機対応表の確定、受動 observer とチェックリストの受入、能力 gate の接続 | N9-6 | BG-1〜BG-8 の境界試験と Windows Computer Use。前面・cursor 不変の artifact、未対応の fail-closed。根拠が揃った組だけを公開候補とする |
 
@@ -263,21 +265,21 @@ N9-7 の合格をブラウザ・Explorer の有効化や release の許可と解
 
 D-6 の計画への採用、AC-6、UIA 優先、N8 の後という順序は既決事項である。「focus が変わったら止める」という今の不変条件を N9a の設計で置き換えること自体も D-6 で既決である。ただし、何で置き換えるか（置き換えの中身）は、この設計の承認で決まる。具体的には Q4（背景経路の束縛）、Q5・Q6（経路とセッションの形）、Q8（takeover の定義）である。次の各項目は、一問で一つの判断とする。
 
-1. §2.1 の pattern ごとの背景入力範囲（Invoke、Toggle、SelectionItem.Select、Value.SetValue、ExpandCollapse）を採用するか。
+1. §2.1 の pattern ごとの背景入力範囲（Invoke、Toggle、SelectionItem.Select、Value.SetValue、ExpandCollapse）を採用するか。判断材料: dialog を開く Invoke（保存・開く・設定など）は、背景では毎回 `unknown_effect` と対象の隔離になり、続けるには Stop と K-5 のカードによる新しいセッションの開始が要る。
 2. §2.1 の semantic scroll（ScrollPattern）を、座標 wheel とは別の新しい背景入力として N9 に含めるか（N8 の operation の列挙の拡張を伴う）。
 3. 背景能力を実機確認済みの provider・control・pattern の組に限り、版付き対応表で開く方針を採用するか。
 4. §2.2 の対象・祖先・内容の指紋・経路・世代への束縛を、背景経路の前面確認の代わりとするか（index 由来の runtime id の proxy を背景能力なしとすることを含む）。
 5. §2.1 の三値の `inputPath`（background_semantic / foreground_semantic / foreground_input）と、背景セッション・前面セッションの二つの形を採用するか。
 6. 前面セッションでは、今どおり連続入力を許し、focus の喪失で pause する（§2.4 の承認の往復だけを例外とする）か。
-7. gate が開いた後、前面でもなく背景能力も無い対象の開始を、自動で前面化せずに拒否するか（§2.1）。
+7. gate が開いた後、前面でもなく背景能力も無い対象の、人の明示の操作を伴わない新しい開始を、自動で前面化せずに拒否するか（§2.1。人が押した引渡し・往復の復帰・人による前面セッションの再開は対象外）。
 8. §2.3 の、対象（対象プロセスの任意の top-level window を含む）が前面になるだけで takeover とする保守的な定義を採用するか。
 9. 背景セッションで、別アプリでの通常入力は継続し、所属不明なら停止する方針を採用するか。
 10. 入力所属の監視に、大域の低レベル mouse hook（`WH_MOUSE_LL`）を採用するか。推奨は「採用する。背景セッションがある間だけ専用スレッドに入れ、キーボード hook は使わず、metadata だけを記録する。生存はマウスに限った Raw Input との照合で確かめる」である。理由は、前面化を伴わない非アクティブ窓への wheel・pointer 操作を WinEvent だけでは検出できないためである。採用しない場合は、非アクティブ窓への pointer 操作を takeover として検出できないことを残余リスクとして受け入れることになる。hook はセキュリティ製品に監視として検出されうること、全 mouse 入力の metadata を helper が受け取ることが欠点である。
 11. §2.4 の、入力前の能力不足と前面だけの操作に限る人の明示的な前面引渡しを採用するか（背景から前面へ製品が自動で前面化しない）。
 12. 引渡しの単位を、推奨の「引渡しの後は前面セッションの区間とする」案にするか、「一操作で前面入力の権限を消費し、次の前面入力にも引渡しを求める」案にするか（§2.4 の推奨の理由を参照）。
-13. §2.4 の `approval_round_trip`（Sprint Coder の窓だけへの往復を、カードの期限内に限り許し、native が前面の移動を判定し、復帰後に再検証する）を採用するか。
+13. §2.4 の `approval_round_trip`（Sprint Coder の窓だけへの往復を、カードの期限内（V1 カードは 60 秒）に限り許し、native が前面の移動を判定して失敗を保持し、復帰後に再検証する。シェルの窓の例外は未確定で、それまでは pause する）を採用するか。
 14. §2.6 の、背景承認後の refocus を、V1 カードと native カードの両方で同じ対象への背景再観測に置き換える案を採用するか。
-15. §2.5 の kill-stop への追加要求 K-1〜K-5 を N3 の範囲に入れることを承認するか。
+15. §2.5 の kill-stop への追加要求 K-1〜K-5 を N3 の範囲に入れることを承認するか（K-5 は、receipt で Stop した後に新しいセッションを始めるときに承認カードで対象の隔離を解く経路で、同じセッションの再開ではなく、client・host・native の未確認による拒否を外さない）。
 16. N3 に K-1〜K-5 が入るまで、背景入力を公開しないことを承認するか。
 17. 残余リスク (a): 隔離は新しい入力を止めるだけで、発行済みの UIA 呼出しは人の takeover / Stop の後にも対象で実行されうる。前提は、K-1〜K-5 が N3 に入り、隔離と表示が働くことである。これを受け入れるか。
 18. 残余リスク (b): completed で返った Invoke の後の非同期の効果は隔離されない（今の前面の semantic Invoke と同じ。kill-stop ADR §5 の 2）。これを受け入れるか。
@@ -291,10 +293,10 @@ D-6 の計画への採用、AC-6、UIA 優先、N8 の後という順序は既�
 
 今回は既存 ADR を変更しない。承認後の別変更で、次を反映する。設計承認、実装、実機受入、公開の状態を混同しない。
 
-- V2 ADR: T5・冒頭の入力前後再検証を経路別にし、user takeover の定義へ §2.3 を接続する。§3.6 の拒否と D14 の非自動フォーカス、`frontmost` 非公開は維持し、D14 の目的が背景から前面への自動前面化にも及ぶこと（§2.4）を追記する。
+- V2 ADR: T5・冒頭の入力前後再検証を経路別にし、user takeover の定義へ §2.3 を接続する。§3.6 の拒否と D14 の非自動フォーカス、`frontmost` 非公開は維持し、D14 の目的が背景から前面への自動前面化にも及ぶこと（§2.1 の開始の拒否と §2.4）を追記する。
 - V2 ADR §8 の表の「入力前後の identity / focus / geometry / 観測鮮度 / cancel epoch 再検証」の行（「変更禁止。deny class 再判定を追加するだけ」）: 背景経路に限り、focus の再検証を §2.2 の束縛で置き換えることを、条件つきの置換えとして書く。置き換えること自体は D-6 で既決であり、置き換えの中身（§2.2 の束縛、経路とセッションの形）は Q4・Q5・Q6 の承認で決まる。前面セッションの行の内容は変えない。
 - 承認経路 ADR: §2.2 の focus 再検証・対象への復帰を、背景経路では §2.2 / §2.6、前面セッションでは §2.4 の `approval_round_trip` に置き換え、§2.7 の停止・世代と §2.8 の表示へ接点を追記する。
-- kill-stop ADR: §2.1、§2.2、§2.3、§5 の 2 に、§2.5 の K-1〜K-5（実行中の隔離の入口、隔離の効く範囲、receipt で確定した背景の応答待ち・効果未確認の行を消さない例外、台帳の `inputPath` の列と前面化の種類および終了時の判定の例外、実行中のセッションの隔離からの同じ世代での再開）を追記し、§4 の S2（N3）の範囲と試験に加える。Q15 の承認が前提である。
+- kill-stop ADR: §2.1、§2.2、§2.3、§5 の 2 に、§2.5 の K-1〜K-5（実行中の隔離の入口、隔離の効く範囲、receipt で確定した背景の応答待ち・効果未確認の行を消さない例外、台帳の `inputPath` の列と前面化の種類および終了時の判定の例外、receipt で Stop した後の新しいセッションの開始での承認カードによる隔離の解除）を追記し、§4 の S2（N3）の範囲と試験に加える。Q15 の承認が前提である。
 
 ## 5. 現コードとの対応と未確認事項
 
@@ -317,6 +319,9 @@ D-6 の計画への採用、AC-6、UIA 優先、N8 の後という順序は既�
 | 呼出し後の窓の単位の再検証 | §2.2 の 7 の項目 | 同 `:9798`〜`:9817`（`RevalidateWindowsTarget`） |
 | copy の経路 | §2.1 の route と `inputPath` の対応 | `main/computer-use-controller.ts:4576`、`native/computer_use_windows_host.cc:11321` |
 | pause と cancel | §2.3 の close を伴わない cancel の新しい経路 | `main/computer-use-controller.ts:4516`（cancel を送らない）、`:3028`、`:3526`、`:3597`、`:3889`（cancel は close とともに送る） |
+| host 全体の拒否 | §2.5 の K-5 が外さないもの | `main/computer-use-native-windows.ts:272`、`:312`、`:554`、`main/computer-use-native-host.ts:247`、`native/computer_use_windows_host.cc:10220` |
+| V1 カードの期限 | §2.4 の V1 カードの往復の上限 | `main/computer-use-controller.ts:4466`、`:4502` |
+| 人による再開の前面化 | §2.1 の開始の拒否の対象外 | `main/computer-use-controller.ts:2948`、`native/computer_use_windows_host.cc:5652`、`:6140` |
 | semantic owner の uncertain | §2.5 の K-1・K-3 | `main/computer-use-native-windows.ts:278`、`:296`、`:301`、`:829`、`:887`、`:896`、`:945`、`:970`、`:1003`、`:1009`、`:1015`、`:1023` |
 | 入力監視・前面の許可 | §2.3 の hook、§2.4 の `AllowSetForegroundWindow` | `apps/desktop/computer-use-native` と `apps/desktop/src` で `SetWindowsHookEx`・`WH_MOUSE_LL`・`AllowSetForegroundWindow` は 0 件 |
 | 入力と不明結果 | §2.4 / §2.5 の accepted と in-flight | `native/computer_use_windows_host.cc:8644`、`:9564`、`:9683`、`:10220` |
@@ -325,6 +330,6 @@ D-6 の計画への採用、AC-6、UIA 優先、N8 の後という順序は既�
 | 承認 | §2.6 の交換・dispatch・例外時の未確認 | `main/computer-use-controller.ts:5213`、`:5244`、`:5254` |
 | 試験 | §2.7 の既存境界試験 | `main/computer-use-windows-input-seam.test.ts:29`、`main/computer-use-windows-ticket-seam.test.ts:873` |
 
-本 Draft のコードについての記述は上記 base の読取りで確認した。kill-stop ADR の記述は origin/main（`0edfc6e1`）の版の読取りで確認した。背景操作の実装、native build、実機試験は行っていない。次は未確認であり、N9 の公開前に確認する: provider の副作用、遮蔽窓の Windows Graphics Capture の成否、index 由来の runtime id の判定方法、入力監視の遅延・欠落の検出の実効性、キー入力が前面の対象にしか届かないという前提（強い推定）、`AllowSetForegroundWindow` を Main の addon から呼ぶ形（強い推定）、マウスに限った Raw Input での hook の生存の照合の実効性、往復の間のタスクバーの一時的な前面の扱い、K-1〜K-5 が N3 に入ること。OS の event と provider 呼出しの間に原子性はなく、悪意ある provider の内部動作を UIA から制限できるとは主張しない。
+本 Draft のコードについての記述は上記 base の読取りで確認した。kill-stop ADR の記述は origin/main（`0edfc6e1`）の版の読取りで確認した。背景操作の実装、native build、実機試験は行っていない。次は未確認であり、N9 の公開前に確認する: provider の副作用、遮蔽窓の Windows Graphics Capture の成否、index 由来の runtime id の判定方法、入力監視の遅延・欠落の検出の実効性、キー入力が前面の対象にしか届かないという前提（強い推定）、`AllowSetForegroundWindow` を Main の addon から呼ぶ形（強い推定）、マウスに限った Raw Input での hook の生存の照合の実効性、往復の間のタスクバーのシェルの窓を class とプロセスの組で特定できるか（それまでは pause）、K-1〜K-5 が N3 に入ること。OS の event と provider 呼出しの間に原子性はなく、悪意ある provider の内部動作を UIA から制限できるとは主張しない。
 
 独立した敵対的レビュー、PR、Review BOT、要塞レビュー、オーナーの設計承認は親の工程である。
