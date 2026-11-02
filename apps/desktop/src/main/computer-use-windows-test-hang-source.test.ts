@@ -11,7 +11,7 @@ const root = join(__dirname, '../../../..');
 function job(source: string, name: string) {
   const block = source.split(`\n  ${name}:\n`)[1];
   if (block === undefined) throw new Error(`Missing job: ${name}`);
-  return block.split(/\n  [\w-]+:\n/u)[0] ?? '';
+  return block.split(/\n {2}[\w-]+:\n/u)[0] ?? '';
 }
 function step(source: string, name: string) {
   const block = source.split(`      - name: ${name}\n`)[1];
