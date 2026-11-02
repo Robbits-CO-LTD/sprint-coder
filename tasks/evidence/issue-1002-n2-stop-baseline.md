@@ -39,3 +39,13 @@ HUNG_HELPER_STOP_LATENCY_PROXY {"proxy_for":"close_session","reference_until":"c
 ## CI だけで起きた attestation の期限切れの診断（`HUNG_HELPER_ATTEST_DIAG`）
 
 CI（head a832a1c3）では、暖機（`HUNG_HELPER_ATTEST_WARMUP`）は速いのに、helper を起動する 5 件すべてで製品の attestation（PowerShell、期限 10 秒）が ETIMEDOUT になった。attestation の間は Main の event loop が止まるので、seam は helper を起動する case ごとに別プロセスの見張り役（fixture の `--watch-attest`）を先に起こし、case の後に 1 行の `HUNG_HELPER_ATTEST_DIAG` を出す。中身は、helper ごとの現れた時刻と作成時刻（seam の spawn からの ms）、スレッドの状態と待ちの理由（Suspended かどうか）、セッション、job への所属、MainModule と同じ native の問い合わせの各段の ms、製品と同じ順の段（Import-Module、Get-Process、MainModule、File.Open＋SHA256、Get-AuthenticodeSignature）を製品と同じ環境の PowerShell で測った各段の ms（全体 60 秒）、見えた製品の attestation の PowerShell の PID と生存時間。見張り役は観察だけで、製品の attestation と期限は変えない（静的な case で確認）。この PC では、製品の attestation の生存時間は約 350〜430 ms、見張り役の段は Import-Module 約 28 ms、Get-Process 約 40 ms、MainModule 約 1 ms、SHA256 約 6〜15 ms、Authenticode 約 14〜24 ms。CI の値は次の CI の実行で取る。
+
+### 原因と CI での結果
+
+- 原因（head fad7c749 の CI の `HUNG_HELPER_ATTEST_DIAG` と、この PC での再現で確認）: 製品の attestation の PowerShell は `windowsHelperEnvironment` の 4 変数（`SystemRoot`・`WINDIR`・`TEMP`・`TMP`）だけで動く。`LOCALAPPDATA` が無いので module の解析のキャッシュが使えず、`Get-Process` と `ConvertTo-Json` の自動読み込みのたびに、runner に入っている大量の module を解析し直していた。CI の見張り役の記録では、Import-Module（50 ms）の後、`Get-Process` の段で 10 秒止まっていた。helper のプロセスへの native の問い合わせは 0.01 ms で、helper は止められていなかった（Suspended 0）。
+- 修正: #1016（main f9fe5c8d）。自動読み込みを止め、使う module を `$PSHOME` から明示的に読み込み、cmdlet を module 名で修飾した。期限・環境・判定は変えていない。
+- CI での結果（windows-2022、head cda4aff3。#1016 の修正を取り込んだ状態）:
+  - 製品の attestation の生存時間: 350〜460 ms（修正前は 10 秒超）。
+  - sessionless の Stop の 4 件: PASS。fixture の start の Stop は 22 ms と 4 ms で closed。discovery の Stop は 2 ms と 10 ms で stopped。
+  - proxy: n 30、p50 23.96 ms、p95 27.49 ms、max 30.06 ms、`load_answered_before_stop` 8。
+  - session が要る 7 件: NOT_RUN（`classic_notepad_not_eligible`。CI でもこの理由だけ）。
