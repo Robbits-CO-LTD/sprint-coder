@@ -4,10 +4,13 @@
 // The same validated, possibly settled facts reach classification and authority construction.
 #include "computer_use_effect_measurement.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_windows_association.h"
 
 namespace sprint_coder::computer_use {
 
 struct WindowsApprovalMeasurementInput {
+  // N8-2 will require and bind these native-only measurements at all three boundaries.
+  const WindowsOpenFacts *open_facts = nullptr;
   const ShadowUiaCapture *capture = nullptr;
   ShadowRequestInfo request;
   ApprovalAuthorityIdentity identity;

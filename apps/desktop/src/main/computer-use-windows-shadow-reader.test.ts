@@ -189,6 +189,23 @@ describe('Windows UI Automation source only reads', () => {
       [...source.matchAll(/(?:->|\.Get\(\)->)(\w+)\(/gu)].map((match) => match[1]!),
     );
     const allowedMethods = new Set([
+      // Returns selected shell items without selecting or opening them.
+      'Items',
+      // Reads the shell selection array length.
+      'GetCount',
+      // Reads an existing shell array entry.
+      'GetItemAt',
+      // Reads the target identity without changing the element.
+      'GetRuntimeId',
+      // Reads the container of the existing selection.
+      'get_CurrentSelectionContainer',
+      // Reads the current UIA selection without changing it.
+      'GetCurrentSelection',
+      // Reads the UIA selection array length.
+      'get_Length',
+      // Reads an existing UIA array entry.
+      'GetElement',
+
       'ElementFromHandle',
       'ElementFromPoint',
       'GetFocusedElement',
@@ -246,6 +263,8 @@ describe('Windows UI Automation source only reads', () => {
       ].map((match) => match[1]!),
     );
     const allowedWin32 = new Set([
+      // Reads the process owning the target window.
+      'GetWindowThreadProcessId',
       'CoCreateInstance',
       'NormalizeString',
       'WideCharToMultiByte',
@@ -277,6 +296,8 @@ describe('Windows UI Automation source only reads', () => {
       'CancelSynchronousIo',
       'DuplicateHandle',
       // the shell lookup of the item path (functions of this file, not Win32 calls)
+      // Resolves the existing shell view without navigating or changing selection.
+      'ShellViewForWindow',
       'ShellItemPathByName',
       'ShellLookupPending',
       'ShellNameEqualsOrdinal',
@@ -353,6 +374,21 @@ describe('Windows UI Automation source only reads', () => {
     );
     // Win32 / COM / macros the source may use.
     const platform = [
+      // Reads the process owning the target window.
+      'GetWindowThreadProcessId',
+      // Releases the local runtime-id array, not a UI element.
+      'SafeArrayDestroy',
+      // Reads the runtime-id array type.
+      'SafeArrayGetVartype',
+      // Reads the runtime-id array dimension count.
+      'SafeArrayGetDim',
+      // Reads the runtime-id array lower bound.
+      'SafeArrayGetLBound',
+      // Reads the runtime-id array upper bound.
+      'SafeArrayGetUBound',
+      // Copies an existing runtime-id array value.
+      'SafeArrayGetElement',
+
       'CloseHandle',
       'CoCreateInstance',
       'CoInitializeEx',
@@ -399,6 +435,13 @@ describe('Windows UI Automation source only reads', () => {
     ];
     // The shared shadow helpers and this file's own functions and methods.
     const own = [
+      // Measures existing shell and UIA selections without altering them.
+      'MeasureWindowsSingleSelection',
+      // Converts a path string in memory.
+      'Utf8',
+      // Releases only the locally owned runtime-id array.
+      'Array',
+
       'ActionStillValid',
       'At',
       'AtPoint',
@@ -428,6 +471,8 @@ describe('Windows UI Automation source only reads', () => {
       'ShadowCheckText',
       'ShadowTextFromUtf16',
       'ShadowUnitsTooLong',
+      // Resolves the existing shell view without navigating or changing selection.
+      'ShellViewForWindow',
       'ShellItemPathByName',
       'ShellNameEqualsOrdinal',
       'ShellDisplayNameUsable',
@@ -803,12 +848,25 @@ describe('Windows UI Automation source only reads', () => {
     expect(source).toContain('#include "computer_use_windows_shell_name_match.h"');
     expect(source).toContain('kShellMaxCandidates');
     expect(source).toContain("constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;");
-    // The walk over the shell windows checks the cancel itself; the listing of the entries, the place
-    // check, the links on the way and the desktop.ini all go through the one helper (cancel and deadline
-    // before each file system call).
-    expect(
-      body.match(/if \(!limits\.still_valid\(\)\) return ShadowReadResult::kStopped;/gu)?.length,
-    ).toBe(1);
+    // Both lookup paths must pass the shared view's cancellation and deadline checks.
+    const view = between(source, 'ShellViewForWindow(HWND tab', 'ShellItemPathByName(HWND tab');
+    const viewStart = view.slice(0, view.indexOf('CoCreateInstance('));
+    expect(viewStart).toContain('if (ShellLookupMustStop(limits, &stopped)) return stopped;');
+    const viewLoop = between(view, 'for (long index', 'VARIANT position;');
+    expect(viewLoop).toContain('if (ShellLookupMustStop(limits, &stopped)) return stopped;');
+    const stop = between(
+      source,
+      'ShellLookupMustStop(const ShellLookupLimits',
+      'Whether any part of',
+    );
+    expect(stop).toContain('if (!limits.still_valid())');
+    expect(stop).toContain('ShadowReadResult::kStopped');
+    expect(stop).toContain('limits.now_ns() > limits.deadline_ns');
+    const pathStart = body.slice(0, body.indexOf('ComRef<IFolderView2>'));
+    expect(pathStart).toContain(
+      'const auto view_result = ShellViewForWindow(tab, top, limits, &view);',
+    );
+    expect(pathStart).toContain('if (view_result != ShadowReadResult::kOk) return view_result;');
     const entriesLoop = between(
       body,
       'for (;;) {',
@@ -1040,7 +1098,29 @@ describe('Windows UI Automation source only reads', () => {
     const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
     expect(item).toContain('ShadowTextFromUtf16(answer.path, false, maximum_bytes, path)');
     expect(item).toContain('ShellItemPathByName(');
-    expect((code(source).match(/ShellItemPathByName\(/gu) ?? []).length).toBe(2);
+    // Definition, existing item lookup, and selection measurement share the same guards.
+    expect((code(source).match(/ShellItemPathByName\(/gu) ?? []).length).toBe(3);
+    const selection = between(
+      source,
+      'WindowsSingleSelectionFacts MeasureWindowsSingleSelection(',
+      'class WindowsUiaShadowSource',
+    );
+    const compactSelection = selection.replace(/\s+/gu, ' ');
+    expect(compactSelection).toContain(
+      'shell_limits.still_valid = [&budget] { return budget.MayRead(); };',
+    );
+    expect(compactSelection).toContain('shell_limits.deadline_ns = budget.deadline_ns;');
+    expect(compactSelection).toContain('count < 0 || count > 1024) return facts;');
+    expect(compactSelection).toContain('array_count != facts.shell_count) return facts;');
+    expect(compactSelection).toContain(
+      'if (!budget.MayRead() || ShellItemPathByName(tab, top, name.View(), shell_limits, &target_answer) != ShadowReadResult::kOk || target_answer.is_folder) return facts;',
+    );
+    expect(body).toContain(
+      'MatchShellDisplayName(display_name, candidates, ShellNameEqualsOrdinal)',
+    );
+    expect(code(selection)).not.toMatch(
+      /navigate|SelectItem|SelectAndPositionItems|InvokeCommand|InvokeVerb|DoVerb|Execute|Refresh|Rename|Delete|SetCurrent|SetViewModeAndIconSize|ShellExecute|SetFocus/iu,
+    );
   });
 
   it('asks the shell only about a ListItem of the shell item view (S5-c-2 PR-3)', () => {

@@ -7,6 +7,7 @@
 #endif
 
 #include <windows.h>
+#include "computer_use_windows_association_measurement.h"
 
 #include <ole2.h>
 #include <UIAutomation.h>

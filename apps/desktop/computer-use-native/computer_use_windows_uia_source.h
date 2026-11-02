@@ -21,6 +21,8 @@
 
 #include "computer_use_windows_shadow_reader.h"
 #include "computer_use_windows_shell_name_match.h"
+#include "computer_use_windows_association.h"
+#include "computer_use_windows_association_measurement.h"
 
 #include <windows.h>
 
@@ -556,23 +558,25 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
 // and views are asked for, never navigated, selected or invoked, and nothing is opened. kAbsent when
 // there is no such view, the folder is not a plain local directory, no or more than one entry fits, a
 // name cannot be read, more than the cap of entries need their shell name, or the deadline passed.
-[[nodiscard]] inline ShadowReadResult ShellItemPathByName(HWND tab, HWND top,
-                                                          std::wstring_view display_name,
-                                                          const ShellLookupLimits &limits,
-                                                          ShellItemAnswer *answer) {
+[[nodiscard]] inline ShadowReadResult ShellViewForWindow(HWND tab, HWND top,
+    const ShellLookupLimits &limits, ComRef<IShellView> *output) {
+  ShadowReadResult stopped = ShadowReadResult::kAbsent;
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   ComRef<IShellWindows> windows;
   if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER,
                               IID_PPV_ARGS(windows.Receive()))) ||
       windows.Get() == nullptr)
     return ShadowReadResult::kFailed;
   long count = 0;
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   if (FAILED(windows.Get()->get_Count(&count))) return ShadowReadResult::kFailed;
+  if (count < 0 || count > kShellLookupMaxWindows) return ShadowReadResult::kAbsent;
   // The view of the tab that holds the item; failing that, the only view of the window.
   ComRef<IShellView> view;
   int top_matches = 0;
   ComRef<IShellView> top_view;
   for (long index = 0; index < count && index < kShellLookupMaxWindows; ++index) {
-    if (!limits.still_valid()) return ShadowReadResult::kStopped;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     VARIANT position;
     VariantInit(&position);
     position.vt = VT_I4;
@@ -581,10 +585,12 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
     if (FAILED(windows.Get()->Item(position, dispatch.Receive())) || dispatch.Get() == nullptr)
       continue;
     ComRef<IWebBrowserApp> application;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     if (FAILED(dispatch.Get()->QueryInterface(IID_PPV_ARGS(application.Receive()))) ||
         application.Get() == nullptr)
       continue;
     SHANDLE_PTR handle = 0;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     if (FAILED(application.Get()->get_HWND(&handle))) continue;
     const HWND candidate = reinterpret_cast<HWND>(static_cast<LONG_PTR>(handle));
     const bool exact = tab != nullptr && candidate == tab;
@@ -593,10 +599,13 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
     ComRef<IServiceProvider> services;
     ComRef<IShellBrowser> browser;
     ComRef<IShellView> candidate_view;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     if (FAILED(application.Get()->QueryInterface(IID_PPV_ARGS(services.Receive()))) ||
         services.Get() == nullptr ||
+        ShellLookupMustStop(limits, &stopped) ||
         FAILED(services.Get()->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(browser.Receive()))) ||
         browser.Get() == nullptr ||
+        ShellLookupMustStop(limits, &stopped) ||
         FAILED(browser.Get()->QueryActiveShellView(candidate_view.Receive())) ||
         candidate_view.Get() == nullptr)
       continue;
@@ -610,15 +619,30 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
   if (view.Get() == nullptr && top_matches == 1) view = std::move(top_view);
   if (view.Get() == nullptr) return ShadowReadResult::kAbsent;
 
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
+  *output = std::move(view);
+  return ShadowReadResult::kOk;
+}
+
+[[nodiscard]] inline ShadowReadResult ShellItemPathByName(HWND tab, HWND top,
+                                                          std::wstring_view display_name,
+                                                          const ShellLookupLimits &limits,
+                                                          ShellItemAnswer *answer) {
+  ComRef<IShellView> view;
+  const auto view_result = ShellViewForWindow(tab, top, limits, &view);
+  if (view_result != ShadowReadResult::kOk) return view_result;
+
   ComRef<IFolderView2> folder_view;
   ComRef<IShellFolder> folder;
+  ShadowReadResult stopped = ShadowReadResult::kAbsent;
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   if (FAILED(view.Get()->QueryInterface(IID_PPV_ARGS(folder_view.Receive()))) ||
       folder_view.Get() == nullptr ||
+      ShellLookupMustStop(limits, &stopped) ||
       FAILED(folder_view.Get()->GetFolder(IID_PPV_ARGS(folder.Receive()))) || folder.Get() == nullptr)
     return ShadowReadResult::kAbsent;
   // Every call below that asks the shell about the FOLDER (it can reach the disk) is preceded by the
   // stop check, like every file system call after it.
-  ShadowReadResult stopped = ShadowReadResult::kAbsent;
   // The folder's id list. The root of the desktop namespace has an EMPTY one (its path would be the
   // user's desktop, while the view also merges the public desktop): not looked into.
   AbsoluteIdList folder_id;
@@ -785,6 +809,112 @@ constexpr std::chrono::milliseconds kShellLookupWait{150};
 }
 
 } // namespace windows_uia_source_detail
+
+// Resolves the target again on an isolated COM lane. No interface from the caller's
+// apartment crosses the thread boundary, and no selection or focus is changed.
+[[nodiscard]] inline WindowsSingleSelectionFacts MeasureWindowsSingleSelection(
+    HWND tab, HWND top, POINT point, std::vector<int> expected_runtime_id,
+    std::string expected_path, const WindowsOpenMeasurementLimits &limits) {
+  return RunWindowsOpenMeasurement<WindowsSingleSelectionFacts>(limits,
+      [tab, top, point, expected_runtime_id = std::move(expected_runtime_id),
+       expected_path = std::move(expected_path)](const WindowsOpenMeasurementLimits &budget) {
+    using namespace windows_uia_source_detail;
+    WindowsSingleSelectionFacts facts;
+    if (!budget.MayRead() || expected_runtime_id.empty() || expected_path.empty() ||
+        top == nullptr || (tab != nullptr && GetAncestor(tab, GA_ROOT) != top)) return facts;
+    ShellLookupLimits shell_limits;
+    shell_limits.still_valid = [&budget] { return budget.MayRead(); };
+    shell_limits.now_ns = budget.now_ns;
+    shell_limits.deadline_ns = budget.deadline_ns;
+    ComRef<IShellView> view;
+    if (ShellViewForWindow(tab, top, shell_limits, &view) != ShadowReadResult::kOk) return facts;
+    ComRef<IFolderView2> folder_view;
+    if (!budget.MayRead() || FAILED(view.Get()->QueryInterface(IID_PPV_ARGS(folder_view.Receive()))) ||
+        !folder_view.Get())
+      return facts;
+    int count = 0;
+    if (!budget.MayRead() || FAILED(folder_view.Get()->ItemCount(SVGIO_SELECTION, &count)) ||
+        count < 0 || count > 1024) return facts;
+    facts.shell_count = static_cast<std::uint32_t>(count);
+    ComRef<IShellItemArray> selected;
+    if (!budget.MayRead() || FAILED(folder_view.Get()->Items(SVGIO_SELECTION,
+                                                            IID_PPV_ARGS(selected.Receive()))) ||
+        !selected.Get()) return facts;
+    DWORD array_count = 0;
+    if (!budget.MayRead() || FAILED(selected.Get()->GetCount(&array_count)) ||
+        array_count != facts.shell_count) return facts;
+    for (DWORD index = 0; index < array_count; ++index) {
+      ComRef<IShellItem> item;
+      if (!budget.MayRead() || FAILED(selected.Get()->GetItemAt(index, item.Receive())) || !item.Get())
+        return facts;
+      PWSTR path = nullptr;
+      if (!budget.MayRead()) return facts;
+      const HRESULT read = item.Get()->GetDisplayName(SIGDN_FILESYSPATH, &path);
+      if (FAILED(read) || !path) { if (path) CoTaskMemFree(path); return facts; }
+      std::string text = windows_association_detail::Utf8(path);
+      CoTaskMemFree(path);
+      if (!budget.MayRead() || text.empty()) return facts;
+      facts.shell_paths.push_back(std::move(text));
+    }
+    facts.shell_complete = budget.MayRead();
+    ComRef<IUIAutomation> automation;
+    if (!budget.MayRead() || !CreateBoundedAutomation(150, 150, automation.Receive())) return facts;
+    ComRef<IUIAutomationElement> target;
+    if (!budget.MayRead() || FAILED(automation.Get()->ElementFromPoint(point, target.Receive())) ||
+        !target.Get()) return facts;
+    DWORD owner = 0;
+    if (!budget.MayRead() || GetWindowThreadProcessId(top, &owner) == 0 || owner == 0) return facts;
+    int target_owner = 0;
+    if (!budget.MayRead() || FAILED(target.Get()->get_CurrentProcessId(&target_owner)) ||
+        target_owner <= 0 || static_cast<DWORD>(target_owner) != owner) return facts;
+    SAFEARRAY *runtime = nullptr;
+    if (!budget.MayRead() || FAILED(target.Get()->GetRuntimeId(&runtime)) || !runtime) return facts;
+    struct Array { SAFEARRAY *value; ~Array() { SafeArrayDestroy(value); } } runtime_owner{runtime};
+    LONG lower = 0, upper = -1;
+    VARTYPE runtime_type = VT_EMPTY;
+    if (FAILED(SafeArrayGetVartype(runtime, &runtime_type)) || runtime_type != VT_I4 ||
+        SafeArrayGetDim(runtime) != 1 || FAILED(SafeArrayGetLBound(runtime, 1, &lower)) ||
+        FAILED(SafeArrayGetUBound(runtime, 1, &upper)) || upper < lower ||
+        static_cast<std::size_t>(upper - lower + 1) != expected_runtime_id.size()) return facts;
+    for (LONG index = lower; index <= upper; ++index) {
+      int value = 0;
+      if (FAILED(SafeArrayGetElement(runtime, &index, &value)) ||
+          value != expected_runtime_id[static_cast<std::size_t>(index - lower)]) return facts;
+    }
+    BstrHolder name;
+    if (!budget.MayRead() || FAILED(target.Get()->get_CurrentName(name.Receive()))) return facts;
+    ShellItemAnswer target_answer;
+    if (!budget.MayRead() || ShellItemPathByName(tab, top, name.View(), shell_limits, &target_answer) !=
+                               ShadowReadResult::kOk || target_answer.is_folder) return facts;
+    facts.target_path = windows_association_detail::Utf8(target_answer.path);
+    if (facts.target_path != expected_path) return facts;
+    ComRef<IUIAutomationSelectionItemPattern> selection_item;
+    if (!budget.MayRead() || FAILED(target.Get()->GetCurrentPatternAs(UIA_SelectionItemPatternId,
+        IID_PPV_ARGS(selection_item.Receive()))) || !selection_item.Get()) return facts;
+    ComRef<IUIAutomationElement> container;
+    if (!budget.MayRead() || FAILED(selection_item.Get()->get_CurrentSelectionContainer(container.Receive())) ||
+        !container.Get()) return facts;
+    ComRef<IUIAutomationSelectionPattern> pattern;
+    if (!budget.MayRead() || FAILED(container.Get()->GetCurrentPatternAs(UIA_SelectionPatternId,
+        IID_PPV_ARGS(pattern.Receive()))) || !pattern.Get()) return facts;
+    ComRef<IUIAutomationElementArray> selection;
+    if (!budget.MayRead() || FAILED(pattern.Get()->GetCurrentSelection(selection.Receive())) ||
+        !selection.Get()) return facts;
+    int uia_count = 0;
+    if (!budget.MayRead() || FAILED(selection.Get()->get_Length(&uia_count)) || uia_count < 0) return facts;
+    facts.uia_count = static_cast<std::uint32_t>(uia_count);
+    if (uia_count != 1) return facts;
+    ComRef<IUIAutomationElement> selected_target;
+    if (!budget.MayRead() || FAILED(selection.Get()->GetElement(0, selected_target.Receive())) ||
+        !selected_target.Get()) return facts;
+    BOOL same = FALSE;
+    if (!budget.MayRead() || FAILED(automation.Get()->CompareElements(target.Get(), selected_target.Get(), &same)))
+      return facts;
+    facts.uia_target_matches = same != FALSE;
+    facts.uia_complete = budget.MayRead();
+    return facts;
+  });
+}
 
 class WindowsUiaShadowSource final : public ShadowUiaSource {
 public:
