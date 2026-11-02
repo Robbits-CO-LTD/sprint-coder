@@ -58,6 +58,19 @@ function stepBlock(job: string, name: string): string {
 }
 
 describe('workflow security boundaries', () => {
+  it('isolates the Windows hung helper live seam in its full-matrix job', () => {
+    const job = jobBlock(workflows['.github/workflows/ci.yml'], 'computer-use-hung-helper');
+    expect(job).toContain('name: Computer Use hung helper seam (Windows)');
+    expect(job).toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(job).toContain('runs-on: windows-2022');
+    expect(job).toContain('timeout-minutes: 30');
+    expect(job).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
+    expect(job).toContain('src/main/computer-use-windows-hung-helper-live-seam.test.ts');
+    expect(jobBlock(workflows['.github/workflows/ci.yml'], 'platform-tests')).not.toContain(
+      'SPRINT_CODER_HUNG_HELPER_SEAM',
+    );
+  }, 5_000);
+
   it('pins every third-party action to its reviewed immutable commit', () => {
     for (const [file, workflow] of Object.entries(workflows)) {
       const refs = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)@([^\s#]+)/gmu)];
