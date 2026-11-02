@@ -955,6 +955,7 @@ jobs:
         package-tests,
         computer-use-native-gate,
         computer-use-windows-v2-harness,
+        computer-use-hung-helper,
         test-macos,
         package-macos,
         platform-tests,
