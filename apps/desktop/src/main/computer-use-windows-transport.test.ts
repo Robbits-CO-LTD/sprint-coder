@@ -610,6 +610,117 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  const identityTargets = [{ pid: 4242, processStartTime: '133000000000000001' }];
+
+  it('checks target identities as the first operation with mixed results in request order and no identities', async () => {
+    const results = [
+      { result: 'alive' },
+      { result: 'terminated', reason: 'signaled' },
+      { result: 'terminated', reason: 'start_time_mismatch' },
+      { result: 'terminated', reason: 'no_process' },
+      { result: 'unverifiable', reason: 'access_denied' },
+      { result: 'unverifiable', reason: 'win32_error' },
+    ];
+    const targets = results.map((_, index) => ({ ...identityTargets[0]!, pid: 4242 + index }));
+    const { addon, helper } = createTarget({
+      ...responders(),
+      check_target_identity: (metadata) => {
+        expect(metadata).toEqual({ operation: 'check_target_identity', targets });
+        return ['target_identity_result', { results }];
+      },
+    });
+    const output = await addon.checkTargetIdentity(targets);
+    // Results carry no identity: each position must correspond to the same request position.
+    expect(output).toEqual(results);
+    expect(JSON.stringify(output)).not.toMatch(/pid|processStartTime|133000000000000001/u);
+    expect(helper().served).toEqual(['handshake', 'check_target_identity']);
+  });
+
+  it.each([
+    { results: 'x' },
+    { results: [1] },
+    { results: [{ result: 'terminated', reason: 'access_denied' }] },
+    { results: [{ result: 'unverifiable', reason: 'start_time_mismatch' }] },
+    { results: [{ result: 'terminated', reason: 'signaled', extra: true }] },
+    { results: [{ result: 'unknown' }] },
+    { results: [{ result: 'terminated', reason: 'unknown' }] },
+    { results: [{ result: 'unverifiable', reason: 'no_process' }] },
+    { results: [{ result: 'alive', reason: 'signaled' }] },
+    { results: [{ result: 'terminated' }] },
+    { results: [{ result: 'alive', pid: 4242 }] },
+    { results: [{ result: 'alive', processStartTime: '133000000000000001' }] },
+    { results: [{ result: 'alive' }], extra: true },
+    { results: [] },
+    { results: [{ result: 'alive' }, { result: 'alive' }] },
+    null,
+  ])(
+    'rejects malformed identity responses without disclosing their payload: %j',
+    async (payload) => {
+      const { addon } = createTarget({
+        ...responders(),
+        check_target_identity: () => ['target_identity_result', payload],
+      });
+      await expect(addon.checkTargetIdentity(identityTargets)).rejects.toThrow(
+        /^Invalid Windows target identity response$/u,
+      );
+    },
+  );
+
+  it.each(['0', '01', '-1', '1.0', '1e3', ' 1', '18446744073709551616', '9'.repeat(21)])(
+    'rejects invalid FILETIME %s before starting a helper',
+    async (processStartTime) => {
+      const { addon } = createTarget();
+      await expect(addon.checkTargetIdentity([{ pid: 4242, processStartTime }])).rejects.toThrow(
+        /^Invalid Windows target identity request$/u,
+      );
+      expect(children).toHaveLength(0);
+    },
+  );
+
+  it('rejects an oversized identity request before starting a helper', async () => {
+    const { addon } = createTarget();
+    await expect(addon.checkTargetIdentity(Array(65).fill(identityTargets[0]))).rejects.toThrow(
+      /^Invalid Windows target identity request$/u,
+    );
+    expect(children).toHaveLength(0);
+  });
+
+  it.each([0, -1, 1.5, 0x1_0000_0000, '4242', null])(
+    'rejects an invalid identity PID %j before starting a helper',
+    async (pid) => {
+      const { addon } = createTarget();
+      await expect(addon.checkTargetIdentity([{ ...identityTargets[0], pid }])).rejects.toThrow(
+        /^Invalid Windows target identity request$/u,
+      );
+      expect(children).toHaveLength(0);
+    },
+  );
+
+  it.each([0, 64])('accepts %i identities with the maximum FILETIME', async (count) => {
+    const results = Array.from({ length: count }, () => ({ result: 'alive' }));
+    const { addon } = createTarget({
+      ...responders(),
+      check_target_identity: () => ['target_identity_result', { results }],
+    });
+    await expect(
+      addon.checkTargetIdentity(
+        Array.from({ length: count }, () => ({
+          pid: 4242,
+          processStartTime: '18446744073709551615',
+        })),
+      ),
+    ).resolves.toEqual(results);
+  });
+
+  it('does not expose helper error payloads in identity check errors', async () => {
+    const { addon } = createTarget({
+      ...responders(),
+      check_target_identity: () => ['error', { code: JSON.stringify(identityTargets) }],
+    });
+    await expect(addon.checkTargetIdentity(identityTargets)).rejects.toThrow(
+      /^Windows target identity check failed$/u,
+    );
+  });
   const cleanupOptions = { recursive: true, force: true, maxRetries: 20, retryDelay: 50 };
   const spawnedTemp = (index: number) =>
     vi.mocked(spawn).mock.calls[index]?.[2]?.env?.[helperTempVariable];
@@ -1977,6 +2088,7 @@ int main() {
                   inputAttemptCount: 1,
                 },
               ],
+        check_target_identity: () => ['target_identity_result', { results: [{ result: 'alive' }] }],
         close_session: (metadata) =>
           inFlight
             ? ['error', { code: 'semantic_input_in_flight', accepted: false }]
@@ -2007,6 +2119,11 @@ int main() {
       );
       await vi.advanceTimersByTimeAsync(ending === 'timeout' ? 10_001 : 0);
       expect(await dispatched).toBe('unconfirmed');
+      expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(addon.checkTargetIdentity(identityTargets)).resolves.toEqual([
+        { result: 'alive' },
+      ]);
+      expect(helper().served).toContain('check_target_identity');
       expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
       if (ending === 'native-error') {
         const closing = host.close(session).then(
