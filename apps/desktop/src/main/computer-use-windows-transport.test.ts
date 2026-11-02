@@ -157,6 +157,20 @@ type HelperResponse = readonly [ComputerUseNativeMessageType, unknown];
 type Responder = (metadata: Readonly<Record<string, unknown>>) => HelperResponse;
 
 const digest = (digit: string): string => digit.repeat(64);
+// Error message, stack and cause are not enumerable, so JSON.stringify alone misses them.
+const exposedText = (value: unknown, depth = 0): string => {
+  if (!(value instanceof Error) || depth > 3) return JSON.stringify(value) ?? String(value);
+  return [
+    JSON.stringify(value),
+    String(value),
+    value.message,
+    value.stack ?? '',
+    value.cause === undefined ? '' : exposedText(value.cause, depth + 1),
+  ].join('\n');
+};
+const expectNoProcessIdentity = (value: unknown): void => {
+  expect(exposedText(value)).not.toMatch(/\bpid\b|processStartTime|133000000000000001/u);
+};
 const helperPath = 'C:\\Resources\\sprint-coder-computer-use-host.exe';
 const sourceCommit = 'f'.repeat(40);
 const signerThumbprint = 'AB'.repeat(20);
@@ -3955,9 +3969,7 @@ int main() {
       (reason: unknown) => reason,
     );
     expect(error).toBeInstanceOf(Error);
-    expect(JSON.stringify(error)).not.toContain('"pid"');
-    expect(JSON.stringify(error)).not.toContain('processStartTime');
-    expect(JSON.stringify(error)).not.toContain('133000000000000001');
+    expectNoProcessIdentity(error);
   });
   it.each(['client', 'manager'] as const)(
     'PR7b does not adopt a discovery response in the exit-to-transfer gap (%s)',
@@ -4020,9 +4032,8 @@ int main() {
       ];
       const result = await target.dispatch(session);
       expect(result.outcome).toBe(accepted ? 'rejected' : 'resolved');
-      expect(JSON.stringify(result)).not.toContain('"pid"');
-      expect(JSON.stringify(result)).not.toContain('processStartTime');
-      expect(JSON.stringify(result)).not.toContain('133000000000000001');
+      expectNoProcessIdentity(result);
+      if (result.outcome === 'rejected') expectNoProcessIdentity(result.error);
       if (result.outcome === 'rejected' && result.error instanceof Error)
         expect(result.error.message).toBe('input_not_confirmed');
     },
