@@ -79,7 +79,7 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
   restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
-  /** Atomically persist quarantines and delete receipt rows; retries must be idempotent. */
+  /** Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent. */
   transferReceipt?(
     rows: readonly WindowsLedgerRow[],
     quarantines: readonly WindowsTargetQuarantine[],
@@ -161,6 +161,8 @@ type ComputerUseNativeBounds = Readonly<{
 export type ComputerUseNativeHostOptions = Readonly<{
   /** PR5a opt-in only. Persistence implementation and foreground handoffs belong to PR4/PR5b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
+  /** Internal PR7 seam. Production enables termination only after the remaining safety slices. */
+  windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
    * Whether the build attests classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). Production sets
    * it from the eligibility compiled into Main (`computerUseClassifierV2Attested`, C5-1), which is
@@ -228,6 +230,8 @@ export function createComputerUseNativeHost(
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
   const ledger = platform === 'win32' ? options.windowsLedger : undefined;
+  const terminationEnabled =
+    ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
   const ledgerStates = new Map<number, WindowsStopState>();
   let holdSequence = 0;
   const pendingWrites = new Map<
@@ -245,7 +249,7 @@ export function createComputerUseNativeHost(
   const ledgerState = (generation: number): WindowsStopState => {
     let state = ledgerStates.get(generation);
     if (state === undefined) {
-      // PR7 will connect lifetime/exit classification. These records only track dispatches.
+      // Without the termination seam these records only track dispatches.
       state = {
         helperGeneration: generation,
         helperLaunched: true,
@@ -269,6 +273,13 @@ export function createComputerUseNativeHost(
   const ledgerEvent = (generation: number, event: WindowsStopEvent) => {
     const decision = decideWindowsStop(ledgerState(generation), event);
     ledgerStates.set(generation, decision.state);
+    if (
+      terminationEnabled &&
+      decision.cleanup === 'generation_after_transfer' &&
+      decision.cleanupGeneration !== null &&
+      decision.awaitingHoldId === null
+    )
+      addon?.cleanupWindowsGeneration?.(decision.cleanupGeneration);
     return decision;
   };
   const tryWrite = async (write: () => boolean | Promise<boolean>): Promise<boolean> => {
@@ -368,6 +379,85 @@ export function createComputerUseNativeHost(
       await writePending(holdId);
     }
   };
+  if (terminationEnabled && ledger !== undefined) {
+    addon?.configureWindowsTermination?.({
+      prepare: async () => {
+        await retryLedger();
+        if ([...ledgerStates.values()].some((state) => state.killRequested && !state.exitConfirmed))
+          throw new Error('native_stop_unconfirmed');
+      },
+      started: (generation) => {
+        const state = ledgerState(generation);
+        ledgerStates.set(generation, {
+          ...state,
+          helperGeneration: generation - 1,
+          helperLaunched: false,
+        });
+        ledgerEvent(generation, { kind: 'start_generation', nextHelperGeneration: generation });
+      },
+      event: (generation, kind) => {
+        ledgerEvent(generation, { kind, helperGeneration: generation });
+      },
+      exited: (generation, cause) => {
+        const state = ledgerState(generation);
+        if (state.exitConfirmed) return;
+        const rows = state.rows;
+        const quarantines: WindowsTargetQuarantine[] = rows
+          .filter((row) => row.kind !== 'foreground')
+          .map((row) => ({ identity: row.identity, reason: 'exit_suspect' }));
+        const holdId = `exit-${++holdSequence}`;
+        ledgerStates.set(generation, {
+          ...state,
+          nativeBlockers: [
+            ...state.nativeBlockers,
+            {
+              helperGeneration: generation,
+              ownerId: holdId,
+              kind: 'in_flight',
+            },
+          ],
+        });
+        // Classify at exit, before any await. Failed storage retains both rows and blockers.
+        ledgerEvent(generation, {
+          kind: 'exit_confirmed',
+          helperGeneration: generation,
+          cause,
+          storage: rows.length === 0 ? { status: 'written' } : { status: 'failed', holdId },
+        });
+        if (rows.length === 0) return;
+        pendingWrites.set(holdId, {
+          generation,
+          write: async () => {
+            // A response/receipt writer may still be touching these rows. Transfer must land last.
+            if (ledgerState(generation).holds.some((hold) => hold.id !== holdId)) return false;
+            if ([...uncertainWrites].some((row) => row.helperGeneration === generation))
+              return false;
+            if (ledger.transferReceipt !== undefined)
+              return ledger.transferReceipt(rows, quarantines);
+            if (quarantines.length !== 0) return false;
+            for (const row of rows) if (!(await ledger.delete(row))) return false;
+            return true;
+          },
+        });
+        void writePending(holdId);
+      },
+    });
+  }
+  const targetGateState = (state: WindowsStopState): WindowsStopState => {
+    if (!terminationEnabled || !state.exitConfirmed) return state;
+    // R19c keeps the native blockers until transfer, but scopes admission to that hold's targets.
+    return {
+      ...state,
+      nativeBlockers: state.nativeBlockers.filter(
+        (blocker) =>
+          !state.holds.some(
+            (hold) =>
+              hold.operation === 'exit_transfer' &&
+              hold.releaseBlockers?.helperGeneration === blocker.helperGeneration,
+          ),
+      ),
+    };
+  };
   const ledgerBlocked = (pid: unknown, creationTime?: string | null): boolean =>
     [...uncertainWrites].some(
       (row) =>
@@ -377,7 +467,7 @@ export function createComputerUseNativeHost(
     ) ||
     [...ledgerStates.values()].some((state) =>
       creationTime != null && typeof pid === 'number'
-        ? !windowsTargetMayStart(state, { pid, creationTime })
+        ? !windowsTargetMayStart(targetGateState(state), { pid, creationTime })
         : state.holds.some(
             (hold) =>
               hold.targets === 'unknown' ||

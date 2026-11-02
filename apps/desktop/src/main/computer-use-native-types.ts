@@ -15,6 +15,12 @@ export type WindowsDispatchCallbacks = Readonly<{
 }>;
 
 export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
+export type WindowsTerminationCallbacks = Readonly<{
+  prepare(): Promise<void>;
+  started(generation: number): void;
+  event(generation: number, kind: 'kill_requested' | 'pipe_closed' | 'exit_wait_exceeded'): void;
+  exited(generation: number, cause: 'stop' | 'crash' | 'abortTransport'): void;
+}>;
 export type WindowsCloseCallbacks = Readonly<{
   received(generation: number, sessionId: string): void;
   blocked(generation: number): boolean;
@@ -77,6 +83,10 @@ export type ComputerUseNativeAddon = Readonly<{
     evidence: unknown,
   ): void | Promise<WindowsCloseConfirmation>;
   configureCloseLedger?(callbacks: WindowsCloseCallbacks): void;
+  configureWindowsTermination?(callbacks: WindowsTerminationCallbacks): void;
+  cleanupWindowsGeneration?(generation: number): void;
+  /** Internal Stop seam; inert unless Host configured the termination callbacks. */
+  requestWindowsTermination?(): void;
   reevaluateIdle?(): void;
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */

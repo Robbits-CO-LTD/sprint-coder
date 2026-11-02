@@ -17,6 +17,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
   computerUseNativeMessageTypeNames,
   computerUseNativeMessageTypeValue,
   decodeComputerUseNativeFrame,
@@ -123,6 +124,14 @@ class FakeHelperChild extends EventEmitter {
     return true;
   }
   unref(): void {}
+}
+
+class ControlledHelperChild extends FakeHelperChild {
+  killResult = true;
+  override kill(): boolean {
+    this.killed = true;
+    return this.killResult;
+  }
 }
 
 const children: FakeHelperChild[] = [];
@@ -3136,6 +3145,7 @@ int main() {
   function ledgerTarget(
     withTransfer = false,
     adaptAddon?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon,
+    termination = false,
   ) {
     const rows = new Map<string, WindowsLedgerRow>();
     const quarantines: WindowsTargetQuarantine[] = [];
@@ -3161,6 +3171,14 @@ int main() {
     const target = createTarget(
       {
         ...base,
+        list_targets: () => ['probe_result', []],
+        list_windows: () => {
+          const [type, value] = base['list_windows']!({});
+          return [
+            type,
+            (value as Record<string, unknown>[]).map((row) => ({ ...row, pid: control.pid })),
+          ];
+        },
         close_session: (metadata) =>
           control.closeResponse ?? [
             'probe_result',
@@ -3221,6 +3239,7 @@ int main() {
       },
       undefined,
       {
+        ...(termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
         windowsLedger: {
           write: async (row) => {
             written.push(row);
@@ -3292,6 +3311,338 @@ int main() {
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it.each(ledgerActions)('PR7a exit transfers an unconfirmed $name row', async (sample) => {
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(session, sample);
+    expect([...target.rows.values()]).toMatchObject([{ kind: sample.kind }]);
+    children[0]!.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.rows.size).toBe(0);
+    expect(target.quarantines).toEqual([
+      { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+    ]);
+  });
+  it('PR7a retains a killed child through T and classifies its late exit once', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.helper().holdOnly('dispatch');
+      const dispatch = target.dispatch(session);
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.emit('data', Buffer.alloc(COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES, 255));
+      await dispatch;
+      expect(child.killed).toBe(true);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(decide.mock.results.at(-1)?.value.state.result).toBe('termination_requested');
+      expect(target.rows.size).toBe(1);
+      await expect(target.addon.listTargets!({})).rejects.toThrow();
+      expect(spawn).toHaveBeenCalledTimes(1);
+      child.emit('exit', 0, null);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.rows.size).toBe(0);
+      expect(target.quarantines).toEqual([
+        { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+      ]);
+      expect(decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed')).toHaveLength(
+        1,
+      );
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it.each([true, false])(
+    'PR7a kill result %s is not exit evidence and T is exactly two seconds',
+    async (killResult) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      const child = new ControlledHelperChild();
+      child.killResult = killResult;
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        await startSession(target.host, 'session-1', 'turn-1');
+        target.addon.requestWindowsTermination!();
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(
+          decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
+        ).toHaveLength(0);
+        expect(
+          decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed'),
+        ).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(decide.mock.results.at(-1)?.value.state.result).toBe('termination_requested');
+        await expect(target.addon.listTargets!({})).rejects.toThrow('native_stop_unconfirmed');
+        expect(spawn).toHaveBeenCalledTimes(1);
+        child.emit('exit', 0, null);
+        expect(
+          decide.mock.calls.find(([, event]) => event.kind === 'exit_confirmed')?.[1],
+        ).toMatchObject({ cause: 'stop' });
+        expect(decide.mock.results.at(-1)?.value.state.result).toBe('terminated_clean');
+        await expect(target.addon.listTargets!({})).resolves.toBeDefined();
+        expect(spawn).toHaveBeenCalledTimes(2);
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+  it('PR7a is absent from production construction', () => {
+    expect(readFileSync(join(__dirname, 'index.ts'), 'utf8')).not.toContain(
+      'windowsKillStopTermination',
+    );
+  });
+  it('PR7a does not adopt a socket that connects after its child exited', async () => {
+    const connect = transport.connectPipe;
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      transport.connectPipe = () => {
+        const socket = connect!();
+        children[0]!.emit('exit', 1, null);
+        return socket;
+      };
+      const result = Promise.resolve(target.addon.listTargets!({})).then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await result).toBe('rejected');
+      expect(sockets[0]!.writes).toHaveLength(0);
+      expect(sockets[0]!.destroyed).toBe(true);
+    } finally {
+      transport.connectPipe = connect;
+    }
+  });
+  it.each([
+    'crash',
+    'pipe-close',
+    'pipe-error',
+    'header',
+    'length',
+    'binding',
+    'json',
+    'error-response',
+    'write-callback',
+    'write-throw',
+    'timeout',
+  ] as const)('PR7a classifies %s through the same exit ledger', async (failure) => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    try {
+      const cleanup = vi.fn();
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          cleanupWindowsGeneration: (id) => {
+            cleanup(id);
+            addon.cleanupWindowsGeneration!(id);
+          },
+        }),
+        true,
+      );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.helper().holdOnly('dispatch');
+      const socket = sockets[0]!;
+      if (failure === 'write-callback') socket.holdWriteCallbacks = true;
+      if (failure === 'write-throw') {
+        const write = socket.write.bind(socket);
+        vi.spyOn(socket, 'write').mockImplementation((bytes, callback) => {
+          if (decodeComputerUseNativeFrame(bytes).messageType === 'dispatch')
+            throw new Error('synthetic write failure');
+          return write(bytes, callback);
+        });
+      }
+      const dispatch = target.dispatch(session);
+      await vi.advanceTimersByTimeAsync(0);
+      if (failure === 'crash') child.emit('exit', 1, null);
+      else if (failure === 'pipe-close') socket.destroy();
+      else if (failure === 'pipe-error') socket.emit('error', new Error('synthetic pipe failure'));
+      else if (failure === 'header')
+        socket.emit('data', Buffer.alloc(COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES, 255));
+      else if (failure === 'write-callback')
+        socket.writeCallbacks.at(-1)!(new Error('synthetic write failure'));
+      else if (failure === 'timeout') await vi.advanceTimersByTimeAsync(10_000);
+      else if (failure !== 'write-throw') {
+        const sent = decodeComputerUseNativeFrame(dispatchWrites(socket)[0]!);
+        const bytes = encodeComputerUseNativeFrame({
+          ...sent,
+          messageType:
+            failure === 'binding'
+              ? 'probe_result'
+              : failure === 'error-response'
+                ? 'error'
+                : 'dispatch_result',
+          metadata: Buffer.from(failure === 'json' ? '{' : '{}'),
+        });
+        if (failure === 'length') bytes.writeUInt32LE(0, 60);
+        socket.emit('data', bytes);
+      }
+      expect((await dispatch).outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(0);
+      if (failure !== 'crash') {
+        expect(child.killed).toBe(true);
+        expect(target.rows.size).toBe(1);
+        expect(cleanup).not.toHaveBeenCalled();
+        child.emit('exit', 0, null);
+      }
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(target.rows.size).toBe(0);
+      expect(target.quarantines).toEqual([
+        { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+      ]);
+      expect(cleanup.mock.calls).toEqual([[1]]);
+      expect(decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed')).toHaveLength(
+        1,
+      );
+      expect(
+        decide.mock.calls.find(([, event]) => event.kind === 'exit_confirmed')?.[1],
+      ).toMatchObject({ cause: failure === 'crash' ? 'crash' : 'abortTransport' });
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it.each(['before', 'after'] as const)('PR7a exit %s T cleans once', async (order) => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    try {
+      const cleanup = vi.fn();
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          cleanupWindowsGeneration: (id) => {
+            cleanup(id);
+            addon.cleanupWindowsGeneration!(id);
+          },
+        }),
+        true,
+      );
+      await startSession(target.host, 'session-1', 'turn-1');
+      if (order === 'before') setTimeout(() => child.emit('exit', 0, null), 2_000);
+      target.addon.requestWindowsTermination!();
+      if (order === 'after') setTimeout(() => child.emit('exit', 0, null), 2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      child.emit('exit', 0, null);
+      expect(decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed')).toHaveLength(
+        1,
+      );
+      expect(decide.mock.results.at(-1)?.value.state.result).toBe('terminated_clean');
+      expect(cleanup.mock.calls).toEqual([[1]]);
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it('PR7a R19c retains rows and blockers until storage recovers, and old cleanup cannot touch a new helper', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const cleanup = vi.fn();
+    try {
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          cleanupWindowsGeneration: (id) => {
+            cleanup(id);
+            addon.cleanupWindowsGeneration!(id);
+          },
+        }),
+        true,
+      );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session);
+      target.control.failTransfer = true;
+      children[0]!.emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(0);
+      const exit = decide.mock.results.find(
+        (_, index) => decide.mock.calls[index]![1].kind === 'exit_confirmed',
+      )!.value;
+      expect(exit).toMatchObject({
+        helper: 'may_start',
+        cleanup: 'deferred_until_transfer',
+        cleanupGeneration: 1,
+      });
+      expect(exit.state.result).toBe('terminated_target_suspect');
+      expect(exit.state.nativeBlockers).toHaveLength(1);
+      expect(target.rows.size).toBe(1);
+      expect(cleanup).not.toHaveBeenCalled();
+      await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
+        'native_unavailable',
+      );
+      target.control.pid = 43;
+      target.control.response = null;
+      await target.host.listWindows(profile);
+      const next = await startSession(target.host, 'session-2', 'turn-2');
+      await expect(target.addon.listTargets!({})).resolves.toEqual([]);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(target.rows.size).toBe(1);
+      expect(cleanup).not.toHaveBeenCalled();
+      expect((await target.dispatch(next)).outcome).toBe('resolved');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(next, ledgerActions[0], 'new-generation-row');
+      expect(target.rows.size).toBe(2);
+      await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
+        'native_unavailable',
+      );
+      target.control.failTransfer = false;
+      await expect(target.addon.listTargets!({})).resolves.toEqual([]);
+      expect([...target.rows.values()]).toMatchObject([
+        { helperGeneration: 2, sessionId: 'session-2', identity: { pid: 43 } },
+      ]);
+      expect(cleanup.mock.calls).toEqual([[1]]);
+      target.control.response = null;
+      expect((await target.dispatch(next, ledgerActions[0], 'after-transfer')).outcome).toBe(
+        'resolved',
+      );
+      target.addon.cleanupWindowsGeneration!(1);
+      children[0]!.emit('exit', 1, null);
+      sockets[0]!.emit('close');
+      sockets[0]!.emit('data', Buffer.alloc(COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES, 255));
+      await expect(target.addon.listTargets!({})).resolves.toEqual([]);
+      expect(children[1]!.killed).toBe(false);
+      expect(sockets[1]!.destroyed).toBe(false);
+      expect(cleanup.mock.calls).toEqual([[1]]);
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it.each(['ledger-only', 'switch-only'] as const)(
+    'PR7a %s preserves the PR6 exit path',
+    async (mode) => {
+      const configure = vi.fn();
+      const adapt = (addon: ComputerUseNativeAddon) => ({
+        ...addon,
+        configureWindowsTermination: configure,
+      });
+      const target =
+        mode === 'ledger-only'
+          ? ledgerTarget(true, adapt)
+          : createTarget(
+              responders(),
+              undefined,
+              { windowsKillStopTermination: { enabled: true } },
+              adapt,
+            );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.host.close(session);
+      expect(children[0]!.killed).toBe(true);
+      expect(configure).not.toHaveBeenCalled();
+    },
+  );
   it.each(['response', 'dispatch_canceled'] as const)(
     'PR6 reevaluates idle when the final %s storage hold completes',
     async (eventKind) => {

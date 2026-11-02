@@ -38,6 +38,7 @@ import {
   type WindowsDispatchCallbacks,
   type WindowsCloseCallbacks,
   type WindowsCloseConfirmation,
+  type WindowsTerminationCallbacks,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
@@ -268,6 +269,9 @@ export function createWindowsComputerUseNativeAddon(
     hasUnconfirmedSemanticInputs: () => client.hasUnconfirmedSemanticInputs(),
     confirmSessionClosed: (receipt, evidence) => client.confirmSessionClosed(receipt, evidence),
     configureCloseLedger: (callbacks) => client.configureCloseLedger(callbacks),
+    configureWindowsTermination: (callbacks) => client.configureWindowsTermination(callbacks),
+    cleanupWindowsGeneration: (generation) => client.cleanupWindowsGeneration(generation),
+    requestWindowsTermination: () => client.requestWindowsTermination(),
     reevaluateIdle: () => client.reevaluateIdle(),
   });
 }
@@ -325,6 +329,17 @@ function semanticNotSubmitted(): Error {
   });
 }
 
+type HelperGeneration = {
+  id: number;
+  child: ChildProcess;
+  socket: Socket | null;
+  decoder: { readBuffer: Buffer };
+  killRequested: boolean;
+  cause: 'stop' | 'crash' | 'abortTransport';
+  exited: boolean;
+  timer?: NodeJS.Timeout;
+};
+
 class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
@@ -348,6 +363,52 @@ class WindowsComputerUseHelperClient {
   private readonly completedLifetimes = new Map<string, object>();
   private readonly closeConfirmations = new WeakMap<object, Promise<WindowsCloseConfirmation>>();
   private readonly persistedLifetimes = new WeakSet<object>();
+  private termination: WindowsTerminationCallbacks | undefined;
+  private readonly generations = new Map<number, HelperGeneration>();
+
+  configureWindowsTermination(callbacks: WindowsTerminationCallbacks): void {
+    this.termination = callbacks;
+  }
+
+  requestWindowsTermination(): void {
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation !== undefined)
+      this.requestTermination(generation, new Error('native_stop_unconfirmed'), 'stop');
+  }
+
+  cleanupWindowsGeneration(generation: number): void {
+    const record = this.generations.get(generation);
+    if (record === undefined || !record.exited) return;
+    clearTimeout(record.timer);
+    record.socket?.destroy();
+    record.decoder.readBuffer = Buffer.alloc(0);
+    this.generations.delete(generation);
+    if (this.child === record.child) this.child = null;
+    if (this.socket === record.socket) this.socket = null;
+  }
+
+  private requestTermination(
+    record: HelperGeneration,
+    error: Error,
+    cause: 'stop' | 'abortTransport' = 'abortTransport',
+  ): void {
+    if (record.exited || record.killRequested) return;
+    record.killRequested = true;
+    record.cause = cause;
+    this.termination!.event(record.id, 'kill_requested');
+    record.timer = setTimeout(() => {
+      if (!record.exited) this.termination!.event(record.id, 'exit_wait_exceeded');
+    }, 2_000);
+    this.failAll(error, 'abortTransport');
+    record.socket?.destroy();
+    if (this.socket === record.socket) this.socket = null;
+    // Neither a successful kill nor a failed kill proves that the process has exited.
+    try {
+      record.child.kill();
+    } catch {
+      // The process remains owned until its exit listener runs.
+    }
+  }
 
   configureCloseLedger(callbacks: WindowsCloseCallbacks): void {
     this.closeLedger = callbacks;
@@ -877,6 +938,11 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.termination !== undefined) {
+      await this.termination.prepare();
+      if ([...this.generations.values()].some((record) => record.killRequested && !record.exited))
+        throw new Error('native_stop_unconfirmed');
+    }
     if (this.socket === null && this.hasUnconfirmedSemanticInputs())
       throw new Error('native_stop_unconfirmed');
     if (this.connecting !== null) {
@@ -891,6 +957,8 @@ class WindowsComputerUseHelperClient {
   }
 
   private async connect(): Promise<void> {
+    if (this.termination !== undefined && this.generations.size >= 128)
+      throw new Error('native_stop_unconfirmed');
     this.helperGeneration += 1;
     this.discoveryHandshakeSupported = false;
     this.artifactReadHandshakeSupported = false;
@@ -917,12 +985,40 @@ class WindowsComputerUseHelperClient {
       throw error;
     }
     this.child = child;
+    const generation: HelperGeneration | undefined =
+      this.termination === undefined
+        ? undefined
+        : {
+            id: this.helperGeneration,
+            child,
+            socket: null,
+            decoder: { readBuffer: Buffer.alloc(0) },
+            killRequested: false,
+            cause: 'crash',
+            exited: false,
+          };
+    if (generation !== undefined) {
+      this.generations.set(generation.id, generation);
+      this.termination!.started(generation.id);
+    }
     child.once('error', () => {
       // A failed spawn has no process and does not emit exit.
       if (child.pid === undefined) removeHelperTemp();
     });
     child.once('exit', (code, signal) => {
       removeHelperTemp();
+      if (generation !== undefined) {
+        if (generation.exited) return;
+        generation.exited = true;
+        clearTimeout(generation.timer);
+        if (this.child === child) {
+          this.failAll(new Error('Computer Use Windows helper exited'));
+          generation.socket?.destroy();
+          this.socket = null;
+        }
+        this.termination!.exited(generation.id, generation.cause);
+        return;
+      }
       if (this.child !== child) return;
       this.lifetimes.clear();
       this.completedLifetimes.clear();
@@ -942,26 +1038,52 @@ class WindowsComputerUseHelperClient {
         attestSpawnedWindowsComputerUseHelper(child.pid),
       );
     } catch (error) {
-      child.kill();
-      if (this.child === child) this.child = null;
+      if (generation !== undefined)
+        this.requestTermination(
+          generation,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      else {
+        child.kill();
+        if (this.child === child) this.child = null;
+      }
       throw error;
     }
     child.unref();
 
     let lastFailure: unknown = null;
     for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (generation?.exited || generation?.killRequested) break;
       try {
         const socket = await connectPipe(pipePath);
+        if (generation?.exited || generation?.killRequested) {
+          socket.destroy();
+          throw new Error('Computer Use Windows helper ended before pipe connection');
+        }
         this.socket = socket;
         // Partial frames belong to this pipe, including handshake retries on the same helper.
         const decoder: { readBuffer: Buffer } = { readBuffer: Buffer.alloc(0) };
+        if (generation !== undefined) {
+          generation.socket = socket;
+          generation.decoder = decoder;
+        }
         socket.on('data', (chunk) => {
           if (this.socket === socket) this.consume(chunk, decoder);
         });
         socket.on('error', (error) => {
-          if (this.socket === socket) this.failAll(error);
+          if (this.socket !== socket) return;
+          if (generation !== undefined) this.requestTermination(generation, error);
+          else this.failAll(error);
         });
         socket.on('close', () => {
+          if (generation !== undefined) {
+            this.termination!.event(generation.id, 'pipe_closed');
+            this.requestTermination(
+              generation,
+              new Error('Computer Use Windows helper pipe closed'),
+            );
+            return;
+          }
           if (this.socket !== socket) return;
           this.failAll(new Error('Computer Use Windows helper pipe closed'));
           this.socket = null;
@@ -984,8 +1106,12 @@ class WindowsComputerUseHelperClient {
         await delay(100);
       }
     }
-    child.kill();
-    throw new Error(`Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`);
+    const failure = new Error(
+      `Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`,
+    );
+    if (generation !== undefined) this.requestTermination(generation, failure);
+    else child.kill();
+    throw failure;
   }
 
   private sendConnected(
@@ -1129,7 +1255,9 @@ class WindowsComputerUseHelperClient {
         decoder.readBuffer.readUInt16LE(4) !== COMPUTER_USE_NATIVE_PROTOCOL_VERSION ||
         !isKnownComputerUseNativeMessageType(decoder.readBuffer.readUInt16LE(6))
       ) {
-        this.failAll(new Error('Computer Use Windows helper returned an invalid frame header'));
+        this.protocolFailure(
+          new Error('Computer Use Windows helper returned an invalid frame header'),
+        );
         this.socket?.destroy();
         return;
       }
@@ -1140,7 +1268,9 @@ class WindowsComputerUseHelperClient {
         metadataBytes > COMPUTER_USE_NATIVE_MAX_METADATA_BYTES ||
         binaryBytes > COMPUTER_USE_NATIVE_MAX_BINARY_BYTES
       ) {
-        this.failAll(new Error('Computer Use Windows helper returned an invalid frame length'));
+        this.protocolFailure(
+          new Error('Computer Use Windows helper returned an invalid frame length'),
+        );
         this.socket?.destroy();
         return;
       }
@@ -1151,7 +1281,7 @@ class WindowsComputerUseHelperClient {
       try {
         this.resolveFrame(decodeComputerUseNativeFrame(encoded));
       } catch (error) {
-        this.failAll(error instanceof Error ? error : new Error(String(error)));
+        this.protocolFailure(error instanceof Error ? error : new Error(String(error)));
         this.socket?.destroy();
         return;
       }
@@ -1250,6 +1380,11 @@ class WindowsComputerUseHelperClient {
   }
 
   private abortTransport(error: Error): void {
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation !== undefined) {
+      this.requestTermination(generation, error);
+      return;
+    }
     this.lifetimes.clear();
     this.completedLifetimes.clear();
     this.failAll(error, 'abortTransport');
@@ -1257,6 +1392,11 @@ class WindowsComputerUseHelperClient {
     this.socket = null;
     this.child?.kill();
     this.child = null;
+  }
+
+  private protocolFailure(error: Error): void {
+    if (this.termination !== undefined) this.abortTransport(error);
+    else this.failAll(error);
   }
 }
 
