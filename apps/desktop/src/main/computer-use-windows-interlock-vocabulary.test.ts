@@ -61,9 +61,14 @@ describe('interlock surface words against V1 words (#500 S5-c-2 PR-5)', () => {
   it('keeps every V1 word that the interlock does not know a V1 refusal (nothing is lost)', () => {
     const onlyV1 = v1.filter((word) => !v2.includes(word));
     expect([...onlyV1].sort()).toEqual([...V1_ONLY_WORDS].sort());
-    // V1 still uses the union at dispatch.
+    // V1 vocabulary is frozen independently in approval-core.test.ts.
     expect(host).toContain('ClassifyWindowsRiskText(text)');
-    for (const word of onlyV1) expect(windowsRisk).toContain(`"${word}"`);
+  });
+
+  it('keeps the V1 risk check as the union of confirmation and other', () => {
+    expect(host).toMatch(
+      /bool ContainsWindowsRiskText\(std::string_view text\)\s*\{\s*const auto bits = sprint_coder::computer_use::ClassifyWindowsRiskText\(text\);\s*return bits\.confirmation \|\| bits\.other;\s*\}/u,
+    );
   });
 
   it('shares every other word', () => {

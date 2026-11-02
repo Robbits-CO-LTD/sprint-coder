@@ -7316,6 +7316,16 @@ bool HighImpact(std::string_view text) {
 } // namespace frozen_v1
 
 namespace frozen_windows_v1 {
+// Independent snapshots: moving a word between sides must fail even if the union is unchanged.
+inline constexpr std::array<std::u8string_view, 20> kConfirmationSubstring = {
+    u8"payment", u8"checkout", u8"purchase", u8"billing", u8"credit card", u8"card number",
+    u8"wire transfer", u8"contract", u8"agreement", u8"sign agreement", u8"決済", u8"支払い", u8"支払う",
+    u8"購入", u8"注文を確定", u8"注文する", u8"請求", u8"送金", u8"契約", u8"署名"};
+inline constexpr std::array<std::u8string_view, 16> kOtherSubstring = {
+    u8"installer", u8"install application", u8"administrator", u8"admin privileges", u8"sudo",
+    u8"root access", u8"security settings", u8"privacy settings", u8"firewall",
+    u8"accessibility permission", u8"screen recording permission", u8"インストール", u8"管理者", u8"セキュリティ",
+    u8"プライバシー", u8"ファイアウォール"};
 inline constexpr std::array<std::u8string_view, 36> kSubstring = {
     u8"payment", u8"checkout", u8"purchase", u8"billing", u8"credit card", u8"card number",
     u8"wire transfer", u8"contract", u8"agreement", u8"sign agreement", u8"installer",
@@ -7379,6 +7389,15 @@ bool CheckWindowsApprovalCore() {
     for (const auto word : table) result.insert(word);
     return result;
   };
+  const auto confirmation_words = words(kConfirmationSubstring);
+  const auto other_words = words(kOtherSubstring);
+  if (!Check(confirmation_words == words(frozen_windows_v1::kConfirmationSubstring),
+             "windows-risk-confirmation-substring-set")) return false;
+  if (!Check(other_words == words(frozen_windows_v1::kOtherSubstring),
+             "windows-risk-other-substring-set")) return false;
+  for (const auto word : confirmation_words) {
+    if (!Check(other_words.count(word) == 0, "windows-risk-substring-disjoint")) return false;
+  }
   auto substring = words(kConfirmationSubstring);
   substring.insert(kOtherSubstring.begin(), kOtherSubstring.end());
   if (!Check(substring == words(frozen_windows_v1::kSubstring) &&
@@ -7491,6 +7510,21 @@ bool CheckWindowsApprovalCore() {
     if (defect == 18) bad.strict.asked = false;
     if (!Check(!MeasureWindowsApproval(bad).eligible, "windows-document-unsafe")) return false;
   }
+  auto file_capture = capture;
+  file_capture.item_kind = ShadowItemKind::kFile;
+  file_capture.item_name = "C:\\synthetic\\document.txt";
+  file_capture.item_name_read = true;
+  auto file_input = input;
+  file_input.capture = &file_capture;
+  file_capture.item_name_is_real_path = false;
+  const auto display_name = MeasureWindowsApproval(file_input);
+  if (!Check(!display_name.eligible && display_name.takeover,
+             "windows-file-display-name-refused")) return false;
+  file_capture.item_name_is_real_path = true;
+  const auto real_path = MeasureWindowsApproval(file_input);
+  if (!Check(real_path.eligible && !real_path.takeover &&
+                 real_path.effect == NativeApprovalEffect::kSupervisedAction,
+             "windows-file-real-path-approved")) return false;
   auto confirm_capture = capture;
   confirm_capture.chain.insert(confirm_capture.chain.begin(), UiaNode("Button", "Pay now"));
   confirm_capture.chain[0].process_id = 4242;
@@ -7515,6 +7549,21 @@ bool CheckWindowsApprovalCore() {
                    !MeasureApproval(MeasureInput(ax)).eligible, "macos-new-extension-refused")) return false;
   }
   using namespace effect_detail;
+  for (const auto extension : {"msu", "msp", "mst", "appinstaller", "application", "ppkg", "appx"}) {
+    auto facts = EffBase();
+    facts.action = ActionKind::kInvoke;
+    facts.extension_known = true;
+    facts.extension = extension;
+    const auto decision = ClassifyEffect(facts, EffAllEnabled());
+    if (!Check(decision.effect_class == EffectClass::kE4InstallerLaunch &&
+                   decision.kind == DecisionKind::kBlocked &&
+                   decision.reason == DecisionReason::kExecutionTrigger &&
+                   InSet(extension, kExecutableExtensions),
+               "approval-installer-extension-literals")) return false;
+  }
+  for (const auto extension : kInstallerExtensions) {
+    if (!Check(InSet(extension, kExecutableExtensions), "approval-installer-subset")) return false;
+  }
   for (const auto extension : {"c++", "x_t", " .C++. ", " .X_T. "}) {
     if (!Check(IsPlainExtension(NormalizeExtension(extension)), "approval-extension-boundary")) return false;
   }

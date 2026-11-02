@@ -57,6 +57,46 @@ const substring = [
   'プライバシー',
   'ファイアウォール',
 ];
+const confirmationSubstring = [
+  'payment',
+  'checkout',
+  'purchase',
+  'billing',
+  'credit card',
+  'card number',
+  'wire transfer',
+  'contract',
+  'agreement',
+  'sign agreement',
+  '決済',
+  '支払い',
+  '支払う',
+  '購入',
+  '注文を確定',
+  '注文する',
+  '請求',
+  '送金',
+  '契約',
+  '署名',
+];
+const otherSubstring = [
+  'installer',
+  'install application',
+  'administrator',
+  'admin privileges',
+  'sudo',
+  'root access',
+  'security settings',
+  'privacy settings',
+  'firewall',
+  'accessibility permission',
+  'screen recording permission',
+  'インストール',
+  '管理者',
+  'セキュリティ',
+  'プライバシー',
+  'ファイアウォール',
+];
 const payment = [
   'pay',
   'pay now',
@@ -87,6 +127,14 @@ const shell = [
 ];
 
 describe('Windows portable approval core (N8-1a)', () => {
+  it('freezes each substring side without overlap', () => {
+    const confirmation = terms('kConfirmationSubstring');
+    const other = terms('kOtherSubstring');
+    expect(confirmation.sort()).toEqual([...confirmationSubstring].sort());
+    expect(other.sort()).toEqual([...otherSubstring].sort());
+    expect(confirmation.filter((word) => other.includes(word))).toEqual([]);
+  });
+
   it('preserves the exact V1 union and matching modes', () => {
     expect([...terms('kConfirmationSubstring'), ...terms('kOtherSubstring')].sort()).toEqual(
       substring.sort(),
@@ -116,6 +164,9 @@ describe('Windows portable approval core (N8-1a)', () => {
       (name) => name.startsWith('computer_use_windows') && /\.(h|cc|inc)$/u.test(name),
     )) {
       expect(read(name), name).not.toMatch(/\bMeasureApproval\s*\(/u);
+      if (name !== 'computer_use_windows_approval_measurement.h') {
+        expect(read(name), name).not.toMatch(/\bMeasureApprovalFromFacts\s*\(/u);
+      }
     }
   });
 
@@ -133,6 +184,13 @@ describe('Windows portable approval core (N8-1a)', () => {
     expect(harness).toContain('if (!CheckWindowsApprovalCore()) return 1;');
     for (const name of [
       'windows-risk-frozen-v1',
+      'windows-risk-confirmation-substring-set',
+      'windows-risk-other-substring-set',
+      'windows-risk-substring-disjoint',
+      'windows-file-display-name-refused',
+      'windows-file-real-path-approved',
+      'approval-installer-extension-literals',
+      'approval-installer-subset',
       'windows-risk-incomplete-confirmation',
       'windows-risk-other-mixed',
       'windows-risk-secure',
