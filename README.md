@@ -12,7 +12,7 @@ Local-first desktop AI coding workspace for multi-agent software development.
 [![GitHub release](https://img.shields.io/github/v/release/Robbits-CO-LTD/sprint-coder?include_prereleases&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/releases)
 [![GitHub downloads](https://img.shields.io/github/downloads/Robbits-CO-LTD/sprint-coder/total?logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/releases)
 [![GitHub stars](https://img.shields.io/github/stars/Robbits-CO-LTD/sprint-coder?style=flat&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/stargazers)
-[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
+[![License: PolyForm Perimeter 1.0.1](https://img.shields.io/badge/license-PolyForm_Perimeter_1.0.1-2ea44f.svg)](LICENSE)
 
 [公式サイト](https://sprintcoder.yuseilab.com/) · [ダウンロード](https://github.com/Robbits-CO-LTD/sprint-coder/releases) · [3分で起動](#3分で起動) · [セキュリティ](#local-firstとセキュリティ) · [FAQ](#よくある質問) · [設計資料](#設計資料)
 
@@ -22,9 +22,9 @@ Local-first desktop AI coding workspace for multi-agent software development.
 
 ## Sprint Coderとは
 
-Sprint Coder（スプリントコーダー）は、**AIコーディングアシスタント、マルチエージェント実行、ローカルの開発環境**を一つにまとめる、local-firstなオープンソースのデスクトップアプリです。Codex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OllamaなどからTaskごとにモデルを選び、必要になった瞬間だけ、同じ会話をLeaderと複数WorkerのAI Teamへ切り替えられます。
+Sprint Coder（スプリントコーダー）は、**AIコーディングアシスタント、マルチエージェント実行、ローカルの開発環境**を一つにまとめる、local-firstなソース公開型のデスクトップアプリです。Codex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OllamaなどからTaskごとにモデルを選び、必要になった瞬間だけ、同じ会話をLeaderと複数WorkerのAI Teamへ切り替えられます。
 
-Sprint Coder is an open-source, local-first desktop AI coding workspace that brings Codex CLI, Claude Code, Gemini, cloud APIs, local LLMs, and multi-agent software development into one Task.
+Sprint Coder is a source-available, local-first desktop AI coding workspace that brings Codex CLI, Claude Code, Gemini, cloud APIs, local LLMs, and multi-agent software development into one Task.
 
 > [!WARNING]
 > 最新の正式版は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest)から入手できます。機能ごとの対応状況と既知の制約はReleaseの説明をご確認ください。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
@@ -227,7 +227,7 @@ Codex CLIやClaude Codeを置き換えるものではありません。既存の
 
 ### 無料で使えますか？
 
-Sprint CoderのソースコードはMIT Licenseで公開されています。接続するクラウドProviderやモデルによっては、別途API利用料金が発生します。
+Sprint Coderは[PolyForm Perimeter 1.0.1](LICENSE)の条件に従い、通常の個人利用・社内業務利用をライセンス料なしで行えます。Sprint Coderを利用して競合製品・サービスを他者へ提供することは、有料・無料を問わず許可されません。接続するクラウドProviderやモデルによっては、別途API利用料金が発生します。
 
 ### コードや会話はローカルに保存されますか？
 
@@ -243,7 +243,11 @@ Issue、改善提案、Pull Requestを歓迎します。大きな変更は、先
 
 ## License
 
-[MIT License](LICENSE)
+[PolyForm Perimeter License 1.0.1](LICENSE)
+
+Sprint Coderはソース公開型（source-available）のソフトウェアです。OSIの定義するオープンソースではありません。通常の利用・改変は許可されますが、本ソフトウェアを利用して競合製品・サービスを他者へ提供することは、有料・無料を問わず許可されません。許諾範囲は[ライセンス原文](LICENSE)に従います。
+
+この変更は、変更前にMITで公開された版・コードに対する既存の許諾を撤回しません。該当するMITの著作権表示・許諾文はLICENSE末尾に保持しています。同梱する第三者コード・フォント・ロゴなどは、それぞれのライセンスと利用条件に従います。
 
 ---
 

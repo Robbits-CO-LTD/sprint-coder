@@ -43,7 +43,7 @@ import {
   writeAccessPresetDefault,
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
-import mitLicenseText from '../../../../../LICENSE?raw';
+import licenseText from '../../../../../LICENSE?raw';
 import {
   readSoundEffectPreferences,
   setSoundEffectsEnabled,
@@ -848,17 +848,19 @@ function LicenseGroup() {
       <span className="settings-field-label">ライセンス</span>
       <div className="settings-license-row">
         <div className="settings-license-copy">
-          <strong>MIT License</strong>
-          <p className="settings-hint">Sprint CoderはMIT Licenseのもとで配布されています。</p>
+          <strong>PolyForm Perimeter 1.0.1</strong>
+          <p className="settings-hint">
+            通常の個人利用・社内業務利用は許可されます。本ソフトウェアを利用した競合製品・サービスの提供は、有料・無料を問わず許可されません。
+          </p>
         </div>
         <span className="settings-license-badge" aria-hidden="true">
-          MIT
+          Perimeter
         </span>
       </div>
       <p className="settings-hint">Copyright (c) 2026 株式会社Robbits</p>
       <details className="settings-license-details" data-testid="settings-license-details">
         <summary>ライセンス全文を表示</summary>
-        <pre data-testid="settings-license-text">{mitLicenseText.trim()}</pre>
+        <pre data-testid="settings-license-text">{licenseText.trim()}</pre>
       </details>
     </div>
   );
