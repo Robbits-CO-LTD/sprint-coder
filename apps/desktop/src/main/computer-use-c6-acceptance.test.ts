@@ -310,6 +310,8 @@ function c6Acceptance(options: C6Options = {}) {
    * Main's own precheck (PR-B) refuses a secure, high-impact, surface or browser node before native is
    * asked, so most branches here are only reached by a node Main lets through. Not mirrored: the
    * Windows role table, the origin state, and `browser_identity_checked` (the real header's inputs).
+   * The UIATextField fixture exercises Main with a Windows Edit observation; C++ JudgeArtifactRead
+   * is covered by the T15-4w native live seam and T15-11 real-device acceptance.
    */
   function judged(app: AppKey, targetId: string, nodes: readonly ScreenNode[], signature: string) {
     const entry = profileByKey.get(app)!;
@@ -318,7 +320,14 @@ function c6Acceptance(options: C6Options = {}) {
     const facts = projection.metadata[targetId];
     if (node === undefined || facts === undefined) return { ok: false as const };
     if (projection.signatures[targetId] !== signature) return { ok: false as const };
-    if (!['AXStaticText', 'AXTextField', 'AXTextArea'].includes(node.role))
+    if (
+      ![
+        'AXStaticText',
+        'AXTextField',
+        'AXTextArea',
+        ...(options.nativeHost?.platform === 'win32' ? ['UIATextField'] : []),
+      ].includes(node.role)
+    )
       return { ok: false as const };
     if (facts.secure || facts.highImpact || facts.surface === true) return { ok: false as const };
     if (isComputerUseBrowserApplication(entry.profile)) return { ok: false as const };
@@ -387,6 +396,7 @@ function c6Acceptance(options: C6Options = {}) {
         executableDigest: entry.profile.executableDigest,
       }));
     };
+    const inputCounts = new Map<string, number>();
     const stop = (input: unknown) => {
       const value = request.parse(input);
       return {
@@ -394,7 +404,7 @@ function c6Acceptance(options: C6Options = {}) {
         cancelEpoch: value.cancelEpoch,
         result: 'closed',
         drained: true,
-        inputAttemptCount: 0,
+        inputAttemptCount: inputCounts.get(value.sessionId) ?? 0,
       };
     };
     const addon: ComputerUseNativeAddon = {
@@ -459,8 +469,23 @@ function c6Acceptance(options: C6Options = {}) {
           value.targetSignature,
         );
       },
-      dispatch: () => {
-        throw new Error('This native-host journey stops at the approval card');
+      dispatch: (input) => {
+        const value = request
+          .extend({ type: z.literal('set_text'), targetId: z.string(), text: z.string() })
+          .parse(input);
+        dispatched.push({
+          app: sessionApp.get(value.sessionId)!,
+          action: { type: value.type, targetId: value.targetId, text: value.text },
+        });
+        const inputAttemptCount = (inputCounts.get(value.sessionId) ?? 0) + 1;
+        inputCounts.set(value.sessionId, inputAttemptCount);
+        return {
+          result: 'completed',
+          reasonCode: null,
+          sessionId: value.sessionId,
+          cancelEpoch: value.cancelEpoch,
+          inputAttemptCount,
+        };
       },
       cancel: stop,
       close: stop,
@@ -2559,6 +2584,38 @@ describe('C6 acceptance: native host attest (T15-E win32)', () => {
     expect(run.dispatched).toEqual([]);
   });
 
+  it('allows one native-host paste and refuses reuse of the consumed artifact', async () => {
+    const run = c6Acceptance({ nativeHost: { platform: 'win32', artifactRead: true } });
+    const { id } = await copyInA(run, 'Total 42', { role: 'UIATextField' });
+    expect(id).toEqual(expect.any(String));
+    run.screen('B', [{ id: 'field', role: 'UIATextField', title: 'Body' }]);
+    run.vars['id'] = id!;
+    const paste: ModelReply = { type: 'set_text', targetId: 'field', artifactRef: id! };
+    run.script('B', paste, paste, { type: 'finish' });
+    const pending = run.startRequest({ app: 'B', carry: [{ artifactId: id! }] });
+    await run.untilCard();
+    expect(run.dispatched).toEqual([]);
+    await run.answer('allow_once');
+    expect((await pending).error).toBeNull();
+    expect(run.dispatched).toEqual([
+      { app: 'B', action: { type: 'set_text', targetId: 'field', text: 'Total 42' } },
+    ]);
+    expect(
+      run
+        .audits()
+        .filter((row) => row['actionKind'] === 'set_text')
+        .map((row) => row['reasonCode']),
+    ).toContain('artifact_paste_refused');
+    expect(run.approvals.filter((card) => card.state === 'pending')).toHaveLength(1);
+  });
+
+  it('refuses the secure role emitted for a Windows password Edit before native read', async () => {
+    const run = c6Acceptance({ nativeHost: { platform: 'win32', artifactRead: true } });
+    expect((await copyInA(run, 'Synthetic password', { role: 'AXSecureTextField' })).id).toBeNull();
+    expect(run.readInputs).toEqual([]);
+    expect(run.audits().some((row) => row['reasonCode'] === 'artifact_copy_refused')).toBe(true);
+  });
+
   it.each([
     { platform: 'win32' },
     { platform: 'win32', artifactRead: false },
@@ -2606,6 +2663,7 @@ describe('C6 acceptance: native host attest (T15-E win32)', () => {
     });
     expect((await copyInA(source, 'Total 42')).id).toBeNull();
     expect(source.audits().some((row) => row['reasonCode'] === 'artifact_copy_refused')).toBe(true);
+    expect(source.readInputs).toEqual([]);
     expect(source.approvals).toEqual([]);
     expect(source.dispatched).toEqual([]);
   });

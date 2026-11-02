@@ -1938,33 +1938,34 @@ describe('Computer Use native manifest and runtime gate', () => {
       expect(nativeProbeCapabilities({ artifactRead }).artifactRead).toBe(
         artifactRead === true ? true : undefined,
       );
-      for (const platform of ['darwin', 'win32'] as const) {
-        const fixture = packageFixture({ platform });
-        const manifest = parseComputerUseNativeManifest(
-          JSON.parse(
-            readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
-          ),
-        );
-        const probe = evaluateComputerUseNativeGate({
-          featureFlag: true,
-          packaged: true,
-          platform,
-          manifest,
-          artifactDigest: platform === 'win32' ? manifest.binaryDigest : manifest.moduleDigest,
-          probe: {
-            protocolVersion: 1,
-            apiVersion: 3,
-            sourceCommit: manifest.sourceCommit,
-            available: true,
-            backend: 'fixture',
-            capabilities: { artifactRead },
-          },
-        });
-        expect(probe.available).toBe(true);
-        expect(probe.capabilities.artifactRead).toBe(
-          platform === 'win32' && artifactRead === true ? true : undefined,
-        );
-      }
+      for (const platform of ['darwin', 'win32'] as const)
+        for (const available of [false, true]) {
+          const fixture = packageFixture({ platform });
+          const manifest = parseComputerUseNativeManifest(
+            JSON.parse(
+              readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+            ),
+          );
+          const probe = evaluateComputerUseNativeGate({
+            featureFlag: true,
+            packaged: true,
+            platform,
+            manifest,
+            artifactDigest: platform === 'win32' ? manifest.binaryDigest : manifest.moduleDigest,
+            probe: {
+              protocolVersion: 1,
+              apiVersion: 3,
+              sourceCommit: manifest.sourceCommit,
+              available,
+              backend: 'fixture',
+              capabilities: { artifactRead },
+            },
+          });
+          expect(probe.available).toBe(available);
+          expect(probe.capabilities.artifactRead).toBe(
+            platform === 'win32' && artifactRead === true ? true : undefined,
+          );
+        }
     },
   );
 

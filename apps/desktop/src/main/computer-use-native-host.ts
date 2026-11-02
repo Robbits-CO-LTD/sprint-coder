@@ -1099,6 +1099,7 @@ export function createComputerUseNativeHost(
     // T15-E: only a ready Windows helper with the read attest opens artifact transfer.
     ...(platform === 'win32' &&
     handshakeReady &&
+    probeReady &&
     binding.probe.capabilities.artifactRead === true &&
     hasMethod(addon, 'readNodeValue')
       ? { artifactReadSupported: () => true, artifactPasteSupported: () => true }

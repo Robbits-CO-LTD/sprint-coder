@@ -264,6 +264,7 @@ class WindowsComputerUseHelperClient {
   private readonly starts = new Map<string, StartTransmission>();
   private readonly discoveries = new Map<string, DiscoveryTransmission>();
   private discoveryHandshakeSupported = false;
+  private artifactReadHandshakeSupported = false;
   private readonly semantic = new Map<string, SemanticTransmission>();
   // Object identity binds Host's confirmation to a received response. A later close reply must not
   // overwrite the earlier evidence that Host cached while independent discovery was still stopping.
@@ -613,6 +614,8 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
+      if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
+        return { ok: false };
       if (!isComputerUseStopOperation(operation)) this.assertSemanticAvailable();
       if (semantic !== undefined) {
         if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
@@ -722,6 +725,7 @@ class WindowsComputerUseHelperClient {
   private async connect(): Promise<void> {
     this.helperGeneration += 1;
     this.discoveryHandshakeSupported = false;
+    this.artifactReadHandshakeSupported = false;
     const nonce = randomBytes(16).toString('hex');
     const pipePath = `\\\\.\\pipe\\sprint-coder-computer-use-${nonce}`;
     const child = spawn(
@@ -784,6 +788,8 @@ class WindowsComputerUseHelperClient {
         );
         assertWindowsComputerUseHelperHandshake(handshake, this.expectedTrust);
         this.discoveryHandshakeSupported = windowsDiscoveryCapability(handshake);
+        this.artifactReadHandshakeSupported =
+          record(record(handshake)['capabilities'] ?? {})['artifactRead'] === true;
         return;
       } catch (error) {
         lastFailure = error;

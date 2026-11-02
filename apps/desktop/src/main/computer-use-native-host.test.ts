@@ -220,41 +220,44 @@ describe('Computer Use native Main adapter', () => {
     for (const platform of ['darwin', 'win32'] as const)
       for (const artifactRead of [undefined, false, true])
         for (const reader of [false, true])
-          for (const ready of [false, true]) {
-            const surface = {
-              probe: () => ({}),
-              pickApplication: () => null,
-              listWindows: () => [],
-              startSession: () => ({}),
-              stopPendingStart: () => ({}),
-              observe: () => ({}),
-              dispatch: () => ({}),
-              cancel: () => undefined,
-              ...(ready ? { close: () => undefined } : {}),
-              ...(reader ? { readNodeValue: () => ({ ok: false }) } : {}),
-            };
-            const host = createComputerUseNativeHost(
-              binding(
-                surface,
-                {
-                  capabilities: {
-                    observe: true,
-                    control: true,
-                    ...(artifactRead === undefined ? {} : { artifactRead }),
+          for (const ready of [false, true])
+            for (const available of [false, true]) {
+              const surface = {
+                probe: () => ({}),
+                pickApplication: () => null,
+                listWindows: () => [],
+                startSession: () => ({}),
+                stopPendingStart: () => ({}),
+                observe: () => ({}),
+                dispatch: () => ({}),
+                cancel: () => undefined,
+                ...(ready ? { close: () => undefined } : {}),
+                ...(reader ? { readNodeValue: () => ({ ok: false }) } : {}),
+              };
+              const host = createComputerUseNativeHost(
+                binding(
+                  surface,
+                  {
+                    available,
+                    capabilities: {
+                      observe: true,
+                      control: true,
+                      ...(artifactRead === undefined ? {} : { artifactRead }),
+                    },
                   },
-                },
+                  platform,
+                ),
                 platform,
-              ),
-              platform,
-              { windowsPhysicalBoundsToDip: (bounds) => bounds },
-            );
-            expect(host.availability().handshakeReady).toBe(ready);
-            const enabled = platform === 'win32' && artifactRead === true && reader && ready;
-            for (const key of ['artifactReadSupported', 'artifactPasteSupported'] as const) {
-              expect(Object.hasOwn(host, key)).toBe(enabled);
-              expect(host[key]?.()).toBe(enabled ? true : undefined);
+                { windowsPhysicalBoundsToDip: (bounds) => bounds },
+              );
+              expect(host.availability().handshakeReady).toBe(ready);
+              const enabled =
+                platform === 'win32' && artifactRead === true && reader && ready && available;
+              for (const key of ['artifactReadSupported', 'artifactPasteSupported'] as const) {
+                expect(Object.hasOwn(host, key)).toBe(enabled);
+                expect(host[key]?.()).toBe(enabled ? true : undefined);
+              }
             }
-          }
   });
 
   it('keeps Gate 0 registration unavailable when the signed probe has no picker seam', async () => {

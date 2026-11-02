@@ -324,8 +324,10 @@ probe and each pipe handshake. API 3 / frame 1 remain unchanged; the legacy Wind
 operation is retired, with no fallback. macOS keeps its existing discovery path.
 
 Windows also reports the private `artifactRead: true` capability in probe and pipe handshake
-responses. Main exposes artifact read and paste capabilities only for a ready Windows handshake
-with that literal attest and a `readNodeValue` method. macOS remains closed. Every artifact paste
+responses. Main exposes artifact read and paste capabilities only for an available Windows probe,
+a ready handshake, the probe’s literal attest and a `readNodeValue` method. Each pipe handshake must
+also report literal `artifactRead: true` before Main sends `read_node_value`; otherwise the read is
+refused locally. macOS remains closed. Every artifact paste
 still requires the Main approval card with `allow_once` / `deny`; no additional flag enables it.
 
 Each Windows query has a Main-issued nonce/counter identity and one original wire request. Native

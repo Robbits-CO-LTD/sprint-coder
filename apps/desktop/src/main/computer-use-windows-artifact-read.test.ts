@@ -218,7 +218,7 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     );
     const host = squash(main('computer-use-native-host.ts'));
     expect(host).toContain(
-      "platform === 'win32' && handshakeReady && binding.probe.capabilities.artifactRead === true && hasMethod(addon, 'readNodeValue')",
+      "platform === 'win32' && handshakeReady && probeReady && binding.probe.capabilities.artifactRead === true && hasMethod(addon, 'readNodeValue')",
     );
     expect(host).toContain('artifactReadSupported: () => true');
     expect(host).toContain('artifactPasteSupported: () => true');
