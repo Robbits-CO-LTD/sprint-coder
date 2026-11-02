@@ -437,7 +437,21 @@ afterEach(async () => {
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'seam cleanup failed');
 }, 60_000);
+// With the seam enabled, the NOT_RUN cases must be exactly the session cases, all for
+// classic_notepad_not_eligible. unexpected: a NOT_RUN outside that list or for another reason (a
+// new skip); missing: a session case that was not NOT_RUN (it passed or failed instead).
+function sessionNotRunMismatch() {
+  const skipped = new Map(notRun.map((row) => [row.case, row.reason]));
+  const unexpected = [...skipped]
+    .filter(([name, reason]) => !sessionCaseNames.includes(name) || reason !== ciExpectedNotRun)
+    .map(([name]) => name);
+  const missing = sessionCaseNames.filter((name) => !skipped.has(name));
+  return unexpected.length === 0 && missing.length === 0
+    ? null
+    : { expected: sessionCaseNames.length, not_run: notRun.length, unexpected, missing };
+}
 afterAll(async () => {
+  const mismatch = enabled ? sessionNotRunMismatch() : null;
   if (notRun.length > 0) {
     const reasons = [...new Set(notRun.map((row) => row.reason))];
     console.log(
@@ -447,22 +461,31 @@ afterAll(async () => {
         reasons: Object.fromEntries(
           reasons.map((reason) => [reason, notRun.filter((row) => row.reason === reason).length]),
         ),
+        ...(enabled ? { matches_session_cases: mismatch === null } : {}),
         cases: notRun.map((row) => row.case),
       })}`,
     );
   }
-  if (!scratch) return;
-  const directory = scratch;
-  expect(dirname(resolve(directory))).toBe(resolve(tmpdir()));
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      rmSync(directory, { recursive: true, force: true });
-      break;
-    } catch {
-      await delay(100);
+  // Outside CI a PC where classic Notepad is eligible runs the session cases, so the difference is
+  // only logged there. In the CI live job it fails the run after the scratch cleanup below.
+  if (mismatch !== null) console.log(`HUNG_HELPER_NOT_RUN_MISMATCH ${JSON.stringify(mismatch)}`);
+  if (scratch) {
+    const directory = scratch;
+    expect(dirname(resolve(directory))).toBe(resolve(tmpdir()));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        rmSync(directory, { recursive: true, force: true });
+        break;
+      } catch {
+        await delay(100);
+      }
     }
+    expect(existsSync(directory), 'seam scratch removed').toBe(false);
   }
-  expect(existsSync(directory), 'seam scratch removed').toBe(false);
+  if (ci && mismatch !== null)
+    throw new Error(
+      `NOT_RUN cases differ from the ${sessionCaseNames.length} session cases in the CI live seam: ${JSON.stringify(mismatch)}`,
+    );
 }, 10_000);
 
 function addonFor(binary: string) {
@@ -594,7 +617,8 @@ function controllerFor(
 // fixture (identity.inc). Neither this PC nor the CI windows-2022 image makes classic Notepad
 // full_access_app, and this slice has no signed fixture, so every case that needs a session is a
 // counted NOT_RUN (classic_notepad_not_eligible) in every environment, CI included; the count and
-// reasons are printed once as HUNG_HELPER_NOT_RUN_SUMMARY. The live fixing of these scenes and the
+// reasons are printed once as HUNG_HELPER_NOT_RUN_SUMMARY, and in the CI live job a NOT_RUN set
+// other than exactly sessionCaseNames fails the run (afterAll). The live fixing of these scenes and the
 // close_session measurement move to N13b (real-machine acceptance) or to an environment with the
 // signed acceptance fixture. What this job fixes live is the sessionless Stop paths (the fixture
 // start and discovery cases above) and the close latency proxy. Of the session scenes, only the
@@ -609,21 +633,28 @@ let notepadWindowId = '';
 // What the seam owns of a Notepad it opened: the spawned process, and the unique scratch file it
 // opened, whose name appears in the window title. On a PC where System32 notepad.exe hands off to
 // the packaged Notepad, the replacement is another process the seam did not spawn and cannot own
-// by pid; only a window whose title carries that unique name is the seam's.
+// by pid; only a window whose title carries that unique name and whose process was created after
+// the fixture clock read just before the spawn (spawnedAt, FILETIME) is the seam's. A titled window
+// of an older process is the person's packaged Notepad that took the file as a tab: never closed.
 let notepadChild: ChildProcess | undefined;
-let notepadTitle: string | undefined;
+let notepadWindow: { title: string; spawnedAt: string } | undefined;
 function cleanupNote(detail: Record<string, unknown>) {
   console.log(`HUNG_HELPER_CLEANUP ${JSON.stringify(detail)}`);
+}
+function titledCounts(stdout: string) {
+  const counts = record(JSON.parse(stdout) as unknown);
+  return { matched: Number(counts['matched']), notOwned: Number(counts['not_owned']) };
 }
 // Never ends a process by pid set or image name: a Notepad the person opened during the case must
 // keep its unsaved text. The spawned child is ended through its own handle; any other window is
 // asked to close with WM_CLOSE (the fixture's --close-titled), which lets Notepad prompt rather
-// than discard. Whatever stays open is reported on one line and does not fail the case.
+// than discard, and only when its process is newer than the spawn. Whatever stays open, and every
+// titled window the seam does not own, is reported on one line and does not fail the case.
 async function closeSeamNotepads() {
   const child = notepadChild;
-  const title = notepadTitle;
+  const owned = notepadWindow;
   notepadChild = undefined;
-  notepadTitle = undefined;
+  notepadWindow = undefined;
   if (child !== undefined && child.exitCode === null && child.signalCode === null) {
     child.kill();
     const exited = await new Promise<boolean>((resolve) => {
@@ -639,19 +670,23 @@ async function closeSeamNotepads() {
     });
     if (!exited) cleanupNote({ reason: 'seam_notepad_child_not_exited', pid: child.pid });
   }
-  if (title === undefined) return;
+  if (owned === undefined) return;
+  const { title, spawnedAt } = owned;
   try {
-    const closed = await run(healthy, ['--close-titled', title], 10_000);
+    const closed = await run(healthy, ['--close-titled', title, spawnedAt], 10_000);
     if (closed.status !== 0) {
       cleanupNote({ reason: 'seam_notepad_window_query_failed', status: closed.status });
       return;
     }
-    if (Number(closed.stdout.trim()) === 0) return;
+    const { matched, notOwned } = titledCounts(closed.stdout);
+    if (notOwned > 0)
+      cleanupNote({ reason: 'redirected_notepad_window_not_owned', title, windows: notOwned });
+    if (matched === 0) return;
     let remaining = Number.NaN;
     for (let attempt = 0; attempt < 25; attempt += 1) {
       await delay(200);
-      const count = await run(healthy, ['--count-titled', title], 10_000);
-      remaining = count.status === 0 ? Number(count.stdout.trim()) : Number.NaN;
+      const count = await run(healthy, ['--count-titled', title, spawnedAt], 10_000);
+      remaining = count.status === 0 ? titledCounts(count.stdout).matched : Number.NaN;
       if (remaining === 0) return;
     }
     cleanupNote({ reason: 'seam_notepad_window_not_closed', title, remaining });
@@ -671,7 +706,12 @@ async function classicProfile(context: TestContext) {
   const title = `sc-hung-helper-seam-${randomUUID()}.txt`;
   const file = join(scratch, title);
   writeFileSync(file, '');
-  notepadTitle = title;
+  // Read just before the spawn: a process created after this is the seam's (see --close-titled).
+  const clock = await run(healthy, ['--now'], 10_000);
+  const spawnedAt = clock.stdout.trim();
+  if (clock.status !== 0 || !/^[1-9][0-9]*$/u.test(spawnedAt))
+    throw new Error('Fixture clock read failed before the Notepad spawn');
+  notepadWindow = { title, spawnedAt };
   const notepad = spawn(path, [file], { windowsHide: false, stdio: 'ignore' });
   notepadChild = notepad;
   notepadPid = notepad.pid;
@@ -781,6 +821,17 @@ function fixtureStart(window: Record<string, unknown>, sessionId: string) {
 // Load sizes. The helper rejects its pipe at 64 queued frames (ServePipe kMaximumQueuedFrames).
 const busyLoadFrames = 16;
 const busyQueuedFrames = busyLoadFrames + 2; // load + cancel + close
+// The cases that need a session, i.e. exactly the expected NOT_RUN set where classic Notepad is not
+// full_access_app. afterAll compares the NOT_RUN names with this list (see sessionNotRunMismatch).
+const sessionCaseNames = [
+  'cancels a pending Controller start in WinVerifyTrust',
+  'cancels a pending Controller start in CreateFileW',
+  'stops observation hung in UiaCall through the worker cancellation path',
+  'stops observation hung in Capture through the worker cancellation path',
+  'retains claimed semantic input after Controller native_unavailable',
+  'keeps a closed session helper while a hung discovery is unconfirmed, then idle-tears it down',
+  `measures healthy close behind ${busyLoadFrames} queued observations (below 64 frames)`,
+];
 const proxyLoadFrames = 8;
 const proxyQueuedFrames = proxyLoadFrames + 2; // load + start + stop_pending_start
 const proxyIterations = 30;
@@ -824,19 +875,55 @@ describe('hung helper seam static contracts (#1002)', () => {
     // The spawned child is ended through its own handle; anything else only by WM_CLOSE on a
     // window titled with the seam's unique scratch file name.
     expect(cleanup).toContain('child.kill()');
-    expect(cleanup).toContain("['--close-titled', title]");
-    expect(cleanup).not.toMatch(/taskkill|tasklist|process\.kill\(|\/F\b|IMAGENAME/u);
+    expect(cleanup).toContain("['--close-titled', title, spawnedAt]");
+    expect(cleanup).toContain("reason: 'redirected_notepad_window_not_owned'");
+    expect(cleanup).not.toMatch(
+      /taskkill|tasklist|process\.kill\(|TerminateProcess|\/F\b|IMAGENAME/u,
+    );
+    // The ownership clock is read before the spawn, never after it.
+    const profile = seam.slice(end, seam.indexOf('\nasync function prepare(', end));
+    expect(profile.indexOf("['--now']")).toBeGreaterThan(0);
+    expect(profile.indexOf("['--now']")).toBeLessThan(profile.indexOf('spawn(path, [file]'));
     // No before/after pid difference anywhere in the seam decides what to end.
     expect(seam).not.toContain(['notepad', 'Baseline'].join(''));
     expect(seam).not.toContain(['IMAGENAME eq', 'notepad'].join(' '));
+    // The fixture: --close-titled dispatches to one function, which holds the fixture's only
+    // window message send (its WM_CLOSE).
     const fixture = readFileSync(source, 'utf8');
-    const mode = fixture.slice(
-      fixture.indexOf('L"--close-titled"'),
-      fixture.indexOf('L"--identity"'),
+    expect(fixture).toMatch(
+      /L"--close-titled"[^;]*\)\)\s*return TitledNotepadWindows\(std::wstring_view\(argv\[1\]\) == L"--close-titled", argv\[2\], argv\[3\]\);/u,
     );
-    expect(mode).toContain('PostMessageW(window, WM_CLOSE, 0, 0)');
-    expect(mode).toContain('L"\\\\notepad.exe"');
-    expect(mode).not.toMatch(/TerminateProcess|taskkill/u);
+    expect(fixture.match(/(?:Post|Send)Message[AW]?\(/gu)).toHaveLength(1);
+    const head = fixture.indexOf('static int TitledNotepadWindows(');
+    expect(head).toBeGreaterThan(0);
+    let depth = 0;
+    let tail = fixture.indexOf('{', head);
+    do {
+      if (fixture[tail] === '{') depth += 1;
+      else if (fixture[tail] === '}') depth -= 1;
+      tail += 1;
+    } while (depth > 0 && tail < fixture.length);
+    const body = fixture.slice(head, tail);
+    expect(depth).toBe(0);
+    expect(body).not.toMatch(/TerminateProcess|taskkill/u);
+    // Inside that one function, in this order: a window whose image is not \notepad.exe returns
+    // before anything is sent; a process created before spawnedAt is counted as not_owned and
+    // returns; only then, and only in close mode, WM_CLOSE is posted.
+    const send = body.indexOf('if (query->close) PostMessageW(window, WM_CLOSE, 0, 0);');
+    const image =
+      /constexpr std::wstring_view suffix = L"\\\\notepad\.exe";\s*if \(!named \|\| size < suffix\.size\(\) \|\|\s*_wcsicmp\(image \+ \(size - suffix\.size\(\)\), suffix\.data\(\)\) != 0\)\s*return TRUE;/u.exec(
+        body,
+      );
+    const age =
+      /if \(!timed \|\| createdAt < query->spawned\) \{\s*query->not_owned \+= 1;\s*return TRUE;\s*\}/u.exec(
+        body,
+      );
+    expect(image).not.toBeNull();
+    expect(age).not.toBeNull();
+    expect(body).toContain('GetProcessTimes(process, &created');
+    expect(send).toBeGreaterThan(0);
+    expect(image!.index).toBeLessThan(send);
+    expect(age!.index).toBeLessThan(send);
   }, 5_000);
 });
 
@@ -1191,12 +1278,16 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
   // close would pay. It does not include the cancel step or a session's own teardown, and it is not
   // a basis for choosing N3's close deadline C.
   // Each round: a fresh healthy helper is connected, proxyLoadFrames sessionless discoveries and a
-  // fixture start are issued in that order, and stop_pending_start for that start is sent before
-  // any reply can be read. Between issuing and Stop only promise jobs run (no timer, no I/O
-  // callback), so the connected client writes the load and the start ahead of Stop while no reply
-  // is processed: every load frame is unanswered when Stop is written and is served before it. A
-  // round with no unanswered load at send, or whose start never reached the helper, is not counted
-  // and is retried, up to proxyAttemptLimit rounds; the uncounted rounds are reported.
+  // fixture start are issued in Main in that order, and stop_pending_start for that start is sent
+  // before any reply can be read. Between issuing and Stop only promise jobs run (no timer, no I/O
+  // callback), so the connected client writes the load and the start ahead of Stop while every
+  // load is still unanswered in Main (min_unanswered_at_send; a client-side view only). What shows
+  // that the helper served the load first, in FIFO order, and only then Stop is the reply order:
+  // load_answered_before_stop counts the load replies read no later than the Stop reply (after
+  // Stop settles, a promise-job-only drain runs the callbacks of replies already read and reads no
+  // more pipe data). A round counts only when it equals proxyLoadFrames; a round with a load reply
+  // after Stop's (stop_before_load) or whose start never reached the helper (start_not_sent) is
+  // not counted and is retried, up to proxyAttemptLimit rounds; the uncounted rounds are reported.
   it(`measures a sessionless Stop round trip behind ${proxyLoadFrames} queued discoveries as a close latency proxy`, async (context) => {
     live(context);
     observeChildren();
@@ -1205,7 +1296,8 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     const query = { ...syntheticIdentity, canonicalPath: healthy };
     const times: number[] = [];
     const unansweredAtSend: number[] = [];
-    const uncounted = { no_load_at_send: 0, start_not_sent: 0 };
+    const answeredBeforeStop: number[] = [];
+    const uncounted = { stop_before_load: 0, start_not_sent: 0 };
     let attempts = 0;
     while (times.length < proxyIterations && attempts < proxyAttemptLimit) {
       attempts += 1;
@@ -1225,22 +1317,27 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       const starting = settle(addon.startSession!(fixtureStart(window, sessionId)));
       // Promise jobs only: lets the start pass ensureConnected and be written, reads no reply.
       for (let turn = 0; turn < 200; turn += 1) await Promise.resolve();
-      // A discovery not yet answered when Stop is sent is queued ahead of it in the helper.
+      // Issued in Main and still unanswered there, written ahead of Stop.
       const unanswered = proxyLoadFrames - answered;
       const origin = performance.now();
       const stopped = await settle(addon.stopPendingStart!({ sessionId }));
       const elapsed = performance.now() - origin;
+      // Promise jobs only: settles every load whose reply was read with or before Stop's reply,
+      // and reads no later reply.
+      for (let turn = 0; turn < 200; turn += 1) await Promise.resolve();
+      const loadAnsweredBeforeStop = answered;
       await Promise.all(load);
       const started = await starting;
       expect(started).toBeInstanceOf(Error);
       if (errorCode(started) === 'Computer Use start canceled before send') {
         uncounted.start_not_sent += 1;
-      } else if (unanswered === 0) {
-        uncounted.no_load_at_send += 1;
+      } else if (loadAnsweredBeforeStop !== proxyLoadFrames) {
+        uncounted.stop_before_load += 1;
       } else {
         expect(stopped).toMatchObject({ result: 'closed' });
         times.push(elapsed);
         unansweredAtSend.push(unanswered);
+        answeredBeforeStop.push(loadAnsweredBeforeStop);
       }
       // Cleanup, outside the measured time. A helper that served discoveries is not torn down when
       // idle (discoverWindows clears idleShutdownPending; stopWindowDiscovery never arms teardown),
@@ -1265,13 +1362,16 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       ...percentiles(times),
       load_frames: proxyLoadFrames,
       queued_frames: proxyQueuedFrames,
+      load_answered_before_stop:
+        answeredBeforeStop.length > 0 ? Math.min(...answeredBeforeStop) : null,
       min_unanswered_at_send: unansweredAtSend.length > 0 ? Math.min(...unansweredAtSend) : null,
       attempts,
       uncounted,
     };
     console.log(`HUNG_HELPER_STOP_LATENCY_PROXY ${JSON.stringify(summary)}`);
     expect(times, 'loaded rounds measured within the attempt limit').toHaveLength(proxyIterations);
-    expect(summary.min_unanswered_at_send).toBeGreaterThan(0);
+    // Every counted round: the helper answered the whole load before Stop (FIFO behind the load).
+    expect(summary.load_answered_before_stop).toBe(proxyLoadFrames);
     expect(summary.max_ms).toBeLessThan(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
   }, 600_000);
 });

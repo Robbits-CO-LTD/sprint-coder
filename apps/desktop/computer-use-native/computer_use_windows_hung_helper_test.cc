@@ -38,6 +38,59 @@ DWORD WitnessHang(HANDLE event, DWORD timeout) {
 #include "computer_use_windows_host.cc"
 #undef wmain
 
+// Closes only what the seam can prove it opened: a visible top-level window whose title contains
+// the seam's unique scratch file name, whose process image is notepad.exe, and whose process was
+// created no earlier than the --now value the seam read just before it spawned Notepad. A window of
+// an older process (e.g. the person's packaged Notepad that took the file as a new tab) is never
+// closed, only counted as not_owned. WM_CLOSE lets Notepad ask about unsaved text; no process is
+// terminated. With close false it only counts. Prints {"matched":n,"not_owned":m}.
+static int TitledNotepadWindows(bool close, std::wstring_view needle, const wchar_t *spawned) {
+  struct TitleQuery {
+    std::wstring_view needle;
+    bool close;
+    ULONGLONG spawned;
+    unsigned matched;
+    unsigned not_owned;
+  } query{needle, close, 0, 0, 0};
+  if (query.needle.size() < 16) return 5;
+  wchar_t *end = nullptr;
+  query.spawned = std::wcstoull(spawned, &end, 10);
+  if (end == spawned || *end != L'\0' || query.spawned == 0) return 6;
+  EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+    auto *query = reinterpret_cast<TitleQuery *>(parameter);
+    if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) return TRUE;
+    wchar_t title[1024]{};
+    const int length = GetWindowTextW(window, title, 1024);
+    if (length <= 0 || std::wstring_view(title, length).find(query->needle) == std::wstring_view::npos)
+      return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) return TRUE;
+    wchar_t image[32768]{};
+    DWORD size = 32768;
+    const BOOL named = QueryFullProcessImageNameW(process, 0, image, &size);
+    FILETIME created{}, exited{}, kernel{}, user{};
+    const BOOL timed = GetProcessTimes(process, &created, &exited, &kernel, &user);
+    CloseHandle(process);
+    constexpr std::wstring_view suffix = L"\\notepad.exe";
+    if (!named || size < suffix.size() ||
+        _wcsicmp(image + (size - suffix.size()), suffix.data()) != 0)
+      return TRUE;
+    const ULONGLONG createdAt =
+        (static_cast<ULONGLONG>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    if (!timed || createdAt < query->spawned) {
+      query->not_owned += 1;
+      return TRUE;
+    }
+    query->matched += 1;
+    if (query->close) PostMessageW(window, WM_CLOSE, 0, 0);
+    return TRUE;
+  }, reinterpret_cast<LPARAM>(&query));
+  std::printf("{\"matched\":%u,\"not_owned\":%u}\n", query.matched, query.not_owned);
+  return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
   if (argc == 3 && std::wstring_view(argv[1]) == L"--window") {
     struct WindowQuery { DWORD pid; HWND window; } query{static_cast<DWORD>(_wtoi(argv[2])), nullptr};
@@ -56,40 +109,20 @@ int wmain(int argc, wchar_t **argv) {
     std::printf("%llu\n", static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(query.window)));
     return 0;
   }
-  // Closes only what the seam can prove it opened: a visible top-level window whose title contains
-  // the seam's unique scratch file name and whose process image is notepad.exe. WM_CLOSE lets
-  // Notepad ask about unsaved text; no process is terminated. Prints the number of matches.
-  if (argc == 3 && (std::wstring_view(argv[1]) == L"--close-titled" ||
-                    std::wstring_view(argv[1]) == L"--count-titled")) {
-    struct TitleQuery { std::wstring_view needle; bool close; unsigned matched; } query{
-        argv[2], std::wstring_view(argv[1]) == L"--close-titled", 0};
-    if (query.needle.size() < 16) return 5;
-    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
-      auto *query = reinterpret_cast<TitleQuery *>(parameter);
-      if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) return TRUE;
-      wchar_t title[1024]{};
-      const int length = GetWindowTextW(window, title, 1024);
-      if (length <= 0 || std::wstring_view(title, length).find(query->needle) == std::wstring_view::npos)
-        return TRUE;
-      DWORD pid = 0;
-      GetWindowThreadProcessId(window, &pid);
-      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-      if (process == nullptr) return TRUE;
-      wchar_t image[32768]{};
-      DWORD size = 32768;
-      const BOOL named = QueryFullProcessImageNameW(process, 0, image, &size);
-      CloseHandle(process);
-      constexpr std::wstring_view suffix = L"\\notepad.exe";
-      if (!named || size < suffix.size() ||
-          _wcsicmp(image + (size - suffix.size()), suffix.data()) != 0)
-        return TRUE;
-      query->matched += 1;
-      if (query->close) PostMessageW(window, WM_CLOSE, 0, 0);
-      return TRUE;
-    }, reinterpret_cast<LPARAM>(&query));
-    std::printf("%u\n", query.matched);
+  // The seam reads this clock just before it spawns Notepad and passes the value to --close-titled
+  // and --count-titled (FILETIME, 100 ns units since 1601). GetSystemTimeAsFileTime is the
+  // tick-granular system time, and a process creation time is stamped from the system time at
+  // creation (that tick or finer), so a process started after the read is never stamped earlier.
+  if (argc == 2 && std::wstring_view(argv[1]) == L"--now") {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    std::printf("%llu\n", (static_cast<unsigned long long>(now.dwHighDateTime) << 32) |
+                              now.dwLowDateTime);
     return 0;
   }
+  if (argc == 4 && (std::wstring_view(argv[1]) == L"--close-titled" ||
+                    std::wstring_view(argv[1]) == L"--count-titled"))
+    return TitledNotepadWindows(std::wstring_view(argv[1]) == L"--close-titled", argv[2], argv[3]);
   if (argc == 3 && std::wstring_view(argv[1]) == L"--identity") {
     WindowsExecutableIdentity identity;
     if (!BuildWindowsExecutableIdentity(argv[2], &identity)) return 2;
