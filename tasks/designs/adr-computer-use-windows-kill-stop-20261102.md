@@ -49,42 +49,45 @@
 終了を決めた時点で、Main は helper に送った control 要求を調べる。helper が入力の claim まで進んだかは Main から分からないので、**応答が無い、または応答が効果未確認の control 要求は「claim 済みかもしれない」として扱う**。効果未確認とは、次のどれかである。
 
 - accepted=true の `semantic_input_in_flight`。helper の `DispatchWindowsSemanticAction` は、期限・Stop・遅い contact で待ちを打ち切ると、`input_in_flight` が真ならこの code を `accepted = ever_claimed` で返す。
-- `input_timeout_unconfirmed`（§2.1 の UIA の client timeout）と `input_not_confirmed`（claim 後に確認できなかった dispatch。`SendInput` の dispatch も含む）。
+- accepted=true の `input_timeout_unconfirmed`（§2.1 の UIA の client timeout）と `input_not_confirmed`（claim 後に確認できなかった dispatch。`SendInput` の dispatch も含む）。
 - client の semantic owner が `uncertain` の状態（`markSemanticUncertain` が立てる）。
+
+効果未確認かどうかは、エラー応答の `accepted` で決める。accepted=true のエラー応答が効果未確認で、上の code はその取りうる値である。`input_not_confirmed` は accepted=false でも返る（`DispatchWindowsAction` は、送れずに reason が空のときもこの code にする）が、accepted=false は効果なしとして台帳から消す。
 
 **判定の情報源は、世代ごとの control 要求の台帳とする**（N3 で新しく作る）。
 
-- 記録する時点は、client の `call()` が `sendConnected` に渡す `beforeWrite`（送信を確定する時点）とする。1 件ごとに helper の世代、session id、request id、種類、対象の identity（pid + 作成時刻）を持つ。
+- 記録する時点は、client の `call()` が `sendConnected` に渡す `beforeWrite`（送信を確定する時点）とする。1 件ごとに helper の世代、session id、request id、種類、対象の identity（pid + 作成時刻）、状態（応答待ち／効果未確認）を持つ。行のうち対象の identity と状態は、送信の前（`beforeWrite` の時点）に既存の SQLite の永続化に書く。書けなければ送らない（fail-closed）。効果を確定した応答で行を消し、効果未確認の応答では状態を書き換える。これにより、応答待ちや効果未確認のまま Main が crash・終了しても、`termination_requested` のまま再起動しても、行が残る（起動時の扱いは 5）。
 - 台帳には `dispatch` のすべてを入れる。semantic（`semanticActionTypes` の invoke / set_text / select / toggle / expand_collapse）に限らず、`SendInput` を使う click / scroll / key / type と、paste（#785 の artifact の貼付け。wire では `type` / `set_text` の dispatch）も含める。
 - 消すのは、応答 frame を実際に受け取り、その応答が効果を確定したとき（成功、または accepted=false の拒否）だけにする。効果未確認の応答では消さず、効果未確認として残す。transport の timeout、`failAll`、`abortTransport`、binding の不一致や不正な応答でも消さない。
+- 検証済みの close receipt でセッションの Stop を確定したら、そのセッションの行は、その時点で「receipt で確定済み」として消す。今と同じ扱いで、対象の隔離にしない（§2.3）。§2.2 の判定は、receipt で確定していない行だけを見る。receipt で確定した後の通常の helper の終了（idle teardown の `shutdown` → `abortTransport`）は、こうして `terminated_clean` になる。
 - 今の client の `pending` は、要求の timeout・`failAll`・`abortTransport` で消える。timeout の後に残る記録は semantic owner だけで、これは semantic の dispatch にしか作られず、キーは session で、対象の identity を持たない。semantic でない dispatch と paste には何も残らない。このため `pending` や semantic owner を判定に使ってはならない。
 
 | 状態 | 条件 | Main の扱い |
 | --- | --- | --- |
-| `terminated_clean` | signaled、かつ台帳にその世代の応答の無い・効果未確認の control 要求が無い | Stop を確定する。隔離を解く。新しい helper を起動できる |
-| `terminated_target_suspect` | signaled、かつ台帳にその世代の、応答が無い、または応答が効果未確認の control 要求がある | Stop を確定する（helper からの新しい入力は無い）。**その要求の対象プロセスの identity（pid + 作成時刻）に限って隔離を保つ**。対象プロセスが終了するか、ユーザーが承認カードで再開を明示するまで、その対象には新しいセッションを始めない。他の対象は使える |
-| `termination_requested` | 期限 T 内に signaled にならない | 隔離を保つ。新しい helper は起動しない。UI は「停止を要求した。最後の操作が後から反映される可能性がある」と表示し、「入力はもう出ない」とは言わない。`exit` を待ち続け、届いたら上の 2 行のどちらかへ移る（中断できない I/O が後で解けることがある） |
+| `terminated_clean` | signaled、かつ台帳にその世代の、receipt で確定していない、応答の無い・効果未確認の control 要求が無い | Stop を確定する。隔離を解く。新しい helper を起動できる |
+| `terminated_target_suspect` | signaled、かつ台帳にその世代の、receipt で確定していない、応答が無い、または応答が効果未確認の control 要求がある | Stop を確定する（helper からの新しい入力は無い）。**その要求の対象プロセスの identity（pid + 作成時刻）に限って隔離を保つ**。対象プロセスが終了するか、ユーザーが承認カードで再開を明示するまで、その対象には新しいセッションを始めない。他の対象は使える |
+| `termination_requested` | 期限 T 内に signaled にならない | 隔離を保つ。新しい helper は起動しない。UI は「停止を要求した。最後の操作が後から反映される可能性がある」と表示し、「入力はもう出ない」とは言わない。`exit` を待ち続け、届いたら上の 2 行のどちらかへ移る（中断できない I/O が後で解けることがある）。このまま Main を終了・再起動しても、台帳の行が SQLite に残るので、起動時に対象の隔離へ移る（5） |
 
 Main が起こしていない helper の終了（crash、Stop 以外の `abortTransport`）も、台帳がある限り同じ判定と §2.5 の後始末に通す。
 
 対象の隔離は、次のように作る（N3 の範囲）。
 
 1. control 要求を送る時点で、Main はその対象の pid と作成時刻を台帳に持つ。取得元は helper の応答（session の開始や target の受領）とする。今の helper は作成時刻を内部にだけ持ち（`ReadProcessStartIdentity`、`WindowsSession::process_start`。応答の `windowIdentityDigest` にはハッシュとして入るだけ）、`StartWindowsNewSession` の応答は `pid` を返すが作成時刻を返さない。Host が持つのも `pidsByIdentity`（identity digest → pid）だけである。N3 で開始の応答に作成時刻を足す。作成時刻は Main の外（AI・Renderer）には出さない（親 ADR §8 の「パス・PID・ウィンドウハンドルを Main/native の外に出さない」と同じ）。
-2. 今ある隔離元（`activeStopQuarantines`、client の semantic owner と `discoveries`、host の `discoveryManager.quarantined()` と `startOwners`）は、どれも host 全体を止める（Host の `inputQuarantined` → `requireMethod`、client の `assertSemanticAvailable` / `ensureConnected`）。`terminated_target_suspect` では、これらを解除し、identity をキーにした新しい「対象の隔離」へ移す。startSession・resume・discovery の入口で、その対象だけを拒否する。
+2. 今ある隔離元（`activeStopQuarantines`、client の semantic owner と `discoveries`、host の `discoveryManager.quarantined()` と `startOwners`）は、どれも host 全体を止める（Host の `inputQuarantined` → `requireMethod`、client の `assertSemanticAvailable` / `ensureConnected`）。`terminated_target_suspect` では、これらを解除し、台帳の行が持つ identity をキーにした新しい「対象の隔離」へ移す。startSession・resume・discovery の入口で、その対象だけを拒否する。対象の隔離に入れるのは台帳の行の identity だけである。identity を持たない隔離元（client の `discoveries`、host の `discoveryManager.quarantined()` と `startOwners`）は、suspect でも対象の隔離へ移さず、helper の終了の確認で解除する。discovery の launch は対象への入力ではなく、launch の子は §3.3 で扱う。
 3. 対象の終了の確認は、新しい世代の helper が `OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)` と `GetProcessTimes` の照合で行う。次の 3 つを対象の終了とみなす: handle が signaled、作成時刻が一致しない（pid が再利用された）、pid が存在しない（`OpenProcess` が `ERROR_INVALID_PARAMETER`）。この照合は §3.1 の 3（新しい helper の最初の操作は `list_targets` か再観測）の例外として許す。それ以外の失敗（アクセス拒否など）では照合できないので、隔離を保つ。
 4. 承認カードでの再開は、新しい経路として N3 で作る（今の Controller の `resume` は paused のセッションのためのもので、この用途には使えない）。再開の ticket は新しい世代で新規に発行する。§3.1 の 2 で失効させた古い ticket は使わない。
-5. 対象の隔離は、既存の SQLite の永続化に保存し、Main の再起動をまたいで保つ（N3 の範囲）。v2 の grant は永続（installation-wide・無期限）で、再起動の後は承認カード無しで開始できるので、メモリだけに持つと再起動が D-2 に無い解除の経路になるためである。保存するのは pid、作成時刻、隔離の理由だけとし、target の名前・パス・AI に見せる情報は入れない。解除するのは、Main の起動時と新しい helper の世代の開始時に 3 の照合で対象の終了を確かめたとき、または 4 の承認カードで再開したときで、照合できないものは保つ。保存の形（既存のテーブル・設定の流用か、新しいテーブルか）は N3 の着手前に決める。保存や読込みに失敗したときは fail-closed とし、その対象の開始を拒否する（対象が特定できなければ、その世代では新しい開始を拒否する）。
+5. 対象の隔離も、台帳の行と同じく既存の SQLite の永続化に保存し、Main の再起動をまたいで保つ（N3 の範囲）。v2 の grant は永続（installation-wide・無期限）で、再起動の後は承認カード無しで開始できるので、メモリだけに持つと再起動が D-2 に無い解除の経路になるためである。保存するのは pid、作成時刻、隔離の理由（台帳の行では状態）だけとし、target の名前・パス・AI に見せる情報は入れない。Main の起動時に SQLite に残っている台帳の行は、対象の隔離へ移す。照合（3）は、起動後の最初の helper の起動時に行う（helper は `ensureConnected` まで起動しないので、照合のためだけに先に起動はしない）。照合が済むまでは、永続化された対象への開始を拒否する。解除するのは、この照合か新しい helper の世代の開始時の照合で対象の終了を確かめたとき、または 4 の承認カードで再開したときで、照合できないものは保つ。保存の形（既存のテーブル・設定の流用か、新しいテーブルか）は N3 の着手前に決める。保存や読込みに失敗したときは fail-closed とし、その対象の開始を拒否する（対象が特定できなければ、その世代では新しい開始を拒否する）。行の削除による解除は検出できない（§5 の 9）。
 
 ### 2.3 #484（変更禁止の不変条件）との関係
 
 **この ADR は #484 を部分的に緩める。** 今は「helper の close receipt」だけが確定の証拠で、claim 済みの UIA 呼出しが残る間は確定しない。この ADR は、helper の終了でも確定させる。ただし、claim 済みかもしれない呼出しが残る場合（`terminated_target_suspect`）は、その対象に限って隔離を保つので、「未確認の入力が残る対象へ入力を再開しない」という #484 の目的は保つ。親 ADR §8 の変更禁止は、オーナー判断 D-1・D-2・D-4 により、上記の条件つきで置き換えることが承認された（§6）。D-4 の 4 箇所以外にある同じ趣旨の記述（親 ADR §8 の「Stop 後に入力が続かない」、§10「#820」の「Mainは未確認semantic ownerと元helperを保持し…」の段落など）も、この ADR を優先する。
 
-終了と receipt の経路は非対称である。終了で確定する経路では、効果未確認の要求の対象を隔離する。receipt で確定する経路（UIA の client timeout の後、§2.1）では、provider 側に呼出しが残りうるのに対象の隔離が無い。これは今と同じで、この ADR は変えない（§5 の 2）。
+終了と receipt の経路は非対称である。終了で確定する経路では、効果未確認の要求の対象を隔離する。receipt で確定する経路（UIA の client timeout の後、§2.1）では、provider 側に呼出しが残りうるのに対象の隔離が無い。これは今と同じで、この ADR は変えない（§5 の 2）。receipt で確定したセッションの台帳の行もその時点で消すので（§2.2）、その後の通常の helper の終了でも対象は隔離されない。
 
 ### 2.4 入力の不変条件（新しく明文化する）
 
 - down と up は 1 回の `SendInput` に入れる（今の click・key はそうなっている）。helper が途中で終了しても、キーやボタンが押されたままにならない。drag・修飾キー・ホットキーを足すときもこれを守る。
-- 今の例外: 補助文字（サロゲートペア）の入力は、`SendUnicodeScalar` で上位サロゲートの down/up と下位サロゲートの down/up を 2 回の `SendInputForBoundTarget` に分けている。その間に helper が終了すると、対象には上位サロゲートだけが届き、テキストや IME の状態が壊れうる。S4（N5）で、1 つの scalar の 4 イベントを 1 回の `SendInput` にまとめる。複数の scalar にまたがる `type` の途中の終了は、一部だけの入力として効果未確認で扱う（§2.2）。
+- 今の例外: 補助文字（サロゲートペア）の入力は、`SendUnicodeScalar` で上位サロゲートの down/up と下位サロゲートの down/up を 2 回の `SendInputForBoundTarget` に分けている。その間に helper が終了すると、対象には上位サロゲートだけが届き、テキストや IME の状態が壊れうる。S4（N5）で、1 つの scalar の 4 イベントを 1 回の `SendInput` にまとめる。今の `type` は 1 回の dispatch で 1 scalar に限られる（helper は `scalars.size() != 1` を `invalid_text` で拒否する）。複数の文字の入力の途中で終了すると、応答待ちの 1 件が効果未確認になり（§2.2）、それより前に completed で返った文字は入力済みとして残る。複数の scalar を受け付けるよう広げる場合は、途中の終了を一部だけの入力として効果未確認で扱う。
 
 ### 2.5 helper の終了は、その helper の上のすべてを止める
 
@@ -98,9 +101,10 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 ### 3.1 Main
 
 1. Stop の手順を「cancel（ack の期限 1 秒）→ close（期限 C）→ 期限内に receipt が無ければ helper を終了 → signaled を待つ（期限 T）→ §2.2 の判定」にする。**C は、実測するまで今の 10 秒（1 回目の close の期限）のままにする。** 健全だが忙しい helper を誤って終了させると、確定できたはずの入力が「効果不明」になり、他のセッションも止まり（§2.5）、再起動では Electron の main thread で同期の PowerShell の署名確認（`execFileSync`、最大 10 秒）が走る。#820 の記録では、UIA 呼出し 1 回の最悪が 800 ms、素の `ElementFromHandle` が 1028 ms だった。S1 で、負荷とキューのある健全な helper の close の所要時間を測り、その分布から C を決める。T は 2 秒を目安にする。
-   - Controller の close の再送（`COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT` = 2 回）は、Windows では廃止する。C の後は再送せず終了へ進む。macOS は今のまま。transport の close の期限（今は再送を見込んで 10 秒 × 3）は、C の後の終了と競合しない値に N3 で直す。
-   - 終了を起こすのは Host の close（期限 C の切れ）とし、child の終了と `exit` の観測は addon の client が受け持つ。Controller は終了を起こさず、close の結果として §2.2 の状態を受け取る。
-   - Controller の扱い: `terminated_clean` と `terminated_target_suspect` は Stop の確定として `nativeAcknowledged` を真にし、停止理由は要求された理由のままにする。今のように `native_unavailable` に置き換えない。`terminated_target_suspect` の UI は「停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない」とする。`termination_requested` は今と同じ `native_unavailable` とし、UI は §2.2 の文言にする。停止理由の値と文言の細部は、N3 の着手前の状態表で決める。
+   - Stop の入口は 3 つある。開始済みのセッションの close（Controller の `completeStop` → Host の `close`）、native がある開始待ちのセッション（Controller が cancel と close の再送を自分で行う）、native が無い開始待ちのセッション（Controller が `starting.native === null` かつ `nativeStarted` のとき Host の `stopPendingStart` を呼ぶ。Host は `stopStartOwner` → `completePendingStop` → `completeNativePendingStop` と進み、`stopWithDeadline('stopPendingStart')` を `COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT` 回まで再送する）。helper が `start_session` の中で固まった場合（S1 が挙げる WinVerifyTrust や process / exe の open）は 3 つ目の経路で、最初の `stopPendingStart` の期限 C の切れを終了の契機とし、C + T 以内に §2.2 の判定へ進む。
+   - Windows では、この 3 つの入口の再送（Controller の close の再送 2 回、`completeNativePendingStop` の再送）を廃止する。C の後は再送せず終了へ進む。同じ定数を共有する discovery manager の `attemptLimit` と transport の close の期限（今は再送を見込んで 10 秒 × 3）も、Windows では 1 回の期限 C に合わせ、C の後の終了と競合しない値に N3 で直す。macOS は今のまま。
+   - 終了を起こすのは Host の Stop の入口（`close` と `stopPendingStart` の期限 C の切れ）とし、child の終了と `exit` の観測は addon の client が受け持つ。Controller は終了を起こさず、Stop の結果として §2.2 の状態を受け取る。今の Host の `close` は `Promise<void>` を返すので、`close` と `stopPendingStart` が §2.2 の状態を返すように型を変える。
+   - Controller の扱い: `terminated_clean` と `terminated_target_suspect` は Stop の確定として `nativeAcknowledged` を真にし（固まった helper では cancel の ack が先に失敗するが、その失敗は終了による確定で上書きする。開始待ちの経路も同じ）、停止理由は要求された理由のままにする。今のように `native_unavailable` に置き換えない。`terminated_target_suspect` の UI は「停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない」とする。`termination_requested` は今と同じ `native_unavailable` とし、UI は §2.2 の文言にする。停止理由の値と文言の細部は、N3 の着手前の状態表で決める。終了で確定した場合の `stop_acknowledged` の capture には、receipt の代わりに終了の種別を記録する。
    - C の上限は 10 秒とする。Host の `stopWithDeadline` と discovery manager は 10 秒を超える期限を拒否するので、S1 の実測で 10 秒を超える C が要るなら、N3 でこの 2 つの上限も変える。
 2. 終了で確定したセッションは、その helper に結び付く token（target / app / session / artifact）と承認 ticket をすべて失効させる。Main の token と session id は `randomUUID` で発行されるが、それだけでは古い token は失効しない。Windows の client には `helperGeneration` があるが、host と controller はそれを token の失効に使っていない。**これを広げて、host・controller の token と ticket を世代に束縛する**（親 ADR §10 は既存の契約のように書いているが、helper 終了に連動した失効の実装は無い）。再開の承認カードの ticket は、新しい世代で新規に発行する（§2.2 の 4）。
 3. 新しい helper の最初の操作は `list_targets` か再観測にする。例外は、§2.2 の 3 の対象の終了の照合だけである。終了の後の最初の観測は、短い待ち（settle）の後に行う（§3.3 の、job で止められない起動の窓が開きうるため）。
@@ -109,7 +113,7 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
    - Host: `activeStopQuarantines`、`discoveryManager.quarantined()`、`startOwners`（`attempts` / `terminal === null` / `unconfirmed` / `discoveryUnconfirmed`）。
    - Host の session 表（`sessions`、`classifierBindings`、`inputAttemptsBySession`、`stopEpochs`、`revisionsBySession`）は、検証済みの close と同じく終了確定として片付け、`confirmedClosed` に登録する。登録しないと、後の Stop の close が `sessions` にも `confirmedClosed` にも無いとして `native_stop_unconfirmed` を投げる。
    - client: semantic owner（`ensureConnected` はこれが未確認の間 helper を起動しない）、`discoveries`、`starts`。`starts` は今は helper の世代を持たず、close receipt を受けるか未送信のまま止まらない限り残る。残った `everSent && !closed` は `shutdownWhenIdle` で新しい世代の idle teardown を止め、16 件で新しい開始も拒否させる。`starts` に世代を持たせ、終了した世代の分を破棄する。
-   - client の semantic owner を単に解除するのは、`terminated_target_suspect` に当たらない世代に限る。suspect の世代では、上の host 全体の隔離元（semantic owner を含む）を §2.2 の対象の隔離へ移してから解除する。`termination_requested` では何も解除しない。
+   - client の semantic owner を単に解除するのは、`terminated_target_suspect` に当たらない世代に限る。suspect の世代では、`activeStopQuarantines` と semantic owner を、台帳の行の identity で §2.2 の対象の隔離へ移してから解除する。identity を持たない元（`discoveries`、`discoveryManager.quarantined()`、`startOwners`）は §2.2 の 2 のとおり終了の確認で解除する。`termination_requested` では何も解除しない。
 6. **終了中の child を世代ごとに保持する。** 今は `abortTransport` が `this.child = null` にするため、exit listener が `this.child !== child` で早く return し、Main は自分の kill の終了を観測できない。crash のときも exit listener は `failAll` するだけである。また `ensureConnected()` は socket が null で未確認の semantic owner が無く、接続中でもなければ `connect()` で新しい helper を起動するので、古いセッションへの close の再送が新しい helper に届き `session_missing` になりうる。終了中の child が `exit` するまで、`pickApplication` を含むすべての操作を止める。古いセッションの Stop を新しい世代へ送らない。世代の終了は原因を問わず（Stop、crash、要求の timeout・binding の不一致・不正な応答・write の失敗による `abortTransport`）、§2.2 の判定と §2.5 の後始末を通す。`abortTransport` のすべての経路で、終了中の child を保持する。
 7. Main の終了時の helper は、新しい作業を要しない。helper は `detached` なしで spawn されるので（`connect()` の `spawn`）、libuv の global job に入る（§3.3）。この job は KILL_ON_JOB_CLOSE を持つので、Main が終わると、正常終了でも crash でも、helper は `TerminateProcess` と同じ形で強制終了される。helper の通常終了経路（parent watcher が Main の終了を検知した後の `DrainWindowsSemanticInputForExit` / `DrainWindowsDiscoveryLaunchesForExit`）は、この強制終了が先に来るので通らない。Main の終了は、S2 の終了と同じく効果未確認の終了であり、drain ではない。残るのは、カーネルの中で止まって終了できない helper だけである（§5 の 1）。
 
@@ -138,8 +142,8 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 | #（#988 のノード） | 内容 | 依存 | 試験 |
 | --- | --- | --- | --- |
 | S1（N2） | 応答しない helper の試験装置。テスト用の build flag で、指定した要求の中で永久に待つ（UIA 呼出し、`CreateFileW`、capture、WinVerifyTrust の各所）。Main の Stop がどこで止まるかを固定する | この ADR 内ではなし | CI の Windows live seam。cancel と close 2 回が期限切れになると Host の `native_stop_unconfirmed` を受け、Controller が約 21 秒の native 待機（start owner に処理中の discovery が無い場合）の後に `native_unavailable` とすることを固定する。transport は §1 の条件下で最初の close から約 40 秒で kill し、未確認の semantic 入力や discovery がある場合は kill しないことも固定する。あわせて、健全で忙しい helper の close の所要時間を、負荷とキューのある状態で測る |
-| S2（N3） | Main: 終了による確定（§2.2 の 3 状態）、世代ごとの control 要求の台帳、対象の identity の取得と対象の隔離、承認カードでの再開の経路と対象の隔離の永続化（§2.2 の 1〜5）、S1 の実測にもとづく close の期限 C の決定（実測までは 10 秒のまま）と close の再送の廃止、すべての隔離元の解除、token の一括失効、再起動後の再観測の強制 | S1（N2）・S3（N4） | S1 の装置の全箇所で、Stop が 1 + C + T 以内（cancel の ack 1 秒 + C + T）に確定し、次のセッションが始められること（§2.2 の対象隔離と `termination_requested` の例外を守る）。Stop 中に dispatch の transport が先に timeout する場合（例: dispatch が helper の中で固まり、Stop の後、C が切れる前にその dispatch の transport 期限が切れる）にも、台帳から `terminated_target_suspect` になること |
-| S3（N4） | helper: §3.3 に従い、起動ごとの job（作成時から KILL_ON_JOB_CLOSE・BREAKAWAY_OK・SILENT_BREAKAWAY_OK、handle は継承させない）に `CREATE_SUSPENDED` と `PROC_THREAD_ATTRIBUTE_JOB_LIST` で子を作成時点から入れる。検証後に KILL_ON_JOB_CLOSE だけを外して resume する。probe も作成時から job に入れ、resume せずに終了を確認する。一時フォルダを helper ごとにする（libuv の job の breakaway は §3.3 の確認済みの事実を前提にする） | この ADR 内ではなし（S2 より前） | launch の検証前に helper が終了しても未検証の子が残らず、検証済みの子は巻き戻されないこと。検証済みの子が `CREATE_BREAKAWAY_FROM_JOB` で子を作れること |
+| S2（N3） | Main: §2.2・§2.5・§3.1 の全項目。終了による確定（§2.2 の 3 状態）、世代ごとの control 要求の台帳とその SQLite への記録、対象の identity の取得と対象の隔離、承認カードでの再開の経路、対象の隔離の永続化と起動後の最初の helper での照合（§2.2 の 1〜5）、S1 の実測にもとづく close の期限 C の決定（実測までは 10 秒のまま）、3 つの Stop の入口での終了と再送の廃止、transport の close の期限と discovery manager の見直し、Host の Stop の戻り値の型と Controller の `nativeAcknowledged`・停止理由・UI 文言・capture（§3.1 の 1）、token の一括失効（§3.1 の 2）、再起動後の再観測の強制（§3.1 の 3）、未確認の入力の記録（§3.1 の 4）、すべての隔離元の解除（§3.1 の 5）、終了中の child の世代ごとの保持と全 `abortTransport` 経路での `exit` の観測（§3.1 の 6）、影響を受けた全セッションの `completeStop` の後始末と他の Task への通知（§2.5） | S1（N2）・S3（N4） | S1 の装置の全箇所で、Stop が 1 + C + T 以内（cancel の ack 1 秒 + C + T）に確定し、次のセッションが始められること（§2.2 の対象隔離と `termination_requested` の例外を守る）。Stop 中に dispatch の transport が先に timeout する場合（例: dispatch が helper の中で固まり、Stop の後、C が切れる前にその dispatch の transport 期限が切れる）にも、台帳から `terminated_target_suspect` になること。`start_session` の中で helper が固まった場合の Stop が C + T 以内に確定すること。効果未確認の dispatch を含むセッションを receipt で Stop した後の idle teardown が `terminated_clean` になること。応答待ちのまま Main を終了した後の起動で、その対象が隔離されていること |
+| S3（N4） | helper: §3.3 に従い、起動ごとの job（作成時から KILL_ON_JOB_CLOSE・BREAKAWAY_OK・SILENT_BREAKAWAY_OK、handle は継承させない）に `CREATE_SUSPENDED` と `PROC_THREAD_ATTRIBUTE_JOB_LIST` で子を作成時点から入れる。検証後に KILL_ON_JOB_CLOSE だけを外して resume する。probe も作成時から job に入れ、resume せずに終了を確認する。一時フォルダを helper ごとにする。着手時に、§3.3 の libuv の job のフラグ（強い推定）を、同梱の Electron の libuv の実装か実機で確かめ、結果をこの ADR に追記する | この ADR 内ではなし（S2 より前） | launch の検証前に helper が終了しても未検証の子が残らず、検証済みの子は巻き戻されないこと。検証済みの子が `CREATE_BREAKAWAY_FROM_JOB` で子を作れること。helper の子が libuv の job に入らないこと（Main を終了しても、検証済みの子が殺されないこと） |
 | S4（N5） | helper: Stop のためだけの仕組みの整理（#940 の残り、#820 の残件のコード側を扱う）。§2.4 のサロゲートペアを 1 回の `SendInput` にまとめる。親 ADR §10 リスク 10 と「#820」の、Stop のためだけの仕組み（worker、slot、alias など）の説明を、整理後の実装に合わせて同じ PR で更新する | S2（N3）・S3（N4） | 既存の native seam の入力安全の試験が全部通ること |
 
 この表は kill-stop 内の依存を示す。S1（N2）・S3（N4）は並行でき、S2（N3）は両方の後、S4（N5）は S2 の後に置く。S2 が helper の終了を通常の Stop にする前に、未検証の子が残らないよう起動を suspend と job で守る必要があるため、S3（N4）を S2（N3）より先に入れる。
@@ -147,12 +151,14 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 ## 5. 残るリスク
 
 1. `termination_requested` のまま signaled にならない環境（壊れたドライバ）では、終了を確認できるまで隔離を保ち、新しい helper は起動しない。Main を終了すると、libuv の job が helper を強制終了しようとするが（§3.1 の 7）、カーネルの中で止まって終了できない helper はそれでも残る。このため再起動を安全な復旧の証拠にはしない。頻度は実機で測る。
-2. 終了の前に発行された UIA pattern の呼出しと、積まれた `SendInput` は、Stop の確定の後に対象で実行されうる。終了で確定する経路では `terminated_target_suspect` で、その対象への再開を止めることで受ける。receipt で確定する経路（UIA の client timeout の後、§2.1）では対象の隔離が無く、provider 側に残った呼出しが後で実行されうる（今と同じ）。対象が固まったままユーザーが自分で操作すると、遅れて実行された入力と混ざりうる（今も同じ）。
+2. 終了の前に発行された UIA pattern の呼出しと、積まれた `SendInput` は、Stop の確定の後に対象で実行されうる。終了で確定する経路で対象の隔離（`terminated_target_suspect`）で受けるのは、応答が無いか効果未確認の要求だけである。completed で返った `SendInput`・`Invoke` が対象のキューに残る分は受けない（今と同じ）。receipt で確定する経路（UIA の client timeout の後、§2.1）では対象の隔離が無く、provider 側に残った呼出しが後で実行されうる（今と同じ）。対象が固まったままユーザーが自分で操作すると、遅れて実行された入力と混ざりうる（今も同じ）。
 3. helper の再起動のたびに、署名検証や context の初期化のコストがかかる（初回の `list_targets` が数秒）。Stop が頻繁なら体感が落ちる。
 4. macOS には適用しない。macOS の Stop は今の serial lock の方式のまま。両 OS の Stop の確定の仕組みが異なることを、受入の記録に明記する。
 5. job で止められない起動（パッケージアプリへの引継ぎ、single-instance への転送）は、Stop の確定の後にウィンドウを開き、フォーカスを取りうる。
 6. 検証済みの子の KILL_ON_JOB_CLOSE を外してから `ResumeThread` するまでの間に helper が終了すると、その子は実行されない suspend のまま残る（§3.3）。窓は 2 つの呼出しの間だけで、子は一度も実行していないので入力の安全には関わらないが、ユーザーには起動しなかったように見え、プロセスと exe の lock が残る。
-7. v2 の grant は SQLite に永続する（installation-wide・無期限）ので、対象の隔離を Main のメモリだけに持つと、再起動の後は承認カード無しで同じ対象に開始できてしまう。このため対象の隔離を永続化し、起動時と新しい世代の開始時の照合か承認カードでだけ解除する（§2.2 の 5）。残るのは、照合できない対象（アクセス拒否など）の隔離が、承認カードで再開するまで再起動をまたいで続くことである。
+7. v2 の grant は SQLite に永続する（installation-wide・無期限）ので、台帳と対象の隔離を Main のメモリだけに持つと、crash・終了・`termination_requested` のままの再起動の後に承認カード無しで同じ対象に開始できてしまう。このため台帳の行と対象の隔離を永続化し、起動後の最初の helper と新しい世代の開始時の照合か、承認カードでだけ解除する（§2.2 の 5）。残るのは、照合できない対象（アクセス拒否など）の隔離が、承認カードで再開するまで再起動をまたいで続くことと、照合が済むまで永続化された対象へ開始できないことである。
+8. control 要求（dispatch）のたびに、送信の前に SQLite へ 1 回書き、応答で 1 回消す（または書き換える）費用がかかる。書けなければ送らないので、DB の不調は Computer Use の入力の停止として現れる。費用は S2 で測る。
+9. 対象の隔離と台帳の行を SQLite から消すと、D-2 に無い解除の経路になる。grant の MAC（T14）の方式は、行が本物であることを示すが、行が消されたことは検出できない。この ADR は、ローカルの DB を書き換えられる攻撃者による削除を対象外とする。T14 が守るのは grant を偽って権限を広げることで、隔離の行を消しても、ユーザーが既に与えた grant の範囲を超える権限は得られず、残るのは遅れて実行される入力が混ざるという事故の側のリスクだけだからである。
 
 ## 6. オーナーの判断（2026-11-02）
 
@@ -168,4 +174,4 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
    - §8「維持する不変条件と、触ってはいけない箇所」: 未確認 stop の fail-closed 隔離（#484）の「変更禁止」
 5. **D-5: 受け入れる。** helper が固まったときは、同じ helper の上の他のセッションも止まる（§2.5）。
 
-補足: D-4 の 2 つ目の項目（「別helperへの再接続で元操作の停止を証明しない」）が置き換えるのは、その段落の「元操作の停止を証明できない間は隔離を解かない」部分であり（元の helper の終了を確認した後は §2.2 で解除できる）、別の helper への再接続や、別の helper・偽の object の応答で停止を証明しない点は維持する（親 ADR の該当箇所の注）。
+補足: D-2 の「応答の無い control 要求」を、§2.2 では「応答が無い、または応答が効果未確認の control 要求」に広げた。D-2 の目的（claim 済みかもしれない入力の対象を再開させない）を実装するには、helper が in-flight や未確認を明示して返した要求も含める必要があるためである。D-4 の 2 つ目の項目（「別helperへの再接続で元操作の停止を証明しない」）が置き換えるのは、その段落の「元操作の停止を証明できない間は隔離を解かない」部分で、親 ADR の注に引用した 2 つの文（「未確認ならHost-wide隔離を維持する」「query/Stopの期限切れで元helperを捨てず、同じ世代へ後の有界Stopを許す」）に当たる。元の helper の終了を確認した後は、効果未確認の要求が無ければ解除し、残るなら対象の隔離へ移す（§2.2、§3.1 の 5）。別の helper への再接続や、別の helper・偽の object の応答で停止を証明しない点は維持する。
