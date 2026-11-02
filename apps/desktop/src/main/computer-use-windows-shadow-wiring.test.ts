@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -11,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const scheduler = read('computer_use_windows_shadow_scheduler.h');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const harness = read('computer_use_protocol_fuzz.cc');
 
 /** The code of a file without its line comments (a comment may name what the code must not do). */

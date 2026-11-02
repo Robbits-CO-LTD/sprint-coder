@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -122,7 +123,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   });
 
   it('returns the Windows helper eligibility from the portable constants only', () => {
-    const source = read('computer_use_windows_host.cc');
+    const source = readWindowsHostSource();
     expect(source).toContain('#include "computer_use_native_eligibility.h"');
     const probe = section(source, 'std::string ProbeJson(', 'std::string ErrorPayload(');
     expect(probe).toContain('\\"eligibility\\":{');

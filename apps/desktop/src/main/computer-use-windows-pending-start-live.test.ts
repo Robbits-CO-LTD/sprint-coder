@@ -1,12 +1,6 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -54,7 +48,7 @@ function findBuild(): Build | null {
 
 // No target application is started. The real pipe's V1 worker is held at its executable-read boundary.
 // The remaining reads name this process with a deliberately wrong identity and cannot reach focus.
-const nativeSource = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const nativeSource = readWindowsHostSource();
 
 function instrumentPendingHost(source: string): string {
   const workerOpen = /OpenLockedProcessExecutable\(target_process->value,\s*process_executable\)/gu;

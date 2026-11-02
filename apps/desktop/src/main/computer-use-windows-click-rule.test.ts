@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const scheduler = read('computer_use_windows_shadow_scheduler.h');
 const shadow = read('computer_use_effect_shadow.h');
 const classifier = read('computer_use_effect_classifier.h');

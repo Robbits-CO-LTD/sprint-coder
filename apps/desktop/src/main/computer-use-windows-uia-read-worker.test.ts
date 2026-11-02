@@ -1,12 +1,13 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { computerUseObservationSchema } from '@sprint-coder/contracts';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const host = readWindowsHostSource();
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
 

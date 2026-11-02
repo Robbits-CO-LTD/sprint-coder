@@ -1,6 +1,7 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -31,7 +32,7 @@ import {
 // a compiler the test is skipped, except in CI or when that row asks for v2.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const windowsHost = readWindowsHostSource();
 function nativeFunction(start: string, end: string): string {
   const from = windowsHost.indexOf(start);
   const to = windowsHost.indexOf(end, from);

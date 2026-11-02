@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -51,7 +52,7 @@ function findBuild(): Build | null {
   };
 }
 
-const source = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const source = readWindowsHostSource();
 const program = readFileSync(
   join(nativeDirectory, 'computer_use_windows_existing_start_test.cc'),
   'utf8',

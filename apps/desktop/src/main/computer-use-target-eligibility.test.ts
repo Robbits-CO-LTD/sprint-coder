@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -32,7 +33,10 @@ import {
 // S5-c-3 (#500): the shared core, used by native v2 and private Main discovery.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const readNative = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
+const readNative = (name: string): string =>
+  name === 'computer_use_windows_host.cc'
+    ? readWindowsHostSource()
+    : readFileSync(join(nativeDirectory, name), 'utf8');
 const sha256 = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 const model = loadDenyRuleset();
 const golden = materializeGoldenCases(model);
@@ -411,6 +415,8 @@ describe('target facts source contract', () => {
       const read = readNative(name);
       const v2From = read.indexOf('// BEGIN windows v2 targets');
       const v2To = read.indexOf('// END windows v2 targets');
+      if (name === 'computer_use_windows_host.cc' && (v2From < 0 || v2To <= v2From))
+        throw new Error('Windows host v2 targets markers missing or out of order');
       const source =
         name === 'computer_use_windows_host.cc' && v2From >= 0 && v2To > v2From
           ? read.slice(0, v2From) + read.slice(v2To)

@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { COMPUTER_USE_ARTIFACT_LIMITS } from '@sprint-coder/contracts';
@@ -17,7 +18,7 @@ const code = (text: string): string =>
   text.replace(/\/\/.*$/gmu, '').replace(/"(?:[^"\\]|\\.)*"/gu, '""');
 
 const header = read('computer_use_windows_artifact_read.h');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const reader = read('computer_use_windows_shadow_reader.h');
 const source = read('computer_use_windows_uia_source.h');
 const block = (() => {

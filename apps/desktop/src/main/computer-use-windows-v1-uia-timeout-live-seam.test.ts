@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,7 +33,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // temporary directory that is removed after the run.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+const host = readWindowsHostSource();
 const uiaSource = readFileSync(join(nativeDirectory, 'computer_use_windows_uia_source.h'), 'utf8');
 const mainHost = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
 const mainWindows = readFileSync(join(__dirname, 'computer-use-native-windows.ts'), 'utf8');

@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -12,7 +13,7 @@ const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const reader = read('computer_use_windows_shadow_reader.h');
 const source = read('computer_use_windows_uia_source.h');
-const host = read('computer_use_windows_host.cc');
+const host = readWindowsHostSource();
 const harness = read('computer_use_protocol_fuzz.cc');
 const sharedShadow = read('computer_use_effect_shadow.h');
 

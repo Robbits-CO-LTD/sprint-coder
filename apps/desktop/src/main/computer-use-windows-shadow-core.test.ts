@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -13,7 +14,7 @@ const read = (name: string): string => readFileSync(join(nativeDirectory, name),
 const windowsShadow = read('computer_use_windows_shadow.h');
 const sharedShadow = read('computer_use_effect_shadow.h');
 const macos = read('computer_use_macos.mm');
-const windowsHost = read('computer_use_windows_host.cc');
+const windowsHost = readWindowsHostSource();
 const harness = read('computer_use_protocol_fuzz.cc');
 
 /** The body of one function, or a failure: an extraction that finds nothing must not pass. */

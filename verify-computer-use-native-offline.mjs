@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from './computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -37,7 +38,7 @@ if (
   throw new Error('Native manifest/source/artifact mismatch');
 mkdirSync(output, { recursive: true });
 
-const hostSource = readFileSync(join(native, 'computer_use_windows_host.cc'), 'utf8');
+const hostSource = readWindowsHostSource();
 const from = hostSource.indexOf('UINT SendInputForBoundTarget(');
 const to = hostSource.indexOf('WORD VirtualKeyForName(', from);
 if (from < 0 || to <= from) throw new Error('Native input seam markers changed');

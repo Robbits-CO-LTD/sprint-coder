@@ -1,13 +1,11 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(
-  join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
-  'utf8',
-);
+const source = readWindowsHostSource();
 function sourceBetween(start: string, end: string): string {
   const from = source.indexOf(start);
   const to = source.indexOf(end, from + start.length);
