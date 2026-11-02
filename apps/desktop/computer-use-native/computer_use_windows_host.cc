@@ -94,6 +94,7 @@
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_native_eligibility.h"
 #include "computer_use_windows_uia_source.h"
+#include "computer_use_windows_risk_terms.h"
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_windows_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"

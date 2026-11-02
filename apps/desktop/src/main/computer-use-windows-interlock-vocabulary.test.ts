@@ -14,6 +14,7 @@ const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const host = readWindowsHostSource();
 const classifier = read('computer_use_effect_classifier.h');
+const windowsRisk = read('computer_use_windows_risk_terms.h');
 
 function quotedTerms(text: string, from: string, prefix: string): string[] {
   const start = text.indexOf(from);
@@ -24,7 +25,7 @@ function quotedTerms(text: string, from: string, prefix: string): string[] {
 }
 
 // V1: windows_host.cc, the shell words of the UI Automation risk text.
-const v1 = quotedTerms(host, 'static constexpr std::array<std::string_view, 9> shell_terms', '');
+const v1 = quotedTerms(windowsRisk, 'kOtherBounded =', 'u8');
 // The classifier: kSurfaceTerms.
 const v2 = quotedTerms(classifier, 'inline constexpr std::u8string_view kSurfaceTerms[]', 'u8');
 
@@ -60,8 +61,9 @@ describe('interlock surface words against V1 words (#500 S5-c-2 PR-5)', () => {
   it('keeps every V1 word that the interlock does not know a V1 refusal (nothing is lost)', () => {
     const onlyV1 = v1.filter((word) => !v2.includes(word));
     expect([...onlyV1].sort()).toEqual([...V1_ONLY_WORDS].sort());
-    // They are still refused by V1's own guard at the dispatch, which is unchanged.
-    for (const word of onlyV1) expect(host).toContain(`"${word}"`);
+    // V1 still uses the union at dispatch.
+    expect(host).toContain('ClassifyWindowsRiskText(text)');
+    for (const word of onlyV1) expect(windowsRisk).toContain(`"${word}"`);
   });
 
   it('shares every other word', () => {
@@ -87,7 +89,10 @@ describe('interlock surface words against V1 words (#500 S5-c-2 PR-5)', () => {
 // control named like an installer a takeover (paused) on EVERY surface, and V1's risk text has fewer
 // of those words. The owner accepted this direction (starting an installer fails closed, the same
 // as the words above). Frozen: a word added to kInstallerTerms without a decision turns this red.
-const v1Risk = quotedTerms(host, 'static constexpr std::array<std::string_view, 36> terms', '');
+const v1Risk = [
+  ...quotedTerms(windowsRisk, 'kConfirmationSubstring =', 'u8'),
+  ...quotedTerms(windowsRisk, 'kOtherSubstring =', 'u8'),
+];
 const installer = quotedTerms(
   classifier,
   'inline constexpr std::u8string_view kInstallerTerms[]',

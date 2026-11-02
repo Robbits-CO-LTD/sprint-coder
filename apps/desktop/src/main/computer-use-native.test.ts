@@ -452,10 +452,11 @@ describe('Windows native helper compile boundary', () => {
       join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
       'utf8',
     );
-    const windowsRisk = windows.slice(
-      windows.indexOf('bool ContainsBoundedWindowsRiskTerm('),
-      windows.indexOf('WindowsUiaRisk ClassifyWindowsUiaElementSelf('),
+    const windowsRisk = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_windows_risk_terms.h'),
+      'utf8',
     );
+    expect(windows).toContain('ClassifyWindowsRiskText(text)');
     // The macOS vocabulary lives in the portable table (C4-2c-1): one source for the addon and the harness.
     const macosRisk = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_native_approved_risk.h'),
@@ -487,7 +488,7 @@ describe('Windows native helper compile boundary', () => {
       expect(windowsRisk).toContain(term);
       expect(macosRisk).toContain(term);
     }
-    expect(windowsRisk).toContain('ContainsBoundedWindowsRiskTerm(text, term)');
+    expect(windowsRisk).toContain('AnyBounded(lowercase_text, kConfirmationBounded)');
     expect(macosRisk).toContain('AnyBounded(lowercase_text, kConfirmationBounded)');
   });
 
