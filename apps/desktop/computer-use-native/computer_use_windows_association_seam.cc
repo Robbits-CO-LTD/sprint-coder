@@ -1,6 +1,7 @@
 // Windows-only read seam. No file is opened by its association and no UI input is sent.
 // Optional live probe: seam.exe selection <x> <y> <real-path> <verified|takeover>
-// Association probe: seam.exe association <real-path> <blocked|takeover>
+// Association probe:   seam.exe association <real-path> <blocked|takeover>   (prints the facts)
+// Identity probe:      seam.exe identity <path>                              (prints the resolver's answer)
 // The parent prepares Explorer's selection (including offscreen items) before each probe.
 #include "computer_use_windows_association_measurement.h"
 #include "computer_use_windows_uia_source.h"
@@ -20,6 +21,33 @@ std::uint64_t Now() {
 WindowsOpenMeasurementLimits Limits() {
   const auto start = Now();
   return {[] { return true; }, Now, start, WindowsOpenMeasurementDeadline(start, UINT64_MAX)};
+}
+void PrintAssociation(const WindowsAssociationFacts &facts) {
+  const auto flag = [](bool value) { return value ? "1" : "0"; };
+  std::cout << "real_path_verified=" << flag(facts.real_path_verified) << '\n'
+            << "real_path=" << facts.real_path << '\n'
+            << "file_id_known=" << flag(!facts.file_id.empty()) << '\n'
+            << "extension=" << facts.extension << '\n'
+            << "perceived_type=" << facts.perceived_type << '\n'
+            << "prog_id=" << facts.prog_id << '\n'
+            << "verb=" << facts.verb << '\n'
+            << "command_key_matches=" << flag(facts.command_key_matches) << '\n'
+            << "delegate_execute=" << flag(facts.delegate_execute) << '\n'
+            << "drop_target=" << flag(facts.drop_target) << '\n'
+            << "explorer_command_handler=" << flag(facts.explorer_command_handler) << '\n'
+            << "dde=" << flag(facts.dde) << '\n'
+            << "shell_extension=" << flag(facts.shell_extension) << '\n'
+            << "dangerous=" << flag(facts.dangerous) << '\n';
+}
+bool Identity(const wchar_t *path) {
+  std::wstring real;
+  std::string file_id;
+  if (!windows_association_detail::ResolveRealFile(path, Limits(), &real, &file_id)) return false;
+  const auto utf8 = windows_association_detail::Utf8(real);
+  std::cout << "real_path=" << utf8 << '\n'
+            << "canonical=" << CanonicalWindowsRealPath(utf8) << '\n'
+            << "file_id=" << file_id << '\n';
+  return !CanonicalWindowsRealPath(utf8).empty() && !file_id.empty();
 }
 bool LiveSelection(int argc, wchar_t **argv) {
   using namespace windows_uia_source_detail;
@@ -62,8 +90,11 @@ int wmain(int argc, wchar_t **argv) {
         (std::wstring_view(argv[3]) == L"blocked" || std::wstring_view(argv[3]) == L"takeover")) {
       const auto wanted = std::wstring_view(argv[3]) == L"blocked" ? WindowsOpenVerdict::kBlocked
                                                                  : WindowsOpenVerdict::kTakeover;
-      ok = ok && Check(JudgeWindowsAssociation(MeasureWindowsAssociation(argv[2], Limits())) == wanted,
-                       "live-association-verdict");
+      const auto facts = MeasureWindowsAssociation(argv[2], Limits());
+      PrintAssociation(facts);
+      ok = ok && Check(JudgeWindowsAssociation(facts) == wanted, "live-association-verdict");
+    } else if (argc == 3 && std::wstring_view(argv[1]) == L"identity") {
+      ok = ok && Check(Identity(argv[2]), "live-identity");
     } else {
       ok = ok && std::wstring_view(argv[1]) == L"selection" && LiveSelection(argc, argv);
     }

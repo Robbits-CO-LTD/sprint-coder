@@ -370,7 +370,11 @@ describe('Windows UI Automation source only reads', () => {
 
   it('calls a closed set of free functions: every capitalized call is listed, none of them acts on a window', () => {
     const calls = new Set(
-      [...code(source).matchAll(/(?<![\w.>])([A-Z]\w*)\(/gu)].map((match) => match[1]!),
+      [
+        ...code(source).matchAll(/(?<![\w.>])([A-Z]\w*)\(/gu),
+        // A call with template arguments, `Name<...>(`, is a call too.
+        ...code(source).matchAll(/(?<![\w.>])([A-Z]\w*)<[^;(){}]*>\(/gu),
+      ].map((match) => match[1]!),
     );
     // Win32 / COM / macros the source may use.
     const platform = [
@@ -437,9 +441,13 @@ describe('Windows UI Automation source only reads', () => {
     const own = [
       // Measures existing shell and UIA selections without altering them.
       'MeasureWindowsSingleSelection',
-      // Converts a path string in memory.
+      // The bounded measurement lane of the association header (closed-set checked there).
+      'RunWindowsOpenMeasurement',
+      // The association header's read-only resolver of the selected file (closed-set checked there).
+      'ResolveRealFile',
+      // Converts a path string in memory (pinned to the selection measurement below).
       'Utf8',
-      // Releases only the locally owned runtime-id array.
+      // Releases only the locally owned runtime-id array (pinned to the selection measurement below).
       'Array',
 
       'ActionStillValid',
@@ -521,6 +529,36 @@ describe('Windows UI Automation source only reads', () => {
     ];
     const allowed = new Set([...platform, ...own]);
     for (const name of calls) expect(allowed.has(name), name).toBe(true);
+    // The generic names admitted for the E3 selection measurement (N8-1b) are admitted only at
+    // their call sites there, on the receiver named here: a new use anywhere fails.
+    const selection = code(
+      between(
+        source,
+        'WindowsSingleSelectionFacts MeasureWindowsSingleSelection(',
+        'class WindowsUiaShadowSource',
+      ),
+    );
+    const pinned: ReadonlyArray<readonly [RegExp, RegExp, number, number?]> = [
+      [/->Items\(/gu, /folder_view\.Get\(\)->Items\(SVGIO_SELECTION,/gu, 1],
+      [/->GetCount\(/gu, /selected\.Get\(\)->GetCount\(&array_count\)/gu, 1],
+      [/->GetItemAt\(/gu, /selected\.Get\(\)->GetItemAt\(index, item\.Receive\(\)\)/gu, 1],
+      [/->GetRuntimeId\(/gu, /target\.Get\(\)->GetRuntimeId\(&runtime\)/gu, 1],
+      [/->get_CurrentSelectionContainer\(/gu, /selection_item\.Get\(\)->get_CurrentSelectionContainer\(/gu, 1],
+      [/->GetCurrentSelection\(/gu, /pattern\.Get\(\)->GetCurrentSelection\(/gu, 1],
+      [/->get_Length\(/gu, /selection\.Get\(\)->get_Length\(&uia_count\)/gu, 1],
+      [/->GetElement\(/gu, /selection\.Get\(\)->GetElement\(0, selected_target\.Receive\(\)\)/gu, 1],
+      [/(?<![\w.>])GetWindowThreadProcessId\(/gu, /GetWindowThreadProcessId\(top, &owner\)/gu, 1],
+      [/(?<![\w.>:])Utf8\(/gu, /^$/gu, 0],
+      [/windows_association_detail::Utf8\(/gu, /windows_association_detail::Utf8\((?:path|real|target_answer\.path)\)/gu, 3],
+      [/(?<![\w.>])ResolveRealFile\(/gu, /windows_association_detail::ResolveRealFile\(single_path, budget,/gu, 1],
+      [/RunWindowsOpenMeasurement</gu, /RunWindowsOpenMeasurement<WindowsSingleSelectionFacts>\(limits,/gu, 1],
+      [/\bArray\b/gu, /struct Array \{ SAFEARRAY \*value; ~Array\(\) \{ SafeArrayDestroy\(value\); \} \} runtime_owner\{runtime\};/gu, 2, 1],
+    ];
+    for (const [anywhere, site, count, sites = count] of pinned) {
+      expect(code(source).match(anywhere)?.length ?? 0, anywhere.source).toBe(count);
+      expect(selection.match(anywhere)?.length ?? 0, anywhere.source).toBe(count);
+      if (count > 0) expect(selection.match(site)?.length ?? 0, site.source).toBe(sites);
+    }
     // What the source actually calls from outside itself acts on no window, focus, input or process:
     // checked on the extracted calls (including ::Name forms), not on the list above.
     for (const name of calls) {

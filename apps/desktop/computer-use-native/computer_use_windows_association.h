@@ -6,18 +6,29 @@
 #include <functional>
 #include <limits>
 #include <algorithm>
+#include <span>
 
 namespace sprint_coder::computer_use {
 
 enum class WindowsOpenVerdict { kVerified, kBlocked, kTakeover };
+// Every path named `real_path` / `target_real_path` comes from one resolver on the Windows side:
+// GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) of a handle opened on the file
+// itself (the "\\?\" form, junctions on the way resolved), with `file_id` read from the same handle
+// (FILE_ID_INFO: volume serial ":" 128-bit file id, both hex). A shell display path (SIGDN_FILESYSPATH,
+// "C:\..." with junctions unresolved) is never taken for a real path.
 struct WindowsAssociationFacts {
   bool complete = false;
   bool real_path_verified = false;
   bool dangerous = false;
   bool delegate_execute = false;
   bool drop_target = false;
+  bool explorer_command_handler = false;
+  bool dde = false;
+  bool shell_extension = false;
+  bool command_key_matches = false;
   bool signature_valid = false;
   std::string real_path;
+  std::string file_id;
   std::string extension;
   std::string perceived_type;
   std::string user_choice;
@@ -35,14 +46,44 @@ struct WindowsSingleSelectionFacts {
   std::uint32_t uia_count = 0;
   std::vector<std::string> shell_paths;
   std::string target_path;
+  // The single selected item resolved by the same resolver as the association (see above).
+  std::string target_real_path;
+  std::string target_file_id;
 };
+// The effect decides what is measured: E2 (download open) needs the association, E3 (file manager
+// open) needs the association AND the single selection of that same file. Any other effect is
+// not an open and is never verified here.
 struct WindowsOpenFacts {
+  EffectClass effect = EffectClass::kUnclassified;
   WindowsAssociationFacts association;
   WindowsSingleSelectionFacts selection;
-  bool requires_single_selection = false;
 };
 
-[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsAssociation(const WindowsAssociationFacts &facts) {
+// The one comparison form of a resolved real path: the "\\?\" / "\\?\UNC\" prefix that the
+// resolver always returns is dropped, and the rest compares byte for byte (both sides are the file
+// system's own normalized spelling). A path without that prefix was not resolved and is empty here,
+// so it never compares equal.
+[[nodiscard]] inline std::string CanonicalWindowsRealPath(std::string_view path) {
+  constexpr std::string_view unc = "\\\\?\\UNC\\", local = "\\\\?\\";
+  if (path.starts_with(unc) && path.size() > unc.size())
+    return "\\\\" + std::string(path.substr(unc.size()));
+  if (path.starts_with(local) && path.size() > local.size()) return std::string(path.substr(local.size()));
+  return {};
+}
+// Whether the file whose association was measured is the file selected for E3: same file id and
+// the same canonical real path.
+[[nodiscard]] inline bool SameWindowsOpenTarget(const WindowsAssociationFacts &association,
+                                                const WindowsSingleSelectionFacts &selection) {
+  const std::string real = CanonicalWindowsRealPath(association.real_path);
+  return !real.empty() && real == CanonicalWindowsRealPath(selection.target_real_path) &&
+         !association.file_id.empty() && association.file_id == selection.target_file_id;
+}
+
+// `viewers` is the production table; only the fixture passes a synthetic one, so each protection
+// below is shown to hold even when a row would otherwise match.
+[[nodiscard]] inline WindowsOpenVerdict JudgeWindowsAssociation(
+    const WindowsAssociationFacts &facts,
+    std::span<const WindowsDocumentViewer> viewers = kWindowsDocumentViewers) {
   using namespace effect_detail;
   // Display labels never enter this decision. The extension comes from the verified path.
   if (facts.real_path_verified &&
@@ -50,11 +91,12 @@ struct WindowsOpenFacts {
     return WindowsOpenVerdict::kBlocked;
   if (facts.dangerous || facts.perceived_type == "application" || facts.perceived_type == "system")
     return WindowsOpenVerdict::kBlocked;
-  if (!facts.complete || !facts.real_path_verified || facts.real_path.empty() ||
-      !IsPlainExtension(facts.extension) || facts.delegate_execute || facts.drop_target ||
-      !facts.signature_valid || facts.prog_id.empty() || facts.verb.empty())
+  if (!facts.complete || !facts.real_path_verified || CanonicalWindowsRealPath(facts.real_path).empty() ||
+      facts.file_id.empty() || !IsPlainExtension(facts.extension) || facts.delegate_execute ||
+      facts.drop_target || facts.explorer_command_handler || facts.dde || facts.shell_extension ||
+      !facts.command_key_matches || !facts.signature_valid || facts.prog_id.empty() || facts.verb.empty())
     return WindowsOpenVerdict::kTakeover;
-  for (const auto &row : kWindowsDocumentViewers)
+  for (const auto &row : viewers)
     if (row.extension == facts.extension && row.perceived_type == facts.perceived_type &&
         row.prog_id == facts.prog_id && row.verb == facts.verb &&
         row.executable == facts.executable && row.command == facts.command &&
@@ -74,23 +116,27 @@ struct WindowsOpenFacts {
 // Native-only framing for comparison at preflight, approve and approved dispatch.
 // Counts and every path are included; UIA viewport truncation cannot hide an extra selection.
 [[nodiscard]] inline std::string WindowsOpenFactsDigest(const WindowsOpenFacts &facts) {
-  std::string frame = "windows-open-facts-v1";
+  std::string frame = "windows-open-facts-v2";
   const auto append = [&frame](std::string_view value) {
     frame += std::to_string(value.size()) + ":";
     frame.append(value);
   };
   append(std::to_string(kWindowsDocumentViewerVersion));
   append(std::to_string(kWindowsDocumentViewerDigest));
+  append(std::to_string(static_cast<unsigned>(facts.effect)));
   const auto &a = facts.association;
-  for (const auto *value : {&a.real_path, &a.extension, &a.perceived_type, &a.user_choice,
+  for (const auto *value : {&a.real_path, &a.file_id, &a.extension, &a.perceived_type, &a.user_choice,
                             &a.prog_id, &a.verb, &a.executable, &a.command, &a.signer_sha256}) append(*value);
   for (const bool value : {a.complete, a.real_path_verified, a.dangerous, a.delegate_execute,
-                           a.drop_target, a.signature_valid, facts.requires_single_selection,
+                           a.drop_target, a.explorer_command_handler, a.dde, a.shell_extension,
+                           a.command_key_matches, a.signature_valid,
                            facts.selection.shell_complete, facts.selection.uia_complete,
                            facts.selection.uia_target_matches}) append(value ? "1" : "0");
   append(std::to_string(facts.selection.shell_count));
   append(std::to_string(facts.selection.uia_count));
   append(facts.selection.target_path);
+  append(facts.selection.target_real_path);
+  append(facts.selection.target_file_id);
   append(std::to_string(facts.selection.shell_paths.size()));
   for (const auto &path : facts.selection.shell_paths) append(path);
   return Sha256Hex(frame);
@@ -99,14 +145,27 @@ struct WindowsOpenFacts {
   return WindowsOpenFactsDigest(before) == WindowsOpenFactsDigest(after);
 }
 [[nodiscard]] inline WindowsOpenVerdict JudgeWindowsOpenFacts(
-    const WindowsOpenFacts &current, const WindowsOpenFacts *previous = nullptr) {
+    const WindowsOpenFacts &current, const WindowsOpenFacts *previous = nullptr,
+    std::span<const WindowsDocumentViewer> viewers = kWindowsDocumentViewers) {
   if (previous && !SameWindowsOpenFacts(*previous, current)) return WindowsOpenVerdict::kTakeover;
-  const auto association = JudgeWindowsAssociation(current.association);
+  const auto association = JudgeWindowsAssociation(current.association, viewers);
+  if (association == WindowsOpenVerdict::kBlocked) return association;
+  const bool e2 = current.effect == EffectClass::kE2DownloadOpen;
+  const bool e3 = current.effect == EffectClass::kE3FileManagerOpen;
+  if (!e2 && !e3) return WindowsOpenVerdict::kTakeover;
   if (association != WindowsOpenVerdict::kVerified) return association;
-  return current.requires_single_selection ? JudgeWindowsSingleSelection(current.selection)
-                                           : WindowsOpenVerdict::kVerified;
+  if (e2) return WindowsOpenVerdict::kVerified;
+  // E3 always: exactly one selected item, and it is the file whose association was measured.
+  if (JudgeWindowsSingleSelection(current.selection) != WindowsOpenVerdict::kVerified ||
+      !SameWindowsOpenTarget(current.association, current.selection))
+    return WindowsOpenVerdict::kTakeover;
+  return WindowsOpenVerdict::kVerified;
 }
 
+// `still_valid` and `now_ns` are copied into a worker thread that can outlive the caller (a
+// measurement abandoned at its deadline keeps running until its OS call returns). They must own
+// everything they capture (values or shared_ptr), never refer to the caller's stack or to an
+// object the caller may destroy. N8-2's boundary wiring has to keep this contract.
 struct WindowsOpenMeasurementLimits {
   std::function<bool()> still_valid;
   std::function<std::uint64_t()> now_ns;

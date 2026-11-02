@@ -9,7 +9,8 @@
 namespace sprint_coder::computer_use {
 
 struct WindowsApprovalMeasurementInput {
-  // N8-2 will require and bind these native-only measurements at all three boundaries.
+  // The receiving slot for N8-2. MeasureWindowsApproval deliberately does not read it yet: N8-2
+  // requires these native-only E2 / E3 measurements and binds them at all three boundaries.
   const WindowsOpenFacts *open_facts = nullptr;
   const ShadowUiaCapture *capture = nullptr;
   ShadowRequestInfo request;

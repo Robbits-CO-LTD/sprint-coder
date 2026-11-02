@@ -843,6 +843,7 @@ constexpr std::chrono::milliseconds kShellLookupWait{150};
     DWORD array_count = 0;
     if (!budget.MayRead() || FAILED(selected.Get()->GetCount(&array_count)) ||
         array_count != facts.shell_count) return facts;
+    std::wstring single_path;
     for (DWORD index = 0; index < array_count; ++index) {
       ComRef<IShellItem> item;
       if (!budget.MayRead() || FAILED(selected.Get()->GetItemAt(index, item.Receive())) || !item.Get())
@@ -851,10 +852,20 @@ constexpr std::chrono::milliseconds kShellLookupWait{150};
       if (!budget.MayRead()) return facts;
       const HRESULT read = item.Get()->GetDisplayName(SIGDN_FILESYSPATH, &path);
       if (FAILED(read) || !path) { if (path) CoTaskMemFree(path); return facts; }
+      if (array_count == 1) single_path = path;
       std::string text = windows_association_detail::Utf8(path);
       CoTaskMemFree(path);
       if (!budget.MayRead() || text.empty()) return facts;
       facts.shell_paths.push_back(std::move(text));
+    }
+    // The single selected item is resolved by the association's own resolver (final path and file
+    // id from a handle), so the judge compares it with the measured association in one form.
+    if (array_count == 1) {
+      std::wstring real;
+      if (!windows_association_detail::ResolveRealFile(single_path, budget, &real, &facts.target_file_id))
+        return facts;
+      facts.target_real_path = windows_association_detail::Utf8(real);
+      if (facts.target_real_path.empty()) return facts;
     }
     facts.shell_complete = budget.MayRead();
     ComRef<IUIAutomation> automation;
@@ -867,6 +878,36 @@ constexpr std::chrono::milliseconds kShellLookupWait{150};
     int target_owner = 0;
     if (!budget.MayRead() || FAILED(target.Get()->get_CurrentProcessId(&target_owner)) ||
         target_owner <= 0 || static_cast<DWORD>(target_owner) != owner) return facts;
+    // Every Explorer window is the same explorer.exe, so the process alone does not tie the
+    // element to this window: the nearest native window above it must be under `top` (and under
+    // `tab` when there is one).
+    {
+      ComRef<IUIAutomationTreeWalker> walker;
+      if (!budget.MayRead() || FAILED(automation.Get()->get_RawViewWalker(walker.Receive())) || !walker.Get())
+        return facts;
+      UIA_HWND native = nullptr;
+      IUIAutomationElement *node = target.Get();
+      ComRef<IUIAutomationElement> holder;
+      for (int depth = 0; depth < 64 && node != nullptr && native == nullptr; ++depth) {
+        if (!budget.MayRead() || FAILED(node->get_CurrentNativeWindowHandle(&native))) return facts;
+        if (native != nullptr) break;
+        ComRef<IUIAutomationElement> parent;
+        if (!budget.MayRead() || FAILED(walker.Get()->GetParentElement(node, parent.Receive()))) return facts;
+        holder = std::move(parent);
+        node = holder.Get();
+      }
+      const HWND window = reinterpret_cast<HWND>(native);
+      if (window == nullptr || !budget.MayRead() || GetAncestor(window, GA_ROOT) != top) return facts;
+      if (tab != nullptr) {
+        bool under_tab = false;
+        HWND step = window;
+        for (int depth = 0; depth < 64 && step != nullptr && !under_tab; ++depth) {
+          under_tab = step == tab;
+          step = GetAncestor(step, GA_PARENT);
+        }
+        if (!under_tab) return facts;
+      }
+    }
     SAFEARRAY *runtime = nullptr;
     if (!budget.MayRead() || FAILED(target.Get()->GetRuntimeId(&runtime)) || !runtime) return facts;
     struct Array { SAFEARRAY *value; ~Array() { SafeArrayDestroy(value); } } runtime_owner{runtime};
