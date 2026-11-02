@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { COMPUTER_USE_ARTIFACT_LIMITS } from '@sprint-coder/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import type { ComputerUseNativeSession } from './computer-use-controller';
 import type { ComputerUseNativeBinding } from './computer-use-native';
 import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
 import {
@@ -470,6 +471,7 @@ describe('Computer Use native Main adapter', () => {
     withPreflight: boolean,
     classifierRoute?: 'v1' | 'v2',
     extraSurface: Record<string, unknown> = {},
+    startResponse: Record<string, unknown> = {},
   ) => {
     const startSession = vi.fn((_input: unknown) => ({
       sessionId: 'session-w',
@@ -481,6 +483,7 @@ describe('Computer Use native Main adapter', () => {
       screenBounds: { x: 300, y: 150, width: 1_200, height: 900 },
       maximumMode: 'full_access_app',
       inputAttemptCount: 0,
+      ...startResponse,
     }));
     const appIdentityDigest = digest('a');
     const windowIdentityDigest = digest('c');
@@ -582,7 +585,7 @@ describe('Computer Use native Main adapter', () => {
       createdAt: '2026-08-30T00:00:00.000Z',
       updatedAt: '2026-08-30T00:00:00.000Z',
     };
-    const session = await host.startSession({
+    const startInput = {
       profile,
       windowId: '100',
       sessionId: 'session-w',
@@ -590,7 +593,8 @@ describe('Computer Use native Main adapter', () => {
       turnId: 'turn-1',
       cancelEpoch: 0,
       ...(classifierRoute === undefined ? {} : { classifierRoute }),
-    });
+    };
+    const session = await host.startSession(startInput);
     await expect(
       host.dispatch({
         session,
@@ -601,8 +605,92 @@ describe('Computer Use native Main adapter', () => {
         signal: new AbortController().signal,
       }),
     ).resolves.toMatchObject({ result: 'completed' });
-    return { preflight, dispatch, winTicket, startSession, host, session };
+    return { preflight, dispatch, winTicket, startSession, host, session, startInput };
   };
+
+  it.each(['0', '9007199254740993', '18446744073709551615', undefined])(
+    'keeps Windows processStartTime %s with pid inside Main across starts',
+    async (processStartTime) => {
+      const response = processStartTime === undefined ? {} : { processStartTime };
+      const { host, session, startSession, startInput, dispatch } = await win32TicketScenario(
+        true,
+        undefined,
+        {},
+        response,
+      );
+      expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+        pid: 42,
+        processStartTime: processStartTime ?? null,
+      });
+      const resumed = await host.startSession({ ...startInput, resume: true });
+      expect(startSession.mock.calls[1]?.[0]).toMatchObject({
+        pid: 42,
+        processStartTime: processStartTime ?? null,
+      });
+      // This session boundary feeds the controller's AI, Renderer and audit output.
+      for (const output of [session, resumed]) {
+        expect(output).not.toHaveProperty('raw');
+        expect(output).not.toHaveProperty('pid');
+        expect(output).not.toHaveProperty('processStartTime');
+        if (processStartTime !== undefined)
+          expect(JSON.stringify(output)).not.toContain(`"${processStartTime}"`);
+      }
+      expectTypeOf<
+        Extract<keyof ComputerUseNativeSession, 'raw' | 'pid' | 'processStartTime'>
+      >().toEqualTypeOf<never>();
+    },
+  );
+
+  it('clears a missing creation time on existing start and preserves unrelated response keys', async () => {
+    const response: Record<string, unknown> = {
+      processStartTime: '9007199254740993',
+      fixtureKey: true,
+    };
+    const { host, startInput, startSession } = await win32TicketScenario(
+      true,
+      undefined,
+      {},
+      response,
+    );
+    delete response['processStartTime'];
+    await host.startSession({ ...startInput, resume: true });
+    await host.startSession({ ...startInput, resume: true });
+    expect(startSession.mock.calls[2]?.[0]).toMatchObject({
+      pid: 42,
+      processStartTime: null,
+      fixtureKey: true,
+    });
+  });
+
+  it('rejects an invalid creation time on existing start', async () => {
+    const response: Record<string, unknown> = { processStartTime: '9007199254740993' };
+    const { host, startInput } = await win32TicketScenario(true, undefined, {}, response);
+    response['processStartTime'] = '18446744073709551616';
+    await expect(host.startSession({ ...startInput, resume: true })).rejects.toThrow(
+      'native_session_invalid',
+    );
+  });
+
+  it.each([
+    null,
+    1,
+    -1,
+    '',
+    '01',
+    '-1',
+    '+1',
+    '1.0',
+    '1e3',
+    ' 1',
+    '1\n',
+    '18446744073709551616',
+    {},
+    [],
+  ])('rejects an invalid Windows processStartTime (%j)', async (processStartTime) => {
+    await expect(win32TicketScenario(true, undefined, {}, { processStartTime })).rejects.toThrow(
+      'native_session_invalid',
+    );
+  });
 
   // #785 T15-4w: the Windows read of one node's value. It travels as the native's own method and is
   // answered in one shape; without an attest it grants no artifact capability.

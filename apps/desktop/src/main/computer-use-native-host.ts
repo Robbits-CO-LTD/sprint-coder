@@ -118,7 +118,9 @@ type NativeMethod =
   | 'close';
 
 type InternalNativeSession = ComputerUseNativeSession &
-  Readonly<{ raw: Readonly<Record<string, unknown>> }>;
+  Readonly<{
+    raw: Readonly<Record<string, unknown> & { processStartTime?: string | null }>;
+  }>;
 type ComputerUseNativeBounds = Readonly<{
   x: number;
   y: number;
@@ -1875,6 +1877,8 @@ function parseNativeSession(
   const windowIdentityDigest = stringField(raw, 'windowIdentityDigest');
   const profileRevision = numberField(raw, 'profileRevision', input.profile.revision);
   const cancelEpoch = numberField(raw, 'cancelEpoch', input.cancelEpoch);
+  const processIdentity =
+    platform === 'win32' ? { processStartTime: parseWindowsProcessStartTime(raw) } : {};
   const policyLanguage = nativePolicyLanguage(raw);
   const maximumMode = bindComputerUseMaximumMode(
     nativeMaximumMode(requestBindings),
@@ -1906,8 +1910,27 @@ function parseNativeSession(
     // The native response intentionally exposes no OS handles beyond its bounded envelope. Keep
     // Main's already-verified geometry/path bindings so an explicit resume can re-submit them,
     // while authority-bearing response facts (especially policyLanguage) always win.
-    raw: Object.freeze({ ...requestBindings, ...raw, policyLanguage, maximumMode }),
+    raw: Object.freeze({
+      ...requestBindings,
+      ...raw,
+      ...processIdentity,
+      policyLanguage,
+      maximumMode,
+    }),
   });
+}
+
+function parseWindowsProcessStartTime(raw: Readonly<Record<string, unknown>>): string | null {
+  const value = raw['processStartTime'];
+  if (value === undefined) return null;
+  if (
+    typeof value !== 'string' ||
+    !/^(0|[1-9][0-9]{0,19})$/u.test(value) ||
+    value.trim() !== value ||
+    BigInt(value) > 18_446_744_073_709_551_615n
+  )
+    throw new ComputerUseNativeUnavailableError('native_session_invalid');
+  return value;
 }
 
 function publicNativeSession(session: InternalNativeSession): ComputerUseNativeSession {
