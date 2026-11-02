@@ -1686,6 +1686,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       ",\"profileRevision\":" + std::to_string(input.profile_revision) +
       ",\"cancelEpoch\":" + std::to_string(response_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
+      ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
       ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"}";
   };
   std::string built = v2 ? build_response(effective_epoch) : std::string{};
@@ -2164,6 +2165,7 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
       ",\"profileRevision\":" + std::to_string(input.profile_revision) +
       ",\"cancelEpoch\":" + std::to_string(input.cancel_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
+      ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
       ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"}";
   // Existing start final success decision; a completed late phase cannot resume after Stop.
   std::lock_guard stop_lock(control.stop_mutex);

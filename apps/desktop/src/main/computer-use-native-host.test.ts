@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { COMPUTER_USE_ARTIFACT_LIMITS } from '@sprint-coder/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import type { ComputerUseNativeSession } from './computer-use-controller';
 import type { ComputerUseNativeBinding } from './computer-use-native';
 import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
 import {
@@ -470,6 +471,7 @@ describe('Computer Use native Main adapter', () => {
     withPreflight: boolean,
     classifierRoute?: 'v1' | 'v2',
     extraSurface: Record<string, unknown> = {},
+    startResponse: Record<string, unknown> = {},
   ) => {
     const startSession = vi.fn((_input: unknown) => ({
       sessionId: 'session-w',
@@ -481,6 +483,7 @@ describe('Computer Use native Main adapter', () => {
       screenBounds: { x: 300, y: 150, width: 1_200, height: 900 },
       maximumMode: 'full_access_app',
       inputAttemptCount: 0,
+      ...startResponse,
     }));
     const appIdentityDigest = digest('a');
     const windowIdentityDigest = digest('c');
@@ -582,7 +585,7 @@ describe('Computer Use native Main adapter', () => {
       createdAt: '2026-08-30T00:00:00.000Z',
       updatedAt: '2026-08-30T00:00:00.000Z',
     };
-    const session = await host.startSession({
+    const startInput = {
       profile,
       windowId: '100',
       sessionId: 'session-w',
@@ -590,19 +593,141 @@ describe('Computer Use native Main adapter', () => {
       turnId: 'turn-1',
       cancelEpoch: 0,
       ...(classifierRoute === undefined ? {} : { classifierRoute }),
+    };
+    const session = await host.startSession(startInput);
+    const dispatchOutput = await host.dispatch({
+      session,
+      requestId: 'request-w',
+      action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+      observationRevision: 1,
+      cancelEpoch: 0,
+      signal: new AbortController().signal,
     });
-    await expect(
-      host.dispatch({
-        session,
-        requestId: 'request-w',
-        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
-        observationRevision: 1,
-        cancelEpoch: 0,
-        signal: new AbortController().signal,
-      }),
-    ).resolves.toMatchObject({ result: 'completed' });
-    return { preflight, dispatch, winTicket, startSession, host, session };
+    expect(dispatchOutput).toMatchObject({ result: 'completed' });
+    return {
+      preflight,
+      dispatch,
+      dispatchOutput,
+      winTicket,
+      startSession,
+      host,
+      session,
+      startInput,
+    };
   };
+
+  it.each(['1', '9007199254740993', '18446744073709551615', undefined])(
+    'keeps Windows processStartTime %s with pid inside Main across starts',
+    async (processStartTime) => {
+      const response = processStartTime === undefined ? {} : { processStartTime };
+      const { host, session, startSession, startInput, dispatch, dispatchOutput } =
+        await win32TicketScenario(true, undefined, {}, response);
+      expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+        pid: 42,
+        processStartTime: processStartTime ?? null,
+      });
+      const resumed = await host.startSession({ ...startInput, resume: true });
+      expect(startSession.mock.calls[1]?.[0]).toMatchObject({
+        pid: 42,
+        processStartTime: processStartTime ?? null,
+      });
+      // This session boundary feeds the controller's AI, Renderer and audit output.
+      for (const output of [session, resumed, dispatchOutput]) {
+        expect(output).not.toHaveProperty('raw');
+        expect(output).not.toHaveProperty('pid');
+        expect(output).not.toHaveProperty('processStartTime');
+        expect(JSON.stringify(output)).not.toContain('processStartTime');
+        if (processStartTime !== undefined)
+          expect(JSON.stringify(output)).not.toContain(`"${processStartTime}"`);
+      }
+      expectTypeOf<
+        Extract<keyof ComputerUseNativeSession, 'raw' | 'pid' | 'processStartTime'>
+      >().toEqualTypeOf<never>();
+    },
+  );
+
+  it.each([undefined, '9007199254740994'])(
+    'rejects a missing or changed creation time on existing start (%s)',
+    async (processStartTime) => {
+      const original = '9007199254740993';
+      const response: Record<string, unknown> = { processStartTime: original };
+      const { host, startInput } = await win32TicketScenario(true, undefined, {}, response);
+      if (processStartTime === undefined) delete response['processStartTime'];
+      else response['processStartTime'] = processStartTime;
+      const error: unknown = await host
+        .startSession({ ...startInput, resume: true })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ reasonCode: 'native_session_identity_mismatch' });
+      if (!(error instanceof Error)) throw new Error('expected start refusal');
+      for (const value of [original, processStartTime]) {
+        if (value === undefined) continue;
+        expect(JSON.stringify({ message: error.message, cause: error.cause })).not.toContain(value);
+      }
+    },
+  );
+
+  it.each([undefined, '9007199254740993'])(
+    'accepts creation time %s when the recorded identity is missing',
+    async (processStartTime) => {
+      const response: Record<string, unknown> = {
+        fixtureKey: true,
+      };
+      const { host, startInput, startSession } = await win32TicketScenario(
+        true,
+        undefined,
+        {},
+        response,
+      );
+      if (processStartTime !== undefined) response['processStartTime'] = processStartTime;
+      await host.startSession({ ...startInput, resume: true });
+      await host.startSession({ ...startInput, resume: true });
+      expect(startSession.mock.calls[2]?.[0]).toMatchObject({
+        pid: 42,
+        processStartTime: processStartTime ?? null,
+        fixtureKey: true,
+      });
+    },
+  );
+
+  it('rejects an invalid creation time on existing start', async () => {
+    const response: Record<string, unknown> = { processStartTime: '9007199254740993' };
+    const { host, startInput } = await win32TicketScenario(true, undefined, {}, response);
+    response['processStartTime'] = '18446744073709551616';
+    await expect(host.startSession({ ...startInput, resume: true })).rejects.toThrow(
+      'native_session_invalid',
+    );
+  });
+
+  it.each([
+    null,
+    1,
+    -1,
+    '',
+    '0',
+    '01',
+    '-1',
+    '+1',
+    '1.0',
+    '1e3',
+    ' 1',
+    '1\n',
+    '18446744073709551616',
+    {},
+    [],
+  ])('rejects an invalid Windows processStartTime (%j)', async (processStartTime) => {
+    const error: unknown = await win32TicketScenario(
+      true,
+      undefined,
+      {},
+      { processStartTime },
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ reasonCode: 'native_session_invalid' });
+    if (!(error instanceof Error)) throw new Error('expected start refusal');
+    expect(error.message).toBe('native_session_invalid');
+    expect(error.cause).toBeUndefined();
+  });
 
   // #785 T15-4w: the Windows read of one node's value. It travels as the native's own method and is
   // answered in one shape; without an attest it grants no artifact capability.
@@ -837,7 +962,7 @@ describe('Computer Use native Main adapter', () => {
         inputAttemptCount: 2,
       };
     });
-    const startSession = vi.fn(() => ({
+    const startSession = vi.fn((_input: unknown) => ({
       inputAttemptCount: 0,
       sessionId: 'session-1',
       platform: 'darwin' as const,
@@ -969,6 +1094,8 @@ describe('Computer Use native Main adapter', () => {
     const session = await host.startSession(startInput);
     expect(session).not.toHaveProperty('pid');
     expect(session.policyLanguage).toBe('ja');
+    expect(session).not.toHaveProperty('processStartTime');
+    expect(startSession.mock.calls[0]?.[0]).not.toHaveProperty('processStartTime');
     expect(session.maximumMode).toBe('full_access_app');
     expect(session.screenBounds).toEqual({ x: 0, y: 0, width: 100, height: 80 });
     const observation = await host.observe(session, {
@@ -1077,6 +1204,7 @@ describe('Computer Use native Main adapter', () => {
       });
     const dispatchCalls = (): number => dispatch.mock.calls.length;
     await expect(preflightAction('pf-ok')).resolves.toMatchObject({ result: 'completed' });
+    expect(dispatch.mock.calls.at(-1)![0]).not.toHaveProperty('processStartTime');
     expect(preflight).toHaveBeenLastCalledWith(
       expect.objectContaining({ requestId: 'pf-ok', sessionId: 'session-1' }),
     );
