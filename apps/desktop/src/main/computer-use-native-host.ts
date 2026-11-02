@@ -63,12 +63,14 @@ import {
   type WindowsLedgerRow,
   type WindowsStopState,
   type WindowsStopEvent,
+  type WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 
 export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
 }>;
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
@@ -265,6 +267,54 @@ export function createComputerUseNativeHost(
       clearTimeout(timer);
     }
   };
+  const retainRestoration = (generation: number, holdId: string): boolean => {
+    const hold = ledgerState(generation).holds.find((item) => item.id === holdId);
+    if (hold?.quarantinesToRestore === undefined) return false;
+    const quarantines = hold.quarantinesToRestore;
+    pendingWrites.set(holdId, {
+      generation,
+      write: () => ledger?.restoreQuarantines?.(quarantines) ?? false,
+    });
+    return true;
+  };
+  const writePending = async (holdId: string): Promise<void> => {
+    const pending = pendingWrites.get(holdId);
+    if (pending === undefined || writing.has(holdId)) return;
+    writing.add(holdId);
+    let settled = false;
+    // Keep the writer claimed until the original I/O settles, even after the caller's deadline.
+    const completion = Promise.resolve()
+      .then(pending.write)
+      .then(
+        (written) => ({ written: written === true, uncertain: false }),
+        () => ({ written: false, uncertain: true }),
+      )
+      .then(async ({ written, uncertain }) => {
+        settled = true;
+        const decision = ledgerEvent(pending.generation, {
+          kind: 'retry_storage',
+          holdId,
+          status: written ? 'written' : 'failed',
+          ...(uncertain ? { uncertain: true } : {}),
+        });
+        const restoration = retainRestoration(pending.generation, holdId);
+        if (written && decision.awaitingHoldId === null && !restoration)
+          pendingWrites.delete(holdId);
+        writing.delete(holdId);
+        // A late obsolete release must land before its compensating quarantine write.
+        if (restoration && pendingWrites.get(holdId)?.write !== pending.write && written)
+          await writePending(holdId);
+        return written;
+      });
+    await tryWrite(() => completion);
+    if (!settled)
+      ledgerEvent(pending.generation, {
+        kind: 'retry_storage',
+        holdId,
+        status: 'failed',
+        uncertain: true,
+      });
+  };
   const retryLedger = async (): Promise<void> => {
     for (const [holdId, pending] of pendingWrites) {
       if (writing.has(holdId)) continue;
@@ -274,18 +324,11 @@ export function createComputerUseNativeHost(
         status: 'before_write',
       });
       if (gate.refusal !== null) {
-        if (gate.refusal === 'release_superseded') pendingWrites.delete(holdId);
+        if (gate.refusal === 'release_superseded' && !retainRestoration(pending.generation, holdId))
+          pendingWrites.delete(holdId);
         continue;
       }
-      writing.add(holdId);
-      try {
-        if (await tryWrite(pending.write)) {
-          ledgerEvent(pending.generation, { kind: 'retry_storage', holdId, status: 'written' });
-          pendingWrites.delete(holdId);
-        }
-      } finally {
-        writing.delete(holdId);
-      }
+      await writePending(holdId);
     }
   };
   const ledgerBlocked = (pid: unknown, creationTime?: string | null): boolean =>
@@ -382,19 +425,7 @@ export function createComputerUseNativeHost(
           ? ledger.update({ ...current, state: 'effect_unconfirmed' })
           : ledger.delete(current);
       pendingWrites.set(holdId, { generation: current.helperGeneration, write });
-      writing.add(holdId);
-      try {
-        if (await tryWrite(write)) {
-          ledgerEvent(current.helperGeneration, {
-            kind: 'retry_storage',
-            holdId,
-            status: 'written',
-          });
-          pendingWrites.delete(holdId);
-        }
-      } finally {
-        writing.delete(holdId);
-      }
+      await writePending(holdId);
     };
     return {
       beforeWrite: async (helperGeneration, requestId) => {
@@ -428,6 +459,8 @@ export function createComputerUseNativeHost(
           inputPath: 'normal',
           state: 'awaiting_response',
         };
+        // PR5b / N9 must persist non-normal path changes before acknowledging them.
+        if (candidate.inputPath !== 'normal') deny();
         let settled = false;
         const pending = Promise.resolve()
           .then(() => ledger.write(candidate))
@@ -486,9 +519,6 @@ export function createComputerUseNativeHost(
       assertSend,
       canceled: () => reflect('canceled'),
       unconfirmed: (cause) => {
-        // PR5b / N9 must persist non-normal path changes before acknowledging them.
-        if (row !== undefined && row.inputPath !== 'normal')
-          throw new Error('Unconfirmed non-normal input requires storage');
         if (row !== undefined)
           ledgerEvent(row.helperGeneration, {
             kind: 'input_unconfirmed',
@@ -1415,6 +1445,16 @@ export function createComputerUseNativeHost(
         throw error;
       } finally {
         owner.attempts.delete(attempt);
+        if (
+          !startEntered &&
+          !owner.nativeInvoked &&
+          owner.attempts.size === 0 &&
+          !owner.stopped &&
+          owner.discoveryPending === 0 &&
+          !owner.discoveryUnconfirmed &&
+          startOwners.get(input.sessionId) === owner
+        )
+          startOwners.delete(input.sessionId);
         if (binding !== undefined) {
           binding.starts.delete(bindingOwner);
           if (

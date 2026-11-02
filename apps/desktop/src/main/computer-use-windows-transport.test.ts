@@ -3100,6 +3100,8 @@ int main() {
       response: null as HelperResponse | null,
       wait: null as Promise<void> | null,
       reflectWait: null as Promise<void> | null,
+      deleteEffect: () => undefined as void,
+      restoreQuarantines: vi.fn(() => true),
     };
     const base = responders();
     const target = createTarget(
@@ -3170,9 +3172,11 @@ int main() {
           delete: async (row) => {
             if (control.reflectWait !== null) await control.reflectWait;
             if (control.failReflect) return false;
+            control.deleteEffect();
             rows.delete(row.requestId);
             return true;
           },
+          restoreQuarantines: () => control.restoreQuarantines(),
         },
       },
     );
@@ -3319,6 +3323,180 @@ int main() {
       expect(target.helper().served.filter((op) => op === 'dispatch')).toHaveLength(2);
     },
   );
+  it.each(['hold', 'uncertain'] as const)(
+    'R19a 128 refused starts do not exhaust start owners (%s)',
+    async (kind) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      let resume!: () => void;
+      if (kind === 'hold') target.control.failReflect = true;
+      else
+        target.control.wait = new Promise<void>((resolve) => {
+          resume = resolve;
+        });
+      const dispatch = target.dispatch(session);
+      if (kind === 'uncertain') await vi.advanceTimersByTimeAsync(2_001);
+      await dispatch;
+      for (let i = 0; i < 128; i++) {
+        await expect(startSession(target.host, `denied-${i}`, `turn-${i}`)).rejects.toMatchObject({
+          reasonCode: 'native_unavailable',
+        });
+      }
+      target.control.failReflect = false;
+      if (kind === 'uncertain') {
+        resume();
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      await expect(startSession(target.host, 'fresh', 'fresh-turn')).resolves.toMatchObject({
+        sessionId: 'fresh',
+      });
+    },
+  );
+
+  it.each(['reflect', 'retry'] as const)(
+    'R19a unresolved %s write cannot be overtaken by a retry',
+    async (path) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      if (path === 'retry') {
+        target.control.failReflect = true;
+        await target.dispatch(session);
+        target.control.failReflect = false;
+      }
+      let resume!: () => void;
+      target.control.reflectWait = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const pending =
+        path === 'reflect' ? target.dispatch(session) : target.host.listWindows(profile);
+      await vi.advanceTimersByTimeAsync(2_001);
+      await pending;
+      target.control.reflectWait = null;
+      await expect(startSession(target.host, 'blocked', 'blocked-turn')).rejects.toMatchObject({
+        reasonCode: 'native_unavailable',
+      });
+      expect(target.rows.size).toBe(1);
+      expect(await target.dispatch(session)).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
+      resume();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(startSession(target.host, 'fresh', 'fresh-turn')).resolves.toMatchObject({
+        sessionId: 'fresh',
+      });
+      expect(target.rows.size).toBe(0);
+    },
+  );
+
+  it.each(['written', 'reflect-timeout', 'retry-timeout', 'exception'] as const)(
+    'R21 host retains and writes restoration after a superseded release (%s)',
+    async (path) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      const quarantine: stopKernel.WindowsTargetQuarantine = {
+        identity: { pid: 42, creationTime: '133000000000000001' },
+        reason: 'response_lost',
+      };
+      let storedQuarantine = true;
+      const order: string[] = [];
+      target.control.deleteEffect = () => {
+        storedQuarantine = false;
+        order.push('release');
+      };
+      let failRestore = true;
+      target.control.restoreQuarantines.mockImplementation(() => {
+        if (failRestore) return false;
+        order.push('restore');
+        storedQuarantine = true;
+        return true;
+      });
+      const realDecide = stopKernel.decideWindowsStop;
+      // PR5a has no public release/receipt entry yet. Supply that future kernel state at
+      // the storage seam, while keeping the real host writer, timers and transport.
+      const decide = vi
+        .spyOn(stopKernel, 'decideWindowsStop')
+        .mockImplementation((state, event) => {
+          let next = state;
+          if (
+            event.kind === 'retry_storage' &&
+            (event.status === 'written' || (event.status === 'failed' && event.uncertain))
+          ) {
+            next = {
+              ...state,
+              quarantines: [quarantine],
+              holds: state.holds.map((hold) =>
+                hold.operation === 'release' ? { ...hold, releaseSuperseded: true } : hold,
+              ),
+            };
+          }
+          const decision = realDecide(next, event);
+          if (event.kind !== 'response') return decision;
+          return {
+            ...decision,
+            state: {
+              ...decision.state,
+              holds: decision.state.holds.map((hold) => ({
+                ...hold,
+                operation: 'release',
+                recovery: 'write_release',
+                releaseTarget: quarantine.identity,
+              })),
+            },
+          };
+        });
+      try {
+        if (path === 'retry-timeout') {
+          target.control.failReflect = true;
+          await target.dispatch(session);
+          target.control.failReflect = false;
+        }
+        let resume!: () => void;
+        let reject!: () => void;
+        if (path !== 'written')
+          target.control.reflectWait = new Promise<void>((resolve, fail) => {
+            resume = resolve;
+            reject = () => fail(new Error('synthetic storage failure'));
+          });
+        const pending =
+          path === 'retry-timeout' ? target.host.listWindows(profile) : target.dispatch(session);
+        if (path !== 'written') {
+          await vi.advanceTimersByTimeAsync(2_001);
+          await pending;
+          target.control.reflectWait = null;
+          // Even a new isolation write cannot authorize starting while the old release is live.
+          order.push('evidence', 'external-restore');
+          storedQuarantine = true;
+          await expect(startSession(target.host, 'blocked', 'blocked-turn')).rejects.toMatchObject({
+            reasonCode: 'native_unavailable',
+          });
+          expect(target.control.restoreQuarantines).not.toHaveBeenCalled();
+          expect(await target.dispatch(session)).toMatchObject({
+            outcome: 'resolved',
+            value: { result: 'rejected', reasonCode: 'native_unavailable' },
+          });
+          if (path === 'exception') reject();
+          else resume();
+          await vi.advanceTimersByTimeAsync(1);
+        } else await pending;
+        await target.host.listWindows(profile);
+        expect(decide.mock.results.at(-1)?.value.state.holds).toMatchObject([
+          { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+        ]);
+        failRestore = false;
+        await target.host.listWindows(profile);
+        expect(target.control.restoreQuarantines).toHaveBeenCalled();
+        expect(storedQuarantine).toBe(true);
+        if (path !== 'exception') expect(order.slice(-2)).toEqual(['release', 'restore']);
+        const finalState = decide.mock.results.at(-1)?.value.state;
+        expect(finalState.holds).toEqual([]);
+        expect(finalState.quarantines).toEqual([quarantine]);
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+
   it('R19a Stop latches a start waiting for storage retry', async () => {
     const target = ledgerTarget();
     const session = await startSession(target.host, 'session-1', 'turn-1');
@@ -3337,8 +3515,8 @@ int main() {
       (error: unknown) => error,
     );
     resume();
-    expect(await starting).toBeInstanceOf(ComputerUseNativeUnavailableError);
-    expect(stopped).not.toBeInstanceOf(Error);
+    expect(await starting).toMatchObject({ reasonCode: 'native_start_canceled' });
+    expect(stopped).toEqual({ kind: 'not_submitted' });
     expect(target.helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
   });
 
@@ -3382,6 +3560,7 @@ int main() {
   });
 
   it('R19a storage reflection has a bounded wait and keeps its hold', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     const target = ledgerTarget();
     const session = await startSession(target.host, 'session-1', 'turn-1');
     target.control.reflectWait = new Promise<void>(() => undefined);
@@ -3394,6 +3573,10 @@ int main() {
     expect(settled).toBe(true);
     expect(await result).toMatchObject({ outcome: 'resolved', value: { result: 'completed' } });
     expect(target.rows.size).toBe(1);
+    expect(decide.mock.results.at(-1)?.value.state.holds).toMatchObject([
+      { operation: 'response', writeUncertain: true },
+    ]);
+    decide.mockRestore();
   });
 
   it('R18 a timed out initial write blocks the target until the late unsent row is removed', async () => {
@@ -3441,6 +3624,8 @@ int main() {
       resume();
       expect(await result).toMatchObject({
         outcome: 'resolved',
+        // The default-off main transport already uses this double-prefixed Stop reason.
+        // Keep its classification unchanged while storage is opt-in (PR5a AC-1).
         value: { result: 'rejected', reasonCode: 'native_native_stop_unconfirmed' },
       });
       expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);

@@ -129,11 +129,13 @@ export type WindowsStorageHold = Readonly<{
   releaseTarget?: WindowsTargetIdentity;
   /** Re-write these quarantines if an obsolete release was already persisted. */
   quarantinesToRestore?: readonly WindowsTargetQuarantine[];
+  /** A deadline or exception cannot prove that an earlier write left storage unchanged. */
+  writeUncertain?: true;
   /**
    * Set on a pending release once newer isolation evidence for `releaseTarget` lands (a K-1
    * quarantine, a K-3 / exit / restore transfer). The release was decided before that evidence, so
-   * its retry must not clear it: retry_storage/before_write refuses and drops the release before
-   * I/O. A late written result instead retains a restoration hold until quarantine storage lands.
+   * its retry must not clear it: retry_storage/before_write refuses the release before I/O.
+   * If quarantine evidence exists, retain a restoration hold even after a failed/ambiguous write.
    * Kept on the hold rather than as a version column on the
    * quarantine, whose stored row holds only pid, creation time and reason (§2.2 の 5).
    * Before that evidence lands, an isolation hold for the same target (or unknown targets)
@@ -268,6 +270,7 @@ export type WindowsStopEvent =
       kind: 'retry_storage';
       holdId: string;
       status: 'before_write' | 'failed' | 'written';
+      uncertain?: true;
     }>
   | Readonly<{
       kind: 'restore_read';
@@ -1033,7 +1036,19 @@ export function decideWindowsStop(
     case 'retry_storage': {
       const hold = state.holds.find((item) => item.id === event.holdId);
       if (hold === undefined) throw new Error('Unknown storage hold');
-      if (event.status === 'failed') return { ...decision, awaitingHoldId: hold.id };
+      if (event.status === 'failed')
+        return {
+          ...decision,
+          state: event.uncertain
+            ? {
+                ...state,
+                holds: state.holds.map((item) =>
+                  item.id === hold.id ? { ...item, writeUncertain: true } : item,
+                ),
+              }
+            : state,
+          awaitingHoldId: hold.id,
+        };
       // A read succeeding alone is not proof that restoration has completed.
       if (hold.recovery === 'restore_store') return refuse('restore_requires_rows');
       // Newer isolation evidence invalidates an older release. No fresh session is granted.
@@ -1058,7 +1073,7 @@ export function decideWindowsStop(
         // A writer that missed the pre-write gate may already have deleted the stored quarantine.
         // Keep a concrete restoration obligation even after receipt removed the source rows.
         const restoration: WindowsStorageHold[] =
-          event.status === 'written' && quarantines.length > 0
+          quarantines.length > 0
             ? [
                 {
                   id: hold.id,

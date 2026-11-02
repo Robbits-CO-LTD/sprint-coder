@@ -1339,7 +1339,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
         status: 'before_write',
       });
       expect(gate.refusal).toBe('release_superseded');
-      expect(gate.state.holds.some((hold) => hold.id === failed.holdId)).toBe(false);
+      expect(gate.state.holds.some((hold) => hold.id === failed.holdId)).toBe(k1First);
       const retried = decideWindowsStop(pending, {
         kind: 'retry_storage',
         holdId: failed.holdId,
@@ -1388,7 +1388,9 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       status: 'before_write',
     });
     expect(gate.refusal).toBe('release_superseded');
-    expect(gate.state.holds).toEqual([]);
+    expect(gate.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
     expect(gate.state.quarantines).toEqual([quarantine]);
     const alreadyWritten = decideWindowsStop(transferred, {
       kind: 'retry_storage',
@@ -1398,6 +1400,32 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     expect(alreadyWritten.state.holds).toMatchObject([
       { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
     ]);
+  });
+
+  it('R21 a timed out release retains restoration after newer evidence before writing', () => {
+    const held = decideWindowsStop(state({ rows: [background], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const ambiguous = decideWindowsStop(held, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'failed',
+      uncertain: true,
+    }).state;
+    const transferred = decideWindowsStop(ambiguous, receipt).state;
+    expect(ambiguous.holds).toMatchObject([{ writeUncertain: true }]);
+    const gate = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.refusal).toBe('release_superseded');
+    expect(gate.awaitingHoldId).toBe(failed.holdId);
+    expect(gate.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
+    expect(windowsTargetMayStart(gate.state, target)).toBe(false);
   });
 
   it('R21 a response hold does not supersede a release', () => {
