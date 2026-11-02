@@ -553,6 +553,39 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain('inserted->second.executable_file = pending->executable');
   });
 
+  it('creates the suspended rename probe in its job and confirms exit before deleting files', () => {
+    const source = readWindowsHostSource();
+    const probe = source.slice(
+      source.indexOf('std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows('),
+      source.indexOf('WindowsTargetFactsContext CurrentWindowsTargetFactsContext('),
+    );
+    for (const required of [
+      'STARTUPINFOEXW',
+      'PROC_THREAD_ATTRIBUTE_JOB_LIST',
+      'CREATE_SUSPENDED',
+      'EXTENDED_STARTUPINFO_PRESENT',
+      'CREATE_NO_WINDOW',
+      'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE',
+      'JOB_OBJECT_LIMIT_BREAKAWAY_OK',
+      'JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK',
+      'CreateJobObjectW(nullptr, nullptr)',
+      'QueryInformationJobObject',
+      'JobObjectBasicAccountingInformation',
+      'ActiveProcesses == 0',
+      'TerminateJobObject',
+      'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP',
+      'GetTempPathW',
+      'FILE_ATTRIBUTE_DIRECTORY',
+    ])
+      expect(probe).toContain(required);
+    expect(probe).not.toContain('AssignProcessToJobObject');
+    expect(probe).not.toContain('ResumeThread');
+    expect(probe).toContain('nullptr, command.data(), nullptr, nullptr, FALSE,');
+    expect(probe.indexOf('TerminateJobObject')).toBeLessThan(probe.indexOf('ActiveProcesses == 0'));
+    expect(probe.indexOf('ActiveProcesses == 0')).toBeLessThan(probe.indexOf('DeleteFileW'));
+    expect(probe).toContain('if (!exited) return std::nullopt;');
+  });
+
   it('allows only same-path same-signer Windows updates to refresh the executable digest', () => {
     const source = readWindowsHostSource();
     const listSource = source.slice(

@@ -375,11 +375,22 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
   const DWORD module_length =
       GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
   std::vector<wchar_t> temp(32'768, L'\0');
-  const DWORD temp_length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
+  DWORD temp_length = GetEnvironmentVariableW(L"SPRINT_CODER_COMPUTER_USE_HELPER_TEMP",
+                                               temp.data(), static_cast<DWORD>(temp.size()));
+  const auto separator = [](wchar_t letter) { return letter == L'\\' || letter == L'/'; };
+  const bool absolute = temp_length > 0 && temp_length < temp.size() &&
+      ((temp_length >= 3 &&
+        ((temp[0] >= L'A' && temp[0] <= L'Z') || (temp[0] >= L'a' && temp[0] <= L'z')) &&
+        temp[1] == L':' && separator(temp[2])) ||
+       (temp_length >= 2 && separator(temp[0]) && separator(temp[1])));
+  const DWORD attributes = absolute ? GetFileAttributesW(temp.data()) : INVALID_FILE_ATTRIBUTES;
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+    temp_length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
   if (module_length == 0 || module_length >= module.size() || temp_length == 0 ||
       temp_length >= temp.size())
     return std::nullopt;
-  const std::wstring directory(temp.data(), temp_length);
+  std::wstring directory(temp.data(), temp_length);
+  if (!separator(directory.back())) directory += L'\\';
   const std::wstring stem = directory + L"sc-rename-probe-" +
                             std::to_wstring(GetCurrentProcessId()) + L"-" +
                             std::to_wstring(GetTickCount64());
@@ -388,24 +399,41 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
   const std::wstring first = stem + L"-a.exe";
   const std::wstring second = stem + L"-b.exe";
   const std::wstring third = subdirectory + L"\\c.exe";
+  ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+      JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  std::optional<WindowsTargetRenameProbe> result;
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  if (!job.value || !SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
+                                             &limits, sizeof(limits))) return std::nullopt;
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  if (attribute_bytes == 0) return std::nullopt;
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+  if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_bytes))
+    return std::nullopt;
+  struct AttributeList {
+    LPPROC_THREAD_ATTRIBUTE_LIST value;
+    ~AttributeList() { DeleteProcThreadAttributeList(value); }
+  } attribute_list{startup.lpAttributeList};
+  if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                                 &job.value, sizeof(job.value), nullptr, nullptr)) return std::nullopt;
+  PROCESS_INFORMATION process{};
+  ScopedKernelHandle child_process, child_thread;
+  std::wstring command = L"\"" + first + L"\"";
   if (!active() || CopyFileW(std::wstring(module.data(), module_length).c_str(), first.c_str(), TRUE) != TRUE)
     return std::nullopt;
   if (active()) CreateDirectoryW(subdirectory.c_str(), nullptr);
-  ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-  std::optional<WindowsTargetRenameProbe> result;
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
-  PROCESS_INFORMATION process{};
-  std::wstring command = L"\"" + first + L"\"";
-  if (active() && job.value != nullptr &&
-      SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
-                              sizeof(limits)) && active() &&
+  if (active() &&
       CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-                     CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                     CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                     nullptr, nullptr, &startup.StartupInfo,
                      &process)) {
-    AssignProcessToJobObject(job.value, process.hProcess);
+    child_process.value = process.hProcess;
+    child_thread.value = process.hThread;
     // The probe volume and the copied file's identity, read from the copied file itself.
     std::optional<WindowsTargetVolume> probe_volume;
     std::optional<WindowsFileIdentity> probe_id;
@@ -461,13 +489,25 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
       probe.volume = *probe_volume;
       if (active()) result = probe;
     }
-    // Terminate on every path (success, failure, the lambdas above throwing): the job also kills it
-    // on close, so the child cannot outlive this function.
-    TerminateProcess(process.hProcess, 0);
-    WaitForSingleObject(process.hProcess, 2'000);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    TerminateJobObject(job.value, 0);
+    const ULONGLONG deadline = GetTickCount64() + 2'000;
+    bool exited = false;
+    do {
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+      if (QueryInformationJobObject(job.value, JobObjectBasicAccountingInformation,
+                                    &accounting, sizeof(accounting), nullptr) &&
+          accounting.ActiveProcesses == 0) {
+        exited = true;
+        break;
+      }
+      Sleep(10);
+    } while (GetTickCount64() < deadline);
+    // Without an exit receipt, leave the files for Main's cleanup after helper exit.
+    if (!exited) return std::nullopt;
+    CloseHandle(child_thread.release());
+    CloseHandle(child_process.release());
   }
+  CloseHandle(job.release());
   // Delete after the child is gone so its image section no longer holds the file. A short retry
   // covers the brief window while the kernel finishes tearing the mapping down.
   for (const std::wstring &file : {first, second, third})

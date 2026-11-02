@@ -142,6 +142,10 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 - job の終了も非同期なので、子が消えたことは `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`（または ActiveProcesses = 0）で確かめる。一時フォルダの削除は、probe の exe がまだ lock されている場合に備えて再試行する。
 - 一時フォルダは helper ごとにする。今の probe は TEMP の直下に `sc-rename-probe-<helper の pid>-…` を作り、helper の中で消している。helper が終了させられるとこの後始末は走らず、helper の exe のコピーが残る。helper の終了の後は、Main が `exit` を受けた後に、その helper の一時フォルダを再試行つきで消す（probe の子は helper の job の handle が閉じた時点で KILL_ON_JOB_CLOSE により終わるが、その終了も非同期なので再試行する）。
 
+N4-2 の実装（2026-11-02）: 上記の probe の「今は」と一時フォルダの「今の probe」は変更前を示す。`WindowsTargetRenameFollows` は、継承しない job に KILL_ON_JOB_CLOSE・BREAKAWAY_OK・SILENT_BREAKAWAY_OK を設定し、STARTUPINFOEXW と PROC_THREAD_ATTRIBUTE_JOB_LIST、CREATE_SUSPENDED・EXTENDED_STARTUPINFO_PRESENT・CREATE_NO_WINDOW で作成時から子を入れる。resume は行わない。`TerminateJobObject` の後、`QueryInformationJobObject(JobObjectBasicAccountingInformation)` の ActiveProcesses == 0 を最大 2 秒待ち、確認後に process/thread/job の handle を閉じ、ファイルを最大 20 回・50 ms 間隔で削除する。期限内に終了を確認できなければ probe の結果は未測定とし、ファイル削除は Main の helper 終了後の処理に委ねる。
+
+一時フォルダは、環境変数 `SPRINT_CODER_COMPUTER_USE_HELPER_TEMP` が絶対パスかつ存在するディレクトリならその場所を使い、それ以外は従来の `GetTempPathW` に戻る。Main は spawn 前に `os.tmpdir()` の下へ `mkdtemp`（接頭辞 `sc-cu-helper-`）で helper ごとのフォルダを作り、`windowsHelperEnvironment(process.env)` にこの変数だけを追加する。TEMP / TMP と `CurrentWindowsTargetRoots` の temp root は変えない。Main は `exit` の世代 guard より前で `fs.rm`（recursive・force、maxRetries: 20、retryDelay: 50）を非同期に呼ぶため、古い helper の終了でも削除する。spawn の同期例外と、PID を持たず exit を出さない非同期の spawn error でも同じ削除を行う。attestation 失敗では kill 後の exit を受けてから削除する。
+
 ## 4. スライス（PR の単位）
 
 | #（#988 のノード） | 内容 | 依存 | 試験 |
@@ -167,6 +171,8 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 10. `SendInput` の効果未確認（送った後の再検証の失敗）では、入力がセッションの対象以外のプロセス（その時点の前面やカーソルの下のプロセス）に届いた可能性がある。対象の隔離はセッションの対象だけを守り、そのプロセスは隔離しない（今と同じ）。
 11. 2026-11-02 の N4-0 実測では、Electron 43.5.0 の libuv の job は KILL_ON_JOB_CLOSE を持ち、親の終了後に子が終了した（§3.3）。したがって今回、以下の代替策には切り替えない。将来、libuv の job が helper を終了させないと分かった場合は、Main が `kill()` を呼べない crash の後に古い helper が残りうる。そのときは、`termination_requested` の世代の helper の pid と作成時刻も台帳と同じく SQLite に残し、再起動の後に照合で終了を確かめるまで host 全体の隔離を保つ扱いに切り替える（N3・N4 で決める）。
 12. N3 で決める（#988 参照）: §5 の 11 の照合の主体（Main で行うか、照合に限り helper の起動を許すか）と、§2.2 の再起動時の helper の起動条件への §5 の 11 の除外の追記。§2.2 の「新しい helper を起動する」の前提は N4-0 の実測で成り立つことを確認済みである。将来 libuv の job が変わり、この前提が成り立たなくなった場合は §5 の 11 の代替策に切り替える。
+
+13. N4-2: Main の crash などで helper の exit を受けられない場合、helper ごとの一時フォルダと exe のコピーが残りうる。削除の再試行を使い切った場合も残りうる。次回起動時に残存フォルダを掃除する処理は N4 に含めない。環境変数を渡さない live seam などの呼出しは GetTempPathW を使うため、Main による helper 専用フォルダの削除対象にはならない。
 
 ## 6. オーナーの判断（2026-11-02）
 
