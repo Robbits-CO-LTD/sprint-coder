@@ -3089,9 +3089,13 @@ int main() {
     await result;
     expect(settledWithoutWrapper).toBe(true);
   });
+  // The storage key is the ledger row key: (helper generation, session, request).
+  const ledgerKey = (row: WindowsLedgerRow) =>
+    `${row.helperGeneration}/${row.sessionId}/${row.requestId}`;
   function ledgerTarget() {
     const rows = new Map<string, WindowsLedgerRow>();
     const written: WindowsLedgerRow[] = [];
+    const deleted: WindowsLedgerRow[] = [];
     const control = {
       failWrite: false,
       failReflect: false,
@@ -3161,19 +3165,20 @@ int main() {
             written.push(row);
             if (control.wait !== null) await control.wait;
             if (control.failWrite) return false;
-            rows.set(row.requestId, row);
+            rows.set(ledgerKey(row), row);
             return true;
           },
           update: async (row) => {
             if (control.failReflect) return false;
-            rows.set(row.requestId, row);
+            rows.set(ledgerKey(row), row);
             return true;
           },
           delete: async (row) => {
             if (control.reflectWait !== null) await control.reflectWait;
             if (control.failReflect) return false;
             control.deleteEffect();
-            rows.delete(row.requestId);
+            deleted.push(row);
+            rows.delete(ledgerKey(row));
             return true;
           },
           restoreQuarantines: () => control.restoreQuarantines(),
@@ -3205,7 +3210,7 @@ int main() {
             accepted: error instanceof Error && 'accepted' in error ? error.accepted : undefined,
           }),
         );
-    return { ...target, rows, written, control, dispatch };
+    return { ...target, rows, written, deleted, control, dispatch };
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
@@ -3641,6 +3646,100 @@ int main() {
       }
     },
   );
+
+  it.each([false, true])(
+    'R19a another session reusing a retained request id reflects only its own row (delete fails: %s)',
+    async (failDelete) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      const kernelRows = () => decide.mock.results.at(-1)!.value.state.rows as WindowsLedgerRow[];
+      const target = ledgerTarget();
+      const sessionA = await startSession(target.host, 'session-a', 'turn-1');
+      target.control.creationTime = '133000000000000002';
+      const sessionB = await startSession(target.host, 'session-b', 'turn-2');
+      // A: an accepted error leaves its row effect-unconfirmed.
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      expect(await target.dispatch(sessionA, ledgerActions[0], 'shared')).toMatchObject({
+        outcome: 'rejected',
+        accepted: true,
+      });
+      target.control.response = null;
+      const rowA = [...target.rows.values()][0]!;
+      expect(rowA).toMatchObject({ sessionId: 'session-a', state: 'effect_unconfirmed' });
+      // B: another target's session uses the same request id.
+      target.control.failReflect = failDelete;
+      expect(await target.dispatch(sessionB, ledgerActions[0], 'shared')).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'completed' },
+      });
+      expect(target.written[1]).toMatchObject({
+        sessionId: 'session-b',
+        requestId: rowA.requestId,
+      });
+      expect(kernelRows().map((row) => row.sessionId)).toEqual(
+        failDelete ? ['session-a', 'session-b'] : ['session-a'],
+      );
+      expect(kernelRows()[0]).toEqual(rowA);
+      expect(target.deleted.map((row) => row.sessionId)).toEqual(failDelete ? [] : ['session-b']);
+      expect([...target.rows.values()].map((row) => row.sessionId)).toEqual(
+        failDelete ? ['session-a', 'session-b'] : ['session-a'],
+      );
+      // The hold, if any, is on B's target: B's next dispatch is refused, A's is not.
+      expect(await target.dispatch(sessionB, ledgerActions[0], 'b-next')).toMatchObject(
+        failDelete
+          ? { outcome: 'resolved', value: { result: 'rejected', reasonCode: 'native_unavailable' } }
+          : { outcome: 'resolved', value: { result: 'completed' } },
+      );
+      expect(await target.dispatch(sessionA, ledgerActions[0], 'a-next')).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'completed' },
+      });
+      expect(target.rows.get(ledgerKey(rowA))).toEqual(rowA);
+      expect(
+        kernelRows().find(
+          (row) => row.sessionId === 'session-a' && row.requestId === rowA.requestId,
+        ),
+      ).toEqual(rowA);
+      // The same key again is refused before storage, so a stored row is never overwritten.
+      const writes = target.written.length;
+      expect(await target.dispatch(sessionA, ledgerActions[0], 'shared')).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
+      expect(target.written).toHaveLength(writes);
+      expect(target.rows.get(ledgerKey(rowA))).toEqual(rowA);
+      decide.mockRestore();
+    },
+  );
+
+  it('R5/R6 transport loss and cancellation name the session of their own row', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const target = ledgerTarget();
+    const sessionA = await startSession(target.host, 'session-a', 'turn-1');
+    target.control.creationTime = '133000000000000002';
+    const sessionB = await startSession(target.host, 'session-b', 'turn-2');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(sessionA, ledgerActions[0], 'shared');
+    target.control.response = null;
+    target.helper().holdOnly('dispatch');
+    const lost = target.dispatch(sessionB, ledgerActions[0], 'shared');
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(operationTimeoutMilliseconds('dispatch'));
+    expect(await lost).toMatchObject({ outcome: 'rejected' });
+    expect(target.written.map((row) => row.requestId)).toEqual([
+      target.written[0]!.requestId,
+      target.written[0]!.requestId,
+    ]);
+    const events = decide.mock.calls.map((call) => call[1]);
+    expect(events.filter((event) => event.kind === 'input_unconfirmed')).toEqual([
+      expect.objectContaining({ sessionId: 'session-b', requestId: target.written[0]!.requestId }),
+    ]);
+    const rowsAfter = decide.mock.results.at(-1)!.value.state.rows as WindowsLedgerRow[];
+    expect(rowsAfter.map((row) => [row.sessionId, row.state])).toEqual([
+      ['session-a', 'effect_unconfirmed'],
+      ['session-b', 'awaiting_response'],
+    ]);
+    decide.mockRestore();
+  });
 
   it('R19a holds only the affected identity and blocks an unknown target', async () => {
     const target = ledgerTarget();

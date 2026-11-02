@@ -66,6 +66,10 @@ import {
   type WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 
+/**
+ * Each row is keyed by (helperGeneration, sessionId, requestId); the wire request id alone can repeat
+ * across sessions, so an implementation must not key rows by requestId only.
+ */
 export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
@@ -386,7 +390,10 @@ export function createComputerUseNativeHost(
       if (current === undefined) return;
       if (
         !ledgerState(current.helperGeneration).rows.some(
-          (item) => item.requestId === current.requestId,
+          (item) =>
+            item.helperGeneration === current.helperGeneration &&
+            item.sessionId === current.sessionId &&
+            item.requestId === current.requestId,
         )
       )
         return;
@@ -399,6 +406,7 @@ export function createComputerUseNativeHost(
           ? {
               kind: 'dispatch_canceled',
               helperGeneration: current.helperGeneration,
+              sessionId: current.sessionId,
               requestId: current.requestId,
               storage,
             }
@@ -406,6 +414,7 @@ export function createComputerUseNativeHost(
             ? {
                 kind: 'response',
                 helperGeneration: current.helperGeneration,
+                sessionId: current.sessionId,
                 requestId: current.requestId,
                 storage,
                 status,
@@ -414,6 +423,7 @@ export function createComputerUseNativeHost(
             : {
                 kind: 'response',
                 helperGeneration: current.helperGeneration,
+                sessionId: current.sessionId,
                 requestId: current.requestId,
                 storage,
                 status,
@@ -461,6 +471,13 @@ export function createComputerUseNativeHost(
         };
         // PR5b / N9 must persist non-normal path changes before acknowledging them.
         if (candidate.inputPath !== 'normal') deny();
+        // The row key must stay unique; never let a second row overwrite a stored one.
+        if (
+          ledgerState(helperGeneration).rows.some(
+            (item) => item.sessionId === candidate.sessionId && item.requestId === requestId,
+          )
+        )
+          deny();
         let settled = false;
         const pending = Promise.resolve()
           .then(() => ledger.write(candidate))
@@ -523,6 +540,7 @@ export function createComputerUseNativeHost(
           ledgerEvent(row.helperGeneration, {
             kind: 'input_unconfirmed',
             helperGeneration: row.helperGeneration,
+            sessionId: row.sessionId,
             requestId: row.requestId,
             cause,
             storage: { status: 'written' },
