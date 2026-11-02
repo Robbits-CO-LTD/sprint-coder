@@ -1274,7 +1274,16 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
         freshSession: false,
         freshSessionRequirements: [],
       });
-      expect(retried.state.holds).toEqual([]);
+      expect(retried.state.holds).toMatchObject([
+        { id: failed.holdId, recovery: 'write_quarantine' },
+      ]);
+      const restored = decideWindowsStop(retried.state, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'written',
+      });
+      expect(restored.state.holds).toEqual([]);
+      expect(restored.state.quarantines).toEqual([quarantine]);
       expect(retried.state.quarantines).toEqual([quarantine]);
       expect(windowsTargetMayStart(retried.state, target)).toBe(false);
       expect(windowsTargetMayStart(retried.state, otherTarget)).toBe(true);
@@ -1324,6 +1333,13 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
           holdId: 'k1-pending',
           status: 'written',
         }).state;
+      const gate = decideWindowsStop(pending, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'before_write',
+      });
+      expect(gate.refusal).toBe('release_superseded');
+      expect(gate.state.holds.some((hold) => hold.id === failed.holdId)).toBe(false);
       const retried = decideWindowsStop(pending, {
         kind: 'retry_storage',
         holdId: failed.holdId,
@@ -1359,6 +1375,50 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     }
   });
 
+  it('R21 refuses a superseded release before writing after a receipt transfer', () => {
+    const held = decideWindowsStop(state({ rows: [background], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const transferred = decideWindowsStop(held, receipt).state;
+    expect(transferred.rows).toEqual([]);
+    const gate = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.refusal).toBe('release_superseded');
+    expect(gate.state.holds).toEqual([]);
+    expect(gate.state.quarantines).toEqual([quarantine]);
+    const alreadyWritten = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'written',
+    });
+    expect(alreadyWritten.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
+  });
+
+  it('R21 a response hold does not supersede a release', () => {
+    const held = decideWindowsStop(state({ rows: [row], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const pending = decideWindowsStop(held, {
+      ...response,
+      storage: { status: 'failed', holdId: 'response-pending' },
+    }).state;
+    const released = decideWindowsStop(pending, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'written',
+    });
+    expect(released.refusal).toBeNull();
+    expect(released.freshSession).toBe(true);
+    expect(released.state.holds).toHaveLength(1);
+  });
+
   it('R24 held approval without newer isolation still releases on retry', () => {
     const held = decideWindowsStop(state({ quarantines: [quarantine] }), {
       ...approval,
@@ -1370,6 +1430,13 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       transportTimeout,
     ).state;
     expect(other.holds[0]?.releaseSuperseded).toBeUndefined();
+    const gate = decideWindowsStop(other, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.state).toBe(other);
+    expect(gate.freshSession).toBe(false);
     const released = decideWindowsStop(other, {
       kind: 'retry_storage',
       holdId: failed.holdId,

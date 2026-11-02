@@ -127,13 +127,16 @@ export type WindowsStorageHold = Readonly<{
   targets: readonly WindowsTargetIdentity[] | 'unknown';
   changes: readonly RowChange[];
   releaseTarget?: WindowsTargetIdentity;
+  /** Re-write these quarantines if an obsolete release was already persisted. */
+  quarantinesToRestore?: readonly WindowsTargetQuarantine[];
   /**
    * Set on a pending release once newer isolation evidence for `releaseTarget` lands (a K-1
    * quarantine, a K-3 / exit / restore transfer). The release was decided before that evidence, so
-   * its retry must not clear it: retry_storage drops the hold and keeps the quarantine
-   * (release_superseded, fail-closed). Kept on the hold rather than as a version column on the
+   * its retry must not clear it: retry_storage/before_write refuses and drops the release before
+   * I/O. A late written result instead retains a restoration hold until quarantine storage lands.
+   * Kept on the hold rather than as a version column on the
    * quarantine, whose stored row holds only pid, creation time and reason (§2.2 の 5).
-   * Before that evidence lands, a non-release hold for the same target (or unknown targets)
+   * Before that evidence lands, an isolation hold for the same target (or unknown targets)
    * also supersedes the release on retry. This closes the window where an older release retries
    * before a pending K-1 write, independently of hold order.
    */
@@ -261,7 +264,11 @@ export type WindowsStopEvent =
       holdId: string;
       targets: readonly WindowsTargetIdentity[] | 'unknown';
     }>
-  | Readonly<{ kind: 'retry_storage'; holdId: string; status: 'failed' | 'written' }>
+  | Readonly<{
+      kind: 'retry_storage';
+      holdId: string;
+      status: 'before_write' | 'failed' | 'written';
+    }>
   | Readonly<{
       kind: 'restore_read';
       holdId: string;
@@ -1029,22 +1036,46 @@ export function decideWindowsStop(
       if (event.status === 'failed') return { ...decision, awaitingHoldId: hold.id };
       // A read succeeding alone is not proof that restoration has completed.
       if (hold.recovery === 'restore_store') return refuse('restore_requires_rows');
-      // Newer isolation evidence for the target landed after this release was decided: drop the
-      // release and keep the quarantine (fail-closed). No fresh session is granted.
+      // Newer isolation evidence invalidates an older release. No fresh session is granted.
       const releaseTarget = hold.releaseTarget;
       const pendingEvidence =
         releaseTarget !== undefined &&
         state.holds.some(
           (item) =>
             item.operation !== 'release' &&
+            (item.changes.some(
+              (change) => change.action === 'transfer' || change.action === 'quarantine',
+            ) ||
+              ['transfer_rows', 'write_quarantine', 'restore_store'].includes(item.recovery)) &&
             (item.targets === 'unknown' ||
               item.targets.some((target) => sameTarget(target, releaseTarget))),
         );
       if (hold.releaseSuperseded === true || pendingEvidence) {
+        const remaining = state.holds.filter((item) => item.id !== hold.id);
+        const quarantines = state.quarantines.filter(
+          (q) => releaseTarget !== undefined && sameTarget(q.identity, releaseTarget),
+        );
+        // A writer that missed the pre-write gate may already have deleted the stored quarantine.
+        // Keep a concrete restoration obligation even after receipt removed the source rows.
+        const restoration: WindowsStorageHold[] =
+          event.status === 'written' && quarantines.length > 0
+            ? [
+                {
+                  id: hold.id,
+                  operation: 'background_quarantine',
+                  recovery: 'write_quarantine',
+                  targets: quarantines.map((q) => q.identity),
+                  changes: [],
+                  quarantinesToRestore: quarantines,
+                },
+              ]
+            : [];
         return refuse('release_superseded', {
-          state: { ...state, holds: state.holds.filter((item) => item.id !== hold.id) },
+          state: { ...state, holds: [...remaining, ...restoration] },
+          awaitingHoldId: restoration.length > 0 ? hold.id : null,
         });
       }
+      if (event.status === 'before_write') return { ...decision, awaitingHoldId: hold.id };
       const next = applyWritten(state, hold);
       const resolved: WindowsStopDecision = {
         ...decision,

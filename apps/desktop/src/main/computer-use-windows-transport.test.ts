@@ -33,6 +33,7 @@ import {
   type ComputerUseNativeHostOptions,
 } from './computer-use-native-host';
 import type { WindowsLedgerRow } from './computer-use-windows-stop-outcome';
+import * as stopKernel from './computer-use-windows-stop-outcome';
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
@@ -3062,6 +3063,32 @@ int main() {
     },
     { name: 'paste', action: { type: 'type', text: 'x' }, kind: 'paste' },
   ] as const;
+  it('default-off dispatch settles without an extra async storage wrapper', async () => {
+    const target = createTarget({
+      ...responders(),
+      dispatch: () => ['dispatch_result', { result: 'completed' }],
+    });
+    await startSession(target.host, 'session-1', 'turn-1');
+    let settled = false;
+    const result = Promise.resolve(
+      target.addon.dispatch!({
+        sessionId: 'session-1',
+        requestId: 'direct',
+        type: 'click',
+        cancelEpoch: 0,
+      }),
+    ).then(() => {
+      settled = true;
+    });
+    // Connection, fake socket delivery, response, caller: the pre-ledger path's turns.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const settledWithoutWrapper = settled;
+    await result;
+    expect(settledWithoutWrapper).toBe(true);
+  });
   function ledgerTarget() {
     const rows = new Map<string, WindowsLedgerRow>();
     const written: WindowsLedgerRow[] = [];
@@ -3069,8 +3096,10 @@ int main() {
       failWrite: false,
       failReflect: false,
       creationTime: '133000000000000001' as string | undefined,
+      pid: 42,
       response: null as HelperResponse | null,
       wait: null as Promise<void> | null,
+      reflectWait: null as Promise<void> | null,
     };
     const base = responders();
     const target = createTarget(
@@ -3082,8 +3111,8 @@ int main() {
             result: 'closed',
             drained: true,
             sessionId: metadata['sessionId'],
-            cancelEpoch: 1,
-            inputAttemptCount: 0,
+            cancelEpoch: 2,
+            inputAttemptCount: 1,
           },
         ],
         cancel: (metadata) => [
@@ -3100,7 +3129,11 @@ int main() {
           const [type, result] = base['start_session']!(metadata);
           return [
             type,
-            { ...(result as Record<string, unknown>), processStartTime: control.creationTime },
+            {
+              ...(result as Record<string, unknown>),
+              pid: control.pid,
+              processStartTime: control.creationTime,
+            },
           ];
         },
         preflight: (metadata) => [
@@ -3135,6 +3168,7 @@ int main() {
             return true;
           },
           delete: async (row) => {
+            if (control.reflectWait !== null) await control.reflectWait;
             if (control.failReflect) return false;
             rows.delete(row.requestId);
             return true;
@@ -3146,6 +3180,7 @@ int main() {
       session: Awaited<ReturnType<typeof startSession>>,
       sample = ledgerActions[0] as (typeof ledgerActions)[number],
       id = 'ledger-request',
+      signal = new AbortController().signal,
     ) =>
       target.host
         .dispatch({
@@ -3154,18 +3189,24 @@ int main() {
           action: sample.action,
           observationRevision: 1,
           cancelEpoch: 0,
-          signal: new AbortController().signal,
+          signal,
           ...(sample.name === 'paste' ? { inputKind: 'paste' as const } : {}),
         })
         .then(
-          () => 'resolved',
-          () => 'rejected',
+          (value) => ({ outcome: 'resolved' as const, value }),
+          (error: unknown) => ({
+            outcome: 'rejected' as const,
+            error,
+            code: error instanceof Error && 'code' in error ? error.code : undefined,
+            accepted: error instanceof Error && 'accepted' in error ? error.accepted : undefined,
+          }),
         );
     return { ...target, rows, written, control, dispatch };
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
   it.each(ledgerActions)('R5/R6 keeps $name rows for each transport loss', async (sample) => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     for (const loss of ['timeout', 'failAll', 'abortTransport'] as const) {
       const target = ledgerTarget();
       const session = await startSession(target.host, `session-${loss}`, 'turn-1');
@@ -3193,9 +3234,16 @@ int main() {
           }),
         );
       }
-      await result;
+      expect(await result).toMatchObject({ outcome: 'rejected' });
+      const events = decide.mock.calls
+        .map((call) => call[1])
+        .filter((event) => event.kind === 'input_unconfirmed');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ cause: loss === 'timeout' ? 'transport_timeout' : loss });
+      decide.mockClear();
       expect(target.rows.size).toBe(1);
     }
+    decide.mockRestore();
   });
   it.each([false, true])(
     'R18 identity missing or initial write failed (%s) never sends',
@@ -3204,7 +3252,10 @@ int main() {
       if (missing) target.control.creationTime = undefined;
       else target.control.failWrite = true;
       const session = await startSession(target.host, 'session-1', 'turn-1');
-      await target.dispatch(session);
+      expect(await target.dispatch(session)).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
       expect(target.helper().served).not.toContain('dispatch');
       expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
       expect(target.rows.size).toBe(0);
@@ -3222,10 +3273,22 @@ int main() {
             : { code: 'ticket_invalid', accepted: outcome === 'unconfirmed' },
         ];
       const session = await startSession(target.host, 'session-1', 'turn-1');
-      await target.dispatch(session);
+      const result = await target.dispatch(session);
+      expect(result).toMatchObject(
+        outcome === 'success' || outcome === 'rejected'
+          ? {
+              outcome: 'resolved',
+              value: { result: outcome === 'success' ? 'completed' : 'rejected' },
+            }
+          : { outcome: 'rejected' },
+      );
       expect(target.rows.size).toBe(outcome === 'success' || outcome === 'rejected' ? 0 : 1);
       if (outcome === 'unconfirmed')
         expect([...target.rows.values()][0]?.state).toBe('effect_unconfirmed');
+      if (outcome === 'unconfirmed')
+        expect(result).toMatchObject({ code: 'ticket_invalid', accepted: true });
+      if (outcome === 'invalid')
+        expect(result).toMatchObject({ code: undefined, accepted: undefined });
     },
   );
   it.each([false, true])(
@@ -3238,7 +3301,10 @@ int main() {
       const session = await startSession(target.host, 'session-1', 'turn-1');
       await target.dispatch(session);
       expect(target.rows.size).toBe(1);
-      await target.dispatch(session, ledgerActions[0], 'second-request');
+      expect(await target.dispatch(session, ledgerActions[0], 'second-request')).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_unavailable' },
+      });
       await expect(startSession(target.host, 'session-2', 'turn-2')).rejects.toThrow(
         'native_unavailable',
       );
@@ -3253,6 +3319,174 @@ int main() {
       expect(target.helper().served.filter((op) => op === 'dispatch')).toHaveLength(2);
     },
   );
+  it('R19a Stop latches a start waiting for storage retry', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.failReflect = true;
+    await target.dispatch(session);
+    target.control.failReflect = false;
+    let resume!: () => void;
+    target.control.reflectWait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const starting = startSession(target.host, 'session-2', 'turn-2').catch(
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    const stopped = await target.host.stopPendingStart!('session-2').catch(
+      (error: unknown) => error,
+    );
+    resume();
+    expect(await starting).toBeInstanceOf(ComputerUseNativeUnavailableError);
+    expect(stopped).not.toBeInstanceOf(Error);
+    expect(target.helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
+  });
+
+  it.each(['windows', 'targets'] as const)(
+    'R19a discovery (%s) retries a pending reflection',
+    async (kind) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.control.failReflect = true;
+      await target.dispatch(session);
+      target.control.failReflect = false;
+      if (kind === 'windows') await target.host.listWindows(profile);
+      else await target.host.listTargets!().catch(() => undefined);
+      expect(target.rows.size).toBe(0);
+    },
+  );
+
+  it('R19a Stop prevents discovery submission during storage retry', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    const submitted = target
+      .helper()
+      .served.filter((op) => op === 'list_windows_cancellable').length;
+    target.control.failReflect = true;
+    await target.dispatch(session);
+    target.control.failReflect = false;
+    let resume!: () => void;
+    target.control.reflectWait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const discovery = target.host.beginWindowDiscovery!(profile);
+    const result = discovery.result.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await discovery.stop()).toMatchObject({ kind: 'not_submitted' });
+    resume();
+    expect(await result).toBeInstanceOf(Error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(target.helper().served.filter((op) => op === 'list_windows_cancellable')).toHaveLength(
+      submitted,
+    );
+  });
+
+  it('R19a storage reflection has a bounded wait and keeps its hold', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.reflectWait = new Promise<void>(() => undefined);
+    let settled = false;
+    const result = target.dispatch(session).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(settled).toBe(true);
+    expect(await result).toMatchObject({ outcome: 'resolved', value: { result: 'completed' } });
+    expect(target.rows.size).toBe(1);
+  });
+
+  it('R18 a timed out initial write blocks the target until the late unsent row is removed', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    let resume!: () => void;
+    target.control.wait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const result = target.dispatch(session);
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await result).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'rejected', reasonCode: 'native_unavailable' },
+    });
+    target.control.wait = null;
+    expect(await target.dispatch(session)).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'rejected', reasonCode: 'native_unavailable' },
+    });
+    expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+    resume();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(target.rows.size).toBe(0);
+    expect(await target.dispatch(session)).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'completed' },
+    });
+  });
+
+  it.each([false, true])(
+    'R18 signal abort cancels the unsent row and retains a failed deletion (%s)',
+    async (failDelete) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      const signal = new AbortController();
+      let resume!: () => void;
+      target.control.wait = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      target.control.failReflect = failDelete;
+      const result = target.dispatch(session, ledgerActions[0], 'signal-request', signal.signal);
+      await vi.advanceTimersByTimeAsync(1);
+      signal.abort();
+      resume();
+      expect(await result).toMatchObject({
+        outcome: 'resolved',
+        value: { result: 'rejected', reasonCode: 'native_native_stop_unconfirmed' },
+      });
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+      expect(target.rows.size).toBe(failDelete ? 1 : 0);
+      if (failDelete) {
+        expect(await target.dispatch(session)).toMatchObject({
+          outcome: 'resolved',
+          value: { result: 'rejected', reasonCode: 'native_unavailable' },
+        });
+        target.control.failReflect = false;
+        await target.host.listWindows(profile);
+        expect(target.rows.size).toBe(0);
+      }
+    },
+  );
+
+  it('R19a holds only the affected identity and blocks an unknown target', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.creationTime = '133000000000000002';
+    const other = await startSession(target.host, 'session-2', 'turn-2');
+    target.control.failReflect = true;
+    await target.dispatch(session);
+    await expect(startSession(target.host, 'session-2', 'turn-2')).resolves.toMatchObject({
+      sessionId: other.sessionId,
+    });
+    expect(await target.dispatch(other)).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'completed' },
+    });
+    await expect(
+      target.host.startSession({
+        profile: { ...profile, identityDigest: digest('9') },
+        windowId: '100',
+        sessionId: 'unknown',
+        taskId: 'task-1',
+        turnId: 'turn-3',
+        cancelEpoch: 0,
+      }),
+    ).rejects.toThrow('native_unavailable');
+    expect(await target.dispatch(session)).toMatchObject({
+      outcome: 'resolved',
+      value: { result: 'rejected', reasonCode: 'native_unavailable' },
+    });
+  });
+
   it.each([false, true])(
     'R18 cancels an unsent stored row after Stop during storage (%s)',
     async (failDelete) => {
@@ -3274,17 +3508,34 @@ int main() {
     },
   );
 
-  it('R18 identity mismatch with ledger stops the existing lifetime', async () => {
-    const target = ledgerTarget();
-    const session = await startSession(target.host, 'session-1', 'turn-1');
-    target.control.creationTime = '133000000000000002';
-    await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
-      'native_session_identity_mismatch',
-    );
-    await target.dispatch(session);
-    expect(target.helper().served).not.toContain('dispatch');
-    expect(target.helper().served).toContain('stop_pending_start');
-  });
+  it.each(['pid', 'creationTime'] as const)(
+    'R18 identity mismatch (%s) preserves the original identity and stops',
+    async (field) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      if (field === 'pid') target.control.pid = 43;
+      else target.control.creationTime = '133000000000000002';
+      target.helper().holdOnly('stop_pending_start');
+      const starting = startSession(target.host, 'session-1', 'turn-1').catch(
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await target.host.cancel(session, 0);
+      const canceled = sockets
+        .at(-1)!
+        .writes.map((bytes) => decodeComputerUseNativeFrame(bytes))
+        .find((frame) => frame.messageType === 'cancel');
+      expect(JSON.parse(canceled!.metadata.toString('utf8'))).toMatchObject({
+        pid: 42,
+        processStartTime: '133000000000000001',
+      });
+      target.helper().release('stop_pending_start');
+      expect(await starting).toMatchObject({ reasonCode: 'native_session_identity_mismatch' });
+      await target.dispatch(session);
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(target.helper().served).toContain('stop_pending_start');
+    },
+  );
   it('R19a an invalid success envelope cannot delete a row', async () => {
     const target = ledgerTarget();
     const session = await startSession(target.host, 'session-1', 'turn-1');

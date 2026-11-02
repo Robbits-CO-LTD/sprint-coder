@@ -910,7 +910,7 @@ class WindowsComputerUseHelperClient {
     throw new Error(`Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`);
   }
 
-  private async sendConnected(
+  private sendConnected(
     messageType: ComputerUseNativeMessageType,
     metadata: NativeRecord,
     sessionId: ComputerUseNativeFrameId,
@@ -937,105 +937,110 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
-    if (dispatchCallbacks !== undefined) {
-      this.preparingDispatches.add(requestId.hex);
-      try {
-        await dispatchCallbacks.beforeWrite(helperGeneration, requestId.hex);
-        if (
-          this.socket !== socket ||
-          socket.destroyed ||
-          helperGeneration !== this.helperGeneration
-        )
-          throw semanticNotSubmitted();
-      } catch (error) {
-        await dispatchCallbacks.canceled();
-        throw error;
-      } finally {
-        this.preparingDispatches.delete(requestId.hex);
-      }
-    }
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.pending.get(requestId.hex) !== pending) return;
-        this.pending.delete(requestId.hex);
-        this.markSemanticUncertain(pending);
-        pending.dispatchCallbacks?.unconfirmed('transport_timeout');
-        const error = new Error('Computer Use Windows helper request timed out');
-        reject(error);
-        // A request that never came back means the helper is unusable, so this normally ends it
-        // outright rather than waiting for the transport to fall idle. The exception is a stop that
-        // is still on the wire: the helper's answer to it is the only thing that can release Main's
-        // input quarantine, and requests that were already in flight when Stop began keep timers of
-        // their own that would otherwise expire inside Stop's window and kill the helper the stop
-        // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-        // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
-        // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
-        // the original input/launch unit ended. A submitted semantic request also needs its
-        // helper before its own deadline: a shorter queued read can time out first.
-        if (
-          activityGeneration === this.activityGeneration &&
-          helperGeneration === this.helperGeneration &&
-          !this.hasPendingStop() &&
-          !this.hasUnconfirmedDiscovery() &&
-          !this.hasUnconfirmedSemanticInputs() &&
-          ![...this.pending.values()].some(
-            (request) => request.semantic?.submitted && !request.semantic.owner.confirmed,
+    const send = (): Promise<unknown> =>
+      new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          if (this.pending.get(requestId.hex) !== pending) return;
+          this.pending.delete(requestId.hex);
+          this.markSemanticUncertain(pending);
+          pending.dispatchCallbacks?.unconfirmed('transport_timeout');
+          const error = new Error('Computer Use Windows helper request timed out');
+          reject(error);
+          // A request that never came back means the helper is unusable, so this normally ends it
+          // outright rather than waiting for the transport to fall idle. The exception is a stop that
+          // is still on the wire: the helper's answer to it is the only thing that can release Main's
+          // input quarantine, and requests that were already in flight when Stop began keep timers of
+          // their own that would otherwise expire inside Stop's window and kill the helper the stop
+          // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
+          // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
+          // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
+          // the original input/launch unit ended. A submitted semantic request also needs its
+          // helper before its own deadline: a shorter queued read can time out first.
+          if (
+            activityGeneration === this.activityGeneration &&
+            helperGeneration === this.helperGeneration &&
+            !this.hasPendingStop() &&
+            !this.hasUnconfirmedDiscovery() &&
+            !this.hasUnconfirmedSemanticInputs() &&
+            ![...this.pending.values()].some(
+              (request) => request.semantic?.submitted && !request.semantic.owner.confirmed,
+            )
           )
-        )
-          this.abortTransport(error);
-        else this.shutdownIfIdle();
-      }, timeoutMilliseconds);
-      const pending: PendingRequest = {
-        resolve,
-        reject,
-        timeout,
-        sessionId,
-        stopsSession,
-        activityGeneration,
-        helperGeneration,
-        responseType: responseTypeFor(messageType),
-        allowBinary: messageType === 'observe',
-        ...(semantic === undefined ? {} : { semantic }),
-        ...(dispatchCallbacks === undefined ? {} : { dispatchCallbacks }),
-        ...(typeof metadata['sessionId'] === 'string'
-          ? { ownerSession: metadata['sessionId'] }
-          : {}),
-      };
-      this.pending.set(requestId.hex, pending);
-      try {
-        if (this.socket !== socket)
-          throw new Error('Computer Use Windows helper changed before send');
-        beforeWrite?.();
-        dispatchCallbacks?.assertSend();
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(requestId.hex);
-        if (dispatchCallbacks === undefined) reject(error);
-        else void dispatchCallbacks.canceled().then(() => reject(error), reject);
-        this.shutdownIfIdle();
-        return;
-      }
-      try {
-        socket.write(encoded, (error) => {
-          if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
-          if (error === null || error === undefined) return;
+            this.abortTransport(error);
+          else this.shutdownIfIdle();
+        }, timeoutMilliseconds);
+        const pending: PendingRequest = {
+          resolve,
+          reject,
+          timeout,
+          sessionId,
+          stopsSession,
+          activityGeneration,
+          helperGeneration,
+          responseType: responseTypeFor(messageType),
+          allowBinary: messageType === 'observe',
+          ...(semantic === undefined ? {} : { semantic }),
+          ...(dispatchCallbacks === undefined ? {} : { dispatchCallbacks }),
+          ...(typeof metadata['sessionId'] === 'string'
+            ? { ownerSession: metadata['sessionId'] }
+            : {}),
+        };
+        this.pending.set(requestId.hex, pending);
+        try {
+          if (this.socket !== socket)
+            throw new Error('Computer Use Windows helper changed before send');
+          beforeWrite?.();
+          dispatchCallbacks?.assertSend();
+        } catch (error) {
           clearTimeout(timeout);
+          this.pending.delete(requestId.hex);
+          if (dispatchCallbacks === undefined) reject(error);
+          else void dispatchCallbacks.canceled().then(() => reject(error), reject);
+          this.shutdownIfIdle();
+          return;
+        }
+        try {
+          socket.write(encoded, (error) => {
+            if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
+            if (error === null || error === undefined) return;
+            clearTimeout(timeout);
+            this.markSemanticUncertain(pending);
+            pending.dispatchCallbacks?.unconfirmed('abortTransport');
+            this.pending.delete(requestId.hex);
+            reject(error);
+            this.abortTransport(error);
+          });
+        } catch (error) {
+          clearTimeout(timeout);
+          this.pending.delete(requestId.hex);
+          const failure = error instanceof Error ? error : new Error(String(error));
           this.markSemanticUncertain(pending);
           pending.dispatchCallbacks?.unconfirmed('abortTransport');
-          this.pending.delete(requestId.hex);
-          reject(error);
-          this.abortTransport(error);
-        });
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(requestId.hex);
-        const failure = error instanceof Error ? error : new Error(String(error));
-        this.markSemanticUncertain(pending);
-        pending.dispatchCallbacks?.unconfirmed('abortTransport');
-        reject(failure);
-        this.abortTransport(failure);
+          reject(failure);
+          this.abortTransport(failure);
+        }
+      });
+    const prepareAndSend = async (): Promise<unknown> => {
+      if (dispatchCallbacks !== undefined) {
+        this.preparingDispatches.add(requestId.hex);
+        try {
+          await dispatchCallbacks.beforeWrite(helperGeneration, requestId.hex);
+          if (
+            this.socket !== socket ||
+            socket.destroyed ||
+            helperGeneration !== this.helperGeneration
+          )
+            throw semanticNotSubmitted();
+        } catch (error) {
+          await dispatchCallbacks.canceled();
+          throw error;
+        } finally {
+          this.preparingDispatches.delete(requestId.hex);
+        }
       }
-    });
+      return send();
+    };
+    return dispatchCallbacks === undefined ? send() : prepareAndSend();
   }
 
   private consume(chunk: Buffer, decoder: { readBuffer: Buffer }): void {
