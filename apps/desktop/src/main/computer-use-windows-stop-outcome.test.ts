@@ -96,6 +96,7 @@ const receipt: WindowsStopEvent = {
 const response = {
   kind: 'response',
   helperGeneration: 1,
+  sessionId: row.sessionId,
   requestId: row.requestId,
   status: 'success',
   accepted: true,
@@ -109,6 +110,7 @@ const unconfirmedResponse = {
 const transportTimeout = {
   kind: 'input_unconfirmed',
   helperGeneration: 1,
+  sessionId: row.sessionId,
   requestId: row.requestId,
   cause: 'transport_timeout',
   storage: written,
@@ -1359,6 +1361,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     const canceled = decideWindowsStop(recorded.state, {
       kind: 'dispatch_canceled',
       helperGeneration: 1,
+      sessionId: row.sessionId,
       requestId: row.requestId,
       storage,
     });
@@ -1373,6 +1376,53 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
         }).state.rows,
       ).toEqual([]);
     }
+  });
+
+  it('§2.2 R5/R6/R19a row events match generation, session and request together', () => {
+    const rowA: WindowsControlLedgerRow = { ...row, state: 'effect_unconfirmed' };
+    const rowB: WindowsControlLedgerRow = { ...row, sessionId: 'session-b', identity: otherTarget };
+    const both = state({ rows: [rowA, rowB] });
+    const onB = { helperGeneration: 1, sessionId: 'session-b', requestId: row.requestId } as const;
+    expect(decideWindowsStop(both, { ...response, ...onB }).state.rows).toEqual([rowA]);
+    const held = decideWindowsStop(both, { ...response, ...onB, storage: failed }).state;
+    expect(held.holds.map((hold) => hold.targets)).toEqual([[otherTarget]]);
+    expect(windowsTargetMayStart(held, otherTarget)).toBe(false);
+    expect(windowsTargetMayStart(held, target)).toBe(true);
+    expect(
+      decideWindowsStop(held, { kind: 'retry_storage', holdId: failed.holdId, status: 'written' })
+        .state.rows,
+    ).toEqual([rowA]);
+    expect(
+      decideWindowsStop(both, { kind: 'dispatch_canceled', ...onB, storage: written }).state.rows,
+    ).toEqual([rowA]);
+    const backgroundB = { ...rowB, inputPath: 'background_semantic' } as const;
+    const lost = decideWindowsStop(
+      state({ rows: [{ ...rowA, inputPath: 'normal' }, backgroundB] }),
+      {
+        ...transportTimeout,
+        ...onB,
+      },
+    );
+    expect(lost.state.quarantines).toEqual([{ identity: otherTarget, reason: 'response_lost' }]);
+    expect(lost.state.rows).toHaveLength(2);
+    // Another session's row with the same request id is never a match.
+    expect(decideWindowsStop(state({ rows: [rowA] }), { ...response, ...onB }).refusal).toBe(
+      'no_control_ledger_row',
+    );
+    expect(
+      decideWindowsStop(state({ rows: [rowA] }), {
+        kind: 'dispatch_canceled',
+        ...onB,
+        storage: written,
+      }).state.rows,
+    ).toEqual([rowA]);
+    // The (generation, session, request) key is unique; a duplicate fails closed.
+    expect(() =>
+      decideWindowsStop(state({ rows: [rowB, { ...rowB, identity: target }] }), {
+        ...response,
+        ...onB,
+      }),
+    ).toThrow('Duplicate ledger request');
   });
 
   it('R21 refuses a superseded release before writing after a receipt transfer', () => {

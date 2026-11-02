@@ -196,6 +196,7 @@ export type WindowsGenerationEvent =
   | Readonly<{
       kind: 'dispatch_canceled';
       helperGeneration: number;
+      sessionId: string;
       requestId: string;
       storage: StorageWrite;
     }>
@@ -220,6 +221,7 @@ export type WindowsGenerationEvent =
   | (Readonly<{
       kind: 'response';
       helperGeneration: number;
+      sessionId: string;
       requestId: string;
       storage: StorageWrite;
     }> &
@@ -228,6 +230,7 @@ export type WindowsGenerationEvent =
   | Readonly<{
       kind: 'input_unconfirmed';
       helperGeneration: number;
+      sessionId: string;
       requestId: string;
       cause: WindowsUnconfirmedInputCause;
       storage: StorageWrite;
@@ -392,6 +395,24 @@ function sameRow(a: WindowsLedgerRow, b: WindowsLedgerRow): boolean {
     a.sessionId === b.sessionId &&
     a.requestId === b.requestId
   );
+}
+/**
+ * §2.2: a row is keyed by (helper generation, session, request). The wire request id alone is not
+ * unique across sessions, so every row lookup uses the whole key. before_dispatch refuses a second
+ * row with the same key; finding one here is an invariant violation (fail-closed).
+ */
+function ledgerRow(
+  rows: readonly WindowsLedgerRow[],
+  key: Readonly<{ helperGeneration: number; sessionId: string; requestId: string }>,
+): WindowsLedgerRow | undefined {
+  const matches = rows.filter(
+    (row) =>
+      row.helperGeneration === key.helperGeneration &&
+      row.sessionId === key.sessionId &&
+      row.requestId === key.requestId,
+  );
+  if (matches.length > 1) throw new Error('Duplicate ledger request');
+  return matches[0];
 }
 function validIdentity(identity: WindowsTargetIdentity): boolean {
   return Number.isSafeInteger(identity.pid) && identity.pid > 0 && identity.creationTime.length > 0;
@@ -738,10 +759,7 @@ export function decideWindowsStop(
   );
   switch (event.kind) {
     case 'dispatch_canceled': {
-      const row = state.rows.find(
-        (item) =>
-          item.helperGeneration === event.helperGeneration && item.requestId === event.requestId,
-      );
+      const row = ledgerRow(state.rows, event);
       if (row === undefined) return decision;
       // Cancel only this unsent row. An exit classification or quarantine is never rolled back.
       return {
@@ -888,7 +906,7 @@ export function decideWindowsStop(
     case 'response': {
       if (event.accepted !== (event.status !== 'rejected'))
         throw new Error('Response acceptance contradicts its status');
-      const row = generationRows.find((item) => item.requestId === event.requestId);
+      const row = ledgerRow(state.rows, event);
       if (row === undefined) return refuse('no_control_ledger_row');
       const background = row.inputPath === 'background_semantic';
       const confirmed = event.status !== 'effect_unconfirmed';
@@ -911,7 +929,7 @@ export function decideWindowsStop(
       };
     }
     case 'input_unconfirmed': {
-      const row = generationRows.find((item) => item.requestId === event.requestId);
+      const row = ledgerRow(state.rows, event);
       // Discovery cannot supply a control identity (omitted combination).
       if (row === undefined) return refuse('no_control_ledger_row');
       const background = row.inputPath === 'background_semantic';
