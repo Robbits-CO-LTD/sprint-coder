@@ -278,6 +278,10 @@ jobs:
       - name: Build Computer Use native artifact for Gate 0
         run: npm run build:computer-use-native
 
+      - name: Reject test hang hooks in the Windows helper
+        if: runner.os == 'Windows'
+        run: node verify-computer-use-test-hang-absent.mjs --require
+
       - name: Verify Computer Use protocol with macOS sanitizers
         if: runner.os == 'macOS'
         shell: bash
@@ -487,6 +491,10 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/verify-computer-use-acceptance-build.mjs --expect absent
 
+      - name: Reject test hang hooks in Windows release artifacts
+        if: runner.os == 'Windows'
+        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
+
       - name: Remove temporary macOS signing credentials
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -609,6 +617,10 @@ jobs:
       - name: Reject a Computer Use acceptance build in a release package
         working-directory: apps/desktop
         run: node scripts/verify-computer-use-acceptance-build.mjs --expect absent
+
+      - name: Reject test hang hooks in signed Windows release artifacts
+        if: runner.os == 'Windows'
+        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
 
       - name: Verify signed Windows gate artifacts
         shell: pwsh

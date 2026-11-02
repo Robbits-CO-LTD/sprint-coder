@@ -84,6 +84,9 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
     pending->attempts->fetch_add(1, std::memory_order_acq_rel);
     *accepted = true;
   }
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::SemanticPattern);
+#endif
   struct Returned {
     WindowsSemanticPending *pending;
     ~Returned() {

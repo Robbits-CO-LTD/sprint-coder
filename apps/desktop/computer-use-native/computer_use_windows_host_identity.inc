@@ -234,6 +234,9 @@ bool ReadAuthenticodeSignerDigest(HANDLE file, const std::wstring &path,
   trust.dwStateAction = WTD_STATEACTION_VERIFY;
   trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_SAFER_FLAG;
   GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::WinVerifyTrust);
+#endif
   const LONG verified = WinVerifyTrust(nullptr, &policy, &trust);
   trust.dwStateAction = WTD_STATEACTION_CLOSE;
   WinVerifyTrust(nullptr, &policy, &trust);
@@ -416,6 +419,9 @@ bool OpenLockedWindowsExecutable(const std::wstring &path,
   // Deliberately allow read sharing only. Existing or future handles with
   // write/delete access make this open fail, preventing executable
   // swap/restore between identity verification and CreateProcessW.
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::CreateFileW);
+#endif
   ScopedKernelHandle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                      OPEN_EXISTING,
                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
