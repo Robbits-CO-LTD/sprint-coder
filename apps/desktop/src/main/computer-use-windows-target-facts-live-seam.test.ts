@@ -407,6 +407,52 @@ int wmain(int argc, wchar_t **argv) {
   outsider.rename_probe = rename_probe;
   // The probe starts and tears down a suspended child; none of its processes outlive it.
   Check(!HasProcessWithLeaf(L"sc-rename-probe-"), "rename_probe_leaves_no_process");
+  {
+    const wchar_t *variable = L"SPRINT_CODER_COMPUTER_USE_HELPER_TEMP";
+    std::vector<wchar_t> saved(32768, L'\0');
+    const DWORD saved_length = GetEnvironmentVariableW(variable, saved.data(),
+                                                       static_cast<DWORD>(saved.size()));
+    Check(saved_length < saved.size(), "helper_temp_environment_fits");
+    const std::wstring dedicated = scratch + L"\\helper-probe-temp";
+    Check(CreateDirectoryW(dedicated.c_str(), nullptr) == TRUE, "helper_temp_directory_created");
+    const auto has_probe = [](const std::wstring &directory) {
+      const std::wstring pattern = directory + L"\\sc-rename-probe-" +
+                                  std::to_wstring(GetCurrentProcessId()) + L"-*";
+      WIN32_FIND_DATAW data{};
+      HANDLE found = FindFirstFileW(pattern.c_str(), &data);
+      if (found == INVALID_HANDLE_VALUE) return false;
+      FindClose(found);
+      return true;
+    };
+    Check(SetEnvironmentVariableW(variable, dedicated.c_str()) == TRUE,
+          "helper_temp_without_trailing_separator_set");
+    bool observed_dedicated = false;
+    const auto dedicated_probe = WindowsTargetRenameFollows([&] {
+      observed_dedicated = has_probe(dedicated) || observed_dedicated;
+      return true;
+    });
+    Check(dedicated_probe.has_value() && dedicated_probe->follows && observed_dedicated,
+          "rename_probe_runs_inside_helper_temp_without_trailing_separator");
+    Check(RemoveDirectoryW(dedicated.c_str()) == TRUE, "helper_temp_empty_after_probe");
+
+    std::vector<wchar_t> temp(32768, L'\0');
+    const DWORD temp_length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
+    Check(temp_length > 0 && temp_length < temp.size(), "fallback_temp_available");
+    const std::wstring fallback(temp.data(), temp_length);
+    for (const std::wstring &invalid : {std::wstring(L"relative-helper-temp"), dedicated}) {
+      Check(SetEnvironmentVariableW(variable, invalid.c_str()) == TRUE, "invalid_helper_temp_set");
+      bool observed_fallback = false;
+      const auto fallback_probe = WindowsTargetRenameFollows([&] {
+        observed_fallback = has_probe(fallback) || observed_fallback;
+        return true;
+      });
+      Check(fallback_probe.has_value() && fallback_probe->follows && observed_fallback,
+            "invalid_helper_temp_uses_GetTempPathW");
+      Check(!has_probe(fallback), "fallback_probe_files_removed");
+    }
+    Check(SetEnvironmentVariableW(variable, saved_length > 0 ? saved.data() : nullptr) == TRUE,
+          "helper_temp_environment_restored");
+  }
   // TEMP reached through an 8.3 short name still follows: the probe normalizes both sides with
   // GetFinalPathNameByHandleW before comparing. (If 8.3 is disabled, the short path equals the long
   // one, which is still a valid run of the probe.)

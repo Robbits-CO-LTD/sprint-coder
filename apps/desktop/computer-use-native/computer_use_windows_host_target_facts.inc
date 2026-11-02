@@ -384,7 +384,9 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
         temp[1] == L':' && separator(temp[2])) ||
        (temp_length >= 2 && separator(temp[0]) && separator(temp[1])));
   const DWORD attributes = absolute ? GetFileAttributesW(temp.data()) : INVALID_FILE_ATTRIBUTES;
-  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+  const bool main_managed_temp = attributes != INVALID_FILE_ATTRIBUTES &&
+      (attributes & FILE_ATTRIBUTE_DIRECTORY);
+  if (!main_managed_temp)
     temp_length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
   if (module_length == 0 || module_length >= module.size() || temp_length == 0 ||
       temp_length >= temp.size())
@@ -502,14 +504,18 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
       }
       Sleep(10);
     } while (GetTickCount64() < deadline);
-    // Without an exit receipt, leave the files for Main's cleanup after helper exit.
-    if (!exited) return std::nullopt;
+    // Only Main's directory has a later cleanup owner; fallback files need a best-effort cleanup.
+    if (main_managed_temp) {
+      if (!exited) return std::nullopt;
+    } else if (!exited) {
+      result.reset();
+    }
     CloseHandle(child_thread.release());
     CloseHandle(child_process.release());
   }
   CloseHandle(job.release());
-  // Delete after the child is gone so its image section no longer holds the file. A short retry
-  // covers the brief window while the kernel finishes tearing the mapping down.
+  // Normally exit is confirmed. On a fallback timeout, closing the job also requests termination;
+  // retry deletion while the kernel finishes tearing the image mapping down.
   for (const std::wstring &file : {first, second, third})
     for (int attempt = 0; attempt < 20 && GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES;
          ++attempt)

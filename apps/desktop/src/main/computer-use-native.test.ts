@@ -584,6 +584,21 @@ describe('Windows native helper compile boundary', () => {
     expect(probe.indexOf('TerminateJobObject')).toBeLessThan(probe.indexOf('ActiveProcesses == 0'));
     expect(probe.indexOf('ActiveProcesses == 0')).toBeLessThan(probe.indexOf('DeleteFileW'));
     expect(probe).toContain('if (!exited) return std::nullopt;');
+    expect(probe).toMatch(
+      /if \(main_managed_temp\) \{\s*if \(!exited\) return std::nullopt;\s*\} else if \(!exited\) \{\s*result\.reset\(\);\s*\}/u,
+    );
+    expect(probe).toContain('if (!main_managed_temp)');
+    const cleanupOrder = [
+      'ActiveProcesses == 0',
+      'if (!exited) return std::nullopt;',
+      'CloseHandle(child_thread.release())',
+      'CloseHandle(child_process.release())',
+      'CloseHandle(job.release())',
+      'DeleteFileW',
+      'RemoveDirectoryW',
+    ].map((step) => probe.indexOf(step));
+    expect(cleanupOrder.every((position) => position >= 0)).toBe(true);
+    expect(cleanupOrder).toEqual([...cleanupOrder].sort((left, right) => left - right));
   });
 
   it('allows only same-path same-signer Windows updates to refresh the executable digest', () => {

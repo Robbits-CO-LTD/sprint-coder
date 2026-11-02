@@ -35,6 +35,7 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
   operationTimeoutMilliseconds,
+  windowsHelperEnvironment,
 } from './computer-use-native-windows';
 
 /**
@@ -621,9 +622,9 @@ describe('Computer Use Windows helper transport', () => {
       await discoverRows(addon);
       expect(mkdtemp).toHaveBeenCalledWith(join(tmpdir(), 'sc-cu-helper-'));
       expect(spawnedTemp(0)).toEqual(expect.stringContaining('sc-cu-helper-'));
-      expect(vi.mocked(spawn).mock.calls[0]?.[2]?.env).toMatchObject({
-        TEMP: process.env['TEMP'],
-        TMP: process.env['TMP'],
+      expect(vi.mocked(spawn).mock.calls[0]?.[2]?.env).toEqual({
+        ...windowsHelperEnvironment(process.env),
+        SPRINT_CODER_COMPUTER_USE_HELPER_TEMP: spawnedTemp(0),
       });
       expect(rm).not.toHaveBeenCalled();
       children[0]!.emit('exit', 0, null);
@@ -692,6 +693,52 @@ describe('Computer Use Windows helper transport', () => {
     expect(spawnedTemp(0)).toEqual(expect.any(String));
     expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
   });
+
+  it('keeps a running helper directory on error until exit', async () => {
+    const { addon } = createTarget();
+    await discoverRows(addon);
+    children[0]!.emit('error', new Error('synthetic helper error'));
+    expect(rm).not.toHaveBeenCalled();
+    children[0]!.emit('exit', 1, null);
+    expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+  });
+
+  it.each(['attestation', 'pipe'] as const)(
+    'waits for exit after %s failure before removing the helper directory',
+    async (failure) => {
+      const originalSpawn = transport.spawnHelper;
+      const originalConnect = transport.connectPipe;
+      const child = new FakeHelperChild();
+      child.kill = () => {
+        child.killed = true;
+        return true;
+      };
+      transport.spawnHelper = () => {
+        children.push(child);
+        return child;
+      };
+      if (failure === 'attestation') transport.attestation = '{}';
+      else
+        transport.connectPipe = () => {
+          throw new Error('synthetic pipe failure');
+        };
+      try {
+        const { addon } = createTarget();
+        const rejected = expect(discoverRows(addon)).rejects.toThrow(
+          failure === 'pipe' ? 'pipe connection failed' : /attestation/u,
+        );
+        await vi.advanceTimersByTimeAsync(5_000);
+        await rejected;
+        expect(child.killed).toBe(true);
+        expect(rm).not.toHaveBeenCalled();
+        child.emit('exit', 1, null);
+        expect(rm).toHaveBeenCalledExactlyOnceWith(spawnedTemp(0), cleanupOptions);
+      } finally {
+        transport.spawnHelper = originalSpawn;
+        transport.connectPipe = originalConnect;
+      }
+    },
+  );
 
   // Current behavior baseline, to be replaced by kill-stop (N3).
   describe('kill-stop (N3) replacement baseline for current Stop timing', () => {
