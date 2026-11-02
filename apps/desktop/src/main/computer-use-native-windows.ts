@@ -10,7 +10,9 @@ import {
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createConnection, type Socket } from 'node:net';
-import { win32 } from 'node:path';
+import { join, win32 } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import {
   COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
   COMPUTER_USE_NATIVE_MAGIC,
@@ -724,17 +726,33 @@ class WindowsComputerUseHelperClient {
     this.discoveryHandshakeSupported = false;
     const nonce = randomBytes(16).toString('hex');
     const pipePath = `\\\\.\\pipe\\sprint-coder-computer-use-${nonce}`;
-    const child = spawn(
-      this.helperPath,
-      ['--pipe', pipePath, '--parent-pid', String(process.pid)],
-      {
+    const helperTemp = await mkdtemp(join(tmpdir(), 'sc-cu-helper-'));
+    const removeHelperTemp = () => {
+      void rm(helperTemp, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 }).catch(
+        () => undefined,
+      );
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(this.helperPath, ['--pipe', pipePath, '--parent-pid', String(process.pid)], {
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore'],
-        env: windowsHelperEnvironment(process.env),
-      },
-    );
+        env: {
+          ...windowsHelperEnvironment(process.env),
+          SPRINT_CODER_COMPUTER_USE_HELPER_TEMP: helperTemp,
+        },
+      });
+    } catch (error) {
+      removeHelperTemp();
+      throw error;
+    }
     this.child = child;
+    child.once('error', () => {
+      // A failed spawn has no process and does not emit exit.
+      if (child.pid === undefined) removeHelperTemp();
+    });
     child.once('exit', (code, signal) => {
+      removeHelperTemp();
       if (this.child !== child) return;
       this.failAll(
         new Error(`Computer Use Windows helper exited: ${String(code ?? signal ?? 'unknown')}`),

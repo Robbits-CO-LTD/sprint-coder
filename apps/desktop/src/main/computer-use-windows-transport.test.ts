@@ -10,6 +10,8 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as NodeChildProcess from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
 import type * as NodeNet from 'node:net';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,13 +35,14 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
   operationTimeoutMilliseconds,
+  windowsHelperEnvironment,
 } from './computer-use-native-windows';
 
 /**
  * These tests drive the real `createWindowsComputerUseNativeAddon` transport — its pending map,
  * per-request timeouts, frame binding and teardown — against a fake helper child process, and put
  * the real Main adapter (`createComputerUseNativeHost`) in front of it so the close deadline and
- * the input quarantine are the production ones. Only `spawn`, the PowerShell attestation and the
+ * the input quarantine are the production ones. Only helper temp I/O, `spawn`, the attestation and the
  * named pipe are faked; nothing in the transport is stubbed.
  */
 // The mock factories run before this module's body, so they only reach the fakes through these
@@ -54,8 +57,20 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
   return {
     ...actual,
-    spawn: () => transport.spawnHelper?.(),
+    spawn: vi.fn((_file: string, _args: string[], _options: NodeChildProcess.SpawnOptions) =>
+      transport.spawnHelper?.(),
+    ),
     execFileSync: () => transport.attestation,
+  };
+});
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  let sequence = 0;
+  return {
+    ...actual,
+    mkdtemp: vi.fn(async (prefix: string) => `${prefix}fixture-${++sequence}`),
+    rm: vi.fn(async () => undefined),
   };
 });
 
@@ -574,6 +589,9 @@ function headerEnumTypes(): Record<string, number> {
 
 describe('Computer Use Windows helper transport', () => {
   beforeEach(() => {
+    vi.mocked(spawn).mockClear();
+    vi.mocked(mkdtemp).mockClear();
+    vi.mocked(rm).mockClear();
     children.length = 0;
     sockets.length = 0;
     onSocket = null;
@@ -590,6 +608,137 @@ describe('Computer Use Windows helper transport', () => {
     vi.useRealTimers();
     onSocket = null;
   });
+
+  const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  const cleanupOptions = { recursive: true, force: true, maxRetries: 20, retryDelay: 50 };
+  const spawnedTemp = (index: number) =>
+    vi.mocked(spawn).mock.calls[index]?.[2]?.env?.[helperTempVariable];
+
+  it('passes a helper-specific temp directory without changing TEMP or TMP and removes it on exit', async () => {
+    vi.stubEnv('TEMP', 'C:\\synthetic-temp');
+    vi.stubEnv('TMP', 'C:\\synthetic-tmp');
+    try {
+      const { addon } = createTarget();
+      await discoverRows(addon);
+      expect(mkdtemp).toHaveBeenCalledWith(join(tmpdir(), 'sc-cu-helper-'));
+      expect(spawnedTemp(0)).toEqual(expect.stringContaining('sc-cu-helper-'));
+      expect(vi.mocked(spawn).mock.calls[0]?.[2]?.env).toEqual({
+        ...windowsHelperEnvironment(process.env),
+        SPRINT_CODER_COMPUTER_USE_HELPER_TEMP: spawnedTemp(0),
+      });
+      expect(rm).not.toHaveBeenCalled();
+      children[0]!.emit('exit', 0, null);
+      expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('removes an old helper directory on exit without removing the current helper directory', async () => {
+    const { addon } = createTarget();
+    await discoverRows(addon);
+    const oldChild = children[0]!;
+    sockets[0]!.destroy();
+    await vi.advanceTimersByTimeAsync(0);
+    await discoverRows(addon);
+    expect(children).toHaveLength(2);
+    expect(spawnedTemp(0)).not.toBe(spawnedTemp(1));
+    oldChild.emit('exit', 0, null);
+    expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+    expect(rm).not.toHaveBeenCalledWith(spawnedTemp(1), cleanupOptions);
+    children[1]!.emit('exit', 0, null);
+    expect(rm).toHaveBeenCalledWith(spawnedTemp(1), cleanupOptions);
+  });
+
+  it('removes the helper directory when spawn throws', async () => {
+    const original = transport.spawnHelper;
+    transport.spawnHelper = () => {
+      throw new Error('synthetic spawn failure');
+    };
+    try {
+      const { addon } = createTarget();
+      await expect(discoverRows(addon)).rejects.toThrow('synthetic spawn failure');
+      expect(spawnedTemp(0)).toEqual(expect.any(String));
+      expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+    } finally {
+      transport.spawnHelper = original;
+    }
+  });
+
+  it('removes the helper directory after an asynchronous spawn failure without exit', async () => {
+    const original = transport.spawnHelper;
+    transport.spawnHelper = () => {
+      const child = new FakeHelperChild();
+      Object.defineProperty(child, 'pid', { value: undefined });
+      child.kill = () => false;
+      children.push(child);
+      queueMicrotask(() => child.emit('error', new Error('synthetic spawn failure')));
+      return child;
+    };
+    try {
+      const { addon } = createTarget();
+      await expect(discoverRows(addon)).rejects.toThrow('PID is unavailable');
+      expect(spawnedTemp(0)).toEqual(expect.any(String));
+      expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+    } finally {
+      transport.spawnHelper = original;
+    }
+  });
+
+  it('removes the helper directory after attestation failure kills the helper', async () => {
+    const { addon } = createTarget();
+    transport.attestation = '{}';
+    await expect(discoverRows(addon)).rejects.toThrow();
+    expect(children[0]!.killed).toBe(true);
+    expect(spawnedTemp(0)).toEqual(expect.any(String));
+    expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+  });
+
+  it('keeps a running helper directory on error until exit', async () => {
+    const { addon } = createTarget();
+    await discoverRows(addon);
+    children[0]!.emit('error', new Error('synthetic helper error'));
+    expect(rm).not.toHaveBeenCalled();
+    children[0]!.emit('exit', 1, null);
+    expect(rm).toHaveBeenCalledWith(spawnedTemp(0), cleanupOptions);
+  });
+
+  it.each(['attestation', 'pipe'] as const)(
+    'waits for exit after %s failure before removing the helper directory',
+    async (failure) => {
+      const originalSpawn = transport.spawnHelper;
+      const originalConnect = transport.connectPipe;
+      const child = new FakeHelperChild();
+      child.kill = () => {
+        child.killed = true;
+        return true;
+      };
+      transport.spawnHelper = () => {
+        children.push(child);
+        return child;
+      };
+      if (failure === 'attestation') transport.attestation = '{}';
+      else
+        transport.connectPipe = () => {
+          throw new Error('synthetic pipe failure');
+        };
+      try {
+        const { addon } = createTarget();
+        const rejected = expect(discoverRows(addon)).rejects.toThrow(
+          failure === 'pipe' ? 'pipe connection failed' : /attestation/u,
+        );
+        await vi.advanceTimersByTimeAsync(5_000);
+        await rejected;
+        expect(child.killed).toBe(true);
+        expect(rm).not.toHaveBeenCalled();
+        child.emit('exit', 1, null);
+        expect(rm).toHaveBeenCalledExactlyOnceWith(spawnedTemp(0), cleanupOptions);
+      } finally {
+        transport.spawnHelper = originalSpawn;
+        transport.connectPipe = originalConnect;
+      }
+    },
+  );
 
   // Current behavior baseline, to be replaced by kill-stop (N3).
   describe('kill-stop (N3) replacement baseline for current Stop timing', () => {
