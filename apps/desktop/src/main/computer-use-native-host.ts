@@ -436,6 +436,7 @@ export function createComputerUseNativeHost(
           cause,
           storage: rows.length === 0 ? { status: 'written' } : { status: 'failed', holdId },
         });
+        // Foreground-only rows stay for restart (R23), even with healthy storage.
         if (decision.awaitingHoldId === null) return;
         pendingWrites.set(holdId, {
           generation,
