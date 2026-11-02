@@ -58,6 +58,56 @@ function stepBlock(job: string, name: string): string {
 }
 
 describe('workflow security boundaries', () => {
+  it('isolates the Windows hung helper live seam in its full-matrix job', () => {
+    const job = jobBlock(workflows['.github/workflows/ci.yml'], 'computer-use-hung-helper');
+    expect(job).toContain('name: Computer Use hung helper seam (Windows)');
+    expect(job).toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(job).toContain('runs-on: windows-2022');
+    expect(job).toContain('timeout-minutes: 30');
+    expect(job).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
+    expect(job).toContain('src/main/computer-use-windows-hung-helper-live-seam.test.ts');
+    // The full-matrix gate fails when this job fails, is cancelled or is skipped.
+    expect(jobBlock(workflows['.github/workflows/ci.yml'], 'required')).toContain(
+      'computer-use-hung-helper,',
+    );
+    const run = stepBlock(job, 'Run hung helper seam and sessionless Stop latency proxy');
+    expect(run).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
+    expect(job.indexOf('\n      - name: Initialize MSVC developer environment')).toBeLessThan(
+      job.indexOf('\n      - name: Run hung helper seam and sessionless Stop latency proxy'),
+    );
+    // The opt-in appears exactly once across every workflow: in that step of this job. Dropping it
+    // into another job, or naming the seam spec in another job, would put the live part on a
+    // shard that was not sized for it.
+    for (const [file, workflow] of Object.entries(workflows)) {
+      for (const block of allJobBlocks(workflow)) {
+        if (file === '.github/workflows/ci.yml' && block.startsWith('  computer-use-hung-helper:'))
+          continue;
+        expect(block, file).not.toContain('SPRINT_CODER_HUNG_HELPER_SEAM');
+        expect(block, file).not.toContain('hung-helper-live-seam');
+      }
+    }
+    expect(
+      Object.values(workflows)
+        .join('\n')
+        .match(/SPRINT_CODER_HUNG_HELPER_SEAM/gu),
+    ).toHaveLength(1);
+    // The seam itself stays opt-in: without the exact gate every live case is a counted skip.
+    const seam = readFileSync(
+      resolve(
+        repositoryRoot,
+        'apps/desktop/src/main/computer-use-windows-hung-helper-live-seam.test.ts',
+      ),
+      'utf8',
+    );
+    expect(seam).toContain("const enabled = process.env['SPRINT_CODER_HUNG_HELPER_SEAM'] === '1';");
+    expect(seam).toContain('if (!enabled) return;');
+    const liveCases = seam.slice(seam.indexOf("describe('real hung helper"));
+    expect(liveCases.match(/\bit\(/gu)?.length).toBeGreaterThan(0);
+    expect(liveCases.match(/\blive\(context\);/gu)?.length).toBe(
+      liveCases.match(/\bit\(/gu)?.length,
+    );
+  }, 5_000);
+
   it('pins every third-party action to its reviewed immutable commit', () => {
     for (const [file, workflow] of Object.entries(workflows)) {
       const refs = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)@([^\s#]+)/gmu)];

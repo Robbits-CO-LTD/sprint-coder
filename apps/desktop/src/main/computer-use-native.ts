@@ -483,7 +483,14 @@ export function verifyComputerUseNativeSignature(
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $helper = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; $app = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_APP_EXE; [pscustomobject]@{HelperStatus=$helper.Status.ToString();AppStatus=$app.Status.ToString();HelperThumbprint=$helper.SignerCertificate.Thumbprint;AppThumbprint=$app.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
+      [
+        "$PSModuleAutoLoadingPreference = 'None'",
+        'Microsoft.PowerShell.Core\\Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1"',
+        'Microsoft.PowerShell.Core\\Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"',
+        '$helper = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER',
+        '$app = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_APP_EXE',
+        '[pscustomobject]@{HelperStatus=$helper.Status.ToString();AppStatus=$app.Status.ToString();HelperThumbprint=$helper.SignerCertificate.Thumbprint;AppThumbprint=$app.SignerCertificate.Thumbprint} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress',
+      ].join('; '),
     ],
     {
       encoding: 'utf8',

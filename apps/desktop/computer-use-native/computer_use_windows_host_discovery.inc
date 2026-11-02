@@ -194,6 +194,133 @@ bool ReadProcessStartIdentity(std::uint32_t pid, std::string *output) {
   return read;
 }
 
+// BEGIN windows target identity
+constexpr std::size_t kMaxWindowsTargetIdentities = 64;
+struct WindowsTargetIdentity {
+  DWORD pid = 0;
+  std::string process_start;
+};
+
+bool ReadWindowsTargetIdentities(std::string_view metadata,
+                                 std::vector<WindowsTargetIdentity>* output) {
+  std::size_t cursor = 0;
+  const auto space = [&] {
+    while (cursor < metadata.size() && (metadata[cursor] == ' ' || metadata[cursor] == '\t' ||
+           metadata[cursor] == '\r' || metadata[cursor] == '\n')) ++cursor;
+  };
+  const auto token = [&](char expected) {
+    space();
+    if (cursor >= metadata.size() || metadata[cursor] != expected) return false;
+    ++cursor; return true;
+  };
+  const auto string = [&](std::string* value) {
+    space(); return ReadJsonStringValueAt(metadata, &cursor, value);
+  };
+  const auto decimal = [](std::string_view value, std::uint64_t maximum) {
+    if (value.empty() || value.size() > 20 || value.front() < '1' || value.front() > '9') return false;
+    std::uint64_t number = 0;
+    for (const char character : value) {
+      if (character < '0' || character > '9') return false;
+      const auto digit = static_cast<std::uint64_t>(character - '0');
+      if (number > (maximum - digit) / 10) return false;
+      number = number * 10 + digit;
+    }
+    return true;
+  };
+  std::vector<WindowsTargetIdentity> targets;
+  if (!token('{')) return false;
+  bool operation_seen = false, targets_seen = false;
+  for (int member = 0; member < 2; ++member) {
+    std::string key;
+    if (!string(&key) || !token(':')) return false;
+    if (key == "operation" && !operation_seen) {
+      std::string operation;
+      if (!string(&operation) || operation != "check_target_identity") return false;
+      operation_seen = true;
+    } else if (key == "targets" && !targets_seen) {
+      targets_seen = true;
+      if (!token('[')) return false;
+      space();
+      if (cursor < metadata.size() && metadata[cursor] != ']') {
+        for (;;) {
+          if (targets.size() == kMaxWindowsTargetIdentities || !token('{')) return false;
+          WindowsTargetIdentity target;
+          bool pid_seen = false, start_seen = false;
+          for (int field = 0; field < 2; ++field) {
+            std::string name;
+            if (!string(&name) || !token(':')) return false;
+            if (name == "pid" && !pid_seen) {
+              space(); const auto begin = cursor;
+              while (cursor < metadata.size() && metadata[cursor] >= '0' && metadata[cursor] <= '9') ++cursor;
+              const auto value = metadata.substr(begin, cursor - begin);
+              if (!decimal(value, std::numeric_limits<DWORD>::max())) return false;
+              for (const char digit : value) target.pid = target.pid * 10 + static_cast<DWORD>(digit - '0');
+              pid_seen = true;
+            } else if (name == "processStartTime" && !start_seen) {
+              if (!string(&target.process_start) ||
+                  !decimal(target.process_start, std::numeric_limits<std::uint64_t>::max())) return false;
+              start_seen = true;
+            } else return false;
+            if (!token(field == 0 ? ',' : '}')) return false;
+          }
+          if (!pid_seen || !start_seen) return false;
+          targets.push_back(std::move(target));
+          space();
+          if (cursor < metadata.size() && metadata[cursor] == ']') break;
+          if (!token(',')) return false;
+        }
+      }
+      if (!token(']')) return false;
+    } else return false;
+    if (!token(member == 0 ? ',' : '}')) return false;
+  }
+  space();
+  if (!operation_seen || !targets_seen || cursor != metadata.size()) return false;
+  *output = std::move(targets);
+  return true;
+}
+
+std::string WindowsTargetIdentityError(DWORD error) {
+  return error == ERROR_ACCESS_DENIED ? "access_denied" : "win32_error";
+}
+
+std::string CheckWindowsTargetIdentity(const WindowsTargetIdentity& target) {
+  const auto unverifiable = [](DWORD error) {
+    return "{\"result\":\"unverifiable\",\"reason\":\"" + WindowsTargetIdentityError(error) + "\"}";
+  };
+  HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, target.pid);
+  if (process == nullptr) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_INVALID_PARAMETER) return "{\"result\":\"terminated\",\"reason\":\"no_process\"}";
+    return unverifiable(error);
+  }
+  struct ProcessScope {
+    HANDLE handle;
+    ~ProcessScope() { CloseHandle(handle); }
+  } scope{process};
+  const DWORD wait = WaitForSingleObject(process, 0);
+  if (wait == WAIT_OBJECT_0) return "{\"result\":\"terminated\",\"reason\":\"signaled\"}";
+  if (wait != WAIT_TIMEOUT) return unverifiable(wait == WAIT_FAILED ? GetLastError() : ERROR_GEN_FAILURE);
+  std::string start;
+  if (!ReadProcessStartIdentity(process, &start)) return unverifiable(GetLastError());
+  if (start != target.process_start) return "{\"result\":\"terminated\",\"reason\":\"start_time_mismatch\"}";
+  return "{\"result\":\"alive\"}";
+}
+
+bool CheckWindowsTargetIdentities(std::string_view metadata, std::string* response) {
+  std::vector<WindowsTargetIdentity> targets;
+  // Validate the entire bounded request before opening any process.
+  if (!ReadWindowsTargetIdentities(metadata, &targets)) return false;
+  std::string result = "{\"results\":[";
+  for (std::size_t index = 0; index < targets.size(); ++index) {
+    if (index != 0) result += ',';
+    result += CheckWindowsTargetIdentity(targets[index]);
+  }
+  *response = result + "]}";
+  return true;
+}
+// END windows target identity
+
 bool WindowsSessionProcessMatches(const WindowsSession &session) {
   std::string process_start;
   return session.process_handle != nullptr &&
