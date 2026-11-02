@@ -33,7 +33,7 @@ namespace {
 using namespace sprint_coder::computer_use;
 std::string mode;
 std::wstring owned_path;
-ScopedKernelHandle job, gate_entered, gate_release;
+ScopedKernelHandle job, gate_entered, gate_release, breakaway_done;
 struct ExitState { volatile LONG child_pid = 0, reads = 0, terminations = 0; };
 ExitState* exit_state = nullptr;
 std::atomic<HANDLE> child_observer{nullptr}, worker_observer{nullptr};
@@ -63,12 +63,22 @@ BOOL FixtureCreate(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES pr
   Check(application && SameWindowsPath(application, owned_path) && !inherit,
         "only the exact owned child may be created");
   Check(create_entries.fetch_add(1) == 0, "one launch claim cannot create twice");
+  Check((flags & (EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED)) ==
+        (EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED) &&
+        startup->cb == sizeof(STARTUPINFOEXW) &&
+        reinterpret_cast<STARTUPINFOEXW*>(startup)->lpAttributeList != nullptr,
+        "launch supplies suspended extended startup and job attributes");
   if (mode == "claim-before-api") Gate();
   if (mode == "create-failure") return FALSE;
   const BOOL created = ::CreateProcessW(application, command, process_security, thread_security,
       inherit, flags | CREATE_NO_WINDOW, environment, directory, startup, information);
   if (!created) return FALSE;
   created_children.fetch_add(1);
+  BOOL in_job = FALSE;
+  Check(IsProcessInJob(information->hProcess, nullptr, &in_job) && in_job,
+        "child already belongs to some job before fixture assignment");
+  // helper-exit-kill-before-verify proves membership in the per-launch job.
+  // Windows 8+ nests the fixture cleanup job with the production launch job.
   if (!AssignProcessToJobObject(job.value, information->hProcess)) {
     ::TerminateProcess(information->hProcess, 1);
     WaitForSingleObject(information->hProcess, 35000);
@@ -127,13 +137,20 @@ struct Harness {
   explicit Harness(const std::wstring& name = {}) {
     job.value = CreateJobObjectW(nullptr, name.empty() ? nullptr : (name + L"-job").c_str()); Check(job.value, "owned job");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     Check(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
                                    sizeof(limits)), "owned job cleanup");
     gate_entered.value = CreateEventW(nullptr, TRUE, FALSE, name.empty() ? nullptr : (name + L"-entered").c_str());
     gate_release.value = CreateEventW(nullptr, TRUE, FALSE, name.empty() ? nullptr : (name + L"-release").c_str());
     Check(gate_entered.value && gate_release.value, "gate events");
     Check(SetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_CHILD", L"owned"), "child mode");
+    if (mode == "breakaway") {
+      const auto event_name = L"sc-discovery-breakaway-" + std::to_wstring(GetCurrentProcessId());
+      breakaway_done.value = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
+      Check(breakaway_done.value && SetEnvironmentVariableW(
+          L"SC_CU_DISCOVERY_FIXTURE_BREAKAWAY", event_name.c_str()), "breakaway event");
+    }
   }
   bool Cleanup() {
     SetEvent(gate_release.value);
@@ -149,6 +166,7 @@ struct Harness {
   ~Harness() {
     Cleanup();
     SetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_CHILD", nullptr);
+    SetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_BREAKAWAY", nullptr);
     if (const auto child = child_observer.exchange(nullptr)) CloseHandle(child);
     if (const auto worker = worker_observer.exchange(nullptr)) CloseHandle(worker);
   }
@@ -280,6 +298,16 @@ void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring&
   Check(child.value && OpenLockedProcessExecutable(child.value, &child_image) &&
         SameWindowsFileIdentity(child_image.identity.file_identity, image.identity.file_identity), "observer checks exact owned child");
   child_observer.store(child.release());
+  if (mode == "helper-exit-kill-before-verify") {
+    Check(::TerminateProcess(helper.process.value, 42), "kill helper before image verification");
+    Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0 &&
+          WaitForSingleObject(child_observer.load(), 5000) == WAIT_OBJECT_0 &&
+          exit_state->reads == 0 && exit_state->terminations == 0,
+          "job removes unverified child after abrupt helper exit");
+    Check(harness.Cleanup(), "observer completes own cleanup");
+    std::cout << "PASS: " << mode << " helper lifetime preserves launch ownership\n";
+    return;
+  }
   CloseHandle(pipe.release());
   // The observer, not the helper, keeps the kill-on-close job open. Helper exit therefore
   // cannot hide an abandoned child by accidentally triggering fixture cleanup.
@@ -287,13 +315,13 @@ void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring&
     Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0, "old helper exits while worker is held");
     DWORD helper_code = 99;
     Check(GetExitCodeProcess(helper.process.value, &helper_code) && helper_code == 0, "old helper normal exit");
-    Check(WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0 &&
-          exit_state->terminations == 0, "old helper abandons its unverified child");
+    Check(WaitForSingleObject(child_observer.load(), 5000) == WAIT_OBJECT_0 && exit_state->reads == 0 &&
+          exit_state->terminations == 0, "job removes held unverified child on helper exit");
     std::cout << "CONTROLSTATE:{\"helperExit\":" << helper_code
-              << ",\"childAlive\":true,\"reads\":" << exit_state->reads
+              << ",\"childAlive\":false,\"reads\":" << exit_state->reads
               << ",\"terminations\":" << exit_state->terminations << "}\n";
-    Check(harness.Cleanup(), "observer removes abandoned owned child");
-    std::cout << "CONTROL: normal helper exit abandoned held unverified child; observer cleaned it\n";
+    Check(harness.Cleanup(), "observer completes own cleanup");
+    std::cout << "CONTROL: normal helper exit removed held unverified child\n";
     return;
   }
   Check(WaitForSingleObject(helper.process.value, 500) == WAIT_TIMEOUT &&
@@ -316,8 +344,32 @@ void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring&
 }
 
 int wmain(int argc, wchar_t** argv) {
+  if (argc == 2 && std::wstring_view(argv[1]) == L"--fixture-grandchild") return 0;
   wchar_t child_mode[16]{};
   if (argc == 1 && GetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_CHILD", child_mode, 16) != 0) {
+    wchar_t event_name[128]{};
+    if (GetEnvironmentVariableW(L"SC_CU_DISCOVERY_FIXTURE_BREAKAWAY", event_name, 128) != 0) {
+      wchar_t executable[32768]{};
+      if (!GetModuleFileNameW(nullptr, executable, 32768)) return 2;
+      const auto command = L"\"" + std::wstring(executable) + L"\" --fixture-grandchild";
+      std::vector<wchar_t> writable(command.begin(), command.end()); writable.push_back(L'\0');
+      STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+      PROCESS_INFORMATION info{};
+      if (!::CreateProcessW(executable, writable.data(), nullptr, nullptr, FALSE,
+                            CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW, nullptr, nullptr,
+                            &startup, &info)) return 3;
+      ScopedKernelHandle grandchild(info.hProcess), thread(info.hThread);
+      const auto waited = WaitForSingleObject(grandchild.value, 5000);
+      DWORD code = 99;
+      if (waited != WAIT_OBJECT_0) {
+        ::TerminateProcess(grandchild.value, 1);
+        WaitForSingleObject(grandchild.value, 5000);
+        return 4;
+      }
+      if (!GetExitCodeProcess(grandchild.value, &code) || code != 0) return 5;
+      ScopedKernelHandle done(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name));
+      if (!done.value || !SetEvent(done.value)) return 6;
+    }
     Sleep(30000); return 0;
   }
   try {
@@ -398,6 +450,9 @@ int wmain(int argc, wchar_t** argv) {
             "unverified child exit precedes terminal proof");
     else Check(child_observer.load() && WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT,
                "verified launch is not rolled back");
+    if (mode == "breakaway")
+      Check(WaitForSingleObject(breakaway_done.value, 10000) == WAIT_OBJECT_0,
+            "verified child creates and reaps a CREATE_BREAKAWAY_FROM_JOB grandchild");
     pipe.Close(); Check(pipe.served, "pipe joined");
     FrameId key; key.bytes[0] = 21;
     const auto owner = WindowsDiscoveries().owners.at(FrameIdKey(key));
