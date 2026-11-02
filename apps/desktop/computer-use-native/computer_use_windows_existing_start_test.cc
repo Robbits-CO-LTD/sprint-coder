@@ -221,6 +221,9 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   if(!config.v2)Check(contexts.load()==0&&com_calls.load()==0&&!WindowsV2FactsContextCache(),"V1 context and COM independence");
   Check(com_calls.load()==com_releases.load()+(config.v2&&config.com_failure?1u:0u),"COM balance");
   if(expected){
+    std::string process_start;
+    Check(ReadJsonString(response,"processStartTime",&process_start)&&process_start==created&&
+          process_start==remaining.process_start,"bound process creation time");
     std::uint64_t epoch=99;Check(ReadJsonUint64(response,"cancelEpoch",&epoch)&&epoch==config.session_epoch,"receipt epoch");
     Check(config.resume?resumes.load()==1:refocuses.load()==1,"correct resolver");
   }
