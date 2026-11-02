@@ -35,6 +35,7 @@ import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
   ComputerUseDiscoveryNotSubmittedError,
   type ComputerUseNativeAddon,
+  type WindowsDispatchCallbacks,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
@@ -134,6 +135,7 @@ type PendingRequest = Readonly<{
   allowBinary: boolean;
   semantic?: SemanticAttempt;
   ownerSession?: string;
+  dispatchCallbacks?: WindowsDispatchCallbacks;
 }>;
 
 export function createWindowsComputerUseNativeAddon(
@@ -145,6 +147,7 @@ export function createWindowsComputerUseNativeAddon(
   const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
     probe: () => probe,
+    dispatchLedgerSupported: true,
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
@@ -214,7 +217,7 @@ export function createWindowsComputerUseNativeAddon(
         `readNodeValue:${stringField(value, 'requestId')}`,
       );
     },
-    dispatch: (input) => {
+    dispatch: (input, callbacks) => {
       const value = record(input);
       return client.call(
         'dispatch',
@@ -222,6 +225,7 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         stringField(value, 'requestId'),
+        callbacks,
       );
     },
     cancel: (input) => {
@@ -321,6 +325,7 @@ class WindowsComputerUseHelperClient {
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly preparingDispatches = new Set<string>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
   private activityGeneration = 0;
@@ -633,6 +638,7 @@ class WindowsComputerUseHelperClient {
     input: NativeRecord,
     sessionKey: string | undefined,
     requestKey: string | undefined,
+    dispatchCallbacks?: WindowsDispatchCallbacks,
   ): Promise<unknown> {
     if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
       this.assertSemanticAvailable();
@@ -739,6 +745,7 @@ class WindowsComputerUseHelperClient {
           }
         },
         semantic,
+        dispatchCallbacks,
       );
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
@@ -903,7 +910,7 @@ class WindowsComputerUseHelperClient {
     throw new Error(`Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`);
   }
 
-  private sendConnected(
+  private async sendConnected(
     messageType: ComputerUseNativeMessageType,
     metadata: NativeRecord,
     sessionId: ComputerUseNativeFrameId,
@@ -912,11 +919,12 @@ class WindowsComputerUseHelperClient {
     stopsSession = false,
     beforeWrite?: () => void,
     semantic?: SemanticAttempt,
+    dispatchCallbacks?: WindowsDispatchCallbacks,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
       return Promise.reject(new Error('Computer Use Windows helper is disconnected'));
-    if (this.pending.has(requestId.hex))
+    if (this.pending.has(requestId.hex) || this.preparingDispatches.has(requestId.hex))
       return Promise.reject(new Error('Computer Use Windows helper request is already pending'));
     const encoded = encodeComputerUseNativeFrame({
       messageType,
@@ -929,11 +937,29 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
+    if (dispatchCallbacks !== undefined) {
+      this.preparingDispatches.add(requestId.hex);
+      try {
+        await dispatchCallbacks.beforeWrite(helperGeneration, requestId.hex);
+        if (
+          this.socket !== socket ||
+          socket.destroyed ||
+          helperGeneration !== this.helperGeneration
+        )
+          throw semanticNotSubmitted();
+      } catch (error) {
+        await dispatchCallbacks.canceled();
+        throw error;
+      } finally {
+        this.preparingDispatches.delete(requestId.hex);
+      }
+    }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (this.pending.get(requestId.hex) !== pending) return;
         this.pending.delete(requestId.hex);
         this.markSemanticUncertain(pending);
+        pending.dispatchCallbacks?.unconfirmed('transport_timeout');
         const error = new Error('Computer Use Windows helper request timed out');
         reject(error);
         // A request that never came back means the helper is unusable, so this normally ends it
@@ -970,6 +996,7 @@ class WindowsComputerUseHelperClient {
         responseType: responseTypeFor(messageType),
         allowBinary: messageType === 'observe',
         ...(semantic === undefined ? {} : { semantic }),
+        ...(dispatchCallbacks === undefined ? {} : { dispatchCallbacks }),
         ...(typeof metadata['sessionId'] === 'string'
           ? { ownerSession: metadata['sessionId'] }
           : {}),
@@ -979,10 +1006,12 @@ class WindowsComputerUseHelperClient {
         if (this.socket !== socket)
           throw new Error('Computer Use Windows helper changed before send');
         beforeWrite?.();
+        dispatchCallbacks?.assertSend();
       } catch (error) {
         clearTimeout(timeout);
         this.pending.delete(requestId.hex);
-        reject(error);
+        if (dispatchCallbacks === undefined) reject(error);
+        else void dispatchCallbacks.canceled().then(() => reject(error), reject);
         this.shutdownIfIdle();
         return;
       }
@@ -992,6 +1021,7 @@ class WindowsComputerUseHelperClient {
           if (error === null || error === undefined) return;
           clearTimeout(timeout);
           this.markSemanticUncertain(pending);
+          pending.dispatchCallbacks?.unconfirmed('abortTransport');
           this.pending.delete(requestId.hex);
           reject(error);
           this.abortTransport(error);
@@ -1001,6 +1031,7 @@ class WindowsComputerUseHelperClient {
         this.pending.delete(requestId.hex);
         const failure = error instanceof Error ? error : new Error(String(error));
         this.markSemanticUncertain(pending);
+        pending.dispatchCallbacks?.unconfirmed('abortTransport');
         reject(failure);
         this.abortTransport(failure);
       }
@@ -1050,6 +1081,7 @@ class WindowsComputerUseHelperClient {
     if (!isWindowsHelperResponseBound(frame, pending)) {
       const error = new Error('Computer Use Windows helper response binding mismatch');
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed('abortTransport');
       this.pending.delete(frame.requestId.hex);
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -1063,7 +1095,7 @@ class WindowsComputerUseHelperClient {
       if (frame.messageType === 'error') {
         const value = asRecord(parsed, 'Computer Use Windows helper rejected the request');
         if (
-          pending.semantic?.submitted &&
+          (pending.semantic?.submitted || pending.dispatchCallbacks !== undefined) &&
           (typeof value['accepted'] !== 'boolean' ||
             typeof value['code'] !== 'string' ||
             !/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(value['code']))
@@ -1075,9 +1107,15 @@ class WindowsComputerUseHelperClient {
           (pending.stopsSession || value['accepted'] === true)
         )
           this.markSemanticUncertain(pending);
-        pending.reject(
-          Object.assign(new Error(code), { code, accepted: value['accepted'] === true }),
-        );
+        const rejection = Object.assign(new Error(code), {
+          code,
+          accepted: value['accepted'] === true,
+        });
+        if (pending.dispatchCallbacks === undefined) pending.reject(rejection);
+        else
+          void pending.dispatchCallbacks
+            .response(value['accepted'] === true)
+            .then(() => pending.reject(rejection), pending.reject);
         this.shutdownIfIdle();
         return;
       }
@@ -1108,18 +1146,20 @@ class WindowsComputerUseHelperClient {
           ? error
           : new Error('Computer Use Windows helper returned an invalid response');
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed('abortTransport');
       pending.reject(invalid);
       this.abortTransport(invalid);
     }
   }
 
-  private failAll(error: unknown): void {
+  private failAll(error: unknown, cause: 'failAll' | 'abortTransport' = 'failAll'): void {
     // Whatever armed the idle teardown is being failed right here, and the next request connects a
     // fresh helper that the old session's teardown has no claim on.
     this.idleShutdownPending = false;
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed(cause);
       clearTimeout(pending.timeout);
       pending.reject(normalized);
       this.pending.delete(requestId);
@@ -1127,7 +1167,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private abortTransport(error: Error): void {
-    this.failAll(error);
+    this.failAll(error, 'abortTransport');
     this.socket?.destroy();
     this.socket = null;
     this.child?.kill();

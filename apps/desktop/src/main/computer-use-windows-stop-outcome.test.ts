@@ -1307,6 +1307,58 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     expect(windowsTargetMayStart(retried.state, target)).toBe(false);
   });
 
+  it.each([false, true])(
+    'R21 pending K-1 supersedes release regardless of retry order (%s)',
+    (k1First) => {
+      const held = decideWindowsStop(state({ rows: [background] }), {
+        ...approval,
+        storage: failed,
+      }).state;
+      let pending = decideWindowsStop(held, {
+        ...transportTimeout,
+        storage: { status: 'failed', holdId: 'k1-pending' },
+      }).state;
+      if (k1First)
+        pending = decideWindowsStop(pending, {
+          kind: 'retry_storage',
+          holdId: 'k1-pending',
+          status: 'written',
+        }).state;
+      const retried = decideWindowsStop(pending, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'written',
+      });
+      expect(retried).toMatchObject({
+        freshSession: false,
+        refusal: 'release_superseded',
+        freshSessionRequirements: [],
+      });
+      expect(windowsTargetMayStart(retried.state, target)).toBe(false);
+    },
+  );
+
+  it.each([written, failed])('R18 cancels a stored but unsent row (%s)', (storage) => {
+    const recorded = decideWindowsStop(state({ killRequested: true }), dispatch);
+    const canceled = decideWindowsStop(recorded.state, {
+      kind: 'dispatch_canceled',
+      helperGeneration: 1,
+      requestId: row.requestId,
+      storage,
+    });
+    expect(canceled.state.rows).toHaveLength(storage.status === 'written' ? 0 : 1);
+    if (storage.status === 'failed') {
+      expect(windowsTargetMayStart(canceled.state, target)).toBe(false);
+      expect(
+        decideWindowsStop(canceled.state, {
+          kind: 'retry_storage',
+          holdId: storage.holdId,
+          status: 'written',
+        }).state.rows,
+      ).toEqual([]);
+    }
+  });
+
   it('R24 held approval without newer isolation still releases on retry', () => {
     const held = decideWindowsStop(state({ quarantines: [quarantine] }), {
       ...approval,

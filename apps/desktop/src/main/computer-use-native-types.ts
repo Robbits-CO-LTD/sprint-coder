@@ -5,6 +5,15 @@ import type {
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
+/** Main-only callbacks. The Windows client never owns or receives a storage implementation. */
+export type WindowsDispatchCallbacks = Readonly<{
+  beforeWrite(helperGeneration: number, wireRequestId: string): Promise<void>;
+  assertSend(): void;
+  canceled(): Promise<void>;
+  unconfirmed(cause: 'transport_timeout' | 'failAll' | 'abortTransport'): void;
+  response(accepted: boolean): Promise<void>;
+}>;
+
 /** Local transport proof only. A native error response can never create this instance. */
 export class ComputerUseDiscoveryNotSubmittedError extends Error {}
 
@@ -67,7 +76,8 @@ export type ComputerUseNativeAddon = Readonly<{
   approvalDiscard?(input: unknown): unknown;
   /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
   dispatchApproved?(input: unknown): unknown;
-  dispatch?(input: unknown): unknown;
+  dispatch?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
+  dispatchLedgerSupported?: true;
   /**
    * Windows helper only (#785 T15-4w; macOS is T15-4m). Reads the value of the one node a `copy`
    * names and answers `{ ok: true, text }` or `{ ok: false }`. No input capability. The host adapter

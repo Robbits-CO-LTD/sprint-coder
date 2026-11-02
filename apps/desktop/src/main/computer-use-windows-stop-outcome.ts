@@ -1,6 +1,7 @@
 /**
  * #988 N3 PR1: kill-stop result types, generation events and the pure §2.6 state-table kernel.
- * Not connected to product paths. Source of truth:
+ * PR5a connects dispatch recording/response only when Host storage is injected (default off).
+ * Helper lifetime/exit integration remains deferred. Source of truth:
  * tasks/designs/adr-computer-use-windows-kill-stop-20261102.md §2.2–§2.6, §3.1, §4.1, §6.1.
  *
  * This module is a leaf: it imports nothing at runtime, so later host/client PRs can import it
@@ -132,6 +133,9 @@ export type WindowsStorageHold = Readonly<{
    * its retry must not clear it: retry_storage drops the hold and keeps the quarantine
    * (release_superseded, fail-closed). Kept on the hold rather than as a version column on the
    * quarantine, whose stored row holds only pid, creation time and reason (§2.2 の 5).
+   * Before that evidence lands, a non-release hold for the same target (or unknown targets)
+   * also supersedes the release on retry. This closes the window where an older release retries
+   * before a pending K-1 write, independently of hold order.
    */
   releaseSuperseded?: true;
   /** Native blockers released only after this write lands (§3.1 の 5: transfer first). */
@@ -183,6 +187,13 @@ type ResponseOutcome =
  * Main facts, not untrusted wire objects or a persistence implementation.
  */
 export type WindowsGenerationEvent =
+  /** Host proves this written request never reached socket.write; not a helper response. */
+  | Readonly<{
+      kind: 'dispatch_canceled';
+      helperGeneration: number;
+      requestId: string;
+      storage: StorageWrite;
+    }>
   | Readonly<{
       kind: 'kill_requested' | 'exit_wait_exceeded' | 'pipe_closed';
       helperGeneration: number;
@@ -706,6 +717,7 @@ export function decideWindowsStop(
     if (
       event.kind !== 'dispatch_gate' &&
       event.kind !== 'before_dispatch' &&
+      event.kind !== 'dispatch_canceled' &&
       (event.helperGeneration < state.helperGeneration || !helperMayBeAlive(state))
     ) {
       return decision;
@@ -715,6 +727,22 @@ export function decideWindowsStop(
     (row) => row.helperGeneration === state.helperGeneration,
   );
   switch (event.kind) {
+    case 'dispatch_canceled': {
+      const row = state.rows.find(
+        (item) =>
+          item.helperGeneration === event.helperGeneration && item.requestId === event.requestId,
+      );
+      if (row === undefined) return decision;
+      // Cancel only this unsent row. An exit classification or quarantine is never rolled back.
+      return {
+        ...decision,
+        state: persist(state, event.storage, {
+          operation: 'response',
+          recovery: 'reflect_response',
+          changes: [{ row, action: 'delete' }],
+        }).state,
+      };
+    }
     case 'pipe_closed':
       return decision;
     case 'kill_requested':
@@ -1003,7 +1031,16 @@ export function decideWindowsStop(
       if (hold.recovery === 'restore_store') return refuse('restore_requires_rows');
       // Newer isolation evidence for the target landed after this release was decided: drop the
       // release and keep the quarantine (fail-closed). No fresh session is granted.
-      if (hold.releaseSuperseded === true) {
+      const releaseTarget = hold.releaseTarget;
+      const pendingEvidence =
+        releaseTarget !== undefined &&
+        state.holds.some(
+          (item) =>
+            item.operation !== 'release' &&
+            (item.targets === 'unknown' ||
+              item.targets.some((target) => sameTarget(target, releaseTarget))),
+        );
+      if (hold.releaseSuperseded === true || pendingEvidence) {
         return refuse('release_superseded', {
           state: { ...state, holds: state.holds.filter((item) => item.id !== hold.id) },
         });

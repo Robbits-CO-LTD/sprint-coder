@@ -667,6 +667,26 @@ describe('Computer Use native Main adapter', () => {
     },
   );
 
+  it('keeps the original Windows identity after a refused resume without a ledger', async () => {
+    const original = '9007199254740993';
+    const response = { processStartTime: original };
+    const { host, startInput, startSession } = await win32TicketScenario(
+      true,
+      undefined,
+      {},
+      response,
+    );
+    response.processStartTime = '9007199254740994';
+    await expect(host.startSession({ ...startInput, resume: true })).rejects.toThrow(
+      'native_session_identity_mismatch',
+    );
+    response.processStartTime = original;
+    await expect(host.startSession({ ...startInput, resume: true })).resolves.toMatchObject({
+      sessionId: startInput.sessionId,
+    });
+    expect(startSession.mock.calls[2]?.[0]).toMatchObject({ pid: 42, processStartTime: original });
+  });
+
   it.each([undefined, '9007199254740993'])(
     'accepts creation time %s when the recorded identity is missing',
     async (processStartTime) => {

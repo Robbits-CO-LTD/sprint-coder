@@ -30,7 +30,9 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
   ComputerUseNativeUnavailableError,
   createComputerUseNativeHost,
+  type ComputerUseNativeHostOptions,
 } from './computer-use-native-host';
+import type { WindowsLedgerRow } from './computer-use-windows-stop-outcome';
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
@@ -80,12 +82,14 @@ vi.mock('node:net', async (importOriginal) => {
 });
 
 class FakeHelperSocket extends EventEmitter {
+  readonly writes: Buffer[] = [];
   destroyed = false;
   holdWriteCallbacks = false;
   readonly writeCallbacks: Array<(error?: Error | null) => void> = [];
   onWrite: ((frame: Buffer) => void) | null = null;
   write(chunk: Buffer, callback?: (error?: Error | null) => void): boolean {
     const written = Buffer.from(chunk);
+    this.writes.push(written);
     if (callback !== undefined) this.writeCallbacks.push(callback);
     // A real socket never calls back or delivers a response inside `write`.
     queueMicrotask(() => {
@@ -440,6 +444,7 @@ function discoveryResponders(): Readonly<Record<string, Responder>> {
 function createTarget(
   customResponders: Readonly<Record<string, Responder>> = responders(),
   configure?: (helper: FakeWindowsHelper) => void,
+  options: ComputerUseNativeHostOptions = {},
 ): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
@@ -486,6 +491,7 @@ function createTarget(
   );
   const host = createComputerUseNativeHost(binding(addon), 'win32', {
     windowsPhysicalBoundsToDip: (value) => value,
+    ...options,
   });
   return {
     addon,
@@ -2957,6 +2963,73 @@ int main() {
   });
 
   // ---- the preflight round trip (S5-a) -------------------------------------------------------
+  it('R18 ledger is persisted before the real transport sends and deleted after success', async () => {
+    const rows = new Map<string, WindowsLedgerRow>();
+    const order: string[] = [];
+    let rowsAtSend = 0;
+    const base = responders();
+    const target = createTarget(
+      {
+        ...base,
+        start_session: (metadata) => {
+          const [type, result] = base['start_session']!(metadata);
+          return [
+            type,
+            { ...(result as Record<string, unknown>), processStartTime: '133000000000000001' },
+          ];
+        },
+        preflight: (metadata) => ['preflight_result', preflightReceipt(metadata)],
+        dispatch: (metadata) => {
+          order.push('send');
+          rowsAtSend = rows.size;
+          return [
+            'dispatch_result',
+            {
+              result: 'completed',
+              reasonCode: null,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: 0,
+              inputAttemptCount: 1,
+            },
+          ];
+        },
+      },
+      undefined,
+      {
+        windowsLedger: {
+          write: async (row) => {
+            order.push('write');
+            rows.set(row.requestId, row);
+            return true;
+          },
+          update: async (row) => {
+            rows.set(row.requestId, row);
+            return true;
+          },
+          delete: async (row) => {
+            order.push('delete');
+            rows.delete(row.requestId);
+            return true;
+          },
+        },
+      },
+    );
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await expect(
+      target.host.dispatch({
+        session,
+        requestId: 'ledger-1',
+        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+        observationRevision: 1,
+        cancelEpoch: 0,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ result: 'completed' });
+    expect(order).toEqual(['write', 'send', 'delete']);
+    expect(rowsAtSend).toBe(1);
+    expect(rows.size).toBe(0);
+  });
+
   const preflightReceipt = (
     metadata: Readonly<Record<string, unknown>>,
     overrides: Record<string, unknown> = {},
@@ -2972,6 +3045,298 @@ int main() {
     cancelEpoch: metadata['cancelEpoch'],
     observationRevision: metadata['observationRevision'],
     ...overrides,
+  });
+  const ledgerActions = [
+    { name: 'click', action: { type: 'click', x: 0.5, y: 0.5, button: 'left' }, kind: 'SendInput' },
+    {
+      name: 'scroll',
+      action: { type: 'scroll', x: 0.5, y: 0.5, deltaX: 0, deltaY: 1 },
+      kind: 'SendInput',
+    },
+    { name: 'key', action: { type: 'key', key: 'Enter' }, kind: 'SendInput' },
+    { name: 'type', action: { type: 'type', text: 'x' }, kind: 'SendInput' },
+    {
+      name: 'semantic',
+      action: { type: 'set_text', targetId: 'node-1', text: 'x' },
+      kind: 'semantic',
+    },
+    { name: 'paste', action: { type: 'type', text: 'x' }, kind: 'paste' },
+  ] as const;
+  function ledgerTarget() {
+    const rows = new Map<string, WindowsLedgerRow>();
+    const written: WindowsLedgerRow[] = [];
+    const control = {
+      failWrite: false,
+      failReflect: false,
+      creationTime: '133000000000000001' as string | undefined,
+      response: null as HelperResponse | null,
+      wait: null as Promise<void> | null,
+    };
+    const base = responders();
+    const target = createTarget(
+      {
+        ...base,
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+        cancel: (metadata) => [
+          'dispatch_result',
+          {
+            result: 'canceled',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ],
+        start_session: (metadata) => {
+          const [type, result] = base['start_session']!(metadata);
+          return [
+            type,
+            { ...(result as Record<string, unknown>), processStartTime: control.creationTime },
+          ];
+        },
+        preflight: (metadata) => [
+          'preflight_result',
+          preflightReceipt(metadata, { inputAttemptCount: 1 }),
+        ],
+        dispatch: (metadata) =>
+          control.response ?? [
+            'dispatch_result',
+            {
+              result: 'completed',
+              reasonCode: null,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: 1,
+            },
+          ],
+      },
+      undefined,
+      {
+        windowsLedger: {
+          write: async (row) => {
+            written.push(row);
+            if (control.wait !== null) await control.wait;
+            if (control.failWrite) return false;
+            rows.set(row.requestId, row);
+            return true;
+          },
+          update: async (row) => {
+            if (control.failReflect) return false;
+            rows.set(row.requestId, row);
+            return true;
+          },
+          delete: async (row) => {
+            if (control.failReflect) return false;
+            rows.delete(row.requestId);
+            return true;
+          },
+        },
+      },
+    );
+    const dispatch = (
+      session: Awaited<ReturnType<typeof startSession>>,
+      sample = ledgerActions[0] as (typeof ledgerActions)[number],
+      id = 'ledger-request',
+    ) =>
+      target.host
+        .dispatch({
+          session,
+          requestId: id,
+          action: sample.action,
+          observationRevision: 1,
+          cancelEpoch: 0,
+          signal: new AbortController().signal,
+          ...(sample.name === 'paste' ? { inputKind: 'paste' as const } : {}),
+        })
+        .then(
+          () => 'resolved',
+          () => 'rejected',
+        );
+    return { ...target, rows, written, control, dispatch };
+  }
+  const dispatchWrites = (socket: FakeHelperSocket) =>
+    socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it.each(ledgerActions)('R5/R6 keeps $name rows for each transport loss', async (sample) => {
+    for (const loss of ['timeout', 'failAll', 'abortTransport'] as const) {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, `session-${loss}`, 'turn-1');
+      target.helper().holdOnly('dispatch');
+      const result = target.dispatch(session, sample);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(target.written[0]).toMatchObject({
+        kind: sample.kind,
+        identity: { pid: 42, creationTime: '133000000000000001' },
+      });
+      if (loss === 'timeout')
+        await vi.advanceTimersByTimeAsync(operationTimeoutMilliseconds('dispatch'));
+      else if (loss === 'failAll')
+        sockets.at(-1)!.emit('error', new Error('synthetic transport loss'));
+      else {
+        const socket = sockets.at(-1)!;
+        const request = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+        socket.emit(
+          'data',
+          encodeComputerUseNativeFrame({
+            ...request,
+            messageType: 'dispatch_result',
+            metadata: Buffer.from('{'),
+            binary: Buffer.alloc(0),
+          }),
+        );
+      }
+      await result;
+      expect(target.rows.size).toBe(1);
+    }
+  });
+  it.each([false, true])(
+    'R18 identity missing or initial write failed (%s) never sends',
+    async (missing) => {
+      const target = ledgerTarget();
+      if (missing) target.control.creationTime = undefined;
+      else target.control.failWrite = true;
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+      expect(target.rows.size).toBe(0);
+    },
+  );
+  it.each(['success', 'rejected', 'unconfirmed', 'invalid'] as const)(
+    'R19a reflects only verified %s responses',
+    async (outcome) => {
+      const target = ledgerTarget();
+      if (outcome !== 'success')
+        target.control.response = [
+          'error',
+          outcome === 'invalid'
+            ? { code: 'ticket_invalid', accepted: 'false' }
+            : { code: 'ticket_invalid', accepted: outcome === 'unconfirmed' },
+        ];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      expect(target.rows.size).toBe(outcome === 'success' || outcome === 'rejected' ? 0 : 1);
+      if (outcome === 'unconfirmed')
+        expect([...target.rows.values()][0]?.state).toBe('effect_unconfirmed');
+    },
+  );
+  it.each([false, true])(
+    'R19a failed delete/update blocks start and dispatch until retry (%s)',
+    async (update) => {
+      const target = ledgerTarget();
+      target.control.failReflect = true;
+      if (update)
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.dispatch(session);
+      expect(target.rows.size).toBe(1);
+      await target.dispatch(session, ledgerActions[0], 'second-request');
+      await expect(startSession(target.host, 'session-2', 'turn-2')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(target.helper().served.filter((op) => op === 'dispatch')).toHaveLength(1);
+      target.control.failReflect = false;
+      target.control.response = null;
+      await expect(startSession(target.host, 'session-2', 'turn-2')).resolves.toMatchObject({
+        sessionId: 'session-2',
+      });
+      expect(target.rows.size).toBe(update ? 1 : 0);
+      await target.dispatch(session, ledgerActions[0], 'third-request');
+      expect(target.helper().served.filter((op) => op === 'dispatch')).toHaveLength(2);
+    },
+  );
+  it.each([false, true])(
+    'R18 cancels an unsent stored row after Stop during storage (%s)',
+    async (failDelete) => {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      let resume!: () => void;
+      target.control.wait = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      target.control.failReflect = failDelete;
+      const result = target.dispatch(session);
+      await vi.advanceTimersByTimeAsync(1);
+      await target.host.cancel(session, 1);
+      resume();
+      await result;
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+      expect(target.rows.size).toBe(failDelete ? 1 : 0);
+    },
+  );
+
+  it('R18 identity mismatch with ledger stops the existing lifetime', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.creationTime = '133000000000000002';
+    await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
+      'native_session_identity_mismatch',
+    );
+    await target.dispatch(session);
+    expect(target.helper().served).not.toContain('dispatch');
+    expect(target.helper().served).toContain('stop_pending_start');
+  });
+  it('R19a an invalid success envelope cannot delete a row', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.response = [
+      'dispatch_result',
+      {
+        result: 'completed',
+        reasonCode: null,
+        sessionId: 'session-1',
+        cancelEpoch: 0,
+        inputAttemptCount: 1,
+        accepted: false,
+      },
+    ];
+    await target.dispatch(session);
+    expect(target.rows.size).toBe(1);
+  });
+  it('R18 helper kill during storage never writes the dispatch frame', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    let resume!: () => void;
+    target.control.wait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const result = target.dispatch(session);
+    await vi.advanceTimersByTimeAsync(1);
+    children.at(-1)!.kill();
+    await vi.advanceTimersByTimeAsync(1);
+    resume();
+    await result;
+    expect(target.helper().served).not.toContain('dispatch');
+    expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+    expect(target.rows.size).toBe(0);
+  });
+  it('R18 a hold arriving during another write refuses and cancels that unsent row', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    let resume!: () => void;
+    target.control.wait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const first = target.dispatch(session);
+    await vi.advanceTimersByTimeAsync(1);
+    target.control.wait = null;
+    target.control.failReflect = true;
+    await target.dispatch(session, ledgerActions[0], 'other-request');
+    target.control.failReflect = false;
+    resume();
+    await first;
+    expect(target.helper().served.filter((op) => op === 'dispatch')).toHaveLength(1);
+    expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(1);
+    expect(target.rows.size).toBe(1);
   });
   const ticketedTable = (
     seen: Array<Readonly<Record<string, unknown>>>,

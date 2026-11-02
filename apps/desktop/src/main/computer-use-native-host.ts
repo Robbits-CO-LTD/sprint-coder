@@ -56,6 +56,20 @@ import {
 import { computerUseActionDigest } from './computer-use-action';
 import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
+import type { WindowsDispatchCallbacks } from './computer-use-native-types';
+import {
+  decideWindowsStop,
+  windowsTargetMayStart,
+  type WindowsLedgerRow,
+  type WindowsStopState,
+  type WindowsStopEvent,
+} from './computer-use-windows-stop-outcome';
+
+export type WindowsDispatchLedgerStorage = Readonly<{
+  write(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  update(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
+}>;
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
 export const COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE = 'native_picker_unavailable' as const;
@@ -128,6 +142,8 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
+  /** PR5a opt-in only. Persistence implementation and foreground handoffs belong to PR4/PR5b. */
+  windowsLedger?: WindowsDispatchLedgerStorage;
   /**
    * Whether the build attests classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). Production sets
    * it from the eligibility compiled into Main (`computerUseClassifierV2Attested`, C5-1), which is
@@ -194,6 +210,230 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  const ledger = platform === 'win32' ? options.windowsLedger : undefined;
+  const ledgerStates = new Map<number, WindowsStopState>();
+  let holdSequence = 0;
+  const pendingWrites = new Map<
+    string,
+    { generation: number; write: () => boolean | Promise<boolean> }
+  >();
+  const writing = new Set<string>();
+  const ledgerState = (generation: number): WindowsStopState => {
+    let state = ledgerStates.get(generation);
+    if (state === undefined) {
+      // PR7 will connect lifetime/exit classification. These records only track dispatches.
+      state = {
+        helperGeneration: generation,
+        helperLaunched: true,
+        entry: 'E1',
+        stopOwnerId: '',
+        killRequested: false,
+        exitConfirmed: false,
+        exitWaitExceeded: false,
+        result: null,
+        rows: [],
+        quarantines: [],
+        holds: [],
+        owners: [],
+        nativeBlockers: [],
+        foregroundDiscardPending: false,
+      };
+      ledgerStates.set(generation, state);
+    }
+    return state;
+  };
+  const ledgerEvent = (generation: number, event: WindowsStopEvent) => {
+    const decision = decideWindowsStop(ledgerState(generation), event);
+    ledgerStates.set(generation, decision.state);
+    return decision;
+  };
+  const tryWrite = async (write: () => boolean | Promise<boolean>): Promise<boolean> => {
+    try {
+      return (await write()) === true;
+    } catch {
+      return false;
+    }
+  };
+  const retryLedger = async (): Promise<void> => {
+    for (const [holdId, pending] of pendingWrites) {
+      if (writing.has(holdId)) continue;
+      writing.add(holdId);
+      try {
+        if (await tryWrite(pending.write)) {
+          ledgerEvent(pending.generation, { kind: 'retry_storage', holdId, status: 'written' });
+          pendingWrites.delete(holdId);
+        }
+      } finally {
+        writing.delete(holdId);
+      }
+    }
+  };
+  const ledgerBlocked = (pid: unknown, creationTime?: string | null): boolean =>
+    [...ledgerStates.values()].some((state) =>
+      creationTime != null && typeof pid === 'number'
+        ? !windowsTargetMayStart(state, { pid, creationTime })
+        : state.holds.some(
+            (hold) =>
+              hold.targets === 'unknown' ||
+              hold.targets.some((t) => pid === undefined || t.pid === pid),
+          ),
+    );
+  const dispatchLedger = (
+    input: Parameters<ComputerUseNativeHost['dispatch']>[0],
+    internal: InternalNativeSession,
+  ): (WindowsDispatchCallbacks & { completed(): Promise<void> }) | undefined => {
+    if (ledger === undefined) return undefined;
+    let row: WindowsLedgerRow | undefined;
+    const identity =
+      typeof internal.raw['pid'] === 'number' && typeof internal.raw.processStartTime === 'string'
+        ? { pid: internal.raw['pid'], creationTime: internal.raw.processStartTime }
+        : null;
+    const deny = (): never => {
+      throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
+        code: 'NATIVE_STOP_UNCONFIRMED',
+        accepted: false,
+      });
+    };
+    const assertSend = () => {
+      if (
+        row === undefined ||
+        input.signal.aborted ||
+        inputQuarantined() ||
+        startOwners.get(input.session.sessionId)?.stopped ||
+        ledgerBlocked(identity?.pid, identity?.creationTime)
+      )
+        deny();
+      if (
+        row !== undefined &&
+        ledgerEvent(row.helperGeneration, {
+          kind: 'dispatch_gate',
+          helperGeneration: row.helperGeneration,
+          identity,
+        }).dispatch !== 'allow'
+      )
+        deny();
+    };
+    const reflect = async (status: 'success' | 'rejected' | 'effect_unconfirmed' | 'canceled') => {
+      const current = row;
+      if (current === undefined) return;
+      if (
+        !ledgerState(current.helperGeneration).rows.some(
+          (item) => item.requestId === current.requestId,
+        )
+      )
+        return;
+      const holdId = `dispatch-write-${++holdSequence}`;
+      const storage = { status: 'failed', holdId } as const;
+      // Install the hold before awaiting I/O so a concurrent start cannot slip through.
+      ledgerEvent(
+        current.helperGeneration,
+        status === 'canceled'
+          ? {
+              kind: 'dispatch_canceled',
+              helperGeneration: current.helperGeneration,
+              requestId: current.requestId,
+              storage,
+            }
+          : status === 'rejected'
+            ? {
+                kind: 'response',
+                helperGeneration: current.helperGeneration,
+                requestId: current.requestId,
+                storage,
+                status,
+                accepted: false,
+              }
+            : {
+                kind: 'response',
+                helperGeneration: current.helperGeneration,
+                requestId: current.requestId,
+                storage,
+                status,
+                accepted: true,
+              },
+      );
+      const write = () =>
+        status === 'effect_unconfirmed'
+          ? ledger.update({ ...current, state: 'effect_unconfirmed' })
+          : ledger.delete(current);
+      pendingWrites.set(holdId, { generation: current.helperGeneration, write });
+      writing.add(holdId);
+      try {
+        if (await tryWrite(write)) {
+          ledgerEvent(current.helperGeneration, {
+            kind: 'retry_storage',
+            holdId,
+            status: 'written',
+          });
+          pendingWrites.delete(holdId);
+        }
+      } finally {
+        writing.delete(holdId);
+      }
+    };
+    return {
+      beforeWrite: async (helperGeneration, requestId) => {
+        if (
+          input.signal.aborted ||
+          inputQuarantined() ||
+          ledgerBlocked(identity?.pid, identity?.creationTime)
+        )
+          deny();
+        if (
+          ledgerEvent(helperGeneration, { kind: 'dispatch_gate', helperGeneration, identity })
+            .dispatch !== 'allow' ||
+          identity === null
+        )
+          deny();
+        if (identity === null) return;
+        const candidate: WindowsLedgerRow = {
+          helperGeneration,
+          sessionId: input.session.sessionId,
+          requestId,
+          identity,
+          kind:
+            input.inputKind === 'paste'
+              ? 'paste'
+              : ['invoke', 'set_text', 'select', 'toggle', 'expand_collapse'].includes(
+                    input.action.type,
+                  )
+                ? 'semantic'
+                : 'SendInput',
+          inputPath: 'normal',
+          state: 'awaiting_response',
+        };
+        const stored = await tryWrite(() => ledger.write(candidate));
+        const decision = ledgerEvent(helperGeneration, {
+          kind: 'before_dispatch',
+          helperGeneration,
+          sessionId: candidate.sessionId,
+          requestId,
+          identity,
+          input: { kind: candidate.kind, inputPath: candidate.inputPath },
+          storage: stored
+            ? { status: 'written' }
+            : { status: 'failed', holdId: `dispatch-write-${++holdSequence}` },
+        });
+        if (stored) row = candidate;
+        if (decision.dispatch !== 'allow') deny();
+        assertSend();
+      },
+      assertSend,
+      canceled: () => reflect('canceled'),
+      unconfirmed: (cause) => {
+        if (row !== undefined)
+          ledgerEvent(row.helperGeneration, {
+            kind: 'input_unconfirmed',
+            helperGeneration: row.helperGeneration,
+            requestId: row.requestId,
+            cause,
+            storage: { status: 'written' },
+          });
+      },
+      response: (accepted) => reflect(accepted ? 'effect_unconfirmed' : 'rejected'),
+      completed: () => reflect('success'),
+    };
+  };
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
   const inputAttemptsBySession = new Map<string, number>();
@@ -763,6 +1003,7 @@ export function createComputerUseNativeHost(
     nativeRoute: 'v1' | 'v2' | undefined,
     owner: StartOwner,
   ): Promise<ComputerUseNativeSession> => {
+    // SetForegroundWindow inside native start is not ledgered here; PR5b owns that handoff.
     assertStartOwner(owner);
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
@@ -797,10 +1038,13 @@ export function createComputerUseNativeHost(
       );
       if (
         existing.platform === 'win32' &&
-        typeof existing.raw.processStartTime === 'string' &&
-        session.raw.processStartTime !== existing.raw.processStartTime
-      )
+        ((typeof existing.raw.processStartTime === 'string' &&
+          session.raw.processStartTime !== existing.raw.processStartTime) ||
+          (ledger !== undefined && session.raw['pid'] !== existing.raw['pid']))
+      ) {
+        if (ledger !== undefined) await stopStartOwner(owner).catch(() => undefined);
         throw new ComputerUseNativeUnavailableError('native_session_identity_mismatch');
+      }
       assertStartOwner(owner);
       owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
       sessions.set(session.sessionId, session);
@@ -974,6 +1218,17 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
+      if (ledger !== undefined) {
+        await retryLedger();
+        const existing = sessions.get(startInput.sessionId);
+        if (
+          ledgerBlocked(
+            existing?.raw['pid'] ?? pidsByIdentity.get(startInput.profile.identityDigest),
+            existing?.raw.processStartTime,
+          )
+        )
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+      }
       requireMethod('startSession');
       const { classifierRoute, ...input } = startInput;
       if (!Number.isSafeInteger(input.cancelEpoch) || input.cancelEpoch < 0)
@@ -1272,6 +1527,7 @@ export function createComputerUseNativeHost(
     },
 
     dispatch: async (input): Promise<ComputerUseNativeActionResult> => {
+      if (ledger !== undefined) await retryLedger();
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
@@ -1355,17 +1611,33 @@ export function createComputerUseNativeHost(
         }
       }
       let value: unknown;
+      const callbacks = dispatchLedger(input, internal);
       try {
-        value = await invoke(
-          'dispatch',
-          ticket === null ? dispatchRequest : { ...dispatchRequest, ticket },
-        );
+        const request = ticket === null ? dispatchRequest : { ...dispatchRequest, ticket };
+        if (callbacks === undefined) value = await invoke('dispatch', request);
+        else {
+          requireMethod('dispatch');
+          if (addon?.dispatchLedgerSupported !== true || addon.dispatch === undefined)
+            throw new ComputerUseNativeUnavailableError('native_unavailable');
+          value = await addon.dispatch(request, callbacks);
+        }
       } catch (error) {
         const preDispatch = classifyComputerUseNativeDispatchFailure(error);
         if (preDispatch !== null) return preDispatch;
         throw error;
       }
-      return parseDispatchRecord(value, input, internal, actionDigest);
+      if (
+        callbacks !== undefined &&
+        Object.keys(asRecord(value, 'native_action_result_invalid')).length !== 5
+      )
+        throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+      const result = parseDispatchRecord(value, input, internal, actionDigest);
+      if (callbacks !== undefined) {
+        if (result.result !== 'completed' || result.reasonCode !== null)
+          throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+        await callbacks.completed();
+      }
+      return result;
     },
 
     cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
