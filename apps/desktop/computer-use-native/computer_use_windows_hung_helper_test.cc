@@ -1,6 +1,7 @@
 // Test-only entry points; the pipe still runs the production host and hang hook.
 #include <windows.h>
 #include <cstdio>
+#include <cwchar>
 #include <string>
 #include <string_view>
 
@@ -53,6 +54,40 @@ int wmain(int argc, wchar_t **argv) {
     if (query.window == nullptr) return 4;
     SetForegroundWindow(query.window);
     std::printf("%llu\n", static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(query.window)));
+    return 0;
+  }
+  // Closes only what the seam can prove it opened: a visible top-level window whose title contains
+  // the seam's unique scratch file name and whose process image is notepad.exe. WM_CLOSE lets
+  // Notepad ask about unsaved text; no process is terminated. Prints the number of matches.
+  if (argc == 3 && (std::wstring_view(argv[1]) == L"--close-titled" ||
+                    std::wstring_view(argv[1]) == L"--count-titled")) {
+    struct TitleQuery { std::wstring_view needle; bool close; unsigned matched; } query{
+        argv[2], std::wstring_view(argv[1]) == L"--close-titled", 0};
+    if (query.needle.size() < 16) return 5;
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+      auto *query = reinterpret_cast<TitleQuery *>(parameter);
+      if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER) != nullptr) return TRUE;
+      wchar_t title[1024]{};
+      const int length = GetWindowTextW(window, title, 1024);
+      if (length <= 0 || std::wstring_view(title, length).find(query->needle) == std::wstring_view::npos)
+        return TRUE;
+      DWORD pid = 0;
+      GetWindowThreadProcessId(window, &pid);
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (process == nullptr) return TRUE;
+      wchar_t image[32768]{};
+      DWORD size = 32768;
+      const BOOL named = QueryFullProcessImageNameW(process, 0, image, &size);
+      CloseHandle(process);
+      constexpr std::wstring_view suffix = L"\\notepad.exe";
+      if (!named || size < suffix.size() ||
+          _wcsicmp(image + (size - suffix.size()), suffix.data()) != 0)
+        return TRUE;
+      query->matched += 1;
+      if (query->close) PostMessageW(window, WM_CLOSE, 0, 0);
+      return TRUE;
+    }, reinterpret_cast<LPARAM>(&query));
+    std::printf("%u\n", query.matched);
     return 0;
   }
   if (argc == 3 && std::wstring_view(argv[1]) == L"--identity") {

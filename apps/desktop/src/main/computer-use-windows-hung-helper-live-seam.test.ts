@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type * as NodeChildProcess from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -109,9 +109,15 @@ let ready = false;
 const probes = new Map<string, Record<string, unknown>>();
 // Every skipped live case is counted and printed once, so a skip never passes silently.
 const notRun: Array<{ case: string; reason: string }> = [];
+// The only NOT_RUN the CI live job expects: windows-2022 does not make System32 Notepad
+// full_access_app, so the session cases cannot start there. Any other reason in that job (a broken
+// --identity, a Store redirect, a missing owned window, ...) fails the case instead of skipping.
+const ciExpectedNotRun = 'classic_notepad_not_eligible';
 function skipWith(context: TestContext, reason: string): never {
   notRun.push({ case: context.task.name, reason });
   console.log(`HUNG_HELPER_NOT_RUN ${JSON.stringify({ case: context.task.name, reason })}`);
+  if (ci && enabled && reason !== ciExpectedNotRun)
+    throw new Error(`Unexpected NOT_RUN reason in the CI live seam: ${reason}`);
   return context.skip(reason);
 }
 
@@ -200,6 +206,85 @@ async function run(file: string, args: string[], timeout: number, verbatim = fal
     },
   );
 }
+// The product attests every spawned helper with Windows PowerShell under a fixed 10 s deadline
+// (attestSpawnedWindowsComputerUseHelper: Import-Module of the Security module, Get-Process of the
+// helper and its MainModule, SHA-256 of the image, Get-AuthenticodeSignature of the image). On a
+// fresh runner the first module load and the first Authenticode/catalog lookup of a newly built
+// image can take longer than that, and an attestation killed at 10 s leaves nothing warmed for
+// the next one. So the same steps run once here, on the same powershell.exe and module path and on
+// the exact images the seam spawns (hung and healthy), under a generous deadline, and each stage is
+// printed as HUNG_HELPER_ATTEST_WARMUP. A failed or expired warm-up fails the run (never NOT_RUN).
+// The product deadline, attestation and process are untouched: a later attestation that still
+// exceeds 10 s fails its case and is a product finding.
+const attestWarmupTimeout = 120_000;
+function attestWarmup() {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$total = [System.Diagnostics.Stopwatch]::StartNew()',
+    '$stage = [System.Diagnostics.Stopwatch]::StartNew()',
+    'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"',
+    '$importMs = $stage.ElapsedMilliseconds',
+    '$stage.Restart()',
+    '$self = Get-Process -Id $PID -ErrorAction Stop',
+    'try { $null = $self.MainModule.FileName } finally { $self.Dispose() }',
+    '$mainModuleMs = $stage.ElapsedMilliseconds',
+    '$images = foreach ($imagePath in @($env:SPRINT_CODER_SEAM_WARM_HUNG, $env:SPRINT_CODER_SEAM_WARM_HEALTHY)) {',
+    '  $stage.Restart()',
+    '  $stream = [System.IO.File]::Open($imagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)',
+    '  try {',
+    '    $sha = [System.Security.Cryptography.SHA256]::Create()',
+    "    try { $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }",
+    '  } finally { $stream.Dispose() }',
+    '  $shaMs = $stage.ElapsedMilliseconds',
+    '  $stage.Restart()',
+    '  $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $imagePath',
+    '  [pscustomobject]@{image=[System.IO.Path]::GetFileName($imagePath);digest=$digest;sha256_ms=$shaMs;authenticode_ms=$stage.ElapsedMilliseconds;signature=$signature.Status.ToString()}',
+    '}',
+    '[pscustomobject]@{import_ms=$importMs;main_module_ms=$mainModuleMs;images=@($images);script_ms=$total.ElapsedMilliseconds} | ConvertTo-Json -Compress -Depth 4',
+  ].join('\n');
+  const start = performance.now();
+  const warm = spawnSync(
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: attestWarmupTimeout,
+      maxBuffer: 64 * 1024,
+      env: {
+        ...process.env,
+        SPRINT_CODER_SEAM_WARM_HUNG: hung,
+        SPRINT_CODER_SEAM_WARM_HEALTHY: healthy,
+      },
+    },
+  );
+  const processMs = Math.round(performance.now() - start);
+  const failure = (reason: string) => {
+    const detail = {
+      status: warm.status,
+      signal: warm.signal,
+      reason,
+      process_ms: processMs,
+      stderr: (warm.stderr ?? '').trim().slice(-400),
+    };
+    console.log(`HUNG_HELPER_ATTEST_WARMUP ${JSON.stringify(detail)}`);
+    return new Error(`Attestation warm-up failed: ${reason}`);
+  };
+  if (warm.error) throw failure(errorCode(warm.error) ?? 'spawn_error');
+  if (warm.status !== 0) throw failure('nonzero_exit');
+  const stages = record(JSON.parse(warm.stdout.trim()) as unknown);
+  const images = Array.isArray(stages['images']) ? stages['images'].map(record) : [];
+  if (images.length !== 2) throw failure('missing_image_stages');
+  for (const [index, binary] of [hung, healthy].entries()) {
+    // The warm-up hashed the same file the product will attest.
+    const digest = createHash('sha256').update(readFileSync(binary)).digest('hex');
+    if (images[index]?.['digest'] !== digest) throw failure('image_digest_mismatch');
+    delete images[index]?.['digest'];
+  }
+  console.log(
+    `HUNG_HELPER_ATTEST_WARMUP ${JSON.stringify({ status: 0, process_ms: processMs, ...stages, images })}`,
+  );
+}
 beforeAll(async () => {
   if (!enabled) return;
   if (process.platform !== 'win32') {
@@ -263,25 +348,7 @@ beforeAll(async () => {
     expect(probe.status, 'native probe exit code').toBe(0);
     probes.set(binary, record(JSON.parse(probe.stdout) as unknown));
   }
-  // The product attests every spawned helper with Windows PowerShell under a fixed 10 s deadline
-  // (attestSpawnedWindowsComputerUseHelper). A runner's first PowerShell start, with its module and
-  // Authenticode load, can exceed that alone, so pay it once here with the same executable and
-  // module. The product deadline is unchanged: a later attestation that still times out fails.
-  const warmStart = performance.now();
-  const warm = spawnSync(
-    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $null = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath '${healthy}'; exit 0`,
-    ],
-    { windowsHide: true, stdio: 'ignore', timeout: 120_000 },
-  );
-  console.log(
-    `HUNG_HELPER_POWERSHELL_WARMUP ${JSON.stringify({ status: warm.status, ms: Math.round(performance.now() - warmStart) })}`,
-  );
+  attestWarmup();
   ready = true;
 }, 650_000);
 
@@ -527,53 +594,70 @@ function controllerFor(
 // fixture (identity.inc). Neither this PC nor the CI windows-2022 image makes classic Notepad
 // full_access_app, and this slice has no signed fixture, so every case that needs a session is a
 // counted NOT_RUN (classic_notepad_not_eligible) in every environment, CI included; the count and
-// reasons are printed once as HUNG_HELPER_NOT_RUN_SUMMARY. Their Stop timing is fixed by the
-// fake-timer "kill-stop (N3) replacement baseline" in computer-use-windows-transport.test.ts. The
-// live fixing of these scenes moves to N13b (real-machine acceptance) or to an environment with
-// the signed acceptance fixture. Where classic Notepad is eligible, they still run unchanged.
+// reasons are printed once as HUNG_HELPER_NOT_RUN_SUMMARY. The live fixing of these scenes and the
+// close_session measurement move to N13b (real-machine acceptance) or to an environment with the
+// signed acceptance fixture. What this job fixes live is the sessionless Stop paths (the fixture
+// start and discovery cases above) and the close latency proxy. Of the session scenes, only the
+// transport's deadline paths (cancel and close expiring, kill or retention) are fixed elsewhere,
+// by the fake-timer "kill-stop (N3) replacement baseline" in computer-use-windows-transport.test.ts,
+// and the post-receipt idle teardown that keeps an unconfirmed discovery by its fake transport
+// cases. A real helper answering at once while a UiaCall or Capture worker is parked, an immediate
+// pending-start Controller Stop, and the busy close distribution are not fixed anywhere yet.
+// Where classic Notepad is eligible, these cases still run unchanged.
 let notepadPid: number | undefined;
 let notepadWindowId = '';
-// Notepad processes that existed before the seam started one. On a PC where System32 notepad.exe
-// hands off to the packaged Notepad, the replacement is not a spawn child; whatever appeared after
-// this baseline was started by the seam and is closed after the case.
-let notepadBaseline: Set<number> | null = null;
-let redirectedNotepad = false;
-function notepadProcessIds(): Set<number> {
-  const result = spawnSync(
-    'tasklist.exe',
-    ['/FI', 'IMAGENAME eq notepad.exe', '/FO', 'CSV', '/NH'],
-    { encoding: 'utf8', windowsHide: true, timeout: 10_000 },
-  );
-  const ids = new Set<number>();
-  for (const line of (result.stdout ?? '').split(/\r?\n/u)) {
-    const match = /^"[^"]*","(\d+)"/u.exec(line);
-    if (match?.[1]) ids.add(Number(match[1]));
-  }
-  return ids;
+// What the seam owns of a Notepad it opened: the spawned process, and the unique scratch file it
+// opened, whose name appears in the window title. On a PC where System32 notepad.exe hands off to
+// the packaged Notepad, the replacement is another process the seam did not spawn and cannot own
+// by pid; only a window whose title carries that unique name is the seam's.
+let notepadChild: ChildProcess | undefined;
+let notepadTitle: string | undefined;
+function cleanupNote(detail: Record<string, unknown>) {
+  console.log(`HUNG_HELPER_CLEANUP ${JSON.stringify(detail)}`);
 }
-function closeSeamNotepads() {
-  if (notepadBaseline === null) return;
-  const baseline = notepadBaseline;
-  notepadBaseline = null;
-  const started = [...notepadProcessIds()].filter((pid) => !baseline.has(pid));
-  for (const pid of started) {
-    const killed = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
-      windowsHide: true,
-      stdio: 'ignore',
-      timeout: 10_000,
+// Never ends a process by pid set or image name: a Notepad the person opened during the case must
+// keep its unsaved text. The spawned child is ended through its own handle; any other window is
+// asked to close with WM_CLOSE (the fixture's --close-titled), which lets Notepad prompt rather
+// than discard. Whatever stays open is reported on one line and does not fail the case.
+async function closeSeamNotepads() {
+  const child = notepadChild;
+  const title = notepadTitle;
+  notepadChild = undefined;
+  notepadTitle = undefined;
+  if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+    child.kill();
+    const exited = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 5_000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      if (child.exitCode !== null || child.signalCode !== null) {
+        clearTimeout(timer);
+        resolve(true);
+      }
     });
-    if (killed.status !== 0 && notepadProcessIds().has(pid))
-      console.log(
-        `HUNG_HELPER_CLEANUP ${JSON.stringify({ reason: 'seam_notepad_not_closed', pid })}`,
-      );
+    if (!exited) cleanupNote({ reason: 'seam_notepad_child_not_exited', pid: child.pid });
   }
-  if (redirectedNotepad && started.length === 0)
-    // A packaged Notepad that was already running opens the hand-off as a tab of that process;
-    // closing it would close the person's own Notepad, so only report it.
-    console.log(
-      `HUNG_HELPER_CLEANUP ${JSON.stringify({ reason: 'redirected_notepad_window_not_identified' })}`,
-    );
-  redirectedNotepad = false;
+  if (title === undefined) return;
+  try {
+    const closed = await run(healthy, ['--close-titled', title], 10_000);
+    if (closed.status !== 0) {
+      cleanupNote({ reason: 'seam_notepad_window_query_failed', status: closed.status });
+      return;
+    }
+    if (Number(closed.stdout.trim()) === 0) return;
+    let remaining = Number.NaN;
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await delay(200);
+      const count = await run(healthy, ['--count-titled', title], 10_000);
+      remaining = count.status === 0 ? Number(count.stdout.trim()) : Number.NaN;
+      if (remaining === 0) return;
+    }
+    cleanupNote({ reason: 'seam_notepad_window_not_closed', title, remaining });
+  } catch (error) {
+    cleanupNote({ reason: 'seam_notepad_window_query_failed', error: errorCode(error) });
+  }
 }
 async function classicProfile(context: TestContext) {
   const path = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'notepad.exe');
@@ -581,14 +665,19 @@ async function classicProfile(context: TestContext) {
   if (result.status !== 0) skipWith(context, 'classic_notepad_identity_unavailable');
   const identity = computerAppIdentitySchema.parse(JSON.parse(result.stdout) as unknown);
   if (identity.maximumMode !== 'full_access_app') skipWith(context, 'classic_notepad_not_eligible');
-  notepadBaseline = notepadProcessIds();
-  const notepad = spawn(path, [], { windowsHide: false, stdio: 'ignore' });
+  if (!scratch) throw new Error('No scratch directory');
+  // A unique, existing scratch file: Notepad opens it without a prompt and shows its name in the
+  // title, which is how the seam recognises its own window after a hand-off.
+  const title = `sc-hung-helper-seam-${randomUUID()}.txt`;
+  const file = join(scratch, title);
+  writeFileSync(file, '');
+  notepadTitle = title;
+  const notepad = spawn(path, [file], { windowsHide: false, stdio: 'ignore' });
+  notepadChild = notepad;
   notepadPid = notepad.pid;
   await delay(500);
-  if (notepad.exitCode !== null || notepadPid === undefined) {
-    redirectedNotepad = true;
+  if (notepad.exitCode !== null || notepadPid === undefined)
     skipWith(context, 'classic_notepad_redirected_or_exited');
-  }
   notepadWindowId = '';
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const window = await run(healthy, ['--window', String(notepadPid)], 5_000);
@@ -611,8 +700,9 @@ async function prepare(context: TestContext, binary = hung, startPoint?: string)
   // from the app identity, process start and HWND) and start with that candidate's token.
   // A missing or empty digest, or more than one matching candidate, is an implementation mix-up and
   // fails; only a window that is not listed at all (e.g. a Store hand-off) is a counted NOT_RUN.
-  // In CI too this whole path is normally NOT_RUN, because classic Notepad was not eligible even on
-  // windows-2022; every such skip appears with its reason in HUNG_HELPER_NOT_RUN_SUMMARY.
+  // In CI too this whole path is NOT_RUN (classic_notepad_not_eligible on windows-2022; any other
+  // reason fails there); close_session is measured in N13b (real-machine acceptance) or where the
+  // signed acceptance fixture is available. This job fixes the sessionless Stop paths and the proxy.
   let candidate: Awaited<ReturnType<typeof controller.listWindows>>[number] | undefined;
   for (let attempt = 0; attempt < 5 && candidate === undefined; attempt += 1) {
     const native = (await host.listWindows(profile)).find(
@@ -694,6 +784,7 @@ const busyQueuedFrames = busyLoadFrames + 2; // load + cancel + close
 const proxyLoadFrames = 8;
 const proxyQueuedFrames = proxyLoadFrames + 2; // load + start + stop_pending_start
 const proxyIterations = 30;
+const proxyAttemptLimit = proxyIterations * 2;
 function percentiles(times: number[]) {
   const sorted = [...times].sort((a, b) => a - b);
   return {
@@ -718,6 +809,34 @@ describe('hung helper seam static contracts (#1002)', () => {
     // The workflow isolation (one job, one env entry) is checked in workflow-security.test.ts.
     expect(proxyQueuedFrames).toBeLessThan(64);
     expect(busyQueuedFrames).toBeLessThan(64);
+  }, 5_000);
+
+  it('closes only Notepad the seam owns, never by pid set or image name', () => {
+    const seam = readFileSync(
+      join(__dirname, 'computer-use-windows-hung-helper-live-seam.test.ts'),
+      'utf8',
+    );
+    const start = seam.indexOf('async function closeSeamNotepads(');
+    const end = seam.indexOf('\nasync function classicProfile(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const cleanup = seam.slice(start, end);
+    // The spawned child is ended through its own handle; anything else only by WM_CLOSE on a
+    // window titled with the seam's unique scratch file name.
+    expect(cleanup).toContain('child.kill()');
+    expect(cleanup).toContain("['--close-titled', title]");
+    expect(cleanup).not.toMatch(/taskkill|tasklist|process\.kill\(|\/F\b|IMAGENAME/u);
+    // No before/after pid difference anywhere in the seam decides what to end.
+    expect(seam).not.toContain(['notepad', 'Baseline'].join(''));
+    expect(seam).not.toContain(['IMAGENAME eq', 'notepad'].join(' '));
+    const fixture = readFileSync(source, 'utf8');
+    const mode = fixture.slice(
+      fixture.indexOf('L"--close-titled"'),
+      fixture.indexOf('L"--identity"'),
+    );
+    expect(mode).toContain('PostMessageW(window, WM_CLOSE, 0, 0)');
+    expect(mode).toContain('L"\\\\notepad.exe"');
+    expect(mode).not.toMatch(/TerminateProcess|taskkill/u);
   }, 5_000);
 });
 
@@ -1066,11 +1185,18 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
   }, 600_000);
 
   // A stand-in for the busy close above while no session can be started (HUNG_HELPER_CLOSE_LATENCY
-  // stays NOT_RUN); it is not close_session. stop_pending_start is answered in FIFO order by the
-  // single serve loop, as close_session is, so its round trip behind queued work is a guide to the
-  // queue cost a close pays. It does not include the cancel step or a session's own teardown.
+  // stays NOT_RUN); it is not close_session, only a reference value until close_session is measured
+  // in N13b (real-machine acceptance). stop_pending_start is answered in FIFO order by the single
+  // serve loop, as close_session is, so its round trip behind queued work shows the queue cost a
+  // close would pay. It does not include the cancel step or a session's own teardown, and it is not
+  // a basis for choosing N3's close deadline C.
   // Each round: a fresh healthy helper is connected, proxyLoadFrames sessionless discoveries and a
-  // fixture start are written in that order, then stop_pending_start for that start is sent.
+  // fixture start are issued in that order, and stop_pending_start for that start is sent before
+  // any reply can be read. Between issuing and Stop only promise jobs run (no timer, no I/O
+  // callback), so the connected client writes the load and the start ahead of Stop while no reply
+  // is processed: every load frame is unanswered when Stop is written and is served before it. A
+  // round with no unanswered load at send, or whose start never reached the helper, is not counted
+  // and is retried, up to proxyAttemptLimit rounds; the uncounted rounds are reported.
   it(`measures a sessionless Stop round trip behind ${proxyLoadFrames} queued discoveries as a close latency proxy`, async (context) => {
     live(context);
     observeChildren();
@@ -1079,36 +1205,43 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     const query = { ...syntheticIdentity, canonicalPath: healthy };
     const times: number[] = [];
     const unansweredAtSend: number[] = [];
-    for (let index = 0; index < proxyIterations; index += 1) {
+    const uncounted = { no_load_at_send: 0, start_not_sent: 0 };
+    let attempts = 0;
+    while (times.length < proxyIterations && attempts < proxyAttemptLimit) {
+      attempts += 1;
       // A fresh addon (transport client) per round, so no round inherits another's state.
       const { addon } = addonFor(healthy);
-      // Connect first, so every frame below is written in call order within one macrotask.
-      await settle(addon.discoverWindows!({ discoveryId: `proxy-warm-${index}`, ...query }));
+      // Connect first, so every frame below is written by the connected client without I/O.
+      await settle(addon.discoverWindows!({ discoveryId: `proxy-warm-${attempts}`, ...query }));
       let answered = 0;
       const load = Array.from({ length: proxyLoadFrames }, (_, queued) =>
         settle(
-          addon.discoverWindows!({ discoveryId: `proxy-load-${index}-${queued}`, ...query }),
+          addon.discoverWindows!({ discoveryId: `proxy-load-${attempts}-${queued}`, ...query }),
         ).finally(() => {
           answered += 1;
         }),
       );
-      const sessionId = `proxy-start-${index}`;
+      const sessionId = `proxy-start-${attempts}`;
       const starting = settle(addon.startSession!(fixtureStart(window, sessionId)));
-      await delay(0);
-      // A discovery not yet answered when Stop is sent was being served or queued by the helper.
+      // Promise jobs only: lets the start pass ensureConnected and be written, reads no reply.
+      for (let turn = 0; turn < 200; turn += 1) await Promise.resolve();
+      // A discovery not yet answered when Stop is sent is queued ahead of it in the helper.
       const unanswered = proxyLoadFrames - answered;
-      expect(unanswered, 'Stop is sent while the helper holds discovery work').toBeGreaterThan(0);
       const origin = performance.now();
-      const stopped = await addon.stopPendingStart!({ sessionId });
-      times.push(performance.now() - origin);
-      unansweredAtSend.push(unanswered);
-      expect(stopped).toMatchObject({ result: 'closed' });
+      const stopped = await settle(addon.stopPendingStart!({ sessionId }));
+      const elapsed = performance.now() - origin;
       await Promise.all(load);
       const started = await starting;
       expect(started).toBeInstanceOf(Error);
-      expect(errorCode(started), 'the start reached the helper before Stop').not.toBe(
-        'Computer Use start canceled before send',
-      );
+      if (errorCode(started) === 'Computer Use start canceled before send') {
+        uncounted.start_not_sent += 1;
+      } else if (unanswered === 0) {
+        uncounted.no_load_at_send += 1;
+      } else {
+        expect(stopped).toMatchObject({ result: 'closed' });
+        times.push(elapsed);
+        unansweredAtSend.push(unanswered);
+      }
       // Cleanup, outside the measured time. A helper that served discoveries is not torn down when
       // idle (discoverWindows clears idleShutdownPending; stopWindowDiscovery never arms teardown),
       // and the addon exposes no shutdown, so the seam ends this round's helper itself and waits
@@ -1127,13 +1260,18 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     }
     const summary = {
       proxy_for: 'close_session',
+      reference_until: 'close_session measured in N13b',
       operation: 'stop_pending_start',
       ...percentiles(times),
       load_frames: proxyLoadFrames,
       queued_frames: proxyQueuedFrames,
-      min_unanswered_at_send: Math.min(...unansweredAtSend),
+      min_unanswered_at_send: unansweredAtSend.length > 0 ? Math.min(...unansweredAtSend) : null,
+      attempts,
+      uncounted,
     };
     console.log(`HUNG_HELPER_STOP_LATENCY_PROXY ${JSON.stringify(summary)}`);
+    expect(times, 'loaded rounds measured within the attempt limit').toHaveLength(proxyIterations);
+    expect(summary.min_unanswered_at_send).toBeGreaterThan(0);
     expect(summary.max_ms).toBeLessThan(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
   }, 600_000);
 });

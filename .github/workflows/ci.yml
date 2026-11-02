@@ -339,7 +339,7 @@ jobs:
         with:
           arch: x64
 
-      - name: Run hung helper seam and busy close measurement
+      - name: Run hung helper seam and sessionless Stop latency proxy
         working-directory: apps/desktop
         env:
           SPRINT_CODER_HUNG_HELPER_SEAM: '1'

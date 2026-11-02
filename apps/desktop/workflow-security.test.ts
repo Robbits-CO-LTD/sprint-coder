@@ -70,10 +70,10 @@ describe('workflow security boundaries', () => {
     expect(jobBlock(workflows['.github/workflows/ci.yml'], 'required')).toContain(
       'computer-use-hung-helper,',
     );
-    const run = stepBlock(job, 'Run hung helper seam and busy close measurement');
+    const run = stepBlock(job, 'Run hung helper seam and sessionless Stop latency proxy');
     expect(run).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
     expect(job.indexOf('\n      - name: Initialize MSVC developer environment')).toBeLessThan(
-      job.indexOf('\n      - name: Run hung helper seam and busy close measurement'),
+      job.indexOf('\n      - name: Run hung helper seam and sessionless Stop latency proxy'),
     );
     // The opt-in appears exactly once across every workflow: in that step of this job. Dropping it
     // into another job, or naming the seam spec in another job, would put the live part on a
