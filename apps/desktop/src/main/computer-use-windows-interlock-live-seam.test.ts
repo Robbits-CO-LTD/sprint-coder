@@ -237,11 +237,33 @@ void Check(bool ok, const char *name) {
   }
 }
 
-std::atomic<bool> g_hang_armed{false};
+const char *NoVerdictName(int value) {
+  switch (value) {
+    case static_cast<int>(InterlockNoVerdict::kNone): return "kNone";
+    case static_cast<int>(InterlockNoVerdict::kCanceled): return "kCanceled";
+    case static_cast<int>(InterlockNoVerdict::kBudget): return "kBudget";
+    case static_cast<int>(InterlockNoVerdict::kIncomplete): return "kIncomplete";
+    default: return "unset";
+  }
+}
+
+// A check that asks for one no_verdict, and on a failure says which one came instead.
+void CheckNoVerdict(int got, InterlockNoVerdict expected, const char *name) {
+  const bool ok = got == static_cast<int>(expected);
+  Check(ok, name);
+  if (!ok) std::cout << "  expected no_verdict=" << NoVerdictName(static_cast<int>(expected)) << " got=" << NoVerdictName(got) << "\n";
+}
+
+// Set by the window that was made not to answer once it has worked off its queue and pumps again.
+std::atomic<bool> g_hang_drained{false};
 
 LRESULT CALLBACK Proc(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_APP + 1) {
     Sleep(3000);  // a window that does not answer: its thread is busy and pumps nothing
+    return 0;
+  }
+  if (message == WM_APP + 2) {
+    g_hang_drained.store(true);  // posted after the WM_APP + 1s, so handled once they all are
     return 0;
   }
   if (message == WM_DESTROY) {
@@ -392,6 +414,8 @@ int main(int argc, char **argv) {
     PostMessageW(hang.handle, WM_APP + 1, 0, 0);
     // Twice: the window still does not answer when the sessions' policies are asked below.
     PostMessageW(hang.handle, WM_APP + 1, 0, 0);
+    // Behind them in the queue: tells when the window answers again (see the end of this case).
+    PostMessageW(hang.handle, WM_APP + 2, 0, 0);
     Sleep(60);
     const auto start = std::chrono::steady_clock::now();
     const InterlockEvaluation first = EvaluateWindowsInterlockOnLane(SessionFor(hang.handle), kClick, "click", ruleset);
@@ -423,6 +447,16 @@ int main(int argc, char **argv) {
                                         v2_answer.verdict.DeniedResult()),
           "the_v2_takeover_is_a_receipt_table_row");
     Check(WaitIdle(15000), "the_v2_session_worker_ends");
+
+    // A worker that has ended is not a window that answers again: the window is still busy for about
+    // 6 s, and while it is, UI Automation in this process (all three windows are its own) cuts the reads
+    // of the ordinary window short too (kBudget). The cases below need an ordinary read, so they start
+    // only once the window has worked off its queue and answers a message again.
+    for (int i = 0; i < 1000 && !g_hang_drained.load(); ++i) Sleep(10);
+    DWORD_PTR ignored = 0;
+    Check(g_hang_drained.load() &&
+              SendMessageTimeoutW(hang.handle, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 2000, &ignored) != 0,
+          "the_hung_window_answers_again");
   }
 
   // 2b. A worker that is stuck past the lane's bound: the lane stops waiting at 500 ms (kBudget).
@@ -477,7 +511,8 @@ int main(int argc, char **argv) {
         if (!idle) break;
         if (after.no_verdict != InterlockNoVerdict::kBudget && after.no_verdict != InterlockNoVerdict::kIncomplete) break;
       }
-      Check(after.no_verdict == InterlockNoVerdict::kNone, "an_evaluation_after_the_worker_ended_runs");
+      CheckNoVerdict(static_cast<int>(after.no_verdict), InterlockNoVerdict::kNone,
+                     "an_evaluation_after_the_worker_ended_is_kNone");
     } else {
       // UI Automation cannot read our windows here, so no_verdict says nothing (a timeout and the
       // single-flight both look like kBudget): the slot check above is what is asked.
@@ -512,8 +547,12 @@ int main(int argc, char **argv) {
     WaitIdle(2000);
     if (g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone) && answer.no_verdict != InterlockNoVerdict::kBudget) break;
     }
-    Check(g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone), "the_worker_itself_did_not_see_a_cancel");
-    Check(answer.no_verdict == InterlockNoVerdict::kCanceled && !answer.Refuses(), "a_cancel_after_the_worker_finished_is_kCanceled");
+    // The worker's own answer must be a finished read (kNone): a kCanceled here is a worker that saw the
+    // cancel, a kBudget / kIncomplete one whose read was cut short; the line after the FAIL says which.
+    CheckNoVerdict(g_worker_no_verdict.load(), InterlockNoVerdict::kNone, "the_held_worker_finished_its_read_kNone");
+    CheckNoVerdict(static_cast<int>(answer.no_verdict), InterlockNoVerdict::kCanceled,
+                   "a_cancel_after_the_worker_finished_is_kCanceled");
+    Check(!answer.Refuses(), "a_cancel_after_the_worker_finished_does_not_refuse");
     cancellation_epoch.store(session.cancel_epoch);
     g_hold_after.store(false);
     WaitIdle(2000);
