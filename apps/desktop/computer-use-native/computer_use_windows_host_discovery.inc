@@ -927,7 +927,12 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
   limits.BasicLimitInformation.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
                                &limits, sizeof(limits))) return false;
-  if (ResumeThread(child.thread.value) == static_cast<DWORD>(-1)) return false;
+  if (ResumeThread(child.thread.value) == static_cast<DWORD>(-1)) {
+    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
+                            &limits, sizeof(limits));
+    return false;
+  }
   child.verified = true;
   *process = child.process.release();
   return true;

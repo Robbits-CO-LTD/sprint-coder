@@ -76,7 +76,8 @@ BOOL FixtureCreate(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES pr
   created_children.fetch_add(1);
   BOOL in_job = FALSE;
   Check(IsProcessInJob(information->hProcess, nullptr, &in_job) && in_job,
-        "child already belongs to its launch job before fixture assignment");
+        "child already belongs to some job before fixture assignment");
+  // helper-exit-kill-before-verify proves membership in the per-launch job.
   // Windows 8+ nests the fixture cleanup job with the production launch job.
   if (!AssignProcessToJobObject(job.value, information->hProcess)) {
     ::TerminateProcess(information->hProcess, 1);

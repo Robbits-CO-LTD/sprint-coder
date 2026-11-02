@@ -547,7 +547,7 @@ describe('Windows native helper compile boundary', () => {
     expect(launchSource).toContain('canonical_path.c_str(), nullptr, nullptr, nullptr, FALSE,');
     const verifiedSource = launchSource.slice(launchSource.indexOf('if (!image_matches)'));
     expect(verifiedSource).toMatch(
-      /limits\.BasicLimitInformation\.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*if \(!SetInformationJobObject\([^;]+?\)\) return false;\s*if \(ResumeThread\(child\.thread\.value\) == static_cast<DWORD>\(-1\)\) return false;/u,
+      /limits\.BasicLimitInformation\.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*if \(!SetInformationJobObject\([^;]+?\)\) return false;\s*if \(ResumeThread\(child\.thread\.value\) == static_cast<DWORD>\(-1\)\) \{\s*limits\.BasicLimitInformation\.LimitFlags \|= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*SetInformationJobObject\(job\.value, JobObjectExtendedLimitInformation,\s*&limits, sizeof\(limits\)\);\s*return false;\s*\}/u,
     );
     expect(source).toContain('WindowsSessionExecutableMatches');
     expect(source).toContain('inserted->second.executable_file = pending->executable');
