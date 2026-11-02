@@ -55,6 +55,7 @@ export function parseNativeHandshake(
               'graphicsCapture',
               'sendInput',
               'cancellableWindowDiscovery',
+              'artifactRead',
             ].includes(key) || typeof enabled !== 'boolean',
         )
       )

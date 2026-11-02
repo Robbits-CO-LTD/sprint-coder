@@ -241,6 +241,10 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
       observe: true,
       control: true,
       ...(parsed.platform === 'win32' &&
+      nativeProbeCapabilities(probe.capabilities).artifactRead === true
+        ? { artifactRead: true }
+        : {}),
+      ...(parsed.platform === 'win32' &&
       nativeProbeCapabilities(probe.capabilities).cancellableWindowDiscovery === true
         ? { cancellableWindowDiscovery: true }
         : {}),

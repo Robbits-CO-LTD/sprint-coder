@@ -344,15 +344,14 @@ export interface ComputerUseNativeHost {
   nativeApprovalPathEnabled?(sessionId: string): boolean;
   /**
    * #785 T15-6b: whether the native can read the value of one node for `copy`. Absent means false.
-   * A production host reports false until the native read exists (T15-4m / T15-4w) and its attest
-   * is carried in the handshake (C5); only a fake native reports true today. While false, the
-   * planner is not offered `copy` and the controller refuses it.
+   * A production Windows host requires a ready handshake, the artifactRead attest and a reader.
+   * macOS remains closed. While false, the planner is not offered `copy` and the controller refuses it.
    */
   artifactReadSupported?(): boolean;
   /**
-   * #785 T15-7: whether the host can type or set a pasted artifact. Absent means false. Only a fake
-   * reports true until the native read and its attest exist; while false, the planner is not
-   * offered `artifactRef` and a session cannot paste one.
+   * #785 T15-7: whether the host can type or set a pasted artifact. Absent means false. Windows
+   * uses the same attest gate as reading; macOS remains closed. While false, the planner is not
+   * offered `artifactRef` and a session cannot paste one. Every paste still requires Main approval.
    */
   artifactPasteSupported?(): boolean;
   /**

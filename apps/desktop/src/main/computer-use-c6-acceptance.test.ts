@@ -21,9 +21,11 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import {
   computerStartToolOutputSchema,
   computerUseAvailabilitySchema,
+  type ComputerAppIdentity,
   type ComputerUseApproval,
   type ComputerUseSessionStatus,
   type ProviderConnection,
@@ -41,9 +43,11 @@ import {
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
 import { preflightComputerUseProvider, ProviderComputerUsePlanner } from './computer-use-planner';
+import { createComputerUseNativeHost } from './computer-use-native-host';
+import type { ComputerUseNativeAddon } from './computer-use-native-types';
 import { IpcRouter } from './ipc';
 import { PermissionBroker } from './permission-broker';
-import type { PermissionPolicyRecord } from './persistence';
+import type { ComputerAppProfileRecord, PermissionPolicyRecord } from './persistence';
 import type { ProviderRuntime } from './provider-runtime';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { secureLogger } from './secure-logger';
@@ -112,21 +116,40 @@ type AppSpec = Readonly<{
 const NOTES: AppSpec = { bundleId: 'com.example.notes', label: 'Notes' };
 const FORM: AppSpec = { bundleId: 'com.example.form', label: 'Form' };
 
-function makeProfile(key: AppKey, spec: AppSpec, ordinal: number) {
-  const facts = {
-    platform: 'darwin' as const,
-    identityDigest: '',
-    bundleId: spec.bundleId,
-    executablePath:
-      spec.canonicalPath ?? `/Applications/${spec.label}.app/Contents/MacOS/${spec.label}`,
-    executableDigest: sha256Hex(`executable:${ordinal}`),
-    teamId: 'TEAMID1234',
-    signingIdentifier: spec.bundleId,
-    cdHash: null,
-    displayName: spec.label,
-    policyLanguage: 'en',
-    maximumMode: 'full_access_app',
-  };
+function makeProfile(
+  key: AppKey,
+  spec: AppSpec,
+  ordinal: number,
+  platform: 'darwin' | 'win32' = 'darwin',
+) {
+  const facts: ComputerAppIdentity =
+    platform === 'win32'
+      ? {
+          platform,
+          identityDigest: '',
+          executablePath: spec.canonicalPath ?? `C:\\Fixture\\${spec.label}.exe`,
+          executableDigest: sha256Hex(`executable:${ordinal}`),
+          signerDigest: 'a'.repeat(64),
+          packageFamilyName: null,
+          appUserModelId: null,
+          displayName: spec.label,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+        }
+      : {
+          platform: 'darwin' as const,
+          identityDigest: '',
+          bundleId: spec.bundleId,
+          executablePath:
+            spec.canonicalPath ?? `/Applications/${spec.label}.app/Contents/MacOS/${spec.label}`,
+          executableDigest: sha256Hex(`executable:${ordinal}`),
+          teamId: 'TEAMID1234',
+          signingIdentifier: spec.bundleId,
+          cdHash: null,
+          displayName: spec.label,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+        };
   const identity = {
     ...facts,
     identityDigest: computerAppNativeIdentityDigest(facts, computerAppGrantIdentityFrom(facts)!)!,
@@ -138,8 +161,8 @@ function makeProfile(key: AppKey, spec: AppSpec, ordinal: number) {
     windowIdentityDigest: sha256Hex(`window:${key}`),
     profile: {
       id: `profile-${key}`,
-      platform: 'darwin' as const,
-      kind: 'macos-bundle' as const,
+      platform,
+      kind: platform === 'win32' ? 'win32-executable' : 'macos-bundle',
       label: spec.label,
       canonicalPath: facts.executablePath,
       appUrl: null,
@@ -155,7 +178,7 @@ function makeProfile(key: AppKey, spec: AppSpec, ordinal: number) {
       revision: 3,
       createdAt: '2026-10-15T00:00:00.000Z',
       updatedAt: '2026-10-15T00:00:00.000Z',
-    },
+    } satisfies ComputerAppProfileRecord,
   };
 }
 
@@ -201,6 +224,7 @@ type Scripted = ModelReply | ((call: ModelCall) => ModelReply);
 type ReadMode = 'judged' | 'reads-anything' | 'throws';
 
 type C6Options = Readonly<{
+  nativeHost?: { platform: 'darwin' | 'win32'; artifactRead?: boolean };
   agentDrivenEnabled?: () => boolean;
   apps?: Readonly<Record<AppKey, AppSpec>>;
   /** The mode each app's grant allows. Default full_access_app. */
@@ -222,7 +246,7 @@ type C6Options = Readonly<{
 function c6Acceptance(options: C6Options = {}) {
   const apps = options.apps ?? { A: NOTES, B: FORM };
   const profiles = Object.entries(apps).map(([key, spec], index) =>
-    makeProfile(key, spec, index + 1),
+    makeProfile(key, spec, index + 1, options.nativeHost?.platform),
   );
   const profileByKey = new Map(profiles.map((entry) => [entry.key, entry]));
   const profileById = new Map(profiles.map((entry) => [entry.profile.id, entry]));
@@ -343,6 +367,144 @@ function c6Acceptance(options: C6Options = {}) {
     cancel: async () => undefined,
   } as unknown as ProviderRuntime;
 
+  type Native = ConstructorParameters<typeof ComputerUseController>[0]['native'];
+  let effectiveNative: Native;
+  function adaptNative(fixture: Native): Native {
+    if (options.nativeHost === undefined) return (effectiveNative = fixture);
+    const { platform, artifactRead } = options.nativeHost;
+    const request = z
+      .object({ sessionId: z.string(), cancelEpoch: z.number().default(0) })
+      .passthrough();
+    const profileRequest = z.object({ id: z.string() });
+    const windows = async (input: unknown) => {
+      const profile = profileRequest.parse(input);
+      const entry = profileById.get(profile.id)!;
+      return (await fixture.listWindows(entry.profile)).map((window) => ({
+        ...window,
+        platform,
+        pid: 42,
+        boundsUnit: 'physical_px',
+        executableDigest: entry.profile.executableDigest,
+      }));
+    };
+    const stop = (input: unknown) => {
+      const value = request.parse(input);
+      return {
+        sessionId: value.sessionId,
+        cancelEpoch: value.cancelEpoch,
+        result: 'closed',
+        drained: true,
+        inputAttemptCount: 0,
+      };
+    };
+    const addon: ComputerUseNativeAddon = {
+      probe: () => ({}),
+      pickApplication: () => null,
+      listWindows: windows,
+      discoverWindows: async (input) => ({
+        discoveryId: z.object({ discoveryId: z.string() }).parse(input).discoveryId,
+        result: 'completed',
+        drained: true,
+        launchAttemptCount: 0,
+        windows: await windows(input),
+      }),
+      stopWindowDiscovery: (input) => ({
+        discoveryId: z.object({ discoveryId: z.string() }).parse(input).discoveryId,
+        result: 'stopped',
+        drained: true,
+        launchAttemptCount: 0,
+      }),
+      cancelUnsubmittedDiscovery: () => 'may_have_been_sent',
+      startSession: async (input) => {
+        const value = request
+          .extend({ profile: profileRequest, windowId: z.string() })
+          .parse(input);
+        const entry = profileById.get(value.profile.id)!;
+        const session = await fixture.startSession({
+          ...value,
+          profile: entry.profile,
+          taskId: current.taskId,
+          turnId: current.turnId,
+        });
+        return { ...session, platform, inputAttemptCount: 0 };
+      },
+      observe: (input) => {
+        const value = request.parse(input);
+        const entry = profileByKey.get(sessionApp.get(value.sessionId)!)!;
+        return fixture.observe(
+          {
+            ...value,
+            platform,
+            appIdentityDigest: entry.profile.identityDigest,
+            windowIdentityDigest: entry.windowIdentityDigest,
+            windowId: entry.windowId,
+            profileRevision: 3,
+            maximumMode: 'full_access_app',
+            policyLanguage: 'en',
+            screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+          },
+          { requestId: 'observe-fixture', cancelEpoch: value.cancelEpoch },
+        );
+      },
+      readNodeValue: (input) => {
+        const value = request
+          .extend({ targetId: z.string(), targetSignature: z.string() })
+          .parse(input);
+        const app = sessionApp.get(value.sessionId)!;
+        readInputs.push({ app, targetId: value.targetId });
+        return judged(
+          app,
+          value.targetId,
+          screenOf(app, observationRevision),
+          value.targetSignature,
+        );
+      },
+      dispatch: () => {
+        throw new Error('This native-host journey stops at the approval card');
+      },
+      cancel: stop,
+      close: stop,
+      stopPendingStart: stop,
+    };
+    effectiveNative = createComputerUseNativeHost(
+      {
+        addon,
+        artifactPath: '/fixture/native',
+        manifest: {
+          version: 1,
+          sourceCommit: 'f'.repeat(40),
+          platform,
+          architecture: platform === 'win32' ? 'x64' : 'arm64',
+          protocolVersion: 1,
+          apiVersion: 3,
+          nativeVersion: 'fixture',
+          moduleDigest: 'a'.repeat(64),
+          binaryDigest: 'b'.repeat(64),
+          signerDigest: 'c'.repeat(64),
+          capabilities: ['observe', 'capture', 'accessibility', 'input'],
+        },
+        probe: {
+          available: true,
+          protocolVersion: 1,
+          apiVersion: 3,
+          backend: 'fixture',
+          reason: '',
+          artifactPath: '/fixture/native',
+          artifactDigest: 'b'.repeat(64),
+          capabilities: {
+            observe: true,
+            control: true,
+            cancellableWindowDiscovery: true,
+            ...(artifactRead === undefined ? {} : { artifactRead }),
+          },
+        },
+      },
+      platform,
+      { windowsPhysicalBoundsToDip: (bounds) => bounds },
+    );
+    return effectiveNative;
+  }
+
   const controller = new ComputerUseController({
     persistence: {
       listComputerAppProfiles: () => profiles.map((entry) => entry.profile),
@@ -375,7 +537,7 @@ function c6Acceptance(options: C6Options = {}) {
       },
       ...grantStore.api,
     } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
-    native: {
+    native: adaptNative({
       availability: () => available,
       pickApplication: async () => null,
       listWindows: async (profile: { id: string }) => {
@@ -524,7 +686,7 @@ function c6Acceptance(options: C6Options = {}) {
             },
           }
         : {}),
-    } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
+    } as unknown as Native),
     featureEnabled: () => true,
     agentDrivenEnabled: options.agentDrivenEnabled ?? (() => true),
     artifactStore: store,
@@ -562,8 +724,8 @@ function c6Acceptance(options: C6Options = {}) {
         catalogRevision: 7,
         policyEpoch: input.policyEpoch,
         structuredOutputSupported: options.structuredOutputSupported ?? false,
-        artifactReadSupported: options.artifactReadSupported !== false,
-        artifactPasteSupported: options.artifactPasteSupported !== false,
+        artifactReadSupported: effectiveNative.artifactReadSupported?.() === true,
+        artifactPasteSupported: effectiveNative.artifactPasteSupported?.() === true,
         egress: () => ({
           allowed: true,
           evaluation: {
@@ -651,7 +813,10 @@ function c6Acceptance(options: C6Options = {}) {
     return targets.targets.find(
       (target) =>
         target.kind === 'selectable' &&
-        target.verified?.appId === profileByKey.get(app)!.spec.bundleId,
+        target.verified?.appId ===
+          (options.nativeHost?.platform === 'win32'
+            ? profileByKey.get(app)!.profile.canonicalPath.split(/[\\/]/u).at(-1)
+            : profileByKey.get(app)!.spec.bundleId),
     )?.targetToken;
   }
 
@@ -2368,6 +2533,83 @@ describe('C6 acceptance: one digest from the card to the audit (N26)', () => {
 // ---------------------------------------------------------------------------------------------
 // A host that cannot read a node is not offered copy (N27)
 // ---------------------------------------------------------------------------------------------
+
+describe('C6 acceptance: native host attest (T15-E win32)', () => {
+  it('offers copy, carries the artifact and requires the Main paste card with an excerpt', async () => {
+    const run = c6Acceptance({
+      nativeHost: { platform: 'win32', artifactRead: true },
+      structuredOutputSupported: true,
+    });
+    const { id } = await copyInA(run, 'Total 42');
+    expect(id).toEqual(expect.any(String));
+    expect(JSON.stringify(run.structuredSchemas)).toContain('"copy"');
+    expect(run.readInputs).toEqual([{ app: 'A', targetId: 'note' }]);
+    const pending = startPasteInB(run, id!);
+    const card = await run.untilCard();
+    expect(JSON.stringify(run.structuredSchemas)).toContain('artifactRef');
+    expect(card.allowedDecisions).toEqual(['allow_once', 'deny']);
+    expect(card.transfer).toMatchObject({
+      sourceLabel: 'Notes',
+      destinationLabel: 'Form',
+      excerpt: 'Total 42',
+    });
+    expect(run.dispatched).toEqual([]);
+    await run.answer('deny');
+    expect((await pending).error).toBeNull();
+    expect(run.dispatched).toEqual([]);
+  });
+
+  it.each([
+    { platform: 'win32' },
+    { platform: 'win32', artifactRead: false },
+    { platform: 'darwin', artifactRead: false },
+    { platform: 'darwin', artifactRead: true },
+  ] as const)('keeps copy, carry and paste closed for %j', async (nativeHost) => {
+    const run = c6Acceptance({ nativeHost, structuredOutputSupported: true });
+    const { id, output } = await copyInA(run, 'Total 42');
+    expect(id).toBeNull();
+    expect(output).not.toHaveProperty('artifacts');
+    expect(run.readInputs).toEqual([]);
+    expect(JSON.stringify(run.structuredSchemas)).toContain('"set_text"');
+    expect(JSON.stringify(run.structuredSchemas)).not.toContain('"copy"');
+    expect(JSON.stringify(run.structuredSchemas)).not.toContain('artifactRef');
+    const result = await run.startRequest({
+      app: 'B',
+      carry: [{ artifactId: '11111111-1111-4111-8111-111111111111' }],
+    });
+    expect(result.error).toContain(CARRY_REFUSED);
+    expect(run.approvals).toEqual([]);
+    expect(run.dispatched).toEqual([]);
+  });
+
+  it('refuses a browser destination before a card and refuses a browser source copy', async () => {
+    const browser = {
+      bundleId: 'fixture.browser',
+      label: 'Browser',
+      canonicalPath: 'C:\\Fixture\\chrome.exe',
+    };
+    const destination = c6Acceptance({
+      nativeHost: { platform: 'win32', artifactRead: true },
+      apps: { A: NOTES, B: browser },
+    });
+    const { id } = await copyInA(destination, 'Total 42');
+    expect(id).toEqual(expect.any(String));
+    await startPasteInB(destination, id!);
+    expect(destination.audits().some((row) => row['reasonCode'] === 'artifact_paste_refused')).toBe(
+      true,
+    );
+    expect(destination.approvals).toEqual([]);
+    expect(destination.dispatched).toEqual([]);
+    const source = c6Acceptance({
+      nativeHost: { platform: 'win32', artifactRead: true },
+      apps: { A: browser, B: FORM },
+    });
+    expect((await copyInA(source, 'Total 42')).id).toBeNull();
+    expect(source.audits().some((row) => row['reasonCode'] === 'artifact_copy_refused')).toBe(true);
+    expect(source.approvals).toEqual([]);
+    expect(source.dispatched).toEqual([]);
+  });
+});
 
 describe('C6 acceptance: no copy where native cannot read a node (N27)', () => {
   it('N27: a host without the capability is not told about copy, and a copy the model asks for anyway stops the session', async () => {

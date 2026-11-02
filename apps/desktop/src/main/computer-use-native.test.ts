@@ -12,6 +12,7 @@ import {
   parseComputerUseNativeManifest,
 } from './computer-use-native';
 import { computerUseNativeCompiledPin } from './computer-use-native-provenance';
+import { nativeProbeCapabilities } from './computer-use-native-probe-facts';
 import {
   COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
@@ -1928,6 +1929,42 @@ describe('Computer Use native manifest and runtime gate', () => {
       });
       expect(binding.probe.available).toBe(typeof claim !== 'string');
       expect(binding.probe.capabilities.cancellableWindowDiscovery === true).toBe(claim === true);
+    },
+  );
+
+  it.each([undefined, false, true, 'true', 1, null])(
+    'retains artifactRead only as a literal win32 fact: %s',
+    (artifactRead) => {
+      expect(nativeProbeCapabilities({ artifactRead }).artifactRead).toBe(
+        artifactRead === true ? true : undefined,
+      );
+      for (const platform of ['darwin', 'win32'] as const) {
+        const fixture = packageFixture({ platform });
+        const manifest = parseComputerUseNativeManifest(
+          JSON.parse(
+            readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+          ),
+        );
+        const probe = evaluateComputerUseNativeGate({
+          featureFlag: true,
+          packaged: true,
+          platform,
+          manifest,
+          artifactDigest: platform === 'win32' ? manifest.binaryDigest : manifest.moduleDigest,
+          probe: {
+            protocolVersion: 1,
+            apiVersion: 3,
+            sourceCommit: manifest.sourceCommit,
+            available: true,
+            backend: 'fixture',
+            capabilities: { artifactRead },
+          },
+        });
+        expect(probe.available).toBe(true);
+        expect(probe.capabilities.artifactRead).toBe(
+          platform === 'win32' && artifactRead === true ? true : undefined,
+        );
+      }
     },
   );
 

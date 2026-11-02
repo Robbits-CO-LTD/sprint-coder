@@ -127,6 +127,13 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     expect(source).toContain('#include "computer_use_native_eligibility.h"');
     const probe = section(source, 'std::string ProbeJson(', 'std::string ErrorPayload(');
     expect(probe).toContain('\\"eligibility\\":{');
+    expect(probe).toContain('\\"artifactRead\\":true');
+    const handshake = section(
+      source,
+      'case MessageType::kHandshake: {',
+      'case MessageType::kProbe: {',
+    );
+    expect(handshake).toContain('ProbeJson(probe)');
     for (const name of [
       'kNativeEligibilityModeName',
       'kNativeEligibilityRulesetVersion',

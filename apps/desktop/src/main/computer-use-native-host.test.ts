@@ -207,12 +207,54 @@ describe('Computer Use native Main adapter', () => {
     expect(refusal('EXECUTION_TRIGGER_BLOCKED', undefined)).toMatchObject({ result: 'paused' });
   });
 
-  it('does not read node values: a production host offers no copy until T15-4m / T15-4w and C5', () => {
+  it('does not expose artifact capabilities without a reader', () => {
     for (const platform of ['darwin', 'win32'] as const) {
       const host = createComputerUseNativeHost(binding({ probe: () => ({}) }), platform);
       expect(host.artifactReadSupported?.() ?? false).toBe(false);
       expect(host.readNodeValue).toBeUndefined();
+      expect(host.artifactPasteSupported).toBeUndefined();
     }
+  });
+
+  it('binds artifact capabilities only to a ready win32 handshake, literal attest and reader', () => {
+    for (const platform of ['darwin', 'win32'] as const)
+      for (const artifactRead of [undefined, false, true])
+        for (const reader of [false, true])
+          for (const ready of [false, true]) {
+            const surface = {
+              probe: () => ({}),
+              pickApplication: () => null,
+              listWindows: () => [],
+              startSession: () => ({}),
+              stopPendingStart: () => ({}),
+              observe: () => ({}),
+              dispatch: () => ({}),
+              cancel: () => undefined,
+              ...(ready ? { close: () => undefined } : {}),
+              ...(reader ? { readNodeValue: () => ({ ok: false }) } : {}),
+            };
+            const host = createComputerUseNativeHost(
+              binding(
+                surface,
+                {
+                  capabilities: {
+                    observe: true,
+                    control: true,
+                    ...(artifactRead === undefined ? {} : { artifactRead }),
+                  },
+                },
+                platform,
+              ),
+              platform,
+              { windowsPhysicalBoundsToDip: (bounds) => bounds },
+            );
+            expect(host.availability().handshakeReady).toBe(ready);
+            const enabled = platform === 'win32' && artifactRead === true && reader && ready;
+            for (const key of ['artifactReadSupported', 'artifactPasteSupported'] as const) {
+              expect(Object.hasOwn(host, key)).toBe(enabled);
+              expect(host[key]?.()).toBe(enabled ? true : undefined);
+            }
+          }
   });
 
   it('keeps Gate 0 registration unavailable when the signed probe has no picker seam', async () => {
@@ -560,12 +602,13 @@ describe('Computer Use native Main adapter', () => {
   };
 
   // #785 T15-4w: the Windows read of one node's value. It travels as the native's own method and is
-  // answered in one shape; it is not a capability (`artifactReadSupported` stays undefined).
-  it('reads one node value through the win32 addon, in one shape, and is not a capability (T15-4w)', async () => {
+  // answered in one shape; without an attest it grants no artifact capability.
+  it('reads one node value through the win32 addon without granting an unattested capability (T15-4w)', async () => {
     const answers: unknown[] = [];
     const readNodeValue = vi.fn((_input: unknown): unknown => answers.shift());
     const { host, session } = await win32TicketScenario(true, undefined, { readNodeValue });
     expect(host.artifactReadSupported).toBeUndefined();
+    expect(host.artifactPasteSupported).toBeUndefined();
     expect(host.readNodeValue).toBeTypeOf('function');
     const read = () =>
       host.readNodeValue!({
