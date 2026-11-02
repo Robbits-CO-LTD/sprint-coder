@@ -28,7 +28,11 @@
 | 開始の可否 | session gate は Task が archive されていないこと、`getActiveTurnId(taskId) === ownerTurnId`、`!hasBusyWorkers(taskId)` を要求する。Controller の canStartSession に接続されている | `main/computer-use-session-gate.ts:32`、`main/ipc.ts:1961`〜`:1967` |
 | Turn の単位 | 現役の Turn は Task ごとに一つである。別々の Task は同時に現役の Turn を持てる（更新時の確認は全 Task の現役 Turn を列挙する） | `main/persistence.ts:20338`〜`:20346`、`main/ipc.ts:5186`〜`:5197` |
 | Turn 開始時の停止 | 新しい Turn・queued Turn・Team の hire / resume / send は stopForTask(taskId, 'turn_started') を呼び、その Task の探索・開始中・実行中を止める。Turn ではなく taskId で絞る | `main/ipc.ts:4212`、`:4221`、`:4230`、`:4290`、`:6457`、`:6480`、`main/computer-use-controller.ts:3672`〜`:3687` |
-| Task 選択の停止 | Task の messages の読込み（Renderer の Task 選択）が stopOutsideTask を呼び、選択外の Task の探索・開始中・実行中を止め、選択外の app-grant カードを引く | `main/ipc.ts:3715`、`:4894`〜`:4897`、`main/computer-use-controller.ts:3689`〜`:3706` |
+| Task 選択の停止 | Task の messages の読込み（Renderer の Task 選択）が stopOutsideTask を呼び、選択外の Task の quick-start latch を消し、探索・開始中・実行中を止め、選択外の app-grant カードを引く（カードを引く呼出しは `:3693`）。Renderer の hook も、保持するパネルのセッションの Task と選択中の Task が違えば、そのセッションを reason task_changed で止める | `main/ipc.ts:3715`、`:4894`〜`:4897`、`main/computer-use-controller.ts:3689`〜`:3706`、`renderer/hooks/useComputerUse.tsx:146`〜`:161` |
+| 手動パネルの開始 | computerUseStart の IPC は、activation か quick-start latch を確かめ、現役の Turn と busy な worker が無いことを確かめてから Controller の start を直接呼ぶ。session gate にも Controller にも、同じ Task の既存のセッションの有無の検査は無く、今は全体の単一セッションの上限だけがこれを防ぐ。手動開始の Turn は合成 ID で、Task の現役 Turn にはならない | `main/ipc.ts:2590`〜`:2612`、`main/computer-use-session-gate.ts:32`、`main/computer-use-controller.ts:2865`、`:3188` |
+| computer_start の paused | computer_start のセッションの paused は呼出し側から見て終端で、Controller は直ちにそのセッションを stop して枠を外す（V2 §5.2 の「呼び出し側から見れば stop と同じく終端」）。paused のまま枠を持ち人の再開を待つのは、パネルのセッションだけである | `main/computer-use-controller.ts:2691`〜`:2706` |
+| picker の入口 | picker は、人のクリックで動くプロファイル登録の IPC（computerUseProfileRegister）が activation を消費して native の pickApplication を直接呼ぶ経路である。Controller の discovery scope にも Task にも属さず、stopOutsideTask も止めない（Task ID は登録の設定にだけ使う） | `main/ipc.ts:2517`〜`:2539` |
+| 探索の時間 | 探索の budget は 25 秒で、helper は列挙の後に、候補が無ければ同じ要求の中で起動するかを決める | host.cc `kWindowsDiscoveryBudgetMs`（`:4218`）、`MeasureWindowsDiscovery`（`:6273`〜`:6276`） |
 | target token | listTargets は冒頭で revokeTargetTokens(taskId) を呼ぶ。失効は binding の taskId が一致するもの（と期限切れ）だけで、他の Task の token は消さない。start で token を消費する。TTL は 5 分 | `main/computer-use-controller.ts:1658`、`:1954`〜`:1961`、`:2612`、`main/computer-use-target-model.ts:23` |
 | app-grant カード | 未解決のカードは全体で 1 枚の欄。2 枚目は access_request_pending。T8 の per-Turn 上限は 2 で、カードを出した時に数える | `main/computer-use-controller.ts:849`、`:2046`、`:2047`〜`:2052`、`:2068`、`:2249`〜`:2252`、`main/computer-use-access-request.ts:36` |
 | copy artifact | 保持できる数は Task ごとに 3 件 | `packages/contracts/src/index.ts:6482`、`main/computer-use-artifact.ts:362`〜`:368` |
@@ -59,7 +63,7 @@
 
 この base には `computer_use_windows_host_*.inc` は存在しない。該当する処理は上表の host.cc で確認した。N1 等で分割された後は同じ関数・境界を追跡する。N3 の永続台帳、N9 の背景経路・監視は、この表の既存実装と混同しない。
 
-上表の claim・session gate・Turn 開始時の停止から、今の契約のままでは「同じ現役 Task の中の複数 AI / Turn owner」の並行は起きない。一つの Turn の中で computer_start を並列に呼んでも、同じキーの write claim で直列になり、computer_start は終了まで返らない。Team の worker が busy なら session gate が開始を拒否する。新しい Turn の開始はその Task の全セッションを止める。一方、別々の Task はそれぞれ現役の Turn を持て、claim の gate も token の失効も Task（claim は Turn）ごとに分かれている。Task をまたぐ並行を止めているのは、Controller の単一の上限と開始中の欄、IPC の単一の緊急停止 ID、Task 選択時の stopOutsideTask、全体で 1 枚の app-grant カードである（確度: 確認済み。Turn の実行そのものに全体の同時数の上限が無いことは、上記の列挙と更新時の確認の文言からの強い推定である）。
+上表の claim・session gate・Turn 開始時の停止から、今の契約のままでは「同じ現役 Task の中の複数 AI / Turn owner」の並行は起きない。一つの Turn の中で computer_start を並列に呼んでも、同じキーの write claim で直列になり、computer_start は終了まで返らない。Team の worker が busy なら session gate が開始を拒否する。新しい Turn の開始はその Task の全セッションを止める。一方、別々の Task はそれぞれ現役の Turn を持て、claim の gate も token の失効も Task（claim は Turn）ごとに分かれている。Task をまたぐ並行を止めているのは、Controller の単一の上限と開始中の欄、IPC の単一の緊急停止 ID、Task 選択時の stopOutsideTask と Renderer の hook の task_changed による停止、全体で 1 枚の app-grant カードである。また「Task ごとに 1 セッション」は AI の経路の claim だけが守っており、手動パネルの経路には Task 単位の検査が無いので、全体の上限を外すと同じ Task から別の PID へ 2 本開始できる（確度: 確認済み。Turn の実行そのものに全体の同時数の上限が無いことは、上記の列挙と更新時の確認の文言からの強い推定である）。
 
 ## 3. 決定（案）
 
@@ -87,11 +91,11 @@ mutex を所有するのは、Main に読み込む Windows 用の新しい署名
 
 | 候補 | 署名・packaging・attestation | 起動のコスト | 所有者が死んだ時 | N15-1 の署名確認との関係 |
 | --- | --- | --- | --- | --- |
-| A: Main に読み込む署名済み N-API module（推奨） | binding.gyp に Windows の target を足し、`.node` を Authenticode 署名して asar の外へ置く。macOS の `.node` の build・packaging の経路は既にある。module の機能は namespace・mutex の作成・照合・解放だけにする | Main の起動時に一度読む。追加のプロセスは無い | 所有者は Main 自身なので、Main が生きている間に所有者だけが死ぬ場合は無い。Main の crash では OS が mutex を abandoned にする | Main と同じプロセスに読み込むので、helper 用の子プロセス検証（N15-1）の対象ではない。完全性はアプリの署名と packaging に依る。読込みの失敗・export の不一致は Computer Use を閉じる |
+| A: Main に読み込む署名済み N-API module（推奨） | binding.gyp に Windows の target を足し、`.node` を Authenticode 署名して asar の外へ置く。macOS の `.node` の build・packaging の経路は既にある。module の機能は namespace・mutex の作成・照合・解放だけにする | Main の起動時に一度読む。追加のプロセスは無い | Win32 の mutex の所有はスレッド単位で、取得したスレッドが終われば process が生きていても abandoned になり、別のスレッドからの ReleaseMutex は ERROR_NOT_OWNER で失敗する。このため作成・取得・照合・解放は Main の JS スレッドで同期的に行い、N-API の async work（libuv の threadpool）では行わない。Main の JS スレッドの終わりは Main の process の終わりなので、この規則の下では Main が生きている間に所有者だけが死ぬ場合は無い。Main の crash では OS が mutex を abandoned にする | Main と同じプロセスに読み込むので、helper 用の子プロセス検証（N15-1）の対象ではない。完全性はアプリの署名と packaging に依る。読込みの失敗・export の不一致は Computer Use を閉じる |
 | B: lane の外の常駐の小さなプロセス（helper exe の別モード） | helper exe の署名と attestation を流用できる | 一つ多いプロセスを起動し、N15-1 と同じ非同期の署名確認を経る | Main が生きたまま所有者が死ぬと mutex が解放され、第二 Main が取れる。この時は全体 gate を直ちに閉じ、再取得まで開かない必要がある。Main の crash 後に残ると旧所有者が残る | N15-1 の検証を同じく通す。ただし D-5 の対象外の常駐プロセスという新しい種類を作る |
 | C: Node の named pipe server の名前の排他 | 新しい native は不要 | 小さい | Main とともに消える | 関係しない。ただし pipe の名前は誰でも先に作れ、DACL も private namespace も指定できないので採らない |
 
-A を推奨する理由は、所有者の寿命が coordinator（Main）の寿命と一致し、B の「所有者だけが死ぬ」分裂を設計から消せるためである。費用は Windows の native build と `.node` の署名の追加で、既存のリリースが Windows の `.node` を署名する手順を持つかは未確認である（N15-3 の着手前に確かめる）。
+A を推奨する理由は、上のスレッドの規則の下で所有者の寿命が coordinator（Main）の寿命と一致し、B の「所有者だけが死ぬ」分裂を設計から消せるためである。費用は Windows の native build と `.node` の署名の追加で、既存のリリースが Windows の `.node` を署名する手順を持つかは未確認である（N15-3 の着手前に確かめる）。
 
 名前の先取り（別のローカルユーザーが `Global\` の名前を先に作り、照合の失敗で Computer Use を閉じさせる DoS）は、ユーザー SID を boundary descriptor に入れた private namespace（`CreateBoundaryDescriptor`・`AddSIDToBoundaryDescriptor`・`CreatePrivateNamespace`、既存なら `OpenPrivateNamespace`）の中に mutex を作って防ぐ。namespace の DACL はそのユーザー SID だけに与え、mutex は非継承 handle とする。作成・open・owner の照合に失敗したら Computer Use を閉じる。boundary descriptor の SID を持たない他ユーザーの token では同じ namespace を作れないこと、同じユーザーの別ログオンセッションから同じ namespace に届くことは、強い推定であり N15-3 の Windows seam と実機で確かめる（§6.1）。
 
@@ -99,7 +103,7 @@ A を推奨する理由は、所有者の寿命が coordinator（Main）の寿�
 
 mutex は coordinator の単一性のためであり、入力一回ごとに OS 呼出しを囲む mutex ではない。abandoned は安全な引継ぎの証拠ではない。新 Main は N3 の recovery と旧 helper の扱いを確定するまで全体 gate を開かない（§3.5）。旧版・調停能力なしの helper を 3 lane の中へ混ぜない。別 OS ユーザーとは共有しない。
 
-**決めること・推奨案（admission の種類）**: 調停は「背景の共有 admission」と、SID 全体で一つの「前面 slot」の二種類とする。前面 slot の所有者は、前面区間の owner（前面入力・前面への引渡し・承認往復）か、探索のアプリ起動・picker の表示（前面副作用）のどちらか一つである。
+**決めること・推奨案（admission の種類）**: 調停は「背景の共有 admission」と、SID 全体で一つの「前面 slot」の二種類とする。前面 slot の所有者は、前面区間の owner（前面入力・前面への引渡し・承認往復）か、探索のアプリ起動・プロファイル登録の picker の表示（前面副作用）のどちらか一つである。
 
 前面区間の入力と背景入力を混在実行する案は採らない。理由は pattern の呼出しに限られる。背景の pattern 呼出しは、Win32 の UIA proxy で `BM_CLICK` や `WM_SETTEXT` などの message に置き換わり、対象のハンドラが窓を生成・活性化しうる（背景入力 ADR §2.1 の Invoke の行と、同 ADR が provider に非活性化の強制力が無いとすること）。これが前面区間の入力先を変えうる。一方、前面区間の間も別 lane の UIA の読取り（property・tree の取得と、その下の `WM_GETOBJECT`）と WGC の capture は許す。読取りは対象のハンドラに操作を実行させる呼出しではなく、窓の生成・活性化を要求しないためである（確度: 強い推定。§4 の CS-3 で、読取りの最中の前面の変化が 0 であることを実機で確かめる。確かめられない provider の読取りは前面区間の間は busy にする）。
 
@@ -109,7 +113,7 @@ mutex は coordinator の単一性のためであり、入力一回ごとに OS 
 | foreground_input / foreground_semantic | 別 lane の読み取りだけ | 前面 slot を前面区間の owner として保持する。背景の claim も閉じる。前面区間の owner は一つ |
 | 前面への引渡し・人の前面再開・承認往復の復帰 | 別 lane の読み取りだけ | 前面入力と同じ前面 slot。SetForegroundWindow だけ別 lock にしない |
 | approval_round_trip | 別 lane の読み取りだけ | 前面区間の owner として前面 slot を保持し、全入力 claim を閉じる。カードへの移動で他 session に前面を貸さない |
-| 探索のアプリ起動・picker の表示（前面副作用） | 別 lane の background_semantic と読み取り | 前面 slot を前面副作用の owner として保持する。前面区間の owner がいれば待たずに busy を返す。背景の claim は閉じない |
+| 探索のアプリ起動・プロファイル登録の picker の表示（前面副作用） | 別 lane の background_semantic と読み取り | 前面 slot を前面副作用の owner として保持する。前面区間の owner がいれば待たずに busy を返す。背景の claim は閉じない |
 | capture / UIA 読取り / copy / 起動を伴わない探索の列挙 | 別プロセスの観測、他 lane の許可済み処理 | 同一 lane の状態更新と観測は直列。SID の入力権利は取らない。copy は入力ではないが既存の権限・成果物束縛を維持 |
 | 背景 session のモデル待ち・背景カードの回答待ち | 他 lane の許可済み処理 | 入力権利も短い state mutex も保持しない。前面区間の owner のモデル待ちはこの行に入らない（下記） |
 | Stop | 全 lane の Stop と並行 | 入力権利・観測枠・通常 queue の取得を待たない |
@@ -118,11 +122,13 @@ mutex は coordinator の単一性のためであり、入力一回ごとに OS 
 
 前面区間に時間・操作数の上限は新しく置かない（推奨）。途中で強制交代すると、人が引き渡した前面の権限を取り上げ、次の前面入力に再び人の引渡しが要る。操作数はセッションの既存の maxRounds（`main/computer-use-controller.ts:2860`〜`:2861`）で有界であり、背景 session の入力は待ち行列に積まずに 1 秒で busy になる（下記 3）ので、待たされた入力が後から出ることは無い。背景 session が前面区間を待っていることは UI に表示し（§3.6）、人はいつでも前面 session を pause / Stop できる。
 
-探索の起動と picker の前面副作用は次のように扱う。
+探索の起動とプロファイル登録の picker の前面副作用は次のように扱う。
 
-- **取得**: 探索の要求で Main が前面 slot を前面副作用として取れた場合に限り、単発の起動 permit（lane / 複合世代 / discovery owner / 期限に束縛）を付けて helper へ送る。helper の `claim_launch` と picker の表示は、この permit を消費できた時だけ進む。permit の無い探索は起動せずに列挙だけを行い、候補が無ければ未起動の busy を返す。前面区間の owner がいる間は待たずに busy とし、遅れて自動起動しない。
-- **保持**: picker は表示から応答（選択・取消し）まで保持する。起動は permit の消費から、helper の `retire_launch` と、起動後の settle 時間までを保持する。settle 時間の初期値は探索の `WaitForInputIdle` の上限と同じ 5 秒（host.cc `MeasureWindowsDiscovery` の `:6278`）とし、N15-6 の実測で見直す。
-- **解放**: 上の終点か、Stop・helper の exit の確認で解放する。応答が失われた場合は、§3.2 の 6 と同じく helper の exit を確認するまで保持する。
+- **探索の二段階化（推奨）**: 今の helper は一つの探索要求の中で列挙し、候補が無ければそのまま起動する（host.cc `MeasureWindowsDiscovery`、`:6273`〜`:6276`）。列挙は最長 25 秒の budget を使う（`kWindowsDiscoveryBudgetMs`、`:4218`）ので、探索の開始から前面 slot を取ると、起動しない探索でも最長 25 秒 slot を握る。そこで探索を二段階にする。第一段では helper は列挙だけを行い、候補が無く起動の条件を満たすなら起動せずに「起動が要る」と返す。その時点で Main が前面 slot を前面副作用として取り、単発の起動 permit（lane / 複合世代 / discovery owner / 期限に束縛）を付けて第二段の起動要求を送る。helper は permit を消費する直前に候補が無いことを確かめ直し、候補が現れていれば permit を消費せずに候補を返す。起動しない探索（既存の窓が見つかった、列挙だけで終わった、起動の条件を満たさない）は前面 slot を一度も取らない。代案の一段階（探索の開始で slot を取る）は、起動しない探索の解放時点が応答の到着に依存し、25 秒の間前面区間を busy にするので採らない。
+- **picker の入口**: picker の入口は、人のクリックで動くプロファイル登録の IPC（`main/ipc.ts:2517`〜`:2539` の computerUseProfileRegister）であり、Task に属する探索ではない。この経路を coordinator 経由にし、空き lane の確保と前面 slot（前面副作用）の取得を必須にする。picker の permit は、その要求の owner（消費した activation・lane・複合世代・期限）に束縛する。空き lane が無いか前面区間の owner がいれば、picker を表示せずに busy を返す。
+- **取得**: Main が前面 slot を前面副作用として取れた場合に限り、上の permit を付けて helper へ送る。helper の `claim_launch` と picker の表示は、この permit を消費できた時だけ進む。permit の無い探索は起動しない。前面区間の owner がいる間は待たずに busy とし、遅れて自動起動しない。起動 permit の期限は発行から 1 秒とし（§3.2 の 3 の待ちの上限と同じ）、期限内に消費されなければ helper は消費を拒み、Main は slot を解放する。
+- **保持**: picker は表示から応答（選択・取消し）まで保持する。picker の応答に期限は置かない（人の操作を待つダイアログであり、時間切れで閉じると人の操作を取り消す）。その間は他 lane の前面入力・前面への引渡し・承認往復の復帰が人の応答時間だけ busy になる。全体 Stop と helper の exit では picker も終わる。起動は permit の消費から、helper の `retire_launch` と、起動後の settle 時間までを保持する。settle 時間の初期値は探索の `WaitForInputIdle` の上限と同じ 5 秒（host.cc `MeasureWindowsDiscovery` の `:6278`）とし、N15-6 の実測で見直す。
+- **解放**: 上の終点、permit を消費せずに応答が返った時点、permit の期限切れ、Stop・helper の exit の確認で解放する。permit の消費の後に応答が失われた場合は、§3.2 の 6 と同じく helper の exit を確認するまで保持する。
 - **遅れた focus**: kill-stop ADR §3.3 のとおり、パッケージアプリや single-instance のアプリは settle 時間の後にも窓を開き focus を取りうる。これは前面 slot の保持では防げない。各前面入力の直前の前面検査（host.cc `SendInputForBoundTarget` が呼ぶ `RevalidateWindowsTarget`）を入力ごとにやり直すことと、前面区間の owner の focus 喪失による pause で受ける。前面検査と SendInput の間（`:9823`〜`:9825`）に入力先が変わる窓は残る（§6.1）。背景対象が起動の巻き添えで前面化した場合は、N9 の takeover の規則でその背景 lane を pause する。
 
 ロックと所有権の順序は次のとおりである。
@@ -136,7 +142,7 @@ mutex は coordinator の単一性のためであり、入力一回ごとに OS 
 
 **代案・理由**: 全操作の排他は簡単だが別プロセスの背景並行を実現しない。前面と背景を無条件に並行にする案は非活性化の保証を過大評価する。長い OS mutex の中で UIA を呼ぶ案は agent-desktop の最大 20 秒の先頭詰まりを再現する。推奨案は短い状態更新と、停止で解決する admission の所有を分離する。調停権を timeout だけで奪う案は二重入力になる。探索の起動・picker を読取りと同じに扱う案は、前面区間の入力先を他 lane が変える経路を残す。前面副作用にも前面区間と同じく背景の claim を閉じさせる案は、人の操作を待つ picker の間、全背景入力を止めるので採らない。
 
-**N15 で作るもの**: SID の単一 coordinator と mutex を持つ N-API module、共有 admission と前面 slot、単発 permit と探索の起動 permit、期限付き queue、writer の drain と Stop 優先を作る。private namespace・DACL・abandoned・別 Main の拒否を Windows seam で確認する。制御用の通信が失われた native は新規 claim を閉じ、既発行分は台帳と kill-stop で扱う。
+**N15 で作るもの**: SID の単一 coordinator と mutex を持つ N-API module、共有 admission と前面 slot、単発 permit、探索の二段階化と起動 permit、プロファイル登録の IPC（computerUseProfileRegister）の picker の coordinator 経由化と picker の permit、期限付き queue、writer の drain と Stop 優先を作る。private namespace・DACL・abandoned・別 Main の拒否、mutex の呼出しが Main の JS スレッドに限られることを Windows seam で確認する。制御用の通信が失われた native は新規 claim を閉じ、既発行分は台帳と kill-stop で扱う。
 
 ### 3.3 同じ対象プロセスへの重複の防止
 
@@ -148,7 +154,7 @@ mutex は coordinator の単一性のためであり、入力一回ごとに OS 
 
 一つのプロセスの別 top-level window は同じ予約に属し、別 session を作れない。元 session が許可された owned dialog を扱う場合も予約は増やさず、N9 の dialog / takeover 規則に従う。異なる PID の同一アプリは独立プロセスとして許せるが、子プロセスや UIA tree の別 PID を親の許可から自動追加しない。入力先要素の owner PID が対象と違えば拒否する。独立した子の窓を扱うなら新しい対象として資格、grant、作成時刻、背景対応表を検証し、別予約と上限を消費する。共有 UI thread / proxy により非活性化・独立性を実機で示せない組は背景能力を開かない。プロセスの親子関係だけで権限を広げず、全子孫を自動予約することもしない。
 
-paused / 承認待ちでも予約を保持する。正常 Stop の確定後に予約を解放し、K-1 の隔離があれば同じキーの隔離が引き継ぐ。効果不明でも予約だけを外して別窓から開始させてはならない。kill-stop の対象終了の照合（signaled、作成時刻不一致、PID 不在）と承認カードの条件だけで隔離を解く。アクセス拒否は終了証拠ではない。
+承認待ちと、パネルのセッションの paused では予約を保持する（computer_start のセッションの paused は §2 のとおり直ちに stop されるので、予約は stop の確定で解放される）。正常 Stop の確定後に予約を解放し、K-1 の隔離があれば同じキーの隔離が引き継ぐ。効果不明でも予約だけを外して別窓から開始させてはならない。kill-stop の対象終了の照合（signaled、作成時刻不一致、PID 不在）と承認カードの条件だけで隔離を解く。アクセス拒否は終了証拠ではない。
 
 **代案・理由**: HWND ごとの予約は同じアプリの UI thread に並行入力する。exe ごとの予約は別プロセスを過剰に止める。PID だけでは再利用を取り違える。PID と作成時刻を採り、N3 の隔離キーと一致させる。
 
@@ -184,6 +190,10 @@ paused / 承認待ちでも予約を保持する。正常 Stop の確定後に�
 
 通常の Stop（行停止・Task 停止・helper の cancel / close の期限 C の待ち）の開始は全体 gate を閉じない。
 
+全体 gate が閉じている間の扱いは次のとおりとする。新しい permit の発行、新規 claim、新規開始、新しい helper の起動、探索の起動 permit と picker の permit の発行を拒否する。gate を閉じる時点で調停 epoch を進めるので、発行済みで未消費の permit は native が消費できず失効する（§3.2 の 5）。既に claim された入力は取り消せないので、その応答は通常どおり分類し、未知効果なら tombstone と K-1 へ進む。他 lane の観測（capture・UIA の読取り・起動を伴わない探索の列挙）と Stop は許す。gate が開いた後は、古い permit を復活させず新規検証から進める。
+
+全体 gate は一時的な拒否であり、上の 3 要因だけで開閉する。次の拒否は全体 gate の要因ではない。並行 gate（試験用 gate と、N15-6 まで閉じたままの本番の並行 gate）は複数セッションの能力そのものを開くかを決める設定であり、build・設定の変更でだけ変わる。能力の拒否（bounded UIA の不在による並行能力の閉鎖、§3.4）は helper の能力の再評価までそのままである。Computer Use を閉じる拒否（N-API module の読込みの失敗、private namespace・mutex の作成・照合の失敗、§3.2）は Main の再起動まで開かない。shortcut の登録の失敗（§3.6）は新規開始の拒否であり、登録の再試行が成功するまで続く。
+
 **隔離元の範囲**: lane ごとに Host / client を分けた後の各状態の範囲は次のとおりである。lane 単位とは、その lane の Host / client / helper が Stop 以外を拒否し、他の lane は影響を受けないことをいう。
 
 | 状態 | 範囲 | 解除 |
@@ -193,7 +203,8 @@ paused / 承認待ちでも予約を保持する。正常 Stop の確定後に�
 | Host の activeStopQuarantines | lane 単位 | 同上 |
 | Host の discovery の隔離・停止中の start owner | lane 単位 | helper の exit の確認（kill-stop §2.2 の 2） |
 | native の in-flight | lane 単位（helper の中） | 同上 |
-| 前面 slot の tombstone（前面入力の未知効果・応答消失、前面副作用の応答消失） | 前面 slot（SID 全体の前面入力・前面副作用と、前面区間の間の背景 claim） | 元 helper の in-flight の解消の証拠（§3.2 の 6） |
+| 前面 slot の tombstone（前面入力の未知効果・応答消失、前面副作用の permit の消費後の応答消失） | 前面 slot（SID 全体の前面入力・前面副作用）。前面入力の tombstone は、前面区間が Stop などで終わった後も残る間、SID 全体の背景 claim を閉じ続ける（行き先の分からない前面入力は背景の対象にも届きうるため）。前面副作用の tombstone は背景 claim を閉じない | 元 helper の in-flight の解消の証拠（§3.2 の 6） |
+| 共有 admission の tombstone（背景入力の未知効果・応答消失） | その lane の新規 claim と、SID 全体の前面 slot の取得（前面区間は背景 admission の drain を要するため）。他 lane の背景 admission は妨げない | 元 helper の in-flight の解消の証拠（§3.2 の 6） |
 | `terminated_target_suspect`・K-1 の対象隔離 | PID + 作成時刻の対象（全 lane） | 対象終了の照合か規定のカード（kill-stop §2.2 の 3・4、K-5） |
 | `termination_requested` | 全体 gate | 上の全体 gate の表 |
 
@@ -226,21 +237,26 @@ N9 の mouse hook / WinEvent と interaction epoch は各専用 helper が自分
 
 ### 3.6 並行の供給源と Main・UI の状態
 
-**現状**: Controller の sessions Map に対し開始中の欄は単一で、resume は全体件数を検査する（`main/computer-use-controller.ts:834`、`:897`、`:2953`）。UI hook と緊急停止の対象も単一である（`renderer/hooks/useComputerUse.tsx:77`、`main/ipc.ts:1101`、`:1936`）。§2 のとおり、同じ Task の中の並行は claim・session gate・Turn 開始時の停止のために起きず、Task をまたぐ並行は Task 選択時の stopOutsideTask と Controller・IPC の単一の欄で止まっている。
+**現状**: Controller の sessions Map に対し開始中の欄は単一で、resume は全体件数を検査する（`main/computer-use-controller.ts:834`、`:897`、`:2953`）。UI hook と緊急停止の対象も単一である（`renderer/hooks/useComputerUse.tsx:77`、`main/ipc.ts:1101`、`:1936`）。§2 のとおり、同じ Task の中の並行は claim・session gate・Turn 開始時の停止のために起きず、Task をまたぐ並行は Task 選択時の stopOutsideTask、Renderer の hook の task_changed による停止、Controller・IPC の単一の欄で止まっている。手動パネルの開始には Task 単位の検査が無い。
 
 **決めること・推奨案（並行の供給源）**: 並行の第一の供給源は「別々の Task がそれぞれ 1 セッションを持つ」Task をまたぐ並行とする。Task ごとの claim（`computer-use:${taskId}`）・現役 Turn の所有・ToolBroker の契約・computer_start が終了まで Turn を保持する V2 の契約（§5.4）を変えずに済むためである。Task をまたぐ並行を成り立たせるために、次を変える。
 
 - Controller の単一の上限と開始中の欄を owner の Map にする（下記）。
-- Task の選択変更（`main/ipc.ts:3715` の stopOutsideTask）で、選択外の Task の実行中・開始中・paused・承認待ちのセッションを止めない。選択外の Task の app-grant カードを引くこと（カードは Task の会話の中にあり、見えないカードで呼出しを待たせない。`main/computer-use-controller.ts:3690`〜`:3692`）と、選択外の Task の picker を止めることは今のまま保つ。起動を伴わない探索の列挙は止めない。選択外の Task のセッションは、全体の一覧・全体 Stop・緊急停止の対象であり続ける（下記の UI）。操作の承認カードは全体の一覧の行から開けるようにし、開けない間は既存の期限で失効させる。
+- Task 単位の原子的な開始予約を置く。coordinator の state の短い更新で、Task ごとに開始中・実行中・paused・承認待ち・停止未確認の owner を合わせて 1 つに制限する。AI の経路（computer_start）と手動パネルの経路（`main/ipc.ts:2610`〜`:2612` から Controller の start）の両方がこの予約を取ってから開始し、取れなければ入力を伴わない拒否を返す。今は全体の単一セッションの上限だけが同じ Task の二重開始を防いでおり（§2）、手動の経路は合成 Turn（`main/computer-use-controller.ts:3188`）なので AI の経路の claim にも掛からない。全体の上限を容量・対象予約に置き換えるだけでは、同じ Task から別の PID へ手動で 2 本開始でき、IPC の Task ごとの session ID（`main/ipc.ts:5103`）も上書きされる。予約は停止の確定（`terminated_*` を含む）で解放する。
+- Task の選択変更（`main/ipc.ts:3715` の stopOutsideTask）で、選択外の Task の AI のセッション（開始中・実行中・承認待ち）を止めない。computer_start のセッションの paused は直ちに stop されるので（§2）、選択外に paused の AI のセッションが残ることは無い。選択外の Task の app-grant カードを引くこと（カードは Task の会話の中にあり、見えないカードで呼出しを待たせない。`main/computer-use-controller.ts:3693`、理由はその上のコメント `:3691`〜`:3692`）は今のまま保つ。起動を伴わない探索の列挙は止めない。選択外の Task の探索には起動 permit を出さない（列挙だけを行い、対象が無ければ起動せずに busy を返す）。選択変更の時点で選択外の Task の、起動 permit が未消費の探索は起動の段を取り消す。人が見ていない Task の起動が人の作業中の前面を奪わないためである。プロファイル登録の picker は Task に属さず（§2）、今も stopOutsideTask の対象ではないので、選択変更とは関係させない。picker は自身の応答、全体 Stop、helper の exit で終わる（§3.2）。選択外の Task のセッションは、全体の一覧・全体 Stop・緊急停止の対象であり続ける（下記の UI）。操作の承認カードは全体の一覧の行から開けるようにし、開けない間は既存の期限で失効させる。
 - 緊急停止を複数 owner にする（下記）。
 - Turn 開始時の stopForTask(taskId, 'turn_started') は Task 単位のまま保つ。Task をまたぐ並行では Task ごとのセッションは一つなので、新しい Turn が止めるのは自分の Task のセッションだけである。
 
 Task の選択変更での停止を外すことは、「別 Task を背景で動かし続ける」機能を N15 に含めることを意味する。今の stopOutsideTask の根拠は「見えないものを動かさない」であり、それを全体の一覧・全体 Stop・overlay による可視性で置き換える。これは本 ADR の決定として Q13 で問う。
 
+**決めること・推奨案（パネルのセッション）**: 人がパネルから始めるセッションは並行の対象に含めない（推奨）。パネルのセッションは選択中の Task だけで、ほかに lane の owner（セッション・開始中・listing・picker）が一つも無い時に限り開始でき、パネルのセッションがある間は他の Task の AI の開始と listing も容量の拒否にする。この判定は Controller の容量判定に入れる。パネルの候補列挙（computerUseWindowCandidates の IPC）も同じ条件で lane を取る。Renderer の hook の task_changed による停止（`renderer/hooks/useComputerUse.tsx:146`〜`:161`）と quick-start latch の削除（`main/ipc.ts:4895`〜`:4896`）は今のまま保つ。理由は次のとおりである。パネルのセッションは paused のまま枠を持って人の再開を待てる唯一の種類であり、hook は単一のセッションを前提に Task 切替で止める作りになっている。並行の目的（複数の AI のセッション）は AI の経路で満たせ、パネルを含めると Renderer の停止の撤去と hook の複数化を N15-5 より前に要する。含める案は、Renderer の task_changed による停止を外す変更とパネルの候補列挙への lane の割当てを N15-3a に、hook の複数化を N15-5 に入れ、CS-1 にパネルのケースを足す必要がある。
+
+**決めること・推奨案（pause の意味）**: 第一の供給源（computer_start のセッション）での pause は、そのセッションを終えることである。Controller は paused を呼出し側の終端として直ちに stop し（§2、V2 §5.2）、lane の枠・対象予約・Task の開始予約を停止の確定で解放する。続けるなら、モデルが新しく computer_list_targets と computer_start を呼び、新しい session id・観測から始める。paused のまま枠を持たせることは V2 §5.2 の変更になるので採らない。本 ADR の「pause」は、AI のセッションについてはこの意味である。
+
 同じ Task の中の並行は、代わりの案として次の二つを挙げ、それぞれ Q14・Q15 で採るかどうかを問う。推奨はどちらも N15 に含めないことである。
 
-- (a) 一つの Turn で computer_start を並列に呼ぶ。claim を Task 単位から session または対象予約の単位に分け（list_targets と request_access の直列化は残す）、token の回転を listing 単位にし、IPC の Task ごとの session ID（`main/ipc.ts:1099`）を session ごとにし、Task ごとの artifact の 3 件を同じ Task の複数セッションで共有する扱いを決める必要がある。V2 ADR §5.2〜§5.4（ツール面、token の性質、1 セッション 1 ウィンドウと切替の手順）の変更を伴う。
-- (b) Team の Leader と worker に並行させる。session gate の `!hasBusyWorkers` を外し、Turn 開始時の停止を Turn 単位にし、worker の Turn にセッションの所有を認める必要がある。V2 ADR の Turn 束縛（§5.2〜§5.4 と §7.2 の流れ）の変更を伴う。
+- (a) 一つの Turn で computer_start を並列に呼ぶ。claim を Task 単位から session または対象予約の単位に分け（list_targets と request_access の直列化は残す）、token の回転を listing 単位にし、Task 単位の開始予約を外し、IPC の Task ごとの session ID（`main/ipc.ts:1099`）を session ごとにする必要がある。artifact は同じ Turn・policyEpoch なので Task の 3 件を共有する（§3.7）。V2 ADR §5.2〜§5.4（ツール面、token の性質、1 セッション 1 ウィンドウと切替の手順）の変更を伴う。
+- (b) Team の Leader と worker に並行させる。session gate の `!hasBusyWorkers` を外し、Turn 開始時の停止を Turn 単位にし、worker の Turn にセッションの所有を認め、Task 単位の開始予約を外し、Turn をまたいで artifact を消し合う今の挙動（§3.7）の扱いを決める必要がある。V2 ADR の Turn 束縛（§5.2〜§5.4 と §7.2 の流れ）の変更を伴う。
 
 どちらも Task をまたぐ並行で得られない利点（一つの会話の中の分担）があるが、V2 の確定済みの契約と ToolBroker の直列化の前提を変えるので、N15 の後に別の ADR で扱う。
 
@@ -250,19 +266,19 @@ computer_list_targets は空き lane を一つ探索用に確保し、その lis
 
 2 つ目のセッションを始めるモデル側の手順は、別の Task の Turn で computer_list_targets を呼んで空き lane の新しい listing を取り、必要なら computer_request_access、続いて computer_start を呼ぶことである。同じ Task の中では、V2 §5.4 のとおり 1 つ目の computer_start が返るまで 2 つ目は始まらない。
 
-**決めること・推奨案（app-grant カード）**: app-grant カードは今のまま全体で 1 枚とする（推奨。V2 §6.1、`main/computer-use-controller.ts:849`）。2 つ目の要求は今のコードどおり access_request_pending で直ちに拒否し、待ち行列には積まない。モデルはカードが解決した後にやり直す。全体の一覧には「許可カードを表示中（どの Task か）」を一行出し、2 つ目の AI が拒否された理由を人が分かるようにする。拒否された要求はカードを出していないので T8 の per-Turn の上限（2 枚）を消費しない（`main/computer-use-controller.ts:2046` の拒否は、`:2249`〜`:2252` の計数より前にある）。V2 §6.1 と T8 は変えない。
+**決めること・推奨案（app-grant カード）**: app-grant カードは今のまま全体で 1 枚とする（推奨。V2 §6.1、`main/computer-use-controller.ts:849`）。選択外の Task の computer_request_access は、カードを出さずに専用の理由コード（選択外の Task であることを示す値。名前は N15-3a で contracts に足す）で直ちに拒否する（推奨）。今のコードがカードを引くのは選択を変えた時だけ（`:3693`）なので、選択外の Task の AI が要求すると見えないカードが出て、全体で 1 枚の欄を最大 2 分（`main/computer-use-access-request.ts:26`）ふさぎ、その間は選択中の Task の要求が access_request_pending になるためである。カードは V2 §7.2 のとおり Task の会話の中にあり、一覧の行から app-grant カードを開ける案は、会話の外で許可の事実を示す新しい面を要するので採らない。モデルは「人がその Task を開くまで許可を求められない」ことを利用者に伝える。この拒否はカードを出していないので T8 を消費しない。選択中の Task 同士の 2 つ目の要求は、今のコードどおり access_request_pending で直ちに拒否し、待ち行列には積まない。モデルはカードが解決した後にやり直す。全体の一覧には「許可カードを表示中（どの Task か）」を一行出し、2 つ目の AI が拒否された理由を人が分かるようにする。拒否された要求はカードを出していないので T8 の per-Turn の上限（2 枚）を消費しない（`main/computer-use-controller.ts:2046` の拒否は、`:2249`〜`:2252` の計数より前にある）。V2 §6.1 と T8 は変えない。
 
 **決めること・推奨案（Main の状態）**: Controller の開始 owner を Map 化し、start / cancel / resume の条件はその owner と容量・対象予約で判断する。Host lane は session の native state、receipt、revision、attempt counter、discovery owner を持ち、coordinator は lane routing、容量、対象予約、入力調停、全体 gate を持つ。client の pending と decoder は接続ごとに分離する。session を「現在の client」に送る入口は作らない。PID cache は予約・認可の代わりに使わない。
 
 **決めること・推奨案（緊急停止と overlay）**: 今の緊急停止は単一の ID に結ばれている（`main/ipc.ts:1101` の computerUseEmergencySessionId、`:1934`〜`:1938` の onStop、`:2069`〜`:2071` の arm での上書き、`:2073`〜`:2077` の一致した一件での disarm）。これを次のように変える。onStop を全体 Stop の入口（§3.5）へ向ける。arm / disarm を owner ごとの参照数にし、最後の owner が終端になるまで shortcut と overlay を外さない。overlay の配置と visual 入力の衝突判定は、前面（visual）の入力を行う lane の対象矩形の集合に対して行う。この変更は、Controller が複数セッションを許す試験用 gate を初めて開くスライス（§5 の N15-3a）に入れる。
 
-overlay の回避と visual 入力の衝突判定の対象は、座標入力を行う前面の lane の対象に限る。背景の lane の対象は遮蔽・最大化されていてよく（背景入力 ADR §2.1）、pattern の入力は座標を使わないので overlay に影響されず、観測も窓単位の capture なので overlay を写さない。前面の lane が無い間は、overlay を対象の制約無しの既定位置（`positionComputerUseStopOverlay` の対象無しの分岐、`main/computer-use-emergency-stop.ts:187`）に置く。前面の lane の矩形に対して配置できない時は、その前面 lane の開始を拒否するか（開始時）、その前面 lane を pause する（観測・承認・resume の reposition の時。今の emergency_stop による停止をこの lane の pause に置き換える）。今の reposition は失敗すると overlay 全体を disarm する（`main/computer-use-emergency-stop.ts:119`〜`:121`）が、複数 owner では overlay を残し、shortcut も外さない。背景の lane の形の変化は overlay の配置の失敗とせず、全体の停止の契機にしない。shortcut の登録の失敗は全 lane の停止手段の喪失なので、新規の開始を拒否し、実行中は全体 Stop へ進める。
+overlay の回避と visual 入力の衝突判定の対象は、座標入力を行う前面の lane の対象に限る。背景の lane の対象は遮蔽・最大化されていてよく（背景入力 ADR §2.1）、pattern の入力は座標を使わないので overlay に影響されず、観測も窓単位の capture なので overlay を写さない。前面の lane が無い間（背景の lane だけの間）も overlay を出し、対象の制約無しの既定位置（`positionComputerUseStopOverlay` の対象無しの分岐、`main/computer-use-emergency-stop.ts:187`）に置く（推奨）。人が見ていない Task のセッションが動く以上（Q13）、目に見える停止手段を残すためである。これは今の安全側の guard を緩める変更である。今の arm は対象の矩形が無ければ例外にして失敗し（`main/computer-use-emergency-stop.ts:42`〜`:43`）、既に armed なら新しい矩形を見ない（`:24`）ので、`:187` の分岐は arm からは呼ばれない。N15-3a では、arm の対象必須の guard を「全 owner が背景の lane」の時に限って緩め、前面 lane の出現・交代の時に reposition して前面の矩形を避ける。緩める根拠は、背景の lane は座標入力を持たず、観測は窓単位の WGC で overlay を写さないことである。代案の「前面の lane が無い間は overlay を出さず shortcut だけ」は guard を保てるが、見えない Task のセッションの停止手段が覚えた shortcut だけになるので採らない。前面の lane の矩形に対して配置できない時は、その前面 lane の開始を拒否するか（開始時）、その前面 lane のセッションを終える（観測・承認の reposition の時）。今のコードはこの時そのセッションを emergency_stop で止める（`main/computer-use-controller.ts:3039`〜`:3041`、`:3859`〜`:3863`、`:5706`〜`:5708`）。変わるのは停止の理由（overlay の配置不能を示す pause の理由にする）と、overlay・shortcut を他の lane のために残すことであり、AI のセッションでは pause は上の「pause の意味」のとおり終端なので、その lane の枠と予約は解放され、全体には波及しない。今の reposition は失敗すると overlay 全体を disarm する（`main/computer-use-emergency-stop.ts:119`〜`:121`）が、複数 owner では overlay を残し、shortcut も外さない。背景の lane の形の変化は overlay の配置の失敗とせず、全体の停止の契機にしない。shortcut の登録の失敗は全 lane の停止手段の喪失なので、新規の開始を拒否し、実行中は全体 Stop へ進める。
 
 **決めること・推奨案（UI）**: UI は AI / Task、検証済み対象ラベル、背景 / 前面、実行中 / 待機 / 承認待ち / 停止確認中 / 隔離を行ごとに示す。一番見つけやすい Stop と緊急 shortcut / overlay は全体 Stop とする。行の停止は「このセッションを停止」と明記する。停止済み行と停止未確認行を分け、未確認が一つでもあれば全停止成功と表示しない。前面 owner のために背景が待つ理由、3 件上限、許可カードの表示中も表示する。選択外の Task のセッションも同じ一覧に出す。
 
 **代案・理由**: 上限の if 文だけを削除すると開始取消し、UI、緊急停止が別 session に作用し、Task 選択時の停止で実際の並行数は 1 のままになる。同じ Task の中の並行を第一の供給源にする案は V2 の Turn 束縛と ToolBroker の直列化を変える。単一の「選択中 session」のみを表示する案は停止の見落としを招く。owner と一覧を明示し、Task / Turn の権限は Task 単位のまま保つ。
 
-**N15 で作るもの**: Controller / Host / client の owner 分離、Task 選択時の停止の範囲の変更、緊急停止の複数 owner 化、listing の lane と token の規則、複数 status の取得・購読と revision、一覧・行停止・全体停止、overlay の集合判定を作る。IPC / contracts は strict schema を正本として Main / Preload / Renderer を揃え、PID・作成時刻・handle・内部 permit を外へ出さない。
+**N15 で作るもの**: Controller / Host / client の owner 分離、AI と手動の両経路を覆う Task 単位の開始予約、パネルのセッションの単独の判定、Task 選択時の停止の範囲の変更と選択外の Task の起動 permit・app-grant 要求の拒否、緊急停止の複数 owner 化と arm の guard の変更、listing の lane と token の規則、複数 status の取得・購読と revision、一覧・行停止・全体停止、overlay の集合判定を作る。IPC / contracts は strict schema を正本として Main / Preload / Renderer を揃え、PID・作成時刻・handle・内部 permit を外へ出さない。
 
 ### 3.7 観測と資源の上限
 
@@ -274,7 +290,7 @@ overlay の回避と visual 入力の衝突判定の対象は、座標入力を�
 
 応答 cache の既存上限を lane ごとに維持すると 3 lane 合計で最大 96 MiB、frame queue は最大 192 件となる。raw capture の約 7 MiB 相当は 3 枚で約 21 MiB だが、これは process RSS の上限ではない。COM・PNG・モデル入力・一時 buffer は別に増える。N15 では helper 数と要求数を有限にし、各 lane は最新観測だけを保持し、不要な binary を破棄する。Provider 送信同意と redaction は各 session で検査し、他 session の観測・copy artifact を流用しない。#785 の明示的な参照転記の契約だけを維持する。
 
-Main の copy artifact の上限は Task ごとの 3 件（`packages/contracts/src/index.ts:6482`、`main/computer-use-artifact.ts:362`〜`:368`）のまま共有で保ち、セッション単位に分けない。Task をまたぐ並行では各 Task のセッションは一つなので、実質はセッションごとの 3 件になる。同じ Task の中の並行（§3.6 の (a)・(b)）を採る場合も Task の 3 件を共有とし、超えた copy は今どおり保存しない。
+Main の copy artifact の上限は今のまま保ち、セッション単位に分けない。今の store は、Task とその時点の Turn・policyEpoch の組ごとに 3 件を保持し、新しい artifact を作る時に、同じ Task で Turn か policyEpoch が違う既存の artifact を削除する（`packages/contracts/src/index.ts:6482`、`main/computer-use-artifact.ts:362`〜`:368`、削除は `:364`〜`:365`）。Task をまたぐ並行では各 Task のセッションは一つなので、実質はセッションごとの 3 件になり、他の Task の artifact は消さない。同じ Task の中の並行のうち (a)（同じ Turn）では Task の 3 件を共有し、超えた copy は今どおり保存しない。(b)（Leader と worker で Turn が別）では共有にならず、互いの artifact を消し合うので、(b) を採る場合は Turn をまたぐ削除の扱いを決める必要がある（§3.6）。
 
 **代案・理由**: 全観測を一列にすると一つの UIA が他を止める。無制限の worker / capture は停止とメモリの上限を失う。3 lane の独立枠を選び、RSS・CPU・GPU・遅延は §4 の実測で公開可否を判定する。
 
@@ -294,15 +310,15 @@ Main の copy artifact の上限は Task ごとの 3 件（`packages/contracts/s
 
 | ケース | 単体・境界で固定すること | Windows 実機での操作・合格条件 |
 | --- | --- | --- |
-| CS-1: 2〜3 背景 session | 別々の Task の Turn から独立 PID へ同時 admission、同じ request ID 値でも lane / 世代で分離。観測・ticket・応答・artifact の交差を拒否。Task の選択変更で選択外の Task のセッションが止まらない | 別々の Task から別 PID の合成 fixture を 2 個、次に 3 個操作し、人は第四のアプリへ入力し、Task の表示も切り替える。異なる合成値と操作回数が各対象だけに届き、前面・カーソルを奪わない。barrier 付き fixture で実際の背景呼出しの重なりも確認 |
-| CS-2: 予約と容量 | 同一 PID + 作成時刻の start 競合、同一 PID の別窓、PID 再利用、別 PID の子、本人性取得失敗、候補の作成時刻と start 応答の不一致、4 件目の拒否、listing の lane の退役、昇格時の同じ listing の token の失効 | 同じアプリの別窓を二重選択して拒否される。独立 PID の窓は資格検証後に開始できる。3 件を超える helper が残らない |
-| CS-3: 前面排他 | 共有 admission と前面 slot の重なり 0、writer drain、1 秒期限、Stop による待機取消し。前面待ち期限後の遅延発行 0。前面区間の owner のモデル待ち中も前面 slot を保持。別 lane の探索の起動／picker と前面入力の競合（前面区間の owner がいる間の起動 permit 0、起動・picker の保持中の前面入力 0、settle 時間の後の前面検査のやり直し） | 二つが同時に前面引渡しを求めても一つだけ前面区間を得る。前面 owner の連続入力中は背景入力が待ち、観測は可能で、別 lane の UIA 読取りの最中の前面の変化が 0。前面 owner の入力中に別 lane の探索が対象の無いアプリを求めても起動・picker は busy になる。人の操作で pause 後、新規検証から継続 |
-| CS-4: 固まりと全体 gate | A の UIA / capture / cleanup を止めても B / C の枠を使える。A の通常 Stop（C の待ち）の間は全体 gate が開いたまま、A の `termination_requested` で閉じ、A の exit と kill-stop §2.2 の判定の後に開く。uncertain / closeCandidate / activeStopQuarantines / native in-flight は A の lane だけを拒否する。無制限 UIA では並行 gate 閉鎖 | A の provider を意図的に固め、A の Stop の C の待ちの間に B / C の背景操作が完了する。A が termination_requested になると B / C の新規入力と新規開始が拒否され、元 helper exit の後は B / C が新規検証で進む。対象アプリは kill されない |
-| CS-5: 全体停止 | 全 lane の latch が最初の await より前。starting / discovery / approval / pending permit を含める。各 lane の C / T を並行計測。緊急停止の onStop が全体 Stop の入口に届く。termination_requested の lane があれば全体 gate が閉じたまま | 一つが固まり、一つが承認待ち、一つが実行中の状態で全体 Stop と Ctrl+Shift+F8 をそれぞれ実行する。全 owner に停止が届き、N3 の期限内の結果を個別表示。termination_requested を成功表示しない |
+| CS-1: 2〜3 背景 session | 別々の Task の Turn から独立 PID へ同時 admission、同じ request ID 値でも lane / 世代で分離。観測・ticket・応答・artifact の交差を拒否。Task の選択変更で選択外の Task の AI のセッションが止まらない。選択外の Task の探索は対象が無くても起動せず busy になり、選択変更の時点で未消費の起動 permit は失効する。パネルのセッションは他の owner がある間は開始できず、パネルのセッションがある間は他の Task の AI の開始が容量の拒否になる | 別々の Task から別 PID の合成 fixture を 2 個、次に 3 個操作し、人は第四のアプリへ入力し、Task の表示も切り替える。異なる合成値と操作回数が各対象だけに届き、前面・カーソルを奪わない。選択外の Task の AI が対象の無いアプリを求めても、アプリは起動しない。barrier 付き fixture で実際の背景呼出しの重なりも確認 |
+| CS-2: 予約と容量 | 同一 PID + 作成時刻の start 競合、同一 PID の別窓、PID 再利用、別 PID の子、本人性取得失敗、候補の作成時刻と start 応答の不一致、4 件目の拒否、listing の lane の退役、昇格時の同じ listing の token の失効。Task 単位の開始予約: 同じ Task・別 PID の二重開始は AI の経路・手動パネルの経路・両者の混在のどれでも拒否され、別の Task なら許可される。開始中・承認待ち・停止未確認の間も予約が残る | 同じアプリの別窓を二重選択して拒否される。独立 PID の窓は資格検証後に開始できる。3 件を超える helper が残らない |
+| CS-3: 前面排他 | 共有 admission と前面 slot の重なり 0、writer drain、1 秒期限、Stop による待機取消し。前面待ち期限後の遅延発行 0。前面区間の owner のモデル待ち中も前面 slot を保持。別 lane の探索の起動／picker と前面入力の競合（前面区間の owner がいる間の起動 permit 0、起動・picker の保持中の前面入力 0、settle 時間の後の前面検査のやり直し）。起動しなかった探索（既存の窓が見つかった・列挙だけで終わった）は前面 slot を取らず、その直後に前面区間の要求がすぐ通る。二段階の第二段で候補が現れた時は permit を消費せずに slot を解放する。起動 permit の期限切れで slot が解放される。プロファイル登録の IPC（computerUseProfileRegister）の picker は空き lane と前面 slot を取ってから表示され、前面区間の owner がいれば表示されずに busy になる。前面入力の tombstone は区間の終了後も背景 claim を閉じ続ける | 二つが同時に前面引渡しを求めても一つだけ前面区間を得る。前面 owner の連続入力中は背景入力が待ち、観測は可能で、別 lane の UIA 読取りの最中の前面の変化が 0。前面 owner の入力中に別 lane の探索が対象の無いアプリを求めても起動は busy になり、設定画面からアプリを登録しようとしても picker は表示されない。人の操作で pause した AI のセッションは終わって枠と予約を解放し、モデルが新しく list と start をすると新規検証から続く |
+| CS-4: 固まりと全体 gate | A の UIA / capture / cleanup を止めても B / C の枠を使える。A の通常 Stop（C の待ち）の間は全体 gate が開いたまま、A の `termination_requested` で閉じ、A の exit と kill-stop §2.2 の判定の後に開く。uncertain / closeCandidate / activeStopQuarantines / native in-flight と共有 admission の tombstone は A の lane だけを拒否する（共有 admission の tombstone は前面 slot の取得も止める）。全体 gate が閉じた時点で未消費の permit が失効し、他 lane の観測は許される。無制限 UIA では並行 gate 閉鎖 | A の provider を意図的に固め、A の Stop の C の待ちの間に B / C の背景操作が完了する。A が termination_requested になると B / C の新規入力と新規開始が拒否され、gate を閉じる前に発行済みで未消費の permit は消費されず、B / C の観測は続く。元 helper exit の後は B / C が新規検証で進む。対象アプリは kill されない |
+| CS-5: 全体停止 | 全 lane の latch が最初の await より前。starting / discovery / approval / pending permit を含める。各 lane の C / T を並行計測。緊急停止の onStop が全体 Stop の入口に届く。N15-3a では lane の状態を fake で与え、termination_requested の lane があれば全体 gate が閉じたままになることを確かめる。Host の termination_requested との実接続は N15-4 で確かめる | 一つが固まり、一つが承認待ち、一つが実行中の状態で全体 Stop と Ctrl+Shift+F8 をそれぞれ実行する。全 owner に停止が届き、N3 の期限内の結果を個別表示。termination_requested を成功表示しない |
 | CS-6: kill-stop と K-1〜K-5 | beforeWrite 保存失敗、応答消失、accepted=true 未確認、receipt の背景例外、K-4 の前面化、起動時 recovery、別世代 receipt 拒否 | helper exit 後の新規入力 0。遅れて対象に反映する既発行操作は別に記録し、対象隔離・警告が残る。承認カードを経た新 session 以外で再開しない |
-| CS-7: 承認と takeover | カードの取り違え・replay・二重消費 0。往復中の第三窓、別 session の前面化、hook 失明、所属不明。app-grant カードの 2 枚目が access_request_pending で拒否され T8 を消費しない | 背景 A のカードを開いても背景 B が進む。前面 A の往復中に B へ移ると A は pause し、自動復帰しない。対象への人の pointer 操作で該当背景 lane が止まる。2 つの Task が同時に許可を求めると、一方のカードだけが出て一覧に表示中と示される |
-| CS-8: 起動と復旧 | 署名確認を遅延・失敗・取消し、古い exit / attest 応答、別 Main・別インストール・別 userData の mutex 競合、他ユーザーによる名前の先取りの不成立、N-API module の読込み失敗、abandoned と recovery | 3 lane の起動・終了を反復して Main の Stop UI が応答する。第二 Main は Computer Use を開始できない。Main の crash の後は、N3 / N4 の recovery が完了するまで全体 gate が閉じ、旧 helper と新 helper が入力を重ねない |
-| CS-9: UI と資源 | status revision の session 別順序、行停止と全体停止、overlay の前面対象の集合での衝突判定、背景対象の最大化で停止しないこと、最後の owner まで停止手段維持 | light / dark、Tab / Shift+Tab、カードの非自動 focus、複数 monitor / DPI、容量・busy・隔離・許可カード表示中の表示を操作確認。背景対象を最大化しても他 lane が止まらない。3 lane を反復して helper / handle / queue が増え続けない |
+| CS-7: 承認と takeover | カードの取り違え・replay・二重消費 0。往復中の第三窓、別 session の前面化、hook 失明、所属不明。app-grant カードの 2 枚目が access_request_pending で拒否され T8 を消費しない。選択外の Task の要求は欄を取らずに専用の理由コードで拒否され T8 を消費しない | 背景 A のカードを開いても背景 B が進む。前面 A の往復中に B へ移ると A は pause し、自動復帰しない。対象への人の pointer 操作で該当背景 lane が止まる。選択外の Task の AI が許可を求めるとカードは出ず専用の理由コードで拒否され、選択中の Task の要求はカードを出せる。選択中の Task のカードの表示中は一覧に表示中と示される |
+| CS-8: 起動と復旧 | 署名確認を遅延・失敗・取消し、古い exit / attest 応答、別 Main・別インストール・別 userData の mutex 競合、他ユーザーによる名前の先取りの不成立、N-API module の読込み失敗、mutex の作成・取得・解放が Main の JS スレッドの同期呼出しに限られること（async work から呼ばない）、abandoned と recovery | 3 lane の起動・終了を反復して Main の Stop UI が応答する。第二 Main は Computer Use を開始できない。Main の crash の後は、N3 / N4 の recovery が完了するまで全体 gate が閉じ、旧 helper と新 helper が入力を重ねない |
+| CS-9: UI と資源 | status revision の session 別順序、行停止と全体停止、overlay の前面対象の集合での衝突判定、背景対象の最大化で停止しないこと、背景の lane だけの間は対象の矩形無しで arm でき、前面 lane の出現・交代で reposition すること、前面の矩形に配置できない時はその lane のセッションだけが終わること、最後の owner まで停止手段維持 | light / dark、Tab / Shift+Tab、カードの非自動 focus、複数 monitor / DPI、容量・busy・隔離・許可カード表示中の表示を操作確認。背景対象を最大化しても他 lane が止まらない。3 lane を反復して helper / handle / queue が増え続けない |
 
 実機操作は開発エージェントの Computer Use で行う。shell は fixture 準備、起動、ログとファイルの照合、受動計測に限る。UI 操作を内部 IPC・DOM・スクリプトで置き換えない。実 Provider の課金を伴う試験は本設計の受入に必須とせず、別途明示された場合だけ行う。
 
@@ -318,13 +334,15 @@ Main の copy artifact の上限は Task ごとの 3 件（`packages/contracts/s
 | --- | --- | --- | --- |
 | N15-1 | 起動境界: 署名確認の非同期化、取消し、終了までの child / attest process 所有。能力は単一のまま | N8、N9、N3、本 ADR 承認 | CS-8 の起動部分。署名不一致・timeout・Stop 後の遅い成功、Main が停止を受け付けること |
 | N15-2 | 所有境界: 専用 lane factory、複合世代と台帳、coordinator の lane routing・容量・対象予約 index、探索の候補への内部専用の作成時刻（§3.3）、探索の同じ lane への昇格と同じ listing の token の失効・listing の lane の退役（§3.6）、終了影響の分離。試験用だけ 3 lane（Host / native の範囲。Controller は単一のまま） | N15-1 | CS-2、CS-6、CS-8。旧 receipt、PID 再利用、上限、台帳 recovery、D-5 |
-| N15-3 | 入力境界: SID coordinator の mutex（Windows 用の署名済み N-API module と private namespace、§3.2）、共有 admission と前面 slot、単発 permit、探索の起動・picker の起動 permit、bounded UIA gate、drain / timeout、Stop 優先、全体 gate と全体 Stop の latch の状態機械（§3.5。lane の状態は fake で駆動） | N15-2 | CS-1、CS-3 の native seam と coordinator 単体。CS-4 の native seam と coordinator 単体（worker 枠の独立、全体 gate の開閉、lane 単位の隔離）。CS-8 の mutex・private namespace・abandoned。claim と Stop の競合 |
-| N15-3a | 並行の供給源と停止入口: Controller の開始 owner の Map 化と容量・予約による start / cancel / resume、Task の選択変更での停止の範囲の変更（§3.6、Q13 の承認が前提）、緊急停止の複数 owner 化（onStop を全体 Stop の入口へ、owner ごとの arm の参照数、前面対象の矩形の集合、最後の owner まで disarm しない、前面 lane だけの配置失敗の扱い）、全体 Stop の集約と latch の接続。Controller の複数セッションの試験用 gate をここで開く | N15-3 | CS-1 の Task 切替、CS-5、CS-9 の overlay と停止手段の維持。選択外の Task の app-grant カードと picker が今どおり引かれること |
-| N15-4 | Main 接続: N3 の K-1〜K-5 への接続、複合世代の台帳の Controller 側、承認往復・takeover と調停、全体 gate と Host の kill-stop の状態（termination_requested 等）の接続、観測上限 | N15-3a | CS-4（Controller 経由）、CS-6、CS-7。150 ms / 5 秒契約、別カード・別世代、観測割込み |
+| N15-3 | 入力境界: SID coordinator の mutex（Windows 用の署名済み N-API module と private namespace、§3.2）、mutex の呼出しを Main の JS スレッドに限ること、共有 admission と前面 slot、単発 permit、探索の二段階化と起動 permit（helper の列挙だけの第一段と、permit の消費直前の候補の再確認）、プロファイル登録の IPC（`main/ipc.ts:2517`〜`:2539` の computerUseProfileRegister）の picker の coordinator 経由化（空き lane と前面 slot の取得、activation・lane・複合世代に束縛した picker の permit）、bounded UIA gate、drain / timeout、Stop 優先、全体 gate と全体 Stop の latch の状態機械（§3.5。gate を閉じる時の未消費 permit の失効を含む。lane の状態は fake で駆動） | N15-2 | CS-1、CS-3 の native seam と coordinator 単体。CS-4 の native seam と coordinator 単体（worker 枠の独立、全体 gate の開閉、lane 単位の隔離）。CS-3 の computerUseProfileRegister の picker の経路、起動しなかった探索の直後の前面区間。CS-8 の mutex・private namespace・JS スレッド・abandoned。claim と Stop の競合 |
+| N15-3a | 並行の供給源と停止入口: Controller の開始 owner の Map 化と容量・予約による start / cancel / resume、AI（computer_start）と手動パネル（`main/ipc.ts:2610`〜`:2612`）の両経路を覆う Task 単位の原子的な開始予約、パネルのセッションの単独の判定（§3.6）、Task の選択変更での停止の範囲の変更と、選択外の Task の起動 permit の不発行・app-grant 要求の専用の理由コードによる拒否（§3.6、Q13 の承認が前提）、緊急停止の複数 owner 化（onStop を全体 Stop の入口へ、owner ごとの arm の参照数、背景の lane だけの間の対象無しの arm と前面 lane の出現・交代での reposition、前面対象の矩形の集合、最後の owner まで disarm しない、前面 lane だけの配置失敗の扱い）、全体 Stop の集約と latch の接続。Controller の複数セッションの試験用 gate をここで開く | N15-3 | CS-1 の Task 切替とパネルの単独、CS-2 の Task 単位の開始予約（同じ Task・別 PID の二重開始の拒否、別の Task の許可）、CS-5（lane の状態は fake。termination_requested の実接続は N15-4）、CS-7 の選択外の Task の app-grant 要求、CS-9 の overlay と停止手段の維持。選択外の Task の app-grant カードが今どおり引かれること |
+| N15-4 | Main 接続: N3 の K-1〜K-5 への接続、複合世代の台帳の Controller 側、承認往復・takeover と調停、全体 gate と Host の kill-stop の状態（termination_requested 等）の接続、観測上限 | N15-3a | CS-4（Controller 経由）、CS-5 の termination_requested の実接続、CS-6、CS-7。150 ms / 5 秒契約、別カード・別世代、観測割込み |
 | N15-5 | 表示境界（UI だけ）: 複数 status の IPC / contracts と一覧、行停止・全体停止の表示、待機・容量・隔離・許可カード表示中の表示 | N15-4 | CS-7、CS-9 の Renderer。keyboard、非自動 focus、旧 darwin 契約 |
 | N15-6 | Windows 受入と gate: 実機証拠、資源・遅延計測、settle 時間の見直し、対応能力の照合と公開候補の接続 | N15-5 | CS-1〜CS-9 の 2 / 3 lane 実機。不足は BLOCKED、gate は閉鎖を維持 |
 
-同じ Task の中の並行（§3.6 の (a)・(b)）を Q14・Q15 で採る場合は、N15-3a より前に claim・token・session gate・Turn 開始時の停止の変更を行う別のスライスと、V2 ADR の変更が要る。本表はそれを含まない。
+同じ Task の中の並行（§3.6 の (a)・(b)）を Q14・Q15 で採る場合は、N15-3a より前に claim・token・session gate・Turn 開始時の停止・Task 単位の開始予約・artifact の変更を行う別のスライスと、V2 ADR の変更が要る。本表はそれを含まない。
+
+Q13 が否決された場合、Task をまたぐ並行は成立しない（Task 選択時の停止が残ると、選択中の Task のセッションしか残らない）。その場合は N15-3a 以降に着手せず、N15-1〜N15-3 の成果は単一 session のまま保持し、N15 の供給源を再計画して本 ADR を改めてオーナーに諮る。
 
 N15-6 の PASS は release や別対象クラスの有効化の許可ではない。独立した敵対的レビュー、PR、Review BOT、要塞レビュー、オーナーの設計承認は親の工程である。
 
@@ -337,17 +355,20 @@ N15-6 の PASS は release や別対象クラスの有効化の許可ではな�
 3. SID ごとの単一 coordinator とし、第二 Main の Computer Use を拒否するか。推奨は拒否である。複数 Main を跨ぐ分散調停を N15 に追加しない（§3.2）。
 4. coordinator の mutex の所有者を、Main に読み込む Windows 用の署名済み N-API module とするか。推奨は採用である。所有者の寿命が Main と一致し、常駐プロセス案の「所有者だけが死ぬ」分裂が無い。費用は Windows の native build と `.node` の署名である（§3.2）。
 5. 背景同士だけを共有にし、前面区間は背景入力も含めて排他にするか。推奨はこの規則である。前面中の背景入力は待つが、観測は並行できる（§3.2）。
-6. 探索のアプリ起動と picker の表示を前面 slot の対象にし、前面区間の owner がいる間は待たずに busy とするか。推奨は採用である。前面入力の入力先を他 lane が変える経路を閉じ、人の操作を待つ picker の間も背景入力は止めない（§3.2）。
+6. 探索のアプリ起動とプロファイル登録の picker の表示を前面 slot の対象にし、前面区間の owner がいる間は待たずに busy とするか。推奨は採用である。探索は列挙と起動の二段階にし、起動しない探索は slot を取らない。前面入力の入力先を他 lane が変える経路を閉じ、人の操作を待つ picker の間も背景入力は止めない。帰結として、picker の応答に期限は置かないので、picker の表示中は他 lane の前面入力・前面への引渡し・承認往復の復帰が人の応答時間だけ busy になる（§3.2）。
 7. admission の待ちを最大 1 秒とし、期限後の自動送信を禁止するか。推奨は採用である。元の ticket / intent の期限の方が短ければそちらを使う（§3.2）。
 8. 同一 PID + 作成時刻への session を一つに限るか。推奨は採用である。同じプロセスの別窓も二重開始しない（§3.3）。
 9. 子プロセスの対象を自動追加せず、独立した資格・予約を要求するか。推奨は要求することである（§3.3）。
 10. bounded UIA を並行実行の必須条件にするか。推奨は必須である。対応しない環境は並行 gate を閉じる（§3.4）。
-11. 全体 gate を閉じる要因を termination_requested・起動時の recovery・全体 Stop の latch に限り、uncertain・closeCandidate・activeStopQuarantines・native の in-flight は lane 単位とするか。推奨は採用である。通常の固まりと通常の Stop は局所化し、termination_requested 中の他 session の新規入力と新しい helper の起動は許さない（§3.5）。
+11. 全体 gate を閉じる要因を termination_requested・起動時の recovery・全体 Stop の latch に限り、uncertain・closeCandidate・activeStopQuarantines・native の in-flight は lane 単位とするか。推奨は採用である。これは Accepted の kill-stop ADR §2.2 の 2 の「どれも host 全体を止める」の「host 全体」を「その lane の Host / client / helper」と読み替えるもので、承認後に kill-stop ADR の文面を更新する（§3.5、§6.1）。通常の固まりと通常の Stop は局所化し、termination_requested 中の他 session の新規入力と新しい helper の起動は許さない。
 12. 最上位 Stop と緊急停止を全体停止とし、別に行停止を置くか。推奨はこの表示である（§3.6）。
-13. 並行の第一の供給源を Task をまたぐ並行とし、そのために Task の選択変更で選択外の Task の実行中のセッションを止めないようにするか。推奨は採用である。Task ごとの claim・Turn 所有・ToolBroker の契約を変えずに済み、見えないセッションは全体の一覧・全体 Stop・overlay で扱う。app-grant カードと picker は今どおり選択外で引く（§3.6）。
+13. 並行の第一の供給源を Task をまたぐ並行とし、そのために Task の選択変更で選択外の Task の AI のセッションを止めないようにするか。推奨は採用である。Task ごとの claim・Turn 所有・ToolBroker の契約を変えずに済み、見えないセッションは全体の一覧・全体 Stop・overlay で扱う。選択外の Task の app-grant カードは今どおり引き、選択外の Task の探索には起動 permit を出さない（対象が無ければ起動せず busy）。否決の場合は N15-3a 以降に着手せず、N15 を再計画する（§3.6、§5）。
 14. 同じ Task の中の並行のうち、一つの Turn で computer_start を並列に呼ぶ案（§3.6 の (a)）を N15 に含めるか。推奨は含めないことである。claim・token の回転・V2 §5.2〜§5.4 の変更を伴い、Task をまたぐ並行で目的を満たせる。
 15. 同じ Task の中の並行のうち、Team の Leader と worker に並行させる案（§3.6 の (b)）を N15 に含めるか。推奨は含めないことである。session gate・Turn 開始時の停止・V2 の Turn 束縛の変更を伴う。
 16. §4 の Windows 実機証拠を並行 gate の公開条件にするか。推奨は必須である。設計・CI だけでは開かない（§4）。
+17. 人がパネルから始めるセッションを並行の対象に含めず、選択中の Task だけ・他に lane の owner が無い時だけ（単独）に限るか。推奨は限ることである。パネルのセッションは paused のまま人の再開を待つ唯一の種類で、Renderer の hook は単一のセッションと Task 切替での停止を前提にしており、並行の目的は AI の経路で満たせる（§3.6）。
+18. 選択外の Task の computer_request_access を、カードを出さずに専用の理由コードで拒否するか。推奨は拒否である。見えないカードが全体で 1 枚の欄を最大 2 分ふさぎ、選択中の Task の要求を止めることを防ぐ。一覧の行からカードを開く案は会話の外に許可の新しい面を要する（§3.6）。
+19. 背景の lane だけの間も overlay を出すために、arm の対象の矩形を必須とする guard をその間に限って緩めるか。推奨は緩めることである。見えない Task のセッションにも目に見える停止手段を残し、背景の lane は座標入力を持たず観測は窓単位なので、overlay との衝突は起きない。緩めない案は、その間は shortcut だけになる（§3.6）。
 
 ### 6.1 残るリスクと前提
 
