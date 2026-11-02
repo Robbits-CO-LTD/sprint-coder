@@ -24,14 +24,9 @@ function fixture(host: string, parts: Record<string, string> = {}): string {
 function unroutedReaders(root: string): string[] {
   const desktop = join(root, 'apps/desktop');
   const allowedReaders = new Set([
-    // These files implement or verify expansion of the raw host source.
-    join(root, 'computer-use-windows-host-source.mjs'),
+    // This test names the raw host file on purpose (fixtures and structure checks) and does not
+    // import the helper as a reader, so the import check below cannot exempt it.
     join(desktop, 'src/main/computer-use-windows-host-source.test.ts'),
-    // The build passes the original translation unit to the compiler.
-    join(root, 'build-computer-use-native.mjs'),
-    // These harnesses include the complete host in C++; the compiler resolves fragments.
-    join(desktop, 'src/main/computer-use-windows-v2-targets.test.ts'),
-    join(desktop, 'src/main/computer-use-windows-v1-uia-timeout-live-seam.test.ts'),
   ]);
   const files = [
     ...readdirSync(join(desktop, 'src'), { recursive: true, encoding: 'utf8' })
@@ -65,9 +60,7 @@ function unroutedReaders(root: string): string[] {
           statement.importClause.namedBindings.elements.some(
             (element) =>
               !element.isTypeOnly &&
-              ['readWindowsHostSource', 'windowsHostNativeDirectory'].includes(
-                (element.propertyName ?? element.name).text,
-              ),
+              (element.propertyName ?? element.name).text === 'readWindowsHostSource',
           )),
     );
   });
@@ -112,6 +105,10 @@ describe('Windows host source structure', () => {
     ],
     [
       `import { windowsHostNativeDirectory } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
+      false,
+    ],
+    [
+      `import { readWindowsHostSource, windowsHostNativeDirectory } from './computer-use-windows-host-source.mjs';\nconst path = '${hostName}';`,
       true,
     ],
     [`import { readWindowsHostSource } from './other.mjs';\nconst path = '${hostName}';`, false],
@@ -176,6 +173,9 @@ describe('Windows host source structure', () => {
       '#include "Computer_Use_Windows_Host_Part.inc"',
       '#include <computer_use_windows_host_part.inc>',
       '#include <windows_host_part.cc>',
+      '#include <computer_use_windows_host_part.cpp>',
+      '#include <part.inl>',
+      '#include <part.hpp>',
     ].flatMap(
       (directive) =>
         [
@@ -198,6 +198,7 @@ describe('Windows host source structure', () => {
     ],
     ['relative include', '#include "./computer_use_windows_host_part.inc"\n', {}, /Unexpanded/u],
     ['header include', '#include "computer_use_windows_host_part.h"\n', {}, /Unexpanded/u],
+    ['angle header include', '#include <computer_use_windows_host_part.h>\n', {}, /Unexpanded/u],
     [
       'unexpanded include in fragment',
       `${include}\n`,

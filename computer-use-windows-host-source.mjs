@@ -18,7 +18,8 @@ export function readWindowsHostSource(directory = windowsHostNativeDirectory) {
         (quoted &&
           !quoted.endsWith('.h') &&
           !/^computer_use_windows_host_[a-z0-9_]+\.inc$/u.test(quoted)) ||
-        (angled && /\.(inc|cc)$/u.test(angled))
+        // Angle includes are system or SDK headers: no extension, or .h only.
+        (angled && !/\.h$/u.test(angled) && /\.[^./\\]*$/u.test(angled))
       )
         throw new Error(`Unsupported Windows host include (Unexpanded): ${name}`);
     }
@@ -43,7 +44,11 @@ export function readWindowsHostSource(directory = windowsHostNativeDirectory) {
     if (/^computer_use_windows_host_.*\.inc$/u.test(name) && !included.has(name))
       throw new Error(`Unreferenced Windows host fragment: ${name}`);
   }
-  if (/^[\t ]*#[\t ]*include[\t ]*"[^"\n]*computer_use_windows_host[^"\n]*"/mu.test(expanded))
+  if (
+    /^[\t ]*#[\t ]*include[\t ]*(?:"[^"\n]*computer_use_windows_host[^"\n]*"|<[^>\n]*computer_use_windows_host[^>\n]*>)/mu.test(
+      expanded,
+    )
+  )
     throw new Error('Unexpanded Windows host include');
   return expanded;
 }
