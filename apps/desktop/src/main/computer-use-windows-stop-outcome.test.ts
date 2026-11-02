@@ -1053,6 +1053,31 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'response_lost' }]);
   });
 
+  it.each([true, false])(
+    'R19b/R19c exit absorbs receipt holds after storage succeeds (%s)',
+    (retry) => {
+      const held = decideWindowsStop(state({ rows: [row], nativeBlockers: blockers }), {
+        ...receipt,
+        storage: failed,
+      });
+      const exited = decideWindowsStop(held.state, {
+        ...exit,
+        storage: retry ? { status: 'failed', holdId: 'exit-write' } : written,
+      });
+      const recovered = retry
+        ? decideWindowsStop(exited.state, {
+            kind: 'retry_storage',
+            holdId: 'exit-write',
+            status: 'written',
+          })
+        : exited;
+      expect(recovered.state.holds).toEqual([]);
+      expect(recovered.state.rows).toEqual([]);
+      expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'exit_suspect' }]);
+      expect(recovered.cleanup).toBe('generation_after_transfer');
+    },
+  );
+
   it('R19c keeps generation blockers until the transfer lands, then signals generation cleanup', () => {
     const held = decideWindowsStop(state({ rows: [row], nativeBlockers: blockers }), {
       ...exit,

@@ -477,6 +477,7 @@ function applyChanges(state: WindowsStopState, changes: readonly RowChange[]): W
 function applyWritten(
   state: WindowsStopState,
   write: Readonly<{
+    operation?: WindowsStorageOperation;
     changes: readonly RowChange[];
     releaseTarget?: WindowsTargetIdentity;
     releaseBlockers?: BlockerRelease;
@@ -486,6 +487,17 @@ function applyWritten(
   const { releaseTarget, releaseBlockers } = write;
   return {
     ...next,
+    // A successful generation transfer subsumes its older receipt transfers.
+    holds:
+      write.operation === 'exit_transfer'
+        ? next.holds.filter(
+            (hold) =>
+              hold.operation !== 'receipt_transfer' ||
+              !hold.changes.every(
+                (change) => change.row.helperGeneration === releaseBlockers?.helperGeneration,
+              ),
+          )
+        : next.holds,
     quarantines:
       releaseTarget === undefined
         ? next.quarantines

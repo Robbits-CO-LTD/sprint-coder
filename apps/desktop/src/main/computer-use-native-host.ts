@@ -271,8 +271,20 @@ export function createComputerUseNativeHost(
     return state;
   };
   const ledgerEvent = (generation: number, event: WindowsStopEvent) => {
-    const decision = decideWindowsStop(ledgerState(generation), event);
+    const previous = ledgerState(generation);
+    const decision = decideWindowsStop(previous, event);
     ledgerStates.set(generation, decision.state);
+    for (const hold of previous.holds) {
+      if (
+        hold.operation === 'receipt_transfer' &&
+        !decision.state.holds.some((remaining) => remaining.id === hold.id)
+      ) {
+        pendingWrites.delete(hold.id);
+        const complete = receiptCompletions.get(hold.id);
+        receiptCompletions.delete(hold.id);
+        complete?.();
+      }
+    }
     if (
       terminationEnabled &&
       decision.cleanup === 'generation_after_transfer' &&
@@ -418,18 +430,19 @@ export function createComputerUseNativeHost(
           ],
         });
         // Classify at exit, before any await. Failed storage retains both rows and blockers.
-        ledgerEvent(generation, {
+        const decision = ledgerEvent(generation, {
           kind: 'exit_confirmed',
           helperGeneration: generation,
           cause,
           storage: rows.length === 0 ? { status: 'written' } : { status: 'failed', holdId },
         });
-        if (rows.length === 0) return;
+        if (decision.awaitingHoldId === null) return;
         pendingWrites.set(holdId, {
           generation,
           write: async () => {
-            // A response/receipt writer may still be touching these rows. Transfer must land last.
-            if (ledgerState(generation).holds.some((hold) => hold.id !== holdId)) return false;
+            // Response and dispatch_canceled both use response holds. Receipt holds are absorbed.
+            if (ledgerState(generation).holds.some((hold) => hold.operation === 'response'))
+              return false;
             if ([...uncertainWrites].some((row) => row.helperGeneration === generation))
               return false;
             if (ledger.transferReceipt !== undefined)
@@ -882,6 +895,18 @@ export function createComputerUseNativeHost(
             });
           },
           write: async () => {
+            const current = ledgerState(generation);
+            // Exit owns the transfer once it includes this session's rows.
+            if (
+              current.holds.some(
+                (hold) =>
+                  hold.operation === 'exit_transfer' &&
+                  hold.changes.some((change) => change.row.sessionId === sessionId),
+              )
+            )
+              return false;
+            if (current.exitConfirmed && !current.rows.some((row) => row.sessionId === sessionId))
+              return true;
             // Older response writes must finish before receipt deletes their rows.
             if (
               ledgerState(generation).holds.some(

@@ -986,7 +986,7 @@ class WindowsComputerUseHelperClient {
     }
     this.child = child;
     const generation: HelperGeneration | undefined =
-      this.termination === undefined
+      this.termination === undefined || child.pid === undefined
         ? undefined
         : {
             id: this.helperGeneration,
@@ -1044,7 +1044,7 @@ class WindowsComputerUseHelperClient {
           error instanceof Error ? error : new Error(String(error)),
         );
       else {
-        child.kill();
+        if (child.pid !== undefined) child.kill();
         if (this.child === child) this.child = null;
       }
       throw error;

@@ -127,9 +127,12 @@ class FakeHelperChild extends EventEmitter {
 }
 
 class ControlledHelperChild extends FakeHelperChild {
-  killResult = true;
+  killResult: boolean | 'throw' = true;
+  killCalls = 0;
   override kill(): boolean {
+    this.killCalls += 1;
     this.killed = true;
+    if (this.killResult === 'throw') throw new Error('synthetic kill failure');
     return this.killResult;
   }
 }
@@ -3311,6 +3314,106 @@ int main() {
   }
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
+  it('PR7a retries after a spawn failure without a PID or exit', async () => {
+    const child = new ControlledHelperChild();
+    Object.defineProperty(child, 'pid', { value: undefined });
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      queueMicrotask(() => child.emit('error', new Error('synthetic spawn failure')));
+      return child as unknown as NodeChildProcess.ChildProcess;
+    });
+    const target = ledgerTarget(true, undefined, true);
+    await expect(target.addon.listTargets!({})).rejects.toThrow('PID is unavailable');
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(target.addon.listTargets!({})).resolves.toEqual([]);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(child.killCalls).toBe(0);
+  });
+  it('PR7a receipt storage failure followed by exit recovers and completes the receipt', async () => {
+    let closeLedger!: WindowsCloseCallbacks;
+    const cleanup = vi.fn();
+    const persisted = vi.fn();
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        configureCloseLedger: (callbacks) => {
+          closeLedger = callbacks;
+          addon.configureCloseLedger!({
+            ...callbacks,
+            verified: (generation, sessionId, complete) =>
+              callbacks.verified(generation, sessionId, () => {
+                persisted();
+                complete();
+              }),
+          });
+        },
+        cleanupWindowsGeneration: (id) => {
+          cleanup(id);
+          addon.cleanupWindowsGeneration!(id);
+        },
+      }),
+      true,
+    );
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(session);
+    target.control.failTransfer = true;
+    const evidence = await target.addon.close!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    const receipt = { sessionId: session.sessionId, cancelEpoch: 1, inputAttemptCount: 1 };
+    await expect(target.addon.confirmSessionClosed!(receipt, evidence)).resolves.toEqual({
+      status: 'pending',
+    });
+    children[0]!.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.rows.size).toBe(1);
+    expect(persisted).not.toHaveBeenCalled();
+    target.control.failTransfer = false;
+    await target.addon.listTargets!({});
+    expect(target.rows.size).toBe(0);
+    expect(target.quarantines).toEqual([
+      { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+    ]);
+    expect(cleanup.mock.calls).toEqual([[1]]);
+    expect(persisted).toHaveBeenCalledTimes(1);
+    expect(closeLedger.blocked(1)).toBe(false);
+    await target.addon.listTargets!({});
+    expect(persisted).toHaveBeenCalledTimes(1);
+  });
+  it('PR7a foreground-only exit does not retry a nonexistent storage hold', async () => {
+    const original = stopKernel.decideWindowsStop;
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      const result = original(state, event);
+      if (event.kind !== 'start_generation') return result;
+      // PR5b will supply foreground rows; seed that future ledger input at the kernel boundary.
+      return {
+        ...result,
+        state: {
+          ...result.state,
+          rows: [
+            {
+              helperGeneration: event.nextHelperGeneration,
+              sessionId: 'foreground-session',
+              requestId: 'foreground-request',
+              kind: 'foreground',
+              inputPath: 'foreground',
+              state: 'effect_unconfirmed',
+              identity: { pid: 42, creationTime: '133000000000000001' },
+            },
+          ],
+        },
+      };
+    });
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      await target.addon.listTargets!({});
+      children[0]!.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.calls.filter(([, event]) => event.kind === 'retry_storage')).toEqual([]);
+      await expect(target.addon.listTargets!({})).resolves.toEqual([]);
+    } finally {
+      decide.mockRestore();
+    }
+  });
   it.each(ledgerActions)('PR7a exit transfers an unconfirmed $name row', async (sample) => {
     const target = ledgerTarget(true, undefined, true);
     const session = await startSession(target.host, 'session-1', 'turn-1');
@@ -3344,7 +3447,10 @@ int main() {
       expect(target.rows.size).toBe(1);
       await expect(target.addon.listTargets!({})).rejects.toThrow();
       expect(spawn).toHaveBeenCalledTimes(1);
+      expect(child.killCalls).toBe(1);
+      const exitListener = child.listeners('exit')[0]!;
       child.emit('exit', 0, null);
+      exitListener(0, null);
       child.emit('exit', 0, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(target.rows.size).toBe(0);
@@ -3354,11 +3460,18 @@ int main() {
       expect(decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed')).toHaveLength(
         1,
       );
+      expect(
+        decide.mock.results.filter((result) => result.value.notification.kind !== 'unchanged'),
+      ).toHaveLength(2);
+      expect(
+        decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
+      ).toHaveLength(1);
+      expect(child.killCalls).toBe(1);
     } finally {
       decide.mockRestore();
     }
   });
-  it.each([true, false])(
+  it.each([true, false, 'throw'] as const)(
     'PR7a kill result %s is not exit evidence and T is exactly two seconds',
     async (killResult) => {
       const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
@@ -3382,6 +3495,7 @@ int main() {
         expect(decide.mock.results.at(-1)?.value.state.result).toBe('termination_requested');
         await expect(target.addon.listTargets!({})).rejects.toThrow('native_stop_unconfirmed');
         expect(spawn).toHaveBeenCalledTimes(1);
+        expect(child.killCalls).toBe(1);
         child.emit('exit', 0, null);
         expect(
           decide.mock.calls.find(([, event]) => event.kind === 'exit_confirmed')?.[1],
@@ -3390,6 +3504,88 @@ int main() {
         await expect(target.addon.listTargets!({})).resolves.toBeDefined();
         expect(spawn).toHaveBeenCalledTimes(2);
       } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+  it.each(['attestation', 'pipe', 'handshake', 'idle-close'] as const)(
+    'PR7a classifies %s outside dispatch and kills each generation once',
+    async (failure) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      const child = new ControlledHelperChild();
+      const originalConnect = transport.connectPipe;
+      const originalAttestation = transport.attestation;
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const cleanup = vi.fn();
+      try {
+        const target = ledgerTarget(
+          true,
+          (addon) => ({
+            ...addon,
+            cleanupWindowsGeneration: (id) => {
+              cleanup(id);
+              addon.cleanupWindowsGeneration!(id);
+            },
+          }),
+          true,
+        );
+        if (failure === 'attestation') transport.attestation = '{}';
+        if (failure === 'pipe')
+          transport.connectPipe = () => {
+            throw new Error('synthetic pipe failure');
+          };
+        if (failure === 'handshake') {
+          transport.connectPipe = () => {
+            const socket = originalConnect!() as FakeHelperSocket;
+            socket.onWrite = (bytes) => {
+              const request = decodeComputerUseNativeFrame(bytes);
+              socket.emit(
+                'data',
+                encodeComputerUseNativeFrame({
+                  ...request,
+                  messageType: 'probe_result',
+                  metadata: Buffer.from('{}'),
+                }),
+              );
+            };
+            return socket;
+          };
+        }
+        if (failure === 'idle-close') {
+          const session = await startSession(target.host, 'session-1', 'turn-1');
+          await target.host.close(session);
+        } else {
+          const rejected = expect(target.addon.listTargets!({})).rejects.toThrow();
+          await vi.advanceTimersByTimeAsync(5_100);
+          await rejected;
+        }
+        expect(child.killCalls).toBe(1);
+        expect(cleanup).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(target.addon.listTargets!({})).rejects.toThrow('native_stop_unconfirmed');
+        expect(child.killCalls).toBe(1);
+        const exitListener = child.listeners('exit')[0]!;
+        child.emit('exit', 0, null);
+        exitListener(0, null);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cleanup.mock.calls).toEqual([[1]]);
+        expect(
+          decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed'),
+        ).toHaveLength(1);
+        expect(
+          decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
+        ).toHaveLength(1);
+        expect(
+          decide.mock.results.filter((result) => result.value.notification.kind !== 'unchanged'),
+        ).toHaveLength(2);
+        expect(
+          decide.mock.calls.find(([, event]) => event.kind === 'exit_confirmed')?.[1],
+        ).toMatchObject({ cause: 'abortTransport' });
+      } finally {
+        transport.connectPipe = originalConnect;
+        transport.attestation = originalAttestation;
         decide.mockRestore();
       }
     },
@@ -3503,6 +3699,13 @@ int main() {
         { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
       ]);
       expect(cleanup.mock.calls).toEqual([[1]]);
+      expect(child.killCalls).toBe(failure === 'crash' ? 0 : 1);
+      expect(
+        decide.mock.results.filter((result) => result.value.notification.kind !== 'unchanged'),
+      ).toHaveLength(1);
+      expect(
+        decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
+      ).toHaveLength(0);
       expect(decide.mock.calls.filter(([, event]) => event.kind === 'exit_confirmed')).toHaveLength(
         1,
       );
@@ -3543,6 +3746,13 @@ int main() {
       );
       expect(decide.mock.results.at(-1)?.value.state.result).toBe('terminated_clean');
       expect(cleanup.mock.calls).toEqual([[1]]);
+      expect(child.killCalls).toBe(1);
+      expect(
+        decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
+      ).toHaveLength(order === 'before' ? 0 : 1);
+      expect(
+        decide.mock.results.filter((result) => result.value.notification.kind !== 'unchanged'),
+      ).toHaveLength(order === 'before' ? 1 : 2);
     } finally {
       decide.mockRestore();
     }
@@ -3592,6 +3802,12 @@ int main() {
       expect(target.rows.size).toBe(1);
       expect(cleanup).not.toHaveBeenCalled();
       expect((await target.dispatch(next)).outcome).toBe('resolved');
+      // Replay old pipe callbacks before transfer/cleanup, while generation 2 is live.
+      sockets[0]!.emit('close');
+      sockets[0]!.emit('data', Buffer.alloc(COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES, 255));
+      expect(children[1]!.killed).toBe(false);
+      expect(sockets[1]!.destroyed).toBe(false);
+      expect(target.quarantines).toEqual([]);
       target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
       await target.dispatch(next, ledgerActions[0], 'new-generation-row');
       expect(target.rows.size).toBe(2);
@@ -3604,6 +3820,9 @@ int main() {
         { helperGeneration: 2, sessionId: 'session-2', identity: { pid: 43 } },
       ]);
       expect(cleanup.mock.calls).toEqual([[1]]);
+      expect(target.quarantines).toEqual([
+        { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+      ]);
       target.control.response = null;
       expect((await target.dispatch(next, ledgerActions[0], 'after-transfer')).outcome).toBe(
         'resolved',
