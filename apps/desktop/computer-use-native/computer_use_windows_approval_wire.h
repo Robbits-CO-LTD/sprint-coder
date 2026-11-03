@@ -59,7 +59,8 @@ inline bool OperationAllowed(const WindowsApprovalDisplay &display) {
     return opens || operation == "toggle" || operation == "select";
   case NativeApprovalEffect::kSupervisedAction:
     return opens || operation == "toggle" || operation == "select" || operation == "set_text" ||
-           operation == "type" || operation == "scroll" || operation == "expand_collapse";
+           operation == "type" || operation == "scroll" || operation == "expand_collapse" ||
+           operation == "semantic_scroll";
   case NativeApprovalEffect::kInvalid:
     return false;
   }

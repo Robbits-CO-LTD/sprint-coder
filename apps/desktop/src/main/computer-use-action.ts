@@ -1,16 +1,21 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import {
-  computerUseActionKindSchema,
+  computerUseInternalActionKindSchema,
   type ComputerUsePlannedAction,
   type ComputerUseActionKind,
+  type ComputerUseSemanticScrollAction,
 } from '@sprint-coder/contracts';
 
-export function computerUseActionKind(action: ComputerUsePlannedAction): ComputerUseActionKind {
-  return computerUseActionKindSchema.parse(action.type);
+export function computerUseActionKind(action: ComputerUsePlannedAction): ComputerUseActionKind;
+export function computerUseActionKind(action: ComputerUseSemanticScrollAction): 'semantic_scroll';
+export function computerUseActionKind(
+  action: ComputerUsePlannedAction | ComputerUseSemanticScrollAction,
+): ComputerUseActionKind | 'semantic_scroll' {
+  return computerUseInternalActionKindSchema.parse(action.type);
 }
 
 export function computerUseActionRoute(
-  action: ComputerUsePlannedAction,
+  action: ComputerUsePlannedAction | ComputerUseSemanticScrollAction,
 ): 'semantic' | 'visual' | 'none' {
   if (action.type === 'wait' || action.type === 'finish') return 'none';
   if (
@@ -19,7 +24,8 @@ export function computerUseActionRoute(
     action.type === 'set_text' ||
     action.type === 'select' ||
     action.type === 'toggle' ||
-    action.type === 'expand_collapse'
+    action.type === 'expand_collapse' ||
+    action.type === 'semantic_scroll'
   )
     return 'semantic';
   return 'visual';

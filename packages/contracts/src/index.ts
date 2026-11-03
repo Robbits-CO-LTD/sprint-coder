@@ -4483,6 +4483,11 @@ export const computerUseActionKindSchema = z.enum([
   'copy',
 ]);
 export type ComputerUseActionKind = z.infer<typeof computerUseActionKindSchema>;
+/** Internal N9 vocabulary; the public action kinds remain unchanged. */
+export const computerUseInternalActionKindSchema = z.enum([
+  ...computerUseActionKindSchema.options,
+  'semantic_scroll',
+]);
 
 export const computerUseKeySchema = z.enum([
   'Enter',
@@ -5900,6 +5905,28 @@ export type ComputerUseStopInput = z.infer<typeof computerUseStopInputSchema>;
 
 const normalizedCoordinateSchema = z.number().finite().min(0).max(1);
 const semanticTargetSchema = z.string().min(1).max(128);
+/** N9 internal definition only; this does not enable execution or provider exposure. */
+export const computerUseSemanticScrollActionSchema = z.discriminatedUnion('operation', [
+  z
+    .object({
+      type: z.literal('semantic_scroll'),
+      targetId: semanticTargetSchema,
+      operation: z.literal('scroll'),
+      axis: z.enum(['horizontal', 'vertical']),
+      amount: z.enum(['small_decrement', 'large_decrement', 'small_increment', 'large_increment']),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('semantic_scroll'),
+      targetId: semanticTargetSchema,
+      operation: z.literal('set_scroll_percent'),
+      axis: z.enum(['horizontal', 'vertical']),
+      percent: z.number().finite().min(0).max(100),
+    })
+    .strict(),
+]);
+export type ComputerUseSemanticScrollAction = z.infer<typeof computerUseSemanticScrollActionSchema>;
 const semanticArgumentsSchema = z
   .record(z.string(), z.json())
   .refine((value) => Object.keys(value).length <= 64, 'Too many semantic action arguments');
@@ -6296,6 +6323,7 @@ export const computerUseWindowsApprovalDisplaySchema = z.discriminatedUnion('eff
       ...computerUseWindowsDisplayFields,
       effect: z.literal('supervised_action'),
       operation: z.enum([
+        'semantic_scroll',
         'click',
         'double_click',
         'invoke',

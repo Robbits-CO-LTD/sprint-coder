@@ -145,6 +145,7 @@ const WINDOWS_OPERATION_LABELS: Readonly<
   type: '文字を入力',
   key: 'キーを入力',
   scroll: 'スクロール',
+  semantic_scroll: '一覧・文書をスクロール',
   select: '項目を選択',
   toggle: '設定を切り替え',
   expand_collapse: '表示を切り替え',

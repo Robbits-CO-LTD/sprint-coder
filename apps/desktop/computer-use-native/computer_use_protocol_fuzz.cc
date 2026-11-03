@@ -1388,7 +1388,7 @@ bool EffTakeover(const EffectFacts &facts, const EffectRuleset &ruleset = Effect
 const ActionKind kEffAllInputs[] = {
     ActionKind::kClick,   ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
     ActionKind::kType,    ActionKind::kKey,         ActionKind::kScroll, ActionKind::kSelect,
-    ActionKind::kToggle,  ActionKind::kExpandCollapse};
+    ActionKind::kToggle,  ActionKind::kExpandCollapse, ActionKind::kSemanticScroll};
 
 using sprint_coder::computer_use::ShadowAxNode;
 using sprint_coder::computer_use::ShadowBudget;
@@ -1475,7 +1475,7 @@ bool CheckEffectShadow() {
            {"invoke", ActionKind::kInvoke}, {"set_text", ActionKind::kSetText},
            {"select", ActionKind::kSelect}, {"toggle", ActionKind::kToggle},
            {"expand_collapse", ActionKind::kExpandCollapse}, {"type", ActionKind::kType},
-           {"key", ActionKind::kKey}}) {
+           {"key", ActionKind::kKey}, {"semantic_scroll", ActionKind::kSemanticScroll}}) {
     if (!Check(BuildShadowFacts(ShadowBase(), ShadowRequest(entry.first)).facts.action == entry.second,
                "shadow-action-mapping")) return false;
   }
@@ -7444,7 +7444,7 @@ const ApprovalOperationCase kApprovalOperationCases[] = {
     {sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction,
      {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
       ActionKind::kType, ActionKind::kKey, ActionKind::kScroll, ActionKind::kSelect,
-      ActionKind::kToggle, ActionKind::kExpandCollapse}},
+      ActionKind::kToggle, ActionKind::kExpandCollapse, ActionKind::kSemanticScroll}},
     {sprint_coder::computer_use::NativeApprovalEffect::kHighImpactConfirmation,
      {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kToggle,
       ActionKind::kSelect, ActionKind::kKey}},

@@ -438,7 +438,7 @@ struct ItemFacts {
       {"invoke", ActionKind::kInvoke},     {"set_text", ActionKind::kSetText},
       {"select", ActionKind::kSelect},     {"toggle", ActionKind::kToggle},
       {"expand_collapse", ActionKind::kExpandCollapse}, {"type", ActionKind::kType},
-      {"key", ActionKind::kKey}};
+      {"key", ActionKind::kKey}, {"semantic_scroll", ActionKind::kSemanticScroll}};
   for (const Entry &entry : kKinds)
     if (entry.kind == kind) {
       *action = entry.action;
