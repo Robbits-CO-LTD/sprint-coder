@@ -151,7 +151,9 @@ function nativeWindow(
 function createFixture(
   options: {
     profiles?: readonly ComputerAppProfileRecord[];
-    windowsFor?: (profile: ComputerAppProfileRecord) => readonly ComputerUseNativeWindow[];
+    windowsFor?: (
+      profile: ComputerAppProfileRecord,
+    ) => readonly ComputerUseNativeWindow[] | Promise<readonly ComputerUseNativeWindow[]>;
     agentDrivenEnabled?: boolean;
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
     now?: () => number;
@@ -212,6 +214,7 @@ function createFixture(
   });
   return {
     controller,
+    native,
     listWindowCalls,
     profiles,
     grants: grantStore.grants,
@@ -1053,4 +1056,148 @@ describe('agent-facing target tool exposure', () => {
     expect(withTools.content).toContain(COMPUTER_TARGET_SYSTEM_PROMPT);
     expect(withoutTools.content).not.toContain('untrustedLabel');
   });
+});
+
+describe('Windows generation-qualified public tokens', () => {
+  function generationFixture() {
+    let helper: Readonly<{ helperGeneration: number }> = Object.freeze({ helperGeneration: 1 });
+    let clock = 0;
+    const profile = profileRecord(
+      'profile-windows',
+      macIdentity({
+        platform: 'win32',
+        executablePath: 'C:\\Program Files\\Example\\Example.exe',
+        signerDigest: '9'.repeat(64),
+        packageFamilyName: null,
+      }),
+    );
+    const generation = { helper, listGeneration: 17, rulesetVersion: 1 };
+    const fixture = createFixture({
+      profiles: [profile],
+      now: () => clock,
+      windowsFor: (p) => [
+        nativeWindow(p, 1, { windowsGeneration: generation, executableDigest: p.executableDigest }),
+      ],
+    });
+    fixture.native.captureWindowsGeneration = () => helper;
+    fixture.native.isWindowsGenerationCurrent = (token) => token === helper;
+    const start = vi.spyOn(fixture.native, 'startSession');
+    fixture.controller.createAppGrant(grantIdentityOf(profile), {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    return {
+      ...fixture,
+      start,
+      generation,
+      rotate: () => {
+        helper = Object.freeze({ helperGeneration: 2 });
+      },
+      expire: () => {
+        clock = COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS;
+      },
+    };
+  }
+
+  it.each(['helper', 'expiry', 'relist'] as const)(
+    'rejects %s-stale tokens before start',
+    async (cause) => {
+      const f = generationFixture();
+      const [row] = selectable((await f.controller.listTargets({}, toolContext)).targets);
+      expect(row).toBeDefined();
+      const binding = f.controller.targetTokenBinding(row!.targetToken);
+      expect(binding?.windowsGeneration).toEqual(f.generation);
+      expect(JSON.stringify(row)).not.toMatch(/helperGeneration|listGeneration|rulesetVersion/);
+      if (cause === 'helper') f.rotate();
+      if (cause === 'expiry') f.expire();
+      if (cause === 'relist') await f.controller.listTargets({}, toolContext);
+      expect(f.controller.targetTokenBinding(row!.targetToken)).toBeNull();
+      await expect(
+        f.controller.listTargets({ appToken: row!.appToken }, toolContext),
+      ).rejects.toThrow(/token/);
+      await expect(
+        f.controller.startForAgent({ targetToken: row!.targetToken, goal: 'x' }, toolContext),
+      ).rejects.toThrow(/token/);
+      expect(f.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects late candidates from the old helper', async () => {
+    const f = generationFixture();
+    f.rotate();
+    await expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/generation/);
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps generation evidence out of Renderer window candidates', async () => {
+    const f = generationFixture();
+    const candidates = await f.controller.listWindows(f.profiles[0]!.id);
+    expect(candidates).toHaveLength(1);
+    expect(JSON.stringify(candidates)).not.toMatch(
+      /windowsGeneration|helperGeneration|listGeneration|rulesetVersion/,
+    );
+  });
+
+  it('does not let a late old enumeration replace the newer tokens', async () => {
+    const f = generationFixture();
+    let release!: (windows: readonly ComputerUseNativeWindow[]) => void;
+    const pending = new Promise<readonly ComputerUseNativeWindow[]>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(f.native, 'listWindows').mockReturnValueOnce(pending);
+    const old = expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/generation/);
+    const [fresh] = selectable((await f.controller.listTargets({}, toolContext)).targets);
+    release([nativeWindow(f.profiles[0]!, 1, { windowsGeneration: f.generation })]);
+    await old;
+    expect(f.controller.targetTokenBinding(fresh!.targetToken)).not.toBeNull();
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it('requires a fresh list after helper replacement without replaying the old token', async () => {
+    const f = generationFixture();
+    const [old] = selectable((await f.controller.listTargets({}, toolContext)).targets);
+    f.rotate();
+    const helper = f.native.captureWindowsGeneration!();
+    expect(helper).not.toBeNull();
+    const generation = { ...f.generation, helper: helper!, listGeneration: 1 };
+    vi.spyOn(f.native, 'listWindows').mockResolvedValue([
+      nativeWindow(f.profiles[0]!, 1, { windowsGeneration: generation }),
+    ]);
+    const [fresh] = selectable((await f.controller.listTargets({}, toolContext)).targets);
+    expect(f.controller.targetTokenBinding(fresh!.targetToken)?.windowsGeneration).toEqual(
+      generation,
+    );
+    await expect(
+      f.controller.startForAgent({ targetToken: old!.targetToken, goal: 'x' }, toolContext),
+    ).rejects.toThrow(/token/);
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it.each(['helper', 'expiry', 'relist'] as const)(
+    'rejects %s invalidation while start is refetching, including a second consumption',
+    async (cause) => {
+      const f = generationFixture();
+      const [row] = selectable((await f.controller.listTargets({}, toolContext)).targets);
+      let release!: (windows: readonly ComputerUseNativeWindow[]) => void;
+      const pending = new Promise<readonly ComputerUseNativeWindow[]>((resolve) => {
+        release = resolve;
+      });
+      const read = vi.spyOn(f.native, 'listWindows').mockReturnValueOnce(pending);
+      const first = f.controller.startForAgent(
+        { targetToken: row!.targetToken, goal: 'x' },
+        toolContext,
+      );
+      const refused = expect(first).rejects.toThrow(/token/);
+      await expect(
+        f.controller.startForAgent({ targetToken: row!.targetToken, goal: 'x' }, toolContext),
+      ).rejects.toThrow(/token/);
+      if (cause === 'helper') f.rotate();
+      if (cause === 'expiry') f.expire();
+      if (cause === 'relist') await f.controller.listTargets({}, toolContext);
+      release([nativeWindow(f.profiles[0]!, 1, { windowsGeneration: f.generation })]);
+      await refused;
+      expect(read).toHaveBeenCalled();
+      expect(f.start).not.toHaveBeenCalled();
+    },
+  );
 });
