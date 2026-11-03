@@ -871,10 +871,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         interaction_deliveries.emplace(session_key, WindowsInteractionDelivery{Frame{queued.frame.header}, task, turn});
     }
   }
-  // The loop also ends on a protocol violation (the reader stops, the pipe stays open). If Main is
-  // alive but not reading, a retirement write would then never finish and Stop would wait on the
-  // write lock; cancel it first. Nothing is written to the pipe after serving ends.
-  CancelIoEx(pipe, nullptr);
+  // Stop cancels a retirement write that Main never reads (the loop also ends on a protocol violation).
   retirements.Stop();
   if (reader.joinable())
     reader.join();

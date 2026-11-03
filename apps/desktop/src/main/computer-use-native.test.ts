@@ -512,6 +512,10 @@ describe('Windows native helper compile boundary', () => {
     expect(outsideSlot).not.toMatch(/std::atomic<bool>::(?:store|exchange|compare_exchange)/u);
     // Nor through a base reference or pointer: no cast to it, and the accessor is the only one.
     expect(outsideSlot).not.toMatch(/_cast<\s*(?:const\s+|volatile\s+)*std::atomic<bool>/u);
+    // No other name for the base type either, so the reference count below sees every one.
+    expect(outsideSlot).not.toMatch(
+      /\batomic_bool\b|(?:using\s+\w+\s*=|typedef)\s*std::atomic<bool>/u,
+    );
     const baseReferences = [...outsideSlot.matchAll(/std::atomic<bool>\s*[&*][^;{]*/gu)].map(
       ([text]) => text.trim(),
     );

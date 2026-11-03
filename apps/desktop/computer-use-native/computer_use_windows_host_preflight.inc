@@ -152,11 +152,18 @@ public:
       return false;
     }
   }
+  // Called once serving has ended; nothing is written to the pipe after it. A write that holds the
+  // lock may never finish while Main is alive but not reading (ServePipe also ends on a protocol
+  // violation, with the pipe open), so cancel until the lock is free: a cancel can land just before
+  // the write is issued, and a single one would then miss it. Once stopping_ is set under the lock,
+  // the notifier writes nothing more.
   void Stop() noexcept {
-    {
-      std::lock_guard lock(WindowsPipeWriteMutex());
-      stopping_ = true;
+    while (!WindowsPipeWriteMutex().try_lock()) {
+      CancelIoEx(pipe_, nullptr);
+      Sleep(1);
     }
+    stopping_ = true;
+    WindowsPipeWriteMutex().unlock();
     WindowsResidualReady().notify_all();
     if (thread_.joinable()) thread_.join();
   }
