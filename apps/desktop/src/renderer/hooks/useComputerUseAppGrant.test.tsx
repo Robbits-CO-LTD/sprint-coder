@@ -144,6 +144,22 @@ describe('useComputerUseAppGrant', () => {
     view.unmount();
   });
 
+  it('ignores approvals and stale events after Windows generation loss', () => {
+    const api = installApi();
+    const view = mount('task-1');
+    const pending = card();
+    api.publish(pending);
+    api.publish({ ...pending, state: 'canceled', revision: 2, noticeCode: 'generation_changed' });
+    api.publish(pending);
+    act(() => view.latest().resolve('allow_once'));
+    expect(api.resolveGrantRequest).not.toHaveBeenCalled();
+    expect(view.latest().request).toMatchObject({
+      state: 'canceled',
+      noticeCode: 'generation_changed',
+    });
+    view.unmount();
+  });
+
   it('keeps a withdrawn card only long enough to say why', () => {
     const api = installApi();
     const view = mount('task-1');

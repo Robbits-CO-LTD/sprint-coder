@@ -607,6 +607,82 @@ describe('N6-3 generation-bound approval', () => {
     return { ...fixture, start, windowsGeneration };
   }
 
+  it.each([false, true])(
+    'audits candidate input before dispatch (write failure: %s)',
+    async (failWrite) => {
+      const fixture = candidateFixture({
+        plan: async (round) =>
+          round === 1
+            ? { type: 'click', x: 0.5, y: 0.5, button: 'left' }
+            : { type: 'finish', answerBoolean: true },
+        onAuditRecord: () => {
+          if (failWrite) throw new Error('synthetic audit failure');
+        },
+      });
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const card = fixture.pending();
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+        intentFor(card, 'allow_always'),
+      );
+      expect(await pending).toMatchObject({ granted: true });
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: target.targetToken, goal: 'synthetic goal' },
+          context,
+        ),
+      );
+      expect(fixture.profiles).toEqual([]);
+      if (failWrite) {
+        expect(fixture.dispatchedActions()).toEqual([]);
+        expect(fixture.audits()).toEqual([]);
+      } else {
+        expect(fixture.dispatchedActions()).toContainEqual({
+          type: 'click',
+          x: 0.5,
+          y: 0.5,
+          button: 'left',
+        });
+        expect(fixture.audits()).toContainEqual(
+          expect.objectContaining({
+            profileId: expect.stringMatching(/^native-target:/),
+            candidateProfileDisplayName: 'Synthetic editor',
+            actionKind: 'click',
+            state: 'applied',
+          }),
+        );
+      }
+    },
+  );
+
+  it.each(['helper', 'list'] as const)(
+    'withdraws a Windows card when its %s generation is lost without a click',
+    async (kind) => {
+      const fixture = candidateFixture();
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.pending();
+      if (kind === 'helper') fixture.native.isWindowsGenerationCurrent = () => false;
+      else fixture.native.isWindowsTargetGenerationCurrent = () => false;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(fixture.published.at(-1)).toMatchObject({
+        state: 'canceled',
+        noticeCode: 'generation_changed',
+      });
+      expect(await pending).toMatchObject({ granted: false });
+      expect(fixture.grants.size).toBe(0);
+    },
+  );
+
   it('approves an unregistered candidate and carries its list generation into start', async () => {
     const fixture = candidateFixture({
       plan: async () => ({ type: 'finish', answerBoolean: true }),

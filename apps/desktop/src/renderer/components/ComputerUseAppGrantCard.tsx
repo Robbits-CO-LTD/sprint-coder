@@ -32,6 +32,8 @@ const COMPUTER_GRANT_MODE_LABELS: Readonly<Record<string, string>> = {
  * case is the one §6.1.1 requires the user to be told about by name.
  */
 const COMPUTER_GRANT_NOTICES: Readonly<Record<string, string>> = {
+  generation_changed:
+    '対象の一覧または操作用プロセスが更新されたため、許可の確認を取り消しました。もう一度依頼してください。',
   identity_changed: '対象アプリが変わったため許可を取り消しました。',
   timed_out: '応答がなかったため、許可の確認を取り消しました。',
   withdrawn: '確認を取り消しました。もう一度依頼してください。',

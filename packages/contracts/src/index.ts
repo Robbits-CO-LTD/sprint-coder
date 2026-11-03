@@ -5484,7 +5484,10 @@ export const computerAppGrantRequestSchema = z
      * Why a card closed without a decision. A closed product vocabulary the Renderer turns into a
      * sentence, so no Main string — and certainly no native or model string — becomes UI text.
      */
-    noticeCode: z.enum(['timed_out', 'withdrawn', 'identity_changed']).nullable().default(null),
+    noticeCode: z
+      .enum(['timed_out', 'withdrawn', 'identity_changed', 'generation_changed'])
+      .nullable()
+      .default(null),
     verified: z
       .object({
         platform: computerUsePlatformSchema,
