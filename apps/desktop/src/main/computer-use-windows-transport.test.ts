@@ -653,6 +653,141 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  it('PR5b refuses an identity-bound start when the connected helper has no capability', async () => {
+    const target = createTarget();
+    await expect(
+      target.addon.startSession!({
+        profile,
+        sessionId: 'identity-start',
+        requireStartIdentity: true,
+        pid: 42,
+        expectedProcessStartTime: '133000000000000001',
+      }),
+    ).rejects.toThrow('native_unavailable');
+    expect(
+      sockets
+        .flatMap((socket) => socket.writes)
+        .some(
+          (bytes) =>
+            JSON.parse(decodeComputerUseNativeFrame(bytes).metadata.toString())['operation'] ===
+            'start_session',
+        ),
+    ).toBe(false);
+  });
+
+  it('PR5b transmits the explicit discovery identity opt-in', async () => {
+    const requested = vi.fn(responders()['list_windows']!);
+    const target = createTarget({ ...responders(), list_windows: requested });
+    await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'identity-discovery',
+      includeStartIdentity: true,
+    });
+    expect(requested).toHaveBeenCalledWith(expect.objectContaining({ includeStartIdentity: true }));
+  });
+  it.each([false, true])('PR5b requires a true connected capability (%s)', async (enabled) => {
+    const base = responders();
+    const requested = vi.fn(base['start_session']!);
+    const target = createTarget({
+      ...base,
+      handshake: () => [
+        'handshake_result',
+        {
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          sourceCommit,
+          capabilities: { cancellableWindowDiscovery: true, identityBoundStart: enabled },
+        },
+      ],
+      start_session: requested,
+    });
+    const input = {
+      profile,
+      sessionId: 'identity-start',
+      requireStartIdentity: true,
+      pid: 42,
+      expectedProcessStartTime: '18446744073709551615',
+    };
+    if (enabled) {
+      await expect(target.addon.startSession!(input)).resolves.toMatchObject({
+        sessionId: input.sessionId,
+      });
+      expect(requested).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requireStartIdentity: true,
+          pid: 42,
+          expectedProcessStartTime: '18446744073709551615',
+        }),
+      );
+    } else {
+      await expect(target.addon.startSession!(input)).rejects.toThrow('native_unavailable');
+      expect(requested).not.toHaveBeenCalled();
+      await expect(
+        target.addon.startSession!({ profile, sessionId: 'legacy-start' }),
+      ).resolves.toMatchObject({ sessionId: 'legacy-start' });
+      expect(requested).toHaveBeenCalledTimes(1);
+      expect(requested.mock.calls[0]?.[0]).not.toHaveProperty('requireStartIdentity');
+    }
+  });
+
+  it.each([undefined, false])('PR5b preserves discovery without opt-in (%s)', async (enabled) => {
+    const requested = vi.fn(responders()['list_windows']!);
+    const target = createTarget({ ...responders(), list_windows: requested });
+    await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'legacy-discovery',
+      ...(enabled === undefined ? {} : { includeStartIdentity: enabled }),
+    });
+    if (enabled === undefined)
+      expect(requested.mock.calls[0]?.[0]).not.toHaveProperty('includeStartIdentity');
+    else expect(requested.mock.calls[0]?.[0]).toHaveProperty('includeStartIdentity', false);
+  });
+
+  it.each([null, 1, 'true'])(
+    'PR5b rejects malformed discovery opt-in %j before connecting',
+    async (enabled) => {
+      const target = createTarget();
+      await expect(
+        Promise.resolve().then(() =>
+          target.addon.discoverWindows!({
+            ...profile,
+            discoveryId: 'invalid-discovery',
+            includeStartIdentity: enabled,
+          }),
+        ),
+      ).rejects.toThrow('Invalid Windows discovery input');
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('PR5b retains integer-string discovery identity only at the Main boundary', async () => {
+    const base = responders();
+    const target = createTarget({
+      ...base,
+      list_windows: (metadata) => {
+        const [type, rows] = base['list_windows']!(metadata);
+        if (!Array.isArray(rows)) throw new Error('Expected fixture rows');
+        return [
+          type,
+          rows.map((row: Record<string, unknown>) => ({
+            ...row,
+            processStartTime: '18446744073709551615',
+          })),
+        ];
+      },
+    });
+    const result = await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'identity-discovery',
+      includeStartIdentity: true,
+    });
+    expect(result).toMatchObject({ windows: [{ processStartTime: '18446744073709551615' }] });
+    const windows = await target.host.listWindows(profile);
+    expect(windows).toHaveLength(1);
+    expect(JSON.stringify(windows)).not.toMatch(/processStartTime|18446744073709551615/);
+  });
   it('PR4 startup discards corrupt rows, retains valid isolation and persists restoration', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ledger-restore-'));
     const path = join(directory, 'shared.sqlite');

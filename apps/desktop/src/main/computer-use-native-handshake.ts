@@ -74,6 +74,7 @@ export function parseNativeHandshake(
               'sendInput',
               'cancellableWindowDiscovery',
               'artifactRead',
+              'identityBoundStart',
               'approval',
             ].includes(key) ||
             typeof enabled !== 'boolean' ||

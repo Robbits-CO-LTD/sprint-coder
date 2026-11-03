@@ -1505,6 +1505,7 @@ export function createComputerUseNativeHost(
       if (typeof resolvedPid === 'number' && Number.isSafeInteger(resolvedPid) && resolvedPid > 0)
         pids.push(resolvedPid);
       const publicCandidate = stripNativeEphemeralFields(raw);
+      delete publicCandidate['processStartTime'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
       publicCandidate['maximumMode'] = nativeMaximumMode(raw);
