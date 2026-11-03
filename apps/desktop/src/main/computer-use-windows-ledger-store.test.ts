@@ -118,6 +118,22 @@ function ledgerStorageContract(name: string, fixture: () => Fixture) {
       expect(() => store.read()).toThrow();
       await expect(Promise.resolve().then(() => store.write(row))).rejects.toThrow();
     });
+    it('releases only the exact terminated identity across connections and survives restart', async () => {
+      const f = fixture();
+      const a = f.open('a');
+      const b = f.open('b');
+      const reused = {
+        ...quarantine,
+        identity: { ...row.identity, creationTime: 'synthetic-new' },
+      };
+      await a.restoreQuarantines([quarantine, reused]);
+      await a.write(row);
+      expect(await b.releaseQuarantine!(row.identity)).toBe(true);
+      expect(await b.releaseQuarantine!(row.identity)).toBe(true);
+      expect(a.read()).toEqual({ rows: [row], quarantines: [reused] });
+      a.close();
+      expect(f.open('a').read()).toEqual({ rows: [row], quarantines: [reused] });
+    });
   });
 }
 
@@ -152,6 +168,24 @@ afterEach(() => {
   for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true });
 });
 ledgerStorageContract('SQLite Windows ledger contract', fixture);
+
+it('retains quarantine when its release fails and retries after the store recovers', async () => {
+  const f = fixture();
+  const store = f.open();
+  await store.restoreQuarantines([quarantine]);
+  const db = new Database(f.path);
+  connections.push(db);
+  db.exec(
+    "CREATE TRIGGER fail_release BEFORE DELETE ON quarantines BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END",
+  );
+  await expect(
+    Promise.resolve().then(() => store.releaseQuarantine!(row.identity)),
+  ).rejects.toThrow();
+  expect(store.read().quarantines).toEqual([quarantine]);
+  db.exec('DROP TRIGGER fail_release');
+  expect(await store.releaseQuarantine!(row.identity)).toBe(true);
+  expect(store.read().quarantines).toEqual([]);
+});
 
 it('uses a fixed LocalAppData path and a normalized stable per-profile identity', () => {
   expect(windowsLedgerStorePath('C:\\synthetic-local')).toBe(
