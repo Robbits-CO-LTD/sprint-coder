@@ -143,7 +143,8 @@ bool SendUnicodeScalar(const WindowsSession &session, const RECT &expected,
                        bool *accepted) {
   if (!RevalidateWindowsTarget(session, expected, expected_epoch))
     return false;
-  INPUT events[2]{};
+  INPUT events[4]{};
+  const UINT count = scalar > 0xffff ? 4 : 2;
   events[0].type = INPUT_KEYBOARD;
   events[0].ki.wVk = 0;
   events[0].ki.wScan = static_cast<WORD>(
@@ -153,26 +154,19 @@ bool SendUnicodeScalar(const WindowsSession &session, const RECT &expected,
   events[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
   if (scalar > 0xffff) {
     // SendInput's KEYEVENTF_UNICODE consumes UTF-16 units. A supplementary
-    // scalar is emitted as a surrogate pair in two complete down/up pairs, with
-    // a fresh focus check for each unit.
+    // scalar uses one API call so Stop cannot split its two down/up pairs
+    // between separate calls. A partial API result is still unconfirmed input.
     const std::uint32_t pair = scalar - 0x10000;
-    events[0].ki.wScan = static_cast<WORD>(0xd800 + (pair >> 10));
-    events[1].ki.wScan = events[0].ki.wScan;
-    const UINT first_pair_sent =
-        SendInputForBoundTarget(session, expected, expected_epoch, 2, events);
-    if (first_pair_sent > 0)
-      *accepted = true;
-    if (first_pair_sent != 2 ||
-        !RevalidateWindowsTarget(session, expected, expected_epoch))
-      return false;
-    events[0].ki.wScan = static_cast<WORD>(0xdc00 + (pair & 0x3ff));
-    events[1].ki.wScan = events[0].ki.wScan;
+    events[2] = events[0];
+    events[2].ki.wScan = static_cast<WORD>(0xdc00 + (pair & 0x3ff));
+    events[3] = events[2];
+    events[3].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
   }
   const UINT sent =
-      SendInputForBoundTarget(session, expected, expected_epoch, 2, events);
+      SendInputForBoundTarget(session, expected, expected_epoch, count, events);
   if (sent > 0)
     *accepted = true;
-  return sent == 2 &&
+  return sent == count &&
          RevalidateWindowsTarget(session, expected, expected_epoch);
 }
 

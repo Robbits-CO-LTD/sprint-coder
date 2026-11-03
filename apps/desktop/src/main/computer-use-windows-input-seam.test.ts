@@ -38,13 +38,21 @@ describe.skipIf(process.platform === 'win32')(
           `
 #include <atomic>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 using UINT = unsigned;
 using BOOL = int;
 constexpr BOOL FALSE = 0;
 struct RECT {};
-struct INPUT {};
+using WORD = std::uint16_t;
+constexpr unsigned INPUT_KEYBOARD = 1;
+constexpr unsigned KEYEVENTF_UNICODE = 4;
+constexpr unsigned KEYEVENTF_KEYUP = 2;
+struct INPUT {
+  unsigned type = 0;
+  struct { WORD wVk = 0; WORD wScan = 0; unsigned dwFlags = 0; } ki;
+};
 using LPINPUT = INPUT*;
 struct WindowsSession {
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts = std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -59,7 +67,11 @@ struct TargetListControl { std::mutex stop_mutex; };
 TargetListControl &WindowsTargetListControl() { static TargetListControl control; return control; }
 std::uint64_t windows_helper_generation = 0;
 std::uint64_t MonotonicNowNs() { return 1; }
-bool WindowsValidationStillCurrent(std::uint64_t, std::uint64_t) { return true; }
+std::uint64_t stopEpoch = 0;
+std::uint64_t stopSerial = 0;
+bool WindowsValidationStillCurrent(std::uint64_t epoch, std::uint64_t serial) {
+  return epoch == stopEpoch && serial == stopSerial;
+}
 bool WindowsSemanticInputInFlightLocked() { return false; }
 // N9 P3c: the approval round trip may close input; the seam keeps it open.
 bool WindowsRoundTripMayInput(const WindowsSession&) { return true; }
@@ -68,22 +80,113 @@ bool valid = true;
 bool semanticInputInFlight = false;
 unsigned calls = 0;
 bool WindowsSemanticInputInFlight() { return semanticInputInFlight; }
-bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t) { return valid; }
-UINT SendInput(UINT, LPINPUT, unsigned) { ++calls; return 0; }
+unsigned validations = 0;
+unsigned stopAtValidation = 0;
+UINT apiResult = 0;
+UINT eventCount = 0;
+INPUT captured[4]{};
+bool stopInsideApi = false;
+bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t epoch) {
+  if (++validations == stopAtValidation) ++stopEpoch;
+  return valid && epoch == stopEpoch;
+}
+UINT SendInput(UINT count, LPINPUT events, unsigned size) {
+  ++calls;
+  eventCount = count;
+  if (count > 4 || size != sizeof(INPUT)) return 0;
+  for (UINT i = 0; i < count; ++i) captured[i] = events[i];
+  if (stopInsideApi) ++stopEpoch;
+  return apiResult;
+}
 ${source.slice(from, to)}
+${sourceBetween('bool SendUnicodeScalar(', 'bool DecodeUtf8Scalars(')}
+void Reset(WindowsSession& session) {
+  session.input_api_attempts->store(0);
+  session.approved_deadline_ns = 0;
+  valid = true;
+  semanticInputInFlight = false;
+  calls = validations = stopAtValidation = 0;
+  stopEpoch = stopSerial = 0;
+  apiResult = eventCount = 0;
+  stopInsideApi = false;
+}
+bool EventsMatch(WORD high, WORD low, UINT count) {
+  if (eventCount != count) return false;
+  for (UINT i = 0; i < count; ++i) {
+    if (captured[i].type != INPUT_KEYBOARD || captured[i].ki.wVk != 0 ||
+        captured[i].ki.wScan != (i < 2 ? high : low) ||
+        captured[i].ki.dwFlags != (KEYEVENTF_UNICODE | (i % 2 ? KEYEVENTF_KEYUP : 0))) return false;
+  }
+  return true;
+}
 int main() {
   WindowsSession session;
   RECT bounds;
   INPUT input;
   if (SendInputForBoundTarget(session, bounds, 0, 1, &input) != 0) return 1;
   if (session.input_api_attempts->load() != 1 || calls != 1) return 2;
+  stopEpoch = 1;
   valid = false;
   SendInputForBoundTarget(session, bounds, 1, 1, &input);
   if (session.input_api_attempts->load() != 1 || calls != 1) return 3;
   valid = true;
   semanticInputInFlight = true;
   SendInputForBoundTarget(session, bounds, 1, 1, &input);
-  return session.input_api_attempts->load() == 1 && calls == 1 ? 0 : 4;
+  if (session.input_api_attempts->load() != 1 || calls != 1) return 4;
+
+  // Supplementary boundaries and a middle scalar: all four events in one call.
+  for (const std::uint32_t scalar : {0x10000u, 0x1f642u, 0x10ffffu}) {
+    Reset(session);
+    apiResult = 4;
+    bool accepted = false;
+    if (!SendUnicodeScalar(session, bounds, 0, scalar, &accepted) || !accepted ||
+        calls != 1 || session.input_api_attempts->load() != 1 ||
+        !EventsMatch(static_cast<WORD>(0xd800 + ((scalar - 0x10000) >> 10)),
+                     static_cast<WORD>(0xdc00 + ((scalar - 0x10000) & 0x3ff)), 4)) return 10;
+  }
+  // Zero/partial results never retry; positive results record accepted input.
+  // BMP keeps its two-event unit and the same acceptance semantics.
+  for (const std::uint32_t scalar : {0x41u, 0x3042u, 0xffffu, 0x1f642u}) {
+    const UINT count = scalar > 0xffff ? 4 : 2;
+    for (UINT sent = 0; sent <= count; ++sent) {
+      Reset(session);
+      apiResult = sent;
+      bool accepted = false;
+      const bool complete = SendUnicodeScalar(session, bounds, 0, scalar, &accepted);
+      if (complete != (sent == count) || accepted != (sent > 0) ||
+          calls != 1 || session.input_api_attempts->load() != 1 || eventCount != count) return 11;
+      if (count == 2 && !EventsMatch(static_cast<WORD>(scalar), 0, 2)) return 12;
+    }
+  }
+  // Stop before the scalar or at the final bound-target revalidation prevents input.
+  for (const unsigned stopPoint : {1u, 2u}) {
+    Reset(session);
+    stopAtValidation = stopPoint;
+    apiResult = 4;
+    bool accepted = false;
+    if (SendUnicodeScalar(session, bounds, 0, 0x1f642, &accepted) || accepted ||
+        calls != 0 || session.input_api_attempts->load() != 0) return 13;
+  }
+  // Approved-input Stop serial is checked under the existing stop mutex.
+  Reset(session);
+  session.approved_deadline_ns = 2;
+  stopSerial = 1;
+  bool accepted = false;
+  if (SendUnicodeScalar(session, bounds, 0, 0x1f642, &accepted) || accepted ||
+      calls != 0 || session.input_api_attempts->load() != 0) return 14;
+
+  Reset(session);
+  semanticInputInFlight = true;
+  if (SendUnicodeScalar(session, bounds, 0, 0x1f642, &accepted) || accepted ||
+      calls != 0 || session.input_api_attempts->load() != 0) return 15;
+
+  // Stop after the API prevents confirmation, but does not erase an accepted attempt.
+  Reset(session);
+  apiResult = 4;
+  stopInsideApi = true;
+  if (SendUnicodeScalar(session, bounds, 0, 0x1f642, &accepted) || !accepted ||
+      calls != 1 || session.input_api_attempts->load() != 1 || eventCount != 4) return 16;
+  return 0;
 }`,
         );
         execFileSync(

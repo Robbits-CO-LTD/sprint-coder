@@ -448,7 +448,11 @@ describe('Windows native helper compile boundary', () => {
     expect(existingStartGate).toContain('cancellation_epoch.load(std::memory_order_acquire)');
     expect(existingStartGate).toContain('input.stop_serial');
     expect(source.match(/\bSendInput\(/gu)).toHaveLength(1);
-    expect(source.match(/SendInputForBoundTarget\(/gu)?.length).toBeGreaterThanOrEqual(7);
+    // A supplementary scalar sends both UTF-16 units in one bound-target call.
+    expect(source.match(/SendInputForBoundTarget\(/gu)?.length).toBeGreaterThanOrEqual(6);
+    expect(source).toContain(
+      'SendInputForBoundTarget(session, expected, expected_epoch, count, events)',
+    );
   });
 
   it('uses bounded payment labels in both native risk classifiers', () => {

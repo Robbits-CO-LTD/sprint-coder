@@ -45,6 +45,18 @@ describe('Windows background monitor (P3a)', () => {
 });
 
 describe('Windows approval round trip state (P3c)', () => {
+  it('pins one bound API call per Unicode scalar, including a surrogate pair', () => {
+    const input = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_windows_host_input.inc'),
+      'utf8',
+    );
+    const scalar = input.split('bool SendUnicodeScalar(')[1]!.split('bool DecodeUtf8Scalars(')[0]!;
+    expect(scalar.match(/SendInputForBoundTarget\(/gu)).toHaveLength(1);
+    expect(scalar).toContain('INPUT events[4]{};');
+    expect(scalar).toContain('expected_epoch, count, events');
+    expect(scalar).toContain('sent == count');
+  });
+
   it('registers the native state machine and keeps the background gate closed', () => {
     const native = (name: string) =>
       readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
