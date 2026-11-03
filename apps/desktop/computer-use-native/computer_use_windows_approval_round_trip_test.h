@@ -172,6 +172,18 @@ inline bool CheckApprovalRoundTripState() {
     if (!check(s.Failed() && !s.MayInput(104) && !s.MayBegin(),
         "RT_target_event_failure_latches_in_all_trip_phases")) return false;
   }
+  for (int phase = 0; phase < 3; ++phase) {
+    State s;
+    if (!begin(s) || !s.Return(binding, 101) || !s.Returned(binding, 102)) return false;
+    if (phase >= 1 && !s.Exchange(binding, 8, 4, 103)) return false;
+    if (phase >= 2 && !s.End(binding, true, 104)) return false;
+    s.Observe(Focus::kSprintCoder, true, true, 105);
+    const auto event = s.ReadNotification();
+    // After the return, Sprint Coder is a focus loss, never a third window ("other" only).
+    if (!check(s.Failed() && !s.MayInput(105) && s.Failure() == "target_changed" &&
+        event.state == "failed" && event.foreground == "sprint_coder",
+        "RT_allowed_focus_does_not_disable_other_guards")) return false;
+  }
   for (const auto *failure : {"registration", "heartbeat"}) {
     State s;
     if (!begin(s)) return false;

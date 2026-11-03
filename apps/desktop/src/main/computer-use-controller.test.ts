@@ -298,6 +298,7 @@ function createFixture(
     /** Opens the native approval path on the fake host (a production host never reports it). */
     helperGeneration?: () => number | null;
     subscribeWindowsStop?: ComputerUseNativeHost['subscribeWindowsStop'];
+    subscribeWindowsInteraction?: ComputerUseNativeHost['subscribeWindowsInteraction'];
     onNativeStart?: (sessionId: string) => void;
     disarmEmergencyStop?: ComputerUseControllerDeps['disarmEmergencyStop'];
     nativeApproval?: {
@@ -344,6 +345,8 @@ function createFixture(
   let nativeCloseCount = 0;
   /** Ordered record of the native calls the approval tests care about. */
   const nativeLog: string[] = [];
+  const nativeStartTurnIds: string[] = [];
+  const nativeCancelEpochs: number[] = [];
   /** The session ids the controller asked whether the native approval path is open for. */
   const approvalPathQueries: string[] = [];
   /** The classifier route every startSession (start, refocus, resume) was given. */
@@ -369,6 +372,11 @@ function createFixture(
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
+    ...(options.subscribeWindowsInteraction === undefined
+      ? {}
+      : {
+          subscribeWindowsInteraction: options.subscribeWindowsInteraction,
+        }),
     ...(options.approveWindowsWindowResume === undefined
       ? {}
       : { approveWindowsWindowResume: options.approveWindowsWindowResume }),
@@ -437,6 +445,7 @@ function createFixture(
       if (options.failFocusRestore === true && startSessionCount > 1)
         throw new Error('focus unavailable');
       nativeStartWindowIds.push(input.windowId);
+      nativeStartTurnIds.push(input.turnId);
       return {
         ...nativeSession,
         sessionId: input.sessionId,
@@ -552,8 +561,9 @@ function createFixture(
           : {}),
       };
     },
-    cancel: async (session) => {
+    cancel: async (session, cancelEpoch) => {
       nativeCancelCount += 1;
+      nativeCancelEpochs.push(cancelEpoch);
       await options.cancelGate;
       if (options.captureInputReceipts)
         return { sessionId: session.sessionId, inputAttemptCount: dispatchCount, cancelEpoch: 1 };
@@ -728,6 +738,8 @@ function createFixture(
       policyEpoch = next;
     },
     nativeLog,
+    nativeStartTurnIds,
+    nativeCancelEpochs,
     approvalPathQueries,
     startRoutes,
     approveInputs,
@@ -1461,6 +1473,42 @@ describe('ComputerUseController', () => {
       expect(fixture.approvedDispatches).toHaveLength(0);
       await fixture.controller.dispose();
       expect(listeners.size).toBe(0);
+    });
+
+    it('BG03_lost_event_cannot_bypass_epoch: cancels the native card without close', async () => {
+      let receive: Parameters<
+        NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>
+      >[0] = () => {};
+      const { fixture, acting, sessionId } = await offered({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => 1,
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      await viWait();
+      const card = pendingCard(fixture);
+      receive({
+        version: 1,
+        kind: 'background_event',
+        sessionId,
+        taskId: card.taskId,
+        turnId: card.turnId!,
+        helperGeneration: 1,
+        cancelEpoch: 0,
+        sequence: 1,
+        interactionEpoch: 2,
+        state: 'takeover',
+      });
+      await expect(acting).resolves.toMatchObject({ reasonCode: 'native_approval_revoked' });
+      expect(fixture.approvals.at(-1)).toMatchObject({ id: card.id, state: 'canceled' });
+      expect(fixture.nativeCancelCount()).toBe(1);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      expect(fixture.approvedDispatches).toHaveLength(0);
+      expect(fixture.controller.getStatus(sessionId)?.state).toBe('paused');
+      await fixture.controller.stop(sessionId);
     });
 
     it.each(['deny', 'expire', 'stop'] as const)(
@@ -6070,6 +6118,280 @@ describe('ComputerUseController', () => {
     expect(fixture.profileUpdates()).toBe(1);
     await fixture.controller.stop(second.sessionId);
   });
+
+  it('BG08_monitor_failure_requires_human_resume: late planner completion cannot restart or close', async () => {
+    let receive: Parameters<
+      NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>
+    >[0] = () => {};
+    let complete!: (action: ComputerUsePlannedAction) => void;
+    const fixture = createFixture({
+      planner: {
+        plan: () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      },
+      subscribeWindowsInteraction: (listener) => {
+        receive = listener;
+        return () => {};
+      },
+    });
+    const started = await start(fixture);
+    // The planner must be mid-plan when the event arrives (one tick is not always enough).
+    await vi.waitFor(() => expect(complete).toBeTypeOf('function'));
+    receive({
+      version: 1,
+      kind: 'background_event',
+      sessionId: started.sessionId,
+      taskId: started.taskId,
+      turnId: fixture.nativeStartTurnIds[0]!,
+      helperGeneration: 1,
+      cancelEpoch: 0,
+      sequence: 1,
+      interactionEpoch: 2,
+      state: 'monitor_failed',
+    });
+    complete(click);
+    await viWait();
+    expect(fixture.controller.getStatus(started.sessionId)?.state).toBe('paused');
+    expect(fixture.nativeCloseCount()).toBe(0);
+    expect(fixture.dispatchCount()).toBe(0);
+    await fixture.controller.stop(started.sessionId);
+  });
+
+  describe('P3d revocation is decided once', () => {
+    type Receive = Parameters<NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>>[0];
+    type Decision = Awaited<ReturnType<NonNullable<ComputerUseControllerDeps['authorize']>>>;
+    const never = () => new Promise<ComputerUsePlannedAction>(() => {});
+    const takeover = (sessionId: string, turnId: string) =>
+      ({
+        version: 1,
+        kind: 'background_event',
+        sessionId,
+        taskId: 'task-1',
+        turnId,
+        helperGeneration: 1,
+        cancelEpoch: 0,
+        sequence: 1,
+        interactionEpoch: 2,
+        state: 'takeover',
+      }) as const;
+    const resumeInput = (status: ComputerUseSessionStatus) => ({
+      resumeSessionId: status.sessionId,
+      taskId: status.taskId,
+      profileId: status.profileId,
+      windowId: status.windowId,
+      mode: status.mode,
+      connectionId: status.connectionId,
+      modelId: status.modelId,
+      providerEgressConsent: true as const,
+      providerEgressConsentBinding: { connectionId: status.connectionId, modelId: status.modelId },
+      remember: false,
+      expectedPolicyEpoch: status.policyEpoch,
+      expectedWindowRevision: 1,
+      expectedProfileRevision: status.profileRevision,
+    });
+
+    it('BG03_lost_event_cannot_bypass_epoch: an event during start ends paused with cancel and no close', async () => {
+      let receive: Receive = () => {};
+      let release!: () => void;
+      let entered = false;
+      const fixture = createFixture({
+        plannerFactory: async () => {
+          entered = true;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return { plan: never };
+        },
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      const starting = start(fixture);
+      await vi.waitFor(() => expect(entered).toBe(true));
+      const sessionId = fixture.statuses[0]!.sessionId;
+      receive(takeover(sessionId, fixture.nativeStartTurnIds[0]!));
+      release();
+      await expect(starting).resolves.toMatchObject({ state: 'paused', resumable: false });
+      await viWait();
+      expect(fixture.nativeCancelEpochs).toEqual([1]);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      expect(fixture.observationCount()).toBe(0);
+      await fixture.controller.stop(sessionId);
+      expect(fixture.nativeCloseCount()).toBe(1);
+    });
+
+    it('BG03_lost_event_cannot_bypass_epoch: a helper-latched revocation the controller missed pauses without close', async () => {
+      const fixture = createFixture({
+        planner: { plan: never },
+        subscribeWindowsInteraction: () => () => {},
+      });
+      const native = (fixture.controller as unknown as { deps: { native: ComputerUseNativeHost } })
+        .deps.native;
+      native.observe = async () => {
+        throw new Error('native_interaction_revoked');
+      };
+      const started = await start(fixture);
+      await viWait();
+      expect(fixture.controller.getStatus(started.sessionId)).toMatchObject({
+        state: 'paused',
+        resumable: false,
+      });
+      expect(fixture.nativeCancelEpochs).toEqual([1]);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('BG08_revoked_session_is_terminal_until_stop: resume is refused and only Stop closes', async () => {
+      let receive: Receive = () => {};
+      const fixture = createFixture({
+        planner: { plan: never },
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      const started = await start(fixture);
+      await viWait();
+      receive(takeover(started.sessionId, fixture.nativeStartTurnIds[0]!));
+      // A duplicate of the old epoch neither bumps nor re-cancels.
+      receive(takeover(started.sessionId, fixture.nativeStartTurnIds[0]!));
+      const paused = fixture.controller.getStatus(started.sessionId)!;
+      expect(paused).toMatchObject({ state: 'paused', resumable: false });
+      const starts = fixture.startSessionEnteredCount();
+      await expect(fixture.controller.start(resumeInput(paused))).rejects.toThrow(/not resumable/u);
+      expect(fixture.startSessionEnteredCount()).toBe(starts);
+      expect(fixture.nativeCancelEpochs).toEqual([1]);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      await fixture.controller.stop(started.sessionId);
+      expect(fixture.nativeCloseCount()).toBe(1);
+      expect(fixture.nativeCancelEpochs.at(-1)).toBeGreaterThan(1);
+    });
+
+    it('RT_v1_timeout_cancels_pending_card: a revocation during the authorizer await creates no card', async () => {
+      let receive: Receive = () => {};
+      let decide: ((decision: Decision) => void) | undefined;
+      const fixture = createFixture({
+        mode: 'supervised',
+        authorize: (request: { capability: string }) =>
+          request.capability === 'computer.observe'
+            ? Promise.resolve({ decision: 'allow' as const, reason: 'computer_observe_session' })
+            : new Promise<Decision>((resolve) => {
+                decide = resolve;
+              }),
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      const started = await start(fixture, 'supervised');
+      await fixture.controller.observe(started.sessionId);
+      const settled = fixture.controller
+        .act(started.sessionId, click, 'authorize-race')
+        .catch(() => undefined);
+      await vi.waitFor(() => expect(decide).toBeDefined());
+      receive(takeover(started.sessionId, fixture.nativeStartTurnIds[0]!));
+      decide!({ decision: 'approval_required', reason: 'computer_control_requires_approval' });
+      await settled;
+      expect(fixture.approvals.filter((value) => value.state === 'pending')).toHaveLength(0);
+      expect(fixture.controller.getStatus(started.sessionId)).toMatchObject({
+        state: 'paused',
+        pendingApproval: null,
+      });
+      expect(fixture.dispatchCount()).toBe(0);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('BG03_lost_event_cannot_bypass_epoch: a late refocus never lowers the revoked cancel epoch', async () => {
+      let receive: Receive = () => {};
+      let release!: () => void;
+      const fixture = createFixture({
+        mode: 'supervised',
+        focusRestoreGate: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      const started = await start(fixture, 'supervised');
+      await fixture.controller.observe(started.sessionId);
+      const settled = fixture.controller
+        .act(started.sessionId, click, 'refocus-race')
+        .catch(() => undefined);
+      await viWait();
+      const approval = fixture.approvals.find((value) => value.state === 'pending')!;
+      const resolving = fixture.controller.resolveApproval({
+        approvalId: approval.id,
+        expectedRevision: approval.revision,
+        decision: 'allow_once',
+        challenge: approval.challenge,
+      });
+      await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(2));
+      receive(takeover(started.sessionId, fixture.nativeStartTurnIds[0]!));
+      const observed = fixture.observationCount();
+      release();
+      await resolving.catch(() => undefined);
+      await settled;
+      expect(fixture.controller.getStatus(started.sessionId)).toMatchObject({ state: 'paused' });
+      expect(fixture.observationCount()).toBe(observed);
+      expect(fixture.dispatchCount()).toBe(0);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      await fixture.controller.stop(started.sessionId);
+      // Stop advances past the revocation's epoch; the refocus did not roll it back.
+      expect(fixture.nativeCancelEpochs[0]).toBe(1);
+      expect(fixture.nativeCancelEpochs.at(-1)).toBeGreaterThan(1);
+    });
+  });
+
+  it.each(['expired', 'monitor_failed', 'third_window'] as const)(
+    'RT_v1_timeout_cancels_pending_card: %s cancels without close or automatic resume',
+    async (failureReason) => {
+      let receive: Parameters<
+        NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>
+      >[0] = () => {};
+      const fixture = createFixture({
+        mode: 'supervised',
+        subscribeWindowsInteraction: (listener) => {
+          receive = listener;
+          return () => {};
+        },
+      });
+      const started = await start(fixture, 'supervised');
+      await fixture.controller.observe(started.sessionId);
+      const pending = fixture.controller.act(started.sessionId, click, 'event-pending');
+      const settled = pending.catch(() => undefined);
+      await viWait();
+      const card = fixture.approvals.find((value) => value.state === 'pending')!;
+      expect(card).toBeDefined();
+      receive({
+        version: 1,
+        kind: 'event',
+        roundTripId: 'trip-1',
+        sessionId: started.sessionId,
+        taskId: started.taskId,
+        turnId: card.turnId!,
+        helperGeneration: 1,
+        cancelEpoch: 0,
+        sequence: 1,
+        state: 'failed',
+        foreground: failureReason === 'third_window' ? 'other' : 'target',
+        failureReason,
+        failureLatched: true,
+      });
+      await viWait();
+      expect(fixture.approvals.at(-1)?.state).toBe('canceled');
+      expect(fixture.nativeCancelCount()).toBe(1);
+      expect(fixture.nativeCloseCount()).toBe(0);
+      expect(fixture.controller.getStatus(started.sessionId)?.state).toBe('paused');
+      expect(fixture.dispatchCount()).toBe(0);
+      await settled;
+      await fixture.controller.stop(started.sessionId);
+    },
+  );
 
   it('cancels an in-memory approval and never dispatches after stop', async () => {
     const fixture = createFixture({ mode: 'supervised' });

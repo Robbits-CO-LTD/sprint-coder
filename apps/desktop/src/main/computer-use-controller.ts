@@ -2,6 +2,10 @@ import {
   ComputerUseDiscoveryScope,
   type ComputerUseDiscoveryResult,
 } from './computer-use-discovery-scope';
+import type {
+  WindowsInteractionEvent,
+  WindowsInteractionListener,
+} from './computer-use-windows-transport-events';
 import {
   sameWindowsStopOwner,
   windowsStopPhaseOrder,
@@ -427,6 +431,7 @@ export async function startComputerUseWindowsQuarantineSession(
 }
 
 export interface ComputerUseNativeHost {
+  subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
   /** Main-only K-5 receiver. The caller must consume the card's exact trusted activation. */
   approveWindowsQuarantineResume?(
     input: Readonly<{
@@ -858,6 +863,8 @@ type PendingAppGrantRequest = {
 };
 
 type StartingSession = {
+  /** Latched by a native event that arrived before promotion; applied when the record is made. */
+  interactionRevoked?: true;
   requestedStopReason?: ComputerUseStopReason;
   controller: AbortController;
   reason: ComputerUseStopReason | null;
@@ -872,6 +879,7 @@ type StartingSession = {
 };
 
 type SessionRecord = {
+  interactionRevoked?: true;
   requestedStopReason?: ComputerUseStopReason;
   status: ComputerUseSessionStatus;
   profile: ComputerAppProfileRecord;
@@ -1117,8 +1125,12 @@ export class ComputerUseController {
   >();
   private readonly unsubscribeWindowsStops: () => void;
   private readonly unsubscribeApprovalStop: (() => void) | undefined;
+  private readonly unsubscribeWindowsInteraction: (() => void) | undefined;
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
+    this.unsubscribeWindowsInteraction = deps.native.subscribeWindowsInteraction?.((event) =>
+      this.receiveWindowsInteraction(event),
+    );
     this.now = deps.now ?? Date.now;
     // A monotonic clock, not the wall clock above: the store measures a lifetime.
     this.artifacts =
@@ -3518,7 +3530,9 @@ export class ComputerUseController {
       this.sessions.size !== 1 ||
       this.startingSessions.size !== 0 ||
       this.startInProgress ||
-      record.status.state !== 'paused'
+      record.status.state !== 'paused' ||
+      // A revoked session holds no authority to resume; only Stop ends it (then a fresh start).
+      record.interactionRevoked
     )
       throw new Error('Computer Use session is not resumable');
     if (
@@ -3589,6 +3603,9 @@ export class ComputerUseController {
         focused.profileRevision !== record.native.profileRevision
       )
         throw new Error('Computer Use resume focus binding changed');
+      // A revocation during the await already advanced the epoch; never roll it back.
+      if (record.interactionRevoked || focused.cancelEpoch < record.native.cancelEpoch)
+        throw new Error('Computer Use interaction authority was revoked');
       if (record.controller.signal.aborted || this.sessions.get(sessionId) !== record) {
         await this.deps.native.cancel(focused, focused.cancelEpoch + 1).catch(() => undefined);
         await this.deps.native.close(focused).catch(() => undefined);
@@ -3615,7 +3632,7 @@ export class ComputerUseController {
       );
       this.emit(record.status);
       void this.run(record, record.status.round + 1).catch((error) => {
-        if (!record.controller.signal.aborted) void this.stop(sessionId, 'error');
+        this.failRun(record, error);
         return error;
       });
       return record.status;
@@ -3810,6 +3827,7 @@ export class ComputerUseController {
       failure: null,
     };
     this.startingSessions.set(sessionId, starting);
+    let promoted: SessionRecord | null = null;
     try {
       this.emit(initialStatus);
       controller.signal.throwIfAborted();
@@ -3953,6 +3971,7 @@ export class ComputerUseController {
         [COMPUTER_OBSERVE_TOOL.toolId, COMPUTER_ACT_TOOL.toolId],
       );
       this.sessions.set(sessionId, record);
+      promoted = record;
       // Native registers the owner during start; its first notification can arrive after cleanup.
       this.promotedWindowsSessions.set(starting, record);
       this.startingSessions.delete(sessionId);
@@ -3981,15 +4000,28 @@ export class ComputerUseController {
       this.attachCarriedArtifacts(record, input.agent?.carry);
       this.emit(status);
       controller.signal.throwIfAborted();
+      // Revoked while starting: the same end as a revocation of a running session, never close.
+      if (starting.interactionRevoked) {
+        this.revokeInteraction(record);
+        return record.status;
+      }
       if (candidate.quarantineResume) await this.observe(sessionId);
       controller.signal.throwIfAborted();
       void this.run(record).catch((error) => {
-        if (!controller.signal.aborted) void this.stop(sessionId, 'error');
+        this.failRun(record, error);
         return error;
       });
       controller.signal.throwIfAborted();
       return candidate.quarantineResume ? record.status : status;
     } catch (error) {
+      if (
+        promoted !== null &&
+        (promoted.interactionRevoked || computerUseInteractionRevoked(error)) &&
+        !controller.signal.aborted
+      ) {
+        this.revokeInteraction(promoted);
+        if (promoted.interactionRevoked) return promoted.status;
+      }
       if (starting.stopPromise === null) starting.failure = error;
       await this.stop(sessionId, starting.reason ?? 'error');
       throw error;
@@ -4538,6 +4570,10 @@ export class ComputerUseController {
       this.sessions.get(record.status.sessionId) !== record
     )
       throw new Error('Computer Use approval focus binding changed');
+    // A revocation during the await bumped cancelEpoch; the refocus must neither lower it nor
+    // resurrect the revoked record.
+    if (record.interactionRevoked || focusedSession.cancelEpoch < record.native.cancelEpoch)
+      throw new Error('Computer Use interaction authority was revoked');
     record.native = focusedSession;
     this.revalidateNativeAttestation(
       record,
@@ -4829,6 +4865,7 @@ export class ComputerUseController {
     const discoveryStop = this.stopDiscoveriesWhere(() => true, 'app_closed');
     this.disposed = true;
     this.unsubscribeApprovalStop?.();
+    this.unsubscribeWindowsInteraction?.();
     this.unsubscribeWindowsStops();
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
@@ -4850,6 +4887,7 @@ export class ComputerUseController {
   }
 
   private async run(record: SessionRecord, firstRound = 1): Promise<void> {
+    if (record.interactionRevoked) return;
     const sessionId = record.status.sessionId;
     record.status = this.status(record, 'observing', null);
     this.emit(record.status);
@@ -4990,6 +5028,8 @@ export class ComputerUseController {
       return { decision: 'deny', reason: 'computer_session_missing' };
     const record = this.sessions.get(sessionId);
     if (record === undefined) return { decision: 'deny', reason: 'computer_session_missing' };
+    if (record.interactionRevoked)
+      return { decision: 'deny', reason: 'native_interaction_revoked' };
     const action =
       request.entry.providerName === COMPUTER_ACT_TOOL.providerName
         ? computerUseActionSchema.safeParse((request.input as Record<string, unknown>)['action'])
@@ -5030,6 +5070,9 @@ export class ComputerUseController {
     });
     if (result !== undefined) {
       let authorized = await result;
+      // A revocation that arrived during the authorizer's await leaves the session paused.
+      if (record.interactionRevoked)
+        return { decision: 'deny', reason: 'native_interaction_revoked' };
       // Copy never asks for action approval or gains permission from the session mode.
       if (action?.success && action.data.type === 'copy' && authorized.decision !== 'allow')
         authorized = { decision: 'deny', reason: authorized.reason };
@@ -5077,6 +5120,7 @@ export class ComputerUseController {
         this.planGrantMatches(record, action.data)
       )
         this.planGrantAuthorizedCalls.add(`${sessionId}\0${request.callId}`);
+      if (authorized.decision === 'deny' && record.interactionRevoked) return authorized;
       if (authorized.decision === 'deny') {
         // A person's own answer to the card (deny, focus restore failed, expired) stays the default
         // takeover; only a deny that `deps.authorize` or the controller itself decided is a policy one.
@@ -5117,6 +5161,9 @@ export class ComputerUseController {
     action: ComputerUseAction,
     paste?: ArtifactPasteCall,
   ): Promise<ToolAuthorizationDecision> {
+    // No card for a revoked session: it stays paused and holds no authority to approve.
+    if (record.interactionRevoked)
+      return Promise.resolve({ decision: 'deny', reason: 'native_interaction_revoked' });
     const approvalId = randomUUID();
     // One reading of the clock: a card's lifetime must not depend on how often the clock advances.
     const createdAtMs = this.now();
@@ -6555,7 +6602,77 @@ export class ComputerUseController {
     return false;
   }
 
+  /**
+   * The single decision point for a native revocation (pause, takeover, monitor or round-trip
+   * failure). The helper and host have already latched it; a session still starting carries the
+   * latch into its record, so the revocation always ends as paused plus cancel without close.
+   */
+  private receiveWindowsInteraction(event: WindowsInteractionEvent): void {
+    if (event.kind === 'event' && event.state !== 'failed') return;
+    const record = this.sessions.get(event.sessionId);
+    if (record === undefined) {
+      const starting = this.startingSessions.get(event.sessionId);
+      if (
+        starting !== undefined &&
+        starting.taskId === event.taskId &&
+        starting.turnId === event.turnId &&
+        (starting.native?.cancelEpoch ?? 0) === event.cancelEpoch
+      )
+        starting.interactionRevoked = true;
+      return;
+    }
+    if (
+      record.status.taskId !== event.taskId ||
+      record.turnId !== event.turnId ||
+      record.native.cancelEpoch !== event.cancelEpoch
+    )
+      return;
+    this.revokeInteraction(record);
+  }
+
+  /** Idempotent. Never closes: only a person's Stop ends a revoked session (no resume, see status). */
+  private revokeInteraction(record: SessionRecord): void {
+    if (
+      record.interactionRevoked ||
+      record.controller.signal.aborted ||
+      record.stopPromise !== null ||
+      this.sessions.get(record.status.sessionId) !== record
+    )
+      return;
+    const sessionId = record.status.sessionId;
+    record.interactionRevoked = true;
+    record.native = { ...record.native, cancelEpoch: record.native.cancelEpoch + 1 };
+    record.observation = null;
+    record.planGrant = null;
+    const prefix = `${sessionId}\0`;
+    for (const call of this.planGrantAuthorizedCalls)
+      if (call.startsWith(prefix)) this.planGrantAuthorizedCalls.delete(call);
+    try {
+      this.cancelPendingApprovals(sessionId, 'native_interaction_revoked');
+      record.status = this.status(
+        record,
+        'paused',
+        null,
+        record.status.observationRevision,
+        record.status.round,
+        null,
+      );
+      this.emit(record.status);
+    } finally {
+      void this.deps.native.cancel(record.native, record.native.cancelEpoch).catch(() => undefined);
+    }
+  }
+
+  /** A run that failed on a revocation the helper or host latched is that revocation, not an error. */
+  private failRun(record: SessionRecord, error: unknown): void {
+    if (record.interactionRevoked || computerUseInteractionRevoked(error))
+      this.revokeInteraction(record);
+    else if (!record.controller.signal.aborted) void this.stop(record.status.sessionId, 'error');
+  }
+
   private assertSessionLive(record: SessionRecord): void {
+    if (record.interactionRevoked)
+      throw new Error('Computer Use interaction authority was revoked');
     if (!this.approvalHelperCurrent(record))
       throw new Error('Computer Use approval helper generation changed');
     if (record.controller.signal.aborted) throw new Error('Computer Use session is canceled');
@@ -6623,6 +6740,7 @@ export class ComputerUseController {
   ): ComputerUseSessionStatus {
     return computerUseSessionStatusSchema.parse({
       ...record.status,
+      ...(record.interactionRevoked ? { resumable: false } : {}),
       state,
       stopReason: state === 'stopped' ? stopReason : null,
       // What was copied is for the card while the session lives; it goes with the session.
@@ -7148,6 +7266,16 @@ function mapAuditState(
   if (result === 'canceled') return 'canceled';
   if (result === 'unknown_effect') return 'unknown_effect';
   return 'rejected';
+}
+
+function computerUseInteractionRevoked(error: unknown): boolean {
+  for (let cause = error, depth = 0; cause instanceof Error && depth < 4; depth += 1) {
+    const reason = (cause as Error & { reasonCode?: unknown }).reasonCode;
+    if (reason === 'native_interaction_revoked' || cause.message === 'native_interaction_revoked')
+      return true;
+    cause = cause.cause;
+  }
+  return false;
 }
 
 function computerUseNativeUserTakeover(error: unknown): boolean {

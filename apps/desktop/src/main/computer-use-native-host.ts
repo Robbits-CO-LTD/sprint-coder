@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
 import {
   computerTargetWindowsGenerationMatches,
@@ -315,6 +316,17 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  const interactionRevoked = new Set<string>();
+  const interactionListeners = new Set<WindowsInteractionListener>();
+  if (platform === 'win32')
+    // The helper is the binding authority (start/begin acknowledgement, generation, epochs, order)
+    // and passes each revocation once. Latched here even before `sessions` holds the session, so
+    // an event of a start still in flight is never dropped by one layer and kept by another.
+    addon?.subscribeWindowsInteraction?.((event) => {
+      if (event.kind === 'background_event' || event.state === 'failed')
+        interactionRevoked.add(event.sessionId);
+      for (const listener of interactionListeners) listener(event);
+    });
   const ledger = platform === 'win32' ? options.windowsLedger : undefined;
   const startIdentityEnabled =
     platform === 'win32' && options.windowsStartIdentity?.enabled === true;
@@ -1359,6 +1371,7 @@ export function createComputerUseNativeHost(
       revisionsBySession.delete(id);
       activeStopQuarantines.delete(id);
       confirmedClosed.add(id);
+      interactionRevoked.delete(id);
       if (confirmedClosed.size > 128)
         confirmedClosed.delete(confirmedClosed.values().next().value!);
     }
@@ -1607,6 +1620,7 @@ export function createComputerUseNativeHost(
         );
       }
       confirmedClosed.add(owner.sessionId);
+      interactionRevoked.delete(owner.sessionId);
       if (confirmedClosed.size > 128) {
         const oldest = confirmedClosed.values().next().value;
         if (oldest !== undefined) confirmedClosed.delete(oldest);
@@ -2846,6 +2860,16 @@ export function createComputerUseNativeHost(
           },
         }
       : {}),
+    ...(platform === 'win32' && addon?.subscribeWindowsInteraction
+      ? {
+          subscribeWindowsInteraction: (listener: WindowsInteractionListener) => {
+            interactionListeners.add(listener);
+            return () => {
+              interactionListeners.delete(listener);
+            };
+          },
+        }
+      : {}),
     ...(terminationEnabled ? { subscribeWindowsStop: stopDelivery.subscribe } : {}),
     ...(terminationEnabled
       ? {
@@ -2987,6 +3011,8 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
+      if (interactionRevoked.has(startInput.sessionId))
+        throw new ComputerUseNativeUnavailableError('native_interaction_revoked');
       if (ledger === undefined) requireMethod('startSession');
       const {
         classifierRoute,
@@ -3231,6 +3257,8 @@ export function createComputerUseNativeHost(
       : {}),
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
+      if (interactionRevoked.has(input.session.sessionId))
+        return { kind: 'refused', result: 'rejected', reasonCode: 'native_interaction_revoked' };
       const internal = sessions.get(input.session.sessionId);
       if (ledger !== undefined && internal !== undefined) {
         await retryLedger();
@@ -3333,6 +3361,8 @@ export function createComputerUseNativeHost(
     },
 
     dispatchApproved: async (input): Promise<ComputerUseNativeActionResult> => {
+      if (interactionRevoked.has(input.session.sessionId))
+        return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined && platform === 'win32')
         return { result: 'rejected', reasonCode: 'native_session_missing' };
@@ -3385,6 +3415,8 @@ export function createComputerUseNativeHost(
     },
 
     dispatch: async (input): Promise<ComputerUseNativeActionResult> => {
+      if (interactionRevoked.has(input.session.sessionId))
+        return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
       if (ledger !== undefined) await retryLedger();
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
@@ -3607,6 +3639,7 @@ export function createComputerUseNativeHost(
         stopEpochs.delete(session.sessionId);
         revisionsBySession.delete(session.sessionId);
         confirmedClosed.add(session.sessionId);
+        interactionRevoked.delete(session.sessionId);
         if (confirmedClosed.size > 128)
           confirmedClosed.delete(confirmedClosed.values().next().value!);
         // Only a verified close releases the process-local quarantine. Late/failed completion

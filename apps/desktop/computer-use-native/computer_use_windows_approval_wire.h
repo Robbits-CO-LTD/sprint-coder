@@ -220,6 +220,35 @@ inline bool ProcessStart(std::string_view value) {
   return true;
 }
 
+[[nodiscard]] inline std::string ApprovalRoundTripWire(const ApprovalRoundTripFields &fields);
+
+struct ApprovalRoundTripEventInput {
+  std::string id, session, task, turn, state, foreground, failure;
+  std::uint64_t generation = 0, epoch = 0, sequence = 0;
+};
+// The round-trip event frame. A notification that the wire contract cannot carry is sent as a
+// latched `monitor_failed` failure and reports `degraded`, so the owner latches the same failure
+// and fails that session closed. Empty only when even that cannot be sent (invalid binding).
+[[nodiscard]] inline std::string ApprovalRoundTripEventWire(const ApprovalRoundTripEventInput &in,
+                                                            bool *degraded) {
+  const auto build = [&](const std::string &state, const std::string &foreground,
+                         const std::string &failure) {
+    const bool failed = state == "failed";
+    return ApprovalRoundTripWire(ApprovalRoundTripFields{{"version", std::uint64_t{1}},
+        {"roundTripId", in.id}, {"sessionId", in.session}, {"taskId", in.task},
+        {"turnId", in.turn}, {"helperGeneration", in.generation}, {"cancelEpoch", in.epoch},
+        {"kind", std::string("event")}, {"sequence", in.sequence}, {"state", state},
+        {"foreground", foreground}, {"failureReason", failed ? failure : std::string("none")},
+        {"failureLatched", failed}});
+  };
+  *degraded = false;
+  auto payload = build(in.state, in.foreground, in.failure);
+  if (!payload.empty()) return payload;
+  *degraded = true;
+  const bool known = in.foreground == "target" || in.foreground == "sprint_coder";
+  return build("failed", known ? in.foreground : std::string("other"), "monitor_failed");
+}
+
 // Invalid/missing/unknown/duplicate members cannot be emitted. No OS operation is performed.
 [[nodiscard]] inline std::string ApprovalRoundTripWire(const ApprovalRoundTripFields &fields) {
   if (!ValidateApprovalRoundTripFields(fields)) return {};

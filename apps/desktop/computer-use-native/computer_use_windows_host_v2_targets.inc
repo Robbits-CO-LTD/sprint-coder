@@ -1802,6 +1802,8 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     session.dialog_set_digest = dialogs.digest;
     session.dialog_set_revision = 1;
   }
+  // The response carries the monitor's epoch; a background start without a monitor never answers.
+  if (background && !session.background_monitor) { *reason = "user_takeover"; return false; }
   std::uint64_t effective_epoch = std::max(input.cancel_epoch, cancellation_epoch.load(std::memory_order_acquire));
   const auto build_response = [&](std::uint64_t response_epoch) {
     return "{\"sessionId\":\"" + JsonEscape(input.session_id) +
@@ -1814,7 +1816,8 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
       ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
       ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"" +
-      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(session.input_session) : "") + "}";
+      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(session.input_session) : "") +
+      (background ? ",\"interactionEpoch\":" + std::to_string(session.background_monitor->state.Snapshot().epoch) : "") + "}";
   };
   std::string built = v2 ? build_response(effective_epoch) : std::string{};
   if ((v2 || background) && (WaitForSingleObject(pending->process, 0) != WAIT_TIMEOUT ||
@@ -2344,6 +2347,7 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     if (!CaptureWindowsBackgroundStartDialogs(session, &final_dialogs, reason)) return false;
     if (final_dialogs.digest != background_dialogs.digest) { *reason = "session_refocus_stale"; return false; }
   }
+  if (background && !session.background_monitor) { *reason = "user_takeover"; return false; }
   const sprint_coder::computer_use::InputSession next_input_session{
       background ? sprint_coder::computer_use::InputSessionKind::kBackground :
                    sprint_coder::computer_use::InputSessionKind::kForeground};
@@ -2357,7 +2361,8 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
       ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
       ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"" +
-      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(next_input_session) : "") + "}";
+      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(next_input_session) : "") +
+      (background ? ",\"interactionEpoch\":" + std::to_string(session.background_monitor->state.Snapshot().epoch) : "") + "}";
   // Existing start final success decision; a completed late phase cannot resume after Stop.
   std::lock_guard stop_lock(control.stop_mutex);
   if (!current()) { *reason = "session_start_canceled"; return false; }

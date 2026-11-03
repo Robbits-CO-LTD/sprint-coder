@@ -631,7 +631,65 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
   return true;
 }
 
+struct WindowsInteractionDelivery {
+  Frame request;
+  std::string task, turn, last_trip;
+  std::uint64_t sequence = 0, epoch = 0;
+};
+
+// The consumer owns sessions and pipe writes. Polling only delivers already-latched native state;
+// a blocked consumer or a lost notification never opens the monitor's claim gate.
+bool DeliverWindowsInteractionEvents(HANDLE pipe,
+    std::unordered_map<std::string, WindowsInteractionDelivery> &deliveries) {
+  using namespace sprint_coder::computer_use;
+  using windows_approval_wire_detail::Quote;
+  for (auto it = deliveries.begin(); it != deliveries.end();) {
+    const auto found = sessions.find(it->first);
+    if (found == sessions.end()) { it = deliveries.erase(it); continue; }
+    auto &session = found->second;
+    auto &delivery = it->second;
+    ++it;
+    if (session.background_monitor) {
+      session.background_monitor->state.CheckHealth();
+      const auto snapshot = session.background_monitor->state.Snapshot();
+      if (snapshot.paused && snapshot.epoch > delivery.epoch) {
+        delivery.epoch = snapshot.epoch;
+        const auto payload = "{\"version\":1,\"kind\":\"background_event\",\"sessionId\":" +
+            Quote(session.session_id) + ",\"taskId\":" + Quote(delivery.task) +
+            ",\"turnId\":" + Quote(delivery.turn) + ",\"helperGeneration\":" +
+            std::to_string(windows_helper_generation) + ",\"cancelEpoch\":" +
+            std::to_string(session.cancel_epoch) + ",\"interactionEpoch\":" +
+            std::to_string(snapshot.epoch) + ",\"sequence\":" +
+            std::to_string(++delivery.sequence) + ",\"state\":\"paused\"}";
+        if (!Respond(pipe, delivery.request, MessageType::kBackgroundInteractionEvent, payload)) return false;
+      }
+    }
+    if (session.round_trip) {
+      WindowsRoundTripCurrent(session);
+      const auto event = session.round_trip->ReadNotification();
+      const auto &binding = event.binding;
+      if (binding.id.empty()) continue;
+      const auto key = binding.id + ":" + event.state + ":" + event.failure + ":" + event.foreground;
+      if (key == delivery.last_trip) continue;
+      delivery.last_trip = key;
+      bool degraded = false;
+      const auto payload = ApprovalRoundTripEventWire(
+          {binding.id, binding.session, binding.task, binding.turn, event.state, event.foreground,
+           event.failure, binding.generation, binding.epoch, delivery.sequence + 1},
+          &degraded);
+      // A notification the contract cannot carry fails this session closed (the latch blocks its
+      // return, exchange and input); it never ends the pipe for every other session.
+      if (degraded) session.round_trip->Invalidate("monitor_failed");
+      if (payload.empty()) continue;
+      ++delivery.sequence;
+      if (!Respond(pipe, delivery.request, MessageType::kApprovalRoundTripEvent, payload)) return false;
+    }
+  }
+  return true;
+}
+
 bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
+  std::unordered_map<std::string, WindowsInteractionDelivery> interaction_deliveries;
   constexpr std::size_t kMaximumQueuedFrames = 64;
   std::mutex queue_mutex;
   std::condition_variable queue_ready;
@@ -772,13 +830,20 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     return true;
   }};
   for (;;) {
+    if (!DeliverWindowsInteractionEvents(pipe, interaction_deliveries)) {
+      served = false;
+      CancelIoEx(pipe, nullptr);
+      break;
+    }
     QueuedFrame queued;
     {
       std::unique_lock lock(queue_mutex);
-      queue_ready.wait(lock,
+      queue_ready.wait_for(lock, std::chrono::milliseconds(20),
                        [&]() { return reader_finished || !queue.empty(); });
-      if (queue.empty())
-        break;
+      if (queue.empty()) {
+        if (reader_finished) break;
+        continue;
+      }
       queued = std::move(queue.front());
       queue.pop_front();
     }
@@ -788,6 +853,13 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;
+    }
+    const auto session_key = FrameIdKey(queued.frame.header.session_id);
+    if (sessions.contains(session_key) && !interaction_deliveries.contains(session_key)) {
+      const std::string metadata(queued.frame.metadata.begin(), queued.frame.metadata.end());
+      std::string task, turn;
+      if (ReadJsonString(metadata, "taskId", &task) && ReadJsonString(metadata, "turnId", &turn))
+        interaction_deliveries.emplace(session_key, WindowsInteractionDelivery{Frame{queued.frame.header}, task, turn});
     }
   }
   if (reader.joinable())
