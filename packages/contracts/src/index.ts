@@ -6414,6 +6414,72 @@ export const computerUseNativeCapabilitySchema = z.enum([
   'accessibility',
   'input',
 ]);
+
+/** Windows N9 wire only. These declarations do not enable background execution. */
+export const computerUseInputPathSchema = z.enum([
+  'background_semantic',
+  'foreground_semantic',
+  'foreground_input',
+]);
+export type ComputerUseInputPath = z.infer<typeof computerUseInputPathSchema>;
+export const computerUseInputSessionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('foreground'), backgroundCapabilityVersion: z.null() }).strict(),
+  z.object({ kind: z.literal('background'), backgroundCapabilityVersion: z.literal(1) }).strict(),
+]);
+export type ComputerUseInputSession = z.infer<typeof computerUseInputSessionSchema>;
+export const computerUseWindowsBackgroundCapabilitySchema = z
+  .object({
+    version: z.literal(1),
+    capabilityTableVersion: z.literal(1),
+    authorityVersion: z.literal(1),
+  })
+  .strict();
+export type ComputerUseWindowsBackgroundCapability = z.infer<
+  typeof computerUseWindowsBackgroundCapabilitySchema
+>;
+const computerUseSemanticPatternSchema = z.enum([
+  'invoke',
+  'toggle',
+  'select',
+  'set_value',
+  'expand_collapse',
+  'scroll',
+  'set_scroll_percent',
+]);
+// P2/P3 supply measurements later. A missing field is not the reserved explicit absence.
+const computerUseInputAuthorityFields = {
+  version: z.literal(1),
+  targetAncestorsDigest: z.null(),
+  contentFingerprint: z.null(),
+  interactionEpoch: z.null(),
+};
+export const computerUseInputAuthoritySchema = z.discriminatedUnion('inputPath', [
+  z
+    .object({
+      ...computerUseInputAuthorityFields,
+      sessionKind: z.literal('background'),
+      inputPath: z.literal('background_semantic'),
+      pattern: computerUseSemanticPatternSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...computerUseInputAuthorityFields,
+      sessionKind: z.literal('foreground'),
+      inputPath: z.literal('foreground_semantic'),
+      pattern: computerUseSemanticPatternSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...computerUseInputAuthorityFields,
+      sessionKind: z.literal('foreground'),
+      inputPath: z.literal('foreground_input'),
+      pattern: z.null(),
+    })
+    .strict(),
+]);
+export type ComputerUseInputAuthority = z.infer<typeof computerUseInputAuthoritySchema>;
 /**
  * How a native build decides which applications are eligible (ADR v2 D7). It is fixed when the
  * native is compiled and recorded in the manifest; Main compiles the same value in, the native
