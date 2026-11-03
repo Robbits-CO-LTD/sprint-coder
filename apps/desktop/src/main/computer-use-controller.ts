@@ -1627,7 +1627,7 @@ export class ComputerUseController {
     // Fire-and-forget with its own catch: this runs on the synchronous path that builds an
     // enumeration, and the answer — "not granted" — does not depend on the removal succeeding. A
     // concurrent revoke of the same row makes it throw, and that is already the outcome we wanted.
-    if (mismatch === 'denied_class' || unreadableVersion)
+    if (mismatch === 'denied_class')
       void this.revokeAppGrant(stored.id, stored.revision).catch(() => undefined);
     return null;
   }

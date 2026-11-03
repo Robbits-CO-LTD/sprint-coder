@@ -62,20 +62,23 @@ function derive(identity: Record<string, unknown>): ComputerAppGrantIdentity {
 }
 
 describe('persisted identity deny rules', () => {
-  it.each(['KEEPASS.EXE', 'python3.exe', 'fixture-update.exe'])(
-    'applies shared exact and glob rules to %s',
-    (leaf) => {
-      expect(
-        computerAppGrantIdentityIsDenied(
-          derive(
-            winIdentity({
-              executablePath: `C:\\Program Files\\Fixture\\${leaf}`,
-            }),
-          ),
+  it.each([
+    'KEEPASS.EXE',
+    'python3.exe',
+    'fixture-update.exe',
+    'setup\u2028x.exe',
+    'python\u2028.exe',
+  ])('applies shared exact and glob rules to %s', (leaf) => {
+    expect(
+      computerAppGrantIdentityIsDenied(
+        derive(
+          winIdentity({
+            executablePath: `C:\\Program Files\\Fixture\\${leaf}`,
+          }),
         ),
-      ).toBe(true);
-    },
-  );
+      ),
+    ).toBe(true);
+  });
 
   it('applies shared package prefixes without relying on the image name', () => {
     expect(

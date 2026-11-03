@@ -396,7 +396,7 @@ describe('target facts source contract', () => {
     for (const source of [tsCore, cppCore]) expect(source).not.toMatch(/displayName|display_name/u);
   });
 
-  it('is used only by private Main discovery and the Windows host v2 targets block', () => {
+  it('is used only by private Main discovery, grant identity and the Windows host v2 targets block', () => {
     const mainDirectory = __dirname;
     const allowed = new Set([
       'computer-use-target-eligibility.ts',
@@ -404,6 +404,7 @@ describe('target facts source contract', () => {
       'computer-use-deny-ruleset.generated.ts',
       'computer-use-native-targets.ts',
       'computer-use-native-host.ts',
+      'computer-use-grant-identity.ts',
     ]);
     for (const name of readdirSync(mainDirectory)) {
       if (!/\.(ts|tsx)$/u.test(name) || /\.test\.tsx?$/u.test(name) || allowed.has(name)) continue;
@@ -418,6 +419,12 @@ describe('target facts source contract', () => {
     expect(mainTargets).toContain('classifyTarget(native.facts)');
     const mainHost = readFileSync(join(mainDirectory, 'computer-use-native-host.ts'), 'utf8');
     expect(mainHost).not.toMatch(/\bclassifyTarget(?:Explained)?\(/u);
+    // Grants share the pin and deny matching, but cannot classify missing live native facts.
+    const grantIdentity = readFileSync(
+      join(mainDirectory, 'computer-use-grant-identity.ts'),
+      'utf8',
+    );
+    expect(grantIdentity).not.toMatch(/\bclassifyTarget(?:Explained)?\b/u);
     // The Windows facts header reads the core's tables, and only the host's v2 block judges with it.
     const factsReaders = new Set([
       'computer_use_windows_target_facts.h',

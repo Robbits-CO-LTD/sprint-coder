@@ -4635,17 +4635,20 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
-    it.each([0, NaN, 4])('unreadable_saved_version_is_revoked (%s)', async (version) => {
-      const fixture = createFixture();
-      const grant = fixture.controller.createAppGrant(
-        computerAppGrantIdentityFrom(windowsProfile().identity)!,
-        input,
-      );
-      fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
-      expect(fixture.controller.appGrantFor(windowsProfile())).toBeNull();
-      expect(fixture.grants.size).toBe(0);
-      await fixture.controller.dispose();
-    });
+    it.each([0, NaN, 4])(
+      'unreadable_saved_version_is_retained_without_grant (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const grant = fixture.controller.createAppGrant(
+          computerAppGrantIdentityFrom(windowsProfile().identity)!,
+          input,
+        );
+        fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
+        expect(fixture.controller.appGrantFor(windowsProfile())).toBeNull();
+        expect(fixture.grants.get(grant.id)).toEqual({ ...grant, denyRulesetVersion: version });
+        await fixture.controller.dispose();
+      },
+    );
 
     it.each([null, 0, 4, NaN])(
       'unreadable_or_mismatched_pin_fails_closed (%s)',
@@ -4666,6 +4669,28 @@ describe('ComputerUseController', () => {
         }
       },
     );
+
+    it('macos_denied_bundle_grant_is_revoked_by_app_grant_state', async () => {
+      const facts = { ...appIdentityFacts, bundleId: 'com.apple.terminal' };
+      const identity = computerAppGrantIdentityFrom(facts)!;
+      const identityDigest = computerAppNativeIdentityDigest(facts, identity)!;
+      const target = {
+        ...profile,
+        identityDigest,
+        identity: { ...facts, identityDigest },
+      };
+      const fixture = createFixture({ profileRecord: target });
+      const legacy = createComputerAppGrantFixtureStore().api.createComputerAppGrant({
+        identity,
+        displayName: 'Fixture',
+        denyRulesetVersion: 1,
+        ...input,
+      });
+      fixture.grants.set(legacy.id, legacy);
+      expect(fixture.controller['appGrantState'](target, null).granted).toBe(false);
+      expect(fixture.grants.size).toBe(0);
+      await fixture.controller.dispose();
+    });
 
     it('macos_grant_version_is_unchanged', async () => {
       const fixture = createFixture();
