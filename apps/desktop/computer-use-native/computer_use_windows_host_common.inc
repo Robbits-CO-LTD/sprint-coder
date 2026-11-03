@@ -69,6 +69,10 @@ struct WindowsWorkerLaunches {
   [[nodiscard]] WindowsWorkerLaunches Holding() const noexcept;
   [[nodiscard]] bool Retired() const noexcept { return !overflow && Holding().count == 0; }
 };
+// Set only on the consumer thread, while it serves one request (WindowsResidualRequestScope). So a
+// request owns the launches made on that thread alone: a launch for a request must be made on the
+// consumer thread, or the response is not flagged and Main is never told to wait for that worker.
+// Off it (worker threads, the effect shadow) this stays null and a launch is no request's work.
 thread_local WindowsWorkerLaunches *windows_worker_launches = nullptr;
 
 class WindowsWorkerSlot : public std::atomic<bool> {

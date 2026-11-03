@@ -510,6 +510,13 @@ describe('Windows native helper compile boundary', () => {
       source.slice(source.indexOf('// END windows worker slot launches'));
     expect(outsideSlot).not.toMatch(/\batomic_(?:exchange|store|compare_exchange)/u);
     expect(outsideSlot).not.toMatch(/std::atomic<bool>::(?:store|exchange|compare_exchange)/u);
+    // Nor through a base reference or pointer: no cast to it, and the accessor is the only one.
+    expect(outsideSlot).not.toMatch(/_cast<\s*(?:const\s+|volatile\s+)*std::atomic<bool>/u);
+    const baseReferences = [...outsideSlot.matchAll(/std::atomic<bool>\s*[&*][^;{]*/gu)].map(
+      ([text]) => text.trim(),
+    );
+    // Its declaration and its definition.
+    expect(baseReferences).toEqual(Array(2).fill('std::atomic<bool> &WindowsTargetListWorkerRunning()'));
     const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
     expect(uses.length).toBeGreaterThan(0);
     for (const [, method, args] of uses)
