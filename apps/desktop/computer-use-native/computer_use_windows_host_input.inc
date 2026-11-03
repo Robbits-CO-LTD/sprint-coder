@@ -637,6 +637,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
         *reason = "stale_target";
       return false;
     }
+    // Defence in depth: a background session never moves the cursor, even if the background branch
+    // of the dispatch above is reordered or loosened. Nothing is attempted, so nothing is counted.
+    if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+      *reason = "input_unavailable";
+      return false;
+    }
     bool cursor_set = false;
     if (session.approved_deadline_ns != 0)
       cursor_set = SetWindowsApprovedCursor(session, screen_x, screen_y);
@@ -715,6 +721,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
         !RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       if (reason->empty())
         *reason = "stale_target";
+      return false;
+    }
+    // Defence in depth: a background session never moves the cursor, even if the background branch
+    // of the dispatch above is reordered or loosened. Nothing is attempted, so nothing is counted.
+    if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+      *reason = "input_unavailable";
       return false;
     }
     bool cursor_set = false;

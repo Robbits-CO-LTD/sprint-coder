@@ -73,6 +73,9 @@ struct WindowsBackgroundMonitor {
   static void CALLBACK Target(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
     // Registration filters the process, including destroyed HWNDs and non-window UIA objects.
     // No own-call proof exists in P3a; a call in progress alone must not suppress these events.
+    // P4a keeps this fail-closed: the WinEvent our own background pattern call raises also pauses
+    // here, so the claim ends as unknown_effect on a real device. BG01 completed is fake-only and
+    // real-device BG01 is BLOCKED until "N9 P4a-attr claim-scoped own-call WinEvent attribution".
     if (current != nullptr) current->state.TargetEvent(Owner::kTarget);
   }
 

@@ -14,6 +14,7 @@ struct FakeOperations {
   Preparation preparation = Preparation::kReady;
   bool guard = true, call_ok = true, read_ok = true, window_ok = true;
   bool changed_content = false, throw_call = false, takeover = false, applies = true;
+  bool own_event = false; // The provider raises the WinEvent our own pattern call causes.
   bool state = false, desired = true;
   std::string text = "Synthetic before", desired_text = "Synthetic after";
   std::uint64_t expected_epoch = 1;
@@ -44,6 +45,7 @@ struct FakeOperations {
       if (pattern == Pattern::kValue) text = desired_text;
       else state = desired;
     }
+    if (own_event) monitor.TargetEvent(sprint_coder::computer_use::BackgroundInputOwner::kTarget);
     return call_ok;
   }
   bool Readback() {
@@ -58,11 +60,40 @@ struct FakeOperations {
     return monitor.Finish(claim);
   }
 };
+// Fake provider patterns: each branch must reach exactly one provider call through the timed contact,
+// and the text argument must arrive as the mutable provider string (a BSTR in the UIA adapter).
+struct FakePattern {
+  int *calls;
+  int Invoke() { ++*calls; return 1; }
+  int Toggle() { ++*calls; return 2; }
+  int Select() { ++*calls; return 3; }
+  int Expand() { ++*calls; return 5; }
+  int Collapse() { ++*calls; return 6; }
+  wchar_t *seen = nullptr;
+  int SetValue(wchar_t *text) { seen = text; ++*calls; return 4; }
+};
+inline bool CheckCallPattern() {
+  wchar_t buffer[] = L"Synthetic";
+  for (int branch = 0; branch < 7; ++branch) {
+    int calls = 0, timed = 0;
+    FakePattern pattern{&calls};
+    FakePattern *none = nullptr;
+    const auto wrap = [&](auto &&call) { ++timed; return call(); };
+    const int result = CallPattern(branch == 0 ? &pattern : none, branch == 1 ? &pattern : none,
+        branch == 2 ? &pattern : none, branch == 3 ? &pattern : none,
+        branch >= 4 && branch < 6 ? &pattern : none, static_cast<wchar_t *>(buffer), branch == 4, wrap, -1);
+    const int expected[] = {1, 2, 3, 4, 5, 6, -1};
+    if (result != expected[branch] || calls != (branch < 6 ? 1 : 0) || timed != calls ||
+        (branch == 3) != (pattern.seen == buffer)) return false;
+  }
+  return true;
+}
 inline bool CheckBackgroundExecutor() {
   const auto check = [](bool ok, const char *name) {
     if (!ok) std::cerr << name << '\n';
     return ok;
   };
+  if (!check(CheckCallPattern(), "BG01_call_pattern_one_timed_provider_call")) return false;
   for (int pattern = 0; pattern < 5; ++pattern) {
     FakeOperations ops;
     ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
@@ -99,6 +130,21 @@ inline bool CheckBackgroundExecutor() {
                    ops.monitor.Claim(ops.monitor.Snapshot().epoch) == 0 &&
                    ops.forbidden == std::array<int, 6>{},
                "BG06_claimed_uia_never_retries_or_falls_back")) return false;
+  }
+  for (int pattern = 0; pattern < 5; ++pattern) {
+    // BG01 completed above is FAKE-ONLY. On a real device the target raises STATECHANGE /
+    // VALUECHANGE / SELECTION / EXPANDCOLLAPSE (or INVOKED) for our own call while the claim is
+    // active, the Target WinEvent hook pauses without own-call attribution, and the claim closes as
+    // unknown_effect. Real-device BG01 completed stays BLOCKED until
+    // "N9 P4a-attr claim-scoped own-call WinEvent attribution" lands; this case pins fail-closed.
+    FakeOperations ops;
+    ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
+    ops.own_event = true;
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.calls == 1 &&
+                   ops.finishes == 1 && ops.monitor.Snapshot().paused &&
+                   ops.monitor.Snapshot().unknown_effect &&
+                   ops.forbidden == std::array<int, 6>{},
+               "BG01_real_device_completed_blocked_until_own_call_attribution")) return false;
   }
   {
     FakeOperations ops;

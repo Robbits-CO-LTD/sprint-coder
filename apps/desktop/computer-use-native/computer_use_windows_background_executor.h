@@ -10,9 +10,12 @@ enum class Preparation { kReady, kNoop, kHandoff, kRejected };
 enum class Outcome { kCompleted, kAwaitingForegroundHandoff, kRejected, kUnknownEffect };
 
 // The host supplies the V1 timed contact; each branch makes exactly one provider call.
-template <class Invoke, class Toggle, class Select, class Value, class Expand, class Timed, class Result>
+// Text is the provider's own string type: the UIA adapter passes a SysAllocStringLen BSTR, never a
+// std::wstring buffer (BSTR marshaling reads the length prefix before the pointer).
+template <class Invoke, class Toggle, class Select, class Value, class Expand, class Text, class Timed,
+          class Result>
 Result CallPattern(Invoke *invoke, Toggle *toggle, Select *select, Value *value,
-                   Expand *expand, const wchar_t *text, bool desired, Timed &&timed, Result failure) {
+                   Expand *expand, Text text, bool desired, Timed &&timed, Result failure) {
   if (invoke) return timed([&] { return invoke->Invoke(); });
   if (toggle) return timed([&] { return toggle->Toggle(); });
   if (select) return timed([&] { return select->Select(); });

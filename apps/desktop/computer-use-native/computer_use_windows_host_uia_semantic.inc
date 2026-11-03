@@ -960,6 +960,10 @@ bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **
 }
 
 #if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+// Test gate only. The monitor's Target hook pauses on every target WinEvent during the claim,
+// including the ones this call raises itself, so a real device reaches unknown_effect, never
+// completed: BG01 completed is fake-only. Real-device BG01 is BLOCKED until
+// "N9 P4a-attr claim-scoped own-call WinEvent attribution" lands (monitor.inc, Target hook).
 struct WindowsBackgroundPatternOperations {
   using Preparation = windows_background_executor_detail::Preparation;
   template <class T> using ComRef = sprint_coder::computer_use::windows_uia_source_detail::ComRef<T>;
@@ -974,6 +978,7 @@ struct WindowsBackgroundPatternOperations {
   ComRef<IUIAutomationValuePattern> value;
   ComRef<IUIAutomationExpandCollapsePattern> expand;
   std::wstring text;
+  BstrHolder text_value;
   bool desired = false;
 
   bool Guard() { return WindowsV1UiaMayCall() && AwaitWindowsSemanticValidation(); }
@@ -1039,8 +1044,14 @@ struct WindowsBackgroundPatternOperations {
     }
     if (work.kind == "set_text") {
       std::string requested;
-      if (!ReadJsonString(work.metadata, "text", &requested) || !Utf16FromUtf8(requested, &text))
-        return Preparation::kRejected;
+      const bool parsed = ReadJsonString(work.metadata, "text", &requested) &&
+          Utf16FromUtf8(requested, &text);
+      std::fill(requested.begin(), requested.end(), '\0');
+      if (!parsed || text.size() > std::numeric_limits<UINT>::max()) return Preparation::kRejected;
+      // SetValue takes a BSTR (length-prefixed), the same allocation as the foreground set_text.
+      BSTR &allocated = *text_value.Receive();
+      allocated = SysAllocStringLen(text.data(), static_cast<UINT>(text.size()));
+      if (allocated == nullptr) return Preparation::kRejected;
       ready = Pattern(UIA_ValuePatternId, value);
       if (ready != Preparation::kReady) return ready;
       BOOL readonly = TRUE;
@@ -1069,6 +1080,9 @@ struct WindowsBackgroundPatternOperations {
         !pending->background_monitor || pending->session_id.empty() || pending->ever_claimed ||
         pending->input_in_flight || !WindowsV1UiaMayCall() ||
         pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone ||
+        // The same set as the foreground claim boundary (InvokeWindowsSemanticInput): an approval
+        // round trip that expired or failed after Guard must still refuse here, under stop_mutex.
+        (pending->round_trip && !pending->round_trip->MayInput(MonotonicNowNs() / 1000000)) ||
         (pending->approved_deadline_ns != 0 &&
          (MonotonicNowNs() < pending->approved_started_ns ||
           MonotonicNowNs() >= pending->approved_deadline_ns))) return 0;
@@ -1082,7 +1096,7 @@ struct WindowsBackgroundPatternOperations {
   bool Call() {
     HRESULT result = E_FAIL;
     result = windows_background_executor_detail::CallPattern(
-        invoke.Get(), toggle.Get(), select.Get(), value.Get(), expand.Get(), text.c_str(), desired,
+        invoke.Get(), toggle.Get(), select.Get(), value.Get(), expand.Get(), *text_value.Receive(), desired,
         [&](auto &&call) { return WindowsV1UiaContact(result, call); }, E_FAIL);
     return WindowsV1UiaOk(result) && WindowsV1UiaMayCall();
   }
@@ -1115,7 +1129,11 @@ struct WindowsBackgroundPatternOperations {
     pending->ready.notify_all();
     return finished && pending->abandoned.load(std::memory_order_acquire) == WindowsV1UiaStop::kNone;
   }
-  ~WindowsBackgroundPatternOperations() { std::fill(text.begin(), text.end(), L'\0'); }
+  ~WindowsBackgroundPatternOperations() {
+    std::fill(text.begin(), text.end(), L'\0');
+    // Scrub the BSTR before its holder frees it.
+    if (BSTR allocated = *text_value.Receive()) SecureZeroMemory(allocated, SysStringByteLen(allocated));
+  }
 };
 // END background pattern adapter
 #endif
