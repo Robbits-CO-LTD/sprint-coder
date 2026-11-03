@@ -942,6 +942,89 @@ describe('Computer Use Windows helper transport', () => {
     }
   });
 
+  it('PR9 refresh drops a shared quarantine another Host released', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-shared-release-'));
+    const path = join(directory, 'shared.sqlite');
+    const a = openWindowsLedgerStore({ path, userData: 'C:\\synthetic\\a' });
+    const b = openWindowsLedgerStore({ path, userData: 'C:\\synthetic\\b' });
+    const identity = { pid: 4242, creationTime: '133000000000000001' };
+    try {
+      const original = responders();
+      const host = (store: typeof a) =>
+        createTarget(
+          {
+            ...original,
+            check_target_identity: (metadata) => [
+              'target_identity_result',
+              { results: (metadata['targets'] as unknown[]).map(() => ({ result: 'alive' })) },
+            ],
+            list_windows: (metadata) => {
+              const [type, result] = original['list_windows']!(metadata);
+              return [
+                type,
+                (result as Record<string, unknown>[]).map((row) => ({
+                  ...row,
+                  pid: identity.pid,
+                  ...(metadata['includeStartIdentity'] === true
+                    ? { processStartTime: identity.creationTime }
+                    : {}),
+                })),
+              ];
+            },
+            start_session: (metadata) => {
+              const [type, result] = original['start_session']!(metadata);
+              return [
+                type,
+                {
+                  ...(result as Record<string, unknown>),
+                  pid: identity.pid,
+                  processStartTime: identity.creationTime,
+                },
+              ];
+            },
+          },
+          undefined,
+          { windowsLedger: store },
+        );
+      const hostA = host(a);
+      const hostB = host(b);
+      a.restoreQuarantines([{ identity, reason: 'effect_unconfirmed' }]);
+      await expect(hostA.host.restoreWindowsLedger()).resolves.toBe(true);
+      await expect(hostB.host.restoreWindowsLedger()).resolves.toBe(true);
+      await expect(startSession(hostB.host, 'b-before', 'turn-a')).rejects.toThrow(
+        'native_unavailable',
+      );
+      // Host A's approval-card release is this single shared delete (ADR §2.2 の 5).
+      expect(a.releaseQuarantine(identity)).toBe(true);
+      await expect(startSession(hostB.host, 'b-after', 'turn-b')).resolves.toMatchObject({
+        sessionId: 'b-after',
+      });
+      a.restoreQuarantines([{ identity, reason: 'takeover_conflict' }]);
+      await expect(startSession(hostB.host, 'b-again', 'turn-c')).rejects.toThrow(
+        'native_unavailable',
+      );
+      // A failed refresh never admits by an empty view (fail-closed).
+      expect(a.releaseQuarantine(identity)).toBe(true);
+      const read = b.readQuarantines;
+      Object.assign(b, {
+        readQuarantines: () => {
+          throw new Error('synthetic read failure');
+        },
+      });
+      await expect(startSession(hostB.host, 'b-unreadable', 'turn-d')).rejects.toThrow(
+        'native_unavailable',
+      );
+      Object.assign(b, { readQuarantines: read });
+      await expect(startSession(hostB.host, 'b-readable', 'turn-e')).resolves.toMatchObject({
+        sessionId: 'b-readable',
+      });
+    } finally {
+      a.close();
+      b.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(['start', 'resume', 'other-target'] as const)(
     'PR5b gates same-target start holds / resume quarantine, allows other targets (%s)',
     async (entry) => {
@@ -3845,6 +3928,13 @@ int main() {
             rows.set(ledgerKey(row), row);
             return true;
           },
+          updateWithQuarantines: async (row, added) => {
+            if (control.updateWait !== null) await control.updateWait;
+            if (control.failReflect) return false;
+            rows.set(ledgerKey(row), row);
+            quarantines.push(...added);
+            return true;
+          },
           delete: async (row) => {
             control.deleteCalls.push(row.sessionId);
             if (control.reflectWait !== null) await control.reflectWait;
@@ -3987,6 +4077,144 @@ int main() {
         await expect(startSession(target.host, session.sessionId, 'turn-4')).rejects.toThrow(
           'native_session_closed',
         );
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it('PR9 K-5 after receipt releases only a K-1 quarantine reason', async () => {
+    const decide = stopKernel.decideWindowsStop;
+    const identity = { pid: 42, creationTime: '133000000000000001' };
+    const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      const decision = decide(state, event);
+      // A non-K-1 quarantine (startup restoration) on the same target lands at receipt time.
+      return event.kind === 'receipt' && event.status === 'received'
+        ? ({
+            ...decision,
+            state: {
+              ...decision.state,
+              quarantines: [...decision.state.quarantines, { identity, reason: 'restored' }],
+            },
+          } as stopKernel.WindowsStopDecision)
+        : decision;
+    });
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await startSession(target.host, 'other-session', 'turn-2');
+      await target.dispatch(session);
+      await target.host.close(session);
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      expect(target.control.releases).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('PR9 a superseded approval release without restoration settles without a missing hold', async () => {
+    const decide = stopKernel.decideWindowsStop;
+    const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      if (event.kind === 'receipt' && event.status === 'received')
+        state = {
+          ...state,
+          rows: state.rows.map((row) => ({
+            ...row,
+            kind: 'semantic',
+            inputPath: 'background_semantic',
+          })),
+        };
+      if (
+        event.kind === 'retry_storage' &&
+        event.status === 'before_write' &&
+        event.holdId.startsWith('approval-release-')
+      )
+        // The release lost its target to newer evidence and has no quarantine left to restore.
+        return {
+          ...decide(state, event),
+          kind: 'refused',
+          refusal: 'release_superseded',
+          state: { ...state, holds: state.holds.filter((hold) => hold.id !== event.holdId) },
+          awaitingHoldId: null,
+        } as stopKernel.WindowsStopDecision;
+      return decide(state, event);
+    });
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await startSession(target.host, 'other-session', 'turn-2');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session, ledgerActions[4]);
+      await target.host.close(session);
+      expect(target.quarantines).toHaveLength(1);
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      expect(target.control.releases).toBe(0);
+      expect(spy.mock.results.filter((result) => result.type === 'throw')).toEqual([]);
+      await target.host.listTargets!().catch(() => undefined);
+      expect(spy.mock.results.filter((result) => result.type === 'throw')).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'PR9 K-1 (a) persists a background effect_unconfirmed row with its quarantine (failure: %s)',
+    async (failReflect) => {
+      const decide = stopKernel.decideWindowsStop;
+      // N9 creates background rows later; inject the path at dispatch time (before_dispatch).
+      const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+        const decision = decide(state, event);
+        return event.kind === 'before_dispatch'
+          ? ({
+              ...decision,
+              state: {
+                ...decision.state,
+                rows: decision.state.rows.map((row) => ({
+                  ...row,
+                  kind: 'semantic' as const,
+                  inputPath: 'background_semantic' as const,
+                })),
+              },
+            } as stopKernel.WindowsStopDecision)
+          : decision;
+      });
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        target.control.failReflect = failReflect;
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        await target.dispatch(session, ledgerActions[4]);
+        const identity = { pid: 42, creationTime: '133000000000000001' };
+        // R21: the K-1 quarantine lands in the shared store with the row, or the target stays held.
+        expect(target.quarantines).toEqual(
+          failReflect ? [] : [{ identity, reason: 'effect_unconfirmed' }],
+        );
+        expect([...target.rows.values()].map((row) => row.state)).toEqual([
+          failReflect ? 'awaiting_response' : 'effect_unconfirmed',
+        ]);
+        await expect(startSession(target.host, 'same-target', 'turn-2')).rejects.toThrow(
+          'native_unavailable',
+        );
+        if (failReflect) {
+          target.control.failReflect = false;
+          await target.host.listTargets!().catch(() => undefined);
+          expect(target.quarantines).toEqual([{ identity, reason: 'effect_unconfirmed' }]);
+          await expect(startSession(target.host, 'same-target-2', 'turn-3')).rejects.toThrow(
+            'native_unavailable',
+          );
+        }
       } finally {
         spy.mockRestore();
       }

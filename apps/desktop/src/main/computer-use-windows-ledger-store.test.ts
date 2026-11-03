@@ -187,6 +187,36 @@ it('PR9 release persists only the approved identity across connections and resta
   expect(await b.releaseQuarantine!(quarantine.identity)).toBe(true);
 });
 
+it('PR9 K-1 (a) writes the row update and its shared quarantine atomically', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  const updated: WindowsLedgerRow = {
+    ...row,
+    inputPath: 'background_semantic',
+    state: 'effect_unconfirmed',
+  };
+  const k1 = { identity: row.identity, reason: 'effect_unconfirmed' as const };
+  await a.write({ ...updated, state: 'awaiting_response' });
+  const db = new Database(f.path);
+  connections.push(db);
+  db.exec(
+    "CREATE TRIGGER fail_quarantine BEFORE INSERT ON quarantines BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END",
+  );
+  await expect(
+    Promise.resolve().then(() => a.updateWithQuarantines!(updated, [k1])),
+  ).rejects.toThrow();
+  expect(a.read()).toEqual({
+    rows: [{ ...updated, state: 'awaiting_response' }],
+    quarantines: [],
+  });
+  db.exec('DROP TRIGGER fail_quarantine');
+  expect(await a.updateWithQuarantines!(updated, [k1])).toBe(true);
+  expect(await a.updateWithQuarantines!(updated, [k1])).toBe(true);
+  expect(a.read()).toEqual({ rows: [updated], quarantines: [k1] });
+  expect(b.read()).toEqual({ rows: [], quarantines: [k1] });
+});
+
 it('retains quarantine when its release fails and retries after the store recovers', async () => {
   const f = fixture();
   const store = f.open();

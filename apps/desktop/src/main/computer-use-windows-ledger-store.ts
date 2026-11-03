@@ -110,6 +110,14 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
     update(row: WindowsLedgerRow): boolean {
       return store.write(row);
     },
+    updateWithQuarantines: db.transaction(
+      (row: WindowsLedgerRow, quarantines: readonly WindowsTargetQuarantine[]): boolean => {
+        if (storedRowProblem(row) !== null) throw new Error('Invalid ledger row');
+        put.run(...key(row), JSON.stringify(row));
+        add(quarantines);
+        return true;
+      },
+    ),
     delete(row: WindowsLedgerRow) {
       remove.run(...key(row));
       return true;

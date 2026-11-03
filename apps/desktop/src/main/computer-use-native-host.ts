@@ -68,6 +68,7 @@ import {
   decideWindowsStop,
   windowsTargetMayStart,
   isStoredWindowsLedgerRow,
+  isStoredWindowsQuarantine,
   type WindowsStopDiagnostic,
   type WindowsLedgerRow,
   type WindowsStopState,
@@ -85,6 +86,14 @@ import {
 export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  /**
+   * K-1 (a): atomically update this row and add its quarantines (first committed reason kept).
+   * Without it a background effect_unconfirmed response stays held (fail-closed, R21).
+   */
+  updateWithQuarantines?(
+    row: WindowsLedgerRow,
+    quarantines: readonly WindowsTargetQuarantine[],
+  ): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
   /** Adds quarantines; an existing quarantine for the same target keeps its first committed reason. */
   restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
@@ -476,6 +485,38 @@ export function createComputerUseNativeHost(
     ledgerStates.set(generation, { ...current, helperLaunched: false });
     if (!current.holds.some((hold) => hold.id === readHold))
       ledgerEvent(generation, { kind: 'store_unreadable', holdId: readHold, targets: 'unknown' });
+    // A quarantine this Main holds without pending storage work is the shared row. Another Main's
+    // persisted release (R15/R17/R24) deletes that row, so a later read must drop it here too.
+    const settled = (q: WindowsTargetQuarantine) =>
+      ![...uncertainWrites].some((row) => sameIdentity(row.identity, q.identity)) &&
+      ![...ledgerStates.values()].some(
+        (state) =>
+          state.rows.some((row) => sameIdentity(row.identity, q.identity)) ||
+          state.holds.some(
+            (hold) =>
+              !hold.id.startsWith('restore-read:') &&
+              (hold.targets === 'unknown' ||
+                hold.targets.some((target) => sameIdentity(target, q.identity))),
+          ),
+      );
+    // Object identity: a quarantine added or re-added after this point is never dropped.
+    const shared = new Set(
+      [...ledgerStates.values()].flatMap((state) => state.quarantines).filter(settled),
+    );
+    const reconcileShared = (stored: readonly unknown[]) => {
+      // A malformed stored row hides its identity; keep every in-memory quarantine (fail-closed).
+      if (!stored.every(isStoredWindowsQuarantine)) return;
+      const released = (q: WindowsTargetQuarantine) =>
+        shared.has(q) &&
+        settled(q) &&
+        !stored.some((item) => sameIdentity(item.identity, q.identity));
+      for (const [id, state] of ledgerStates)
+        if (state.quarantines.some(released))
+          ledgerStates.set(id, {
+            ...state,
+            quarantines: state.quarantines.filter((q) => !released(q)),
+          });
+    };
     const task = Promise.resolve()
       .then(async () => {
         const snapshot = startupRead
@@ -488,6 +529,7 @@ export function createComputerUseNativeHost(
             }
           : await ledger.read!();
         if (!Array.isArray(snapshot.rows) || !Array.isArray(snapshot.quarantines)) return false;
+        reconcileShared(snapshot.quarantines);
         const rows = snapshot.rows.filter(isStoredWindowsLedgerRow);
         const holdId = `restore-write:${++holdSequence}`;
         const event = {
@@ -906,10 +948,26 @@ export function createComputerUseNativeHost(
                 accepted: true,
               },
       );
+      // K-1 (a): a background row's unconfirmed effect also quarantines its target. The core put
+      // that quarantine on this hold; write it with the row update in one transaction (R21).
+      const changes =
+        ledgerState(current.helperGeneration).holds.find((hold) => hold.id === holdId)?.changes ??
+        [];
+      const quarantines: WindowsTargetQuarantine[] = changes.flatMap((change) =>
+        change.action === 'quarantine'
+          ? [{ identity: change.row.identity, reason: change.reason }]
+          : [],
+      );
+      const updated = changes.find((change) => change.action === 'effect_unconfirmed')?.row;
       const write = () =>
-        status === 'effect_unconfirmed'
-          ? ledger.update({ ...current, state: 'effect_unconfirmed' })
-          : ledger.delete(current);
+        status !== 'effect_unconfirmed'
+          ? ledger.delete(current)
+          : quarantines.length === 0
+            ? ledger.update({ ...(updated ?? current), state: 'effect_unconfirmed' })
+            : (ledger.updateWithQuarantines?.(
+                { ...(updated ?? current), state: 'effect_unconfirmed' },
+                quarantines,
+              ) ?? false);
       pendingWrites.set(holdId, { generation: current.helperGeneration, write });
       await writePending(holdId);
     };
@@ -2056,6 +2114,11 @@ export function createComputerUseNativeHost(
             )
               return false;
             const previousStop = owner.terminated ? ('exit' as const) : ('receipt' as const);
+            // K-5 (R24) releases only a K-1 quarantine after receipt; exit approval (R17) any reason.
+            const releasable = (q: WindowsTargetQuarantine) =>
+              sameIdentity(q.identity, identity) &&
+              (previousStop === 'exit' ||
+                ['response_lost', 'effect_unconfirmed', 'takeover_conflict'].includes(q.reason));
             const blocked = (holdId?: string) =>
               inputQuarantined() ||
               [...ledgerStates.values()].some(
@@ -2074,9 +2137,7 @@ export function createComputerUseNativeHost(
             await retryLedger();
             if (
               blocked() ||
-              ![...ledgerStates.values()].some((state) =>
-                state.quarantines.some((q) => sameIdentity(q.identity, identity)),
-              )
+              ![...ledgerStates.values()].some((state) => state.quarantines.some(releasable))
             )
               return false;
             // This read is after approval; it can launch the new helper after a confirmed exit.
@@ -2107,7 +2168,7 @@ export function createComputerUseNativeHost(
             const state = ledgerState(generation);
             const quarantine = [...ledgerStates.values()]
               .flatMap((state) => state.quarantines)
-              .find((q) => sameIdentity(q.identity, identity));
+              .find(releasable);
             if (quarantine === undefined) return false;
             if (!state.quarantines.some((q) => sameIdentity(q.identity, identity)))
               ledgerStates.set(generation, {
@@ -2129,10 +2190,19 @@ export function createComputerUseNativeHost(
             });
             if (decision.refusal !== null) return false;
             let released = false;
+            // A superseded release without a restoration obligation has no hold left (F5).
+            const held = () => ledgerState(generation).holds.some((hold) => hold.id === holdId);
             pendingWrites.set(holdId, {
               generation,
               write: async () => {
-                if (blocked(holdId) || !(await reobserve()) || blocked(holdId)) return false;
+                if (
+                  !held() ||
+                  blocked(holdId) ||
+                  !(await reobserve()) ||
+                  !held() ||
+                  blocked(holdId)
+                )
+                  return false;
                 const gate = ledgerEvent(generation, {
                   kind: 'retry_storage',
                   holdId,
@@ -2142,6 +2212,16 @@ export function createComputerUseNativeHost(
                 return ledger.releaseQuarantine!(identity);
               },
               reflect: (written, uncertain) => {
+                if (!held()) {
+                  // Nothing is left to retry or release; answer with a read-only gate query.
+                  released = false;
+                  pendingWrites.delete(holdId);
+                  return decideWindowsStop(ledgerState(generation), {
+                    kind: 'dispatch_gate',
+                    helperGeneration: ledgerState(generation).helperGeneration,
+                    identity,
+                  });
+                }
                 const result = ledgerEvent(generation, {
                   kind: 'retry_storage',
                   holdId,
