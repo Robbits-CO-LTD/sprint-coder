@@ -40,6 +40,7 @@ import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture
 import { COMPUTER_START_TOOL, COMPUTER_TARGET_TOOLS } from './computer-use-target-tools';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { compilePromptGuidance } from './prompt-context';
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
 
 const availability: ComputerUseAvailability = computerUseAvailabilitySchema.parse({
   platform: 'darwin',
@@ -1261,7 +1262,7 @@ describe('N6-2 gated Windows cross-application candidates', () => {
     };
     const parsed = parseWindowsComputerUseTargets({
       generation: 17,
-      rulesetVersion: 2,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       truncated: false,
       targets: [
         native,
@@ -1271,7 +1272,11 @@ describe('N6-2 gated Windows cross-application candidates', () => {
     });
     if (parsed === null) throw new Error('invalid fixture');
     const helper = Object.freeze({ helperGeneration: 3 });
-    const generation = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const generation = {
+      helper,
+      listGeneration: 17,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+    };
     const list = { ...parsed, windowsGeneration: generation };
     const listTargets = vi.fn(async () => list);
     f.native.listTargets = listTargets;

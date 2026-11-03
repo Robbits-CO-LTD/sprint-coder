@@ -15,6 +15,20 @@ int wmain() {
   session.observation_revision = 1;
   windows_helper_generation = 7;
   cancellation_epoch.store(0);
+  session.approval_route_v2 = true;
+  session.approval_helper_generation = 7;
+  session.eligibility_basis = sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+  check(WindowsApprovalSessionBindingCurrent(session), "start-binding-without-operation-mode");
+  check(!WindowsApprovalSessionGate(session), "build-capability-missing");
+  session.approval_route_v2 = false;
+  check(!WindowsApprovalSessionBindingCurrent(session), "route-v1-closed");
+  session.approval_route_v2 = true;
+  session.approval_helper_generation = 6;
+  check(!WindowsApprovalSessionBindingCurrent(session), "stale-helper-closed");
+  session.approval_helper_generation = 7;
+  session.approval_revoked = true;
+  check(!WindowsApprovalSessionBindingCurrent(session), "old-session-not-promoted");
+  session.approval_revoked = false;
   const std::string fields = "\"taskId\":\"task-1\",\"turnId\":\"turn-1\","
       "\"requestId\":\"request-1\",\"actionDigest\":\"" + std::string(64, 'a') +
       "\",\"approvalGeneration\":1,\"cancelEpoch\":0,\"observationRevision\":1";

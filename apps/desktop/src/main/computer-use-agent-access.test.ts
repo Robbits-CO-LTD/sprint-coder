@@ -40,6 +40,7 @@ import {
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
 
 /**
  * `computer_request_access` and `computer_start` (ADR v2 §5.2, §6.1, §6.1.1).
@@ -564,7 +565,7 @@ describe('N6-3 generation-bound approval', () => {
       throw new Error('invalid golden');
     const parsed = parseWindowsComputerUseTargets({
       generation: 17,
-      rulesetVersion: 2,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       truncated: false,
       targets: [
         {
@@ -586,7 +587,11 @@ describe('N6-3 generation-bound approval', () => {
     });
     if (parsed === null) throw new Error('invalid targets');
     const helper = Object.freeze({ helperGeneration: 1 });
-    const windowsGeneration = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const windowsGeneration = {
+      helper,
+      listGeneration: 17,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+    };
     const fixture = createFixture({
       profiles: [],
       windowsTargetDiscoveryEnabled: true,
@@ -739,7 +744,11 @@ describe('N6-3 generation-bound approval', () => {
       }),
     );
     const helper = Object.freeze({ helperGeneration: 1 });
-    const generation = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const generation = {
+      helper,
+      listGeneration: 17,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+    };
     let current = true;
     const fixture = createFixture({
       profiles: [profile],

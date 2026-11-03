@@ -35,7 +35,8 @@
     {
       "name": "signed general app under Program Files",
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -44,7 +45,8 @@
         "imageRoot": "local_programs"
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -55,7 +57,8 @@
         "windowClass": "chrome_widgetwin_1"
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -80,7 +83,8 @@
         "windowClass": "notepad"
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -155,7 +159,8 @@
         "packageSignatureKind": "store"
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -404,7 +409,8 @@
         "acceptanceFixture": true
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -518,7 +524,8 @@
         "originalFilename": ""
       },
       "expect": {
-        "kind": "upper"
+        "kind": "upper",
+        "maximumMode": "supervised"
       }
     },
     {
@@ -528,7 +535,8 @@
         "imageLeaf": "idea64.exe"
       },
       "expect": {
-        "kind": "upper"
+        "kind": "upper",
+        "maximumMode": "supervised"
       }
     },
     {
@@ -537,7 +545,8 @@
         "descendantShell": true
       },
       "expect": {
-        "kind": "upper"
+        "kind": "upper",
+        "maximumMode": "supervised"
       }
     },
     {
@@ -546,7 +555,8 @@
         "descendantPseudoConsole": true
       },
       "expect": {
-        "kind": "upper"
+        "kind": "upper",
+        "maximumMode": "supervised"
       }
     },
     {
@@ -557,7 +567,8 @@
         "windowClass": "chrome_widgetwin_1"
       },
       "expect": {
-        "kind": "upper"
+        "kind": "upper",
+        "maximumMode": "observe_only"
       }
     },
     {
@@ -737,7 +748,8 @@
         }
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
       }
     },
     {
@@ -779,7 +791,52 @@
         "imageLeaf": "メモ帳.exe"
       },
       "expect": {
-        "kind": "eligible"
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
+      }
+    },
+    {
+      "name": "browser overlap signature",
+      "set": {
+        "signature": "unsigned",
+        "imageLeaf": "chrome.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "browser overlap descendantShell",
+      "set": {
+        "descendantShell": true,
+        "imageLeaf": "chrome.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "browser overlap descendantPseudoConsole",
+      "set": {
+        "descendantPseudoConsole": true,
+        "imageLeaf": "chrome.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "browser overlap signerOrganization",
+      "set": {
+        "signerOrganization": "jetbrains s.r.o.",
+        "imageLeaf": "chrome.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
       }
     }
   ]

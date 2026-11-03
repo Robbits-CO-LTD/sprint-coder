@@ -50,10 +50,10 @@ export const DENY_RULESET = {
   schemaVersion: 1,
   platforms: {
     win32: {
-      rulesetVersion: 2,
+      rulesetVersion: 3,
       eligibleMaximumMode: 'full_access_app',
       upperMaximumMode: 'observe_only',
-      contentSha256: '06a9ae9573a2a192bb80a00a713736576bcdcade21eb199d12efb26952a4fb4f',
+      contentSha256: '6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584',
     },
   },
   signals: [
@@ -772,24 +772,28 @@ export const DENY_RULESET = {
     },
     {
       class: 'C',
+      maximumMode: 'supervised',
       verdict: 'upper',
       platforms: ['win32'],
       when: [{ signal: 'descendantShell', match: 'true', negate: false, values: [] }],
     },
     {
       class: 'C',
+      maximumMode: 'supervised',
       verdict: 'upper',
       platforms: ['win32'],
       when: [{ signal: 'descendantPseudoConsole', match: 'true', negate: false, values: [] }],
     },
     {
       class: 'C',
+      maximumMode: 'supervised',
       verdict: 'upper',
       platforms: ['win32'],
       when: [{ signal: 'signature', match: 'equals', negate: false, values: ['unsigned'] }],
     },
     {
       class: 'C',
+      maximumMode: 'supervised',
       verdict: 'upper',
       platforms: ['win32'],
       when: [
@@ -803,6 +807,7 @@ export const DENY_RULESET = {
     },
     {
       class: 'C',
+      maximumMode: 'observe_only',
       verdict: 'upper',
       platforms: ['win32'],
       when: [
@@ -822,6 +827,7 @@ export const DENY_RULESET = {
     },
     {
       class: 'C',
+      maximumMode: 'observe_only',
       verdict: 'upper',
       platforms: ['win32'],
       when: [

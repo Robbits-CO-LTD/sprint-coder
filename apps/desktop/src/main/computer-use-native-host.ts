@@ -1816,9 +1816,33 @@ export function createComputerUseNativeHost(
     if (binding === undefined) return 'unbound';
     return binding.expectedVersion === 2 ? 'v2' : 'v1';
   };
+  // Discovery has no session yet: only build, provenance and handshake evidence apply.
+  const windowsApprovalAvailable = (): boolean =>
+    platform === 'win32' &&
+    options.windowsApprovalInterlockForTesting === true &&
+    options.classifierV2Attested === true &&
+    binding.windowsApprovalVerified === true &&
+    packageReady &&
+    handshakeReady &&
+    probeReady &&
+    !inputQuarantined() &&
+    addon?.windowsApprovalAvailable?.() === true &&
+    (options.effectiveEligibilityMode?.() ?? binding.manifest.eligibility?.mode) ===
+      'v2-denylist' &&
+    hasMethod(addon, 'preflight') &&
+    hasMethod(addon, 'approvalApprove') &&
+    hasMethod(addon, 'approvalDiscard') &&
+    hasMethod(addon, 'dispatchApproved');
+  const presentedMaximumMode = (raw: Readonly<Record<string, unknown>>): ComputerUseMode => {
+    const mode = nativeMaximumMode(raw);
+    return platform === 'win32' && mode === 'supervised' && !windowsApprovalAvailable()
+      ? 'observe_only'
+      : mode;
+  };
+  const revokedApprovalSessions = new Set<string>();
   const approvalPathEnabled = (sessionId: string): boolean => {
     const route = approvalRouteOf(sessionId);
-    return computerUseApprovalPathEnabled({
+    const enabled = computerUseApprovalPathEnabled({
       platform,
       methodsExported:
         hasMethod(addon, 'preflight') &&
@@ -1840,6 +1864,10 @@ export function createComputerUseNativeHost(
         sessions.has(sessionId) &&
         addon?.windowsApprovalReady?.(sessionId) === true,
     });
+    if (platform !== 'win32') return enabled;
+    const session = sessions.get(sessionId);
+    if (!enabled && session?.maximumMode === 'supervised') revokedApprovalSessions.add(sessionId);
+    return enabled && !revokedApprovalSessions.has(sessionId);
   };
 
   const parseDispatchRecord = (
@@ -1897,12 +1925,9 @@ export function createComputerUseNativeHost(
 
   // The route the native is told for a session (C4): the one Main will accept receipts for, which
   // is v2 only when the build attested classifier 2. The native keeps it for the life of the
-  // session. Only the macOS addon reads it, and a session that was never bound sends nothing.
-  const nativeRouteField = (
-    platform: NativePlatform,
-    route: 'v1' | 'v2' | undefined,
-  ): Record<string, unknown> =>
-    platform === 'darwin' && route !== undefined ? { classifierRoute: route } : {};
+  // session. Both adapters read it; a session that was never bound sends nothing.
+  const nativeRouteField = (route: 'v1' | 'v2' | undefined): Record<string, unknown> =>
+    route !== undefined ? { classifierRoute: route } : {};
 
   const parseWindows = (
     profile: Parameters<ComputerUseNativeHost['listWindows']>[0],
@@ -1922,7 +1947,7 @@ export function createComputerUseNativeHost(
       delete publicCandidate['processStartTime'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
-      publicCandidate['maximumMode'] = nativeMaximumMode(raw);
+      publicCandidate['maximumMode'] = presentedMaximumMode(raw);
       let screenBounds: ComputerUseNativeBounds;
       if (profile.platform === 'win32') {
         if (raw['boundsUnit'] !== 'physical_px' || options.windowsPhysicalBoundsToDip === undefined)
@@ -2190,7 +2215,7 @@ export function createComputerUseNativeHost(
         windowIdentityDigest: existing.windowIdentityDigest,
         resume: input.resume === true,
         expectedPolicyLanguage: existing.policyLanguage,
-        ...nativeRouteField(existing.platform, nativeRoute),
+        ...nativeRouteField(nativeRoute),
       };
       assertStartOwner(owner);
       if (ledger !== undefined) {
@@ -2323,7 +2348,7 @@ export function createComputerUseNativeHost(
       expectedPolicyLanguage: nativePolicyLanguage(selectedRecord),
       maximumMode: expectedMaximumMode,
       expectedMaximumMode,
-      ...nativeRouteField(input.profile.platform, nativeRoute),
+      ...nativeRouteField(nativeRoute),
     };
     assertStartOwner(owner);
     // Discovery awaited after the admission check; a hold left on this target meanwhile refuses.
@@ -2638,7 +2663,7 @@ export function createComputerUseNativeHost(
       };
       requireGeneration();
       requireDiscovery();
-      const parsed = parseWindowsComputerUseTargets(value);
+      const parsed = parseWindowsComputerUseTargets(value, windowsApprovalAvailable());
       if (parsed === null)
         throw new ComputerUseNativeUnavailableError('native_target_list_invalid');
       const result = {
@@ -2725,7 +2750,7 @@ export function createComputerUseNativeHost(
       const publicIdentity = stripNativeEphemeralFields(raw);
       delete publicIdentity['screenBounds'];
       publicIdentity['policyLanguage'] = nativePolicyLanguage(raw);
-      publicIdentity['maximumMode'] = nativeMaximumMode(raw);
+      publicIdentity['maximumMode'] = presentedMaximumMode(raw);
       const identity = computerAppIdentitySchema.parse(publicIdentity);
       if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0)
         pidsByIdentity.set(identity.identityDigest, pid);
@@ -2846,12 +2871,21 @@ export function createComputerUseNativeHost(
             throw new ComputerUseNativeUnavailableError('native_unavailable');
         }
         startEntered = true;
-        return await startNative(
+        const started = await startNative(
           input,
           binding === undefined ? undefined : binding.expectedVersion === 2 ? 'v2' : 'v1',
           owner,
           assertTargetCurrent,
         );
+        if (
+          platform === 'win32' &&
+          started.maximumMode === 'supervised' &&
+          !approvalPathEnabled(started.sessionId)
+        ) {
+          await host.close(started).catch(() => undefined);
+          throw new ComputerUseNativeUnavailableError('native_approval_ceiling_mismatch');
+        }
+        return started;
       } catch (error) {
         // An active Cancel/Close owns its cleanup. A late resume must not create a second
         // terminal operation that removes the session before Cancel validates its receipt.
@@ -3131,6 +3165,12 @@ export function createComputerUseNativeHost(
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
+      if (
+        platform === 'win32' &&
+        internal.maximumMode === 'supervised' &&
+        !approvalPathEnabled(input.session.sessionId)
+      )
+        return { result: 'rejected', reasonCode: 'native_approval_closed' };
       const actionDigest = computerUseActionDigest(input.action);
       const dispatchRequest = {
         ...internal.raw,
@@ -3846,6 +3886,12 @@ function parseNativeSession(
   const processIdentity =
     platform === 'win32' ? { processStartTime: parseWindowsProcessStartTime(raw) } : {};
   const policyLanguage = nativePolicyLanguage(raw);
+  if (
+    platform === 'win32' &&
+    nativeMaximumMode(raw) === 'supervised' &&
+    nativeMaximumMode(requestBindings) === 'observe_only'
+  )
+    throw new ComputerUseNativeUnavailableError('native_approval_ceiling_mismatch');
   const maximumMode = bindComputerUseMaximumMode(
     nativeMaximumMode(requestBindings),
     nativeMaximumMode(raw),

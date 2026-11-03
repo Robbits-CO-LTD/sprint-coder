@@ -23,7 +23,9 @@ type PlatformRuleset = Ruleset['platforms'][keyof Ruleset['platforms']];
 /** The mode an eligible target may be bound with, as the generated ruleset states it. */
 export type TargetEligibleMode = PlatformRuleset['eligibleMaximumMode'];
 /** The mode a capped (upper) target may be bound with, as the generated ruleset states it. */
-export type TargetUpperMode = PlatformRuleset['upperMaximumMode'];
+export type TargetUpperMode =
+  | PlatformRuleset['upperMaximumMode']
+  | Extract<Ruleset['rules'][number], { maximumMode: string }>['maximumMode'];
 type Condition = Readonly<{
   signal: string;
   match: 'true' | 'false' | 'equals' | 'prefix' | 'glob';
@@ -130,6 +132,7 @@ export function classifyTargetExplained(facts: TargetFacts): TargetClassificatio
     entry.platforms.includes(platform);
   const rules = DENY_RULESET.rules as readonly Readonly<{
     class: string;
+    maximumMode?: TargetUpperMode;
     verdict: 'denied' | 'upper';
     platforms: readonly string[];
     when: readonly Condition[];
@@ -144,13 +147,14 @@ export function classifyTargetExplained(facts: TargetFacts): TargetClassificatio
   }>[];
   const route = routes.find((entry) => applies(entry) && allHold(facts, entry.when));
   if (route === undefined) return { verdict: { kind: 'denied' }, denyClass: 'W-NR', route: null };
+  let maximumMode: TargetUpperMode | undefined;
   for (const rule of rules)
-    if (rule.verdict === 'upper' && applies(rule) && allHold(facts, rule.when))
-      return {
-        verdict: { kind: 'upper', maximumMode: ruleset.upperMaximumMode },
-        denyClass: null,
-        route: route.id,
-      };
+    if (rule.verdict === 'upper' && applies(rule) && allHold(facts, rule.when)) {
+      const ceiling = rule.maximumMode ?? ruleset.upperMaximumMode;
+      maximumMode = maximumMode === 'observe_only' ? maximumMode : ceiling;
+    }
+  if (maximumMode !== undefined)
+    return { verdict: { kind: 'upper', maximumMode }, denyClass: null, route: route.id };
   return {
     verdict: { kind: 'eligible', maximumMode: ruleset.eligibleMaximumMode },
     denyClass: null,
@@ -217,6 +221,7 @@ export function denyRulesetCanonicalText(platform: string): string | null {
   for (const rule of DENY_RULESET.rules)
     if (applies(rule)) {
       lines.push(`rule\t${rule.class}\t${rule.verdict}`);
+      if ('maximumMode' in rule) lines.push(`ceiling\t${rule.maximumMode}`);
       for (const condition of rule.when as readonly Condition[]) lines.push(when(condition));
     }
   return `${lines.join('\n')}\n`;

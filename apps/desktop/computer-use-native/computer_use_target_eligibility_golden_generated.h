@@ -16,11 +16,12 @@ struct TargetGoldenCase {
   TargetFacts facts;
   TargetVerdictKind kind;
   std::string_view deny_class;
+  std::string_view maximum_mode;
 };
 
 inline std::vector<TargetGoldenCase> TargetGoldenCases() {
   std::vector<TargetGoldenCase> cases;
-  cases.reserve(69);
+  cases.reserve(73);
   {
     TargetFacts facts;
     facts.platform = TargetPlatform::kWin32;
@@ -52,7 +53,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"signed general app under Program Files", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"signed general app under Program Files", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -85,7 +86,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"signed general app under LOCALAPPDATA Programs (decision A)", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"signed general app under LOCALAPPDATA Programs (decision A)", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -118,7 +119,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("chrome_widgetwin_1", 18);
-    cases.push_back({"Electron app with a renamed binary (decision F)", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"Electron app with a renamed binary (decision F)", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -151,7 +152,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"upper case leaf is folded before matching", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"upper case leaf is folded before matching", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -184,7 +185,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("notepad", 7);
-    cases.push_back({"System32 notepad on the explicit table", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"System32 notepad on the explicit table", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -217,7 +218,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"System32 notepad without a valid signature is not on the route", facts, TargetVerdictKind::kDenied, "W-NR"});
+    cases.push_back({"System32 notepad without a valid signature is not on the route", facts, TargetVerdictKind::kDenied, "W-NR", ""});
   }
   {
     TargetFacts facts;
@@ -250,7 +251,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("cabinetwclass", 13);
-    cases.push_back({"Explorer under WINDIR (decision E)", facts, TargetVerdictKind::kDenied, "W-SYS"});
+    cases.push_back({"Explorer under WINDIR (decision E)", facts, TargetVerdictKind::kDenied, "W-SYS", ""});
   }
   {
     TargetFacts facts;
@@ -283,7 +284,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a LOLBin under System32", facts, TargetVerdictKind::kDenied, "W-SYS"});
+    cases.push_back({"a LOLBin under System32", facts, TargetVerdictKind::kDenied, "W-SYS", ""});
   }
   {
     TargetFacts facts;
@@ -316,7 +317,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a SystemApps packaged image stays W-SYS (decision: WINDIR package not overridden)", facts, TargetVerdictKind::kDenied, "W-SYS"});
+    cases.push_back({"a SystemApps packaged image stays W-SYS (decision: WINDIR package not overridden)", facts, TargetVerdictKind::kDenied, "W-SYS", ""});
   }
   {
     TargetFacts facts;
@@ -349,7 +350,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Store notepad package", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"Store notepad package", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -382,7 +383,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"sideloaded developer package", facts, TargetVerdictKind::kDenied, "W-NR"});
+    cases.push_back({"sideloaded developer package", facts, TargetVerdictKind::kDenied, "W-NR", ""});
   }
   {
     TargetFacts facts;
@@ -415,7 +416,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Store package in development mode", facts, TargetVerdictKind::kDenied, "W-NR"});
+    cases.push_back({"Store package in development mode", facts, TargetVerdictKind::kDenied, "W-NR", ""});
   }
   {
     TargetFacts facts;
@@ -448,7 +449,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Settings package (W1)", facts, TargetVerdictKind::kDenied, "W1"});
+    cases.push_back({"Settings package (W1)", facts, TargetVerdictKind::kDenied, "W1", ""});
   }
   {
     TargetFacts facts;
@@ -481,7 +482,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Windows Security package (W2)", facts, TargetVerdictKind::kDenied, "W2"});
+    cases.push_back({"Windows Security package (W2)", facts, TargetVerdictKind::kDenied, "W2", ""});
   }
   {
     TargetFacts facts;
@@ -514,7 +515,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("Credential Dialog Xaml Host", 27);
-    cases.push_back({"credential prompt window class (W2)", facts, TargetVerdictKind::kDenied, "W2"});
+    cases.push_back({"credential prompt window class (W2)", facts, TargetVerdictKind::kDenied, "W2", ""});
   }
   {
     TargetFacts facts;
@@ -547,7 +548,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"password manager publisher, any application (W3)", facts, TargetVerdictKind::kDenied, "W3"});
+    cases.push_back({"password manager publisher, any application (W3)", facts, TargetVerdictKind::kDenied, "W3", ""});
   }
   {
     TargetFacts facts;
@@ -580,7 +581,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"password manager by leaf (W3)", facts, TargetVerdictKind::kDenied, "W3"});
+    cases.push_back({"password manager by leaf (W3)", facts, TargetVerdictKind::kDenied, "W3", ""});
   }
   {
     TargetFacts facts;
@@ -613,7 +614,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"console subsystem (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"console subsystem (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -646,7 +647,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Windows Terminal package (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"Windows Terminal package (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -679,7 +680,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("PseudoConsoleWindow", 19);
-    cases.push_back({"pseudo console window class (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"pseudo console window class (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -712,7 +713,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"remote desktop publisher (W5)", facts, TargetVerdictKind::kDenied, "W5"});
+    cases.push_back({"remote desktop publisher (W5)", facts, TargetVerdictKind::kDenied, "W5", ""});
   }
   {
     TargetFacts facts;
@@ -745,7 +746,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"remote desktop by leaf (W5)", facts, TargetVerdictKind::kDenied, "W5"});
+    cases.push_back({"remote desktop by leaf (W5)", facts, TargetVerdictKind::kDenied, "W5", ""});
   }
   {
     TargetFacts facts;
@@ -778,7 +779,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"image under TEMP (W6)", facts, TargetVerdictKind::kDenied, "W6"});
+    cases.push_back({"image under TEMP (W6)", facts, TargetVerdictKind::kDenied, "W6", ""});
   }
   {
     TargetFacts facts;
@@ -811,7 +812,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"requireAdministrator manifest (W6)", facts, TargetVerdictKind::kDenied, "W6"});
+    cases.push_back({"requireAdministrator manifest (W6)", facts, TargetVerdictKind::kDenied, "W6", ""});
   }
   {
     TargetFacts facts;
@@ -844,7 +845,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"installer leaf (W6)", facts, TargetVerdictKind::kDenied, "W6"});
+    cases.push_back({"installer leaf (W6)", facts, TargetVerdictKind::kDenied, "W6", ""});
   }
   {
     TargetFacts facts;
@@ -877,7 +878,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"renamed installer caught by OriginalFilename (W6)", facts, TargetVerdictKind::kDenied, "W6"});
+    cases.push_back({"renamed installer caught by OriginalFilename (W6)", facts, TargetVerdictKind::kDenied, "W6", ""});
   }
   {
     TargetFacts facts;
@@ -910,7 +911,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"elevated token (W7)", facts, TargetVerdictKind::kDenied, "W7"});
+    cases.push_back({"elevated token (W7)", facts, TargetVerdictKind::kDenied, "W7", ""});
   }
   {
     TargetFacts facts;
@@ -943,7 +944,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"UIAccess token (W7)", facts, TargetVerdictKind::kDenied, "W7"});
+    cases.push_back({"UIAccess token (W7)", facts, TargetVerdictKind::kDenied, "W7", ""});
   }
   {
     TargetFacts facts;
@@ -976,7 +977,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"another session (W7)", facts, TargetVerdictKind::kDenied, "W7"});
+    cases.push_back({"another session (W7)", facts, TargetVerdictKind::kDenied, "W7", ""});
   }
   {
     TargetFacts facts;
@@ -1009,7 +1010,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Sprint Coder install root (W8)", facts, TargetVerdictKind::kDenied, "W8"});
+    cases.push_back({"Sprint Coder install root (W8)", facts, TargetVerdictKind::kDenied, "W8", ""});
   }
   {
     TargetFacts facts;
@@ -1042,7 +1043,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"own descendant (W8)", facts, TargetVerdictKind::kDenied, "W8"});
+    cases.push_back({"own descendant (W8)", facts, TargetVerdictKind::kDenied, "W8", ""});
   }
   {
     TargetFacts facts;
@@ -1075,7 +1076,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"own signer outside acceptance mode (W8)", facts, TargetVerdictKind::kDenied, "W8"});
+    cases.push_back({"own signer outside acceptance mode (W8)", facts, TargetVerdictKind::kDenied, "W8", ""});
   }
   {
     TargetFacts facts;
@@ -1108,7 +1109,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"own signer as the acceptance fixture is not refused as W8", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"own signer as the acceptance fixture is not refused as W8", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -1141,7 +1142,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"interpreter by leaf (W10)", facts, TargetVerdictKind::kDenied, "W10"});
+    cases.push_back({"interpreter by leaf (W10)", facts, TargetVerdictKind::kDenied, "W10", ""});
   }
   {
     TargetFacts facts;
@@ -1174,7 +1175,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"generic electron.exe (W10)", facts, TargetVerdictKind::kDenied, "W10"});
+    cases.push_back({"generic electron.exe (W10)", facts, TargetVerdictKind::kDenied, "W10", ""});
   }
   {
     TargetFacts facts;
@@ -1207,7 +1208,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"renamed interpreter caught by OriginalFilename (W10)", facts, TargetVerdictKind::kDenied, "W10"});
+    cases.push_back({"renamed interpreter caught by OriginalFilename (W10)", facts, TargetVerdictKind::kDenied, "W10", ""});
   }
   {
     TargetFacts facts;
@@ -1240,7 +1241,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"ApplicationFrameHost proxy (W-PX)", facts, TargetVerdictKind::kDenied, "W-PX"});
+    cases.push_back({"ApplicationFrameHost proxy (W-PX)", facts, TargetVerdictKind::kDenied, "W-PX", ""});
   }
   {
     TargetFacts facts;
@@ -1273,7 +1274,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"AppContainer token (W-PX)", facts, TargetVerdictKind::kDenied, "W-PX"});
+    cases.push_back({"AppContainer token (W-PX)", facts, TargetVerdictKind::kDenied, "W-PX", ""});
   }
   {
     TargetFacts facts;
@@ -1306,7 +1307,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"network volume (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR"});
+    cases.push_back({"network volume (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR", ""});
   }
   {
     TargetFacts facts;
@@ -1339,7 +1340,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"running image does not match (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR"});
+    cases.push_back({"running image does not match (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR", ""});
   }
   {
     TargetFacts facts;
@@ -1372,7 +1373,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"invalid signature (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR"});
+    cases.push_back({"invalid signature (W-UR)", facts, TargetVerdictKind::kDenied, "W-UR", ""});
   }
   {
     TargetFacts facts;
@@ -1405,7 +1406,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Microsoft signed outside WINDIR (decision B)", facts, TargetVerdictKind::kDenied, "W-NR"});
+    cases.push_back({"Microsoft signed outside WINDIR (decision B)", facts, TargetVerdictKind::kDenied, "W-NR", ""});
   }
   {
     TargetFacts facts;
@@ -1438,7 +1439,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"image outside every install root", facts, TargetVerdictKind::kDenied, "W-NR"});
+    cases.push_back({"image outside every install root", facts, TargetVerdictKind::kDenied, "W-NR", ""});
   }
   {
     TargetFacts facts;
@@ -1471,7 +1472,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"unsigned general app is capped (decision C)", facts, TargetVerdictKind::kUpper, ""});
+    cases.push_back({"unsigned general app is capped (decision C)", facts, TargetVerdictKind::kUpper, "", "supervised"});
   }
   {
     TargetFacts facts;
@@ -1504,7 +1505,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"IDE publisher is capped (C)", facts, TargetVerdictKind::kUpper, ""});
+    cases.push_back({"IDE publisher is capped (C)", facts, TargetVerdictKind::kUpper, "", "supervised"});
   }
   {
     TargetFacts facts;
@@ -1537,7 +1538,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = true;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"shell descendant is capped (C)", facts, TargetVerdictKind::kUpper, ""});
+    cases.push_back({"shell descendant is capped (C)", facts, TargetVerdictKind::kUpper, "", "supervised"});
   }
   {
     TargetFacts facts;
@@ -1570,7 +1571,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = true;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"ConPTY descendant is capped (C)", facts, TargetVerdictKind::kUpper, ""});
+    cases.push_back({"ConPTY descendant is capped (C)", facts, TargetVerdictKind::kUpper, "", "supervised"});
   }
   {
     TargetFacts facts;
@@ -1603,7 +1604,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("chrome_widgetwin_1", 18);
-    cases.push_back({"browser is capped (decision D)", facts, TargetVerdictKind::kUpper, ""});
+    cases.push_back({"browser is capped (decision D)", facts, TargetVerdictKind::kUpper, "", "observe_only"});
   }
   {
     TargetFacts facts;
@@ -1636,7 +1637,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = true;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a refusal wins over the cap", facts, TargetVerdictKind::kDenied, "W7"});
+    cases.push_back({"a refusal wins over the cap", facts, TargetVerdictKind::kDenied, "W7", ""});
   }
   {
     TargetFacts facts;
@@ -1669,7 +1670,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class.reset();
-    cases.push_back({"one unmeasured fact is unresolvable", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"one unmeasured fact is unresolvable", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -1702,7 +1703,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"an unmeasured token is unresolvable", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"an unmeasured token is unresolvable", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -1735,7 +1736,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"an enum value the ruleset does not know is unresolvable", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"an enum value the ruleset does not know is unresolvable", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -1768,7 +1769,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"SecureCRT by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"SecureCRT by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1801,7 +1802,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Xshell by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"Xshell by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1834,7 +1835,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"PuTTY by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"PuTTY by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1867,7 +1868,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"MobaXterm by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"MobaXterm by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1900,7 +1901,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Termius by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"Termius by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1933,7 +1934,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Tabby by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"Tabby by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1966,7 +1967,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"WinSCP by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"WinSCP by publisher (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -1999,7 +2000,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"SecureCRT by leaf (W4)", facts, TargetVerdictKind::kDenied, "W4"});
+    cases.push_back({"SecureCRT by leaf (W4)", facts, TargetVerdictKind::kDenied, "W4", ""});
   }
   {
     TargetFacts facts;
@@ -2032,7 +2033,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Devolutions Remote Desktop Manager by publisher (W5)", facts, TargetVerdictKind::kDenied, "W5"});
+    cases.push_back({"Devolutions Remote Desktop Manager by publisher (W5)", facts, TargetVerdictKind::kDenied, "W5", ""});
   }
   {
     TargetFacts facts;
@@ -2065,7 +2066,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"Royal TS by publisher (W5)", facts, TargetVerdictKind::kDenied, "W5"});
+    cases.push_back({"Royal TS by publisher (W5)", facts, TargetVerdictKind::kDenied, "W5", ""});
   }
   {
     TargetFacts facts;
@@ -2098,7 +2099,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"mRemoteNG by leaf (W5)", facts, TargetVerdictKind::kDenied, "W5"});
+    cases.push_back({"mRemoteNG by leaf (W5)", facts, TargetVerdictKind::kDenied, "W5", ""});
   }
   {
     TargetFacts facts;
@@ -2131,7 +2132,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a 1026-byte multibyte string is unresolvable (UTF-8 bytes are counted)", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"a 1026-byte multibyte string is unresolvable (UTF-8 bytes are counted)", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -2164,7 +2165,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a string of exactly 1024 bytes is accepted", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"a string of exactly 1024 bytes is accepted", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
   }
   {
     TargetFacts facts;
@@ -2197,7 +2198,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a string with U+0000 keeps every byte in both cores (over-long after the NUL is unresolvable)", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"a string with U+0000 keeps every byte in both cores (over-long after the NUL is unresolvable)", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -2230,7 +2231,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"an over-long measured string is unresolvable", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"an over-long measured string is unresolvable", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -2263,7 +2264,7 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a platform with no ruleset is unresolvable", facts, TargetVerdictKind::kUnresolvable, ""});
+    cases.push_back({"a platform with no ruleset is unresolvable", facts, TargetVerdictKind::kUnresolvable, "", ""});
   }
   {
     TargetFacts facts;
@@ -2296,7 +2297,139 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_shell = false;
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
-    cases.push_back({"a non-ASCII leaf is compared byte for byte", facts, TargetVerdictKind::kEligible, ""});
+    cases.push_back({"a non-ASCII leaf is compared byte for byte", facts, TargetVerdictKind::kEligible, "", "full_access_app"});
+  }
+  {
+    TargetFacts facts;
+    facts.platform = TargetPlatform::kWin32;
+    facts.image_root = std::string("program_files", 13);
+    facts.image_relative_path = std::string("contoso\\editor\\editor.exe", 25);
+    facts.image_leaf = std::string("chrome.exe", 10);
+    facts.image_volume = std::string("fixed", 5);
+    facts.running_image_matches = true;
+    facts.signature = std::string("unsigned", 8);
+    facts.signer_organization = std::string("contoso ltd", 11);
+    facts.signer_microsoft_root = false;
+    facts.signer_is_self = false;
+    facts.acceptance_fixture = false;
+    facts.pe_subsystem = std::string("gui", 3);
+    facts.original_filename = std::string("editor.exe", 10);
+    facts.requires_administrator = false;
+    facts.token_elevated = false;
+    facts.token_other_user = false;
+    facts.token_other_session = false;
+    facts.token_protected = false;
+    facts.token_ui_access = false;
+    facts.token_integrity_above_self = false;
+    facts.token_app_container = false;
+    facts.packaged = false;
+    facts.package_family = std::string("", 0);
+    facts.package_signature_kind = std::string("none", 4);
+    facts.package_development_mode = false;
+    facts.own_descendant = false;
+    facts.descendant_shell = false;
+    facts.descendant_pseudo_console = false;
+    facts.window_class = std::string("contosoeditorwindow", 19);
+    cases.push_back({"browser overlap signature", facts, TargetVerdictKind::kUpper, "", "observe_only"});
+  }
+  {
+    TargetFacts facts;
+    facts.platform = TargetPlatform::kWin32;
+    facts.image_root = std::string("program_files", 13);
+    facts.image_relative_path = std::string("contoso\\editor\\editor.exe", 25);
+    facts.image_leaf = std::string("chrome.exe", 10);
+    facts.image_volume = std::string("fixed", 5);
+    facts.running_image_matches = true;
+    facts.signature = std::string("valid", 5);
+    facts.signer_organization = std::string("contoso ltd", 11);
+    facts.signer_microsoft_root = false;
+    facts.signer_is_self = false;
+    facts.acceptance_fixture = false;
+    facts.pe_subsystem = std::string("gui", 3);
+    facts.original_filename = std::string("editor.exe", 10);
+    facts.requires_administrator = false;
+    facts.token_elevated = false;
+    facts.token_other_user = false;
+    facts.token_other_session = false;
+    facts.token_protected = false;
+    facts.token_ui_access = false;
+    facts.token_integrity_above_self = false;
+    facts.token_app_container = false;
+    facts.packaged = false;
+    facts.package_family = std::string("", 0);
+    facts.package_signature_kind = std::string("none", 4);
+    facts.package_development_mode = false;
+    facts.own_descendant = false;
+    facts.descendant_shell = true;
+    facts.descendant_pseudo_console = false;
+    facts.window_class = std::string("contosoeditorwindow", 19);
+    cases.push_back({"browser overlap descendantShell", facts, TargetVerdictKind::kUpper, "", "observe_only"});
+  }
+  {
+    TargetFacts facts;
+    facts.platform = TargetPlatform::kWin32;
+    facts.image_root = std::string("program_files", 13);
+    facts.image_relative_path = std::string("contoso\\editor\\editor.exe", 25);
+    facts.image_leaf = std::string("chrome.exe", 10);
+    facts.image_volume = std::string("fixed", 5);
+    facts.running_image_matches = true;
+    facts.signature = std::string("valid", 5);
+    facts.signer_organization = std::string("contoso ltd", 11);
+    facts.signer_microsoft_root = false;
+    facts.signer_is_self = false;
+    facts.acceptance_fixture = false;
+    facts.pe_subsystem = std::string("gui", 3);
+    facts.original_filename = std::string("editor.exe", 10);
+    facts.requires_administrator = false;
+    facts.token_elevated = false;
+    facts.token_other_user = false;
+    facts.token_other_session = false;
+    facts.token_protected = false;
+    facts.token_ui_access = false;
+    facts.token_integrity_above_self = false;
+    facts.token_app_container = false;
+    facts.packaged = false;
+    facts.package_family = std::string("", 0);
+    facts.package_signature_kind = std::string("none", 4);
+    facts.package_development_mode = false;
+    facts.own_descendant = false;
+    facts.descendant_shell = false;
+    facts.descendant_pseudo_console = true;
+    facts.window_class = std::string("contosoeditorwindow", 19);
+    cases.push_back({"browser overlap descendantPseudoConsole", facts, TargetVerdictKind::kUpper, "", "observe_only"});
+  }
+  {
+    TargetFacts facts;
+    facts.platform = TargetPlatform::kWin32;
+    facts.image_root = std::string("program_files", 13);
+    facts.image_relative_path = std::string("contoso\\editor\\editor.exe", 25);
+    facts.image_leaf = std::string("chrome.exe", 10);
+    facts.image_volume = std::string("fixed", 5);
+    facts.running_image_matches = true;
+    facts.signature = std::string("valid", 5);
+    facts.signer_organization = std::string("jetbrains s.r.o.", 16);
+    facts.signer_microsoft_root = false;
+    facts.signer_is_self = false;
+    facts.acceptance_fixture = false;
+    facts.pe_subsystem = std::string("gui", 3);
+    facts.original_filename = std::string("editor.exe", 10);
+    facts.requires_administrator = false;
+    facts.token_elevated = false;
+    facts.token_other_user = false;
+    facts.token_other_session = false;
+    facts.token_protected = false;
+    facts.token_ui_access = false;
+    facts.token_integrity_above_self = false;
+    facts.token_app_container = false;
+    facts.packaged = false;
+    facts.package_family = std::string("", 0);
+    facts.package_signature_kind = std::string("none", 4);
+    facts.package_development_mode = false;
+    facts.own_descendant = false;
+    facts.descendant_shell = false;
+    facts.descendant_pseudo_console = false;
+    facts.window_class = std::string("contosoeditorwindow", 19);
+    cases.push_back({"browser overlap signerOrganization", facts, TargetVerdictKind::kUpper, "", "observe_only"});
   }
   return cases;
 }

@@ -377,6 +377,9 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
   if (sessions.contains(FrameIdKey(request.header.session_id))) {
     WindowsStartInput input;
+    std::string approval_route;
+    input.approval_route_v2 = ReadJsonString(metadata, "classifierRoute", &approval_route) && approval_route == "v2";
+    ReadJsonUint64(metadata, "helperGeneration", &input.approval_helper_generation);
     input.eligibility_basis = eligibility_basis;
     input.start_lease = start_lease;
     input.expected_process_start = expected_process_start;
@@ -408,6 +411,9 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   if (v2_basis && !sessions.contains(FrameIdKey(request.header.session_id))) {
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
       WindowsStartInput input;
+      std::string approval_route;
+      input.approval_route_v2 = ReadJsonString(metadata, "classifierRoute", &approval_route) && approval_route == "v2";
+      ReadJsonUint64(metadata, "helperGeneration", &input.approval_helper_generation);
       input.start_lease = start_lease;
       input.expected_process_start = expected_process_start;
       input.start_result = start_result;
@@ -439,6 +445,9 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   }
   if (!v2_basis && !sessions.contains(FrameIdKey(request.header.session_id))) {
     WindowsStartInput input;
+    std::string approval_route;
+    input.approval_route_v2 = ReadJsonString(metadata, "classifierRoute", &approval_route) && approval_route == "v2";
+    ReadJsonUint64(metadata, "helperGeneration", &input.approval_helper_generation);
     input.eligibility_basis = eligibility_basis;
     input.start_lease = start_lease;
     input.expected_process_start = expected_process_start;

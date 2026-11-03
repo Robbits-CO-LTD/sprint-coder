@@ -6264,9 +6264,14 @@ export class ComputerUseController {
   private approvalHelperCurrent(record: SessionRecord): boolean {
     const generation = record.approvalHelperGeneration;
     if (generation === undefined) return true;
-    if (generation !== null && this.deps.native.isWindowsGenerationCurrent?.(generation) === true)
+    if (
+      generation !== null &&
+      this.deps.native.isWindowsGenerationCurrent?.(generation) === true &&
+      this.nativeApprovalPathOpen(record.status.sessionId)
+    )
       return true;
     record.approvalHelperGeneration = null;
+    record.status = { ...record.status, maximumMode: 'observe_only', mode: 'observe_only' };
     record.planGrant = null;
     const prefix = `${record.status.sessionId}\0`;
     for (const call of this.planGrantAuthorizedCalls)
