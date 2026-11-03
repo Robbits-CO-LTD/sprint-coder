@@ -1020,7 +1020,7 @@ class WindowsComputerUseHelperClient {
     let helper: number | undefined;
     let picker: { id: string; lifetimeId: string } | undefined;
     try {
-      await this.ensureConnected();
+      await this.ensureConnected(operation);
       helper = this.helperGeneration;
       const generationToken = this.captureWindowsGeneration();
       this.bindOwners(helper);
@@ -1156,9 +1156,13 @@ class WindowsComputerUseHelperClient {
     }
   }
 
-  private async ensureConnected(): Promise<void> {
+  private async ensureConnected(operation = ''): Promise<void> {
     if (this.termination !== undefined) {
-      await this.termination.prepare();
+      await this.termination.prepare(
+        isComputerUseStopOperation(operation) && this.socket !== null
+          ? 'stop_existing_helper'
+          : 'work',
+      );
       if ([...this.generations.values()].some((record) => record.killRequested && !record.exited))
         throw new Error('native_stop_unconfirmed');
     }

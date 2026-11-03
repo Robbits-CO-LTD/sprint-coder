@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -217,6 +217,115 @@ it('PR9 K-1 (a) writes the row update and its shared quarantine atomically', asy
   expect(b.read()).toEqual({ rows: [], quarantines: [k1] });
 });
 
+it.each([
+  ['unknown reason', JSON.stringify({ ...quarantine, reason: 'future-reason' })],
+  ['unknown shape', 'null'],
+  ['malformed JSON', '{'],
+  [
+    'mismatched identity',
+    JSON.stringify({ ...quarantine, identity: { ...row.identity, pid: 99 } }),
+  ],
+])(
+  'rejects conflicting %s without losing ledger rows or partially restoring quarantines',
+  async (_, payload) => {
+    const f = fixture();
+    const store = f.open();
+    await store.write(row);
+    const db = new Database(f.path);
+    connections.push(db);
+    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+      row.identity.pid,
+      row.identity.creationTime,
+      payload,
+    );
+    const other = { ...quarantine, identity: { ...row.identity, pid: 42 } };
+    expect(await store.transferReceipt!([row], [other, quarantine])).toBe(false);
+    expect(await store.restoreQuarantines([other, quarantine])).toBe(false);
+    expect(store.read().rows).toEqual([row]);
+    expect(db.prepare('SELECT payload FROM quarantines').all()).toEqual([{ payload }]);
+    store.close();
+    expect(f.open().read().rows).toEqual([row]);
+  },
+);
+
+it('PR10 preserves unknown quarantine payloads for diagnostics and newer readers', () => {
+  const f = fixture();
+  const store = f.open();
+  const db = new Database(f.path);
+  connections.push(db);
+  const values = [null, { ...quarantine, reason: 'future-reason' }];
+  values.forEach((value, index) =>
+    db
+      .prepare('INSERT INTO quarantines VALUES (?, ?, ?)')
+      .run(100 + index, 'synthetic', JSON.stringify(value)),
+  );
+  expect(store.read().quarantines).toEqual(values);
+  expect(store.read().quarantines).toEqual(values);
+  expect(db.prepare('SELECT count(*) AS count FROM quarantines').get()).toEqual({ count: 2 });
+});
+
+it('PR10 records the schema version and preserves unknown-version rows', () => {
+  const f = fixture();
+  const store = f.open();
+  const db = new Database(f.path);
+  connections.push(db);
+  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)').run(
+    windowsLedgerInstanceId('C:/synthetic/default'),
+    1,
+    'future',
+    'future',
+    'null',
+  );
+  db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(100, 'synthetic', 'null');
+  db.pragma('user_version = 99');
+  expect(() => store.read()).toThrow('Unsupported Windows ledger version');
+  expect(() => store.delete(row)).toThrow('Unsupported Windows ledger version');
+  store.close();
+  expect(() => f.open()).toThrow('Unsupported Windows ledger version');
+  expect(db.pragma('user_version', { simple: true })).toBe(99);
+  expect(db.prepare('SELECT count(*) AS count FROM ledger').get()).toEqual({ count: 1 });
+  expect(db.prepare('SELECT count(*) AS count FROM quarantines').get()).toEqual({ count: 1 });
+});
+
+it('PR10 resolves profile junctions before hashing the instance identity', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'windows-ledger-'));
+  folders.push(folder);
+  const real = join(folder, 'real');
+  const alias = join(folder, 'alias');
+  mkdirSync(real);
+  symlinkSync(real, alias, 'junction');
+  expect(windowsLedgerInstanceId(alias)).toBe(windowsLedgerInstanceId(real));
+});
+
+it('PR10 upgrades an unversioned store without losing existing rows or quarantines', () => {
+  const f = fixture();
+  const store = f.open();
+  store.write(row);
+  store.restoreQuarantines([quarantine]);
+  store.close();
+  const db = new Database(f.path);
+  connections.push(db);
+  db.pragma('user_version = 0');
+  const reopened = f.open();
+  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  expect(reopened.read()).toEqual({ rows: [row], quarantines: [quarantine] });
+});
+
+it('PR10 discards only its own invalid ledger rows and preserves quarantine payloads', () => {
+  const f = fixture();
+  const store = f.open();
+  store.write(row);
+  const db = new Database(f.path);
+  connections.push(db);
+  const insert = db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)');
+  insert.run(windowsLedgerInstanceId('C:/synthetic/default'), 1, 'invalid', 'invalid', 'null');
+  insert.run(windowsLedgerInstanceId('C:/synthetic/other'), 1, 'invalid', 'invalid', 'null');
+  expect(store.read().rows).toEqual([row, null]);
+  expect(store.read().rows).toEqual([row]);
+  expect(db.prepare('SELECT count(*) AS count FROM ledger').get()).toEqual({ count: 2 });
+});
+
 it('retains quarantine when its release fails and retries after the store recovers', async () => {
   const f = fixture();
   const store = f.open();
@@ -265,15 +374,17 @@ it('uses WAL and bounds lock contention below the Host two-second deadline', asy
   expect(await store.write(row)).toBe(true);
 });
 
-it('serializes simultaneous writes from independent connections without losing either instance', async () => {
-  const f = fixture();
-  const a = f.open('a');
-  const b = f.open('b');
-  const gate = new SharedArrayBuffer(4);
-  const workers = ['a', 'b'].map(
-    (instance) =>
-      new Worker(
-        `
+it.each([false, true])(
+  'serializes simultaneous Worker writes and differing transfer reasons (transfer: %s)',
+  async (transfer) => {
+    const f = fixture();
+    const a = f.open('a');
+    const b = f.open('b');
+    const gate = new SharedArrayBuffer(4);
+    const workers = ['a', 'b'].map(
+      (instance) =>
+        new Worker(
+          `
     const { workerData, parentPort } = require('node:worker_threads');
     const fs = require('node:fs');
     const ts = require('typescript');
@@ -286,54 +397,87 @@ it('serializes simultaneous writes from independent connections without losing e
     parentPort.postMessage('ready');
     Atomics.wait(new Int32Array(workerData.gate), 0, 0);
     try {
-      for (let i = 0; i < 20; i++) store.write({ ...workerData.row, requestId: String(i) });
-      store.restoreQuarantines([workerData.quarantine]);
+      // Host retries failed storage operations; only lock contention is retryable here.
+      const retryBusy = (operation) => {
+        for (let attempt = 0; ; attempt++) {
+          try { return operation(); }
+          catch (error) {
+            if (error.code !== 'SQLITE_BUSY' || attempt >= 9) throw error;
+          }
+        }
+      };
+      const rows = Array.from({ length: 20 }, (_, i) => ({ ...workerData.row, requestId: String(i) }));
+      for (const row of rows) retryBusy(() => store.write(row));
+      if (workerData.transfer) {
+        const quarantine = { ...workerData.quarantine, reason: workerData.instance === 'a' ? 'exit_suspect' : 'response_lost' };
+        retryBusy(() => store.transferReceipt(rows, [quarantine]));
+        parentPort.postMessage(store.read().quarantines);
+      } else retryBusy(() => store.restoreQuarantines([workerData.quarantine]));
     } finally { store.close(); }
   `,
-        {
-          eval: true,
-          workerData: {
-            path: f.path,
-            instance,
-            gate,
-            row,
-            quarantine,
-            modulePath: fileURLToPath(
-              new URL('./computer-use-windows-ledger-store.ts', import.meta.url),
-            ),
+          {
+            eval: true,
+            workerData: {
+              path: f.path,
+              instance,
+              gate,
+              row,
+              quarantine,
+              transfer,
+              modulePath: fileURLToPath(
+                new URL('./computer-use-windows-ledger-store.ts', import.meta.url),
+              ),
+            },
           },
-        },
-      ),
-  );
-  const exits = workers.map(
-    (worker) =>
-      new Promise<void>((resolve, reject) => {
-        worker.once('error', reject);
-        worker.once('exit', (code) =>
-          code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
-        );
-      }),
-  );
-  // Install handlers before awaiting either worker so failures never become unhandled rejections.
-  const completed = Promise.all(exits);
-  void completed.catch(() => undefined);
-  try {
-    await Promise.all(
-      workers.map(
-        (worker) =>
-          new Promise<void>((resolve, reject) => {
-            worker.once('message', () => resolve());
-            worker.once('error', reject);
-          }),
-      ),
+        ),
     );
-    Atomics.store(new Int32Array(gate), 0, 1);
-    Atomics.notify(new Int32Array(gate), 0);
-    await completed;
-    expect(a.read().rows).toHaveLength(20);
-    expect(b.read().rows).toHaveLength(20);
-    expect(a.read().quarantines).toEqual([quarantine]);
-  } finally {
-    await Promise.all(workers.map((worker) => worker.terminate()));
-  }
-});
+    const observed: unknown[] = [];
+    for (const worker of workers)
+      worker.on('message', (value: unknown) => {
+        if (Array.isArray(value)) observed.push(value);
+      });
+    const exits = workers.map(
+      (worker) =>
+        new Promise<void>((resolve, reject) => {
+          worker.once('error', reject);
+          worker.once('exit', (code) =>
+            code === 0 ? resolve() : reject(new Error(`worker exit ${code}`)),
+          );
+        }),
+    );
+    // Install handlers before awaiting either worker so failures never become unhandled rejections.
+    const completed = Promise.all(exits);
+    void completed.catch(() => undefined);
+    try {
+      await Promise.all(
+        workers.map(
+          (worker) =>
+            new Promise<void>((resolve, reject) => {
+              worker.once('message', () => resolve());
+              worker.once('error', reject);
+            }),
+        ),
+      );
+      Atomics.store(new Int32Array(gate), 0, 1);
+      Atomics.notify(new Int32Array(gate), 0);
+      await completed;
+      expect(a.read().rows).toHaveLength(transfer ? 0 : 20);
+      expect(b.read().rows).toHaveLength(transfer ? 0 : 20);
+      if (transfer) {
+        const persisted = a.read().quarantines;
+        expect(persisted).toEqual([
+          {
+            identity: row.identity,
+            reason: expect.stringMatching(/^(exit_suspect|response_lost)$/),
+          },
+        ]);
+        expect(observed).toEqual([persisted, persisted]);
+        await a.restoreQuarantines([quarantine]);
+        await b.restoreQuarantines([{ ...quarantine, reason: 'response_lost' }]);
+        expect(b.read().quarantines).toEqual(persisted);
+      } else expect(a.read().quarantines).toEqual([quarantine]);
+    } finally {
+      await Promise.all(workers.map((worker) => worker.terminate()));
+    }
+  },
+);
