@@ -133,6 +133,8 @@ function workerSource(): string {
     '      TestBeforeAdoption(pending->done);\n      std::lock_guard stop_lock(control.stop_mutex);\n      WindowsV1UiaLane &lane',
   );
   return (
+    cut('// BEGIN windows worker slot launches', '// END windows worker slot launches') +
+    'WindowsWorkerSlot& InterlockWorkerRunning(){static WindowsWorkerSlot running;return running;}\n' +
     cut(
       'thread_local const std::uint64_t *windows_validation_frame_serial',
       'bool WindowsValidationStillCurrent(',
@@ -149,6 +151,10 @@ function workerSource(): string {
     cut(
       '// BEGIN windows semantic operation ownership',
       '// END windows semantic operation ownership',
+    ) +
+    cut(
+      '// BEGIN windows residual response ownership',
+      '// END windows residual response ownership',
     )
   );
 }
@@ -165,6 +171,11 @@ function focusReceiptSource(): string {
   const take = `${transfer[0]}\n${flag[0]}`;
   const serialize = `const std::string receipt=${wire[0]};`;
   const ordered = wire.index < transfer.index ? `${serialize}\n${take}` : `${take}\n${serialize}`;
+  const deadlineGuard =
+    /else if \((windows_v1_uia_lane != nullptr[\s\S]*?)\) \{\s*commit_failure = "observation_timeout";/u.exec(
+      observe,
+    );
+  if (!deadlineGuard) throw new Error('Observation commit deadline boundary changed');
   return String.raw`
 void Check(bool,const char*);
 void FocusReceiptContract(){
@@ -177,6 +188,13 @@ void FocusReceiptContract(){
     std::cout<<"FOCUS_RECEIPT:"<<receipt<<"\n";
     Check(receipt==(has_focused_element_signature?"\""+std::string(64,'a')+"\"":"null"),"focus receipt retains digest after ownership transfer");
   }
+}
+void ExpiredCommitContract(){
+  const WindowsV1UiaPath path(std::chrono::milliseconds(1),0);
+  windows_v1_uia_lane->deadline=std::chrono::steady_clock::now()-std::chrono::milliseconds(1);
+  bool adopted=false;
+  if (!(${deadlineGuard[1]})) adopted=true;
+  Check(!adopted,"expired_result_never_commits");
 }
 `;
 }
@@ -225,6 +243,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
 // the Windows pipe/real-UIA seams independently validate the actual OS boundary.
 const preamble = String.raw`
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -245,6 +264,23 @@ const preamble = String.raw`
 #include <vector>
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_windows_approval_round_trip.h"
+#include "computer_use_protocol.h"
+using sprint_coder::computer_use::Frame;
+using sprint_coder::computer_use::FrameHeader;
+using sprint_coder::computer_use::MessageType;
+using HANDLE=void*;
+bool CancelIoEx(HANDLE,void*){return true;}
+std::uint64_t windows_helper_generation=7;
+std::atomic<bool>& WindowsTargetListWorkerRunning(){static std::atomic<bool> running{false};return running;}
+namespace sprint_coder::computer_use::windows_uia_source_detail {
+std::atomic<bool>& ShellLookupRunning(){static std::atomic<bool> running{false};return running;}
+std::atomic<bool>& InterlockShellLookupRunning(){static std::atomic<bool> running{false};return running;}
+}
+struct WireResult {FrameHeader header;std::string metadata;std::vector<std::uint8_t> binary;};
+std::vector<WireResult> written_frames;
+bool WriteFrame(HANDLE,const FrameHeader& header,std::string_view metadata,std::span<const std::uint8_t> binary){
+  written_frames.push_back({header,std::string(metadata),{binary.begin(),binary.end()}});return true;
+}
 using HRESULT=std::int32_t;
 using DWORD=std::uint32_t;
 using HWND=void*;
@@ -492,7 +528,100 @@ void PngPolicies(){
 }
 
 int main(){try {
+  Reset();{const WindowsValidationFrameScope frame(0);const WindowsV1UiaPath path(std::chrono::milliseconds(6000),0,0);
+    const auto deadline=windows_v1_uia_lane->deadline;bool inherited=false;
+    Check(RunWindowsUiaRead<Sample>(false,[&]{inherited=windows_v1_uia_lane->deadline==deadline;return std::optional<Sample>{Value()};},[](Sample){}),"inherited read succeeds");
+    Check(inherited,"existing_outer_deadline_is_not_shortened");}
+  Reset();{Consumer call([]{int value=0;WindowsV1UiaRead(value,[&]{Sleep(900);value=7;return S_OK;});return std::optional<Sample>{Value()};},true,2000);
+    Check(call.Ready(1500)&&call.Take().ok,"inherited_noncontact_budget_preserves_live_value");}
+  {Frame request;written_frames.clear();Check(!InterlockWorkerRunning().exchange(true),"earlier worker started");
+    const WindowsResidualRequestScope request_scope(request);
+    Check(Respond(nullptr,request,MessageType::kProbeResult,"{}"),"unrelated response written");
+    Check(written_frames.size()==1&&written_frames[0].header.flags==0,"unrelated_worker_does_not_change_response_shape");
+    InterlockWorkerRunning().store(false);written_frames.clear();}
+  // The effect shadow's and the interlock's shell lookups, and a worker another thread starts, are no
+  // request's residual work: a hung lookup cannot make the request's D end the helper.
+  {Frame request;written_frames.clear();const WindowsResidualRequestScope request_scope(request);
+    sprint_coder::computer_use::windows_uia_source_detail::ShellLookupRunning().store(true);sprint_coder::computer_use::windows_uia_source_detail::InterlockShellLookupRunning().store(true);
+    std::thread([]{(void)WindowsCaptureWorkerRunning().exchange(true);}).join();
+    Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.size()==1&&written_frames[0].header.flags==0,"background_and_lookup_work_is_not_request_residual");
+    sprint_coder::computer_use::windows_uia_source_detail::ShellLookupRunning().store(false);sprint_coder::computer_use::windows_uia_source_detail::InterlockShellLookupRunning().store(false);
+    WindowsCaptureWorkerRunning().store(false);written_frames.clear();}
+  // A slot that an earlier request's worker held on entry and that this request takes again is this
+  // request's own residual; the earlier request retires when its own launch ends.
+  {using sprint_coder::computer_use::kResidualWorkFlag;written_frames.clear();auto& slot=WindowsUiaReadWorkerRunning();
+    Frame earlier;earlier.header.request_id.bytes[0]=3;
+    {const WindowsResidualRequestScope scope(earlier);Check(!slot.exchange(true),"earlier launch");
+      Check(Respond(nullptr,earlier,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"earlier residual");}
+    Frame request;request.header.request_id.bytes[0]=4;
+    {const WindowsResidualRequestScope scope(request);
+      slot.store(false);Check(!slot.exchange(true),"slot taken again");
+      Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"recycled_slot_keeps_own_worker_residual");}
+    const auto retired=[](std::uint8_t id){return std::count_if(written_frames.begin(),written_frames.end(),[id](const WireResult& frame){
+      return frame.header.message_type==27&&frame.header.request_id.bytes[0]==id;});};
+    Check(DeliverWindowsRetiredOperations(nullptr)&&retired(3)==1&&retired(4)==0,"earlier_owner_retires_when_its_launch_ends");
+    slot.store(false);Check(DeliverWindowsRetiredOperations(nullptr)&&retired(4)==1,"recycled launch retires");written_frames.clear();}
+  // The consumer is held on a second, long request while the first request's worker retires: the
+  // notifier still sends the retirement, after the first response.
+  {written_frames.clear();WindowsRetirementNotifier notifier(nullptr);Check(notifier.Start(),"notifier started");
+    auto& slot=WindowsCaptureWorkerRunning();Frame first;first.header.request_id.bytes[0]=5;
+    {const WindowsResidualRequestScope scope(first);Check(!slot.exchange(true),"first launch");
+      Check(Respond(nullptr,first,MessageType::kProbeResult,"{}"),"first answered");}
+    Frame second;second.header.request_id.bytes[0]=6;
+    {const WindowsResidualRequestScope held(second);
+      slot.store(false);
+      bool sent=false,ordered=false;
+      for(auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);!sent&&std::chrono::steady_clock::now()<until;){
+        {std::lock_guard lock(WindowsPipeWriteMutex());
+          const auto response=std::find_if(written_frames.begin(),written_frames.end(),[](const WireResult& frame){return frame.header.message_type!=27&&frame.header.request_id.bytes[0]==5;});
+          const auto retire=std::find_if(written_frames.begin(),written_frames.end(),[](const WireResult& frame){return frame.header.message_type==27&&frame.header.request_id.bytes[0]==5;});
+          sent=retire!=written_frames.end();ordered=sent&&response<retire;}
+        if(!sent)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+      Check(sent,"retirement_is_not_held_behind_a_long_request");Check(ordered,"retirement_follows_its_response");
+      Check(Respond(nullptr,second,MessageType::kProbeResult,"{}"),"second answered");}
+    notifier.Stop();Check(!notifier.Failed(),"notifier healthy");written_frames.clear();}
   FocusReceiptContract();
+  ExpiredCommitContract();
+  {using namespace sprint_coder::computer_use;
+    // A store of true takes the slot like exchange(true): numbered and recorded (discovery, existing start).
+    WindowsWorkerSlot slot;
+    {Frame request;request.header.request_id.bytes[0]=9;const WindowsResidualRequestScope scope(request);
+      slot.store(true,std::memory_order_release);
+      written_frames.clear();Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"store_true_launch_is_residual");}
+    slot.store(false);slot.store(true);
+    Check(DeliverWindowsRetiredOperations(nullptr)&&written_frames.back().header.message_type==27,"store_true_relaunch_does_not_hide_retirement");
+    slot.store(false);written_frames.clear();}
+  {using namespace sprint_coder::computer_use;
+    for(WindowsWorkerSlot* running:{&WindowsUiaReadWorkerRunning(),&WindowsCaptureWorkerRunning(),&InterlockWorkerRunning()}){
+      Frame request;request.header.request_id.bytes[0]=1;request.header.session_id.bytes[0]=2;
+      const WindowsResidualRequestScope request_scope(request);
+      written_frames.clear();Check(!running->exchange(true),"request launches its worker");
+      {Frame other;const WindowsResidualRequestScope nested(other);
+        Check(Respond(nullptr,other,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==0,"nested_stop_does_not_own_parent_worker");}
+      written_frames.clear();
+      Check(Respond(nullptr,request,MessageType::kProbeResult,"{\"truncated\":true}"),"partial response written");
+      Check(written_frames.size()==1&&written_frames[0].header.flags==kResidualWorkFlag&&written_frames[0].metadata=="{\"truncated\":true}","list_partial_rows_keep_residual_watch");
+      Check(DeliverWindowsRetiredOperations(nullptr)&&written_frames.size()==1,"cleanup_stall_keeps_operation_unretired");
+      running->store(false);Check(DeliverWindowsRetiredOperations(nullptr)&&written_frames.size()==2,"retirement delivered");
+      const auto& retired=written_frames.back();
+      Check(retired.header.message_type==27&&retired.header.flags==0&&retired.header.request_id.bytes[0]==1&&retired.header.session_id.bytes[0]==2&&retired.metadata=="{\"helperGeneration\":7}"&&retired.binary.empty(),"retirement bound to original request");
+      Check(DeliverWindowsRetiredOperations(nullptr)&&written_frames.size()==2,"retirement once");
+      Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==0,"completed_worker_keeps_legacy_response_shape");
+    }
+  }
+  Reset();{auto gate=MakeGate();Consumer call([gate]{int value=0;WindowsV1UiaRead(value,[&]{gate->Hold();value=7;return S_OK;});return std::optional<Sample>{Value()};});
+    Check(gate->Wait(),"noncontact entered");Check(call.Ready(1500),"noncontact_without_outer_deadline_is_bounded");
+    const auto out=call.Take();Check(!out.ok&&WindowsUiaReadWorkerRunning(),"noncontact retained worker");gate->Release();Check(Drain(),"noncontact drained");}
+  Reset();cleanup_gate=MakeGate();{Consumer call([]{return std::optional<Sample>{Value()};});
+    Check(cleanup_gate->Wait(),"cleanup entered");Check(call.Ready(6000),"cleanup_stall_keeps_operation_unretired");
+    const auto out=call.Take();Check(!out.ok&&WindowsUiaReadWorkerRunning()&&cleaned==0,"cleanup retained ownership");cleanup_gate->Release();Check(Drain(),"cleanup drained");}
+  Reset();{const WindowsValidationFrameScope frame(0);const WindowsV1UiaPath path(std::chrono::milliseconds(120),0,0);
+    const auto deadline=windows_v1_uia_lane->deadline;
+    CaptureOutcome capture;capture.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&capture.bytes,&capture.width,&capture.height,&capture.stop,0);
+    Check(capture.ok&&DrainCapture(),"capture before deadline");
+    cleanup_gate=MakeGate();PngOutcome png;png.bytes=std::move(capture.bytes);png.ok=ReadPng(png,true);
+    Check(!png.ok&&png.stop==WindowsV1UiaStop::kBudget&&windows_v1_uia_lane->deadline==deadline&&WindowsCaptureWorkerRunning(),"capture_png_cleanup_share_absolute_deadline");
+    cleanup_gate->Release();Check(DrainCapture()&&capture_scrubbed,"expired PNG scrubbed after cleanup");}
   // Same-epoch prequeued Close must use the frame's old serial, not the current global one.
   Reset();{WindowsValidationFrameScope frame(0);Stop(false);const WindowsV1UiaPath path;bool adopted=false;
     Check(!RunWindowsUiaRead<Sample>(true,[]{return std::optional<Sample>{Value()};},[&](Sample){adopted=true;}),"stale frame refused");
@@ -533,10 +662,14 @@ int main(){try {
   }}
   // Slow but nonempty property results are not turned into a timeout.
   Reset();{Consumer call([]{int value=0;const bool ok=WindowsV1UiaRead(value,[&]{std::this_thread::sleep_for(std::chrono::milliseconds(320));value=7;return S_OK;});
-    return ok?std::optional<Sample>{Value()}:std::nullopt;});const auto out=call.Take();Check(out.ok&&out.stop==WindowsV1UiaStop::kNone,"slow nonempty answer preserved");}
+    return ok?std::optional<Sample>{Value()}:std::nullopt;});const auto out=call.Take();Check(out.ok&&out.stop==WindowsV1UiaStop::kNone,"slow_nonempty_value_within_budget_is_preserved");}
   // First contacts alone keep the existing 470ms refusal, even without a Stop request.
-  Reset();{auto gate=MakeGate();Consumer call([gate]{int value=0;WindowsV1UiaContact(value,[&]{gate->Hold();value=7;return S_OK;});return std::optional<Sample>{Value()};});
-    Check(gate->Wait(),"contact gate entered");const auto out=call.Take();Check(!out.ok&&out.stop==WindowsV1UiaStop::kTimeout&&cleaned==0,"contact deadline releases consumer only");gate->Release();Check(Drain(),"contact drained");}
+  for(int budget:{0,25000}){Reset();auto gate=MakeGate();const auto started=std::chrono::steady_clock::now();
+    Consumer call([gate]{int value=0;WindowsV1UiaContact(value,[&]{gate->Hold();value=7;return S_OK;});return std::optional<Sample>{Value()};},true,budget);
+    Check(gate->Wait(),"contact gate entered");const auto out=call.Take();Check(!out.ok&&out.stop==WindowsV1UiaStop::kTimeout&&cleaned==0,"contact deadline releases consumer only");
+    const auto elapsed=std::chrono::steady_clock::now()-started;
+    Check(elapsed>=kWindowsV1UiaSlowContact&&elapsed<std::chrono::seconds(1),"contact_keeps_470ms_watchdog_with_or_without_outer_deadline");
+    gate->Release();Check(Drain(),"contact drained");}
   // The inherited absolute budget and cumulative nodes survive the worker handoff.
   Reset();{auto gate=MakeGate();Consumer call([gate]{WindowsV1UiaCountNode();WindowsV1UiaCountNode();gate->Hold();return std::optional<Sample>{Value()};},true,80,3);
     Check(gate->Wait(),"budget gate entered");const auto out=call.Take();Check(!out.ok&&out.stop==WindowsV1UiaStop::kBudget&&out.nodes==5,"absolute budget and node accounting");gate->Release();Check(Drain(),"budget worker drained");}

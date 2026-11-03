@@ -2274,8 +2274,24 @@ struct RcaRun {
       }
     });
     receiving = std::thread([this] {
+      std::vector<FrameHeader> residual_responses;
       Frame frame;
       while (ReadFrame(client.value, &frame)) {
+        if (frame.header.message_type == static_cast<std::uint16_t>(MessageType::kOperationRetired)) {
+          auto found = std::find_if(residual_responses.begin(), residual_responses.end(), [&](const auto& header) {
+            return header.request_id.bytes == frame.header.request_id.bytes && header.session_id.bytes == frame.header.session_id.bytes;
+          });
+          const std::string body(frame.metadata.begin(), frame.metadata.end());
+          std::uint64_t generation = 0;
+          Require(found != residual_responses.end() && frame.header.flags == 0 && frame.binary.empty() &&
+                      ReadJsonUint64(body, "helperGeneration", &generation) && generation == windows_helper_generation,
+                  "retirement_identity");
+          residual_responses.erase(found);
+          frame = {};
+          continue;
+        }
+        if (frame.header.flags == sprint_coder::computer_use::kResidualWorkFlag) residual_responses.push_back(frame.header);
+        else Require(frame.header.flags == 0, "response_flags");
         {
           std::lock_guard<std::mutex> lock(replies_mutex);
           ++reply_counts[frame.header.request_id.bytes[0]];
@@ -4412,9 +4428,13 @@ int DiagnoseUia(std::wstring_view scenario) {
     } else {
       Require(!result.first && result.empty && result.first_nodes == 0 && result.outer_nodes == 0 &&
                   result.stop == (timeout ? "timeout" : "canceled"), "uia_outer_stop_propagated");
-      if (timeout)
+      if (timeout) {
+        const auto held_ms = GetTickCount64() - uia_held_since.load();
+        if (response_ms < static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()) || held_ms >= 1000)
+          std::cerr << "uia-contact-timing responseMs=" << response_ms << " heldMs=" << held_ms << "\n";
         Require(response_ms >= static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()) &&
-                    GetTickCount64() - uia_held_since.load() < 1000, "uia_contact_deadline_bounded");
+                    held_ms < 1000, "uia_contact_deadline_bounded");
+      }
     }
     if (queued) {
       Require(uia_contacts.load() == 0 && !WindowsUiaReadWorkerRunning().load(),

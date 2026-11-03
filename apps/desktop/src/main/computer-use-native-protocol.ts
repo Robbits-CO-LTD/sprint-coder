@@ -46,6 +46,7 @@ export const COMPUTER_USE_NATIVE_MAX_FRAME_BYTES =
   COMPUTER_USE_NATIVE_MAX_METADATA_BYTES + COMPUTER_USE_NATIVE_MAX_BINARY_BYTES;
 export const COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES = 68;
 export const COMPUTER_USE_NATIVE_MAGIC = 0x31554353;
+export const COMPUTER_USE_NATIVE_RESIDUAL_WORK = 1;
 
 export type ComputerUseNativeMessageType =
   | 'handshake'
@@ -73,7 +74,8 @@ export type ComputerUseNativeMessageType =
   | 'approval_round_trip_end'
   | 'approval_round_trip_end_result'
   | 'approval_round_trip_event'
-  | 'background_interaction_event';
+  | 'background_interaction_event'
+  | 'operation_retired';
 
 const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Object.freeze({
   handshake: 1,
@@ -102,6 +104,7 @@ const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Ob
   approval_round_trip_end_result: 24,
   approval_round_trip_event: 25,
   background_interaction_event: 26,
+  operation_retired: 27,
 });
 const MESSAGE_TYPES_BY_NUMBER = new Map(
   Object.entries(MESSAGE_TYPES).map(([name, value]) => [

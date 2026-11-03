@@ -272,6 +272,7 @@ bool RevalidateWindowsTarget(const WindowsSession &, const RECT &, std::uint64_t
 bool JudgeWindowsV2Input(const WindowsSession &, std::string *) { return true; }
 // Every session in this ordinary-ticket fixture is foreground.
 bool ValidateWindowsBackgroundActionBinding(const WindowsSession &, const std::string &) { return true; }
+bool ValidateWindowsBackgroundActionBindingWithinFrame(const WindowsSession &, const std::string &) { return true; }
 bool WindowsFocusedElementSignature(std::uint32_t, const RECT &, std::string *signature) {
   if (!g_focus_ok) return false;
   *signature = "focus-signature";
@@ -871,6 +872,7 @@ function assembled(): string {
   };
   return [
     preamble,
+    between('// BEGIN windows worker slot launches', '// END windows worker slot launches'),
     between('struct WindowsTargetListState {', 'struct WindowsStartRegistry {'),
     between(
       'thread_local const std::uint64_t *windows_validation_frame_serial',

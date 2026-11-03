@@ -29,16 +29,18 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
     expect(computerUseNativeMessageTypeValue('preflight_result')).toBe(12);
   });
 
-  it('bounds known message types by the final background interaction event (N9 P3d)', () => {
+  it('bounds known message types by the final operation retirement event (N5 B2)', () => {
     expect(protocolHeader).toMatch(/kTargetIdentityResult = 14,/u);
     expect(protocolHeader).toMatch(/kDispatchApprovedResult = 20,/u);
     expect(protocolHeader).toMatch(/kApprovalRoundTripEvent = 25,/u);
     expect(protocolHeader).toMatch(/kBackgroundInteractionEvent = 26,/u);
+    expect(protocolHeader).toMatch(/kOperationRetired = 27,/u);
+    expect(computerUseNativeMessageTypeValue('operation_retired')).toBe(27);
     expect(computerUseNativeMessageTypeValue('background_interaction_event')).toBe(26);
     expect(computerUseNativeMessageTypeValue('target_identity_result')).toBe(14);
     expect(
       between(protocolHeader, 'inline bool IsKnownMessageType(', 'inline bool ValidateHeader('),
-    ).toContain('value <= static_cast<std::uint16_t>(MessageType::kBackgroundInteractionEvent);');
+    ).toContain('value <= static_cast<std::uint16_t>(MessageType::kOperationRetired);');
   });
 
   it('sends the Windows preflight as its own message under its own request key', () => {

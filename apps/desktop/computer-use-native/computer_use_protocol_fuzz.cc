@@ -9771,7 +9771,8 @@ int main() {
                           MessageType::kApprovalApprove, MessageType::kApprovalApproveResult,
                           MessageType::kApprovalDiscard, MessageType::kApprovalDiscardResult,
                           MessageType::kDispatchApproved, MessageType::kDispatchApprovedResult,
-                          MessageType::kApprovalRoundTripEvent, MessageType::kBackgroundInteractionEvent}) {
+                          MessageType::kApprovalRoundTripEvent, MessageType::kBackgroundInteractionEvent,
+                          MessageType::kOperationRetired}) {
     auto known_type_header = ValidHeader();
     known_type_header.message_type = static_cast<std::uint16_t>(type);
     if (!Check(!EncodeFrame(known_type_header, metadata).empty() &&
@@ -9780,11 +9781,16 @@ int main() {
       return 1;
   }
   auto unknown_type_header = ValidHeader();
+  auto residual_header = ValidHeader();
+  residual_header.flags = sprint_coder::computer_use::kResidualWorkFlag;
+  const auto residual = DecodeFrame(EncodeFrame(residual_header, metadata));
+  if (!Check(residual.has_value() && residual->header.flags == 1,
+             "residual-response-flag-round-trip")) return 1;
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kBackgroundInteractionEvent) + 1;
+      static_cast<std::uint16_t>(MessageType::kOperationRetired) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-background-interaction-event-unknown"))
+             "message-type-after-operation-retired-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');

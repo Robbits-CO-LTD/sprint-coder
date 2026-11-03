@@ -185,7 +185,12 @@ enum class MessageType : std::uint16_t {
   kApprovalRoundTripEndResult = 24,
   kApprovalRoundTripEvent = 25,
   kBackgroundInteractionEvent = 26,
+  kOperationRetired = 27,
 };
+
+// A normal response with this flag is settled, but its original deadline still covers cleanup.
+// kOperationRetired echoes request/session ids and carries {helperGeneration}; no binary or flags.
+constexpr std::uint32_t kResidualWorkFlag = 1;
 
 // Windows identityBoundStart capability (no new MessageType):
 // list_windows_cancellable / list_targets: includeStartIdentity=true adds the
@@ -207,7 +212,7 @@ struct Frame {
 
 [[nodiscard]] inline bool IsKnownMessageType(std::uint16_t value) noexcept {
   return value >= static_cast<std::uint16_t>(MessageType::kHandshake) &&
-         value <= static_cast<std::uint16_t>(MessageType::kBackgroundInteractionEvent);
+         value <= static_cast<std::uint16_t>(MessageType::kOperationRetired);
 }
 
 [[nodiscard]] inline bool ValidateHeader(const FrameHeader &header) noexcept {

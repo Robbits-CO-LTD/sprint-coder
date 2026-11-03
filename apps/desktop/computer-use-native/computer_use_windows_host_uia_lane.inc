@@ -24,10 +24,11 @@
 //     every read of properties): the epoch is the one that was current when the path began (observe:
 //     the session's own). So a Cancel that arrives while the lane reads a slow but live app waits for
 //     at most the call that is under way: one call, 800 ms at the worst, never the whole path.
-//  There is deliberately NO time budget on a path: a deep tree of a live app (an Electron or Office
-//  window read up the parents, one call each) can take a long time while every call answers, and
-//  cutting it short would turn a live app into "unclassified" and change what V1 answers. A Cancel needs
-//  no budget either (rule 3). The one budget is the whole observe (25 s), and it is there only so that
+//  Without an outer deadline, read workers bound noncontact calls to 800 ms and the shared read plus
+//  cleanup to 5 s (image jobs: 25 s). An inherited absolute deadline is kept unchanged. A blocked API
+//  or destructor keeps its slot busy;
+//  Main retains the original request deadline after a residual response. Input path/claim policy is
+//  separate. The whole observe has a 25 s budget so that
 //  the native answers with its own reason (observation_timeout, with the number of nodes it had read
 //  logged) before the 30 s Main gives an observe runs out; it is wide because a tree of several thousand
 //  nodes of an ordinary app is read four times (two readings, two binding captures) and must not fail.
@@ -49,6 +50,10 @@
 constexpr DWORD kWindowsV1UiaConnectionTimeoutMs = 500;
 constexpr DWORD kWindowsV1UiaTransactionTimeoutMs = 300;
 constexpr std::chrono::milliseconds kWindowsV1UiaObserveBudget{25'000};
+constexpr std::chrono::milliseconds kWindowsUiaReadBudget{5'000};
+constexpr std::chrono::milliseconds kWindowsUiaCallBudget{800};
+// Main's D for preflight and approval frames: the bound of their background-binding search.
+constexpr std::chrono::milliseconds kWindowsUiaFrameBudget{10'000};
 
 // The ONE place the V1 lane creates UI Automation. The bounded one when the system has it
 // (CreateBoundedAutomation); if IUIAutomation2 cannot be had it falls back to the plain one, as before
@@ -74,6 +79,7 @@ struct WindowsUiaReadProgress {
   std::atomic<WindowsV1UiaStop> stop{WindowsV1UiaStop::kNone};
   std::atomic<std::size_t> nodes{0};
   bool contact_active = false;
+  bool call_active = false;
   std::chrono::steady_clock::time_point contact_started;
   bool done = false;
 };
@@ -85,15 +91,15 @@ template <class Result> struct WindowsUiaReadPending : WindowsUiaReadProgress {
 // Installed only by the UIA read worker. No caller's lane or COM pointer crosses threads.
 thread_local WindowsUiaReadProgress *windows_uia_read_progress = nullptr;
 
-std::atomic<bool> &WindowsUiaReadWorkerRunning() {
+WindowsWorkerSlot &WindowsUiaReadWorkerRunning() {
   // A provider stuck in COM may outlive ServePipe and static destruction.
-  static auto *running = new std::atomic<bool>{false};
+  static auto *running = new WindowsWorkerSlot;
   return *running;
 }
 
-std::atomic<bool> &WindowsCaptureWorkerRunning() {
+WindowsWorkerSlot &WindowsCaptureWorkerRunning() {
   // A stalled capture must not block a healthy UIA read, or inherit a timed-out UIA worker's slot.
-  static auto *running = new std::atomic<bool>{false};
+  static auto *running = new WindowsWorkerSlot;
   return *running;
 }
 
@@ -233,13 +239,14 @@ bool WindowsV1UiaEmpty(Value value) {
 class WindowsUiaReadContact {
 public:
   WindowsUiaReadContact(bool contact, std::chrono::steady_clock::time_point started)
-      : pending_(contact ? windows_uia_read_progress : nullptr) {
+      : pending_(windows_uia_read_progress) {
     if (pending_ == nullptr)
       return;
     {
       std::lock_guard lock(pending_->mutex);
       pending_->contact_started = started;
-      pending_->contact_active = true;
+      pending_->contact_active = contact;
+      pending_->call_active = true;
     }
     pending_->ready.notify_one();
   }
@@ -249,6 +256,7 @@ public:
     {
       std::lock_guard lock(pending_->mutex);
       pending_->contact_active = false;
+      pending_->call_active = false;
     }
     pending_->ready.notify_one();
   }

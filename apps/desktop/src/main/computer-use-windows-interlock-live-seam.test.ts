@@ -112,6 +112,7 @@ const program = String.raw`
 #include <UIAutomation.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -592,7 +593,10 @@ describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
           context.source,
           program
             .replace('//@@POINT@@', block('windows action point'))
-            .replace('//@@ENTRY@@', block('sync interlock entry')),
+            .replace(
+              '//@@ENTRY@@',
+              block('windows worker slot launches') + block('sync interlock entry'),
+            ),
         );
         const compiler = context.compiler!;
         const built = spawnSync(compiler.file, compiler.args, {

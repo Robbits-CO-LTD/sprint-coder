@@ -498,6 +498,46 @@ describe('Windows native helper compile boundary', () => {
     );
   });
 
+  it('takes worker slots only through numbered WindowsWorkerSlot operations (N5-B2)', () => {
+    const source = readWindowsHostSource();
+    // The base-typed accessor may only read or release the target-list slot; a take through it
+    // would skip the launch numbering that residual ownership relies on.
+    // Free functions take a std::atomic<bool>* and would skip the numbering as well.
+    // With or without std:: (ADL), and every _explicit/_strong/_weak form; nor an explicit base call.
+    // The slot type itself is the one place that calls its base.
+    const outsideSlot =
+      source.slice(0, source.indexOf('// BEGIN windows worker slot launches')) +
+      source.slice(source.indexOf('// END windows worker slot launches'));
+    expect(outsideSlot).not.toMatch(/\batomic_(?:exchange|store|compare_exchange)/u);
+    expect(outsideSlot).not.toMatch(/std::atomic<bool>::(?:store|exchange|compare_exchange)/u);
+    // Nor through a base reference or pointer: no cast to it, and the accessor is the only one.
+    expect(outsideSlot).not.toMatch(/_cast<\s*(?:const\s+|volatile\s+)*std::atomic<bool>/u);
+    // No other name or spelling for the base type either, so the reference count below sees every one.
+    expect(outsideSlot).not.toMatch(
+      /(?<!std::)\batomic<bool>|using\s+(?:namespace\s+std\b|std::atomic\b)|atomic<\s*[A-Z]\w?\s*>/u,
+    );
+    expect(outsideSlot).not.toMatch(
+      /\batomic_bool\b|(?:using\s+\w+\s*=|typedef)\s*std::atomic<bool>/u,
+    );
+    const baseReferences = [...outsideSlot.matchAll(/std::atomic<bool>\s*[&*][^;{]*/gu)].map(
+      ([text]) => text.trim(),
+    );
+    // Its declaration and its definition.
+    expect(baseReferences).toEqual(
+      Array(2).fill('std::atomic<bool> &WindowsTargetListWorkerRunning()'),
+    );
+    const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
+    expect(uses.length).toBeGreaterThan(0);
+    for (const [, method, args] of uses)
+      expect(
+        method === 'load' || (method === 'store' && (args ?? '').startsWith('false')),
+        `${method}(${args})`,
+      ).toBe(true);
+    expect(source).toContain(
+      'bool compare_exchange_strong(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;',
+    );
+  });
+
   it('uses bounded payment labels in both native risk classifiers', () => {
     const windows = readWindowsHostSource();
     const macos = readFileSync(

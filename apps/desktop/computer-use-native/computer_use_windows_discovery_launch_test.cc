@@ -208,8 +208,19 @@ struct Pipe {
     header.request_id.bytes[0] = id; header.session_id.bytes[0] = 21;
     Check(WriteFrame(client.value, header, metadata), "write");
   }
+  // Request ids whose response said worker cleanup was still running (N5-B2).
+  std::vector<unsigned char> residual;
   std::string Read(unsigned char id, MessageType type) {
     Frame frame; Check(ReadFrame(client.value, &frame), "read");
+    // A retirement may come between responses, but only after a flagged response of the same request.
+    while (frame.header.message_type == static_cast<std::uint16_t>(MessageType::kOperationRetired)) {
+      const auto owner = std::find(residual.begin(), residual.end(), frame.header.request_id.bytes[0]);
+      Check(owner != residual.end() && frame.header.flags == 0 && frame.binary.empty(), "retirement follows flagged reply");
+      residual.erase(owner);
+      Check(ReadFrame(client.value, &frame), "read");
+    }
+    if (frame.header.flags == sprint_coder::computer_use::kResidualWorkFlag) residual.push_back(id);
+    Check(frame.header.flags == 0 || frame.header.flags == sprint_coder::computer_use::kResidualWorkFlag, "reply flags");
     FrameId request, session; request.bytes[0] = id; session.bytes[0] = 21;
     Check(frame.header.request_id.bytes == request.bytes && frame.header.session_id.bytes == session.bytes &&
           frame.header.message_type == static_cast<std::uint16_t>(type), "bound reply");

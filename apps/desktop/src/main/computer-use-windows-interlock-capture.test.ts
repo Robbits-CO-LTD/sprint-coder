@@ -352,9 +352,7 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
 
   it('starts one worker at a time and gives it values only, never the sessions (S5-c-2 PR-1)', () => {
     const body = code(entry);
-    expect(body).toContain(
-      'static std::atomic<bool> *const running = new std::atomic<bool>(false);',
-    );
+    expect(body).toContain('static WindowsWorkerSlot *const running = new WindowsWorkerSlot;');
     // The single-flight flag is taken before anything is copied, and a taken one is a budget answer.
     expect(body).toMatch(
       /if \(running\.exchange\(true\)\) \{\s*unavailable\.no_verdict = InterlockNoVerdict::kBudget;\s*return unavailable;/u,

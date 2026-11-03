@@ -238,12 +238,19 @@ bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tre
 // Both policies abandon immediately on consumer-side Stop, deadline or slow first contact.
 template <class Result, class Measure, class Adopt>
 bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adopt,
-                       std::atomic<bool> &running = WindowsUiaReadWorkerRunning()) {
+                       WindowsWorkerSlot &running = WindowsUiaReadWorkerRunning()) {
   static_assert(std::is_nothrow_move_constructible_v<Result> && std::is_nothrow_move_assignable_v<Result>,
                 "UIA read results must be publishable without throwing.");
   const WindowsV1UiaPath path;
   if (!WindowsV1UiaMayCall()) return false;
   WindowsV1UiaLane snapshot = *windows_v1_uia_lane;
+  // Bound the read and its cleanup without restarting an inherited operation deadline.
+  const auto read_deadline = std::chrono::steady_clock::now() +
+      (&running == &WindowsCaptureWorkerRunning() ? kWindowsV1UiaObserveBudget : kWindowsUiaReadBudget);
+  if (!snapshot.has_deadline) {
+    snapshot.has_deadline = true;
+    snapshot.deadline = read_deadline;
+  }
   auto &control = WindowsTargetListControl();
   if (!snapshot.stop_serial.has_value())
     snapshot.stop_serial = WindowsValidationFrameStopSerial();
@@ -309,12 +316,14 @@ bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adop
             cancellation_epoch.load(std::memory_order_acquire) != snapshot.epoch ||
             control.stop_serial.load(std::memory_order_acquire) != *snapshot.stop_serial)
           external_stop = WindowsV1UiaStop::kCanceled;
-        else if (lane.has_deadline && std::chrono::steady_clock::now() > lane.deadline)
+        else if (snapshot.has_deadline && std::chrono::steady_clock::now() >= snapshot.deadline)
           external_stop = WindowsV1UiaStop::kBudget;
       }
       const auto worker_stop = pending->stop.load(std::memory_order_acquire);
-      if (external_stop == WindowsV1UiaStop::kNone && pending->contact_active &&
-          std::chrono::steady_clock::now() - pending->contact_started >= kWindowsV1UiaSlowContact)
+      if (external_stop == WindowsV1UiaStop::kNone &&
+          (pending->contact_active || (pending->call_active && !lane.has_deadline)) &&
+          std::chrono::steady_clock::now() - pending->contact_started >=
+              (pending->contact_active ? kWindowsV1UiaSlowContact : kWindowsUiaCallBudget))
         external_stop = WindowsV1UiaStop::kTimeout;
       if (external_stop != WindowsV1UiaStop::kNone ||
           (!preserve_stopped_result && worker_stop != WindowsV1UiaStop::kNone)) {

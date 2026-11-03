@@ -29,6 +29,7 @@ import {
   COMPUTER_USE_NATIVE_MAGIC,
   COMPUTER_USE_NATIVE_PROTOCOL_VERSION,
   isKnownComputerUseNativeMessageType,
+  COMPUTER_USE_NATIVE_RESIDUAL_WORK,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
   COMPUTER_USE_NATIVE_MAX_METADATA_BYTES,
   decodeComputerUseNativeFrame,
@@ -402,7 +403,14 @@ type HelperGeneration = {
   cause: 'stop' | 'crash' | 'abortTransport';
   exited: boolean;
   timer?: NodeJS.Timeout;
-  deferredRequests: Array<{ order: number; duration: number; requestId: string }>;
+  deferredRequests: Array<{
+    order: number;
+    duration: number;
+    requestId: string;
+    sessionId: string;
+    /** Answered late with residual work: only a matching operation_retired may forget it. */
+    residual?: true;
+  }>;
   deferredTimer?: NodeJS.Timeout;
 };
 
@@ -419,13 +427,16 @@ class WindowsComputerUseHelperClient {
    * A late answer to a deferred request proves the helper is still serving its queue, so that
    * request no longer counts towards terminating the generation. Its result stays rejected.
    */
-  private forgetDeferredRequest(requestId: string): void {
+  private forgetDeferredRequest(requestId: string, retired = false): void {
     const generation = this.generations.get(this.helperGeneration);
     if (generation === undefined) return;
     const index = generation.deferredRequests.findIndex(
       (request) => request.requestId === requestId,
     );
     if (index === -1) return;
+    // A late answer that still has residual work is not proof that the work ended: its fresh D
+    // stays armed until the helper retires that work.
+    if (generation.deferredRequests[index]!.residual === true && !retired) return;
     generation.deferredRequests.splice(index, 1);
     if (index === 0) {
       clearTimeout(generation.deferredTimer);
@@ -534,6 +545,7 @@ class WindowsComputerUseHelperClient {
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly residual = new Map<string, PendingRequest>();
   private readonly preparingDispatches = new Set<string>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
@@ -887,6 +899,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private shutdownIfIdle(): void {
+    if (this.residual.size !== 0) return;
     if (this.closeLedger?.blocked(this.helperGeneration)) return;
     if (this.hasUnconfirmedSemanticInputs()) return;
     for (const owner of this.discoveries.values())
@@ -1655,7 +1668,11 @@ class WindowsComputerUseHelperClient {
     const socket = this.socket;
     if (socket === null)
       return Promise.reject(new Error('Computer Use Windows helper is disconnected'));
-    if (this.pending.has(requestId.hex) || this.preparingDispatches.has(requestId.hex))
+    if (
+      this.pending.has(requestId.hex) ||
+      this.residual.has(requestId.hex) ||
+      this.preparingDispatches.has(requestId.hex)
+    )
       return Promise.reject(new Error('Computer Use Windows helper request is already pending'));
     const encoded = encodeComputerUseNativeFrame({
       messageType,
@@ -1673,6 +1690,16 @@ class WindowsComputerUseHelperClient {
     const send = (): Promise<unknown> => {
       const result = new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          if (this.residual.get(requestId.hex) === pending) {
+            this.residual.delete(requestId.hex);
+            const generation = this.generations.get(helperGeneration);
+            if (generation !== undefined)
+              this.requestTermination(
+                generation,
+                new Error('Computer Use Windows helper worker timed out'),
+              );
+            return;
+          }
           if (this.pending.get(requestId.hex) !== pending) return;
           // Map insertion order follows sends; a serial consumer may still be serving the head.
           let earlierRequestWithinDeadline = false;
@@ -1703,6 +1730,7 @@ class WindowsComputerUseHelperClient {
                 order: pending.order,
                 duration: timeoutMilliseconds,
                 requestId: requestId.hex,
+                sessionId: sessionId.hex,
               });
               generation.deferredRequests.sort((a, b) => a.order - b.order);
               this.reevaluateDeferredRequests(generation);
@@ -1852,7 +1880,51 @@ class WindowsComputerUseHelperClient {
     }
   }
 
+  /** The deferred entry of the current generation that a late answer or retirement names. */
+  private deferredRequestFor(
+    frame: ComputerUseNativeFrame,
+  ): HelperGeneration['deferredRequests'][number] | undefined {
+    return this.generations
+      .get(this.helperGeneration)
+      ?.deferredRequests.find(
+        (request) =>
+          request.requestId === frame.requestId.hex && request.sessionId === frame.sessionId.hex,
+      );
+  }
+
   private resolveFrame(frame: ComputerUseNativeFrame): void {
+    if (frame.messageType === 'operation_retired') {
+      const residual = this.residual.get(frame.requestId.hex);
+      const deferred = residual === undefined ? this.deferredRequestFor(frame) : undefined;
+      if (residual === undefined && deferred?.residual !== true) return;
+      const value = asRecord(
+        JSON.parse(frame.metadata.toString('utf8')),
+        'Invalid worker retirement',
+      );
+      if (
+        frame.flags !== 0 ||
+        frame.binary.length !== 0 ||
+        frame.cancelId !== null ||
+        Object.keys(value).length !== 1 ||
+        value['helperGeneration'] !== this.helperGeneration
+      )
+        return;
+      if (residual === undefined) {
+        // Its D already passed once; the fresh deferred timer stays the bound until this point.
+        this.forgetDeferredRequest(frame.requestId.hex, true);
+        return;
+      }
+      if (
+        frame.sessionId.hex !== residual.sessionId.hex ||
+        residual.helperGeneration !== this.helperGeneration ||
+        Date.now() >= residual.deadline
+      )
+        return;
+      clearTimeout(residual.timeout);
+      this.residual.delete(frame.requestId.hex);
+      this.shutdownIfIdle();
+      return;
+    }
     if (
       frame.messageType === 'approval_round_trip_event' ||
       frame.messageType === 'background_interaction_event'
@@ -1883,7 +1955,12 @@ class WindowsComputerUseHelperClient {
     }
     const pending = this.pending.get(frame.requestId.hex);
     if (pending === undefined) {
-      this.forgetDeferredRequest(frame.requestId.hex);
+      // Only an answer with no residual work proves the deferred request ended. A flagged late
+      // answer keeps the deferred entry (and its fresh D) until a matching operation_retired.
+      if (frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK) {
+        const deferred = this.deferredRequestFor(frame);
+        if (deferred !== undefined) deferred.residual = true;
+      } else if (frame.flags === 0) this.forgetDeferredRequest(frame.requestId.hex);
       return;
     }
     if (!isWindowsHelperResponseBound(frame, pending)) {
@@ -1897,7 +1974,13 @@ class WindowsComputerUseHelperClient {
       return;
     }
     this.pending.delete(frame.requestId.hex);
-    clearTimeout(pending.timeout);
+    // Keep the original send-time D; a response is not proof that cleanup retired.
+    if (
+      frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK &&
+      this.generations.has(pending.helperGeneration)
+    )
+      this.residual.set(frame.requestId.hex, pending);
+    else clearTimeout(pending.timeout);
     try {
       let parsed = JSON.parse(frame.metadata.toString('utf8')) as unknown;
       if (frame.messageType === 'error') {
@@ -1988,6 +2071,8 @@ class WindowsComputerUseHelperClient {
     // Whatever armed the idle teardown is being failed right here, and the next request connects a
     // fresh helper that the old session's teardown has no claim on.
     this.idleShutdownPending = false;
+    for (const request of this.residual.values()) clearTimeout(request.timeout);
+    this.residual.clear();
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
       if (retainStops && pending.retainAfterKill) continue;
@@ -2165,6 +2250,7 @@ export function isWindowsHelperResponseBound(
   }>,
 ): boolean {
   return (
+    (frame.flags === 0 || frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK) &&
     frame.sessionId.hex === expected.sessionId.hex &&
     (frame.messageType === 'error' || frame.messageType === expected.responseType) &&
     (frame.binary.byteLength === 0 ||

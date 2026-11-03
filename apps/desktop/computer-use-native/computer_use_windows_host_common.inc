@@ -47,6 +47,85 @@ std::uint64_t windows_helper_generation = 0;
 constexpr bool kWindowsApprovalHandlersEnabled = false;
 std::uint64_t MonotonicNowNs();
 
+// BEGIN windows worker slot launches
+// A single-flight worker slot (UIA read, capture, target list, interlock) that numbers every time it is
+// taken. The request whose WindowsResidualRequestScope is installed on the taking thread records that
+// launch, so a response is charged only for workers its own request started: not for a slot an earlier
+// request or the effect shadow holds, and not for one that was released and taken again. The slot is
+// taken only through exchange(true), store(true) or assigning true on this type; a std::atomic<bool>
+// reference to it only loads and releases it.
+class WindowsWorkerSlot;
+struct WindowsWorkerLaunch {
+  const WindowsWorkerSlot *slot = nullptr;
+  std::uint64_t serial = 0;
+};
+// Only the latest launch of a slot can still hold it, so after dropping the ended ones the entries
+// never run out (four slots); `overflow` is kept anyway and then never counts as retired.
+struct WindowsWorkerLaunches {
+  std::array<WindowsWorkerLaunch, 8> entries{};
+  std::size_t count = 0;
+  bool overflow = false;
+  void Add(const WindowsWorkerSlot *slot, std::uint64_t serial) noexcept;
+  [[nodiscard]] WindowsWorkerLaunches Holding() const noexcept;
+  [[nodiscard]] bool Retired() const noexcept { return !overflow && Holding().count == 0; }
+};
+// Set only on the consumer thread, while it serves one request (WindowsResidualRequestScope). So a
+// request owns the launches made on that thread alone: a launch for a request must be made on the
+// consumer thread, or the response is not flagged and Main is never told to wait for that worker.
+// Off it (worker threads, the effect shadow) this stays null and a launch is no request's work.
+thread_local WindowsWorkerLaunches *windows_worker_launches = nullptr;
+
+class WindowsWorkerSlot : public std::atomic<bool> {
+public:
+  WindowsWorkerSlot() noexcept : std::atomic<bool>(false) {}
+  // Hides std::atomic<bool>::exchange: taking the slot numbers the launch and records it.
+  bool exchange(bool desired, std::memory_order order = std::memory_order_seq_cst) noexcept {
+    const bool previous = std::atomic<bool>::exchange(desired, order);
+    if (desired && !previous) {
+      const auto serial = launches_.fetch_add(1, std::memory_order_acq_rel) + 1;
+      if (windows_worker_launches != nullptr) windows_worker_launches->Add(this, serial);
+    }
+    return previous;
+  }
+  // Hides std::atomic<bool>::store: a store of true takes the slot like exchange(true) and is numbered.
+  void store(bool desired, std::memory_order order = std::memory_order_seq_cst) noexcept {
+    if (desired) (void)exchange(true, order == std::memory_order_release ? std::memory_order_acq_rel : order);
+    else std::atomic<bool>::store(false, order);
+  }
+  // No slot is taken by compare-exchange; deleting it keeps every take numbered.
+  bool compare_exchange_strong(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;
+  bool compare_exchange_weak(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;
+  // Assigning true takes the slot like exchange(true), so it is numbered too.
+  bool operator=(bool desired) noexcept {
+    store(desired);
+    return desired;
+  }
+  // Whether the worker started as launch `serial` still holds the slot.
+  [[nodiscard]] bool Holds(std::uint64_t serial) const noexcept {
+    return load(std::memory_order_acquire) && launches_.load(std::memory_order_acquire) == serial;
+  }
+private:
+  std::atomic<std::uint64_t> launches_{0};
+};
+
+inline void WindowsWorkerLaunches::Add(const WindowsWorkerSlot *slot, std::uint64_t serial) noexcept {
+  if (count == entries.size()) *this = Holding();
+  if (count == entries.size()) {
+    overflow = true;
+    return;
+  }
+  entries[count++] = {slot, serial};
+}
+
+inline WindowsWorkerLaunches WindowsWorkerLaunches::Holding() const noexcept {
+  WindowsWorkerLaunches held;
+  held.overflow = overflow;
+  for (std::size_t index = 0; index < count; ++index)
+    if (entries[index].slot->Holds(entries[index].serial)) held.entries[held.count++] = entries[index];
+  return held;
+}
+// END windows worker slot launches
+
 std::atomic<bool> &WindowsTargetListWorkerRunning();
 
 struct CachedResponse {

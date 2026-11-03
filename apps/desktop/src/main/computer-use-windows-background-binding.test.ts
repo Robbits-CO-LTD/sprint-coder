@@ -15,7 +15,7 @@ describe('background binding native entry', () => {
     expect(semantic).toContain('ValidateWindowsBackgroundActionBinding');
     const preflight = native('computer_use_windows_host_preflight.inc');
     expect(
-      preflight.match(/ValidateWindowsBackgroundActionBinding\(session, metadata\)/gu),
+      preflight.match(/ValidateWindowsBackgroundActionBindingWithinFrame\(session, metadata\)/gu),
     ).toHaveLength(2);
     expect(native('computer_use_windows_approval_measurement.h')).toContain(
       'WindowsBackgroundBindingMatches',

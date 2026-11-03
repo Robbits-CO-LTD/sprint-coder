@@ -326,7 +326,7 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     // rejects a stale background target before V1/shadow; it does not rewrite the V1 answer.
     expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(7);
     expect(text).toMatch(
-      /if \(!ValidateWindowsBackgroundActionBinding\(session, metadata\)\) \{\s*return Respond\(pipe, request, MessageType::kPreflightResult,\s*WindowsPreflightReceipt\(session, request_id, cancel_epoch, observation_revision,\s*"denied", "native_stale_target", ""\)\);\s*\}\s*if \(!ValidateWindowsDispatchBinding\(/u,
+      /if \(!ValidateWindowsBackgroundActionBindingWithinFrame\(session, metadata\)\) \{\s*return Respond\(pipe, request, MessageType::kPreflightResult,\s*WindowsPreflightReceipt\(session, request_id, cancel_epoch, observation_revision,\s*"denied", "native_stale_target", ""\)\);\s*\}\s*if \(!ValidateWindowsDispatchBinding\(/u,
     );
     const gated = text.slice(
       text.indexOf('if (WindowsApprovalGate(session))'),
