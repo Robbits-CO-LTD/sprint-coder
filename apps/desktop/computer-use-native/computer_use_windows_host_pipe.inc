@@ -372,8 +372,17 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
             ErrorPayload("HANDSHAKE_REQUIRED"));
     return false;
   }
-  if (!admission_error.empty() && type != MessageType::kHandshake)
-    return Respond(pipe, request, MessageType::kError, ErrorPayload(admission_error));
+  if (!admission_error.empty() && type != MessageType::kHandshake) {
+    std::string operation;
+    WindowsStartResult start_result;
+    if (type == MessageType::kProbe && ReadJsonString(metadata, "operation", &operation) &&
+        operation == "start_session") start_result = ReadWindowsStartResult(metadata);
+    // Admission can reject a conflicting retry after an earlier attempt. This invocation's zero
+    // counter cannot certify that the request/session has never caused foreground effects.
+    start_result.execution_unknown = true;
+    return Respond(pipe, request, MessageType::kError,
+        AppendWindowsStartResult(ErrorPayload(admission_error), start_result, false));
+  }
   if (type != MessageType::kHandshake) {
     bool replayed = false;
     if (!ReplayCachedResponse(pipe, request, &replayed))
@@ -424,6 +433,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     std::string response;
     std::string reason;
     bool succeeded = false;
+    auto start_result = std::make_shared<WindowsStartResult>();
     if (operation == "probe") {
       response = ProbeJson(probe);
       succeeded = true;
@@ -451,10 +461,15 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                                        discovery.lease, &response, &reason);
     } else if (operation == "list_targets") {
       // S5-c-3 PR-5: unsupported_operation in a v1 build.
-      succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);
+      bool include_start_identity = false;
+      if (!ReadOptionalJsonBoolean(metadata, "includeStartIdentity", &include_start_identity))
+        reason = "list_targets_input_invalid";
+      else succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial, include_start_identity);
     } else if (operation == "start_session") {
+      *start_result = ReadWindowsStartResult(metadata);
       if (!admission_error.empty()) reason = admission_error;
-      else succeeded = StartWindowsSession(request, metadata, &response, &reason, queued_stop_serial, std::move(start_lease));
+      else succeeded = StartWindowsSession(request, metadata, &response, &reason, queued_stop_serial,
+                                           std::move(start_lease), start_result);
     } else if (operation == "stop_pending_start") {
       succeeded = StopPendingWindowsStart(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
@@ -464,13 +479,15 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       reason = "unsupported_operation";
     }
     if (!succeeded && reason == "semantic_input_in_flight") {
-      if (!Respond(pipe, request, MessageType::kError, ErrorPayload(reason))) return false;
+      if (!Respond(pipe, request, MessageType::kError,
+                   AppendWindowsStartResult(ErrorPayload(reason), *start_result, false))) return false;
       break;
     }
     if (!RespondAndCache(
             pipe, request,
             succeeded ? MessageType::kProbeResult : MessageType::kError,
-            succeeded ? std::move(response) : ErrorPayload(reason)))
+            AppendWindowsStartResult(succeeded ? std::move(response) : ErrorPayload(reason),
+                                     *start_result, succeeded)))
       return false;
     break;
   }

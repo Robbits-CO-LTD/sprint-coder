@@ -618,7 +618,8 @@ std::string WindowsV2RefusedRow(sprint_coder::computer_use::TargetVerdictKind ki
 std::string WindowsV2SelectableRow(const WindowsV2Judgement &judgement,
                                    const sprint_coder::computer_use::TargetVerdict &verdict,
                                    const sprint_coder::computer_use::TargetFacts &facts,
-                                   const WindowsV2RowWindow &window) {
+                                   const WindowsV2RowWindow &window,
+                                   bool include_start_identity = false) {
   using namespace sprint_coder::computer_use;
   if (!WindowsV2FactsWithinContract(facts) || !WindowsV2IdentityWithinContract(judgement) ||
       window.title.empty() || window.title.size() > 256)
@@ -639,7 +640,8 @@ std::string WindowsV2SelectableRow(const WindowsV2Judgement &judgement,
          ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
          std::string(verdict.maximum_mode) + "\",\"identity\":" +
          WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
-         ",\"facts\":" + WindowsV2TargetFactsJson(facts) + "}";
+         ",\"facts\":" + WindowsV2TargetFactsJson(facts) +
+         (include_start_identity ? ",\"processStartTime\":\"" + judgement.process_start + "\"" : "") + "}";
 }
 
 // The refused rows: the kind only.
@@ -775,7 +777,8 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
                                 const std::function<bool()> &still_valid,
                                 const std::function<bool()> &context_valid,
                                 WindowsTargetListPending *pending,
-                                std::string *response, std::string *reason) {
+                                std::string *response, std::string *reason,
+                                bool include_start_identity = false) {
   using namespace sprint_coder::computer_use;
   // Without Main's pid there is no lineage root: nothing is enumerated or measured.
   if (windows_v2_main_pid == 0 || !context_valid()) return false;
@@ -887,7 +890,7 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
     row_window.client = client;
     row_window.screen = screen;
     if (!still_valid()) return false;
-    rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));
+    rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window, include_start_identity));
   }
   if (!truncated) remaining = 0;
   publish();
@@ -898,7 +901,8 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
 }
 
 bool ListWindowsTargets(std::string *response, std::string *reason,
-                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
+                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
+                        bool include_start_identity = false) {
   if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
     (void)response;
     *reason = "unsupported_operation";
@@ -926,7 +930,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
     if (!still_valid() || control.running.exchange(true, std::memory_order_acq_rel))
       return false;
     try {
-      std::thread([pending, still_valid, context_valid, expected_stop, generation] {
+      std::thread([pending, still_valid, context_valid, expected_stop, generation, include_start_identity] {
         bool succeeded = false;
         std::string built;
         std::string failure = "list_targets_unavailable";
@@ -945,7 +949,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
             }
             if (context_valid())
               succeeded = MeasureWindowsV2TargetList(generation, expected_stop, still_valid, context_valid,
-                                                    pending.get(), &built, &failure);
+                                                    pending.get(), &built, &failure, include_start_identity);
           }
         } catch (...) {
           succeeded = false;
@@ -1330,6 +1334,8 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
 }
 // BEGIN windows shared new start
 struct WindowsStartInput {
+  std::string expected_process_start;
+  std::shared_ptr<WindowsStartResult> start_result = std::make_shared<WindowsStartResult>();
   sprint_coder::computer_use::EligibilityBasis eligibility_basis =
       sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
   std::shared_ptr<WindowsStartLease> start_lease;
@@ -1628,21 +1634,35 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     session.start_owner = input.start_lease->owner;
     session.input_api_attempts = input.start_lease->owner->input_api_attempts;
   }
-  const auto begin_focus = [&] {
+  const auto identity_matches = [&](HWND focus_window) {
+    if (CheckWindowsStartFocusIdentity(pending->process, input.pid, input.expected_process_start,
+        measured.process_start, input.window, focus_window, input.app_identity, input.expected_window_identity))
+      return true;
+    *reason = "session_identity_changed";
+    return false;
+  };
+  if (!identity_matches(input.window)) return false;
+  const auto begin_focus = [&](HWND focus_window) {
+    // Potentially blocking identity queries must not hold the reader's Stop lock.
+    if (!CheckWindowsStartFocusIdentity(pending->process, input.pid, input.expected_process_start,
+        measured.process_start, input.window, focus_window, input.app_identity, input.expected_window_identity)) {
+      *reason = "session_identity_changed"; return false;
+    }
     std::lock_guard stop_lock(control.stop_mutex);
     if (!start_valid()) {
       *reason = "session_start_canceled";
       return false;
     }
     session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+    ++input.start_result->attempt_count;
     return true;
   };
   if (GetForegroundWindow() != input.window) {
     if (IsIconic(input.window)) {
-      if (!begin_focus()) return false;
+      if (!begin_focus(input.window)) return false;
       ShowWindow(input.window, SW_RESTORE);
     }
-    if (!begin_focus()) return false;
+    if (!begin_focus(input.window)) return false;
     SetForegroundWindow(input.window);
   }
   RECT bounds{};
@@ -2115,23 +2135,32 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     return false;
   }
   if (!check_current()) return false;
-  const auto begin_focus = [&] {
+  if (!CheckWindowsStartFocusIdentity(session.process_handle, input.pid, input.expected_process_start,
+      session.process_start, input.window, refocus_window, input.app_identity, input.expected_window_identity)) {
+    *reason = "session_identity_changed"; return false;
+  }
+  const auto begin_focus = [&](HWND focus_window) {
+    if (!CheckWindowsStartFocusIdentity(session.process_handle, input.pid, input.expected_process_start,
+        session.process_start, input.window, focus_window, input.app_identity, input.expected_window_identity)) {
+      *reason = "session_identity_changed"; return false;
+    }
     // Existing start focus unit begins under the reader's Stop lock.
     std::lock_guard stop_lock(control.stop_mutex);
     if (!current()) { *reason = "session_start_canceled"; return false; }
     session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+    ++input.start_result->attempt_count;
     return true;
   };
   if (GetForegroundWindow() != refocus_window) {
     if (IsIconic(input.window)) {
-      if (!begin_focus()) return false;
+      if (!begin_focus(input.window)) return false;
       ShowWindow(input.window, SW_RESTORE);
     }
     if (refocus_window != input.window && IsIconic(refocus_window)) {
-      if (!begin_focus()) return false;
+      if (!begin_focus(refocus_window)) return false;
       ShowWindow(refocus_window, SW_RESTORE);
     }
-    if (!begin_focus()) return false;
+    if (!begin_focus(refocus_window)) return false;
     SetForegroundWindow(refocus_window);
   }
   RECT bounds{};

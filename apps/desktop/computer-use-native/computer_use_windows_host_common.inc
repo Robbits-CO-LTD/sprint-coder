@@ -490,6 +490,7 @@ struct WindowsDiscoveryParameters {
   std::string identity;
   std::string executable_digest;
   std::string signer_digest;
+  bool include_start_identity = false;
 };
 
 struct WindowsDiscoveryStringField {
@@ -499,7 +500,8 @@ struct WindowsDiscoveryStringField {
 };
 
 bool ReadWindowsDiscoveryFields(std::string_view metadata,
-                                std::span<WindowsDiscoveryStringField> fields) {
+                                std::span<WindowsDiscoveryStringField> fields,
+                                bool* include_start_identity = nullptr) {
   std::size_t cursor = 0;
   const auto space = [&] {
     while (cursor < metadata.size() && (metadata[cursor] == ' ' || metadata[cursor] == '\t' ||
@@ -507,21 +509,36 @@ bool ReadWindowsDiscoveryFields(std::string_view metadata,
   };
   space();
   if (cursor >= metadata.size() || metadata[cursor++] != '{') return false;
-  for (std::size_t member = 0; member < fields.size(); ++member) {
+  bool identity_seen = false;
+  if (include_start_identity) *include_start_identity = false;
+  for (std::size_t member = 0; member <= fields.size(); ++member) {
     space(); std::string key, value;
     if (!ReadJsonStringValueAt(metadata, &cursor, &key)) return false;
     space(); if (cursor >= metadata.size() || metadata[cursor++] != ':') return false;
-    space(); if (!ReadJsonStringValueAt(metadata, &cursor, &value)) return false;
-    const auto field = std::find_if(fields.begin(), fields.end(),
-        [&](const auto& candidate) { return candidate.key == key; });
-    if (field == fields.end() || field->seen) return false;
-    field->seen = true; *field->value = std::move(value);
     space();
-    if (cursor >= metadata.size() ||
-        metadata[cursor++] != (member + 1 == fields.size() ? '}' : ',')) return false;
+    if (key == "includeStartIdentity" && include_start_identity && !identity_seen) {
+      identity_seen = true;
+      if (metadata.substr(cursor, 4) == "true") { *include_start_identity = true; cursor += 4; }
+      else if (metadata.substr(cursor, 5) == "false") cursor += 5;
+      else return false;
+    } else {
+      if (!ReadJsonStringValueAt(metadata, &cursor, &value)) return false;
+      const auto field = std::find_if(fields.begin(), fields.end(),
+          [&](const auto& candidate) { return candidate.key == key; });
+      if (field == fields.end() || field->seen) return false;
+      field->seen = true; *field->value = std::move(value);
+    }
+    space();
+    if (cursor >= metadata.size()) return false;
+    const char separator = metadata[cursor++];
+    if (separator == '}') {
+      space();
+      return cursor == metadata.size() && std::all_of(fields.begin(), fields.end(),
+          [](const auto& field) { return field.seen; });
+    }
+    if (separator != ',') return false;
   }
-  space();
-  return cursor == metadata.size();
+  return false;
 }
 
 bool ReadWindowsDiscoveryQuery(std::string_view metadata, WindowsDiscoveryParameters* output) {
@@ -539,7 +556,7 @@ bool ReadWindowsDiscoveryQuery(std::string_view metadata, WindowsDiscoveryParame
       return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     });
   };
-  return ReadWindowsDiscoveryFields(metadata, fields) && operation == "list_windows_cancellable" &&
+  return ReadWindowsDiscoveryFields(metadata, fields, &output->include_start_identity) && operation == "list_windows_cancellable" &&
       !output->id.empty() && output->id.size() <= 256 && !output->canonical_path.empty() &&
       digest(output->identity) && digest(output->executable_digest) &&
       (output->signer_digest.empty() || digest(output->signer_digest));

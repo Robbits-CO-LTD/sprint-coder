@@ -21,7 +21,7 @@ const consumer =
   '    if (!HandlePipeRequest(pipe, probe, queued.frame, &handshaken, queued.stop_serial,';
 const uiaContact =
   'WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });';
-const startReady = '  const auto begin_focus = [&] {';
+const startReady = '  const auto begin_focus = [&](HWND focus_window) {';
 const startAdopt = '  // Stop and final start adoption share this lock.';
 const startEpilogue =
   '        // Adopted handles belong to the session; this worker must not release the shared slot.';
@@ -154,8 +154,8 @@ function instrumentedHost(): string {
   );
   resume = replaceOnce(
     resume,
-    '  const auto begin_focus = [&] {',
-    '  Sc940ResumePrepareFocus(input.window);\n  const auto begin_focus = [&] {',
+    '  const auto begin_focus = [&](HWND focus_window) {',
+    '  Sc940ResumePrepareFocus(input.window);\n  const auto begin_focus = [&](HWND focus_window) {',
   );
   resume = replaceOnce(resume, 'ResolveWindowsExplicitResumeTarget(', 'Sc940ResumeResolve(');
   resume = replaceOnce(resume, 'ResolveWindowsSessionRefocusTarget(', 'Sc940ResumeRefocus(');

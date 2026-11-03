@@ -53,13 +53,17 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
       [
         '    } else if (operation == "list_targets") {',
         '      // S5-c-3 PR-5: unsupported_operation in a v1 build.',
-        '      succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);',
+        '      bool include_start_identity = false;',
+        '      if (!ReadOptionalJsonBoolean(metadata, "includeStartIdentity", &include_start_identity))',
+        '        reason = "list_targets_input_invalid";',
+        '      else succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial, include_start_identity);',
       ].join('\n'),
     );
     expect(v2Block).toContain(
       [
         'bool ListWindowsTargets(std::string *response, std::string *reason,',
-        '                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {',
+        '                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt,',
+        '                        bool include_start_identity = false) {',
         '  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {',
         '    (void)response;',
         '    *reason = "unsupported_operation";',
@@ -77,7 +81,9 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     // dispatcher answers a false with ErrorPayload(reason)) and the pipe stays up.
     expect(v2Block).toContain('if (built.empty() || built.size() > kMaxMetadataBytes) {');
     expect(v2Block).toContain('*reason = "list_targets_unavailable";');
-    expect(host).toContain('succeeded ? std::move(response) : ErrorPayload(reason)))');
+    expect(host).toContain(
+      'AppendWindowsStartResult(succeeded ? std::move(response) : ErrorPayload(reason),',
+    );
   });
 
   it('gives a refused row its kind and nothing else', () => {
@@ -105,7 +111,7 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     // Each row carries its own window's mode and facts; no row is refused for another window's.
     expect(list).not.toContain('judgement.verdict');
     expect(list).toContain(
-      'rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));',
+      'rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window, include_start_identity));',
     );
     const builder = cut(
       'std::string WindowsV2SelectableRow(',
