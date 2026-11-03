@@ -96,11 +96,8 @@ describe('Windows native start ownership table', () => {
             'std::atomic<bool> &WindowsTargetListWorkerRunning() {',
           ) +
           retirementPreamble +
-          cut(
-            '// Rejected candidates are closed on this worker before another measurement can begin.',
-            '    }).detach();',
-          ) +
-          '\n}\n' +
+          cut('  struct Slot {', '  ScopedKernelHandle target_process;') +
+          '\n}\npending->changed.notify_one();\n}\n' +
           driver,
       );
       const compiled = spawnSync(build.file, build.args, {
@@ -134,15 +131,19 @@ const preamble = String.raw`
 #include <unordered_map>
 #include <vector>
 constexpr std::size_t kMaximumCachedResponses=256;
+// This ownership-only seam has no measurement thread; the new-start component covers cancellation.
+using HANDLE = void*;
+bool CancelSynchronousIo(HANDLE){throw std::runtime_error("unexpected measurement cancellation");}
 struct WindowsTargetListState {
   std::mutex stop_mutex;
+  HANDLE new_start_thread = nullptr;
   std::atomic<std::uint64_t> stop_serial{0};
   std::shared_ptr<int> context_candidate;
 };
 WindowsTargetListState& WindowsTargetListControl(){static auto* state=new WindowsTargetListState;return *state;}
 `;
-// Execute the production rejection-publication tail with its real start lease. The notifier
-// parks the worker after idle publication but before the captured/argument lease can destruct.
+// Execute the production slot retirement with its real start lease. The notifier parks
+// the worker after idle publication but before the argument lease can destruct.
 const retirementPreamble = String.raw`
 std::atomic<bool>& WindowsTargetListWorkerRunning(){static std::atomic<bool> running{true};return running;}
 struct RetirementNotification {
@@ -150,8 +151,9 @@ struct RetirementNotification {
   void notify_one(){entered.store(true,std::memory_order_release);while(!release.load(std::memory_order_acquire))std::this_thread::yield();}
 };
 struct RetirementPending { std::mutex mutex; bool ready=false; RetirementNotification changed; };
-struct RetirementInput { std::shared_ptr<WindowsStartLease> start_lease; };
-void PublishRejectedStart(RetirementInput input,std::shared_ptr<RetirementPending> pending) {
+struct WindowsStartInput { std::shared_ptr<WindowsStartLease> start_lease; };
+void PublishRejectedStart(WindowsStartInput input,std::shared_ptr<RetirementPending> pending) {
+  {
 `;
 const driver = String.raw`
 void Check(bool value,const char* message){if(!value)throw std::runtime_error(message);}

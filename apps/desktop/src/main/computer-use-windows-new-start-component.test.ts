@@ -90,7 +90,6 @@ function componentSource(): string {
     CaptureWindowsBackgroundStartDialogs: 'ComponentBackgroundDialogs',
     OpenProcess: 'ComponentOpenProcess',
     OpenLockedProcessExecutable: 'ComponentOpenExecutable',
-    DuplicateHandle: 'ComponentDuplicateHandle',
     IsProcessElevated: 'ComponentElevated',
     IsWindow: 'ComponentWindow',
     IsApplicationWindow: 'ComponentApplicationWindow',
@@ -113,8 +112,8 @@ function componentSource(): string {
   }
   shared = replaceOne(
     shared,
-    '    std::thread([pending, input]() mutable {',
-    '    ComponentBeforeThread();\n    std::thread([pending, input]() mutable {\n      ComponentWorkerLifetime worker_lifetime;',
+    '    struct Apartment {',
+    '    ComponentBeforeMeasurement();\n    struct Apartment {',
   );
   const adoption = '  // Stop and final start adoption share this lock.';
   shared = replaceOne(shared, adoption, '  ComponentBeforeAdopt();\n' + adoption);
@@ -127,13 +126,26 @@ function componentSource(): string {
     .replaceAll('GetWindowThreadProcessId(', 'ComponentWindowOwner(')
     .replaceAll('IsWindow(', 'ComponentWindow(');
   const prefix = source.slice(0, identityBegin) + identity + source.slice(identityEnd, begin);
-  return (prefix + shared + source.slice(end)).replaceAll('CloseHandle(', 'ComponentCloseHandle(');
+  return (prefix + shared + source.slice(end))
+    .replaceAll('CloseHandle(', 'ComponentCloseHandle(')
+    .replaceAll('DuplicateHandle(', 'ComponentDuplicateHandle(')
+    .replaceAll('CancelSynchronousIo(', 'ComponentCancelSynchronousIo(');
 }
 
-it('limits component substitutions to the shared worker and retains real eligibility predicates', () => {
+it('limits component substitutions to the shared measurement and retains real eligibility predicates', () => {
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');
+});
+
+it('registers cancellation only for measurement and refuses occupied sessions before I/O', () => {
+  expect(source).toContain('HANDLE new_start_thread = nullptr;');
+  expect(source).toContain('CancelSynchronousIo(control.new_start_thread)');
+  const start = source.slice(source.indexOf('bool StartWindowsNewSession('));
+  expect(start.indexOf('if (!sessions.empty())')).toBeLessThan(
+    start.indexOf('MeasureWindowsNewStart(input'),
+  );
+  expect(start).toContain('WindowsNewStartIoRegistration cancellation;');
 });
 
 describe.skipIf(process.platform !== 'win32')('Windows shared new-start component matrix', () => {
@@ -211,7 +223,7 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
       });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: 58 component cases, controlled focus only, no OS input',
+        'PASS: 66 component cases, controlled focus only, no OS input',
       );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

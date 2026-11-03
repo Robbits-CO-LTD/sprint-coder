@@ -22,6 +22,7 @@ struct WindowsTargetFactsContext;
 HANDLE ComponentOpenProcess(DWORD access, BOOL inherit, DWORD pid);
 bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output);
 BOOL ComponentCloseHandle(HANDLE handle);
+BOOL ComponentCancelSynchronousIo(HANDLE thread);
 BOOL ComponentDuplicateHandle(HANDLE source_process, HANDLE source, HANDLE target_process,
                               LPHANDLE target, DWORD access, BOOL inherit, DWORD options);
 WindowsTargetFactsContext ComponentContext(std::uint32_t pid);
@@ -42,9 +43,8 @@ BOOL ComponentShow(HWND, int);
 BOOL ComponentFocus(HWND);
 HRESULT ComponentCoInitialize(LPVOID, DWORD);
 void ComponentCoUninitialize();
-void ComponentBeforeThread();
+void ComponentBeforeMeasurement();
 void ComponentBeforeAdopt();
-struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLifetime(); };
 }
 #define wmain ProductionHostMain
 #include "component-host.cc"
@@ -70,25 +70,35 @@ struct Case {
   bool supervised_ceiling = false;
   bool bound_start = false, bad_start = false, identity_read_failure = false;
   bool window_replaced = false, late_window = false, stop_identity = false;
-  bool iconic = false, focus_failure = false;
+  bool iconic = false, focus_failure = false, stop_after_restore = false, stop_after_focus = false;
   unsigned expected_focus_calls = 0;
   bool v2 = false, unsigned_image = false, bad_signer = false, bad_digest = false;
   bool bad_identity = false, bad_path = false, bad_window_identity = false;
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
   bool bad_before_geometry = false, changed_after_geometry = false, resume = false;
   bool stop_during_read = false, parent_during_read = false, io_failure = false;
-  bool thread_failure = false, allocation_failure = false, com_failure = false;
+  bool measurement_failure = false, allocation_failure = false, com_failure = false;
+  bool latch_during_read = false;
+  bool occupied = false;
   std::uint64_t global_epoch = 0, closed_epoch = 0, input_epoch = 0;
   std::optional<std::uint64_t> adopt_epoch;
 };
 Case current;
 unsigned identity_reads = 0, background_reads = 0;
 std::wstring canonical;
-std::atomic<unsigned> workers{0}, reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
+std::atomic<unsigned> reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
 std::mutex handles_mutex;
 std::set<HANDLE> tracked_handles;
 unsigned case_count = 0;
+unsigned cancel_calls = 0;
+DWORD consumer_thread = 0;
 void Check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+BOOL ComponentCancelSynchronousIo(HANDLE thread) {
+  Check(GetThreadId(thread) == consumer_thread,
+        "cancellation uses a real thread handle");
+  ++cancel_calls;
+  return TRUE;
+}
 void Track(HANDLE handle) {
   if (handle == nullptr || handle == INVALID_HANDLE_VALUE) return;
   std::lock_guard lock(handles_mutex); tracked_handles.insert(handle);
@@ -108,6 +118,14 @@ BOOL ComponentDuplicateHandle(HANDLE sp, HANDLE source, HANDLE tp, LPHANDLE targ
   if (copied) Track(*target); return copied;
 }
 bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
+  if (current.latch_during_read) {
+    const auto owner = WindowsStarts().input_owner;
+    Check(owner != nullptr, "start owns cancellation");
+    std::thread reader([&] { LatchWindowsPendingStop(owner->session_key, owner->session_id); });
+    reader.join();
+    Check(cancel_calls == 1, "Stop cancels the registered measurement thread");
+    return false;
+  }
   if (current.io_failure) return false;
   const bool opened = OpenLockedProcessExecutable(process, output);
   if (!opened) return false;
@@ -174,26 +192,27 @@ HWND ComponentForeground() { return reinterpret_cast<HWND>(static_cast<UINT_PTR>
 BOOL ComponentEnabled(HWND) { return TRUE; }
 bool ComponentTakeover(HWND) { return false; }
 BOOL ComponentIconic(HWND) { return current.iconic ? TRUE : FALSE; }
-BOOL ComponentShow(HWND, int) { input_calls.fetch_add(1); return TRUE; }
-BOOL ComponentFocus(HWND) { input_calls.fetch_add(1); return TRUE; }
+BOOL ComponentShow(HWND, int) {
+  input_calls.fetch_add(1);
+  if (current.stop_after_restore) WindowsTargetListControl().stop_serial.fetch_add(1);
+  return TRUE;
+}
+BOOL ComponentFocus(HWND) {
+  input_calls.fetch_add(1);
+  if (current.stop_after_focus) WindowsTargetListControl().stop_serial.fetch_add(1);
+  return TRUE;
+}
 HRESULT ComponentCoInitialize(LPVOID reserved, DWORD flags) {
   com_calls.fetch_add(1); return current.com_failure ? E_FAIL : ::CoInitializeEx(reserved, flags);
 }
 void ComponentCoUninitialize() { com_releases.fetch_add(1); ::CoUninitialize(); }
-void ComponentBeforeThread() { if (current.thread_failure) throw std::runtime_error("thread failure"); }
+void ComponentBeforeMeasurement() { if (current.measurement_failure) throw std::runtime_error("measurement failure"); }
 void ComponentBeforeAdopt() {
   if (current.allocation_failure) throw std::bad_alloc();
   if (current.adopt_epoch) {
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
     cancellation_epoch.store(*current.adopt_epoch); last_closed_cancel_epoch = *current.adopt_epoch;
   }
-}
-ComponentWorkerLifetime::ComponentWorkerLifetime() { workers.fetch_add(1); }
-ComponentWorkerLifetime::~ComponentWorkerLifetime() { workers.fetch_sub(1); }
-void WaitWorkers() {
-  const auto until = GetTickCount64() + 5000;
-  while ((workers.load() != 0 || WindowsTargetListWorkerRunning().load()) && GetTickCount64() < until) Sleep(1);
-  Check(workers.load() == 0 && !WindowsTargetListWorkerRunning().load(), "worker retirement");
 }
 void CheckStartContract() {
   using sprint_coder::computer_use::WindowsBackgroundStartFacts;
@@ -304,10 +323,24 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   input.expected_window_identity = config.bad_window_identity ? std::string(64, 'f') :
       Sha256String("computer-window-identity-v1\n" + input.app_identity + "\n" + created + "\n1");
   ticket_states[input.session_key].generation = 10;
+  if (config.occupied) sessions.try_emplace("synthetic-active-session");
+  cancel_calls = 0;
+  if (config.latch_during_read) {
+    std::string admission_reason;
+    input.start_lease = AdmitWindowsStart(input.session_key, input.session_id,
+        "synthetic-request", std::string(64, 'a'), &admission_reason);
+    Check(input.start_lease && ClaimWindowsStartInput(input.start_lease), "start admission");
+  }
   std::string response, failure; bool succeeded = false;
   try { succeeded = StartWindowsNewSession(input, &response, &failure); }
   catch (const std::bad_alloc&) { Check(config.allocation_failure, "unexpected allocation error"); failure = "allocation_failure"; }
-  WaitWorkers();
+  if (config.latch_during_read) {
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    Check(WindowsTargetListControl().new_start_thread == nullptr, "measurement unregisters before return");
+    CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());
+    Check(cancel_calls == 1, "later Stop cannot cancel unrelated consumer I/O");
+  }
+  Check(!WindowsTargetListWorkerRunning().load(), "synchronous measurement releases slot");
   Check(succeeded == expected, name);
   if (!expected) Check(failure == reason, "expected refusal reason");
   Check(ticket_states[input.session_key].generation == 10 + ticket_calls, "ticket invalidation count");
@@ -350,7 +383,8 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     WindowsFileIdentity actual;
     Check(ReadWindowsFileIdentity(session.executable_file, &actual) && actual.volume_serial == session.executable_volume_serial &&
           std::memcmp(actual.file_id.Identifier, session.executable_file_id.Identifier, sizeof(actual.file_id.Identifier)) == 0, "real held FileId handoff");
-  } else Check(sessions.empty(), "refusal cannot adopt");
+  } else Check(sessions.size() == (config.occupied ? 1u : 0u), "refusal cannot adopt");
+  if (config.occupied) Check(reads == 0 && com_calls == 0, "occupied session refuses before measurement");
   for (auto& entry : sessions) ReleaseWindowsSessionResources(&entry.second);
   sessions.clear(); ticket_states.clear();
   { std::lock_guard lock(handles_mutex); Check(tracked_handles.empty(), "all tracked handles released once"); }
@@ -359,10 +393,20 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
 }
 int wmain() {
   try {
+    Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "production consumer STA");
+    consumer_thread = GetCurrentThreadId();
     CheckStartContract();
     std::vector<wchar_t> system(32768); const auto length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
     Check(length != 0 && length < system.size(), "system directory"); canonical.assign(system.data(), length); canonical += L"\\notepad.exe";
     Run("v1-normal", {}, true, "", 2);
+    Case stopped; stopped.latch_during_read = true;
+    Run("v1-latched-stop-during-measurement", stopped, false, "session_start_canceled", 0);
+    stopped.v2 = true;
+    Run("v2-latched-stop-during-measurement", stopped, false, "session_start_canceled", 0);
+    Case occupied; occupied.occupied = true;
+    Run("v1-occupied-before-measurement", occupied, false, "session_limit", 0);
+    occupied.v2 = true;
+    Run("v2-occupied-before-measurement", occupied, false, "session_limit", 0);
     Case c; c.unsigned_image = true; Run("v1-unsigned", c, false, "session_target_rejected", 0);
     c = {}; c.bad_signer = true; Run("v1-signer", c, false, "session_target_rejected", 0);
     c = {}; c.bad_digest = true; Run("v1-digest", c, false, "session_target_rejected", 0);
@@ -384,7 +428,7 @@ int wmain() {
     c = {}; c.stop_during_read = true; Run("v1-stop-during-read", c, false, "session_start_canceled", 0);
     c = {}; c.parent_during_read = true; Run("v1-parent-during-read", c, false, "session_start_canceled", 0);
     c = {}; c.io_failure = true; Run("v1-io-failure", c, false, "session_target_rejected", 0);
-    c = {}; c.thread_failure = true; Run("v1-thread-failure", c, false, "session_target_rejected", 0);
+    c = {}; c.measurement_failure = true; Run("v1-measurement-exception", c, false, "session_target_rejected", 0);
     c = {}; c.allocation_failure = true; Run("v1-allocation-failure", c, false, "allocation_failure", 1);
     c = {}; c.com_failure = true; Run("v1-no-com-dependency", c, true, "", 2);
     c = {}; c.v2 = true; Run("v2-normal", c, true, "", 1);
@@ -405,6 +449,10 @@ int wmain() {
       Run("bound-change-after-restore", c, false, "session_identity_changed", 1);
       c.iconic = false; c.late_window = false; c.focus_failure = true;
       Run("bound-failure-after-focus", c, false, "focus_required", 1);
+      c.focus_failure = false; c.iconic = true; c.stop_after_restore = true;
+      Run("bound-stop-after-restore-no-next-input", c, false, "session_start_canceled", 1);
+      c.iconic = false; c.stop_after_restore = false; c.stop_after_focus = true;
+      Run("bound-stop-after-focus-no-adoption", c, false, "session_start_canceled", 1);
     }
     c = {}; c.v2 = true; c.background_gate = true;
     Run("BG08-already-foreground", c, true, "", 1);
@@ -426,6 +474,7 @@ int wmain() {
     Run("BG08-v1-new-start-never-autofocus", c, false, "focus_required", 1);
     c.background_supported = true;
     Run("BG-v1-background-start", c, true, "", 2);
+    CoUninitialize();
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }

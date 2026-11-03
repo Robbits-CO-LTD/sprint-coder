@@ -770,6 +770,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           // A new Close must stop discovery even when its epoch equals the current input epoch.
           control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
           control.context_candidate.reset();
+          CancelWindowsNewStartMeasurementLocked(control);
           // Close invalidates discovery here, but only its consumer owns session epochs. A retry
           // for an already-closed session must not cancel another session or raise the input epoch
           // beyond last_closed_cancel_epoch and prevent a fresh epoch-zero start.

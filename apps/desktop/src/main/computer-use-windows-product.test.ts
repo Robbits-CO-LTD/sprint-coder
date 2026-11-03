@@ -55,14 +55,15 @@ describe('PR10a product wiring', () => {
     const open = vi.fn(() => {
       throw new Error('must not open');
     });
-    expect(
-      configureWindowsKillStop({
-        platform: 'win32',
-        userData: 'C:/synthetic',
-        enabled: false,
-        open,
-      }).options,
-    ).toEqual({});
+    // N5-G: no old path remains, so a disabled Windows build is unavailable (no ledger).
+    const disabled = configureWindowsKillStop({
+      platform: 'win32',
+      userData: 'C:/synthetic',
+      enabled: false,
+      open,
+    }).options;
+    expect(disabled).toMatchObject({ windowsKillStopTermination: { enabled: true } });
+    expect(disabled.windowsLedger).toBeUndefined();
     expect(
       configureWindowsKillStop({ platform: 'darwin', userData: '/synthetic', enabled: true, open })
         .options,
