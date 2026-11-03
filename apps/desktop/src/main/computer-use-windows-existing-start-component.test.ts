@@ -115,13 +115,8 @@ function componentSource(): string {
   }
   shared = replaceOne(
     shared,
-    '    std::thread(WindowsExistingStartWorker, std::move(work)).detach();',
-    '    ComponentBeforeThread();\n    std::thread(WindowsExistingStartWorker, std::move(work)).detach();',
-  );
-  shared = replaceOne(
-    shared,
-    'void WindowsExistingStartWorker(std::unique_ptr<WindowsExistingStartWork> work) {',
-    'void WindowsExistingStartWorker(std::unique_ptr<WindowsExistingStartWork> work) {\n  ComponentWorkerLifetime lifetime;',
+    '    WindowsNewStartIoRegistration cancellation;',
+    '    ComponentBeforeMeasurement();\n    WindowsNewStartIoRegistration cancellation;',
   );
   shared = replaceOne(
     shared,
@@ -140,7 +135,7 @@ function componentSource(): string {
   return (prefix + shared + source.slice(end)).replaceAll('CloseHandle(', 'ComponentCloseHandle(');
 }
 
-it('limits component substitutions to the shared worker and retains real eligibility predicates', () => {
+it('limits component substitutions to the shared measurement and retains real eligibility predicates', () => {
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');

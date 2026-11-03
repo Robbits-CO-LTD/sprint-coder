@@ -1863,16 +1863,6 @@ struct WindowsExistingStartMeasurement {
   std::string reason = "session_target_rejected";
 };
 
-struct WindowsExistingStartPending {
-  std::mutex mutex;
-  std::condition_variable ready;
-  std::atomic<bool> abandoned{false};
-  bool done = false;
-  // This job alone owns the cancellation handle; it is closed on its worker before publication.
-  ScopedKernelHandle thread;
-  WindowsExistingStartMeasurement result;
-};
-
 struct WindowsExistingStartWork {
   WindowsStartInput input;
   WindowsExistingStartSnapshot expected;
@@ -1881,7 +1871,6 @@ struct WindowsExistingStartWork {
   ScopedKernelHandle executable;
   bool source_ready = false;
   WindowsExistingStartPhase phase = WindowsExistingStartPhase::BeforeFocus;
-  std::shared_ptr<WindowsExistingStartPending> pending;
 };
 
 bool WindowsExistingStartStillCurrent(const WindowsStartInput &input, std::uint64_t expected_epoch) {
@@ -1916,8 +1905,7 @@ bool MeasureWindowsV1ExistingStartEligibility(const WindowsStartInput &input,
 WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsExistingStartWork &work) {
   WindowsExistingStartMeasurement measured;
   const auto still_valid = [&] {
-    return !work.pending->abandoned.load(std::memory_order_acquire) &&
-        WindowsExistingStartStillCurrent(work.input, work.expected.cancel_epoch);
+    return WindowsExistingStartStillCurrent(work.input, work.expected.cancel_epoch);
   };
   const auto &input = work.input;
   const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
@@ -1983,8 +1971,7 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartAfter(const WindowsEx
   WindowsExistingStartMeasurement measured;
   measured.reason = "session_refocus_stale";
   const auto still_valid = [&] {
-    return !work.pending->abandoned.load(std::memory_order_acquire) &&
-        WindowsExistingStartStillCurrent(work.input, work.expected.cancel_epoch);
+    return WindowsExistingStartStillCurrent(work.input, work.expected.cancel_epoch);
   };
   std::string source_start;
   WindowsFileIdentity held{};
@@ -2005,71 +1992,15 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartAfter(const WindowsEx
   return measured;
 }
 
-void CancelWindowsExistingStartJob(const std::shared_ptr<WindowsExistingStartPending> &pending) {
-  std::lock_guard lock(pending->mutex);
-  if (pending->done) return;
-  pending->abandoned.store(true, std::memory_order_release);
-  if (pending->thread.value != nullptr) CancelSynchronousIo(pending->thread.value);
-}
-
-void WindowsExistingStartWorker(std::unique_ptr<WindowsExistingStartWork> work) {
-  // Existing start worker entry; this job owns its thread and source duplicates.
-  const auto pending = work->pending;
-  const char *failure_reason = work->phase == WindowsExistingStartPhase::BeforeFocus
-      ? "session_target_rejected" : "session_refocus_stale";
-  WindowsExistingStartMeasurement measured;
-  measured.reason = failure_reason;
-  try {
-    struct Apartment {
-      HRESULT result;
-      bool initialized;
-      explicit Apartment(bool needed)
-          : result(needed ? CoInitializeEx(nullptr, COINIT_MULTITHREADED) : S_OK),
-            initialized(needed && SUCCEEDED(result)) {}
-      ~Apartment() { if (initialized) CoUninitialize(); }
-    } apartment(work->input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist);
-    bool thread_ready = false;
-    {
-      std::lock_guard lock(pending->mutex);
-      thread_ready = DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
-          &pending->thread.value, 0, FALSE, DUPLICATE_SAME_ACCESS) != FALSE;
-    }
-    if (SUCCEEDED(apartment.result) && thread_ready)
-      measured = work->phase == WindowsExistingStartPhase::BeforeFocus
-          ? MeasureWindowsExistingStartBefore(*work) : MeasureWindowsExistingStartAfter(*work);
-  } catch (...) {
-    measured = {};
-    measured.reason = failure_reason;
-  }
-  // All candidates, COM objects and source duplicates are released on this worker.
-  work.reset();
-  {
-    std::lock_guard lock(pending->mutex);
-    if (pending->thread.value != nullptr) CloseHandle(pending->thread.release());
-    WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-    if (!pending->abandoned.load(std::memory_order_acquire)) pending->result = std::move(measured);
-    pending->done = true;
-  }
-  pending->ready.notify_one();
-  // Existing start worker epilogue; no handle or shared-slot access remains.
-}
-
-struct WindowsExistingStartLease {
-  std::shared_ptr<WindowsExistingStartPending> pending;
-  ~WindowsExistingStartLease() { CancelWindowsExistingStartJob(pending); }
-};
-
 bool RunWindowsExistingStartMeasurement(
     const WindowsStartInput &input, const WindowsSession &session, WindowsExistingStartPhase phase,
     const WindowsExistingStartMeasurement *before, WindowsExistingStartMeasurement *output,
     std::string *reason) {
   *reason = phase == WindowsExistingStartPhase::BeforeFocus ? "session_target_rejected" : "session_refocus_stale";
-  auto pending = std::make_shared<WindowsExistingStartPending>();
   auto work = std::make_unique<WindowsExistingStartWork>();
   work->input = input;
   work->expected = WindowsExistingStartBinding(session);
   work->phase = phase;
-  work->pending = pending;
   if (before != nullptr) work->before = *before;
   const auto expected = work->expected;
   const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
@@ -2095,34 +2026,46 @@ bool RunWindowsExistingStartMeasurement(
     }
     control.running.store(true, std::memory_order_release);
   }
+  // Keep the slot through source-handle and COM cleanup. Main's kill-stop bounds a hung call.
+  struct Slot {
+    ~Slot() { WindowsTargetListWorkerRunning().store(false, std::memory_order_release); }
+  } slot;
   const std::uint32_t main_pid = work->input.main_pid;
+  WindowsExistingStartMeasurement measured;
+  measured.reason = *reason;
   try {
+    // Starts share one consumer; reuse its Stop-locked synchronous I/O registration.
+    WindowsNewStartIoRegistration cancellation;
+    if (cancellation.thread == nullptr) return false;
+    struct Apartment {
+      HRESULT result;
+      bool initialized;
+      explicit Apartment(bool needed)
+          : result(needed ? CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) : S_OK),
+            initialized(needed && SUCCEEDED(result)) {}
+      ~Apartment() { if (initialized) CoUninitialize(); }
+    } apartment(v2);
     work->source_ready = source_process != nullptr && source_process != INVALID_HANDLE_VALUE &&
         source_executable != nullptr && source_executable != INVALID_HANDLE_VALUE &&
         DuplicateHandle(GetCurrentProcess(), source_process, GetCurrentProcess(), &work->process.value,
                         0, FALSE, DUPLICATE_SAME_ACCESS) &&
         DuplicateHandle(GetCurrentProcess(), source_executable, GetCurrentProcess(), &work->executable.value,
                         0, FALSE, DUPLICATE_SAME_ACCESS);
-    if (!work->source_ready && (v2 || phase == WindowsExistingStartPhase::AfterFocus)) {
-      work.reset();
-      control.running.store(false, std::memory_order_release);
-      return false;
-    }
-    std::thread(WindowsExistingStartWorker, std::move(work)).detach();
+    if (SUCCEEDED(apartment.result) && current() &&
+        (work->source_ready || (!v2 && phase == WindowsExistingStartPhase::BeforeFocus)))
+      measured = phase == WindowsExistingStartPhase::BeforeFocus
+          ? MeasureWindowsExistingStartBefore(*work) : MeasureWindowsExistingStartAfter(*work);
+    work.reset();
   } catch (...) {
     work.reset();
-    control.running.store(false, std::memory_order_release);
-    return false;
+    measured = {};
+    measured.reason = *reason;
   }
-  WindowsExistingStartLease lease{pending};
-  std::unique_lock lock(pending->mutex);
-  while (!pending->done && current()) pending->ready.wait_for(lock, std::chrono::milliseconds(20));
   std::lock_guard stop_lock(control.stop_mutex);
   if (!current() || (v2 && windows_v2_main_pid != main_pid)) {
     *reason = "session_start_canceled";
     return false;
   }
-  const auto &measured = pending->result;
   if (v2 && measured.context.has_value() && !WindowsV2FactsContextCache().has_value())
     WindowsV2FactsContextCache() = measured.context;
   *output = measured;

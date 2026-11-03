@@ -47,10 +47,9 @@ BOOL ComponentShow(HWND, int);
 BOOL ComponentFocus(HWND);
 HRESULT ComponentCoInitialize(LPVOID, DWORD);
 void ComponentCoUninitialize();
-void ComponentBeforeThread();
+void ComponentBeforeMeasurement();
 void ComponentBeforeTicket();
 bool ComponentReadHeld(HANDLE, WindowsFileIdentity*);
-struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLifetime(); };
 }
 #define wmain ProductionHostMain
 #include "component-host.cc"
@@ -81,7 +80,7 @@ struct Case {
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
   bool bad_before_geometry = false, changed_after_geometry = false, resume = false;
   bool stop_during_read = false, parent_during_read = false, io_failure = false;
-  bool thread_failure = false, after_thread_failure = false, com_failure = false;
+  bool measurement_failure = false, after_measurement_failure = false, com_failure = false;
   bool source_missing_process = false, source_missing_file = false, source_bad_digest = false;
   bool duplicate_failure = false, publication_stop = false, after_stop = false, after_read_failure = false;
   bool move_focus = false, dialog_failure = false, resolver_failure = false;
@@ -92,13 +91,14 @@ struct Case {
 Case current;
 unsigned identity_reads = 0;
 std::wstring canonical;
-std::atomic<unsigned> workers{0}, reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
+std::atomic<unsigned> reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
 std::mutex handles_mutex;
 std::set<HANDLE> tracked_handles;
 unsigned case_count = 0;
 HANDLE source_process = nullptr, source_file = INVALID_HANDLE_VALUE;
-std::atomic<unsigned> held_reads{0}, thread_attempts{0}, resumes{0}, refocuses{0};
+std::atomic<unsigned> held_reads{0}, measurement_attempts{0}, resumes{0}, refocuses{0};
 bool focused = false;
+DWORD consumer_thread = 0;
 std::atomic<bool> held_entered{false}, release_held{false};
 std::atomic<unsigned> released_reads{0};
 void Check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -122,6 +122,7 @@ BOOL ComponentDuplicateHandle(HANDLE sp, HANDLE source, HANDLE tp, LPHANDLE targ
   if (copied) Track(*target); return copied;
 }
 bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
+  Check(GetCurrentThreadId() == consumer_thread, "measurement stays on consumer");
   if (current.io_failure) return false;
   const bool opened = OpenLockedProcessExecutable(process, output);
   if (!opened) return false;
@@ -203,9 +204,9 @@ HRESULT ComponentCoInitialize(LPVOID reserved, DWORD flags) {
   com_calls.fetch_add(1); return current.com_failure ? E_FAIL : ::CoInitializeEx(reserved, flags);
 }
 void ComponentCoUninitialize() { com_releases.fetch_add(1); ::CoUninitialize(); }
-void ComponentBeforeThread() {
-  const auto phase=thread_attempts.fetch_add(1);
-  if ((phase==0&&current.thread_failure)||(phase==1&&current.after_thread_failure)) throw std::runtime_error("thread failure");
+void ComponentBeforeMeasurement() {
+  const auto phase=measurement_attempts.fetch_add(1);
+  if ((phase==0&&current.measurement_failure)||(phase==1&&current.after_measurement_failure)) throw std::runtime_error("measurement failure");
 }
 void ComponentBeforeTicket() { if(current.publication_stop) WindowsTargetListControl().stop_serial.fetch_add(1); }
 bool ComponentReadHeld(HANDLE handle, WindowsFileIdentity* output) {
@@ -213,22 +214,27 @@ bool ComponentReadHeld(HANDLE handle, WindowsFileIdentity* output) {
   if(phase==1&&current.after_stop)WindowsTargetListControl().stop_serial.fetch_add(1);
   if(phase==1&&current.after_read_failure)return false;
   const bool hold=(phase==0&&current.hold_before_file)||(phase==1&&current.hold_after_file);
-  if(hold){held_entered.store(true);while(!release_held.load())Sleep(1);}
+  if(hold){
+    Check(GetCurrentThreadId() == consumer_thread, "held read stays on consumer");
+    HANDLE reader = nullptr, writer = nullptr;
+    Check(CreatePipe(&reader, &writer, nullptr, 0) != FALSE, "cancellable synchronous pipe");
+    ScopedKernelHandle read_end(reader), write_end(writer);
+    held_entered.store(true);
+    char byte = 0; DWORD count = 0;
+    const BOOL read = ReadFile(reader, &byte, 1, &count, nullptr);
+    const DWORD error = GetLastError();
+    release_held.store(true);
+    Check(!read && error == ERROR_OPERATION_ABORTED, "Stop cancels consumer synchronous I/O");
+  }
   const bool read=ReadWindowsFileIdentity(handle,output);
   if(hold&&read)released_reads.fetch_add(1);
   return read;
 }
-ComponentWorkerLifetime::ComponentWorkerLifetime() { workers.fetch_add(1); }
-ComponentWorkerLifetime::~ComponentWorkerLifetime() { workers.fetch_sub(1); }
-void WaitWorkers() {
-  const auto until = GetTickCount64() + 5000;
-  while ((workers.load() != 0 || WindowsTargetListWorkerRunning().load()) && GetTickCount64() < until) Sleep(1);
-  Check(workers.load() == 0 && !WindowsTargetListWorkerRunning().load(), "worker retirement");
-}
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
   identity_reads = 0;
+  consumer_thread = GetCurrentThreadId();
   current=config;reads=0;contexts=0;com_calls=0;com_releases=0;input_calls=0;
-  held_reads=0;thread_attempts=0;resumes=0;refocuses=0;focused=false;
+  held_reads=0;measurement_attempts=0;resumes=0;refocuses=0;focused=false;
   held_entered=false;release_held=false;released_reads=0;
   parent_process_dead=false;cancellation_epoch=config.global_epoch;last_closed_cancel_epoch=config.closed_epoch;
   WindowsTargetListControl().stop_serial=0;WindowsTargetListControl().context_candidate.reset();WindowsV2FactsContextCache().reset();
@@ -262,11 +268,28 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     const auto until=GetTickCount64()+5000;
     while(!held_entered.load()&&GetTickCount64()<until)Sleep(1);
     if(!held_entered.load()){release_held=true;parent_process_dead=true;return;}
-    WindowsTargetListControl().stop_serial.fetch_add(1);
+    auto& control = WindowsTargetListControl();
+    while (!release_held.load() && GetTickCount64() < until) {
+      {
+        std::lock_guard lock(control.stop_mutex);
+        if (release_held.load()) break;
+        control.stop_serial.fetch_add(1);
+        Check(control.new_start_thread != nullptr && GetThreadId(control.new_start_thread) == consumer_thread,
+              "Stop targets registered consumer");
+        CancelWindowsNewStartMeasurementLocked(control);
+      }
+      Sleep(1);
+    }
   });
   std::string response,failure;const bool succeeded=StartWindowsExistingSession(input,&response,&failure);
-  if(held_case)Check(held_entered.load()&&!release_held.load()&&WindowsTargetListWorkerRunning().load(),"caller returns before held read and retains slot");
-  else WaitWorkers();
+  if (held_case) stop_reader.join();
+  Check(!WindowsTargetListWorkerRunning().load(), "synchronous measurement releases slot");
+  Check(WindowsTargetListControl().new_start_thread == nullptr, "consumer cancellation unregistered");
+  if (held_case) {
+    Check(measurement_attempts.load() == (config.hold_after_file ? 2u : 1u), "Stop prevents the next measurement");
+    Check(response.empty(), "late measurement never publishes success");
+    if (config.hold_before_file) Check(input_calls.load() == 0, "Stop before focus prevents input");
+  }
   Check(succeeded==expected,name);if(!expected)Check(failure==reason,"refusal reason");
   Check(ticket_states[input.session_key].generation==10+ticket_calls,"ticket count");
   Check(sessions.size()==1,"existing lifetime remains until explicit close");
@@ -309,9 +332,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   Check(CloseWindowsSession(frame,"{\"cancelEpoch\":"+std::to_string(terminal_epoch)+"}",&receipt),"component terminal close");
   std::uint64_t count=99;Check(ReadJsonUint64(receipt,"inputAttemptCount",&count)&&count==input_calls.load(),"terminal receipt preserves prior focus count");
   if(held_case){
-    Check(!release_held.load()&&WindowsTargetListWorkerRunning().load(),"Close completes while duplicate read remains held");
-    release_held=true;stop_reader.join();WaitWorkers();
-    Check(released_reads.load()==1&&sessions.empty(),"real held read survives original close without late adoption");
+    Check(release_held.load()&&released_reads.load()==1&&sessions.empty(),"canceled read cannot adopt a late result");
   }
   ticket_states.clear();{std::lock_guard lock(handles_mutex);Check(tracked_handles.empty(),"all owned handles closed");}
   ++case_count;std::cout<<"CASE:"<<name<<"\n";
@@ -340,8 +361,8 @@ int wmain() {
     c={};c.stop_during_read=true;Run("v1-stop-before",c,false,"session_start_canceled",0);
     c={};c.parent_during_read=true;Run("v1-parent-before",c,false,"session_start_canceled",0);
     c={};c.publication_stop=true;Run("v1-late-identity-bool",c,false,"session_start_canceled",0);
-    c={};c.thread_failure=true;Run("v1-before-thread-failure",c,false,"session_target_rejected",0);
-    c={};c.after_thread_failure=true;Run("v1-after-thread-failure",c,false,"session_refocus_stale",1);
+    c={};c.measurement_failure=true;Run("v1-before-measurement-failure",c,false,"session_target_rejected",0);
+    c={};c.after_measurement_failure=true;Run("v1-after-measurement-failure",c,false,"session_refocus_stale",1);
     c={};c.after_read_failure=true;Run("v1-after-read-failure",c,false,"session_refocus_stale",1);
     c={};c.move_focus=true;c.after_stop=true;Run("v1-after-stop-counter",c,false,"session_start_canceled",1);
     c={};c.com_failure=true;Run("v1-no-com",c,true,"",2);

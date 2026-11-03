@@ -1097,6 +1097,8 @@ const busyQueuedFrames = busyLoadFrames + 2; // load + cancel + close
 // The cases that need a session, i.e. exactly the expected NOT_RUN set where classic Notepad is not
 // full_access_app. afterAll compares the NOT_RUN names with this list (see sessionNotRunMismatch).
 const sessionCaseNames = [
+  'terminates existing start hung in WinVerifyTrust through E3 kill-stop',
+  'terminates existing start hung in CreateFileW through E3 kill-stop',
   'cancels a pending Controller start in WinVerifyTrust',
   'cancels a pending Controller start in CreateFileW',
   'stops observation hung in UiaCall through the worker cancellation path',
@@ -1464,6 +1466,60 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     },
     caseTimeout,
   );
+
+  for (const point of ['WinVerifyTrust', 'CreateFileW']) {
+    it(
+      `terminates existing start hung in ${point} through E3 kill-stop`,
+      async (context) => {
+        live(context);
+        observeChildren();
+        arm('');
+        const profile = await classicProfile(context);
+        await watchAttestation(context);
+        const { binding } = addonFor(hung);
+        const killStop = killStopOptions();
+        const host = createComputerUseNativeHost(binding, 'win32', {
+          windowsPhysicalBoundsToDip: (value) => value,
+          ...killStop.options,
+        });
+        const selected = (await host.listWindows(profile)).find(
+          (window) => window.windowId === notepadWindowId,
+        );
+        expect(selected, 'owned classic Notepad window').toBeDefined();
+        const input = {
+          profile,
+          windowId: selected!.windowId,
+          sessionId: 'existing-start-hang',
+          taskId: 'seam-task',
+          turnId: 'seam-turn',
+          cancelEpoch: 0,
+        };
+        const session = await host.startSession(input);
+        expect(session.sessionId).toBe(input.sessionId);
+        // Reuse the same native session, so the next measurement is existing-start.
+        arm(point);
+        const starting = settle(host.startSession(input));
+        await awaitHang(starting, operationTimeoutMilliseconds('start_session') - margin);
+        const origin = performance.now();
+        const stopped = await host.stopPendingStart!(input.sessionId);
+        const elapsed = performance.now() - origin;
+        expect(stopped).toMatchObject({ kind: 'terminated', result: 'terminated_clean' });
+        expect(elapsed).toBeLessThan(killStopBudget + margin);
+        const helpers = children.filter((row) => row.temp);
+        expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+        expect(helpers[0]!.kills[0]! - origin).toBeGreaterThanOrEqual(
+          COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS - margin,
+        );
+        expect(helpers.every((row) => row.exited)).toBe(true);
+        const outcome = await starting;
+        expect(outcome).toBeInstanceOf(Error);
+        expect(helperReply(outcome)).toBeNull();
+        expect(killStop.rows.filter((row) => row.at >= origin)).toEqual([]);
+        report(context.task.name, origin, { result: stopped.kind }, elapsed);
+      },
+      caseTimeout,
+    );
+  }
 
   for (const point of ['UiaCall', 'Capture']) {
     it(

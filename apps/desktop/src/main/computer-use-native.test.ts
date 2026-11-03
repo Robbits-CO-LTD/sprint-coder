@@ -737,6 +737,27 @@ describe('Windows native helper compile boundary', () => {
     expect(observeSource).toContain(String.raw`activeWindowKind\":\"`);
   });
 
+  it('measures existing start on the consumer with cancellable I/O and no detached publication', () => {
+    const source = readWindowsHostSource();
+    const existing = source.slice(
+      source.indexOf('// BEGIN windows shared existing start'),
+      source.indexOf('// END windows shared existing start'),
+    );
+    expect(existing).not.toMatch(
+      /WindowsExistingStartPending|WindowsExistingStartWorker|WindowsExistingStartLease|wait_for|\.detach\(/u,
+    );
+    expect(existing).toContain('WindowsNewStartIoRegistration cancellation;');
+    expect(existing).toContain('if (cancellation.thread == nullptr) return false;');
+    expect(existing).toContain('COINIT_APARTMENTTHREADED');
+    expect(existing).toContain(
+      'MeasureWindowsExistingStartBefore(*work) : MeasureWindowsExistingStartAfter(*work)',
+    );
+    expect(existing).toContain('if (!current() || (v2 && windows_v2_main_pid != main_pid))');
+    expect(existing).toContain(
+      'WindowsTargetListWorkerRunning().store(false, std::memory_order_release);',
+    );
+  });
+
   it('refocuses an existing session to its observation-bound safe dialog without rebinding the set', () => {
     const source = readWindowsHostSource();
     const resolverSource = source.slice(
