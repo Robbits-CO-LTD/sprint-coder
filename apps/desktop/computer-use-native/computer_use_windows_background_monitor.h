@@ -38,17 +38,20 @@ public:
   }
   void BeginMonitoring(std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
+    now = ObserveLocked(now);
     if (monitoring_) { PauseLocked(); return; }
     monitoring_ = true;
     hook_heartbeat_ = raw_heartbeat_ = now;
   }
   void Heartbeat(BackgroundMonitorPump pump, std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
+    now = ObserveLocked(now);
     CheckHealthLocked(now);
     (pump == BackgroundMonitorPump::kHook ? hook_heartbeat_ : raw_heartbeat_) = now;
   }
   void MouseHook(std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
+    now = ObserveLocked(now);
     CheckHealthLocked(now);
     hook_seen_ = true;
     last_hook_ = now;
@@ -56,6 +59,7 @@ public:
   }
   void RawMouse(std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
+    now = ObserveLocked(now);
     CheckHealthLocked(now);
     // Coalescing and delivery order prohibit a one-to-one event-count assumption.
     if (hook_seen_ && now >= last_hook_ && now - last_hook_ <= kBackgroundMouseCorrelationMs)
@@ -64,7 +68,7 @@ public:
   }
   void CheckHealth(std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
-    CheckHealthLocked(now);
+    CheckHealthLocked(ObserveLocked(now));
   }
   void Foreground(BackgroundInputOwner owner) {
     if (owner != BackgroundInputOwner::kOther) Pause();
@@ -88,7 +92,7 @@ public:
   }
   std::uint64_t Claim(std::uint64_t expected_epoch, std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
-    CheckHealthLocked(now);
+    CheckHealthLocked(ObserveLocked(now));
     if (!registered_ || state_.paused || expected_epoch != state_.epoch || active_claim_ != 0)
       return 0;
     if (next_claim_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -105,6 +109,12 @@ public:
     return !state_.paused && !state_.unknown_effect;
   }
 private:
+  // A default argument samples the clock before the lock, so a thread may arrive with a time
+  // older than one another thread already recorded. Never let that order read as a stall.
+  std::uint64_t ObserveLocked(std::uint64_t now) {
+    if (now > latest_) latest_ = now;
+    return latest_;
+  }
   void CheckHealthLocked(std::uint64_t now) {
     if (!monitoring_) return;
     const auto expired = [now](std::uint64_t time, std::uint64_t limit) {
@@ -130,6 +140,7 @@ private:
   bool raw_pending_ = false;
   std::uint64_t hook_heartbeat_ = 0, raw_heartbeat_ = 0;
   std::uint64_t last_hook_ = 0, first_raw_ = 0;
+  std::uint64_t latest_ = 0;
   std::uint64_t next_claim_ = 0;
   std::uint64_t active_claim_ = 0;
 };

@@ -46,6 +46,18 @@ inline bool CheckBackgroundMonitor() {
     if (!check(s.Claim(1, 2980) != 0,
                "BG08_keyboard_only_is_not_mouse_blindness")) return false;
   }
+  {
+    WindowsBackgroundMonitorState s;
+    s.BeginMonitoring(1000);
+    s.Registered(true);
+    // A watchdog that sampled 1000 before the lock may run after a pump recorded 1001.
+    s.Heartbeat(Pump::kHook, 1001);
+    s.CheckHealth(1000);
+    s.RawMouse(1001);
+    s.MouseHook(1000);
+    if (!check(!s.Snapshot().paused && s.Claim(1, 1000) != 0,
+               "BG08_stale_clock_sample_is_not_a_stall")) return false;
+  }
   for (bool hook_first : {false, true}) {
     WindowsBackgroundMonitorState s;
     s.BeginMonitoring(1000);
