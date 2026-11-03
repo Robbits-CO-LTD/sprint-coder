@@ -502,6 +502,8 @@ describe('Windows native helper compile boundary', () => {
     const source = readWindowsHostSource();
     // The base-typed accessor may only read or release the target-list slot; a take through it
     // would skip the launch numbering that residual ownership relies on.
+    // Free functions take a std::atomic<bool>* and would skip the numbering as well.
+    expect(source).not.toMatch(/\bstd::atomic_(?:exchange|store|compare_exchange)/u);
     const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
     expect(uses.length).toBeGreaterThan(0);
     for (const [, method, args] of uses)
