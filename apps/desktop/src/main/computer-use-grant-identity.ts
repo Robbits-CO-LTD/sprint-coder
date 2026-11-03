@@ -1,4 +1,53 @@
 import { createHash } from 'node:crypto';
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
+import { denyRulesetVersion } from './computer-use-target-eligibility';
+
+/** macOS retains its V1 policy; Windows must resolve the same table pin as native-host. */
+export function computerAppGrantRulesetVersion(platform: ComputerAppGrantPlatform): number | null {
+  if (platform === 'darwin') return 1;
+  const version = denyRulesetVersion(platform);
+  return Number.isSafeInteger(version) &&
+    version !== null &&
+    version > 0 &&
+    version === DENY_RULESET.platforms.win32.rulesetVersion
+    ? version
+    : null;
+}
+
+/**
+ * Re-evaluate the deny rules answerable from a persisted identity. Process, signer and window facts
+ * are not stored grant attributes: their live classification remains at the native boundary.
+ * Missing facts never satisfy a condition, including a negated one.
+ */
+export function computerAppGrantIdentityIsDenied(
+  identity: Pick<ComputerAppGrantIdentity, 'platform' | 'executablePath' | 'packageFamilyName'>,
+): boolean {
+  if (identity.platform !== 'win32') return false;
+  const facts: Readonly<Record<string, string | null>> = {
+    imageLeaf: executableLeafName('win32', identity.executablePath),
+    packageFamily: identity.packageFamilyName,
+  };
+  return DENY_RULESET.rules.some(
+    (rule) =>
+      rule.verdict === 'denied' &&
+      (rule.platforms as readonly string[]).includes(identity.platform) &&
+      rule.when.every((condition) => {
+        const value = facts[condition.signal];
+        if (value === undefined || value === null) return false;
+        const folded = asciiLowercase(value);
+        const matches = condition.values.some((pattern) => {
+          if (condition.match === 'equals') return folded === pattern;
+          if (condition.match === 'prefix') return folded.startsWith(pattern);
+          if (condition.match !== 'glob') return false;
+          const escaped = pattern
+            .split('*')
+            .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
+          return new RegExp(`^${escaped.join('.*')}$`, 'u').test(folded);
+        });
+        return condition.negate ? !matches : matches;
+      }),
+  );
+}
 
 /**
  * What an application grant is bound to (ADR v2 §6.2, §6.3).

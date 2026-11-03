@@ -103,6 +103,8 @@ import {
 } from './computer-use-target-model';
 import {
   computerAppGrantIdentityFrom,
+  computerAppGrantIdentityIsDenied,
+  computerAppGrantRulesetVersion,
   computerAppGrantMismatch,
   computerAppNativeIdentityDigest,
   normalizeExecutablePath,
@@ -1610,7 +1612,14 @@ export class ComputerUseController {
       derived,
       computerUseAppIdentityIsDenied(profile.identity),
     );
-    if (mismatch === null) return stored;
+    const version = computerAppGrantRulesetVersion(derived.platform);
+    if (version === null) return null;
+    const unreadableVersion =
+      derived.platform === 'win32' &&
+      (!Number.isSafeInteger(stored.denyRulesetVersion) ||
+        stored.denyRulesetVersion < 1 ||
+        stored.denyRulesetVersion > version);
+    if (mismatch === null && !unreadableVersion) return stored;
     // A newly denied class is revoked outright — the user is not asked again (§6.3, T3). Every
     // other mismatch leaves the row alone: it simply stops matching, and the next request raises a
     // card whose approval writes the new identity.
@@ -1618,14 +1627,23 @@ export class ComputerUseController {
     // Fire-and-forget with its own catch: this runs on the synchronous path that builds an
     // enumeration, and the answer — "not granted" — does not depend on the removal succeeding. A
     // concurrent revoke of the same row makes it throw, and that is already the outcome we wanted.
-    if (mismatch === 'denied_class')
+    if (mismatch === 'denied_class' || unreadableVersion)
       void this.revokeAppGrant(stored.id, stored.revision).catch(() => undefined);
     return null;
   }
 
   /** Every grant, for the settings screen, with the count of rows that failed their MAC (T14). */
   listAppGrants(): ComputerAppGrantListing {
+    this.revokeDeniedAppGrants();
     return this.deps.persistence.listComputerAppGrants();
+  }
+
+  /** Check before filtering discovery results, including grants with no remaining profile. */
+  private revokeDeniedAppGrants(): void {
+    for (const grant of this.deps.persistence.listComputerAppGrants().grants) {
+      if (computerAppGrantIdentityIsDenied(grant))
+        void this.revokeAppGrant(grant.id, grant.revision).catch(() => undefined);
+    }
   }
 
   /**
@@ -1638,7 +1656,7 @@ export class ComputerUseController {
    * revokes from.
    */
   listAppGrantViews(): ComputerUseGrantListResult {
-    const listing = this.deps.persistence.listComputerAppGrants();
+    const listing = this.listAppGrants();
     const grants: ComputerAppGrantView[] = [];
     let discardedRecords = listing.discarded;
     for (const grant of listing.grants) {
@@ -1724,6 +1742,7 @@ export class ComputerUseController {
     // the one the card was re-verified against, and re-deriving here would be a second derivation
     // that nothing had bound to the profile native verified (T14).
     const derived = identity;
+    const denyRulesetVersion = requireComputerAppGrantRulesetVersion(derived.platform);
     // The gate already applied the deny ruleset to the whole record; this is the belt, over the
     // attributes a grant identity still carries, so a mis-wired caller cannot widen the deny list.
     if (
@@ -1746,7 +1765,7 @@ export class ComputerUseController {
           : derived.appId,
       ),
       maxMode: input.maxMode,
-      denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+      denyRulesetVersion,
       providerEgress: input.providerEgress,
     });
   }
@@ -1872,8 +1891,8 @@ export class ComputerUseController {
     // A denied class is never granted, whatever a V1 registration or an earlier card says.
     // `listTargets` already filters these out before asking, so this is the belt rather than the
     // braces — but a future caller that forgets the filter must not be handed a granted terminal.
-    if (computerUseAppIdentityIsDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
     const grant = this.appGrantFor(profile);
+    if (computerUseAppIdentityIsDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
     if (grant !== null)
       return Object.freeze({
         granted: true,
@@ -1929,7 +1948,7 @@ export class ComputerUseController {
     const entry = scoped.get(key);
     if (entry === undefined) return null;
     if (
-      entry.denyRulesetVersion !== COMPUTER_USE_DENY_RULESET_VERSION ||
+      entry.denyRulesetVersion !== computerAppGrantRulesetVersion(identity.platform) ||
       entry.policyEpoch !== this.currentPolicyEpoch(taskId)
     ) {
       scoped.delete(key);
@@ -1974,6 +1993,7 @@ export class ComputerUseController {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<ComputerListTargetsOutput> {
+    this.revokeDeniedAppGrants();
     const scope = this.discoveryScope(context.taskId, context.turnId, signal);
     return scope.run(() => this.listTargetsInScope(input, context, scope));
   }
@@ -2695,7 +2715,7 @@ export class ComputerUseController {
     const identityDigest = computerAppGrantIntentDigest({
       appToken: input.appToken,
       grantIdentityDigest: input.identity.grantIdentityDigest,
-      denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+      denyRulesetVersion: requireComputerAppGrantRulesetVersion(input.identity.platform),
       policyEpoch: input.policyEpoch,
       taskId: input.context.taskId,
     });
@@ -3039,7 +3059,7 @@ export class ComputerUseController {
       Object.freeze({
         identity: observed.identity,
         maxMode: observed.facts.maximumMode,
-        denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+        denyRulesetVersion: requireComputerAppGrantRulesetVersion(observed.identity.platform),
         policyEpoch: pending.policyEpoch,
         providerEgress: pending.providerEgress,
       }),
@@ -6866,15 +6886,17 @@ function executableLeafName(executablePath: string | null): string {
 }
 
 /**
- * The version of the deny ruleset this build applies (ADR v2 §3.0, T3).
- *
- * Stored on every grant so that raising it can be told from "this grant was written under the
- * current rules". ADR v2 §9 makes the eligibility mode and its ruleset version compile-time
- * constants rather than environment variables, and this is that constant for the V1 allow-list era:
- * S4/S5 replace the list below and bump it, at which point grants written under version 1 are
- * re-evaluated and any that now fall in a denied class are revoked rather than re-confirmed.
+ * Legacy macOS version. Windows grants use computerAppGrantRulesetVersion instead.
  */
 export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
+
+function requireComputerAppGrantRulesetVersion(
+  platform: ComputerAppGrantIdentity['platform'],
+): number {
+  const version = computerAppGrantRulesetVersion(platform);
+  if (version === null) throw new Error('Computer Use application ruleset is unavailable');
+  return version;
+}
 
 /**
  * The session status, reduced to what may be written into the conversation.
@@ -6935,6 +6957,19 @@ function computerUseAgentGoal(goal: string): string {
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {
   if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return true;
   const record = identity as Record<string, unknown>;
+  if (record['platform'] === 'win32') {
+    if (computerAppGrantRulesetVersion('win32') === null) return true;
+    if (
+      computerAppGrantIdentityIsDenied({
+        platform: 'win32',
+        executablePath:
+          typeof record['executablePath'] === 'string' ? record['executablePath'] : '',
+        packageFamilyName:
+          typeof record['packageFamilyName'] === 'string' ? record['packageFamilyName'] : null,
+      })
+    )
+      return true;
+  }
   const text = (key: string): string =>
     typeof record[key] === 'string' ? record[key].toLowerCase() : '';
   const bundleId = text('bundleId');
