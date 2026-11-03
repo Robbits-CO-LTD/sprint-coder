@@ -17,7 +17,8 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
                                       std::uint64_t stop_serial,
                                       std::vector<std::uint8_t> *output,
                                       std::size_t *width, std::size_t *height,
-                                      WindowsV1UiaStop *stop = nullptr);
+                                      WindowsV1UiaStop *stop = nullptr,
+                                      std::uint32_t background_pid = 0);
 bool ReadWindowsPngPatchGrid(std::vector<std::uint8_t> *png, std::size_t width,
                              std::size_t height, std::uint64_t epoch, std::uint64_t serial,
                              std::vector<std::string> *digests, std::size_t *columns,
@@ -30,8 +31,16 @@ bool ReadWindowsPngPatchDigest(std::vector<std::uint8_t> *png, std::size_t width
 #if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
 bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
                                       std::vector<std::uint8_t> *output,
-                                      std::size_t *width, std::size_t *height) {
-  if (!WindowsV1UiaMayCall() || window == nullptr || GetForegroundWindow() != window)
+                                      std::size_t *width, std::size_t *height,
+                                      std::uint32_t background_pid = 0) {
+  const auto target_valid = [&] {
+    RECT bounds{};
+    return background_pid == 0 ? GetForegroundWindow() == window :
+        WindowsBackgroundStartGate() &&
+        sprint_coder::computer_use::WindowsBackgroundStartFactsAdmit(
+            MeasureWindowsBackgroundStartFacts(background_pid, window, &bounds));
+  };
+  if (!WindowsV1UiaMayCall() || window == nullptr || !target_valid())
     return false;
   try {
     RECT client_bounds{};
@@ -281,7 +290,7 @@ bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,
         }
       }
     }
-    if (!success || !WindowsV1UiaMayCall())
+    if (!success || !WindowsV1UiaMayCall() || (background_pid != 0 && !target_valid()))
       return false;
     *width = capture_width;
     *height = capture_height;

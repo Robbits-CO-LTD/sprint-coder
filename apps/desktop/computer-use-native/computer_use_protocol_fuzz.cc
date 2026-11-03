@@ -26,6 +26,7 @@
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_background_wire_test.h"
+#include "computer_use_windows_background_observe_test.h"
 #include "computer_use_preflight_classifier.h"
 
 #include <algorithm>
@@ -9477,6 +9478,7 @@ bool CheckStrictInterlock() {
 
 int main() {
   if (!Check(CheckBackgroundInputWire(), "background-input-wire")) return 1;
+  if (!Check(CheckWindowsBackgroundObservation(), "background-observation")) return 1;
   if (!Check(windows_approval_handlers_test::Check(), "windows-approval-handlers")) return 1;
   if (!Check(CheckWindowsApprovalWire(kWindowsApprovalWireFixture), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;

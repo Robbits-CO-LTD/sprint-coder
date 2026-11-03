@@ -337,7 +337,7 @@ function instrumentedHost(): string {
     '  Sc820BeforeObserveCommit();\n  const char *commit_failure = nullptr;',
   );
   for (const [name, wrapper, count] of [
-    ['ValidateWindowsSession(', 'Sc820ObserveValidate(', 2],
+    ['ValidateWindowsObservationSession(', 'Sc820ObserveValidate(', 2],
     ['ReadUiaObservation(', 'Sc820ObserveTree(', 2],
     ['CaptureWindowsControlBindings(', 'Sc820ObserveBindings(', 2],
     ['ClassifyWindowsFocusedElement(', 'Sc820ObserveRisk(', 1],
@@ -779,12 +779,12 @@ bool Sc820CapturePoint(const RECT&,const std::string&,POINT*);
 WindowsUiaRisk Sc820CaptureRisk(POINT,std::uint32_t,std::string*);
 std::string Sc820CaptureDispatchProbe(const sprint_coder::computer_use::Frame&,const std::string&);
 bool Sc820ObserveValidate(const WindowsSession&, RECT*, std::string*, WindowsDialogSetSnapshot*);
-bool Sc820ObserveTree(std::uint32_t, HWND, std::string*, std::size_t*);
+bool Sc820ObserveTree(std::uint32_t, HWND, std::string*, std::size_t*, bool);
 bool Sc820ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*);
 WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 bool Sc820ObserveSignature(std::uint32_t,const RECT&,std::string*);
-bool Sc820ObserveCapture(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*);
+bool Sc820ObserveCapture(HWND,std::vector<std::uint8_t>*,std::size_t*,std::size_t*,std::uint32_t);
 bool Sc820PngGrid(std::span<const std::uint8_t>,std::size_t,std::size_t,std::vector<std::string>*,std::size_t*,std::size_t*);
 bool Sc820PngDigest(std::span<const std::uint8_t>,std::size_t,std::size_t,double,double,std::string*,std::size_t*);
 void Sc820CaptureRuntimeInit();
@@ -1596,11 +1596,11 @@ void Sc820CaptureRuntimeUninit(){
 }
 std::atomic<unsigned> observe_after_signature_calls{0};
 bool Sc820ObserveValidate(const WindowsSession& session,RECT* bounds,std::string* reason,WindowsDialogSetSnapshot* dialogs){
-  if(!observe_signature_mode&&!observe_capture_mode)return ValidateWindowsSession(session,bounds,reason,dialogs);
+  if(!observe_signature_mode&&!observe_capture_mode)return ValidateWindowsObservationSession(session,bounds,reason,dialogs);
   *bounds=RECT{0,0,100,100};dialogs->active_window=fixture_windows[0];return true;
 }
-bool Sc820ObserveTree(std::uint32_t pid,HWND window,std::string* tree,std::size_t* nodes){
-  if(!observe_signature_mode&&!observe_capture_mode)return ReadUiaObservation(pid,window,tree,nodes);
+bool Sc820ObserveTree(std::uint32_t pid,HWND window,std::string* tree,std::size_t* nodes,bool background){
+  if(!observe_signature_mode&&!observe_capture_mode)return ReadUiaObservation(pid,window,tree,nodes,background);
   *tree="controlled-observe-prerequisite";*nodes=1;return true;
 }
 bool Sc820ObserveBindings(std::uint32_t pid,HWND window,WindowsControlBindings* bindings){
@@ -1621,8 +1621,15 @@ bool Sc820ObserveSignature(std::uint32_t pid,const RECT& bounds,std::string* sig
   if(observe_capture_mode){*signature="controlled-capture-prerequisite";return true;}
   return WindowsFocusedElementSignature(pid,bounds,signature);
 }
-bool Sc820ObserveCapture(HWND window,std::vector<std::uint8_t>* output,std::size_t* width,std::size_t* height){
-  if(!observe_capture_mode)return CaptureWindowWithGraphicsCaptureOnWorker(window,output,width,height);
+bool Sc820ObserveCapture(HWND window,std::vector<std::uint8_t>* output,std::size_t* width,std::size_t* height,std::uint32_t background_pid){
+  if(!observe_capture_mode){
+#if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
+    return CaptureWindowWithGraphicsCaptureOnWorker(window,output,width,height,background_pid);
+#else
+    (void)background_pid;
+    return CaptureWindowWithGraphicsCaptureOnWorker(window,output,width,height);
+#endif
+  }
   DWORD pid=0;Require(window==fixture_windows[0]&&GetWindowThreadProcessId(window,&pid)!=0&&pid==fixture_pids[0],"capture_owned_window");
   if(png_stall_mode){*output={1,2,3,4};*width=100;*height=100;return true;}
   observe_capture_calls.fetch_add(1);Sc820DetailGate();output->clear();*width=0;*height=0;return false;

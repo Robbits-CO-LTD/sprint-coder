@@ -24,6 +24,15 @@
 
 namespace sprint_coder::computer_use {
 
+// Background observations cannot borrow the foreground focus as missing risk evidence.
+// P2b conservatively refuses the entire tree when any node cannot be classified safely.
+[[nodiscard]] inline bool WindowsBackgroundObservationNodeAdmitted(
+    std::uint32_t owner, std::uint32_t expected_owner, bool classified,
+    bool metadata_complete, bool secure, bool high_impact) {
+  return expected_owner != 0 && owner == expected_owner && classified &&
+      metadata_complete && !secure && !high_impact;
+}
+
 // S5-c-3 PR-5: what a v2 session's interlock adds to the capture (ADR v2 section 3.2.5). `asked` is
 // set only for a session bound to the v2 basis; every other capture is evaluated as before.
 //   * process_id: the session's target process. An element of the chain that another process

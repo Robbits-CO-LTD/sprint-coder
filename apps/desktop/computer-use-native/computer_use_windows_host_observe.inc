@@ -44,7 +44,7 @@ std::string UiaRole(CONTROLTYPEID control_type, bool password) {
 
 bool AppendUiaTree(IUIAutomationElement *element,
                    IUIAutomationTreeWalker *walker, std::size_t depth,
-                   std::size_t *nodes, std::string *json) {
+                   std::size_t *nodes, std::string *json, std::uint32_t background_pid = 0) {
   if (element == nullptr || walker == nullptr || depth > 16 ||
       *nodes >= 5'000 || json->size() > 512 * 1024 || !WindowsV1UiaMayCall())
     return false;
@@ -90,6 +90,23 @@ bool AppendUiaTree(IUIAutomationElement *element,
       (help == nullptr || SysStringLen(help) == 0 || !help_utf8.empty());
   if (!text_converted)
     return false;
+  if (background_pid != 0) {
+    int owner = 0;
+    const auto normalized = sprint_coder::computer_use::windows_interlock_capture_detail::FoldedLower(
+        name_utf8 + "\n" + automation_utf8 + "\n" + help_utf8);
+    const auto risk = sprint_coder::computer_use::ClassifyWindowsRiskText(normalized);
+    const bool secure = password == TRUE || normalized.find("password") != std::string::npos ||
+        normalized.find("passcode") != std::string::npos || normalized.find("パスワード") != std::string::npos;
+    // Classify full labels only. Truncation is insufficient evidence for the background path.
+    const bool complete_labels =
+        (name == nullptr || Utf8FromWide(std::wstring_view(name, SysStringLen(name))).size() <= 256) &&
+        (automation_id == nullptr || Utf8FromWide(std::wstring_view(automation_id, SysStringLen(automation_id))).size() <= 256) &&
+        (help == nullptr || Utf8FromWide(std::wstring_view(help, SysStringLen(help))).size() <= 4'096);
+    if (!WindowsV1UiaRead(owner, [&] { return element->get_CurrentProcessId(&owner); }) ||
+        !sprint_coder::computer_use::WindowsBackgroundObservationNodeAdmitted(
+            static_cast<std::uint32_t>(owner), background_pid, control_type != 0,
+            complete_labels, secure, risk.confirmation || risk.other)) return false;
+  }
   owned_name.reset();
   owned_id.reset();
   owned_help.reset();
@@ -112,7 +129,7 @@ bool AppendUiaTree(IUIAutomationElement *element,
     if (!first)
       *json += ',';
     first = false;
-    if (!AppendUiaTree(child, walker, depth + 1, nodes, json))
+    if (!AppendUiaTree(child, walker, depth + 1, nodes, json, background_pid))
       complete = false;
     IUIAutomationElement *next = nullptr;
     if (complete && !WindowsV1UiaOk(WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); })))
@@ -135,6 +152,32 @@ bool TargetWindowFacts(std::uint32_t pid, HWND window, RECT *bounds) {
   return ClientBoundsPhysical(window, bounds);
 }
 
+// Observation alone opts into this validator. Input/approval keep their foreground validator
+// until their separately reviewed background binding and monitoring stages are connected.
+bool ValidateWindowsObservationSession(const WindowsSession &session, RECT *bounds,
+                                       std::string *reason, WindowsDialogSetSnapshot *dialogs) {
+  if (session.input_session.kind != sprint_coder::computer_use::InputSessionKind::kBackground)
+    return ValidateWindowsSession(session, bounds, reason, dialogs);
+  const WindowsValidationFrameScope frame;
+  WindowsSessionIdentityResult identity;
+  if (!WindowsBackgroundStartGate() || WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ||
+      !ReadWindowsSessionIdentityOnLane(session, frame.StopSerial(), &identity) ||
+      !identity.identity_matches || identity.elevated || !IsApplicationWindow(session.window) ||
+      !sprint_coder::computer_use::WindowsBackgroundStartFactsAdmit(
+          MeasureWindowsBackgroundStartFacts(session.pid, session.window, bounds))) {
+    *reason = "session_identity_changed";
+    return false;
+  }
+  if (!CaptureWindowsBackgroundStartDialogs(session, dialogs, reason)) return false;
+  std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+  if (!WindowsValidationStillCurrent(session.cancel_epoch, frame.StopSerial())) {
+    *reason = "observation_stale";
+    return false;
+  }
+  dialogs->active_bounds = *bounds;
+  return true;
+}
+
 bool IsProcessElevated(std::uint32_t pid) {
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (process == nullptr)
@@ -153,7 +196,7 @@ bool IsProcessElevated(std::uint32_t pid) {
 }
 
 bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tree,
-                                std::size_t *nodes) {
+                                std::size_t *nodes, bool background = false) {
   const WindowsV1UiaPath path;
   struct Objects {
     IUIAutomation *automation = nullptr;
@@ -181,7 +224,7 @@ bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tre
   std::string value;
   std::size_t count = 0;
   const bool complete = SUCCEEDED(walker_result) && walker != nullptr &&
-                        AppendUiaTree(root, walker, 0, &count, &value);
+                        AppendUiaTree(root, walker, 0, &count, &value, background ? pid : 0);
   if (!complete)
     return false;
   *tree = std::move(value);
@@ -300,11 +343,11 @@ struct WindowsUiaObservationResult {
 };
 
 bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
-                        std::size_t *nodes) {
+                        std::size_t *nodes, bool background = false) {
   return RunWindowsUiaRead<WindowsUiaObservationResult>(false,
-      [pid, window]() -> std::optional<WindowsUiaObservationResult> {
+      [pid, window, background]() -> std::optional<WindowsUiaObservationResult> {
         WindowsUiaObservationResult value;
-        if (!ReadUiaObservationOnWorker(pid, window, &value.tree, &value.nodes)) return std::nullopt;
+        if (!ReadUiaObservationOnWorker(pid, window, &value.tree, &value.nodes, background)) return std::nullopt;
         return value;
       }, [tree, nodes](WindowsUiaObservationResult value) {
         *tree = std::move(value.tree);
@@ -357,17 +400,17 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
                                       std::uint64_t stop_serial,
                                       std::vector<std::uint8_t> *output,
                                       std::size_t *width, std::size_t *height,
-                                      WindowsV1UiaStop *stop) {
+                                      WindowsV1UiaStop *stop, std::uint32_t background_pid) {
   if (stop != nullptr) *stop = WindowsV1UiaStop::kNone;
 #if SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE
   std::unique_ptr<WindowsCaptureBytes> result;
   const bool captured = RunWindowsImageRead<std::unique_ptr<WindowsCaptureBytes>>(epoch, stop_serial,
-        [window]() -> std::optional<std::unique_ptr<WindowsCaptureBytes>> {
+        [window, background_pid]() -> std::optional<std::unique_ptr<WindowsCaptureBytes>> {
           winrt::init_apartment(winrt::apartment_type::multi_threaded);
           struct Runtime { ~Runtime() { winrt::uninit_apartment(); } } runtime;
           auto value = std::make_unique<WindowsCaptureBytes>();
           if (!CaptureWindowWithGraphicsCaptureOnWorker(window, &value->bytes,
-                                                        &value->width, &value->height))
+                                                        &value->width, &value->height, background_pid))
             return std::nullopt;
           return value;
         }, [&result](std::unique_ptr<WindowsCaptureBytes> value) noexcept {
@@ -380,7 +423,7 @@ bool CaptureWindowWithGraphicsCapture(HWND window, std::uint64_t epoch,
     return true;
   }
 #else
-  (void)window; (void)epoch; (void)stop_serial; (void)width; (void)height;
+  (void)window; (void)epoch; (void)stop_serial; (void)width; (void)height; (void)background_pid;
 #endif
   std::fill(output->begin(), output->end(), 0);
   output->clear();
