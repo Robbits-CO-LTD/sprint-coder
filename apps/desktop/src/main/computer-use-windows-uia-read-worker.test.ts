@@ -271,7 +271,8 @@ enum class apartment_type {multi_threaded};
 void init_apartment(apartment_type){runtime_inits.fetch_add(1);if(fail_runtime)throw std::runtime_error("runtime init fault");}
 void uninit_apartment(){runtime_uninits.fetch_add(1);}
 }
-bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,std::vector<std::uint8_t>* bytes,std::size_t* width,std::size_t* height){
+bool CaptureWindowWithGraphicsCaptureOnWorker(HWND window,std::vector<std::uint8_t>* bytes,std::size_t* width,std::size_t* height,std::uint32_t background_pid){
+  if(background_pid!=0)throw std::runtime_error("foreground capture expected");
   capture_calls.fetch_add(1);return capture_measure(window,bytes,width,height);
 }
 void Sleep(DWORD milliseconds){std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));}
@@ -397,7 +398,7 @@ struct CaptureCall {
       const WindowsV1UiaPath path(std::chrono::milliseconds(budget),0,0);
       auto* parent=windows_v1_uia_lane;parent->stop=prior;parent->nodes=7;
       const auto before=*parent;CaptureOutcome out;
-      out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,frame.StopSerial(),&out.bytes,&out.width,&out.height,&out.stop);
+      out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,frame.StopSerial(),&out.bytes,&out.width,&out.height,&out.stop,0);
       out.parent_preserved=windows_v1_uia_lane==parent&&parent->stop==before.stop&&parent->nodes==before.nodes&&parent->has_deadline==before.has_deadline&&(!before.has_deadline||parent->deadline==before.deadline);
       promise.set_value(std::move(out));
     }catch(...){promise.set_exception(std::current_exception());}});
@@ -415,15 +416,15 @@ void CapturePolicies(){
   for(auto prior:{WindowsV1UiaStop::kCanceled,WindowsV1UiaStop::kBudget}){Reset();CaptureCall call(prior);const auto out=call.Take();
     Check(!out.ok&&out.bytes.empty()&&out.width==99&&out.height==77&&out.stop==prior&&out.parent_preserved&&initialized==0,"capture preserves prior cancel/budget without spawn");}
   for(bool implicit:{false,true}){Reset();const WindowsValidationFrameScope frame(implicit?std::nullopt:std::optional<std::uint64_t>{0});Stop(false);
-    CaptureOutcome out;out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,WindowsValidationFrameStopSerial(),&out.bytes,&out.width,&out.height,&out.stop);
+    CaptureOutcome out;out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,WindowsValidationFrameStopSerial(),&out.bytes,&out.width,&out.height,&out.stop,0);
     Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&out.bytes.empty()&&initialized==0&&windows_v1_uia_lane==nullptr,"capture refuses original explicit or implicit frame before spawn");}
   Reset();cancellation_epoch=1;{const WindowsV1UiaPath parent(std::chrono::milliseconds::zero(),1,0);CaptureOutcome out;
-    out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&out.bytes,&out.width,&out.height,&out.stop);
+    out.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&out.bytes,&out.width,&out.height,&out.stop,0);
     Check(!out.ok&&out.stop==WindowsV1UiaStop::kCanceled&&initialized==0&&parent.Stop()==WindowsV1UiaStop::kNone,"capture does not replace old session epoch with newer global epoch");}
   for(int ending=0;ending<3;++ending){Reset();auto gate=MakeGate();capture_measure=[gate](auto window,auto bytes,auto width,auto height){CaptureValue(window,bytes,width,height);gate->Hold();return true;};{
     CaptureCall call(WindowsV1UiaStop::kNone,ending==2?100:0);Check(gate->Wait(),"capture held");
     if(ending!=2){CaptureOutcome rejected;
-      rejected.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&rejected.bytes,&rejected.width,&rejected.height,&rejected.stop);
+      rejected.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&rejected.bytes,&rejected.width,&rejected.height,&rejected.stop,0);
       Check(!rejected.ok&&rejected.bytes.empty()&&windows_v1_uia_lane==nullptr&&capture_calls==1&&WindowsCaptureWorkerRunning(),"second capture busy without freeing first slot");
       // Consumer's cleanup helper releases all gates; use the engine directly to leave the other
       // capture's foreign-call gate held while checking independent UIA admission.
@@ -480,7 +481,7 @@ void PngPolicies(){
   for(int ending=0;ending<3;++ending){Reset();auto gate=MakeGate();png_measure=[gate]{gate->Hold();return true;};{
     PngCall call(true,ending==2?100:0);Check(gate->Wait(),"PNG worker held");
     if(ending!=2){PngOutcome rejected;rejected.ok=ReadPng(rejected,true);PngUnchanged(rejected);
-      CaptureOutcome capture;capture.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&capture.bytes,&capture.width,&capture.height,&capture.stop);
+      CaptureOutcome capture;capture.ok=CaptureWindowWithGraphicsCapture(nullptr,0,0,&capture.bytes,&capture.width,&capture.height,&capture.stop,0);
       Check(!capture.ok&&capture_calls==0&&png_calls==1&&WindowsCaptureWorkerRunning(),"busy image slot rejects PNG and capture");Stop(ending==0);}
     const auto out=call.Take();PngUnchanged(out);Check(out.parent_preserved&&WindowsCaptureWorkerRunning(),"PNG Stop retains running worker ownership");
     gate->Release();Check(DrainCapture()&&capture_scrubbed,"PNG late input/result scrub and slot retirement");
