@@ -4650,6 +4650,22 @@ describe('ComputerUseController', () => {
       },
     );
 
+    it.each([4, NaN])(
+      'reapproval_replaces_a_retained_unreadable_grant (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const identity = computerAppGrantIdentityFrom(windowsProfile().identity)!;
+        const grant = fixture.controller.createAppGrant(identity, input);
+        fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
+        // The newer build's row grants nothing here; approving again in this build replaces it.
+        const replaced = fixture.controller.createAppGrant(identity, input);
+        expect(replaced.denyRulesetVersion).toBe(3);
+        expect(fixture.grants.has(grant.id)).toBe(false);
+        expect(fixture.controller.appGrantFor(windowsProfile())?.id).toBe(replaced.id);
+        await fixture.controller.dispose();
+      },
+    );
+
     it.each([null, 0, 4, NaN])(
       'unreadable_or_mismatched_pin_fails_closed (%s)',
       async (version) => {

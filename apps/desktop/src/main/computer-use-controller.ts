@@ -1754,6 +1754,19 @@ export class ComputerUseController {
       })
     )
       throw new Error('Computer Use application cannot be granted');
+    // A row written by a newer build is kept unread (it grants nothing here); an explicit approval
+    // in this build replaces it, or the store's one-row-per-identity rule would refuse the grant.
+    const retained = this.deps.persistence.findComputerAppGrantByIdentity(
+      derived.platform,
+      derived.grantIdentityDigest,
+    );
+    if (
+      retained !== null &&
+      derived.platform === 'win32' &&
+      (!Number.isSafeInteger(retained.denyRulesetVersion) ||
+        retained.denyRulesetVersion > denyRulesetVersion)
+    )
+      this.deps.persistence.removeComputerAppGrant(retained.id, retained.revision);
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
       // Sanitised before it is stored as well as before it is shown. Storing the raw string would
