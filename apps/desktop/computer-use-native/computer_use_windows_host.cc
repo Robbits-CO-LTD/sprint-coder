@@ -103,6 +103,7 @@
 #include "computer_use_windows_target_facts.h"
 #include "computer_use_windows_test_hang.h"
 #include "computer_use_windows_approval_handlers.h"
+#include "computer_use_windows_approval_round_trip.h"
 
 namespace {
 #include "computer_use_windows_host_common.inc"

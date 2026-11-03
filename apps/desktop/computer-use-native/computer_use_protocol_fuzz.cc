@@ -22,6 +22,7 @@
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
 #include "computer_use_windows_approval_wire_test.h"
+#include "computer_use_windows_approval_round_trip_test.h"
 #include "computer_use_windows_approval_handlers_test.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
@@ -9477,6 +9478,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
+  if (!CheckApprovalRoundTripState()) return 1;
   if (!Check(CheckBackgroundInputWire(), "background-input-wire")) return 1;
   if (!Check(CheckWindowsBackgroundObservation(), "background-observation")) return 1;
   if (!Check(windows_approval_handlers_test::Check(), "windows-approval-handlers")) return 1;

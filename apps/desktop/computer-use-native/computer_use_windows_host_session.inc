@@ -253,6 +253,168 @@ std::string FrameIdKey(const sprint_coder::computer_use::FrameId &id) {
                      id.bytes.size());
 }
 
+// The foreground pump owns its session snapshot. It does not read the consumer's session map.
+// Stop -> round-trip is the lock order; the pump never acquires the Stop lock.
+struct WindowsRoundTripMonitor {
+  WindowsSession snapshot;
+  DWORD main_pid = 0;
+  std::uint64_t stop_serial = 0;
+  std::uint64_t generation = 0;
+  std::mutex mutex;
+  std::condition_variable ready;
+  DWORD thread_id = 0;
+  bool registered = false;
+  bool initialized = false;
+  std::uint64_t requested = 0, acknowledged = 0;
+  std::jthread pump;
+  static constexpr UINT kPing = WM_APP + 91;
+  static thread_local WindowsRoundTripMonitor *current;
+
+  void Sample(HWND foreground) {
+    using Focus = sprint_coder::computer_use::ApprovalRoundTripFocus;
+    DWORD pid = 0;
+    std::wstring window_class;
+    Focus focus = Focus::kOther;
+    if (foreground != nullptr && ReadWindowClass(foreground, &window_class) &&
+        GetWindowThreadProcessId(foreground, &pid) != 0) {
+      if (window_class == L"Shell_TrayWnd" || window_class == L"Shell_SecondaryTrayWnd" ||
+          window_class == L"Progman" || window_class == L"WorkerW" ||
+          window_class == L"CabinetWClass" || window_class == L"ExploreWClass") focus = Focus::kShell;
+      else if (pid == snapshot.pid && (foreground == snapshot.window ||
+               IsOwnedByRootWindow(foreground, snapshot.window, snapshot.pid, nullptr))) focus = Focus::kTarget;
+      else if (pid == main_pid) focus = Focus::kSprintCoder;
+    }
+    RECT bounds{};
+    WindowsDialogSetSnapshot dialogs;
+    std::string reason;
+    const bool guards = WindowsValidationStillCurrent(snapshot.cancel_epoch, stop_serial) &&
+        generation == windows_helper_generation && IsWindow(snapshot.window) &&
+        WaitForSingleObject(snapshot.process_handle, 0) == WAIT_TIMEOUT &&
+        ClientBoundsPhysical(snapshot.active_window, &bounds) &&
+        EqualRect(&bounds, &snapshot.observation_bounds) &&
+        CaptureWindowsDialogInventory(snapshot, &dialogs, &reason) &&
+        dialogs.digest == snapshot.dialog_set_digest;
+    snapshot.round_trip->Observe(focus, registered, guards, MonotonicNowNs() / 1000000);
+  }
+  static void CALLBACK Foreground(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWORD, DWORD) {
+    if (current != nullptr) current->Sample(window);
+  }
+  static void CALLBACK Target(HWINEVENTHOOK, DWORD event, HWND window, LONG object,
+                              LONG child, DWORD, DWORD) {
+    if (current == nullptr) return;
+    // Process filtering is enforced by registration, including ownerless new windows.
+    // Capture/move events are system events; object events concern top-level windows only.
+    const bool system_event = event < EVENT_OBJECT_CREATE;
+    if (system_event || (object == OBJID_WINDOW && child == CHILDID_SELF &&
+        (window == nullptr || !IsWindow(window) || GetAncestor(window, GA_ROOT) == window)))
+      current->snapshot.round_trip->TargetEvent();
+  }
+  bool Start(const WindowsSession &session, DWORD pid) {
+    snapshot = session;
+    snapshot.round_trip_monitor.reset();
+    main_pid = pid;
+    stop_serial = WindowsValidationFrameStopSerial();
+    generation = windows_helper_generation;
+    // Keep the process alive independently of Close releasing the session's original handle.
+    HANDLE process = nullptr;
+    snapshot.process_handle = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), session.process_handle, GetCurrentProcess(),
+                         &process, 0, FALSE, DUPLICATE_SAME_ACCESS)) return false;
+    snapshot.process_handle = process;
+    try {
+      pump = std::jthread([this](std::stop_token stop) {
+        current = this;
+        MSG message{};
+        PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+        const auto hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+            nullptr, Foreground, 0, 0, WINEVENT_OUTOFCONTEXT);
+        const DWORD events[] = {EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_REORDER, EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+            EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTUREEND};
+        std::vector<HWINEVENTHOOK> target_hooks;
+        bool all_registered = hook != nullptr;
+        for (const DWORD event : events) {
+          const auto target_hook = SetWinEventHook(event, event, nullptr, Target,
+              snapshot.pid, 0, WINEVENT_OUTOFCONTEXT);
+          target_hooks.push_back(target_hook);
+          all_registered = all_registered && target_hook != nullptr;
+        }
+        if (!all_registered) snapshot.round_trip->Invalidate("monitor_failed");
+        {
+          std::lock_guard lock(mutex);
+          thread_id = GetCurrentThreadId();
+          registered = all_registered;
+          initialized = true;
+        }
+        ready.notify_all();
+        while (all_registered && !stop.stop_requested()) {
+          MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+          while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            if (message.message == kPing) {
+              Sample(GetForegroundWindow());
+              std::lock_guard lock(mutex);
+              acknowledged = static_cast<std::uint64_t>(message.wParam);
+              ready.notify_all();
+            }
+          }
+          Sample(GetForegroundWindow());
+        }
+        for (const auto target_hook : target_hooks)
+          if (target_hook != nullptr) UnhookWinEvent(target_hook);
+        if (hook != nullptr) UnhookWinEvent(hook);
+        current = nullptr;
+      });
+    } catch (...) {
+      CloseHandle(snapshot.process_handle);
+      snapshot.process_handle = nullptr;
+      return false;
+    }
+    std::unique_lock lock(mutex);
+    const bool started = ready.wait_for(lock, std::chrono::milliseconds(150),
+        [&] { return initialized; }) && registered;
+    if (!started) snapshot.round_trip->Invalidate("monitor_failed");
+    return started;
+  }
+  bool Sync() {
+    std::unique_lock lock(mutex);
+    const auto serial = ++requested;
+    if (!registered || !PostThreadMessageW(thread_id, kPing, static_cast<WPARAM>(serial), 0) ||
+        !ready.wait_for(lock, std::chrono::milliseconds(150), [&] { return acknowledged >= serial; })) {
+      snapshot.round_trip->Invalidate("monitor_failed");
+      return false;
+    }
+    return !snapshot.round_trip->Failed();
+  }
+  ~WindowsRoundTripMonitor() {
+    if (pump.joinable()) { pump.request_stop(); pump.join(); }
+    if (snapshot.process_handle != nullptr) CloseHandle(snapshot.process_handle);
+  }
+};
+thread_local WindowsRoundTripMonitor *WindowsRoundTripMonitor::current = nullptr;
+
+bool ReadWindowsRoundTripBinding(const WindowsSession &session, const std::string &metadata,
+    sprint_coder::computer_use::ApprovalRoundTripBinding *binding) {
+  return ReadJsonString(metadata, "roundTripId", &binding->id) && !binding->id.empty() &&
+      ReadJsonString(metadata, "sessionId", &binding->session) && binding->session == session.session_id &&
+      ReadJsonString(metadata, "taskId", &binding->task) && !binding->task.empty() &&
+      ReadJsonString(metadata, "turnId", &binding->turn) && !binding->turn.empty() &&
+      ReadJsonUint64(metadata, "helperGeneration", &binding->generation) &&
+      binding->generation == windows_helper_generation && binding->generation != 0 &&
+      ReadJsonUint64(metadata, "cancelEpoch", &binding->epoch) && binding->epoch == session.cancel_epoch;
+}
+
+bool WindowsRoundTripCurrent(const WindowsSession &session) {
+  return !session.round_trip || (session.round_trip_monitor && session.round_trip_monitor->Sync());
+}
+
+bool WindowsRoundTripMayInput(const WindowsSession &session) {
+  return !session.round_trip ||
+      (WindowsRoundTripCurrent(session) && session.round_trip->MayInput(MonotonicNowNs() / 1000000));
+}
+
 std::string ResponseCacheKey(const Frame& request);
 std::string RequestPayloadDigest(const Frame& request);
 
@@ -406,7 +568,32 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       *reason = "session_target_rejected";
       return false;
     }
-    return StartWindowsExistingSession(std::move(input), response, reason);
+    auto &existing = sessions.at(input.session_key);
+    sprint_coder::computer_use::ApprovalRoundTripBinding binding;
+    if (existing.round_trip && !existing.round_trip->MayLegacyStart()) {
+      // Main consumes trusted activation before sending the P1b return binding. A plain resume
+      // cannot clear a retained failure; human recovery closes this session and starts a new one.
+      if (!ReadWindowsRoundTripBinding(existing, metadata, &binding) ||
+          !WindowsRoundTripCurrent(existing) ||
+          !existing.round_trip->Return(binding, MonotonicNowNs() / 1000000)) {
+        existing.round_trip->Invalidate();
+        *reason = "approval_round_trip_rejected";
+        return false;
+      }
+    } else if (metadata.find("\"roundTripId\"") != std::string::npos) {
+      *reason = "approval_round_trip_rejected";
+      return false;
+    }
+    const bool succeeded = StartWindowsExistingSession(std::move(input), response, reason);
+    if (!binding.id.empty()) {
+      if (!succeeded || !WindowsRoundTripCurrent(existing) ||
+          !existing.round_trip->Returned(binding, MonotonicNowNs() / 1000000)) {
+        existing.round_trip->Invalidate();
+        *reason = "approval_round_trip_rejected";
+        return false;
+      }
+    }
+    return succeeded;
   }
   if (v2_basis && !sessions.contains(FrameIdKey(request.header.session_id))) {
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
@@ -595,6 +782,20 @@ bool StopPendingWindowsStart(const Frame& request, const std::string& metadata,
 bool ValidateWindowsSession(
     const WindowsSession &session, RECT *bounds, std::string *reason,
     WindowsDialogSetSnapshot *dialog_snapshot = nullptr) {
+  bool valid = false;
+  struct RoundTripValidation {
+    const WindowsSession &session;
+    const std::string *reason;
+    const bool &valid;
+    ~RoundTripValidation() {
+      if (valid || !session.round_trip || session.round_trip->MayLegacyStart()) return;
+      // Only the permitted focus transfer is non-terminal. All identity/dialog/Stop failures
+      // remain terminal, including a failure whose notification never reaches Main.
+      if (*reason == "focus_required" && WindowsRoundTripCurrent(session) &&
+          session.round_trip->FocusException()) return;
+      session.round_trip->Invalidate();
+    }
+  } round_trip_validation{session, reason, valid};
   const WindowsValidationFrameScope frame;
   if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
     *reason = "session_identity_changed";
@@ -625,6 +826,7 @@ bool ValidateWindowsSession(
   *bounds = current_dialogs.active_bounds;
   if (dialog_snapshot != nullptr)
     *dialog_snapshot = std::move(current_dialogs);
+  valid = true;
   return true;
 }
 

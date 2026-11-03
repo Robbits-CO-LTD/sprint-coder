@@ -155,7 +155,10 @@ struct WindowsStartLease {
   ~WindowsStartLease();
 };
 
+struct WindowsRoundTripMonitor;
 struct WindowsSession {
+  std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
+  std::shared_ptr<WindowsRoundTripMonitor> round_trip_monitor;
   std::uint64_t approved_started_ns = 0;
   std::uint64_t approved_deadline_ns = 0;
   std::uint64_t approved_stop_serial = 0;
@@ -219,6 +222,9 @@ struct WindowsSession {
 };
 
 // Start evaluates capability and binding before the operation-mode check.
+bool WindowsRoundTripCurrent(const WindowsSession &session);
+bool WindowsRoundTripMayInput(const WindowsSession &session);
+
 bool WindowsApprovalSessionBindingCurrent(const WindowsSession &session) {
   return !session.approval_revoked &&
       session.approval_route_v2 && windows_helper_generation != 0 &&

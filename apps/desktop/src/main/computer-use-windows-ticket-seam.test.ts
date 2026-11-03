@@ -131,6 +131,7 @@ const preamble = String.raw`
 #include <vector>
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_approval_handlers.h"
+#include "computer_use_windows_approval_round_trip.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
@@ -222,6 +223,7 @@ std::string Sha256String(std::string_view message) {
 
 // The parts of a Windows session that the ticket code reads (same member names as the helper).
 struct WindowsSession {
+  std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
       std::make_shared<std::atomic<std::uint64_t>>(0);
   std::string session_id;
@@ -241,6 +243,13 @@ struct WindowsSession {
   bool has_focused_element_signature = false;
 };
 std::unordered_map<std::string, WindowsSession> sessions;
+
+// Ordinary ticket fixtures have no round trip; unexpected round-trip work fails closed.
+bool WindowsRoundTripCurrent(const WindowsSession &session) { return !session.round_trip; }
+bool ReadWindowsRoundTripBinding(const WindowsSession &, const std::string &,
+                                sprint_coder::computer_use::ApprovalRoundTripBinding *) {
+  return false;
+}
 
 bool g_validate_ok = true;
 std::string g_validate_reason = "stale_target";
@@ -868,7 +877,12 @@ function assembled(): string {
     between('std::string JsonEscape(', 'std::string Sha256Bytes('),
     between('struct CachedResponse {', 'struct WindowsStartAdmission {'),
     between('// The ordinary dispatch ticket (ADR v2', 'std::uint64_t last_closed_cancel_epoch'),
-    between('std::string FrameIdKey(', 'struct WindowsStartAttemptScope {'),
+    // The Win32 round-trip monitor follows FrameIdKey and is outside this ordinary-ticket seam.
+    between('std::string FrameIdKey(', 'struct WindowsRoundTripMonitor {'),
+    between(
+      'std::string ResponseCacheKey(const Frame& request);',
+      'struct WindowsStartAttemptScope {',
+    ),
     between('std::string ErrorPayload(', 'bool Respond('),
     between(
       'std::string ResponseCacheKey(const Frame &request) {',

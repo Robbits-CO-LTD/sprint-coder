@@ -1,5 +1,6 @@
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
+  std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::uint64_t approved_started_ns = 0;
   std::uint64_t approved_deadline_ns = 0;
   std::string session_id;
@@ -78,6 +79,7 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
   {
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
     if (WindowsSemanticOperations().active.get() != pending || pending->session_id.empty() ||
+        (pending->round_trip && !pending->round_trip->MayInput(MonotonicNowNs() / 1000000)) ||
         (pending->approved_deadline_ns != 0 &&
          (MonotonicNowNs() < pending->approved_started_ns ||
           MonotonicNowNs() >= pending->approved_deadline_ns)) ||
@@ -979,6 +981,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   pending->approved_started_ns = session.approved_started_ns;
   pending->approved_deadline_ns = session.approved_deadline_ns;
   pending->session_id = session.session_id;
+  pending->round_trip = session.round_trip;
   pending->attempts = session.input_api_attempts;
   auto &control = WindowsTargetListControl();
   {
