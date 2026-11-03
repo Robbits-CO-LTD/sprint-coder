@@ -672,16 +672,17 @@ bool DeliverWindowsInteractionEvents(HANDLE pipe,
       const auto key = binding.id + ":" + event.state + ":" + event.failure + ":" + event.foreground;
       if (key == delivery.last_trip) continue;
       delivery.last_trip = key;
-      const bool failed = event.state == "failed";
-      ApprovalRoundTripFields fields{{"version", std::uint64_t{1}},
-          {"kind", std::string("event")}, {"roundTripId", binding.id},
-          {"sessionId", binding.session}, {"taskId", binding.task}, {"turnId", binding.turn},
-          {"helperGeneration", binding.generation}, {"cancelEpoch", binding.epoch},
-          {"sequence", ++delivery.sequence}, {"state", event.state},
-          {"foreground", event.foreground},
-          {"failureReason", failed ? event.failure : std::string("none")}, {"failureLatched", failed}};
-      const auto payload = ApprovalRoundTripWire(fields);
-      if (payload.empty() || !Respond(pipe, delivery.request, MessageType::kApprovalRoundTripEvent, payload)) return false;
+      bool degraded = false;
+      const auto payload = ApprovalRoundTripEventWire(
+          {binding.id, binding.session, binding.task, binding.turn, event.state, event.foreground,
+           event.failure, binding.generation, binding.epoch, delivery.sequence + 1},
+          &degraded);
+      // A notification the contract cannot carry fails this session closed (the latch blocks its
+      // return, exchange and input); it never ends the pipe for every other session.
+      if (degraded) session.round_trip->Invalidate("monitor_failed");
+      if (payload.empty()) continue;
+      ++delivery.sequence;
+      if (!Respond(pipe, delivery.request, MessageType::kApprovalRoundTripEvent, payload)) return false;
     }
   }
   return true;

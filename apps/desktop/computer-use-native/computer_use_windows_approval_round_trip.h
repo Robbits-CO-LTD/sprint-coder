@@ -49,8 +49,10 @@ public:
     else if (!guards) Fail("target_changed");
     else if (focus != ApprovalRoundTripFocus::kTarget && focus != ApprovalRoundTripFocus::kSprintCoder)
       Fail("third_window");
+    // After the return the focus exception is over: a move to Sprint Coder is the foreground
+    // session's focus loss (ADR §2.4), not a third window, whose wire foreground is "other".
     else if ((phase_ == Phase::kReturned || phase_ == Phase::kExchanged || phase_ == Phase::kEnded) &&
-             focus != ApprovalRoundTripFocus::kTarget) Fail("third_window");
+             focus != ApprovalRoundTripFocus::kTarget) Fail("target_changed");
   }
   bool Return(const ApprovalRoundTripBinding &binding, std::uint64_t now) {
     std::lock_guard lock(mutex_);

@@ -33,7 +33,11 @@ describe('Windows background monitor (P3a)', () => {
       delivery.indexOf('MessageType::kBackgroundInteractionEvent'),
     );
     expect(delivery).toContain('session.round_trip->ReadNotification()');
-    expect(delivery).toContain('ApprovalRoundTripWire(fields)');
+    expect(delivery).toContain('ApprovalRoundTripEventWire(');
+    // A payload the contract cannot carry fails that session closed; it never ends the pipe.
+    expect(delivery).toContain('if (degraded) session.round_trip->Invalidate("monitor_failed");');
+    expect(delivery).toContain('if (payload.empty()) continue;');
+    expect(delivery).not.toMatch(/payload\.empty\(\) \|\|[^;]*return false/u);
     expect(delivery).not.toContain('StartWindowsBackgroundMonitor');
     expect(native('computer_use_windows_host_v2_targets.inc')).toContain('interactionEpoch');
     expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);

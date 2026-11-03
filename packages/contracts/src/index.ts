@@ -5891,6 +5891,12 @@ export const computerUseSessionStatusSchema = z
       .optional(),
     stopCause: z.literal('shared_helper_stop').optional(),
     /**
+     * `false` only for a session whose native interaction authority was revoked (background pause,
+     * takeover or round-trip failure). It stays `paused` but cannot be resumed; Stop ends it and a
+     * fresh start creates new authority. Absent means a paused session is resumable by a person.
+     */
+    resumable: z.literal(false).optional(),
+    /**
      * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
      * it when the session ends, and it is never persisted, logged or given to the outer agent.
      */

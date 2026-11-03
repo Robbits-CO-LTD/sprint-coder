@@ -5,6 +5,7 @@ import {
 import {
   WindowsInteractionEvents,
   parseWindowsInteractionEvent,
+  type WindowsInteractionEvent,
   type WindowsInteractionListener,
 } from './computer-use-windows-transport-events';
 import { computerUseApprovalRoundTripWireSchema } from '@sprint-coder/contracts';
@@ -416,26 +417,50 @@ class WindowsComputerUseHelperClient {
     if (wire.helperGeneration !== this.helperGeneration) throw new Error('Stale round trip');
     if (wire.kind === 'begin' && !this.interactionEvents.begin(wire, wire.roundTripId))
       throw new Error('Unbound round trip');
-    const result = computerUseApprovalRoundTripWireSchema.parse(
-      await this.call(
-        wire.kind === 'begin' ? 'approval_round_trip_begin' : 'approval_round_trip_end',
-        `approval_round_trip_${wire.kind}`,
-        wire,
-        wire.sessionId,
-        undefined,
-      ),
-    );
-    if (
-      result.kind !== `${wire.kind}_result` ||
-      result.sessionId !== wire.sessionId ||
-      result.taskId !== wire.taskId ||
-      result.turnId !== wire.turnId ||
-      result.helperGeneration !== wire.helperGeneration ||
-      result.cancelEpoch !== wire.cancelEpoch ||
-      result.roundTripId !== wire.roundTripId
-    )
-      throw new Error('Unbound round trip acknowledgement');
-    return result;
+    let accepted = false;
+    try {
+      const result = computerUseApprovalRoundTripWireSchema.parse(
+        await this.call(
+          wire.kind === 'begin' ? 'approval_round_trip_begin' : 'approval_round_trip_end',
+          `approval_round_trip_${wire.kind}`,
+          wire,
+          wire.sessionId,
+          undefined,
+        ),
+      );
+      if (
+        result.kind !== `${wire.kind}_result` ||
+        result.sessionId !== wire.sessionId ||
+        result.taskId !== wire.taskId ||
+        result.turnId !== wire.turnId ||
+        result.helperGeneration !== wire.helperGeneration ||
+        result.cancelEpoch !== wire.cancelEpoch ||
+        result.roundTripId !== wire.roundTripId
+      )
+        throw new Error('Unbound round trip acknowledgement');
+      accepted = 'accepted' in result && result.accepted === true;
+      if (wire.kind === 'begin' && !accepted) throw new Error('Round trip begin refused');
+      return result;
+    } finally {
+      // The trip id is recorded only after native accepted it; a refusal or throw rolls it back.
+      if (wire.kind === 'begin')
+        this.deliverInteraction(
+          this.interactionEvents.settleBegin(wire.sessionId, wire.roundTripId, accepted),
+        );
+    }
+  }
+  /**
+   * Each listener is isolated: one that throws cannot reach resolveFrame's protocol-failure path
+   * (which would tear down every session's transport). It fails closed for its session only.
+   */
+  private deliverInteraction(events: readonly WindowsInteractionEvent[]): void {
+    for (const event of events)
+      for (const listener of this.interactionListeners)
+        try {
+          listener(event);
+        } catch {
+          this.interactionEvents.revoke(event.sessionId);
+        }
   }
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
@@ -1261,15 +1286,17 @@ class WindowsComputerUseHelperClient {
           Number.isSafeInteger(cancelEpoch) &&
           cancelEpoch >= 0
         )
-          this.interactionEvents.bind(
-            {
-              sessionId: sessionKey,
-              taskId: input['taskId'],
-              turnId: input['turnId'],
-              cancelEpoch,
-              helperGeneration: helper,
-            },
-            interactionEpoch,
+          this.deliverInteraction(
+            this.interactionEvents.bind(
+              {
+                sessionId: sessionKey,
+                taskId: input['taskId'],
+                turnId: input['turnId'],
+                cancelEpoch,
+                helperGeneration: helper,
+              },
+              interactionEpoch,
+            ),
           );
       }
       if (closes && sessionKey !== undefined) {
@@ -1725,11 +1752,20 @@ class WindowsComputerUseHelperClient {
       if (
         !event ||
         (event.kind === 'event') !== (frame.messageType === 'approval_round_trip_event') ||
-        frame.sessionId.hex !== frameIdFromText(`session:${event.sessionId}`).hex ||
-        !this.interactionEvents.receive(event, this.helperGeneration)
+        frame.sessionId.hex !== frameIdFromText(`session:${event.sessionId}`).hex
       )
         return;
-      for (const listener of this.interactionListeners) listener(event);
+      if (!this.interactionEvents.receive(event, this.helperGeneration)) {
+        // It may precede, in the same read, the start response or begin_result it depends on.
+        const start = this.starts.get(event.sessionId);
+        this.interactionEvents.hold(
+          event,
+          this.helperGeneration,
+          start !== undefined && start.attempts.size !== 0 && !start.stopped,
+        );
+        return;
+      }
+      this.deliverInteraction([event]);
       return;
     }
     const pending = this.pending.get(frame.requestId.hex);

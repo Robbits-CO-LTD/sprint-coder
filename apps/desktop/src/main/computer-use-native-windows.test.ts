@@ -72,6 +72,7 @@ describe('P3d interaction authority', () => {
     delivery.bind(binding);
     expect(delivery.receive(trip, 2)).toBe(false);
     expect(delivery.begin(binding, 'trip-1')).toBe(true);
+    delivery.settleBegin(binding.sessionId, 'trip-1', true);
     expect(delivery.receive({ ...trip, roundTripId: 'other' }, 2)).toBe(false);
     expect(delivery.receive({ ...trip, sequence: 3 }, 2)).toBe(true);
     expect(delivery.begin(binding, 'trip-1')).toBe(false);
@@ -108,6 +109,7 @@ describe('P3d interaction authority', () => {
     const delivery = new WindowsInteractionEvents();
     delivery.bind(binding);
     delivery.begin(binding, 'trip-1');
+    delivery.settleBegin(binding.sessionId, 'trip-1', true);
     expect(delivery.receive({ ...trip, state: 'ended' }, 2)).toBe(true);
     expect(delivery.receive({ ...trip, sequence: 2 }, 2)).toBe(false);
     expect(

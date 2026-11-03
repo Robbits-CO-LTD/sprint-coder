@@ -61,5 +61,21 @@ inline bool CheckApprovalRoundTripWire() {
   if (!ApprovalRoundTripWire(rejected).empty()) return false;
   for (auto &[key, value] : rejected) if (key == "failureLatched") value = true;
   if (ApprovalRoundTripWire(rejected).empty()) return false;
+  // The event frame: a contract-valid notification is sent as is; one the contract cannot carry
+  // degrades to a latched monitor_failed failure, never an empty payload that ends the pipe.
+  ApprovalRoundTripEventInput event{"round-trip-1", "session-1", "task-1", "turn-1", "failed",
+                                    "other", "third_window", 1, 0, 2};
+  bool degraded = true;
+  if (ApprovalRoundTripEventWire(event, &degraded) != fixtures[5].second || degraded) return false;
+  event.foreground = "sprint_coder";
+  const auto fallback = ApprovalRoundTripEventWire(event, &degraded);
+  if (!degraded || fallback.find("\"failureReason\":\"monitor_failed\"") == std::string::npos ||
+      fallback.find("\"foreground\":\"sprint_coder\"") == std::string::npos ||
+      fallback.find("\"failureLatched\":true") == std::string::npos) return false;
+  event = {"round-trip-1", "session-1", "task-1", "turn-1", "active", "other", "none", 1, 0, 3};
+  if (ApprovalRoundTripEventWire(event, &degraded).find("\"state\":\"failed\"") ==
+      std::string::npos || !degraded) return false;
+  event.id.clear();
+  if (!ApprovalRoundTripEventWire(event, &degraded).empty()) return false;
   return !kWindowsBackgroundInputEnabled;
 }

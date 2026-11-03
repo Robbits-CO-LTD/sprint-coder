@@ -319,14 +319,10 @@ export function createComputerUseNativeHost(
   const interactionRevoked = new Set<string>();
   const interactionListeners = new Set<WindowsInteractionListener>();
   if (platform === 'win32')
+    // The helper is the binding authority (start/begin acknowledgement, generation, epochs, order)
+    // and passes each revocation once. Latched here even before `sessions` holds the session, so
+    // an event of a start still in flight is never dropped by one layer and kept by another.
     addon?.subscribeWindowsInteraction?.((event) => {
-      const session = sessions.get(event.sessionId);
-      if (
-        !session ||
-        session.cancelEpoch !== event.cancelEpoch ||
-        interactionRevoked.has(event.sessionId)
-      )
-        return;
       if (event.kind === 'background_event' || event.state === 'failed')
         interactionRevoked.add(event.sessionId);
       for (const listener of interactionListeners) listener(event);
@@ -1375,6 +1371,7 @@ export function createComputerUseNativeHost(
       revisionsBySession.delete(id);
       activeStopQuarantines.delete(id);
       confirmedClosed.add(id);
+      interactionRevoked.delete(id);
       if (confirmedClosed.size > 128)
         confirmedClosed.delete(confirmedClosed.values().next().value!);
     }
@@ -1623,6 +1620,7 @@ export function createComputerUseNativeHost(
         );
       }
       confirmedClosed.add(owner.sessionId);
+      interactionRevoked.delete(owner.sessionId);
       if (confirmedClosed.size > 128) {
         const oldest = confirmedClosed.values().next().value;
         if (oldest !== undefined) confirmedClosed.delete(oldest);
@@ -3641,6 +3639,7 @@ export function createComputerUseNativeHost(
         stopEpochs.delete(session.sessionId);
         revisionsBySession.delete(session.sessionId);
         confirmedClosed.add(session.sessionId);
+        interactionRevoked.delete(session.sessionId);
         if (confirmedClosed.size > 128)
           confirmedClosed.delete(confirmedClosed.values().next().value!);
         // Only a verified close releases the process-local quarantine. Late/failed completion

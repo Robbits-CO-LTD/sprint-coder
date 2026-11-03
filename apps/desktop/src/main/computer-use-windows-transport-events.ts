@@ -39,6 +39,9 @@ export function parseWindowsInteractionEvent(value: unknown): WindowsInteraction
   return trip.success && trip.data.kind === 'event' ? trip.data : null;
 }
 
+type HeldInteractionEvent = Readonly<{ event: WindowsInteractionEvent; generation: number }>;
+const MAX_HELD_EVENTS = 8;
+
 /** Authority comes from a successful start/begin, never from an incoming notification. */
 export class WindowsInteractionEvents {
   private readonly sessions = new Map<
@@ -48,51 +51,105 @@ export class WindowsInteractionEvents {
       sequence: number;
       interactionEpoch: number;
       roundTripId?: string;
+      /** Sent but not yet acknowledged; committed only by an accepted begin_result. */
+      pendingTrip?: string | undefined;
       usedTrips: Set<string>;
       tripSequence: number;
       tripEnded: boolean;
       revoked: boolean;
     }
   >();
-  bind(binding: WindowsInteractionBinding, interactionEpoch = 0): void {
+  /**
+   * Events read before the acknowledgement they depend on was processed (the start response or a
+   * begin_result coalesced in the same pipe read). Replayed through `receive` once it is.
+   */
+  private readonly held = new Map<string, HeldInteractionEvent[]>();
+  /** Returns the held events that the new binding accepted, in order, for the caller to deliver. */
+  bind(binding: WindowsInteractionBinding, interactionEpoch = 0): WindowsInteractionEvent[] {
     const previous = this.sessions.get(binding.sessionId);
     if (
-      previous &&
-      binding.helperGeneration === previous.binding.helperGeneration &&
-      binding.cancelEpoch <= previous.binding.cancelEpoch
+      !previous ||
+      binding.helperGeneration !== previous.binding.helperGeneration ||
+      binding.cancelEpoch > previous.binding.cancelEpoch
     )
-      return;
-    this.sessions.set(binding.sessionId, {
-      binding,
-      sequence: 0,
-      interactionEpoch,
-      usedTrips: new Set(),
-      tripSequence: 0,
-      tripEnded: false,
-      revoked: false,
-    });
+      this.sessions.set(binding.sessionId, {
+        binding,
+        sequence: 0,
+        interactionEpoch,
+        usedTrips: new Set(),
+        tripSequence: 0,
+        tripEnded: false,
+        revoked: false,
+      });
+    return this.replay(binding.sessionId, () => true);
   }
   begin(binding: WindowsInteractionBinding, roundTripId: string): boolean {
     const current = this.sessions.get(binding.sessionId);
     if (
       !current ||
       current.revoked ||
+      current.pendingTrip !== undefined ||
       current.usedTrips.has(roundTripId) ||
       (current.roundTripId !== undefined && !current.tripEnded) ||
       !this.matches(current.binding, binding)
     )
       return false;
-    current.usedTrips.add(roundTripId);
-    current.roundTripId = roundTripId;
-    current.tripSequence = 0;
-    current.tripEnded = false;
+    current.pendingTrip = roundTripId;
     return true;
+  }
+  /**
+   * Settles a `begin`: only an accepted acknowledgement records the id; a refusal or a failed call
+   * rolls it back, so a later trip can begin and the previous trip's events stay bound.
+   */
+  settleBegin(
+    sessionId: string,
+    roundTripId: string,
+    accepted: boolean,
+  ): WindowsInteractionEvent[] {
+    const current = this.sessions.get(sessionId);
+    if (current?.pendingTrip !== roundTripId) return [];
+    current.pendingTrip = undefined;
+    if (accepted) {
+      current.usedTrips.add(roundTripId);
+      current.roundTripId = roundTripId;
+      current.tripSequence = 0;
+      current.tripEnded = false;
+    }
+    return this.replay(
+      sessionId,
+      (event) => event.kind !== 'event' || event.roundTripId === roundTripId,
+      accepted,
+    );
+  }
+  /**
+   * Keeps an event that may precede its acknowledgement: for a start in flight (no binding yet) or
+   * for the trip whose begin is in flight. Bounded; anything else is dropped.
+   */
+  hold(event: WindowsInteractionEvent, generation: number, startPending: boolean): void {
+    const current = this.sessions.get(event.sessionId);
+    const waiting =
+      current === undefined
+        ? startPending
+        : event.kind === 'event' &&
+          current.pendingTrip !== undefined &&
+          event.roundTripId === current.pendingTrip;
+    if (!waiting) return;
+    const queue = this.held.get(event.sessionId) ?? [];
+    if (queue.length >= MAX_HELD_EVENTS) return;
+    queue.push({ event, generation });
+    this.held.set(event.sessionId, queue);
   }
   blocked(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.revoked === true;
   }
+  /** Fail closed for one session (for example a listener that threw while delivering). */
+  revoke(sessionId: string): void {
+    const current = this.sessions.get(sessionId);
+    if (current !== undefined) current.revoked = true;
+  }
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.held.delete(sessionId);
   }
   receive(event: WindowsInteractionEvent, generation: number): boolean {
     const current = this.sessions.get(event.sessionId);
@@ -118,6 +175,20 @@ export class WindowsInteractionEvents {
       if (event.state === 'ended') current.tripEnded = true;
     }
     return true;
+  }
+  private replay(
+    sessionId: string,
+    selects: (event: WindowsInteractionEvent) => boolean,
+    deliver = true,
+  ): WindowsInteractionEvent[] {
+    const queue = this.held.get(sessionId) ?? [];
+    const kept = queue.filter((held) => !selects(held.event));
+    if (kept.length === 0) this.held.delete(sessionId);
+    else this.held.set(sessionId, kept);
+    if (!deliver) return [];
+    return queue
+      .filter((held) => selects(held.event) && this.receive(held.event, held.generation))
+      .map((held) => held.event);
   }
   private matches(a: WindowsInteractionBinding, b: WindowsInteractionBinding): boolean {
     return (

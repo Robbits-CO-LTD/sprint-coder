@@ -481,6 +481,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       api === undefined ||
       session === null ||
       session.state !== 'paused' ||
+      session.resumable === false ||
       prior === null ||
       resuming ||
       stopping
@@ -533,7 +534,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       ? null
       : approvalView(session.pendingApproval);
   const resumeActivation =
-    session?.state === 'paused' && lastStartInput !== null
+    session?.state === 'paused' && session.resumable !== false && lastStartInput !== null
       ? startActivationIntent({
           ...lastStartInput,
           mode: session.mode,
@@ -783,13 +784,15 @@ function sessionView(
     maxRounds: status.maxRounds,
     expiresAt: status.expiresAt,
     observedAt: status.lastObservationAt,
-    resumable: status.state === 'paused',
+    resumable: status.state === 'paused' && status.resumable !== false,
     pauseReason:
-      status.state === 'paused'
-        ? '必要な手動操作を終えたら「対象へ戻って再開」を選んでください'
-        : status.state === 'failed'
-          ? '利用者の操作を待っています'
-          : null,
+      status.state === 'paused' && status.resumable === false
+        ? '対象の操作が検出されたため、このセッションは再開できません。停止してから開始し直してください'
+        : status.state === 'paused'
+          ? '必要な手動操作を終えたら「対象へ戻って再開」を選んでください'
+          : status.state === 'failed'
+            ? '利用者の操作を待っています'
+            : null,
     copied: status.copied,
   };
 }
