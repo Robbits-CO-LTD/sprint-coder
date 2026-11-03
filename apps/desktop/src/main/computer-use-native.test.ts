@@ -716,7 +716,11 @@ describe('Windows native helper compile boundary', () => {
     expect(existingSource).toContain(
       'ResolveWindowsSessionRefocusTarget(session, &refocus_window, reason)',
     );
-    expect(existingSource).toContain('refocused_dialogs.digest != session.dialog_set_digest');
+    // N9 P2a: a background session compares with the dialogs captured at its background start;
+    // a foreground session still compares with its observation-bound dialog set.
+    expect(existingSource).toContain(
+      'refocused_dialogs.digest != (background ? background_dialogs.digest : session.dialog_set_digest)',
+    );
     expect(existingSource).toContain(
       'refocused_dialogs.active_identity != session.active_window_identity',
     );
