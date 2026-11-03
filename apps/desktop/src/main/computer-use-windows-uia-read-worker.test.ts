@@ -133,6 +133,8 @@ function workerSource(): string {
     '      TestBeforeAdoption(pending->done);\n      std::lock_guard stop_lock(control.stop_mutex);\n      WindowsV1UiaLane &lane',
   );
   return (
+    cut('// BEGIN windows worker slot launches', '// END windows worker slot launches') +
+    'WindowsWorkerSlot& InterlockWorkerRunning(){static WindowsWorkerSlot running;return running;}\n' +
     cut(
       'thread_local const std::uint64_t *windows_validation_frame_serial',
       'bool WindowsValidationStillCurrent(',
@@ -241,6 +243,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
 // the Windows pipe/real-UIA seams independently validate the actual OS boundary.
 const preamble = String.raw`
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -266,9 +269,9 @@ using sprint_coder::computer_use::Frame;
 using sprint_coder::computer_use::FrameHeader;
 using sprint_coder::computer_use::MessageType;
 using HANDLE=void*;
+bool CancelIoEx(HANDLE,void*){return true;}
 std::uint64_t windows_helper_generation=7;
 std::atomic<bool>& WindowsTargetListWorkerRunning(){static std::atomic<bool> running{false};return running;}
-std::atomic<bool>& InterlockWorkerRunning(){static std::atomic<bool> running{false};return running;}
 namespace sprint_coder::computer_use::windows_uia_source_detail {
 std::atomic<bool>& ShellLookupRunning(){static std::atomic<bool> running{false};return running;}
 std::atomic<bool>& InterlockShellLookupRunning(){static std::atomic<bool> running{false};return running;}
@@ -531,19 +534,59 @@ int main(){try {
     Check(inherited,"existing_outer_deadline_is_not_shortened");}
   Reset();{Consumer call([]{int value=0;WindowsV1UiaRead(value,[&]{Sleep(900);value=7;return S_OK;});return std::optional<Sample>{Value()};},true,2000);
     Check(call.Ready(1500)&&call.Take().ok,"inherited_noncontact_budget_preserves_live_value");}
-  {Frame request;written_frames.clear();WindowsTargetListWorkerRunning().store(true);
+  {Frame request;written_frames.clear();Check(!InterlockWorkerRunning().exchange(true),"earlier worker started");
     const WindowsResidualRequestScope request_scope(request);
     Check(Respond(nullptr,request,MessageType::kProbeResult,"{}"),"unrelated response written");
     Check(written_frames.size()==1&&written_frames[0].header.flags==0,"unrelated_worker_does_not_change_response_shape");
-    WindowsTargetListWorkerRunning().store(false);written_frames.clear();}
+    InterlockWorkerRunning().store(false);written_frames.clear();}
+  // The effect shadow's and the interlock's shell lookups, and a worker another thread starts, are no
+  // request's residual work: a hung lookup cannot make the request's D end the helper.
+  {Frame request;written_frames.clear();const WindowsResidualRequestScope request_scope(request);
+    sprint_coder::computer_use::windows_uia_source_detail::ShellLookupRunning().store(true);sprint_coder::computer_use::windows_uia_source_detail::InterlockShellLookupRunning().store(true);
+    std::thread([]{(void)WindowsCaptureWorkerRunning().exchange(true);}).join();
+    Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.size()==1&&written_frames[0].header.flags==0,"background_and_lookup_work_is_not_request_residual");
+    sprint_coder::computer_use::windows_uia_source_detail::ShellLookupRunning().store(false);sprint_coder::computer_use::windows_uia_source_detail::InterlockShellLookupRunning().store(false);
+    WindowsCaptureWorkerRunning().store(false);written_frames.clear();}
+  // A slot that an earlier request's worker held on entry and that this request takes again is this
+  // request's own residual; the earlier request retires when its own launch ends.
+  {using sprint_coder::computer_use::kResidualWorkFlag;written_frames.clear();auto& slot=WindowsUiaReadWorkerRunning();
+    Frame earlier;earlier.header.request_id.bytes[0]=3;
+    {const WindowsResidualRequestScope scope(earlier);Check(!slot.exchange(true),"earlier launch");
+      Check(Respond(nullptr,earlier,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"earlier residual");}
+    Frame request;request.header.request_id.bytes[0]=4;
+    {const WindowsResidualRequestScope scope(request);
+      slot.store(false);Check(!slot.exchange(true),"slot taken again");
+      Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"recycled_slot_keeps_own_worker_residual");}
+    const auto retired=[](std::uint8_t id){return std::count_if(written_frames.begin(),written_frames.end(),[id](const WireResult& frame){
+      return frame.header.message_type==27&&frame.header.request_id.bytes[0]==id;});};
+    Check(DeliverWindowsRetiredOperations(nullptr)&&retired(3)==1&&retired(4)==0,"earlier_owner_retires_when_its_launch_ends");
+    slot.store(false);Check(DeliverWindowsRetiredOperations(nullptr)&&retired(4)==1,"recycled launch retires");written_frames.clear();}
+  // The consumer is held on a second, long request while the first request's worker retires: the
+  // notifier still sends the retirement, after the first response.
+  {written_frames.clear();WindowsRetirementNotifier notifier(nullptr);Check(notifier.Start(),"notifier started");
+    auto& slot=WindowsCaptureWorkerRunning();Frame first;first.header.request_id.bytes[0]=5;
+    {const WindowsResidualRequestScope scope(first);Check(!slot.exchange(true),"first launch");
+      Check(Respond(nullptr,first,MessageType::kProbeResult,"{}"),"first answered");}
+    Frame second;second.header.request_id.bytes[0]=6;
+    {const WindowsResidualRequestScope held(second);
+      slot.store(false);
+      bool sent=false,ordered=false;
+      for(auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);!sent&&std::chrono::steady_clock::now()<until;){
+        {std::lock_guard lock(WindowsPipeWriteMutex());
+          const auto response=std::find_if(written_frames.begin(),written_frames.end(),[](const WireResult& frame){return frame.header.message_type!=27&&frame.header.request_id.bytes[0]==5;});
+          const auto retire=std::find_if(written_frames.begin(),written_frames.end(),[](const WireResult& frame){return frame.header.message_type==27&&frame.header.request_id.bytes[0]==5;});
+          sent=retire!=written_frames.end();ordered=sent&&response<retire;}
+        if(!sent)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+      Check(sent,"retirement_is_not_held_behind_a_long_request");Check(ordered,"retirement_follows_its_response");
+      Check(Respond(nullptr,second,MessageType::kProbeResult,"{}"),"second answered");}
+    notifier.Stop();Check(!notifier.Failed(),"notifier healthy");written_frames.clear();}
   FocusReceiptContract();
   ExpiredCommitContract();
   {using namespace sprint_coder::computer_use;
-    for(auto* running:{&WindowsUiaReadWorkerRunning(),&WindowsCaptureWorkerRunning(),&WindowsTargetListWorkerRunning(),
-        &InterlockWorkerRunning(),&windows_uia_source_detail::ShellLookupRunning(),&windows_uia_source_detail::InterlockShellLookupRunning()}){
+    for(WindowsWorkerSlot* running:{&WindowsUiaReadWorkerRunning(),&WindowsCaptureWorkerRunning(),&InterlockWorkerRunning()}){
       Frame request;request.header.request_id.bytes[0]=1;request.header.session_id.bytes[0]=2;
       const WindowsResidualRequestScope request_scope(request);
-      written_frames.clear();running->store(true);
+      written_frames.clear();Check(!running->exchange(true),"request launches its worker");
       {Frame other;const WindowsResidualRequestScope nested(other);
         Check(Respond(nullptr,other,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==0,"nested_stop_does_not_own_parent_worker");}
       written_frames.clear();

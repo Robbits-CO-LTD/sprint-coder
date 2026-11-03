@@ -8232,6 +8232,44 @@ int main() {
     expect(child.killCalls).toBe(0);
   });
 
+  it.each(['stalled', 'retired', 'wrong_session'] as const)(
+    'flagged_late_answer_to_a_deferred_request_stays_bounded (%s)',
+    async (kind) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'deferred-residual', 'turn-1');
+      const helper = target.helper();
+      helper.hold('observe');
+      helper.hold('list_targets');
+      helper.residual.add('list_targets');
+      const observe = observeThroughTransport(target.addon, session.sessionId);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await queued).toBe('rejected');
+      helper.release('observe');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await observe).toBe('resolved');
+      // The late answer still has worker cleanup running: it does not drop the deferred watch.
+      helper.release('list_targets');
+      await vi.advanceTimersByTimeAsync(5_000);
+      if (kind === 'retired') helper.retire('list_targets');
+      if (kind === 'wrong_session')
+        helper.retire('list_targets', { sessionId: { hex: 'd'.repeat(32) } });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(kind === 'retired' ? 0 : 1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(child.killCalls).toBe(kind === 'retired' ? 0 : 1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
   it('deferred_watch_cleared_on_exit', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(

@@ -403,7 +403,14 @@ type HelperGeneration = {
   cause: 'stop' | 'crash' | 'abortTransport';
   exited: boolean;
   timer?: NodeJS.Timeout;
-  deferredRequests: Array<{ order: number; duration: number; requestId: string }>;
+  deferredRequests: Array<{
+    order: number;
+    duration: number;
+    requestId: string;
+    sessionId: string;
+    /** Answered late with residual work: only a matching operation_retired may forget it. */
+    residual?: true;
+  }>;
   deferredTimer?: NodeJS.Timeout;
 };
 
@@ -420,13 +427,16 @@ class WindowsComputerUseHelperClient {
    * A late answer to a deferred request proves the helper is still serving its queue, so that
    * request no longer counts towards terminating the generation. Its result stays rejected.
    */
-  private forgetDeferredRequest(requestId: string): void {
+  private forgetDeferredRequest(requestId: string, retired = false): void {
     const generation = this.generations.get(this.helperGeneration);
     if (generation === undefined) return;
     const index = generation.deferredRequests.findIndex(
       (request) => request.requestId === requestId,
     );
     if (index === -1) return;
+    // A late answer that still has residual work is not proof that the work ended: its fresh D
+    // stays armed until the helper retires that work.
+    if (generation.deferredRequests[index]!.residual === true && !retired) return;
     generation.deferredRequests.splice(index, 1);
     if (index === 0) {
       clearTimeout(generation.deferredTimer);
@@ -1720,6 +1730,7 @@ class WindowsComputerUseHelperClient {
                 order: pending.order,
                 duration: timeoutMilliseconds,
                 requestId: requestId.hex,
+                sessionId: sessionId.hex,
               });
               generation.deferredRequests.sort((a, b) => a.order - b.order);
               this.reevaluateDeferredRequests(generation);
@@ -1869,10 +1880,23 @@ class WindowsComputerUseHelperClient {
     }
   }
 
+  /** The deferred entry of the current generation that a late answer or retirement names. */
+  private deferredRequestFor(
+    frame: ComputerUseNativeFrame,
+  ): HelperGeneration['deferredRequests'][number] | undefined {
+    return this.generations
+      .get(this.helperGeneration)
+      ?.deferredRequests.find(
+        (request) =>
+          request.requestId === frame.requestId.hex && request.sessionId === frame.sessionId.hex,
+      );
+  }
+
   private resolveFrame(frame: ComputerUseNativeFrame): void {
     if (frame.messageType === 'operation_retired') {
       const residual = this.residual.get(frame.requestId.hex);
-      if (residual === undefined) return;
+      const deferred = residual === undefined ? this.deferredRequestFor(frame) : undefined;
+      if (residual === undefined && deferred?.residual !== true) return;
       const value = asRecord(
         JSON.parse(frame.metadata.toString('utf8')),
         'Invalid worker retirement',
@@ -1881,11 +1905,19 @@ class WindowsComputerUseHelperClient {
         frame.flags !== 0 ||
         frame.binary.length !== 0 ||
         frame.cancelId !== null ||
+        Object.keys(value).length !== 1 ||
+        value['helperGeneration'] !== this.helperGeneration
+      )
+        return;
+      if (residual === undefined) {
+        // Its D already passed once; the fresh deferred timer stays the bound until this point.
+        this.forgetDeferredRequest(frame.requestId.hex, true);
+        return;
+      }
+      if (
         frame.sessionId.hex !== residual.sessionId.hex ||
-        value['helperGeneration'] !== residual.helperGeneration ||
         residual.helperGeneration !== this.helperGeneration ||
-        Date.now() >= residual.deadline ||
-        Object.keys(value).length !== 1
+        Date.now() >= residual.deadline
       )
         return;
       clearTimeout(residual.timeout);
@@ -1923,7 +1955,12 @@ class WindowsComputerUseHelperClient {
     }
     const pending = this.pending.get(frame.requestId.hex);
     if (pending === undefined) {
-      this.forgetDeferredRequest(frame.requestId.hex);
+      // Only an answer with no residual work proves the deferred request ended. A flagged late
+      // answer keeps the deferred entry (and its fresh D) until a matching operation_retired.
+      if (frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK) {
+        const deferred = this.deferredRequestFor(frame);
+        if (deferred !== undefined) deferred.residual = true;
+      } else if (frame.flags === 0) this.forgetDeferredRequest(frame.requestId.hex);
       return;
     }
     if (!isWindowsHelperResponseBound(frame, pending)) {

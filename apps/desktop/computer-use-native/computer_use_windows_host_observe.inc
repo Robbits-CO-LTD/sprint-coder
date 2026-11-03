@@ -238,7 +238,7 @@ bool ReadUiaObservationOnWorker(std::uint32_t pid, HWND window, std::string *tre
 // Both policies abandon immediately on consumer-side Stop, deadline or slow first contact.
 template <class Result, class Measure, class Adopt>
 bool RunWindowsUiaRead(bool preserve_stopped_result, Measure measure, Adopt adopt,
-                       std::atomic<bool> &running = WindowsUiaReadWorkerRunning()) {
+                       WindowsWorkerSlot &running = WindowsUiaReadWorkerRunning()) {
   static_assert(std::is_nothrow_move_constructible_v<Result> && std::is_nothrow_move_assignable_v<Result>,
                 "UIA read results must be publishable without throwing.");
   const WindowsV1UiaPath path;

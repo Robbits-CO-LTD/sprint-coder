@@ -253,7 +253,7 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
     auto pending = std::make_shared<ArtifactReadPending>();
     const WindowsSession copy = session;
     const std::string signature = observed->second;
-    std::atomic<bool> &running = InterlockWorkerRunning();
+    WindowsWorkerSlot &running = InterlockWorkerRunning();
     if (running.exchange(true)) return false;
     try {
       std::thread([pending, copy, target_id, signature, expected_epoch, &running]() {
@@ -810,6 +810,12 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
 
   bool handshaken = false;
   bool served = true;
+  // Retirements must not wait for the request the consumer is serving.
+  WindowsRetirementNotifier retirements(pipe);
+  if (!retirements.Start()) {
+    served = false;
+    CancelIoEx(pipe, nullptr);
+  }
   WindowsDiscoveryStopPump discovery_stop_pump{[&](const std::string& waiting_owner) {
     // Bound each pass even if the reader keeps receiving Stops. Do not run another query or input.
     for (std::size_t count = 0; count < kMaximumQueuedFrames; ++count) {
@@ -832,7 +838,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     return true;
   }};
   for (;;) {
-    if (!DeliverWindowsRetiredOperations(pipe) ||
+    if (!served || retirements.Failed() || !DeliverWindowsRetiredOperations(pipe) ||
         !DeliverWindowsInteractionEvents(pipe, interaction_deliveries)) {
       served = false;
       CancelIoEx(pipe, nullptr);
@@ -865,8 +871,9 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         interaction_deliveries.emplace(session_key, WindowsInteractionDelivery{Frame{queued.frame.header}, task, turn});
     }
   }
+  retirements.Stop();
   if (reader.joinable())
     reader.join();
-  return served && reader_valid;
+  return served && reader_valid && !retirements.Failed();
 }
 

@@ -75,7 +75,7 @@ struct WindowsTargetListState {
   std::mutex stop_mutex;
   HANDLE new_start_thread = nullptr;
   std::atomic<std::uint64_t> stop_serial{0};
-  std::atomic<bool> running{false};
+  WindowsWorkerSlot running;  // numbered launches: WindowsResidualRequestScope (N5-B2)
   std::shared_ptr<const WindowsTargetFactsContext> context_candidate;
   std::uint64_t context_stop_serial = 0;
 };

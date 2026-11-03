@@ -65,51 +65,62 @@ std::string ProbeJson(const BackendProbe &probe) {
 }
 
 // BEGIN windows residual response ownership
-std::atomic<bool> &InterlockWorkerRunning();
+WindowsWorkerSlot &InterlockWorkerRunning();
 
-std::uint32_t WindowsResidualWorkers() {
-  using namespace sprint_coder::computer_use;
-  return (WindowsUiaReadWorkerRunning().load(std::memory_order_acquire) ? 1u : 0u) |
-      (WindowsCaptureWorkerRunning().load(std::memory_order_acquire) ? 2u : 0u) |
-      (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ? 4u : 0u) |
-      (InterlockWorkerRunning().load(std::memory_order_acquire) ? 8u : 0u) |
-      (windows_uia_source_detail::ShellLookupRunning().load(std::memory_order_acquire) ? 16u : 0u) |
-      (windows_uia_source_detail::InterlockShellLookupRunning().load(std::memory_order_acquire) ? 32u : 0u);
-}
-
+// A response is flagged only while a worker that THIS request started still holds its slot (see
+// WindowsWorkerSlot). Work the scheduler owns (the effect shadow) or that a worker thread starts (the
+// shell lookups: each its own single-flight slot, which a lookup that never returns holds alone) is no
+// request's residual work.
 struct WindowsResidualResponse {
   FrameHeader header;
-  std::uint32_t workers;
+  WindowsWorkerLaunches workers;
 };
 
 class WindowsResidualRequestScope;
 thread_local const WindowsResidualRequestScope *windows_residual_request = nullptr;
 
-// A nested Stop or a later request does not own workers that were already running on entry.
+// A nested Stop or a later request does not own workers that another request started.
 class WindowsResidualRequestScope {
 public:
   explicit WindowsResidualRequestScope(const Frame &request)
-      : request_(&request), previous_(windows_residual_request), existing_(WindowsResidualWorkers()) {
+      : request_(&request), previous_(windows_residual_request),
+        previous_launches_(windows_worker_launches) {
     windows_residual_request = this;
+    windows_worker_launches = &launches_;
   }
-  ~WindowsResidualRequestScope() { windows_residual_request = previous_; }
-  std::uint32_t Workers(const Frame &request) const {
-    return request_ == &request ? WindowsResidualWorkers() & ~existing_ : 0;
+  ~WindowsResidualRequestScope() {
+    windows_residual_request = previous_;
+    windows_worker_launches = previous_launches_;
+  }
+  WindowsResidualRequestScope(const WindowsResidualRequestScope &) = delete;
+  WindowsResidualRequestScope &operator=(const WindowsResidualRequestScope &) = delete;
+  WindowsWorkerLaunches Workers(const Frame &request) const noexcept {
+    return request_ == &request ? launches_.Holding() : WindowsWorkerLaunches{};
   }
 private:
   const Frame *request_;
   const WindowsResidualRequestScope *previous_;
-  std::uint32_t existing_;
+  WindowsWorkerLaunches *previous_launches_;
+  WindowsWorkerLaunches launches_;
 };
 
-// Only the pipe consumer owns this queue and writes frames; cleanup keeps its slot busy.
+// Every frame goes out through Respond or a retirement delivery under this lock. So the notifier can
+// write a retirement while the consumer serves a long request (an observe, a discovery wait, the modal
+// picker), and a retirement is queued and written only after its own response.
+std::mutex &WindowsPipeWriteMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+std::condition_variable &WindowsResidualReady() {
+  static std::condition_variable ready;
+  return ready;
+}
+// Guarded by WindowsPipeWriteMutex.
 std::vector<WindowsResidualResponse> windows_residual_responses;
 
-bool DeliverWindowsRetiredOperations(HANDLE pipe) {
-  const auto running = WindowsResidualWorkers();
+bool DeliverWindowsRetiredOperationsLocked(HANDLE pipe) {
   for (auto it = windows_residual_responses.begin(); it != windows_residual_responses.end();) {
-    it->workers &= running;
-    if (it->workers != 0) { ++it; continue; }
+    if (!it->workers.Retired()) { ++it; continue; }
     auto header = it->header;
     header.message_type = static_cast<std::uint16_t>(MessageType::kOperationRetired);
     header.flags = 0;
@@ -119,6 +130,56 @@ bool DeliverWindowsRetiredOperations(HANDLE pipe) {
   }
   return true;
 }
+
+bool DeliverWindowsRetiredOperations(HANDLE pipe) {
+  std::lock_guard lock(WindowsPipeWriteMutex());
+  return DeliverWindowsRetiredOperationsLocked(pipe);
+}
+
+// Sends each retirement as soon as its workers end, independently of the request being served. Idle
+// while nothing is queued; otherwise it looks again every 20 ms.
+class WindowsRetirementNotifier {
+public:
+  explicit WindowsRetirementNotifier(HANDLE pipe) : pipe_(pipe) {}
+  ~WindowsRetirementNotifier() { Stop(); }
+  WindowsRetirementNotifier(const WindowsRetirementNotifier &) = delete;
+  WindowsRetirementNotifier &operator=(const WindowsRetirementNotifier &) = delete;
+  bool Start() noexcept {
+    try {
+      thread_ = std::thread([this] { Run(); });
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+  void Stop() noexcept {
+    {
+      std::lock_guard lock(WindowsPipeWriteMutex());
+      stopping_ = true;
+    }
+    WindowsResidualReady().notify_all();
+    if (thread_.joinable()) thread_.join();
+  }
+  [[nodiscard]] bool Failed() const noexcept { return failed_.load(std::memory_order_acquire); }
+private:
+  void Run() {
+    std::unique_lock lock(WindowsPipeWriteMutex());
+    while (!stopping_) {
+      if (windows_residual_responses.empty()) WindowsResidualReady().wait(lock);
+      else WindowsResidualReady().wait_for(lock, std::chrono::milliseconds(20));
+      if (stopping_) break;
+      if (!DeliverWindowsRetiredOperationsLocked(pipe_)) {
+        failed_.store(true, std::memory_order_release);
+        CancelIoEx(pipe_, nullptr);
+        break;
+      }
+    }
+  }
+  HANDLE pipe_;
+  bool stopping_ = false;  // under WindowsPipeWriteMutex
+  std::atomic<bool> failed_{false};
+  std::thread thread_;
+};
 
 std::string ErrorPayload(std::string_view code, bool accepted = false) {
   return std::string("{\"result\":\"rejected\",\"code\":\"") +
@@ -133,19 +194,56 @@ bool Respond(HANDLE pipe, const Frame &request, MessageType type,
   response.message_type = static_cast<std::uint16_t>(type);
   response.cancel_id = {};
   response.flags = 0;
+  std::lock_guard write_lock(WindowsPipeWriteMutex());
+  bool queued = false;
   if (type != MessageType::kHandshakeResult &&
       type != MessageType::kApprovalRoundTripEvent &&
       type != MessageType::kBackgroundInteractionEvent) {
-    const auto workers = windows_residual_request != nullptr ? windows_residual_request->Workers(request) : 0;
-    if (workers != 0) {
+    const auto workers = windows_residual_request != nullptr ? windows_residual_request->Workers(request)
+                                                             : WindowsWorkerLaunches{};
+    if (!workers.Retired()) {
       if (windows_residual_responses.size() >= 128) return false;
       response.flags = sprint_coder::computer_use::kResidualWorkFlag;
-      windows_residual_responses.push_back({response, workers});
+      try {
+        windows_residual_responses.push_back({response, workers});
+      } catch (...) {
+        return false;
+      }
+      queued = true;
     }
   }
-  return WriteFrame(pipe, response, payload, binary);
+  if (!WriteFrame(pipe, response, payload, binary)) {
+    // Never retire a response that was not written.
+    if (queued) windows_residual_responses.pop_back();
+    return false;
+  }
+  if (queued) WindowsResidualReady().notify_all();
+  return true;
 }
 // END windows residual response ownership
+
+// The background binding re-finds the target with a full raw-view search. Without an outer deadline a
+// read gets kWindowsUiaReadBudget (5 s) and the noncontact call watchdog, which would refuse a deep but
+// answering tree that the observe of the same window accepts. So this search gets the D Main gives
+// these frames (preflight and approval: 10 s), counted from here: the helper takes the frame no earlier
+// than Main sent it, so this can never end a search Main would still have accepted, and it is never
+// unbounded. An inherited deadline is kept as it is.
+bool ValidateWindowsBackgroundActionBindingWithinFrame(const WindowsSession &session,
+                                                       const std::string &metadata) {
+  WindowsV1UiaLane *lane = windows_v1_uia_lane;
+  const bool bounded_here = lane != nullptr && !lane->has_deadline;
+  if (bounded_here) {
+    lane->has_deadline = true;
+    lane->deadline = std::chrono::steady_clock::now() + kWindowsUiaFrameBudget;
+  }
+  struct Restore {
+    WindowsV1UiaLane *lane;
+    ~Restore() {
+      if (lane != nullptr) lane->has_deadline = false;
+    }
+  } restore{bounded_here ? lane : nullptr};
+  return ValidateWindowsBackgroundActionBinding(session, metadata);
+}
 
 bool RespondAndCache(HANDLE pipe, const Frame &request, MessageType type,
                      std::string payload,
@@ -403,8 +501,8 @@ struct InterlockPending {
 };
 
 // Never destroyed: an abandoned worker may end after the process has started to exit.
-std::atomic<bool> &InterlockWorkerRunning() {
-  static std::atomic<bool> *const running = new std::atomic<bool>(false);
+WindowsWorkerSlot &InterlockWorkerRunning() {
+  static WindowsWorkerSlot *const running = new WindowsWorkerSlot;
   return *running;
 }
 
@@ -466,7 +564,7 @@ sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     strict.process_id = strict.asked ? session.pid : 0;
     strict.target_not_web = strict.asked ? session.v2_input_not_web : std::nullopt;
     // Single-flight: a worker still stuck from an earlier evaluation means no second one.
-    std::atomic<bool> &running = InterlockWorkerRunning();
+    WindowsWorkerSlot &running = InterlockWorkerRunning();
     if (running.exchange(true)) {
       unavailable.no_verdict = InterlockNoVerdict::kBudget;
       return unavailable;
@@ -731,7 +829,7 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   std::string kind, reason;
   RECT bounds{};
   if (!WindowsApprovalGate(session) || !limits.MayRead() || WindowsSemanticInputInFlight() ||
-      !ValidateWindowsBackgroundActionBinding(session, metadata) ||
+      !ValidateWindowsBackgroundActionBindingWithinFrame(session, metadata) ||
       !ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, &reason)) return {};
   if (kind == "type") {
     std::string text;
@@ -985,7 +1083,7 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   std::string kind;
   RECT bounds{};
   std::string reason;
-  if (!ValidateWindowsBackgroundActionBinding(session, metadata)) {
+  if (!ValidateWindowsBackgroundActionBindingWithinFrame(session, metadata)) {
     return Respond(pipe, request, MessageType::kPreflightResult,
         WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
                                 "denied", "native_stale_target", ""));

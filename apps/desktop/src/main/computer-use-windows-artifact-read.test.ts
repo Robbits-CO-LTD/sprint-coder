@@ -135,7 +135,7 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     const body = squash(code(block));
     expect(body).toContain('CoInitializeEx(nullptr, COINIT_MULTITHREADED)');
     expect(body).toContain(
-      'std::atomic<bool> &running = InterlockWorkerRunning(); if (running.exchange(true)) return false;',
+      'WindowsWorkerSlot &running = InterlockWorkerRunning(); if (running.exchange(true)) return false;',
     );
     expect(body).toContain('pending->ready.wait_for(lock, kInterlockLaneHoldLimit');
     expect(body).toContain('pending->abandoned.store(true, std::memory_order_release);');

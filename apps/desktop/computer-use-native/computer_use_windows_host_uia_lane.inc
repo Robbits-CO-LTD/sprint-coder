@@ -52,6 +52,8 @@ constexpr DWORD kWindowsV1UiaTransactionTimeoutMs = 300;
 constexpr std::chrono::milliseconds kWindowsV1UiaObserveBudget{25'000};
 constexpr std::chrono::milliseconds kWindowsUiaReadBudget{5'000};
 constexpr std::chrono::milliseconds kWindowsUiaCallBudget{800};
+// Main's D for preflight and approval frames: the bound of their background-binding search.
+constexpr std::chrono::milliseconds kWindowsUiaFrameBudget{10'000};
 
 // The ONE place the V1 lane creates UI Automation. The bounded one when the system has it
 // (CreateBoundedAutomation); if IUIAutomation2 cannot be had it falls back to the plain one, as before
@@ -89,15 +91,15 @@ template <class Result> struct WindowsUiaReadPending : WindowsUiaReadProgress {
 // Installed only by the UIA read worker. No caller's lane or COM pointer crosses threads.
 thread_local WindowsUiaReadProgress *windows_uia_read_progress = nullptr;
 
-std::atomic<bool> &WindowsUiaReadWorkerRunning() {
+WindowsWorkerSlot &WindowsUiaReadWorkerRunning() {
   // A provider stuck in COM may outlive ServePipe and static destruction.
-  static auto *running = new std::atomic<bool>{false};
+  static auto *running = new WindowsWorkerSlot;
   return *running;
 }
 
-std::atomic<bool> &WindowsCaptureWorkerRunning() {
+WindowsWorkerSlot &WindowsCaptureWorkerRunning() {
   // A stalled capture must not block a healthy UIA read, or inherit a timed-out UIA worker's slot.
-  static auto *running = new std::atomic<bool>{false};
+  static auto *running = new WindowsWorkerSlot;
   return *running;
 }
 
