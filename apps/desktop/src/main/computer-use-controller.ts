@@ -452,6 +452,7 @@ export interface ComputerUseNativeHost {
   ): Promise<boolean>;
   captureWindowsGeneration?(): WindowsGenerationToken | null;
   isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
+  isWindowsTargetGenerationCurrent?(generation: ComputerTargetWindowsGeneration): boolean;
   /** No IPC exposure. Subscribe before invoking native; disabled unless termination is enabled. */
   subscribeWindowsStop?(listener: WindowsStopListener): () => void;
   /** Private discovery seam; Controller exposure and token binding are a separate step. */
@@ -472,6 +473,8 @@ export interface ComputerUseNativeHost {
     input: Readonly<{
       /** Main-only consumed-token guard, rechecked at the transport write boundary. */
       assertTargetCurrent?: () => void;
+      windowsGeneration?: ComputerTargetWindowsGeneration;
+      expectedWindowIdentityDigest?: string;
       profile: ComputerAppProfileRecord;
       windowId: string;
       sessionId: string;
@@ -644,6 +647,7 @@ export type ComputerUseStartRequest = Readonly<{
 }>;
 
 export type ComputerUseAgentStartBinding = Readonly<{
+  candidateProfile?: ComputerAppProfileRecord;
   /** Model-authored, already normalised and bounded like a Task goal. */
   goal: string;
   /** The closed question the call asked (T15-2), normalised; null when it asked none. */
@@ -825,6 +829,7 @@ const COMPUTER_APP_UNGRANTED: ComputerAppGrantState = Object.freeze({
  * against itself and pass every time.
  */
 type PendingAppGrantRequest = {
+  targetRecord?: ComputerTargetAppTokenRecord;
   request: ComputerAppGrantRequest;
   facts: ComputerAppGrantCardFacts;
   identityDigest: string;
@@ -1423,14 +1428,20 @@ export class ComputerUseController {
   private async listNativeWindows(
     profile: ComputerAppProfileRecord,
     scope: ComputerUseDiscoveryScope,
+    generation?: ComputerTargetWindowsGeneration,
   ): Promise<ComputerUseNativeWindow[]> {
     const profileMaximumMode = maximumModeForProfile(profile);
     const windows = await scope.read(profile);
     scope.check();
+    if (generation !== undefined && !this.windowsTargetGenerationCurrent(generation))
+      throw new Error('Computer Use target generation changed');
     return windows
       .filter((window) => window.appIdentityDigest === profile.identityDigest)
       .map((window) => ({
         ...window,
+        ...(generation === undefined || window.windowsGeneration !== undefined
+          ? {}
+          : { windowsGeneration: generation }),
         maximumMode: bindComputerUseMaximumMode(profileMaximumMode, window.maximumMode),
       }));
   }
@@ -1687,9 +1698,23 @@ export class ComputerUseController {
   async revokeAppGrant(grantId: string, expectedRevision: number): Promise<void> {
     const grant = this.deps.persistence.getComputerAppGrant(grantId);
     this.deps.persistence.removeComputerAppGrant(grantId, expectedRevision);
+    const candidateProfiles = new Set<string>();
+    for (const record of [
+      ...this.targetTokens.values(),
+      ...this.targetAppTokens.values(),
+      this.pendingAppGrantRequest?.targetRecord,
+    ]) {
+      const profile = record?.candidateProfile;
+      if (
+        profile !== undefined &&
+        this.boundGrantIdentity(profile)?.grantIdentityDigest === grant.grantIdentityDigest
+      )
+        candidateProfiles.add(profile.id);
+    }
     // Tokens naming this application are worthless now, and a live session must not keep driving an
     // application whose permission was just withdrawn.
     const revoked = (profileId: string): boolean =>
+      candidateProfiles.has(profileId) ||
       this.profileGrantIdentityDigest(profileId) === grant.grantIdentityDigest;
     // A Task-scoped "allow once" for the same application goes too. The user asked for this
     // application to stop being permitted, and leaving the weaker agreement standing would mean the
@@ -2042,10 +2067,7 @@ export class ComputerUseController {
         profileRevision: profile.revision,
         ...(windowsGeneration === undefined ? {} : { windowsGeneration }),
       } as const;
-      const grantState =
-        candidate === undefined
-          ? this.appGrantState(profile, context.taskId)
-          : COMPUTER_APP_UNGRANTED;
+      const grantState = this.appGrantState(profile, context.taskId);
       if (candidate === undefined) snapshots.set(profile.id, { profile, grantState });
       let issued = false;
       let windowIndex = 0;
@@ -2091,6 +2113,7 @@ export class ComputerUseController {
             }),
             profileId: profile.id,
             expiresAt,
+            ...(candidate === undefined ? {} : { candidateProfile: profile }),
             ...(windowsGeneration === undefined ? {} : { enumeration }),
           }),
         );
@@ -2113,6 +2136,7 @@ export class ComputerUseController {
             binding: appBinding,
             profileId: profile.id,
             expiresAt,
+            ...(candidate === undefined ? {} : { candidateProfile: profile }),
             ...(windowsGeneration === undefined ? {} : { enumeration }),
           }),
         );
@@ -2199,7 +2223,10 @@ export class ComputerUseController {
   }
 
   private windowsTargetGenerationCurrent(generation: ComputerTargetWindowsGeneration): boolean {
-    return this.deps.native.isWindowsGenerationCurrent?.(generation.helper) === true;
+    return (
+      this.deps.native.isWindowsGenerationCurrent?.(generation.helper) === true &&
+      (this.deps.native.isWindowsTargetGenerationCurrent?.(generation) ?? true)
+    );
   }
 
   private targetRecordCurrent(record: ComputerTargetAppTokenRecord): boolean {
@@ -2207,6 +2234,8 @@ export class ComputerUseController {
     return (
       generation === undefined ||
       (this.now() < record.expiresAt &&
+        (record.candidateProfile === undefined ||
+          this.deps.windowsTargetDiscoveryEnabled?.() === true) &&
         record.enumeration === this.targetEnumerations.get(record.binding.taskId) &&
         this.windowsTargetGenerationCurrent(generation))
     );
@@ -2253,10 +2282,14 @@ export class ComputerUseController {
    * Whether the application's egress agreement still names the destination of the Turn a closed
    * answer would be returned into (T15-2). A profile that is gone agrees to nothing.
    */
-  private answerEgressAgreed(profileId: string, context: ToolExecutionContext): boolean {
+  private answerEgressAgreed(
+    profileId: string,
+    context: ToolExecutionContext,
+    candidateProfile?: ComputerAppProfileRecord,
+  ): boolean {
     let profile: ComputerAppProfileRecord;
     try {
-      profile = this.deps.persistence.getComputerAppProfile(profileId);
+      profile = candidateProfile ?? this.deps.persistence.getComputerAppProfile(profileId);
     } catch {
       return false;
     }
@@ -2388,6 +2421,12 @@ export class ComputerUseController {
     const profiles = this.deps.persistence
       .listComputerAppProfiles()
       .filter((profile) => !computerUseAppIdentityIsDenied(profile.identity));
+    const candidateRecord = this.targetAppTokens.get(input.appToken);
+    if (
+      candidateRecord?.candidateProfile !== undefined &&
+      this.targetRecordCurrent(candidateRecord)
+    )
+      profiles.push(candidateRecord.candidateProfile);
     let profileId: string;
     try {
       profileId = this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
@@ -2396,6 +2435,7 @@ export class ComputerUseController {
     }
     const profile = profiles.find((candidate) => candidate.id === profileId);
     if (profile === undefined) return this.accessRefused('access_request_invalid_token');
+    const targetRecord = this.targetAppTokens.get(input.appToken);
     const identity = this.boundGrantIdentity(profile);
     if (identity === null) return this.accessRefused('access_request_invalid_token');
     const egressBinding =
@@ -2427,8 +2467,10 @@ export class ComputerUseController {
       return this.accessRefused('access_request_rate_limited');
     // The same live enumeration the click will re-run, so both sides compute the ceiling from
     // native rather than one from native and one from the store.
-    const observed = await this.refetchAppGrantFacts(profile.id, scope);
+    const observed = await this.refetchAppGrantFacts(profile.id, scope, targetRecord);
     scope.check();
+    if (targetRecord === undefined || !this.targetRecordCurrent(targetRecord))
+      return this.accessRefused('access_request_invalid_token');
     if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
       return this.accessRefused('access_request_invalid_token');
     // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
@@ -2442,6 +2484,7 @@ export class ComputerUseController {
     if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
     if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     return await this.raiseAppGrantCard({
+      ...(targetRecord.binding.windowsGeneration === undefined ? {} : { targetRecord }),
       context,
       kind,
       profile: observed.profile,
@@ -2511,6 +2554,7 @@ export class ComputerUseController {
   private async refetchAppGrantFacts(
     profileId: string,
     scope: ComputerUseDiscoveryScope,
+    targetRecord?: ComputerTargetAppTokenRecord,
   ): Promise<Readonly<{
     profile: ComputerAppProfileRecord;
     identity: ComputerAppGrantIdentity;
@@ -2519,9 +2563,32 @@ export class ComputerUseController {
     let profile: ComputerAppProfileRecord;
     let windows: readonly ComputerUseNativeWindow[];
     try {
-      profile = this.deps.persistence.getComputerAppProfile(profileId);
-      windows = await this.listNativeWindows(profile, scope);
+      if (targetRecord !== undefined && !this.targetRecordCurrent(targetRecord)) return null;
+      profile =
+        targetRecord?.candidateProfile ?? this.deps.persistence.getComputerAppProfile(profileId);
+      windows = await this.listNativeWindows(
+        profile,
+        scope,
+        targetRecord?.binding.windowsGeneration,
+      );
       scope.check();
+      if (
+        targetRecord !== undefined &&
+        (!this.targetRecordCurrent(targetRecord) ||
+          windows.some(
+            (window) =>
+              !computerTargetWindowsGenerationMatches(
+                window.windowsGeneration,
+                targetRecord.binding.windowsGeneration,
+              ),
+          ))
+      )
+        return null;
+      if (
+        targetRecord?.candidateProfile !== undefined &&
+        windows.some((window) => window.executableDigest !== profile.executableDigest)
+      )
+        return null;
       profile = this.refreshSignedWindowsProfile(profile, windows);
     } catch (error) {
       if (
@@ -2543,6 +2610,7 @@ export class ComputerUseController {
   /** Builds one card, publishes it, and resolves when a person answers or the card lapses. */
   private async raiseAppGrantCard(
     input: Readonly<{
+      targetRecord?: ComputerTargetAppTokenRecord;
       context: ToolExecutionContext;
       kind: 'app-grant' | 'provider-egress';
       profile: ComputerAppProfileRecord;
@@ -2641,6 +2709,7 @@ export class ComputerUseController {
       );
       timer.unref?.();
       this.pendingAppGrantRequest = {
+        ...(input.targetRecord === undefined ? {} : { targetRecord: input.targetRecord }),
         request,
         facts: input.facts,
         identityDigest,
@@ -2765,7 +2834,11 @@ export class ComputerUseController {
       });
       return;
     }
-    const observed = await this.refetchAppGrantFacts(pending.profileId, scope);
+    const observed = await this.refetchAppGrantFacts(
+      pending.profileId,
+      scope,
+      pending.targetRecord,
+    );
     scope.check();
     // The card may have been withdrawn while native was answering; nothing below may resurrect it.
     if (this.pendingAppGrantRequest !== pending) return;
@@ -2783,6 +2856,7 @@ export class ComputerUseController {
     // stored grant gets (§6.3), and a grant about to be written must pass it first.
     if (
       observed === null ||
+      (pending.targetRecord !== undefined && !this.targetRecordCurrent(pending.targetRecord)) ||
       !computerAppGrantCardFactsMatch(pending.facts, observed.facts) ||
       computerAppGrantMismatch(pending.identity, observed.identity, observed.facts.denied) !== null
     ) {
@@ -2987,10 +3061,6 @@ export class ComputerUseController {
     this.targetTokens.delete(input.targetToken);
     if (binding === null || record === undefined)
       throw new Error('Computer Use target token is not valid');
-    const validateTarget = (): void => {
-      if (!this.targetRecordCurrent(record))
-        throw new Error('Computer Use target token is not valid');
-    };
     const policyEpoch = this.currentPolicyEpoch(context.taskId);
     if (
       binding.taskId !== context.taskId ||
@@ -3003,7 +3073,8 @@ export class ComputerUseController {
     for (const session of this.sessions.values())
       if (session.status.taskId === context.taskId)
         throw new Error('Computer Use session is already running for this Task');
-    const profile = this.deps.persistence.getComputerAppProfile(record.profileId);
+    const profile =
+      record.candidateProfile ?? this.deps.persistence.getComputerAppProfile(record.profileId);
     if (
       computerUseAppIdentityIsDenied(profile.identity) ||
       profile.revision !== binding.profileRevision ||
@@ -3029,11 +3100,38 @@ export class ComputerUseController {
       throw new Error('Computer Use provider egress consent is missing for this model');
     const identity = this.boundGrantIdentity(profile);
     if (identity === null) throw new Error('Computer Use target token is not valid');
+    const validateTarget = (): void => {
+      if (!this.targetRecordCurrent(record))
+        throw new Error('Computer Use target token is not valid');
+      if (binding.windowsGeneration === undefined) return;
+      const current =
+        record.candidateProfile ?? this.deps.persistence.getComputerAppProfile(record.profileId);
+      const currentIdentity = this.boundGrantIdentity(current);
+      const egress = this.deps.providerEgressBindingFor?.(context.taskId, context.turnId);
+      if (
+        this.currentPolicyEpoch(context.taskId) !== policyEpoch ||
+        current.revision !== binding.profileRevision ||
+        current.identityDigest !== binding.appIdentityDigest ||
+        currentIdentity === null ||
+        computerAppGrantMismatch(
+          identity,
+          currentIdentity,
+          computerUseAppIdentityIsDenied(current.identity),
+        ) !== null ||
+        !ComputerUseController.grantStateMatches(
+          this.appGrantState(current, context.taskId),
+          state,
+        ) ||
+        egress?.connectionId !== egressBinding.connectionId ||
+        egress?.modelId !== egressBinding.modelId
+      )
+        throw new Error('Computer Use application grant or provider consent changed');
+    };
     // Checked around every await from here on, not only once the session exists. Native enumeration
     // is the slow part of this path, and a Turn cancelled during it must not go on to focus a
     // window and start driving it.
     signal?.throwIfAborted();
-    const observed = await this.refetchAppGrantFacts(profile.id, scope);
+    const observed = await this.refetchAppGrantFacts(profile.id, scope, record);
     validateTarget();
     scope.check();
     signal?.throwIfAborted();
@@ -3043,7 +3141,11 @@ export class ComputerUseController {
       observed.profile.revision !== profile.revision
     )
       throw new Error('Computer Use app identity changed');
-    const windows = await this.listNativeWindows(observed.profile, scope);
+    const windows = await this.listNativeWindows(
+      observed.profile,
+      scope,
+      binding.windowsGeneration,
+    );
     validateTarget();
     scope.check();
     signal?.throwIfAborted();
@@ -3107,7 +3209,9 @@ export class ComputerUseController {
           stopReason: settled.stopReason,
           // Read now, not at start: the answer leaves when the call returns, and the agreement or
           // the Turn's destination may have moved while the session ran.
-          egressAgreed: candidate !== null && this.answerEgressAgreed(profile.id, context),
+          egressAgreed:
+            candidate !== null &&
+            this.answerEgressAgreed(profile.id, context, record.candidateProfile),
         }),
         artifacts,
       );
@@ -3141,6 +3245,9 @@ export class ComputerUseController {
           expectedWindowRevision: candidate.revision,
           expectedProfileRevision: observed.profile.revision,
           agent: {
+            ...(record.candidateProfile === undefined
+              ? {}
+              : { candidateProfile: record.candidateProfile }),
             goal: computerUseAgentGoal(input.goal),
             question,
             grantScope: state.scope ?? 'grant',
@@ -3211,7 +3318,7 @@ export class ComputerUseController {
     const agent = record.agent;
     if (agent === null) return;
     const state = this.appGrantState(
-      this.deps.persistence.getComputerAppProfile(record.profile.id),
+      agent.candidateProfile ?? this.deps.persistence.getComputerAppProfile(record.profile.id),
       record.status.taskId,
     );
     if (
@@ -3473,7 +3580,8 @@ export class ComputerUseController {
     if (this.deps.canStartSession?.(input.taskId, ownerTurnId) === false)
       throw new Error('Computer Use requires an idle Task without active Team work');
     computerUseModeSchema.parse(input.mode);
-    const profile = this.deps.persistence.getComputerAppProfile(input.profileId);
+    const profile =
+      input.agent?.candidateProfile ?? this.deps.persistence.getComputerAppProfile(input.profileId);
     if (computerUseAppIdentityIsDenied(profile.identity))
       throw new Error('Computer Use cannot target this application class');
     if (profile.revision !== input.expectedProfileRevision)
@@ -3535,7 +3643,11 @@ export class ComputerUseController {
       this.now() >= permit.expiresAt
     )
       throw new Error('Computer Use window candidate is stale');
-    const candidates = await this.listNativeWindows(profile, scope);
+    const candidates = await this.listNativeWindows(
+      profile,
+      scope,
+      permit.native.windowsGeneration,
+    );
     permit.validateTarget?.();
     scope.check();
     controller.signal.throwIfAborted();
@@ -3650,6 +3762,12 @@ export class ComputerUseController {
       }
       starting.nativeStarted = true;
       const native = await this.deps.native.startSession({
+        ...(candidate.windowsGeneration === undefined
+          ? {}
+          : {
+              windowsGeneration: candidate.windowsGeneration,
+              expectedWindowIdentityDigest: candidate.windowIdentityDigest,
+            }),
         ...(permit.validateTarget === undefined
           ? {}
           : { assertTargetCurrent: permit.validateTarget }),

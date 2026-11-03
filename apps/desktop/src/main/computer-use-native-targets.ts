@@ -1,4 +1,5 @@
 import { win32 } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   bindComputerUseMaximumMode,
   computerWindowsNativeTargetListSchema,
@@ -49,7 +50,7 @@ export type ComputerUseNativeTargetList = Readonly<{
 const asciiLower = (value: string): string =>
   value.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 
-/** Ephemeral profiles for enumeration only: no registration, grant, or egress agreement. */
+/** Ephemeral profiles bound to tokens: no registration, grant, or egress agreement. */
 export function windowsComputerTargetCandidates(
   list: ComputerUseNativeTargetList,
 ): readonly WindowsComputerTargetCandidate[] {
@@ -65,7 +66,9 @@ export function windowsComputerTargetCandidates(
     if (target.kind !== 'selectable') continue;
     const { native, maximumMode } = target;
     // Byte identity also separates simultaneous versions of the same signed application.
-    const id = `native-target:${native.appIdentityDigest}:${native.executableDigest}`;
+    const id = `native-target:${createHash('sha256')
+      .update(`${native.appIdentityDigest}:${native.executableDigest}`)
+      .digest('hex')}`;
     const previous = candidates.get(id);
     const profile: ComputerAppProfileRecord = previous?.profile ?? {
       id,

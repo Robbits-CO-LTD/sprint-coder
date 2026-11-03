@@ -8405,6 +8405,87 @@ int main() {
     expect(target.helper().served).not.toContain('start_session');
   });
 
+  it.each([false, true])(
+    'N6-3 binds native start to list generation and window (changed=%s)',
+    async (changed) => {
+      const base = responders();
+      const start = vi.fn(base['start_session']!);
+      const eligibility = {
+        mode: 'v2-denylist' as const,
+        rulesetVersion: 2,
+        classifierVersion: 1,
+        lexiconVersion: 1,
+        ticketRequired: true as const,
+      };
+      const target = createTarget(
+        {
+          ...base,
+          start_session: start,
+          handshake: () => [
+            'handshake_result',
+            {
+              protocolVersion: 1,
+              apiVersion: 3,
+              platform: 'win32',
+              napiVersion: 10,
+              sourceCommit,
+              eligibility,
+              capabilities: { cancellableWindowDiscovery: true, artifactRead: true },
+            },
+          ],
+          list_targets: () => [
+            'probe_result',
+            {
+              generation: 17,
+              rulesetVersion: 2,
+              targets: [],
+              truncated: false,
+            },
+          ],
+        },
+        undefined,
+        {
+          effectiveEligibilityMode: () => 'v2-denylist',
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            restoreQuarantines: () => true,
+          },
+          windowsKillStopTermination: { enabled: true },
+        },
+        undefined,
+        undefined,
+        eligibility,
+      );
+      const list = await target.host.listTargets!();
+      const pending = target.host.startSession({
+        profile,
+        windowId: '100',
+        sessionId: 'n6-start',
+        taskId: 'task-1',
+        turnId: 'turn-a',
+        cancelEpoch: 0,
+        windowsGeneration: list.windowsGeneration!,
+        expectedWindowIdentityDigest: (changed ? '0' : 'c').repeat(64),
+      });
+      if (changed) {
+        await expect(pending).rejects.toThrow();
+        expect(start).not.toHaveBeenCalled();
+        return;
+      }
+      await pending;
+      expect(start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targetGeneration: 17,
+          denyRulesetVersion: 2,
+          eligibilityBasis: 'v2-denylist',
+        }),
+      );
+      expect(start.mock.calls[0]?.[0]).not.toHaveProperty('windowsGeneration');
+    },
+  );
+
   it('N6 binds a target-list response to its exact helper capability', async () => {
     const target = createTarget(
       {

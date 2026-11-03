@@ -1,6 +1,9 @@
 import type { ComputerUseDiscoveryStop } from './computer-use-native-discovery';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   computerAppGrantRequestSchema,
@@ -237,6 +240,7 @@ function createFixture(
     /** Read on every call, so a test can move the Turn to another destination mid-session. */
     providerBindingFor?: () => Readonly<{ connectionId: string; modelId: string }> | null;
     agentDrivenEnabled?: boolean;
+    windowsTargetDiscoveryEnabled?: boolean;
     publish?: boolean;
     startSessionGate?: Promise<void>;
     /** What the controller is told the effective eligibility mode is (default: unset). */
@@ -292,12 +296,13 @@ function createFixture(
     },
     startSession: async (input) => {
       await options.startSessionGate;
+      input.assertTargetCurrent?.();
       startedSessions += 1;
       startRoutes.push(input.classifierRoute);
-      const profile = profiles.find((candidate) => candidate.id === input.profile.id)!;
+      const profile = input.profile;
       return {
         sessionId: input.sessionId,
-        platform: 'darwin',
+        platform: profile.platform,
         appIdentityDigest: profile.identityDigest,
         windowIdentityDigest: 'd'.repeat(64),
         windowId: input.windowId,
@@ -316,6 +321,7 @@ function createFixture(
         Date.now(),
         session.appIdentityDigest,
       );
+      observed.profileRevision = session.profileRevision;
       const withNode =
         options.artifactRead === undefined
           ? observed
@@ -414,6 +420,7 @@ function createFixture(
     ...(options.effectiveEligibilityMode === undefined
       ? {}
       : { effectiveEligibilityMode: options.effectiveEligibilityMode }),
+    windowsTargetDiscoveryEnabled: () => options.windowsTargetDiscoveryEnabled === true,
     // Where the Turn ships to. Every Turn in this file ships to the same place unless a test says
     // otherwise; which Turn a token belongs to is enforced by the token binding, not by this.
     providerEgressBindingFor: () =>
@@ -456,6 +463,7 @@ function createFixture(
   });
   return {
     controller,
+    native,
     profiles,
     published,
     grants: grantStore.grants,
@@ -529,6 +537,237 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('N6-3 generation-bound approval', () => {
+  function candidateFixture(options: Parameters<typeof createFixture>[0] = {}) {
+    const draft = {
+      platform: 'win32' as const,
+      identityDigest: '',
+      executableDigest: 'b'.repeat(64),
+      executablePath: 'C:\\Program Files\\Contoso\\Editor\\editor.exe',
+      signerDigest: 'd'.repeat(64),
+      packageFamilyName: null,
+      appUserModelId: null,
+      displayName: 'Synthetic editor',
+      policyLanguage: 'en' as const,
+      maximumMode: 'full_access_app' as const,
+    };
+    const identity = { ...draft, identityDigest: nativeIdentityDigestFor(draft) };
+    const golden: unknown = JSON.parse(
+      readFileSync(
+        join(__dirname, '../../computer-use-native/target-eligibility-golden.json'),
+        'utf8',
+      ),
+    );
+    if (typeof golden !== 'object' || golden === null || !('base' in golden))
+      throw new Error('invalid golden');
+    const parsed = parseWindowsComputerUseTargets({
+      generation: 17,
+      rulesetVersion: 2,
+      truncated: false,
+      targets: [
+        {
+          kind: 'eligible',
+          windowId: '42',
+          pid: 42,
+          appIdentityDigest: identity.identityDigest,
+          executableDigest: identity.executableDigest,
+          windowIdentityDigest: 'd'.repeat(64),
+          title: 'Synthetic window',
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+          screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+          boundsUnit: 'physical_px',
+          maximumMode: 'full_access_app',
+          identity,
+          facts: golden.base,
+        },
+      ],
+    });
+    if (parsed === null) throw new Error('invalid targets');
+    const helper = Object.freeze({ helperGeneration: 1 });
+    const windowsGeneration = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const fixture = createFixture({
+      profiles: [],
+      windowsTargetDiscoveryEnabled: true,
+      effectiveEligibilityMode: () => 'v2-denylist',
+      windowsFor: (profile) => [
+        nativeWindow(profile, {
+          platform: 'win32',
+          windowId: '42',
+          executableDigest: profile.executableDigest,
+        }),
+      ],
+      ...options,
+    });
+    fixture.native.availability = () => ({ ...availability, platform: 'win32' });
+    fixture.native.listTargets = async () => ({ ...parsed, windowsGeneration });
+    fixture.native.isWindowsGenerationCurrent = (token) => token === helper;
+    const start = vi.spyOn(fixture.native, 'startSession');
+    return { ...fixture, start, windowsGeneration };
+  }
+
+  it('approves an unregistered candidate and carries its list generation into start', async () => {
+    const fixture = candidateFixture({
+      plan: async () => ({ type: 'finish', answerBoolean: true }),
+    });
+    const { start, windowsGeneration } = fixture;
+    const target = await listOne(fixture);
+    expect(fixture.grants.size).toBe(0);
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'synthetic request' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    expect(await pending).toMatchObject({ granted: true });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          {
+            targetToken: target.targetToken,
+            goal: 'synthetic goal',
+            question: { kind: 'boolean' },
+          },
+          context,
+        ),
+      ),
+    ).toMatchObject({ stopReason: 'agent_finish', answer: { kind: 'boolean', value: true } });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ windowsGeneration }));
+    expect(fixture.profiles).toEqual([]);
+    const fresh = await listOne(fixture);
+    const grant = [...fixture.grants.values()][0]!;
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    expect(fixture.controller.targetTokenBinding(fresh.targetToken)).toBeNull();
+  });
+
+  it.each(['grant', 'egress', 'helper', 'list', 'identity'] as const)(
+    'sends no start when %s changes at the send boundary',
+    async (change) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let modelId = 'model-1';
+      const fixture = candidateFixture({
+        startSessionGate: gate,
+        providerBindingFor: () => ({ connectionId: 'connection-1', modelId }),
+      });
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const card = fixture.pending();
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+        intentFor(card, 'allow_always'),
+      );
+      expect(await pending).toMatchObject({ granted: true });
+      const start = fixture.controller.startForAgent(
+        { targetToken: target.targetToken, goal: 'synthetic goal' },
+        context,
+      );
+      const rejected = start.then(
+        () => false,
+        () => true,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.start).toHaveBeenCalledOnce();
+      if (change === 'grant') fixture.grants.clear();
+      if (change === 'egress') modelId = 'model-2';
+      if (change === 'helper') fixture.native.isWindowsGenerationCurrent = () => false;
+      if (change === 'list') fixture.native.isWindowsTargetGenerationCurrent = () => false;
+      if (change === 'identity') {
+        const input = fixture.start.mock.calls[0]![0];
+        Object.assign(input.profile.identity, { identityDigest: '0'.repeat(64) });
+      }
+      release();
+      expect(await settle(rejected)).toBe(true);
+      expect(fixture.startedSessions()).toBe(0);
+    },
+  );
+
+  it.each(['display', 'approval'] as const)(
+    'creates no grant if the generation changes during %s refetch',
+    async (stage) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fixture = candidateFixture({
+        listWindowsGate: (call) => (call === (stage === 'display' ? 1 : 2) ? gate : undefined),
+      });
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      let approval: Promise<void> | undefined;
+      if (stage === 'approval') {
+        const card = fixture.pending();
+        approval = fixture.controller.resolveAppGrantRequest(
+          { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+          intentFor(card, 'allow_always'),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      fixture.native.isWindowsGenerationCurrent = () => false;
+      release();
+      await approval;
+      expect(await pending).toMatchObject({ granted: false });
+      expect(fixture.grants.size).toBe(0);
+      expect(fixture.startedSessions()).toBe(0);
+      if (stage === 'display') expect(fixture.cardsRaised()).toBe(0);
+    },
+  );
+
+  it('refuses a card after the helper generation changes', async () => {
+    const profile = profileRecord(
+      'profile-windows',
+      macIdentity({
+        platform: 'win32',
+        executablePath: 'C:\\Program Files\\Example\\Example.exe',
+        signerDigest: '9'.repeat(64),
+        packageFamilyName: null,
+      }),
+    );
+    const helper = Object.freeze({ helperGeneration: 1 });
+    const generation = { helper, listGeneration: 17, rulesetVersion: 2 };
+    let current = true;
+    const fixture = createFixture({
+      profiles: [profile],
+      windowsFor: () => [
+        nativeWindow(profile, {
+          platform: 'win32',
+          windowsGeneration: generation,
+          executableDigest: profile.executableDigest,
+        }),
+      ],
+    });
+    fixture.native.isWindowsGenerationCurrent = (token) => current && token === helper;
+    const target = await listOne(fixture);
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'synthetic request' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    current = false;
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    expect(await pending).toMatchObject({ granted: false });
+    expect(fixture.grants.size).toBe(0);
+    expect(fixture.startedSessions()).toBe(0);
+  });
 });
 
 describe('computer_request_access', () => {
