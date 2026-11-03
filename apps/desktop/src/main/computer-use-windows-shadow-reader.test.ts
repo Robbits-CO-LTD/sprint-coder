@@ -80,7 +80,12 @@ describe('Windows shadow reader is portable and decides nothing', () => {
     expect(gatedBody).toContain('ShadowReadResult::kStopped');
     // Step() asks the gate with the validity and the clock, in that one place.
     const step = between(gated, 'bool Step()', 'template <class Call>');
-    expect(step).toContain('gate_.Step(source_.NowNs(), source_.ActionStillValid())');
+    expect(step).toContain(
+      'gate_.Step(source_.NowNs() - origin_elapsed_ns_, source_.ActionStillValid())',
+    );
+    expect(step).toContain('if (reading_origin_)');
+    expect(step).toContain('OriginWithinBudget()');
+    expect(step).toContain('origin_calls_ >= windows_shadow_reader_detail::kOriginMaxCalls');
 
     // Outside this section the source is never touched.
     const outside = reader.replace(gated, '');
@@ -93,7 +98,20 @@ describe('Windows shadow reader is portable and decides nothing', () => {
       if (!/source_\./u.test(line)) continue;
       // The admission of a call (Step) and the admission of the end of the capture (Finish) ask the
       // gate with the clock and the validity; they read nothing of the target.
-      if (/gate_\.(Step|Finish)\(source_\.NowNs\(\), source_\.ActionStillValid\(\)\)/u.test(line))
+      if (
+        /gate_\.(Step|Finish)\(source_\.NowNs\(\) - origin_elapsed_ns_, source_\.ActionStillValid\(\)\)/u.test(
+          line,
+        )
+      )
+        continue;
+      if (
+        [
+          'if (!source_.ActionStillValid() ||',
+          'source_.NowNs() - origin_start_ns_ > windows_shadow_reader_detail::kOriginDeadlineNs)',
+          'origin_start_ns_ = source_.NowNs();',
+          'origin_elapsed_ns_ += source_.NowNs() - origin_start_ns_;',
+        ].includes(line.trim())
+      )
         continue;
       const match = /^\s*return Gated\(\[&\] \{ return source_\.(\w+)\([^;]*\); \}\);$/u.exec(line);
       expect(match, line).not.toBeNull();

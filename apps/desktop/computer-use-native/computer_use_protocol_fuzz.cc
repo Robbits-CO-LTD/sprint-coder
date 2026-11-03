@@ -3214,6 +3214,52 @@ bool CheckWindowsPageOrigin() {
     if (!Check(reader.Capture("click", "").page_origin == OriginState::kUnknown,
                "winorigin-empty-never-reuses-origin")) return false;
   }
+  // Origin-only work must not change the legacy capture when its own budget runs out.
+  for (int mode = 0; mode < 3; ++mode) {
+    auto baseline = page();
+    baseline.source.process_path = "C:\\Apps\\browser.exe"; // Skip Chrome-only metadata.
+    WindowsShadowReader baseline_reader(baseline.source);
+    const auto before = baseline_reader.Capture("click", "");
+    auto form = page();
+    if (mode == 0) {
+      for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
+    } else {
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2)
+          form.source.now += mode == 1 ? 30'000'001 : kShadowDeadlineNs + 1;
+      };
+    }
+    WindowsShadowReader reader(form.source);
+    const auto capture = reader.Capture("click", "");
+    if (!Check(!capture.budget_exhausted && !capture.read_failed &&
+                   capture.page_origin == OriginState::kUnknown &&
+                   capture.chain_reached_root && capture.neighbors_complete &&
+                   capture.chain.size() == before.chain.size() &&
+                   capture.neighbors.size() == before.neighbors.size() &&
+                   capture.document_url == before.document_url &&
+                   form.source.calls - baseline.source.calls <= 128 &&
+                   reader.Gate().Calls() == baseline_reader.Gate().Calls(),
+               "winorigin-budget-isolated-from-legacy-capture")) return false;
+    const auto old_record = WindowsShadowClassify(before, UiaRequest("click"), true);
+    const auto record = WindowsShadowClassify(capture, UiaRequest("click"), true);
+    const auto old_interlock = EvaluateWindowsInterlockFromCapture(before, UiaRequest("click"), false);
+    const auto interlock = EvaluateWindowsInterlockFromCapture(capture, UiaRequest("click"), false);
+    if (!Check(record.kind == old_record.kind && record.gaps == old_record.gaps &&
+                   record.reason == old_record.reason && record.effect_class == old_record.effect_class &&
+                   interlock.no_verdict == old_interlock.no_verdict &&
+                   interlock.no_verdict != sprint_coder::computer_use::InterlockNoVerdict::kBudget &&
+                   interlock.strict_verdict.reason == old_interlock.strict_verdict.reason &&
+                   interlock.strict_verdict.outcome == old_interlock.strict_verdict.outcome &&
+                   interlock.verdict.reason == old_interlock.verdict.reason &&
+                   interlock.verdict.outcome == old_interlock.verdict.outcome,
+               "winorigin-budget-preserves-classification-and-interlock")) return false;
+    std::string signature;
+    (void)reader.ReadTargetSignature(&signature);
+    (void)baseline_reader.ReadTargetSignature(&signature);
+    if (!Check(!reader.Gate().Stopped() &&
+                   reader.Gate().Calls() == baseline_reader.Gate().Calls(),
+               "winorigin-budget-preserves-subsequent-read")) return false;
+  }
   for (const auto result : {ShadowReadResult::kAbsent, ShadowReadResult::kFailed,
                             ShadowReadResult::kTooLong, ShadowReadResult::kStopped}) {
     auto form = page();

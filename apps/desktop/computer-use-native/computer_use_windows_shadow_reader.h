@@ -129,6 +129,8 @@ constexpr std::size_t kSearchMaxDepth = 16;      // the v1 search depth
 constexpr std::size_t kUrlBytes = 2048;
 constexpr std::size_t kPathBytes = 1024;
 constexpr std::size_t kFrameworkBytes = 64;
+constexpr std::uint32_t kOriginMaxCalls = 128;
+constexpr std::uint64_t kOriginDeadlineNs = 30'000'000;
 
 [[nodiscard]] inline bool IsSemanticKind(std::string_view kind) {
   // "copy" (#785 T15-4w) finds its node exactly as the semantic actions do: by the target id.
@@ -189,10 +191,14 @@ public:
       CaptureChain(target, have_root, root, &capture);
       CaptureNeighbors(&capture);
       CaptureItem(&capture);
-      if (have_root) CapturePageOrigin(root, &capture);
     }
     Finish();
     capture.budget_exhausted = gate_.BudgetExhausted();
+    if (located && have_root && !gate_.Stopped()) {
+      BeginOrigin();
+      CapturePageOrigin(root, &capture);
+      EndOrigin();
+    }
     if (gate_.Stopped()) capture.page_origin = OriginState::kUnknown;
     return capture;
   }
@@ -224,7 +230,34 @@ private:
   // ---- The only place the source is called -------------------------------------------------
   // BEGIN gated source calls
   [[nodiscard]] bool Step() {
-    return gate_.Step(source_.NowNs(), source_.ActionStillValid());
+    if (reading_origin_) {
+      if (!OriginWithinBudget() || origin_calls_ >= windows_shadow_reader_detail::kOriginMaxCalls) {
+        origin_stopped_ = true;
+        return false;
+      }
+      ++origin_calls_;
+      return true;
+    }
+    return gate_.Step(source_.NowNs() - origin_elapsed_ns_, source_.ActionStillValid());
+  }
+  bool OriginWithinBudget() {
+    if (origin_stopped_) return false;
+    if (!source_.ActionStillValid() ||
+        source_.NowNs() - origin_start_ns_ > windows_shadow_reader_detail::kOriginDeadlineNs)
+      origin_stopped_ = true;
+    return !origin_stopped_;
+  }
+  void BeginOrigin() {
+    reading_origin_ = true;
+    origin_stopped_ = false;
+    origin_calls_ = 0;
+    origin_start_ns_ = source_.NowNs();
+  }
+  void EndOrigin() {
+    // Metadata time must not consume the legacy budget, including subsequent target reads.
+    origin_elapsed_ns_ += source_.NowNs() - origin_start_ns_;
+    reading_origin_ = false;
+    Finish(); // Cancellation still stops the action; an origin deadline does not.
   }
   template <class Call> [[nodiscard]] ShadowReadResult Gated(Call &&call) {
     if (!Step()) return ShadowReadResult::kStopped;
@@ -289,7 +322,9 @@ private:
     return Gated([&] { return source_.FrameworkId(element, maximum_bytes, output); });
   }
   // The capture is over: a cancel, or a deadline passed during the last call, makes it incomplete.
-  void Finish() { (void)gate_.Finish(source_.NowNs(), source_.ActionStillValid()); }
+  void Finish() {
+    (void)gate_.Finish(source_.NowNs() - origin_elapsed_ns_, source_.ActionStillValid());
+  }
   // END gated source calls
 
   // The node's properties. The password flag is read for every node: a failed read is an
@@ -408,7 +443,7 @@ private:
   // would turn ambiguity into certainty. The gate bounds calls/time; depth also bounds recursion.
   bool ScanDocuments(Element element, std::size_t depth, int *count, Element *document) {
     using namespace windows_shadow_reader_detail;
-    if (depth > kSearchMaxDepth || gate_.Stopped()) return false;
+    if (depth > kSearchMaxDepth || origin_stopped_) return false;
     bool failed = false;
     std::string type;
     if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
@@ -429,7 +464,7 @@ private:
       step = NextSibling(child, &next);
       child = next;
     }
-    return step == ShadowReadResult::kAbsent && !gate_.Stopped();
+    return step == ShadowReadResult::kAbsent && !origin_stopped_;
   }
 
   // Separate from the legacy URL/surface path: this state grants nothing. A Chrome class alone
@@ -466,8 +501,7 @@ private:
       if (!ShadowSettle(Parent(chain_elements_[i], &parent), &failed) ||
           !ShadowSettle(Same(parent, chain_elements_[i + 1], &same), &failed) || !same) return;
     }
-    Finish();
-    if (!gate_.Stopped()) capture->page_origin = ClassifyPageOrigin(url).state;
+    if (OriginWithinBudget()) capture->page_origin = ClassifyPageOrigin(url).state;
   }
 
   // The other children of the target's parent, for the captions a page puts beside a field.
@@ -598,6 +632,11 @@ private:
 
   ShadowUiaSource &source_;
   ShadowGate gate_;
+  bool reading_origin_ = false;
+  bool origin_stopped_ = false;
+  std::uint32_t origin_calls_ = 0;
+  std::uint64_t origin_start_ns_ = 0;
+  std::uint64_t origin_elapsed_ns_ = 0;
   // The node the last Capture located, for ReadTargetValue.
   bool has_target_ = false;
   Element target_element_ = 0;
