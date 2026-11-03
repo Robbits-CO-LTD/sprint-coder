@@ -24,7 +24,13 @@ export type ComputerUseNativeMessageType =
   | 'preflight'
   | 'preflight_result'
   | 'check_target_identity'
-  | 'target_identity_result';
+  | 'target_identity_result'
+  | 'approval_approve'
+  | 'approval_approve_result'
+  | 'approval_discard'
+  | 'approval_discard_result'
+  | 'dispatch_approved'
+  | 'dispatch_approved_result';
 
 const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Object.freeze({
   handshake: 1,
@@ -41,6 +47,12 @@ const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Ob
   preflight_result: 12,
   check_target_identity: 13,
   target_identity_result: 14,
+  approval_approve: 15,
+  approval_approve_result: 16,
+  approval_discard: 17,
+  approval_discard_result: 18,
+  dispatch_approved: 19,
+  dispatch_approved_result: 20,
 });
 const MESSAGE_TYPES_BY_NUMBER = new Map(
   Object.entries(MESSAGE_TYPES).map(([name, value]) => [

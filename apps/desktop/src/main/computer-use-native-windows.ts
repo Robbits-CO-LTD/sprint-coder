@@ -168,7 +168,7 @@ export function createWindowsComputerUseNativeAddon(
       return client.stopWindowDiscovery(id);
     },
     cancelUnsubmittedDiscovery: (id) => client.cancelUnsubmittedDiscovery(id),
-    startSession: (input) => {
+    startSession: (input, assertSend) => {
       const value = record(input);
       const profile = record(value['profile']);
       const identity = record(profile['identity']);
@@ -183,6 +183,8 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         undefined,
+        undefined,
+        assertSend,
       );
     },
     observe: (input) => {
@@ -358,6 +360,7 @@ class WindowsComputerUseHelperClient {
   private readonly discoveries = new Map<string, DiscoveryTransmission>();
   private discoveryHandshakeSupported = false;
   private artifactReadHandshakeSupported = false;
+  private identityBoundStartHandshakeSupported = false;
   private readonly semantic = new Map<string, SemanticTransmission>();
   // Object identity binds Host's confirmation to a received response. A later close reply must not
   // overwrite the earlier evidence that Host cached while independent discovery was still stopping.
@@ -924,6 +927,7 @@ class WindowsComputerUseHelperClient {
     sessionKey: string | undefined,
     requestKey: string | undefined,
     dispatchCallbacks?: WindowsDispatchCallbacks,
+    assertStartSend?: () => void,
   ): Promise<unknown> {
     if (sessionKey !== undefined && operation !== 'start_session')
       this.assertSessionGeneration(sessionKey);
@@ -1010,6 +1014,12 @@ class WindowsComputerUseHelperClient {
       if (sessionKey !== undefined) this.assertSessionGeneration(sessionKey);
       if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
         return { ok: false };
+      if (
+        operation === 'start_session' &&
+        input['requireStartIdentity'] === true &&
+        !this.identityBoundStartHandshakeSupported
+      )
+        throw new Error('native_unavailable');
       if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
       if (semantic !== undefined) {
         if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
@@ -1048,6 +1058,7 @@ class WindowsComputerUseHelperClient {
           if (owner !== undefined) {
             if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
               throw new Error('Computer Use start canceled before send');
+            assertStartSend?.();
             owner.everSent = true;
           }
           if (semantic !== undefined) {
@@ -1157,6 +1168,7 @@ class WindowsComputerUseHelperClient {
     this.helperGeneration += 1;
     this.discoveryHandshakeSupported = false;
     this.artifactReadHandshakeSupported = false;
+    this.identityBoundStartHandshakeSupported = false;
     const nonce = randomBytes(16).toString('hex');
     const pipePath = `\\\\.\\pipe\\sprint-coder-computer-use-${nonce}`;
     const helperTemp = await mkdtemp(join(tmpdir(), 'sc-cu-helper-'));
@@ -1295,6 +1307,8 @@ class WindowsComputerUseHelperClient {
         this.discoveryHandshakeSupported = windowsDiscoveryCapability(handshake);
         this.artifactReadHandshakeSupported =
           record(record(handshake)['capabilities'] ?? {})['artifactRead'] === true;
+        this.identityBoundStartHandshakeSupported =
+          record(record(handshake)['capabilities'] ?? {})['identityBoundStart'] === true;
         return;
       } catch (error) {
         lastFailure = error;
@@ -1833,7 +1847,17 @@ function windowsDiscoveryInput(value: NativeRecord): NativeRecord {
       (signerDigest !== '' && !digest(signerDigest))
     )
       throw new Error('Invalid discovery input');
-    return { discoveryId, canonicalPath, identityDigest, executableDigest, signerDigest };
+    const includeStartIdentity = value['includeStartIdentity'];
+    if (includeStartIdentity !== undefined && typeof includeStartIdentity !== 'boolean')
+      throw new Error('Invalid discovery identity opt-in');
+    return {
+      discoveryId,
+      canonicalPath,
+      identityDigest,
+      executableDigest,
+      signerDigest,
+      ...(includeStartIdentity === undefined ? {} : { includeStartIdentity }),
+    };
   } catch {
     throw new ComputerUseDiscoveryNotSubmittedError('Invalid Windows discovery input');
   }

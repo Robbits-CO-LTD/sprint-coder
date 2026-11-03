@@ -51,6 +51,7 @@ export function nativeProbeCapabilities(value: unknown): ComputerUseNativeProbe[
     screenCapture: nativeCapabilityGranted(value, 'screenCapture'),
     screenCaptureKit: nativeCapabilityGranted(value, 'screenCaptureKit'),
     ...(nativeCapabilityGranted(value, 'artifactRead') ? { artifactRead: true } : {}),
+    ...(nativeCapabilityGranted(value, 'identityBoundStart') ? { identityBoundStart: true } : {}),
     ...(nativeCapabilityGranted(value, 'cancellableWindowDiscovery')
       ? { cancellableWindowDiscovery: true }
       : {}),
