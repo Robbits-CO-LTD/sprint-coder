@@ -3,7 +3,15 @@
 #include <windows.h>
 #include <atomic>
 #include <string>
+#include "computer_use_windows_target_facts.h"
 namespace {
+struct WindowsExecutableIdentity;
+struct WindowsSession;
+struct WindowsDialogSetSnapshot;
+bool ComponentBackgroundGate();
+bool ComponentBackgroundSupported(const WindowsExecutableIdentity&);
+sprint_coder::computer_use::WindowsBackgroundStartFacts ComponentBackgroundFacts(std::uint32_t, HWND, RECT*);
+bool ComponentBackgroundDialogs(const WindowsSession&, WindowsDialogSetSnapshot*, std::string*);
 struct LockedWindowsExecutable;
 struct WindowsSession;
 struct WindowsDialogSetSnapshot;
@@ -51,6 +59,8 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 namespace {
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool background_gate = false, background_supported = false, background_session = false;
+  bool cloaked = false, other_desktop = false, other_virtual_desktop = false, unreadable = false;
   bool bound_start = false, bad_start = false, identity_read_failure = false;
   bool window_replaced = false, late_window = false, stop_identity = false;
   bool iconic = false, focus_failure = false, dialog_focus = false;
@@ -125,6 +135,17 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
 }
 bool ComponentAdmit(const WindowsStartInput&, WindowsExistingStartMeasurement* measured) {
   measured->maximum_mode = "observe_only"; return true;
+}
+bool ComponentBackgroundGate() { return current.background_gate; }
+bool ComponentBackgroundSupported(const WindowsExecutableIdentity&) { return current.background_supported; }
+sprint_coder::computer_use::WindowsBackgroundStartFacts ComponentBackgroundFacts(std::uint32_t, HWND, RECT* bounds) {
+  *bounds = {0, 0, 100, 80};
+  if (current.unreadable) return {};
+  return {true, !current.iconic, true, !current.cloaked,
+      !current.other_desktop, !current.other_virtual_desktop};
+}
+bool ComponentBackgroundDialogs(const WindowsSession& session, WindowsDialogSetSnapshot* output, std::string* reason) {
+  return ComponentDialogs(session, output, reason);
 }
 bool ComponentElevated(std::uint32_t) { return current.elevated; }
 BOOL ComponentWindow(HWND) { return TRUE; }
@@ -215,6 +236,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   LockedWindowsExecutable executable;Check(process.value&&OpenLockedProcessExecutable(process.value,&executable),"own source handles");
   Track(process.value);Track(executable.file);source_process=process.value;source_file=executable.file;
   WindowsSession session;session.session_id=name;session.pid=input.pid;session.window=input.window;session.active_window=input.window;
+  if (config.background_session) session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kBackground;
   session.app_identity=input.app_identity;session.window_identity=identity;session.active_window_identity=identity;session.process_start=created;
   session.canonical_path=canonical;session.executable_volume_serial=executable.identity.file_identity.volume_serial;session.executable_file_id=executable.identity.file_identity.file_id;
   session.executable_digest=config.source_bad_digest?std::string(64,'f'):input.executable_digest;session.signer_digest=input.signer_digest;session.policy_language="en";
@@ -257,7 +279,12 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(ReadJsonString(response,"processStartTime",&process_start)&&process_start==created&&
           process_start==remaining.process_start,"bound process creation time");
     std::uint64_t epoch=99;Check(ReadJsonUint64(response,"cancelEpoch",&epoch)&&epoch==config.session_epoch,"receipt epoch");
-    Check(config.resume?resumes.load()==1:refocuses.load()==1,"correct resolver");
+    const bool background = config.background_session ||
+        (config.background_gate && config.background_supported && config.resume && config.bound_start);
+    if (background) Check(resumes.load() == 0 && refocuses.load() == 0, "background never uses foreground resolver");
+    else Check(config.resume?resumes.load()==1:refocuses.load()==1,"correct resolver");
+    Check((remaining.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) == background,
+          "resumed session kind");
   }
   if(config.after_stop||config.hold_after_file)Check(input_calls.load()==1,"pre-stop focus count retained");
   sprint_coder::computer_use::Frame frame;frame.header.session_id.bytes.fill(static_cast<unsigned char>('A'+case_count));
@@ -323,6 +350,21 @@ int wmain() {
       c.window_replaced = true; c.expected_focus_calls = 0;
       Run("bound-foreign-dialog", c, false, "session_identity_changed", 1);
     }
+    c = {}; c.v2 = true; c.bound_start = true; c.move_focus = true; c.background_gate = true;
+    c.background_supported = true; c.background_session = true;
+    Run("BG-background-reobserve-start", c, true, "", 2);
+    c.resume = true; Run("BG-background-human-resume", c, true, "", 2);
+    c.cloaked = true; Run("BG-resume-cloaked", c, false, "session_target_rejected", 1); c.cloaked = false;
+    c.other_desktop = true; Run("BG-resume-other-desktop", c, false, "session_target_rejected", 1); c.other_desktop = false;
+    c.other_virtual_desktop = true; Run("BG-resume-other-virtual-desktop", c, false, "session_target_rejected", 1); c.other_virtual_desktop = false;
+    c.unreadable = true; Run("BG-resume-unreadable", c, false, "session_target_rejected", 1); c.unreadable = false;
+    c.background_supported = false; Run("BG-resume-capability-lost", c, false, "focus_required", 1); c.background_supported = true;
+    c.background_gate = false; Run("BG-resume-gate-closed", c, false, "focus_required", 1); c.background_gate = true;
+    c.background_session = false; Run("BG-human-resume-enters-background", c, true, "", 2);
+    c.resume = false; c.expected_focus_calls = 1;
+    Run("BG08-foreground-refocus-retained", c, true, "", 2);
+    c.background_gate = false; c.resume = true;
+    Run("BG08-closed-gate-resume-retained", c, true, "", 2);
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }

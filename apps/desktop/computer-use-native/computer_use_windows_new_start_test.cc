@@ -3,7 +3,15 @@
 #include <windows.h>
 #include <atomic>
 #include <string>
+#include "computer_use_windows_target_facts.h"
 namespace {
+struct WindowsSession;
+struct WindowsDialogSetSnapshot;
+struct WindowsExecutableIdentity;
+bool ComponentBackgroundGate();
+bool ComponentBackgroundSupported(const WindowsExecutableIdentity&);
+sprint_coder::computer_use::WindowsBackgroundStartFacts ComponentBackgroundFacts(std::uint32_t, HWND, RECT*);
+bool ComponentBackgroundDialogs(const WindowsSession&, WindowsDialogSetSnapshot*, std::string*);
 struct LockedWindowsExecutable;
 struct WindowsStartInput;
 struct WindowsNewStartMeasurement;
@@ -45,6 +53,9 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 namespace {
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool background_gate = false, background_supported = false;
+  bool cloaked = false, other_desktop = false, other_virtual_desktop = false, unreadable = false;
+  bool hidden = false, background_dialog = false, late_cloak = false;
   bool supervised_ceiling = false;
   bool bound_start = false, bad_start = false, identity_read_failure = false;
   bool window_replaced = false, late_window = false, stop_identity = false;
@@ -60,7 +71,7 @@ struct Case {
   std::optional<std::uint64_t> adopt_epoch;
 };
 Case current;
-unsigned identity_reads = 0;
+unsigned identity_reads = 0, background_reads = 0;
 std::wstring canonical;
 std::atomic<unsigned> workers{0}, reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
 std::mutex handles_mutex;
@@ -111,6 +122,22 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
 bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement* measured) {
   measured->maximum_mode = current.supervised_ceiling ? "supervised" : "observe_only"; return true;
 }
+bool ComponentBackgroundGate() { return current.background_gate; }
+bool ComponentBackgroundSupported(const WindowsExecutableIdentity&) { return current.background_supported; }
+sprint_coder::computer_use::WindowsBackgroundStartFacts ComponentBackgroundFacts(std::uint32_t, HWND, RECT* bounds) {
+  ++background_reads;
+  *bounds = {0, 0, 100, 80};
+  if (current.unreadable) return {};
+  return {!current.hidden, !current.iconic, true,
+      !(current.cloaked || (current.late_cloak && background_reads > 1)),
+      !current.other_desktop, !current.other_virtual_desktop};
+}
+bool ComponentBackgroundDialogs(const WindowsSession& session, WindowsDialogSetSnapshot* output, std::string* reason) {
+  if (current.background_dialog) { *reason = "native_dialog_user_takeover"; return false; }
+  output->digest = "synthetic-dialog-set"; output->active_window = session.window;
+  output->active_identity = session.window_identity; output->active_kind = "application";
+  return true;
+}
 bool ComponentElevated(std::uint32_t) { return current.elevated; }
 BOOL ComponentWindow(HWND) { return TRUE; }
 bool ComponentStartTime(HANDLE process, std::string* output) {
@@ -158,6 +185,20 @@ void WaitWorkers() {
   Check(workers.load() == 0 && !WindowsTargetListWorkerRunning().load(), "worker retirement");
 }
 void CheckStartContract() {
+  using sprint_coder::computer_use::WindowsBackgroundStartFacts;
+  using sprint_coder::computer_use::WindowsBackgroundStartFactsAdmit;
+  const WindowsBackgroundStartFacts admitted{true, true, true, true, true, true};
+  Check(WindowsBackgroundStartFactsAdmit(admitted), "all background evidence present");
+  for (const auto field : {&WindowsBackgroundStartFacts::visible,
+      &WindowsBackgroundStartFacts::not_minimized, &WindowsBackgroundStartFacts::enabled,
+      &WindowsBackgroundStartFacts::not_cloaked, &WindowsBackgroundStartFacts::input_desktop,
+      &WindowsBackgroundStartFacts::current_virtual_desktop}) {
+    auto facts = admitted;
+    facts.*field = false;
+    Check(!WindowsBackgroundStartFactsAdmit(facts), "negative background evidence refused");
+    (facts.*field).reset();
+    Check(!WindowsBackgroundStartFactsAdmit(facts), "missing background evidence refused");
+  }
   std::string start;
   Check(ReadWindowsStartIdentity("{}", &start) && start.empty(), "legacy start has no new identity");
   for (const auto value : {"1", "18446744073709551615"}) {
@@ -230,7 +271,7 @@ void CheckStartContract() {
       "refused discovery never reveals identity");
 }
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
-  identity_reads = 0;
+  identity_reads = 0; background_reads = 0;
   current = config; reads = 0; contexts = 0; com_calls = 0; com_releases = 0; input_calls = 0;
   parent_process_dead = false; cancellation_epoch = config.global_epoch;
   last_closed_cancel_epoch = config.closed_epoch; WindowsTargetListControl().stop_serial = 0;
@@ -274,6 +315,11 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   if (expected) {
     Check(sessions.size() == 1, "single adopted session");
     const auto& session = sessions.at(input.session_key);
+    const bool background = config.background_gate && config.bound_start && config.background_supported;
+    Check((session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) == background,
+          "native session kind");
+    Check((response.find("\"inputSession\":") != std::string::npos) == config.background_gate,
+          "legacy wire unchanged");
     const auto epoch = std::max(config.input_epoch, config.adopt_epoch.value_or(config.global_epoch));
     Check(session.eligibility_basis == input.eligibility_basis && session.cancel_epoch == epoch && cancellation_epoch.load() == epoch, "basis and epoch");
     Check(session.maximum_mode == (config.v2 ? "observe_only" : "full_access_app") && session.policy_language == "en", "mode and language");
@@ -343,6 +389,26 @@ int wmain() {
       c.iconic = false; c.late_window = false; c.focus_failure = true;
       Run("bound-failure-after-focus", c, false, "focus_required", 1);
     }
+    c = {}; c.v2 = true; c.background_gate = true;
+    Run("BG08-already-foreground", c, true, "", 1);
+    c.bound_start = true;
+    Run("BG08-all-new-starts-never-autofocus", c, false, "focus_required", 1);
+    c.background_supported = true;
+    Run("BG-background-start", c, true, "", 1);
+    c.cloaked = true; Run("BG-cloaked", c, false, "session_target_rejected", 1); c.cloaked = false;
+    c.other_desktop = true; Run("BG-other-desktop", c, false, "session_target_rejected", 1); c.other_desktop = false;
+    c.other_virtual_desktop = true; Run("BG-other-virtual-desktop", c, false, "session_target_rejected", 1); c.other_virtual_desktop = false;
+    c.unreadable = true; Run("BG-unreadable", c, false, "session_target_rejected", 1); c.unreadable = false;
+    c.hidden = true; Run("BG-hidden", c, false, "session_target_rejected", 1); c.hidden = false;
+    c.iconic = true; Run("BG-no-restore", c, false, "session_target_rejected", 1); c.iconic = false;
+    c.background_dialog = true; Run("BG-dialog", c, false, "native_dialog_user_takeover", 1); c.background_dialog = false;
+    c.late_cloak = true; Run("BG-late-cloak", c, false, "session_target_rejected", 1); c.late_cloak = false;
+    c.background_gate = false; c.expected_focus_calls = 1;
+    Run("BG08-closed-gate-legacy-focus", c, true, "", 1);
+    c = {}; c.background_gate = true; c.bound_start = true;
+    Run("BG08-v1-new-start-never-autofocus", c, false, "focus_required", 1);
+    c.background_supported = true;
+    Run("BG-v1-background-start", c, true, "", 2);
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }

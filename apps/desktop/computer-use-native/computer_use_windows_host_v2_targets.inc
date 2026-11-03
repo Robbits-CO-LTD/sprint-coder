@@ -1340,6 +1340,75 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
       ruleset_version, generation, windows_v2_list_generation, new_session,
       app_identity, executable_digest, signer_digest, maximum_mode, not_web_file);
 }
+// P2a has no production capability table. P8 must connect verified provenance before opening it;
+// no request, environment variable or Renderer value can enable this path.
+bool WindowsBackgroundStartGate() {
+  return sprint_coder::computer_use::kWindowsBackgroundInputEnabled;
+}
+
+bool WindowsBackgroundTargetSupported(const WindowsExecutableIdentity &) { return false; }
+
+sprint_coder::computer_use::WindowsBackgroundStartFacts
+MeasureWindowsBackgroundStartFacts(std::uint32_t pid, HWND window, RECT *bounds) {
+  using sprint_coder::computer_use::WindowsBackgroundStartFacts;
+  WindowsBackgroundStartFacts facts;
+  DWORD owner = 0;
+  const DWORD thread = GetWindowThreadProcessId(window, &owner);
+  if (!IsWindow(window) || thread == 0 || owner != pid || !ClientBoundsPhysical(window, bounds))
+    return facts;
+  DWORD foreground_pid = 0;
+  const HWND foreground = GetForegroundWindow();
+  if (foreground == nullptr || GetWindowThreadProcessId(foreground, &foreground_pid) == 0 ||
+      foreground_pid == pid || IsNativeTakeoverWindow(foreground)) return facts;
+  facts.visible = IsWindowVisible(window) == TRUE;
+  facts.not_minimized = IsIconic(window) == FALSE;
+  facts.enabled = IsWindowEnabled(window) == TRUE;
+  DWORD cloaked = 0;
+  if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))))
+    facts.not_cloaked = cloaked == 0;
+  // Desktop handles returned by GetThreadDesktop are borrowed; only OpenInputDesktop is closed.
+  const HDESK target_desktop = GetThreadDesktop(thread);
+  const HDESK input_desktop = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+  if (input_desktop != nullptr) {
+    std::array<wchar_t, 512> target_name{}, input_name{};
+    DWORD needed = 0;
+    if (target_desktop != nullptr &&
+        GetUserObjectInformationW(target_desktop, UOI_NAME, target_name.data(), sizeof(target_name), &needed) &&
+        GetUserObjectInformationW(input_desktop, UOI_NAME, input_name.data(), sizeof(input_name), &needed))
+      facts.input_desktop = std::wstring_view(target_name.data()) == std::wstring_view(input_name.data());
+    CloseDesktop(input_desktop);
+  }
+  const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  if (SUCCEEDED(apartment) || apartment == RPC_E_CHANGED_MODE) {
+    IVirtualDesktopManager *manager = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_VirtualDesktopManager, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&manager)))) {
+      BOOL current = FALSE;
+      if (SUCCEEDED(manager->IsWindowOnCurrentVirtualDesktop(window, &current)))
+        facts.current_virtual_desktop = current == TRUE;
+      manager->Release();
+    }
+    if (SUCCEEDED(apartment)) CoUninitialize();
+  }
+  return facts;
+}
+
+bool CaptureWindowsBackgroundStartDialogs(const WindowsSession &session,
+                                          WindowsDialogSetSnapshot *snapshot, std::string *reason) {
+  if (!CaptureWindowsDialogInventory(session, snapshot, reason)) return false;
+  // P2a starts only at the bound application root. Never follow a popup or restore a modal owner.
+  if (!snapshot->dialogs.empty() || IsWindowEnabled(session.window) != TRUE ||
+      session.active_window != session.window || session.active_window_identity != session.window_identity ||
+      session.active_window_kind != "application") {
+    *reason = "native_dialog_user_takeover";
+    return false;
+  }
+  snapshot->active_window = session.window;
+  snapshot->active_identity = session.window_identity;
+  snapshot->active_kind = "application";
+  return true;
+}
+
 // BEGIN windows shared new start
 struct WindowsStartInput {
   bool approval_route_v2 = false;
@@ -1640,6 +1709,19 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     return false;
   }
   WindowsSession session;
+  const bool background_gate = WindowsBackgroundStartGate();
+  const bool background = background_gate && foreground != input.window;
+  if (background && !WindowsBackgroundTargetSupported(measured.executable)) {
+    *reason = "focus_required";
+    return false;
+  }
+  if (background) session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kBackground;
+  const auto target_facts = [&](RECT *bounds) {
+    if (!background) return TargetWindowFacts(input.pid, input.window, bounds);
+    return GetForegroundWindow() != input.window &&
+        sprint_coder::computer_use::WindowsBackgroundStartFactsAdmit(
+            MeasureWindowsBackgroundStartFacts(input.pid, input.window, bounds));
+  };
   if (input.start_lease) {
     session.start_owner = input.start_lease->owner;
     session.input_api_attempts = input.start_lease->owner->input_api_attempts;
@@ -1667,7 +1749,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     ++input.start_result->attempt_count;
     return true;
   };
-  if (GetForegroundWindow() != input.window) {
+  if (!background_gate && GetForegroundWindow() != input.window) {
     if (IsIconic(input.window)) {
       if (!begin_focus(input.window)) return false;
       ShowWindow(input.window, SW_RESTORE);
@@ -1677,11 +1759,11 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   }
   RECT bounds{};
   RECT screen_bounds{};
-  if (!TargetWindowFacts(input.pid, input.window, &bounds)) {
-    *reason = "focus_required";
+  if (!target_facts(&bounds)) {
+    *reason = background ? "session_target_rejected" : "focus_required";
     return false;
   }
-  if (v2 && !geometry_matches(bounds)) {
+  if ((v2 || background) && !geometry_matches(bounds)) {
     *reason = "window_geometry_changed";
     return false;
   }
@@ -1712,6 +1794,12 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     session.approval_revoked = true;
   }
   session.not_web_file = measured.not_web_file;
+  if (background) {
+    WindowsDialogSetSnapshot dialogs;
+    if (!CaptureWindowsBackgroundStartDialogs(session, &dialogs, reason)) return false;
+    session.dialog_set_digest = dialogs.digest;
+    session.dialog_set_revision = 1;
+  }
   std::uint64_t effective_epoch = std::max(input.cancel_epoch, cancellation_epoch.load(std::memory_order_acquire));
   const auto build_response = [&](std::uint64_t response_epoch) {
     return "{\"sessionId\":\"" + JsonEscape(input.session_id) +
@@ -1723,14 +1811,20 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       ",\"cancelEpoch\":" + std::to_string(response_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
       ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
-      ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"}";
+      ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"" +
+      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(session.input_session) : "") + "}";
   };
   std::string built = v2 ? build_response(effective_epoch) : std::string{};
-  if (v2 && (WaitForSingleObject(pending->process, 0) != WAIT_TIMEOUT ||
-      !IsApplicationWindow(input.window) || !TargetWindowFacts(input.pid, input.window, &bounds) ||
+  if ((v2 || background) && (WaitForSingleObject(pending->process, 0) != WAIT_TIMEOUT ||
+      !IsApplicationWindow(input.window) || !target_facts(&bounds) ||
       !geometry_matches(bounds))) {
     *reason = "session_target_rejected";
     return false;
+  }
+  if (background) {
+    WindowsDialogSetSnapshot dialogs;
+    if (!CaptureWindowsBackgroundStartDialogs(session, &dialogs, reason)) return false;
+    if (dialogs.digest != session.dialog_set_digest) { *reason = "session_refocus_stale"; return false; }
   }
   // Stop and final start adoption share this lock. Window/geometry OS queries stay outside it so
   // their latency cannot prevent the reader from recording Stop.
@@ -1793,6 +1887,7 @@ struct WindowsExistingStartSnapshot {
   std::string executable_digest;
   std::string signer_digest;
   std::string policy_language;
+  sprint_coder::computer_use::InputSessionKind session_kind = sprint_coder::computer_use::InputSessionKind::kForeground;
 };
 
 WindowsExistingStartSnapshot WindowsExistingStartBinding(const WindowsSession &session) {
@@ -1800,7 +1895,7 @@ WindowsExistingStartSnapshot WindowsExistingStartBinding(const WindowsSession &s
           session.window_identity, session.process_start, session.maximum_mode,
           session.eligibility_basis, session.cancel_epoch,
           {session.executable_volume_serial, session.executable_file_id},
-          session.executable_digest, session.signer_digest, session.policy_language};
+          session.executable_digest, session.signer_digest, session.policy_language, session.input_session.kind};
 }
 
 bool WindowsExistingStartBindingMatches(const WindowsExistingStartSnapshot &expected,
@@ -1813,7 +1908,7 @@ bool WindowsExistingStartBindingMatches(const WindowsExistingStartSnapshot &expe
       SameWindowsFileIdentity(expected.file_identity,
                               {session.executable_volume_serial, session.executable_file_id}) &&
       expected.executable_digest == session.executable_digest && expected.signer_digest == session.signer_digest &&
-      expected.policy_language == session.policy_language;
+      expected.policy_language == session.policy_language && expected.session_kind == session.input_session.kind;
 }
 
 struct WindowsExistingStartMeasurement {
@@ -2145,7 +2240,23 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   }
   if (!check_current()) return false;
   HWND refocus_window = input.window;
-  if (input.explicit_resume) {
+  const bool background_gate = WindowsBackgroundStartGate();
+  const bool was_background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
+  const bool background_supported = background_gate && WindowsBackgroundTargetSupported(before.executable);
+  const bool background = was_background ||
+      (input.explicit_resume && background_supported && GetForegroundWindow() != input.window);
+  if (background && (!background_supported || GetForegroundWindow() == input.window)) {
+    *reason = "focus_required";
+    return false;
+  }
+  WindowsDialogSetSnapshot background_dialogs;
+  if (background) {
+    if (!CaptureWindowsBackgroundStartDialogs(session, &background_dialogs, reason)) return false;
+    if (!session.dialog_set_digest.empty() && session.dialog_set_digest != background_dialogs.digest) {
+      *reason = "session_refocus_stale";
+      return false;
+    }
+  } else if (input.explicit_resume) {
     if (!ResolveWindowsExplicitResumeTarget(&session, &refocus_window, reason)) return false;
   } else if (!ResolveWindowsSessionRefocusTarget(session, &refocus_window, reason)) {
     return false;
@@ -2167,7 +2278,7 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     ++input.start_result->attempt_count;
     return true;
   };
-  if (GetForegroundWindow() != refocus_window) {
+  if (!background && GetForegroundWindow() != refocus_window) {
     if (IsIconic(input.window)) {
       if (!begin_focus(input.window)) return false;
       ShowWindow(input.window, SW_RESTORE);
@@ -2180,8 +2291,21 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     SetForegroundWindow(refocus_window);
   }
   RECT bounds{};
-  if (!TargetWindowFacts(input.pid, refocus_window, &bounds)) {
-    *reason = "focus_required";
+  const auto target_facts = [&] {
+    if (!background) return TargetWindowFacts(input.pid, refocus_window, &bounds);
+    return GetForegroundWindow() != input.window &&
+        sprint_coder::computer_use::WindowsBackgroundStartFactsAdmit(
+            MeasureWindowsBackgroundStartFacts(input.pid, input.window, &bounds));
+  };
+  if (!target_facts()) {
+    *reason = background ? "session_target_rejected" : "focus_required";
+    return false;
+  }
+  if (background && (std::abs(static_cast<double>(bounds.left) - input.bounds_x) > 1.0 ||
+      std::abs(static_cast<double>(bounds.top) - input.bounds_y) > 1.0 ||
+      std::abs(static_cast<double>(bounds.right - bounds.left) - input.bounds_width) > 1.0 ||
+      std::abs(static_cast<double>(bounds.bottom - bounds.top) - input.bounds_height) > 1.0)) {
+    *reason = "window_geometry_changed";
     return false;
   }
   RECT screen_bounds{};
@@ -2190,8 +2314,10 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     return false;
   }
   WindowsDialogSetSnapshot refocused_dialogs;
-  if (!CaptureWindowsDialogSet(session, &refocused_dialogs, reason)) return false;
-  if (refocused_dialogs.digest != session.dialog_set_digest ||
+  if (background) {
+    if (!CaptureWindowsBackgroundStartDialogs(session, &refocused_dialogs, reason)) return false;
+  } else if (!CaptureWindowsDialogSet(session, &refocused_dialogs, reason)) return false;
+  if (refocused_dialogs.digest != (background ? background_dialogs.digest : session.dialog_set_digest) ||
       refocused_dialogs.active_window != session.active_window ||
       refocused_dialogs.active_identity != session.active_window_identity ||
       refocused_dialogs.active_kind != session.active_window_kind) {
@@ -2199,9 +2325,22 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
     return false;
   }
   if (!check_current()) return false;
+  const RECT before_final_bounds = bounds;
   WindowsExistingStartMeasurement after;
   if (!RunWindowsExistingStartMeasurement(input, session, WindowsExistingStartPhase::AfterFocus,
                                            &before, &after, reason)) return false;
+  if (background) {
+    if (!target_facts() || !EqualRect(&before_final_bounds, &bounds)) {
+      *reason = "session_target_rejected";
+      return false;
+    }
+    WindowsDialogSetSnapshot final_dialogs;
+    if (!CaptureWindowsBackgroundStartDialogs(session, &final_dialogs, reason)) return false;
+    if (final_dialogs.digest != background_dialogs.digest) { *reason = "session_refocus_stale"; return false; }
+  }
+  const sprint_coder::computer_use::InputSession next_input_session{
+      background ? sprint_coder::computer_use::InputSessionKind::kBackground :
+                   sprint_coder::computer_use::InputSessionKind::kForeground};
   std::string built = "{\"sessionId\":\"" + JsonEscape(input.session_id) +
       "\",\"platform\":\"win32\",\"appIdentityDigest\":\"" + input.app_identity +
       "\",\"windowIdentityDigest\":\"" + before.window_identity + "\",\"windowId\":\"" +
@@ -2211,11 +2350,18 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
       ",\"cancelEpoch\":" + std::to_string(input.cancel_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
       ",\"processStartTime\":\"" + JsonEscape(session.process_start) + "\"" +
-      ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"}";
+      ",\"pid\":" + std::to_string(input.pid) + ",\"windowHandle\":\"" + std::to_string(input.window_value) + "\"" +
+      (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(next_input_session) : "") + "}";
   // Existing start final success decision; a completed late phase cannot resume after Stop.
   std::lock_guard stop_lock(control.stop_mutex);
   if (!current()) { *reason = "session_start_canceled"; return false; }
   InvalidateWindowsTicket(input.session_key);
+  session.input_session = next_input_session;
+  if (background) {
+    session.dialog_set_digest = std::move(background_dialogs.digest);
+    if (session.dialog_set_revision == 0) session.dialog_set_revision = 1;
+    session.has_observation = false;
+  }
   *response = std::move(built);
   return true;
 }

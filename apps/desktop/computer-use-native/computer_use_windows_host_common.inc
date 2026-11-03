@@ -171,6 +171,7 @@ struct WindowsSession {
   std::string session_id;
   std::uint32_t pid = 0;
   HWND window = nullptr;
+  sprint_coder::computer_use::InputSession input_session;
   HWND active_window = nullptr;
   std::string app_identity;
   std::string window_identity;

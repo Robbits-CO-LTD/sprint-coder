@@ -82,6 +82,10 @@ function componentSource(): string {
     'ComponentAdmit(input, measured)',
   );
   const functions: Record<string, string> = {
+    WindowsBackgroundStartGate: 'ComponentBackgroundGate',
+    WindowsBackgroundTargetSupported: 'ComponentBackgroundSupported',
+    MeasureWindowsBackgroundStartFacts: 'ComponentBackgroundFacts',
+    CaptureWindowsBackgroundStartDialogs: 'ComponentBackgroundDialogs',
     OpenProcess: 'ComponentOpenProcess',
     OpenLockedProcessExecutable: 'ComponentOpenExecutable',
     DuplicateHandle: 'ComponentDuplicateHandle',
@@ -205,7 +209,7 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
       });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: 44 component cases, controlled focus only, no OS input',
+        'PASS: 58 component cases, controlled focus only, no OS input',
       );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
