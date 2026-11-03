@@ -7996,6 +7996,348 @@ int main() {
       decide.mockRestore();
     }
   });
+  it.each(['semantic', 'discovery'] as const)(
+    'normal_deadline_terminates_original_generation_without_stop (%s)',
+    async (operation) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const notifications: WindowsOwnerStopNotification[] = [];
+      target.host.subscribeWindowsStop!((event) => {
+        if (event.kind === 'notification') notifications.push(event.notification);
+      });
+      const session = await startSession(target.host, 'normal-deadline', 'turn-1');
+      target.helper().holdOnly(operation === 'semantic' ? 'dispatch' : 'list_windows_cancellable');
+      const result =
+        operation === 'semantic'
+          ? target.dispatch(session, ledgerActions[4])
+          : target.host.beginWindowDiscovery!(profile).result.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      const deadline = operation === 'semantic' ? 10_000 : 30_000;
+      await vi.advanceTimersByTimeAsync(deadline - 1);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      await result;
+      expect(notifications.find((event) => event.phase === 'exit_confirmed')).toMatchObject({
+        result: operation === 'semantic' ? 'terminated_target_suspect' : 'terminated_clean',
+        reason: 'native_unavailable',
+      });
+      if (operation === 'discovery') {
+        expect(
+          notifications.filter(
+            (event) => event.phase === 'exit_confirmed' && event.owner.kind === 'discovery',
+          ),
+        ).toMatchObject([{ reason: 'requested_reason', result: 'terminated_clean' }]);
+      }
+      expect(target.quarantines).toHaveLength(operation === 'semantic' ? 1 : 0);
+    },
+  );
+
+  it('queued_request_deadline_defers_to_head', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'queued-deadline', 'turn-1');
+    target.helper().hold('list_windows_cancellable');
+    const discovery = target.host.beginWindowDiscovery!(profile);
+    const discoveryResult = discovery.result.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const dispatch = Promise.resolve(
+      target.addon.dispatch!({
+        sessionId: session.sessionId,
+        requestId: 'queued-request',
+        cancelEpoch: 0,
+        type: 'click',
+      }),
+    ).then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await dispatch).toBe('rejected');
+    expect(child.killCalls).toBe(0);
+    await vi.advanceTimersByTimeAsync(18_999);
+    expect(child.killCalls).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await discoveryResult;
+    expect(child.killCalls).toBe(1);
+  });
+
+  it.each(['complete', 'reject'] as const)(
+    'deferred_request_rearms_after_head_completes (%s)',
+    async (outcome) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'deferred-deadline', 'turn-1');
+      target.helper().hold('observe');
+      target.helper().hold('list_targets');
+      if (outcome === 'reject') target.helper().refuse('observe');
+      const observe = observeThroughTransport(target.addon, session.sessionId);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await queued).toBe('rejected');
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      target.helper().release('observe');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await observe).toBe(outcome === 'complete' ? 'resolved' : 'rejected');
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(child.killCalls).toBe(1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it('late_answer_to_a_deferred_request_does_not_terminate', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-late', 'turn-1');
+    target.helper().hold('observe');
+    target.helper().hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    target.helper().release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    // The helper answers the deferred request late: it is alive, so nothing is terminated.
+    target.helper().release('list_targets');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(child.killCalls).toBe(0);
+  });
+
+  it('deferred_watch_cleared_on_exit', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-old', 'turn-1');
+    const helper = target.helper();
+    helper.hold('observe');
+    helper.hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    helper.release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    const timersBefore = vi.getTimerCount();
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBeLessThan(timersBefore);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.killCalls).toBe(0);
+    await startSession(target.host, 'deferred-new', 'turn-2');
+    helper.release('list_targets');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(children.at(-1)?.killed).toBe(false);
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('deferred_watch_survives_an_unrelated_stop', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-stop', 'turn-1');
+    const helper = target.helper();
+    helper.hold('observe');
+    helper.hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    helper.release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    // A Stop of the session proves nothing about the deferred list read the helper is stuck on.
+    helper.holdOnly('list_targets');
+    await target.addon.cancel!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(child.killCalls).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('normal_deadline_exit_missing_preserves_isolation', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const notifications: WindowsOwnerStopNotification[] = [];
+    target.host.subscribeWindowsStop!((event) => {
+      if (event.kind === 'notification') notifications.push(event.notification);
+    });
+    const session = await startSession(target.host, 'normal-deadline', 'turn-1');
+    target.helper().holdOnly('dispatch');
+    const result = target.dispatch(session, ledgerActions[4]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.killCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(notifications).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(notifications).toMatchObject([{ phase: 'termination_pending' }]);
+    expect(target.rows.size).toBe(1);
+    await expect(target.addon.listTargets!({})).rejects.toThrow('native_stop_unconfirmed');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect((await result).outcome).toBe('rejected');
+  });
+
+  it.each(['deadline-during-close', 'termination-before-close-cancels-deadline'] as const)(
+    'normal_deadline_and_stop_share_one_termination_budget (%s)',
+    async (order) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const notifications: WindowsOwnerStopNotification[] = [];
+      target.host.subscribeWindowsStop!((event) => {
+        if (event.kind === 'notification') notifications.push(event.notification);
+      });
+      const session = await startSession(target.host, 'normal-deadline', 'turn-1');
+      target.helper().holdOnly('dispatch');
+      target.helper().holdOnly('close_session');
+      const dispatch = target.dispatch(session, ledgerActions[4]);
+      await vi.advanceTimersByTimeAsync(9_000);
+      const terminationFirst = order === 'termination-before-close-cancels-deadline';
+      if (terminationFirst) target.addon.requestWindowsTermination!();
+      const closeSettled = vi.fn();
+      const close = target.host.close(session).then(
+        (value) => {
+          closeSettled('resolved', value);
+          return value;
+        },
+        (error: unknown) => {
+          closeSettled('rejected', error);
+          throw error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(terminationFirst ? 1_999 : 2_999);
+      expect(child.killCalls).toBe(1);
+      expect(notifications.some((event) => event.phase === 'termination_pending')).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(notifications.filter((event) => event.phase === 'termination_pending')).toHaveLength(
+        1,
+      );
+      expect(child.killCalls).toBe(1);
+      await dispatch;
+      await expect(close).resolves.toEqual({ kind: 'termination_requested' });
+      expect(closeSettled).toHaveBeenCalledExactlyOnceWith('resolved', {
+        kind: 'termination_requested',
+      });
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(
+        notifications.filter(
+          (event) => event.phase === 'exit_confirmed' && event.owner.id === session.sessionId,
+        ),
+      ).toMatchObject([
+        {
+          reason: terminationFirst ? 'native_unavailable' : 'requested_reason',
+          result: 'terminated_target_suspect',
+        },
+      ]);
+      expect(closeSettled).toHaveBeenCalledTimes(1);
+      expect(child.killCalls).toBe(1);
+    },
+  );
+
+  it('late_result_rejected_and_late_exit_delivered_once', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const notifications: WindowsOwnerStopNotification[] = [];
+    target.host.subscribeWindowsStop!((event) => {
+      if (event.kind === 'notification') notifications.push(event.notification);
+    });
+    const session = await startSession(target.host, 'normal-deadline', 'turn-1');
+    const helper = target.helper();
+    helper.holdOnly('dispatch');
+    const result = target.dispatch(session, ledgerActions[4]);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect((await result).outcome).toBe('rejected');
+    helper.release('dispatch');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.rows.size).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    child.emit('exit', 0, null);
+    expect(notifications.map((event) => event.phase)).toEqual([
+      'termination_pending',
+      'exit_confirmed',
+      'cleanup_completed',
+    ]);
+    expect(notifications.every((event) => event.reason === 'native_unavailable')).toBe(true);
+    expect(notifications[1]).toMatchObject({ late: true, result: 'terminated_target_suspect' });
+    expect(target.quarantines).toHaveLength(1);
+  });
+
+  it('stale_completion_cannot_release_new_generation', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    await startSession(target.host, 'old-session', 'turn-old');
+    const oldHelper = target.helper();
+    oldHelper.holdOnly('list_windows_cancellable');
+    const discovery = target.host.beginWindowDiscovery!(profile);
+    const result = discovery.result.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await result;
+    const next = await startSession(target.host, 'new-session', 'turn-new');
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await target.dispatch(next, ledgerActions[4], 'new-row');
+    const rows = [...target.rows.values()];
+    oldHelper.release('list_windows_cancellable');
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect([...target.rows.values()]).toEqual(rows);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.helperGeneration).toBe(2);
+    expect(children.at(-1)?.killed).toBe(false);
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
   it.each([true, false, 'throw'] as const)(
     'PR7a kill result %s is not exit evidence and T is exactly two seconds',
     async (killResult) => {

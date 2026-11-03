@@ -140,9 +140,11 @@ export type WindowsComputerUseHelperAttestation = Readonly<{
   signerThumbprint: string | null;
 }>;
 type PendingRequest = Readonly<{
+  order: number;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  deadline: number;
   sessionId: ComputerUseNativeFrameId;
   /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
   stopsSession: boolean;
@@ -400,9 +402,75 @@ type HelperGeneration = {
   cause: 'stop' | 'crash' | 'abortTransport';
   exited: boolean;
   timer?: NodeJS.Timeout;
+  deferredRequests: Array<{ order: number; duration: number; requestId: string }>;
+  deferredTimer?: NodeJS.Timeout;
 };
 
 class WindowsComputerUseHelperClient {
+  private requestOrder = 0;
+
+  private clearDeferredRequests(generation: HelperGeneration): void {
+    clearTimeout(generation.deferredTimer);
+    delete generation.deferredTimer;
+    generation.deferredRequests.length = 0;
+  }
+
+  /**
+   * A late answer to a deferred request proves the helper is still serving its queue, so that
+   * request no longer counts towards terminating the generation. Its result stays rejected.
+   */
+  private forgetDeferredRequest(requestId: string): void {
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation === undefined) return;
+    const index = generation.deferredRequests.findIndex(
+      (request) => request.requestId === requestId,
+    );
+    if (index === -1) return;
+    generation.deferredRequests.splice(index, 1);
+    if (index === 0) {
+      clearTimeout(generation.deferredTimer);
+      delete generation.deferredTimer;
+      this.reevaluateDeferredRequests(generation);
+    }
+  }
+
+  private reevaluateDeferredRequests(generation: HelperGeneration): void {
+    if (
+      generation.exited ||
+      generation.killRequested ||
+      this.generations.get(generation.id) !== generation ||
+      generation.id !== this.helperGeneration ||
+      generation.deferredTimer !== undefined
+    )
+      return;
+    const head = generation.deferredRequests[0];
+    if (head === undefined) return;
+    const earlierPending = () =>
+      [...this.pending.values()].some(
+        (request) =>
+          request.helperGeneration === generation.id &&
+          request.order < head.order &&
+          request.deadline > Date.now(),
+      );
+    if (earlierPending()) return;
+    // Settling the preceding request approximates dequeue; retain the timed-out request's D.
+    generation.deferredTimer = setTimeout(() => {
+      delete generation.deferredTimer;
+      if (
+        generation.exited ||
+        generation.killRequested ||
+        this.generations.get(generation.id) !== generation ||
+        generation.id !== this.helperGeneration
+      )
+        return;
+      if (!earlierPending())
+        this.requestTermination(
+          generation,
+          new Error('Computer Use Windows helper request timed out'),
+        );
+    }, head.duration);
+  }
+
   private readonly interactionEvents = new WindowsInteractionEvents();
   private readonly interactionListeners = new Set<WindowsInteractionListener>();
   subscribeWindowsInteraction(listener: WindowsInteractionListener): () => void {
@@ -632,6 +700,7 @@ class WindowsComputerUseHelperClient {
   ): void {
     if (record.exited || record.killRequested) return;
     record.killRequested = true;
+    this.clearDeferredRequests(record);
     record.cause = cause;
     this.termination!.event(record.id, 'kill_requested');
     record.timer = setTimeout(() => {
@@ -1438,6 +1507,7 @@ class WindowsComputerUseHelperClient {
             killRequested: false,
             cause: 'crash',
             exited: false,
+            deferredRequests: [],
           };
     if (generation !== undefined) {
       this.generationToken = Object.freeze({ helperGeneration: generation.id });
@@ -1454,6 +1524,7 @@ class WindowsComputerUseHelperClient {
       if (generation !== undefined) {
         if (generation.exited) return;
         generation.exited = true;
+        this.clearDeferredRequests(generation);
         clearTimeout(generation.timer);
         if (this.child === child) {
           this.failAll(new Error('Computer Use Windows helper exited'));
@@ -1597,25 +1668,52 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
-    const send = (): Promise<unknown> =>
-      new Promise((resolve, reject) => {
+    // A Stop for one session proves nothing about a deferred request it did not own, so the watch
+    // stays until the generation exits, is killed, or the helper answers that request late.
+    const send = (): Promise<unknown> => {
+      const result = new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
           if (this.pending.get(requestId.hex) !== pending) return;
+          // Map insertion order follows sends; a serial consumer may still be serving the head.
+          let earlierRequestWithinDeadline = false;
+          for (const request of this.pending.values()) {
+            if (request === pending) break;
+            if (request.helperGeneration === helperGeneration && request.deadline > Date.now()) {
+              earlierRequestWithinDeadline = true;
+              break;
+            }
+          }
           this.pending.delete(requestId.hex);
           this.markSemanticUncertain(pending);
           pending.dispatchCallbacks?.unconfirmed('transport_timeout');
           const error = new Error('Computer Use Windows helper request timed out');
           reject(error);
-          // A request that never came back means the helper is unusable, so this normally ends it
-          // outright rather than waiting for the transport to fall idle. The exception is a stop that
-          // is still on the wire: the helper's answer to it is the only thing that can release Main's
-          // input quarantine, and requests that were already in flight when Stop began keep timers of
-          // their own that would otherwise expire inside Stop's window and kill the helper the stop
-          // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-          // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
-          // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
-          // the original input/launch unit ended. A submitted semantic request also needs its
-          // helper before its own deadline: a shorter queued read can time out first.
+          // D is independent of Stop's C. Keep the original generation and reuse its single T;
+          // uncertain input/discovery must not leave a hung helper alive indefinitely.
+          const generation = this.generations.get(helperGeneration);
+          if (
+            generation !== undefined &&
+            !isComputerUseStopOperation(String(metadata['operation']))
+          ) {
+            if (
+              earlierRequestWithinDeadline ||
+              generation.deferredRequests.some((request) => request.order < pending.order)
+            ) {
+              generation.deferredRequests.push({
+                order: pending.order,
+                duration: timeoutMilliseconds,
+                requestId: requestId.hex,
+              });
+              generation.deferredRequests.sort((a, b) => a.order - b.order);
+              this.reevaluateDeferredRequests(generation);
+            } else this.requestTermination(generation, error);
+            return;
+          }
+          // Only Stop operations or configurations without kill-stop reach this legacy path.
+          // Retain the helper for a bounded Stop or an unconfirmed input/discovery; reconnecting
+          // cannot prove the original unit ended. Since PR11, exit -> cleanupGeneration also
+          // releases quarantine, in addition to a confirmed Stop response. A submitted semantic
+          // request needs its helper before its own deadline when a shorter queued read expires.
           if (
             activityGeneration === this.activityGeneration &&
             helperGeneration === this.helperGeneration &&
@@ -1633,6 +1731,8 @@ class WindowsComputerUseHelperClient {
           resolve,
           reject,
           timeout,
+          deadline: Date.now() + timeoutMilliseconds,
+          order: ++this.requestOrder,
           sessionId,
           stopsSession,
           retainAfterKill:
@@ -1683,6 +1783,11 @@ class WindowsComputerUseHelperClient {
           this.abortTransport(failure);
         }
       });
+      const generation = this.generations.get(helperGeneration);
+      return generation === undefined
+        ? result
+        : result.finally(() => this.reevaluateDeferredRequests(generation));
+    };
     const prepareAndSend = async (): Promise<unknown> => {
       if (dispatchCallbacks !== undefined) {
         this.preparingDispatches.add(requestId.hex);
@@ -1777,7 +1882,10 @@ class WindowsComputerUseHelperClient {
       return;
     }
     const pending = this.pending.get(frame.requestId.hex);
-    if (pending === undefined) return;
+    if (pending === undefined) {
+      this.forgetDeferredRequest(frame.requestId.hex);
+      return;
+    }
     if (!isWindowsHelperResponseBound(frame, pending)) {
       const error = new Error('Computer Use Windows helper response binding mismatch');
       this.markSemanticUncertain(pending);
