@@ -18,6 +18,7 @@ import {
   computerUseNativeInputReceiptSchema,
   computerUseNativeCloseReceiptSchema,
   computerUseWindowCandidateSchema,
+  computerUseWindowsApprovalDisplaySchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
   type ComputerUseEligibilityMode,
@@ -50,6 +51,7 @@ import {
 // transport and leave the close budgets below uninitialised. See computer-use-native-probe-facts.
 import type { ComputerUseNativeBinding, ComputerUseNativeAddon } from './computer-use-native';
 import { computerUseMissingNativePermissions } from './computer-use-native-probe-facts';
+import { sanitizeNativeDisplayLabel } from './computer-use-native-display';
 import {
   ComputerUseAccessibilityTreeError,
   projectComputerUseAccessibilityTree,
@@ -2577,13 +2579,14 @@ const NATIVE_APPROVAL_OFFER_KEYS_V2 = [
   'remainingMs',
   'effect',
 ] as const;
+const NATIVE_APPROVAL_OFFER_KEYS_V3 = [...NATIVE_APPROVAL_OFFER_KEYS_V2, 'display'] as const;
 
 /**
  * Validate a native preflight receipt. Fail closed (throw before any input) on anything outside
  * the fixed key set or the closed decision table. The ticket is a secret: it is returned only to
  * be passed straight to dispatch and never appears in an error message.
  */
-function parseNativePreflightReceipt(
+export function parseNativePreflightReceipt(
   value: unknown,
   input: Readonly<{
     session: ComputerUseNativeSession;
@@ -2597,6 +2600,9 @@ function parseNativePreflightReceipt(
      * pre-C3 rule, classifier 2 for an offer and 1 for the rest. Main always binds a route.
      */
     expectedClassifierVersion?: number;
+    /** Supplied only after the Windows connection's capability and session route are checked.
+     * N8-3 connects this; the production caller deliberately leaves it absent for now. */
+    windowsApproval?: Readonly<{ route: ComputerUseApprovalRoute; receiptVersion: number }>;
   }>,
 ): NativePreflightOutcome {
   const invalid = (): never => {
@@ -2607,13 +2613,29 @@ function parseNativePreflightReceipt(
   // `receiptVersion` is the format version and is independent of the classifier's own version. A
   // receipt without it is version 1 and keeps its original strict shape.
   const version2 = keys.includes('receiptVersion');
-  if (version2 && record['receiptVersion'] !== 2) return invalid();
+  const version3 = record['receiptVersion'] === 3;
   const offersApproval = version2 && record['decision'] === 'single_use_approval';
-  const expectedKeys = !version2
-    ? NATIVE_PREFLIGHT_KEYS
-    : offersApproval
-      ? NATIVE_APPROVAL_OFFER_KEYS_V2
-      : NATIVE_PREFLIGHT_KEYS_V2;
+  if (offersApproval && input.session.platform === 'win32' && !version3) return invalid();
+  if (version3) {
+    if (
+      input.session.platform !== 'win32' ||
+      input.windowsApproval?.route !== 'v2' ||
+      input.windowsApproval.receiptVersion !== 3 ||
+      input.expectedClassifierVersion !== 2 ||
+      !offersApproval ||
+      typeof record['inputAttemptCount'] !== 'number' ||
+      !Number.isSafeInteger(record['inputAttemptCount']) ||
+      record['inputAttemptCount'] < 0
+    )
+      return invalid();
+  } else if (version2 && record['receiptVersion'] !== 2) return invalid();
+  const expectedKeys = version3
+    ? NATIVE_APPROVAL_OFFER_KEYS_V3
+    : !version2
+      ? NATIVE_PREFLIGHT_KEYS
+      : offersApproval
+        ? NATIVE_APPROVAL_OFFER_KEYS_V2
+        : NATIVE_PREFLIGHT_KEYS_V2;
   const bound = input.expectedClassifierVersion;
   const expectedClassifierVersion = offersApproval
     ? NATIVE_APPROVAL_CLASSIFIER_VERSION
@@ -2659,6 +2681,45 @@ function parseNativePreflightReceipt(
       !(NATIVE_APPROVAL_EFFECTS as readonly string[]).includes(effect)
     )
       return invalid();
+    if (version3) {
+      const rawDisplay = asRecord(record['display'], 'native_preflight_invalid');
+      let targetLabel = rawDisplay['targetLabel'];
+      if (typeof targetLabel === 'string') {
+        const sanitized = sanitizeNativeDisplayLabel(targetLabel);
+        if (sanitized.kind === 'rejected') return invalid();
+        targetLabel = sanitized.kind === 'verified' ? sanitized.label : null;
+      }
+      const parsed = computerUseWindowsApprovalDisplaySchema.safeParse({
+        ...rawDisplay,
+        targetLabel,
+      });
+      if (!parsed.success || parsed.data.effect !== effect) return invalid();
+      const display = parsed.data;
+      const common = { kind: 'approval_required' as const, approvalGeneration, remainingMs };
+      // Preserve the effect/display discriminant relationship without an unchecked cast.
+      let approvalOffer: ComputerUseNativeApprovalOffer;
+      switch (display.effect) {
+        case 'supervised_action':
+          approvalOffer = { ...common, effect: display.effect, display };
+          break;
+        case 'high_impact_confirmation':
+          approvalOffer = { ...common, effect: display.effect, display };
+          break;
+        case 'download_open':
+          approvalOffer = { ...common, effect: display.effect, display };
+          break;
+        case 'file_manager_open':
+          approvalOffer = { ...common, effect: display.effect, display };
+          break;
+      }
+      return {
+        kind: 'refused',
+        result: 'paused',
+        reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE,
+        record,
+        approvalOffer,
+      };
+    }
     // No approval path exists in Main yet, so the offer is still a closed no-input pause.
     return {
       kind: 'refused',

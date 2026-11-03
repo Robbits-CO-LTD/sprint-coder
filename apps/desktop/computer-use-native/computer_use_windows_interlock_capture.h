@@ -121,6 +121,14 @@ EvaluateWindowsInterlockFromCapture(const ShadowUiaCapture &capture, const Shado
   if (strict.asked && !WindowsCaptureChainOwnedBy(capture, strict.process_id) &&
       result.strict_verdict.outcome == InterlockOutcome::kNone)
     result.strict_verdict = interlock_detail::StrictUnclassified(EffectClass::kUnclassified);
+  // This capture serves ordinary preflight and dispatch, never an approved dispatch. The shared
+  // strict map leaves approval to its owner; Windows must not turn that into an ordinary ticket.
+  // Keep stronger refusals and the legacy verdict (used by v1 sessions) unchanged.
+  const EffectDecision decision = ClassifyEffect(built.facts, ruleset);
+  if (result.strict_verdict.outcome == InterlockOutcome::kNone &&
+      decision.kind == DecisionKind::kApproval)
+    result.strict_verdict = interlock_detail::Refusal(
+        InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed, decision.effect_class);
   return result;
 }
 

@@ -21,6 +21,7 @@
 #include "computer_use_windows_shell_name_match.h"
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
+#include "computer_use_windows_approval_wire_test.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -41,6 +42,9 @@
 #include <vector>
 
 namespace {
+
+// Shared golden receipt: the TS wire test reads this exact value through its strict parser.
+inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":2,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
 
 using sprint_coder::computer_use::DecodeFrame;
 using sprint_coder::computer_use::EncodeFrame;
@@ -6684,6 +6688,74 @@ bool CheckNativeInterlockCapture() {
 
 // ---- Classifier v2, S5-c-1: the Windows synchronous interlock evaluation (nothing calls it yet) ---
 
+bool CheckWindowsOrdinaryApprovalClosed() {
+  using namespace sprint_coder::computer_use;
+  const EffectRuleset enabled{true, true};
+  const WindowsStrictCaptureIdentity strict{true, 4242, true};
+  for (const auto effect : {NativeApprovalEffect::kSupervisedAction,
+                            NativeApprovalEffect::kHighImpactConfirmation,
+                            NativeApprovalEffect::kDownloadOpen,
+                            NativeApprovalEffect::kFileManagerOpen}) {
+    auto capture = UiaBase();
+    auto request = UiaRequest("invoke");
+    if (effect == NativeApprovalEffect::kSupervisedAction)
+      request.maximum_mode = "supervised";
+    if (effect == NativeApprovalEffect::kHighImpactConfirmation)
+      capture.chain[0].name = "Place order";
+    if (effect == NativeApprovalEffect::kDownloadOpen ||
+        effect == NativeApprovalEffect::kFileManagerOpen) {
+      capture.item_kind = ShadowItemKind::kFile;
+      capture.item_name_read = true;
+      capture.item_name_is_real_path = true;
+      capture.item_name = "C:\\fixture\\report.pdf";
+      if (effect == NativeApprovalEffect::kDownloadOpen) {
+        capture.window_class = "Chrome_WidgetWin_1";
+        capture.process_path = "C:\\fixture\\browser.exe";
+        capture.chain = {UiaNode("Button", "Open"), UiaNode("Document", "Downloads"),
+                         UiaNode("Window", "Browser")};
+        capture.document_url_read = true;
+        capture.document_url = "chrome://downloads/";
+      } else {
+        capture.window_class = "CabinetWClass";
+        capture.process_path = "C:\\Windows\\explorer.exe";
+        capture.chain = {UiaNode("ListItem", "report.pdf"), UiaNode("Window", "Files")};
+      }
+    }
+    for (auto &node : capture.chain) {
+      node.process_id = 4242;
+      node.framework_read = true;
+      node.framework_id = "Win32";
+    }
+    const auto facts = BuildWindowsShadowFacts(capture, request).facts;
+    const auto decision = ClassifyEffect(facts, enabled);
+    if (!Check(decision.kind == DecisionKind::kApproval && decision.approval_effect == effect,
+               "windows-ordinary-approval-positive-classification")) return false;
+    const auto evaluation = EvaluateWindowsInterlockFromCapture(capture, request, false, enabled, strict);
+    const auto ordinary = ApplyIncompletePolicy(evaluation, IncompletePolicy::kTakeover);
+    if (!Check(ordinary.Refuses() && ordinary.verdict.reason == InterlockReason::kApprovalClosed &&
+                   ordinary.verdict.DecisionName() == "blocked" &&
+                   ordinary.verdict.DispatchCode() == "approval_not_enabled",
+               "windows-ordinary-approval-closed")) return false;
+    const auto legacy = ApplyIncompletePolicy(evaluation, IncompletePolicy::kDeferToV1);
+    const auto original = InterlockForFacts(facts, enabled);
+    if (!Check(legacy.verdict.outcome == original.outcome && legacy.verdict.reason == original.reason,
+               "windows-ordinary-approval-v1-unchanged")) return false;
+    capture.chain[0].process_id = 0;
+    const auto unowned = ApplyIncompletePolicy(
+        EvaluateWindowsInterlockFromCapture(capture, request, false, enabled, strict),
+        IncompletePolicy::kTakeover);
+    if (!Check(unowned.Refuses() && unowned.verdict.reason == InterlockReason::kUnclassified,
+               "windows-ordinary-approval-owned-chain-required")) return false;
+  }
+  auto capture = UiaBase();
+  for (auto &node : capture.chain) node.process_id = 4242;
+  const auto ordinary = ApplyIncompletePolicy(
+      EvaluateWindowsInterlockFromCapture(capture, UiaRequest(), false, enabled, strict),
+      IncompletePolicy::kTakeover);
+  if (!Check(!ordinary.Refuses(), "windows-ordinary-approval-ordinary-unchanged")) return false;
+  return true;
+}
+
 bool CheckWindowsInterlockCapture() {
   using namespace sprint_coder::computer_use;
   const auto no_verdict = [](const InterlockEvaluation &evaluation, InterlockNoVerdict why,
@@ -9402,6 +9474,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
+  if (!Check(CheckWindowsApprovalWire(kWindowsApprovalWireFixture), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;
@@ -9423,6 +9496,7 @@ int main() {
   if (!CheckNativeInterlockMap()) return 1;
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
+  if (!CheckWindowsOrdinaryApprovalClosed()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckWindowsShellNameMatch()) return 1;
   if (!CheckWindowsV1DefaultRisk()) return 1;
@@ -9487,9 +9561,12 @@ int main() {
   if (!Check(!EncodeFrame(cancel_header, metadata).empty(), "cancel-id-valid"))
     return 1;
 
-  // The preflight and target identity pairs are known; the number after target identity is not.
+  // The approval request/result pairs are known; the next number is not.
   for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult,
-                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult}) {
+                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult,
+                          MessageType::kApprovalApprove, MessageType::kApprovalApproveResult,
+                          MessageType::kApprovalDiscard, MessageType::kApprovalDiscardResult,
+                          MessageType::kDispatchApproved, MessageType::kDispatchApprovedResult}) {
     auto known_type_header = ValidHeader();
     known_type_header.message_type = static_cast<std::uint16_t>(type);
     if (!Check(!EncodeFrame(known_type_header, metadata).empty() &&
@@ -9499,10 +9576,10 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kTargetIdentityResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-target-identity-unknown"))
+             "message-type-after-approved-dispatch-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');
