@@ -25,7 +25,10 @@ struct WindowsApprovalMeasurementInput {
 };
 
 [[nodiscard]] inline NativeApprovalMeasurement
-MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input) {
+MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input,
+                       DecisionKind *decision_kind = nullptr) {
+  // The classified kind is reported only for complete facts; every early answer stays a takeover.
+  if (decision_kind != nullptr) *decision_kind = DecisionKind::kTakeover;
   NativeApprovalMeasurement measured;
   if (!input.approval_gate || input.route != ClassifierRoute::kV2) return measured;
   if (input.capture == nullptr || input.stopped_by_cancel || input.capture->budget_exhausted) {
@@ -49,6 +52,7 @@ MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input) {
     built.facts.origin = OriginState::kOrdinary;
     decision = ClassifyEffect(built.facts, input.ruleset);
   }
+  if (decision_kind != nullptr) *decision_kind = decision.kind;
   // Only the origin is used from this binding capture; no AX fact builder is called here.
   ShadowAxCapture binding_capture;
   binding_capture.web_area_url_read = capture.document_url_read;

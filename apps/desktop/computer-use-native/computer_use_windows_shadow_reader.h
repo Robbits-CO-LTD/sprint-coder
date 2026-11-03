@@ -21,6 +21,7 @@
 #include "computer_use_windows_shadow.h"
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -96,6 +97,11 @@ public:
   virtual ShadowReadResult ControlSignature(Element element, std::string *signature) {
     (void)element;
     (void)signature;
+    return ShadowReadResult::kAbsent;
+  }
+  virtual ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) {
+    (void)element;
+    (void)frame;
     return ShadowReadResult::kAbsent;
   }
   // S5-c-3 PR-5: the process that provides an element (UIA_ProcessIdPropertyId) and its framework
@@ -197,6 +203,12 @@ public:
     if (!has_target_) return ShadowReadResult::kFailed;
     return ControlSignature(target_element_, signature);
   }
+  [[nodiscard]] ShadowReadResult ReadTargetFrame(std::array<std::int64_t, 4> *frame) {
+    if (!has_target_) return ShadowReadResult::kFailed;
+    const auto result = TargetFrame(target_element_, frame);
+    Finish();
+    return result;
+  }
 
   [[nodiscard]] ShadowReadResult ReadTargetValue(std::size_t maximum_bytes, std::string *output) {
     if (!has_target_) return ShadowReadResult::kFailed;
@@ -214,6 +226,9 @@ private:
   template <class Call> [[nodiscard]] ShadowReadResult Gated(Call &&call) {
     if (!Step()) return ShadowReadResult::kStopped;
     return call();
+  }
+  ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) {
+    return Gated([&] { return source_.TargetFrame(element, frame); });
   }
   ShadowReadResult Root(Element *output) {
     return Gated([&] { return source_.Root(output); });

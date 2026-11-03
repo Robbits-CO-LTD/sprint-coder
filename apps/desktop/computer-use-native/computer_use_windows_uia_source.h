@@ -1172,6 +1172,17 @@ public:
     *signature = std::move(computed);
     return ShadowReadResult::kOk;
   }
+  ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) override {
+    auto *target = At(element);
+    RECT bounds{};
+    if (target == nullptr || frame == nullptr ||
+        FAILED(target->get_CurrentBoundingRectangle(&bounds)) ||
+        bounds.right <= bounds.left || bounds.bottom <= bounds.top) return ShadowReadResult::kFailed;
+    *frame = {bounds.left, bounds.top,
+              static_cast<std::int64_t>(bounds.right) - bounds.left,
+              static_cast<std::int64_t>(bounds.bottom) - bounds.top};
+    return ShadowReadResult::kOk;
+  }
 
   ShadowReadResult WindowProcessPath(Element window, std::size_t maximum_bytes,
                                      std::string *output) override {

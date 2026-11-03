@@ -9,7 +9,9 @@
 #include "computer_use_windows_association_measurement.h"
 #include "computer_use_windows_uia_source.h"
 #include "computer_use_windows_association_fixture.h"
+#include "computer_use_windows_approval_handlers.h"
 #include <iostream>
+#include <thread>
 
 using namespace sprint_coder::computer_use;
 namespace {
@@ -86,6 +88,47 @@ bool LiveSelection(int argc, wchar_t **argv) {
                                                              : WindowsOpenVerdict::kTakeover;
   return Check(JudgeWindowsSingleSelection(facts) == wanted, "live-selection-verdict");
 }
+// #991 N8-2c: the approval measurement's worker is abandoned at its deadline and the caller returns
+// (its strings and the request it built are destroyed). The worker then reads the operation it was
+// given: it must read its own copy, never a view of the caller's frame.
+bool AbandonedApprovalWorkerReadsItsOwnRequest() {
+  auto release = std::make_shared<std::atomic<bool>>(false);
+  auto finished = std::make_shared<std::atomic<bool>>(false);
+  auto observed = std::make_shared<std::string>();
+  const std::string expected = "click" + std::string(48, 'k');
+  int answer = -1;
+  {
+    auto caller_kind = std::make_unique<std::string>(expected);
+    auto caller_key = std::make_unique<std::string>(std::string(48, 'q'));
+    WindowsApprovalOwnedRequest request;
+    request.kind = *caller_kind;
+    request.key = *caller_key;
+    request.maximum_mode = "full_access_app";
+    auto lane = Limits();
+    lane.deadline_ns = lane.started_ns + kNativeApprovalWaitMaxNs;
+    answer = RunWindowsOpenMeasurement<int>(lane, WindowsApprovalMeasurementRead(std::move(request),
+        [release, finished, observed](const ShadowRequestInfo &info, const WindowsOpenMeasurementLimits &) {
+          while (!release->load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          *observed = std::string(info.kind) + "|" + std::string(info.key) + "|" +
+                      std::string(info.maximum_mode);
+          finished->store(true);
+          return 1;
+        }));
+    // The caller's strings go, and their memory is reused, before the worker reads.
+    caller_kind.reset();
+    caller_key.reset();
+    std::vector<std::string> reuse(64, std::string(53, 'z'));
+    release->store(true);
+    for (int wait = 0; wait < 2000 && !finished->load(); ++wait)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  for (int wait = 0; wait < 2000 && windows_association_detail::WindowsOpenMeasurementRunning().load(); ++wait)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  return Check(answer == 0, "approval-worker-abandoned") &&
+         Check(finished->load(), "approval-worker-finished") &&
+         Check(*observed == expected + "|" + std::string(48, 'q') + "|full_access_app",
+               "approval-worker-reads-its-own-request");
+}
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -128,6 +171,7 @@ int wmain(int argc, wchar_t **argv) {
     const auto missing = MeasureWindowsAssociation(L"C:\\synthetic\\missing.txt", Limits());
     ok = ok && Check(JudgeWindowsAssociation(missing) == WindowsOpenVerdict::kTakeover,
                      "association-missing-real-path");
+    ok = ok && AbandonedApprovalWorkerReadsItsOwnRequest();
   }
   CoUninitialize();
   std::cout << (ok ? "OK\n" : "FAILED\n");

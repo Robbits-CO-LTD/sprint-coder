@@ -42,6 +42,10 @@ struct ScopedKernelHandle {
 
 std::atomic<std::uint64_t> cancellation_epoch{0};
 std::atomic<bool> parent_process_dead{false};
+// Received once from the authenticated connection. Missing generation never authorizes approval.
+std::uint64_t windows_helper_generation = 0;
+constexpr bool kWindowsApprovalHandlersEnabled = false;
+std::uint64_t MonotonicNowNs();
 
 std::atomic<bool> &WindowsTargetListWorkerRunning();
 
@@ -152,6 +156,14 @@ struct WindowsStartLease {
 };
 
 struct WindowsSession {
+  std::uint64_t approved_started_ns = 0;
+  std::uint64_t approved_deadline_ns = 0;
+  std::uint64_t approved_stop_serial = 0;
+  std::uint64_t approved_helper_generation = 0;
+  bool approved_click_tracked = false;
+  bool approved_click_opens = false;
+  bool approved_click_input_read = false;
+  DWORD approved_click_input_tick = 0;
   std::shared_ptr<WindowsStartAdmission> start_owner;
   // Counts API attempts, never inferred successful effects. Shared by session refocus copies.
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
@@ -218,6 +230,7 @@ struct WindowsTicketState {
   std::uint64_t generation = 0;
 };
 std::unordered_map<std::string, WindowsTicketState> ticket_states;
+std::unordered_map<std::string, sprint_coder::computer_use::WindowsApprovalHandlers> approval_states;
 
 void InvalidateWindowsTicket(const std::string &session_key) {
   const auto found = ticket_states.find(session_key);
@@ -227,6 +240,7 @@ void InvalidateWindowsTicket(const std::string &session_key) {
 }
 
 void ForgetWindowsTicket(const std::string &session_key) {
+  approval_states.erase(session_key);
   const auto found = ticket_states.find(session_key);
   if (found == ticket_states.end()) return;
   found->second.slot.Invalidate();

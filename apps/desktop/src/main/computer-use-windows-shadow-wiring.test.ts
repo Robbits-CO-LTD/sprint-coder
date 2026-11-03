@@ -35,6 +35,13 @@ const preflight = between(
   'bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,',
   'bool ObserveWindowsWindow(',
 );
+// The approval measurement (#991 N8-2c) is the one other entry that runs the reader, on its own
+// bounded worker; its own contract is in computer-use-windows-shadow-reader.test.ts.
+const approvalMeasurement = between(
+  host,
+  'sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(',
+  'sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(',
+);
 
 describe('Windows shadow scheduler decides nothing and reads nothing itself', () => {
   it('is portable: no platform header, no thread of its own, no ring of its own', () => {
@@ -165,7 +172,7 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
   it('includes the scheduler and the source, and uses the reader only through the scheduler', () => {
     expect(host).toContain('#include "computer_use_windows_uia_source.h"');
     expect(host).toContain('#include "computer_use_windows_shadow_scheduler.h"');
-    const text = code(host);
+    const text = code(host.replace(approvalMeasurement, ''));
     for (const name of [
       'WindowsShadowReader',
       'WindowsShadowClassify',
@@ -180,6 +187,8 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     // The shadow's open_source, the synchronous interlock entry (S5-c-1) and the read of one node's
     // value (#785 T15-4w); the last two run on the lane's workers.
     expect(text.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(3);
+    // The approval measurement creates its own source once, on its worker.
+    expect(code(approvalMeasurement).match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
     expect(wiring.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
     expect(wiring).toMatch(
       /environment\.open_source = \[window, point, still_valid, point_known, needs_point\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*if \(needs_point && !point_known\)\s*return nullptr;\s*return WindowsUiaShadowSource::Create\(\s*window, point, still_valid,\s*WindowsUiaShadowSource::kShadowUiaTimeoutMs,\s*windows_uia_source_detail::ShellLookupRunning\(\)\);/u,
@@ -299,8 +308,10 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     const point = between(host, '// BEGIN windows action point', '// END windows action point');
     expect(code(point)).toContain('bounds.right - bounds.left - 1');
     expect(code(point)).toContain('x < 0 || x > 1 || y < 0 || y > 1');
-    // Three callers: the click and the scroll of the dispatch, the shadow, the synchronous entry.
-    expect(text.match(/WindowsActionPoint\(/gu)).toHaveLength(5); // the definition and four calls
+    // Callers: the click and the scroll of the dispatch, the shadow, the synchronous entry, and the
+    // approval measurement (#991 N8-2c), which maps the point of the binding it re-validated.
+    expect(text.match(/WindowsActionPoint\(/gu)).toHaveLength(6); // the definition and five calls
+    expect(code(approvalMeasurement)).toContain('WindowsActionPoint(bounds, metadata, &point)');
     const dispatch = between(host, 'bool DispatchWindowsAction(', 'std::string ProbeJson(');
     expect(code(dispatch).match(/WindowsActionPoint\(bounds, metadata, &/gu)).toHaveLength(2);
     expect(code(wiring)).toContain('WindowsActionPoint(session.observation_bounds');
@@ -310,8 +321,15 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(host).toContain('kNativePreflightClassifierVersion');
     // The receipt constructor and its two calls still build the V1 answer from V1 inputs only.
     const text = code(preflight);
-    // replay, a failed binding, the two spellings of an interlock refusal, the V1 answer
-    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(5);
+    // replay, a failed binding, the gated approval refusal (#991 N8-2c), the two spellings of an
+    // interlock refusal, the V1 answer
+    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(6);
+    const gated = text.slice(
+      text.indexOf('if (WindowsApprovalGate(session))'),
+      text.indexOf('WindowsInterlockRefusal('),
+    );
+    expect(gated.match(/WindowsPreflightReceipt\(/gu)?.length).toBe(1);
+    expect(gated).toContain('"denied", "native_approval_unavailable"');
     expect(text).toContain('issued ? "ordinary" : "denied"');
     expect(text).not.toMatch(/ProcessShadowLog|Snapshot\(|Total\(\)/u);
   });
