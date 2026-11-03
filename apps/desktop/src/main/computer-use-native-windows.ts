@@ -168,7 +168,7 @@ export function createWindowsComputerUseNativeAddon(
       return client.stopWindowDiscovery(id);
     },
     cancelUnsubmittedDiscovery: (id) => client.cancelUnsubmittedDiscovery(id),
-    startSession: (input) => {
+    startSession: (input, assertSend) => {
       const value = record(input);
       const profile = record(value['profile']);
       const identity = record(profile['identity']);
@@ -183,6 +183,8 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         undefined,
+        undefined,
+        assertSend,
       );
     },
     observe: (input) => {
@@ -861,6 +863,7 @@ class WindowsComputerUseHelperClient {
     sessionKey: string | undefined,
     requestKey: string | undefined,
     dispatchCallbacks?: WindowsDispatchCallbacks,
+    assertStartSend?: () => void,
   ): Promise<unknown> {
     if (sessionKey !== undefined && operation !== 'start_session')
       this.assertSessionGeneration(sessionKey);
@@ -974,6 +977,7 @@ class WindowsComputerUseHelperClient {
           if (owner !== undefined) {
             if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
               throw new Error('Computer Use start canceled before send');
+            assertStartSend?.();
             owner.everSent = true;
           }
           if (semantic !== undefined) {

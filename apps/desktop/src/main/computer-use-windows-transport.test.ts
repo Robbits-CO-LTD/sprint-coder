@@ -795,6 +795,80 @@ describe('Computer Use Windows helper transport', () => {
     }
   });
 
+  it.each(['start', 'resume'] as const)(
+    'PR5b gates %s after another instance commits during admission',
+    async (entry) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ledger-start-gate-'));
+      const path = join(directory, 'shared.sqlite');
+      const a = openWindowsLedgerStore({ path, userData: 'C:/synthetic/a' });
+      const b = openWindowsLedgerStore({ path, userData: 'C:/synthetic/b' });
+      let commit = false;
+      let discoveryCount = 0;
+      try {
+        const original = responders();
+        const identity = { pid: 4242, processStartTime: '133000000000000001' };
+        const target = createTarget(
+          {
+            ...original,
+            list_windows: (metadata) => {
+              const [type, result] = original['list_windows']!(metadata);
+              discoveryCount += 1;
+              return [
+                type,
+                (result as Record<string, unknown>[]).map((row) => ({
+                  ...row,
+                  ...(discoveryCount === 1 ? {} : identity),
+                })),
+              ];
+            },
+            start_session: (metadata) => {
+              const [type, result] = original['start_session']!(metadata);
+              return [type, { ...(result as Record<string, unknown>), ...identity }];
+            },
+          },
+          undefined,
+          { windowsLedger: b, windowsKillStopTermination: { enabled: true } },
+          (addon) => ({
+            ...addon,
+            startSession: (...args) => {
+              if (commit) {
+                expect(
+                  a.restoreQuarantines([
+                    {
+                      identity: { pid: identity.pid, creationTime: identity.processStartTime },
+                      reason: 'exit_suspect',
+                    },
+                  ]),
+                ).toBe(true);
+              }
+              return addon.startSession!(...args);
+            },
+          }),
+        );
+        await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
+        if (entry === 'resume') await startSession(target.host, 'shared-session', 'turn-a');
+        commit = true;
+        await expect(
+          target.host.startSession({
+            profile,
+            windowId: '100',
+            sessionId: 'shared-session',
+            taskId: 'task-1',
+            turnId: 'turn-a',
+            cancelEpoch: 0,
+            resume: entry === 'resume',
+          }),
+        ).rejects.toMatchObject({ reasonCode: 'native_unavailable' });
+        expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(
+          entry === 'resume' ? 1 : 0,
+        );
+      } finally {
+        a.close();
+        b.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
   it.each(['throw', 'timeout'] as const)(
     'PR4 unreadable startup blocks before helper launch and recovers (%s)',
     async (failure) => {

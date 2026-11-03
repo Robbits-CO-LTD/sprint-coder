@@ -184,6 +184,7 @@ export type ComputerUseNativeHostOptions = Readonly<{
   /**
    * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
    * them, a helper whose exit never arrives keeps refusing connections with no user notification.
+   * PR5b's start/resume ledger gate immediately before socket.write is also required.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
@@ -1618,6 +1619,19 @@ export function createComputerUseNativeHost(
   ): Promise<ComputerUseNativeSession> => {
     // SetForegroundWindow inside native start is not ledgered here; PR5b owns that handoff.
     assertStartOwner(owner);
+    const sendStart = async (request: Record<string, unknown>, creationTime: unknown) => {
+      if (ledger === undefined) return await invoke('startSession', request);
+      requireMethod('startSession');
+      const start = addon?.startSession;
+      if (start === undefined) throw new ComputerUseNativeUnavailableError('native_unavailable');
+      return await start(request, () => {
+        assertStartOwner(owner);
+        if (
+          ledgerBlocked(request['pid'], typeof creationTime === 'string' ? creationTime : undefined)
+        )
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+      });
+    };
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
       if (
@@ -1639,7 +1653,7 @@ export function createComputerUseNativeHost(
       };
       assertStartOwner(owner);
       owner.nativeInvoked = true;
-      const value = await invoke('startSession', request);
+      const value = await sendStart(request, existing.raw.processStartTime);
       assertStartOwner(owner);
       const raw = asRecord(value, 'native_session_invalid');
       const session = parseNativeSession(
@@ -1730,7 +1744,7 @@ export function createComputerUseNativeHost(
     )
       throw new ComputerUseNativeUnavailableError('native_unavailable');
     owner.nativeInvoked = true;
-    const value = await invoke('startSession', request);
+    const value = await sendStart(request, selectedRecord['processStartTime']);
     assertStartOwner(owner);
     const raw = asRecord(value, 'native_session_invalid');
     const session = parseNativeSession(

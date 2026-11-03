@@ -72,7 +72,8 @@ export type ComputerUseNativeAddon = Readonly<{
   cancelUnsubmittedDiscovery?(discoveryId: string): 'never_sent' | 'may_have_been_sent' | 'unknown';
   /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
   listTargets?(input: unknown): unknown;
-  startSession?(input: unknown): unknown;
+  /** Main-only synchronous gate, evaluated after preparation immediately before socket.write. */
+  startSession?(input: unknown, assertSend?: () => void): unknown;
   /** API3: terminates an admitted lifetime without guessing its native epoch. */
   stopPendingStart?(input: unknown): unknown;
   /** Main-only Windows transport proof; never a value received from native. */
