@@ -83,6 +83,8 @@ export function eligibilityDeclaration(mode, platform) {
     classifierVersion: versions.classifierVersion,
     lexiconVersion: versions.lexiconVersion,
     ticketRequired: table.ticketRequired[platform],
+    // macOS keeps its existing policy until ADR G's separate enablement decision.
+    interlockEnforced: platform === 'win32' && mode === MODES.v2,
   };
 }
 
@@ -98,6 +100,7 @@ export function eligibilityBuildHeader(declaration) {
     `#define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION ${declaration.classifierVersion}`,
     `#define SPRINT_CODER_ELIGIBILITY_LEXICON_VERSION ${declaration.lexiconVersion}`,
     `#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED ${declaration.ticketRequired ? 1 : 0}`,
+    `#define SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED ${declaration.interlockEnforced ? 1 : 0}`,
     '',
   ].join('\n');
 }

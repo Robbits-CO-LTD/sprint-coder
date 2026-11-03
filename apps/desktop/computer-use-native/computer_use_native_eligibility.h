@@ -32,6 +32,11 @@
 #define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 1
 #endif
 
+#if !defined(SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED)
+#define SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED 0
+#endif
+
+#include "computer_use_native_interlock.h"
 #include <cstdint>
 
 namespace sprint_coder::computer_use {
@@ -54,6 +59,15 @@ constexpr std::uint32_t kNativeEligibilityLexiconVersion =
     SPRINT_CODER_ELIGIBILITY_LEXICON_VERSION;
 constexpr bool kNativeEligibilityTicketRequired =
     SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED == 1;
+constexpr bool kNativeEligibilityInterlockEnforced =
+    SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 1;
+static_assert(SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 0 ||
+                  SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 1,
+              "The interlock claim is a boolean.");
+static_assert(!kNativeEligibilityInterlockEnforced ||
+                  (kNativeEligibilityIsV2 &&
+                   IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover),
+              "An attested v2 interlock must take over incomplete facts.");
 
 static_assert(kNativeEligibilityRulesetVersion > 0 && kNativeEligibilityRulesetVersion <= 0xffff &&
                   kNativeEligibilityClassifierVersion > 0 &&

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import console from 'node:console';
+import process from 'node:process';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -31,7 +33,9 @@ function isPlainRecord(value) {
 function declarationProblems(label, value, expected) {
   if (!isPlainRecord(value)) return [`${label} eligibility is missing or not an object`];
   const problems = [];
-  const keys = Object.keys(value).sort();
+  const keys = Object.keys(value)
+    .filter((key) => key !== 'interlockEnforced')
+    .sort();
   if (JSON.stringify(keys) !== JSON.stringify(KEYS))
     problems.push(`${label} eligibility has unexpected keys`);
   for (const key of KEYS)
@@ -39,6 +43,12 @@ function declarationProblems(label, value, expected) {
       problems.push(
         `${label} eligibility.${key} is ${JSON.stringify(value[key])}, expected ${JSON.stringify(expected[key])}`,
       );
+  // Older artifacts omit this claim. Their existing v1/macOS policy remains accepted.
+  if (
+    (value.interlockEnforced ?? false) !== expected.interlockEnforced ||
+    value.interlockEnforced === null
+  )
+    problems.push(`${label} eligibility.interlockEnforced differs from the build declaration`);
   return problems;
 }
 

@@ -42,6 +42,18 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
   it('is not called by any native source yet, and moves no version', () => {
     const sources = readdirSync(nativeDirectory).filter((name) => /\.(h|cc|mm)$/u.test(name));
     for (const name of sources) {
+      if (name === 'computer_use_native_eligibility.h') {
+        // ADR G binds the compile-time attest to the same policy; it does not evaluate input.
+        const declaration = read(name);
+        expect(declaration).toContain('#include "computer_use_native_interlock.h"');
+        expect(declaration).toContain('static_assert(!kNativeEligibilityInterlockEnforced ||');
+        expect(declaration).toContain(
+          'IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover',
+        );
+        expect(declaration).not.toContain('MapEffectToInterlock');
+        expect(declaration).not.toContain('MapEffectToStrictInterlock');
+        continue;
+      }
       // The portable synchronous evaluation (S4-1b-1) is the one other reader; its own contract is
       // in computer-use-native-interlock-capture.test.ts (the .mm reaches the map only through it).
       if (

@@ -13,6 +13,21 @@ export const COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV =
 
 export type ComputerUseEligibilityVerdict = 'ok' | 'mismatch' | 'ticket_unattested';
 
+/** ADR G: prepared for N7-7, which connects this check when Windows v2 builds are enabled. */
+export function checkComputerUseWindowsV2InterlockAttestation(input: {
+  platform: string;
+  compiled: ComputerUseEligibility | null;
+  manifest: ComputerUseEligibility | undefined;
+  attested: ComputerUseEligibility | undefined;
+}): 'ok' | 'interlock_unattested' {
+  if (input.platform !== 'win32' || input.compiled?.mode !== 'v2-denylist') return 'ok';
+  return [input.compiled, input.manifest, input.attested].every(
+    (declared) => declared?.interlockEnforced === true,
+  )
+    ? 'ok'
+    : 'interlock_unattested';
+}
+
 /** The fields a legacy (pre-D7) declaration can be compared on. */
 function sameCore(
   left: Pick<

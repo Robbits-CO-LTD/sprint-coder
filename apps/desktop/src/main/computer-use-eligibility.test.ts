@@ -14,6 +14,7 @@ import {
 import {
   COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV,
   checkComputerUseEligibility,
+  checkComputerUseWindowsV2InterlockAttestation,
   computerUseClassifierRoute,
   effectiveComputerUseEligibilityMode,
 } from './computer-use-eligibility';
@@ -282,6 +283,96 @@ describe('Computer Use eligibility contract (D7-1)', () => {
       expect(checkComputerUseEligibility({ compiled: V2, manifest: V1, attested: V2 })).toBe(
         'mismatch',
       );
+    });
+  });
+
+  describe('interlock attestation (N7-6)', () => {
+    it('v2_requires_matching_interlock_attestation', () => {
+      const declared = { ...V2, interlockEnforced: true };
+      const input = {
+        platform: 'win32',
+        compiled: declared,
+        manifest: declared,
+        attested: declared,
+      };
+      expect(checkComputerUseWindowsV2InterlockAttestation(input)).toBe('ok');
+      for (const interlockEnforced of [undefined, false]) {
+        const wrong = { ...V2, interlockEnforced };
+        for (const key of ['compiled', 'manifest', 'attested'] as const)
+          expect(checkComputerUseWindowsV2InterlockAttestation({ ...input, [key]: wrong })).toBe(
+            'interlock_unattested',
+          );
+        expect(
+          checkComputerUseWindowsV2InterlockAttestation({
+            ...input,
+            compiled: wrong,
+            manifest: wrong,
+            attested: wrong,
+          }),
+        ).toBe('interlock_unattested');
+      }
+      for (const key of ['manifest', 'attested'] as const)
+        expect(checkComputerUseWindowsV2InterlockAttestation({ ...input, [key]: undefined })).toBe(
+          'interlock_unattested',
+        );
+    });
+
+    it('legacy_v1_remains_accepted', () => {
+      for (const compiled of [null, V1, { ...V1, interlockEnforced: false }]) {
+        expect(checkComputerUseEligibility({ compiled, manifest: V1, attested: V1 })).toBe('ok');
+        expect(
+          checkComputerUseWindowsV2InterlockAttestation({
+            platform: 'win32',
+            compiled,
+            manifest: V1,
+            attested: V1,
+          }),
+        ).toBe('ok');
+      }
+    });
+
+    it('macos_v2_attestation_is_unchanged', () => {
+      for (const interlockEnforced of [undefined, false, true]) {
+        const declared = { ...V2, interlockEnforced };
+        expect(gate({ main: declared, manifest: V2, attested: V2 })).toMatchObject({
+          available: true,
+        });
+        expect(
+          checkComputerUseWindowsV2InterlockAttestation({
+            platform: 'darwin',
+            compiled: declared,
+            manifest: V2,
+            attested: V2,
+          }),
+        ).toBe('ok');
+      }
+    });
+
+    it('preserves the claim through handshake and pin and binds it to the digest', () => {
+      const digests = [undefined, false, true].map((interlockEnforced) => {
+        const declared = {
+          ...V1,
+          ...(interlockEnforced === undefined ? {} : { interlockEnforced }),
+        };
+        const parsed = computerUseNativeManifestSchema.parse(manifest(declared));
+        expect(
+          parseComputerUseNativeCompiledPin(computerUseNativeCompiledPin(parsed)).eligibility,
+        ).toEqual(declared);
+        expect(
+          parseNativeHandshake(
+            {
+              protocolVersion: 1,
+              apiVersion: 3,
+              platform: 'darwin',
+              napiVersion: 10,
+              eligibility: declared,
+            },
+            'darwin',
+          ),
+        ).toEqual(declared);
+        return computerUseNativeManifestDigest(parsed);
+      });
+      expect(new Set(digests).size).toBe(3);
     });
   });
 

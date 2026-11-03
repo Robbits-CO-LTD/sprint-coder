@@ -3200,6 +3200,9 @@ napi_value Handshake(napi_env env, napi_callback_info info) {
   napi_set_named_property(
       env, eligibility, "ticketRequired",
       BoolValue(env, sprint_coder::computer_use::kNativeEligibilityTicketRequired));
+  napi_set_named_property(
+      env, eligibility, "interlockEnforced",
+      BoolValue(env, sprint_coder::computer_use::kNativeEligibilityInterlockEnforced));
   napi_set_named_property(env, result, "eligibility", eligibility);
   return result;
 }

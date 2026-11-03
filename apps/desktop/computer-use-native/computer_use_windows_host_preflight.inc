@@ -59,6 +59,8 @@ std::string ProbeJson(const BackendProbe &probe) {
          std::to_string(sprint_coder::computer_use::kNativeEligibilityLexiconVersion) +
          ",\"ticketRequired\":" +
          (sprint_coder::computer_use::kNativeEligibilityTicketRequired ? "true" : "false") +
+         ",\"interlockEnforced\":" +
+         (sprint_coder::computer_use::kNativeEligibilityInterlockEnforced ? "true" : "false") +
          "},\"reason\":\"" + reason + "\"}\n";
 }
 

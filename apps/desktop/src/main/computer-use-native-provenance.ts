@@ -45,6 +45,9 @@ export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManif
             manifest.eligibility.classifierVersion,
             manifest.eligibility.lexiconVersion,
             manifest.eligibility.ticketRequired,
+            ...(manifest.eligibility.interlockEnforced === undefined
+              ? []
+              : [manifest.eligibility.interlockEnforced]),
           ],
         ]),
     ...(manifest.windowsDocumentViewers === undefined

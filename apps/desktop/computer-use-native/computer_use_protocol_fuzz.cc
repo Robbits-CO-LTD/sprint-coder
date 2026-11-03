@@ -1277,6 +1277,10 @@ bool CheckNativeRunningIdentity() {
 bool CheckNativeEligibility() {
   using namespace sprint_coder::computer_use;
   const std::string_view name = kNativeEligibilityModeName;
+  if (!Check(!kNativeEligibilityInterlockEnforced ||
+                 (kNativeEligibilityIsV2 &&
+                  IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover),
+             "eligibility-interlock-attestation")) return false;
   // The only two names the contract knows, and the flag agrees with the name.
   if (!Check(name == "v1-allowlist" || name == "v2-denylist", "eligibility-mode-name") ||
       !Check((name == "v2-denylist") == kNativeEligibilityIsV2, "eligibility-mode-flag"))
@@ -1311,7 +1315,7 @@ bool CheckNativeEligibility() {
 #endif
   if (!Check(name == (kDefaultsExpectV2 ? "v2-denylist" : "v1-allowlist") &&
                  kNativeEligibilityIsV2 == kDefaultsExpectV2 &&
-                 kNativeEligibilityTicketRequired,
+                 kNativeEligibilityTicketRequired && !kNativeEligibilityInterlockEnforced,
              "eligibility-defaults")) return false;
 #endif
   return true;
