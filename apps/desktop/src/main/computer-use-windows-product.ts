@@ -17,8 +17,9 @@ export function configureWindowsKillStop(input: {
     windowsKillStopTermination: { enabled: true },
     windowsStartIdentity: { enabled: true },
   };
-  // N5-G removed the Stop-only new-start worker, so the old path is gone: a disabled build leaves
-  // the Host unavailable, exactly like a missing ledger, instead of starting without kill-stop.
+  // N5-G removed the Stop-only new-start worker, and N5-I the discovery one, so the old path is gone:
+  // a disabled build leaves the Host unavailable, exactly like a missing ledger, instead of starting
+  // or discovering without kill-stop.
   if (!(input.enabled ?? WINDOWS_KILL_STOP_ENABLED)) return { options, close() {} };
   try {
     const store = (input.open ?? openWindowsLedgerStore)({
