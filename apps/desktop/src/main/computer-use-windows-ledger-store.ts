@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, win32 } from 'node:path';
 import Database from 'better-sqlite3';
+import { secureLogger } from './secure-logger';
 import type { WindowsDispatchLedgerStorage } from './computer-use-native-host';
 import {
   isStoredWindowsQuarantine,
@@ -18,6 +19,11 @@ export function windowsLedgerInstanceId(userData: string): string {
     canonical = realpathSync.native(userData);
   } catch {
     // Profiles that do not exist yet retain the normalized-path fallback.
+    secureLogger.warn(
+      'Windows ledger profile realpath unavailable; using normalized path',
+      undefined,
+      { event: 'computer_use.windows_ledger.realpath_fallback' },
+    );
   }
   const normalized = win32
     .normalize(canonical)
@@ -164,14 +170,14 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
       assertVersion();
       return add(quarantines);
     }).immediate,
-    releaseQuarantine(identity: WindowsTargetQuarantine['identity']) {
+    releaseQuarantine: db.transaction((identity: WindowsTargetQuarantine['identity']) => {
       assertVersion();
       db.prepare('DELETE FROM quarantines WHERE pid = ? AND creation_time = ?').run(
         identity.pid,
         identity.creationTime,
       );
       return true;
-    },
+    }).immediate,
     transferReceipt: db.transaction(
       (rows: readonly WindowsLedgerRow[], quarantines: readonly WindowsTargetQuarantine[]) => {
         assertVersion();

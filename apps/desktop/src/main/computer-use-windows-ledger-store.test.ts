@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { secureLogger } from './secure-logger';
 import {
   openWindowsLedgerStore,
   windowsLedgerInstanceId,
@@ -294,6 +295,67 @@ it('retains quarantine when its release fails and retries after the store recove
   db.exec('DROP TRIGGER fail_release');
   expect(await store.releaseQuarantine!(row.identity)).toBe(true);
   expect(store.read().quarantines).toEqual([]);
+});
+
+it('checks the store version inside the release transaction', () => {
+  const store = fixture().open();
+  store.restoreQuarantines([quarantine]);
+  const original = Database.prototype.pragma;
+  const transactions: boolean[] = [];
+  const pragma = vi.spyOn(Database.prototype, 'pragma').mockImplementation(function (
+    this: Database.Database,
+    source,
+    options,
+  ) {
+    if (source === 'user_version') transactions.push(this.inTransaction);
+    return original.call(this, source, options);
+  });
+  try {
+    expect(store.releaseQuarantine!(row.identity)).toBe(true);
+    expect(transactions).toEqual([true]);
+  } finally {
+    pragma.mockRestore();
+  }
+});
+
+// Generation-bound approval integration follows PR9 (#1035) merging into main.
+it('releases an unknown reason by exact identity so a blocked transfer can recover', () => {
+  const f = fixture();
+  const store = f.open();
+  store.write(row);
+  const db = new Database(f.path);
+  connections.push(db);
+  const future = JSON.stringify({ ...quarantine, reason: 'future-reason' });
+  const insert = db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)');
+  insert.run(row.identity.pid, row.identity.creationTime, future);
+  insert.run(row.identity.pid, 'synthetic-other-time', future);
+  expect(store.transferReceipt!([row], [quarantine])).toBe(false);
+  expect(store.releaseQuarantine!(row.identity)).toBe(true);
+  expect(db.prepare('SELECT creation_time FROM quarantines').all()).toEqual([
+    { creation_time: 'synthetic-other-time' },
+  ]);
+  expect(store.transferReceipt!([row], [quarantine])).toBe(true);
+  store.close();
+  expect(f.open().read()).toEqual({
+    rows: [],
+    quarantines: [JSON.parse(future), quarantine],
+  });
+});
+
+it('reports realpath fallback without exposing the profile path or filesystem error', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'windows-ledger-'));
+  folders.push(folder);
+  const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+  try {
+    expect(windowsLedgerInstanceId(join(folder, 'missing'))).toMatch(/^[a-f0-9]{64}$/);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      'Windows ledger profile realpath unavailable; using normalized path',
+      undefined,
+      { event: 'computer_use.windows_ledger.realpath_fallback' },
+    );
+  } finally {
+    warn.mockRestore();
+  }
 });
 
 it('uses a fixed LocalAppData path and a normalized stable per-profile identity', () => {
