@@ -78,23 +78,35 @@ it('measures validation identity on the consumer with cancellable I/O and fresh 
     join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
     'utf8',
   );
-  const watcher = host.slice(host.indexOf('parent_watcher = std::thread('));
+  const watcher = host.slice(
+    host.indexOf('parent_watcher = std::thread('),
+    host.indexOf('ServePipe(pipe, probe);'),
+  );
   const parentLock = watcher.slice(
-    watcher.indexOf('std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);'),
+    watcher.indexOf('if (control.stop_mutex.try_lock()) {'),
     watcher.indexOf('CancelIoEx(pipe, nullptr);'),
   );
   expect(parentLock).toContain('parent_process_dead.store(true, std::memory_order_release);');
-  expect(parentLock).toContain(
-    'CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());',
+  expect(parentLock).toContain('CancelWindowsNewStartMeasurementLocked(control);');
+  // A cancel can miss the next I/O, a stall outside I/O never returns, and a thread may hold
+  // stop_mutex: keep cancelling without waiting on the lock, then end the helper after the grace
+  // period rather than leave it holding the target's handles.
+  const flat = watcher.replace(/\s+/gu, ' ');
+  expect(flat).not.toContain('std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);');
+  expect(flat).toContain(
+    'if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8); Sleep(20); }',
   );
-  // A cancel can miss the next I/O and a stall outside I/O never returns: keep cancelling, then
-  // end the helper after the grace period rather than leave it holding the target's handles.
-  const grace = watcher.slice(watcher.indexOf('DisconnectNamedPipe(pipe);'));
-  expect(grace.replace(/\s+/gu, ' ')).toContain(
-    'while (serving.load(std::memory_order_acquire)) { if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8);',
-  );
-  expect(grace).toContain('CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());');
   expect(host).toContain("inline constexpr ULONGLONG kWindowsParentDeathGraceMs = 2'000;");
+  // The watcher runs until the exit cleanup is done, so a stalled drain is bounded too.
+  const exit = host.slice(host.indexOf('ServePipe(pipe, probe);'), host.indexOf('int wmain('));
+  const cleaned = exit.indexOf('DrainWindowsDiscoveryLaunchesForExit();');
+  const finished = exit.indexOf('serving.store(false, std::memory_order_release);');
+  expect(cleaned).toBeGreaterThan(-1);
+  expect(finished).toBeGreaterThan(cleaned);
+  expect(exit.indexOf('parent_watcher.join();')).toBeGreaterThan(finished);
+  expect(exit.indexOf('CloseHandle(pipe);')).toBeGreaterThan(
+    exit.indexOf('parent_watcher.join();'),
+  );
   expect(source).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
   expect(source).toContain(
     'WindowsTargetListWorkerRunning().store(false, std::memory_order_release)',

@@ -290,37 +290,42 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     // its pipe accepted, fixed before the first request (the facts context reads it once, then).
     windows_v2_main_pid = static_cast<std::uint32_t>(client_pid);
     parent_watcher = std::thread([parent, pipe, &serving]() {
+      // `serving` stays true until the exit cleanup below is done, so this watcher also bounds it.
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {
-          {
-            std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
-            parent_process_dead.store(true, std::memory_order_release);
-            cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
-            // A start or session identity measurement runs on the consumer itself (N5-C/G/H). With no
-            // Main left to kill this helper, cancel its I/O so ServePipe can return and the helper exits.
-            CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());
-          }
-          CancelIoEx(pipe, nullptr);
-          DisconnectNamedPipe(pipe);
-          // A cancel can land just before the consumer issues its next I/O, and a stall outside I/O
-          // never returns. With Main gone nothing else ends this helper, so keep cancelling for a
-          // short grace period, then end the process (its job ends any unverified child).
+          // A start or session identity measurement runs on the consumer itself (N5-C/G/H), and with
+          // Main gone no E1/E2 kill follows. A cancel can land just before the consumer issues its
+          // next I/O, a stall outside I/O never returns, a thread may hold stop_mutex, and the exit
+          // cleanup may stall: keep cancelling for a short grace period without waiting on the lock,
+          // then end the process (its job ends any unverified child).
           const ULONGLONG grace_end = GetTickCount64() + kWindowsParentDeathGraceMs;
+          auto &control = WindowsTargetListControl();
+          bool published = false, disconnected = false;
           while (serving.load(std::memory_order_acquire)) {
+            if (control.stop_mutex.try_lock()) {
+              std::lock_guard stop_lock(control.stop_mutex, std::adopt_lock);
+              if (!published) {
+                parent_process_dead.store(true, std::memory_order_release);
+                cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+                published = true;
+              }
+              CancelWindowsNewStartMeasurementLocked(control);
+            }
+            // Parent death reaches the input gate before the pipe ends.
+            if (published && !disconnected) {
+              disconnected = true;
+              CancelIoEx(pipe, nullptr);
+              DisconnectNamedPipe(pipe);
+            }
             if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8);
             Sleep(20);
-            std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
-            CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());
           }
           break;
         }
       }
     });
     ServePipe(pipe, probe);
-    serving.store(false, std::memory_order_release);
   }
-  if (parent_watcher.joinable())
-    parent_watcher.join();
   DisconnectNamedPipe(pipe);
   for (auto &entry : sessions)
     ReleaseWindowsSessionResources(&entry.second);
@@ -329,6 +334,9 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   DrainWindowsDiscoveryLaunchesForExit();
   if (SUCCEEDED(initialized))
     CoUninitialize();
+  serving.store(false, std::memory_order_release);
+  if (parent_watcher.joinable())
+    parent_watcher.join();
   CloseHandle(pipe);
   CloseHandle(parent);
   return 0;
