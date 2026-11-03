@@ -578,7 +578,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
       return false;
     }
     if (kind != "invoke" && kind != "toggle" && kind != "select" &&
-        kind != "set_text" && kind != "expand_collapse") {
+        kind != "set_text" && kind != "expand_collapse" && kind != "semantic_scroll") {
       *reason = "awaiting_foreground_handoff";
       return false;
     }

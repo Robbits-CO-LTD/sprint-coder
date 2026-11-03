@@ -166,4 +166,135 @@ inline bool CheckBackgroundExecutor() {
   }
   return true;
 }
+struct FakeScrollOperations : FakeOperations {
+  enum Amount { kNone, kSmallDown, kLargeDown, kSmallUp, kLargeUp };
+  ScrollRequest request;
+  ScrollSnapshot before{true, true, 40, 40, 20, 20}, current = before;
+  bool initial_read = true;
+  int timed_calls = 0;
+  Amount horizontal = kNone, vertical = kNone;
+  double horizontal_percent = -1, vertical_percent = -1;
+  FakeScrollOperations() {
+    ParseScroll("scroll", "vertical", "small_increment",
+                std::numeric_limits<double>::quiet_NaN(), &request);
+  }
+  Preparation Prepare() {
+    return initial_read ? PrepareScroll(request, before) : Preparation::kRejected;
+  }
+  bool Apply() {
+    ++calls;
+    if (takeover) monitor.Pause();
+    if (throw_call) throw 1;
+    if (applies) {
+      double &position = request.horizontal ? current.horizontal_percent : current.vertical_percent;
+      position = request.absolute ? request.percent : position + (request.increment ? 10 : -10);
+    }
+    return call_ok;
+  }
+  bool Scroll(Amount h, Amount v) { horizontal = h; vertical = v; return Apply(); }
+  bool SetScrollPercent(double h, double v) {
+    horizontal_percent = h; vertical_percent = v; return Apply();
+  }
+  bool Call() {
+    return CallScroll(this, request, kNone, kSmallDown, kLargeDown, kSmallUp, kLargeUp,
+                      [&](auto &&call) { ++timed_calls; return call(); });
+  }
+  bool Readback() { ++reads; return read_ok && ScrollMatches(request, before, current); }
+};
+inline bool CheckBackgroundScroll() {
+  const auto check = [](bool ok, const char *name) {
+    if (!ok) std::cerr << name << '\n';
+    return ok;
+  };
+  const double absent = std::numeric_limits<double>::quiet_NaN();
+  double parsed_percent = 0;
+  if (!check(ParseScrollPercent("1e2", &parsed_percent) && parsed_percent == 100 &&
+                 ParseScrollPercent("1.25e1", &parsed_percent) && parsed_percent == 12.5 &&
+                 !ParseScrollPercent("10px", &parsed_percent) &&
+                 !ParseScrollPercent("1000e-0", &parsed_percent) &&
+                 !ParseScrollPercent("NaN", &parsed_percent) &&
+                 !ParseScrollPercent("Infinity", &parsed_percent),
+             "BG01_scroll_units_and_readback")) return false;
+  for (bool horizontal : {false, true}) {
+    for (const auto amount : {"small_decrement", "large_decrement", "small_increment", "large_increment"}) {
+      FakeScrollOperations ops;
+      if (!ParseScroll("scroll", horizontal ? "horizontal" : "vertical", amount, absent, &ops.request))
+        return false;
+      const auto expected = std::string_view(amount) == "small_decrement" ? FakeScrollOperations::kSmallDown :
+          std::string_view(amount) == "large_decrement" ? FakeScrollOperations::kLargeDown :
+          std::string_view(amount) == "small_increment" ? FakeScrollOperations::kSmallUp : FakeScrollOperations::kLargeUp;
+      if (!check(RunBackgroundExecutor(ops) == Outcome::kCompleted && ops.calls == 1 &&
+                     ops.reads == 1 && ops.claims == 1 && ops.finishes == 1 && ops.timed_calls == 1 &&
+                     ops.horizontal == (horizontal ? expected : FakeScrollOperations::kNone) &&
+                     ops.vertical == (horizontal ? FakeScrollOperations::kNone : expected) &&
+                     ops.forbidden == std::array<int, 6>{}, "BG01_scroll_units_and_readback")) return false;
+    }
+    for (double percent : {0.0, 12.5, 40.0, 100.0}) {
+      FakeScrollOperations ops;
+      if (!ParseScroll("set_scroll_percent", horizontal ? "horizontal" : "vertical", "", percent, &ops.request))
+        return false;
+      const int calls = percent == 40 ? 0 : 1;
+      if (!check(RunBackgroundExecutor(ops) == Outcome::kCompleted && ops.calls == calls &&
+                     ops.claims == calls && ops.finishes == calls && ops.timed_calls == calls &&
+                     (calls == 0 || (ops.horizontal_percent == (horizontal ? percent : -1) &&
+                                     ops.vertical_percent == (horizontal ? -1 : percent))),
+                 "BG01_scroll_same_percent_noop")) return false;
+    }
+  }
+  ScrollRequest request;
+  if (!check(!ParseScroll("scroll", "vertical", "120", absent, &request) &&
+                 !ParseScroll("scroll", "both", "small_increment", absent, &request) &&
+                 !ParseScroll("scroll", "vertical", "small_increment", 5, &request) &&
+                 !ParseScroll("set_scroll_percent", "vertical", "small_increment", 5, &request) &&
+                 !ParseScroll("set_scroll_percent", "vertical", "", -1, &request) &&
+                 !ParseScroll("set_scroll_percent", "vertical", "", 101, &request) &&
+                 !ParseScroll("set_scroll_percent", "vertical", "", absent, &request) &&
+                 !ParseScroll("set_scroll_percent", "vertical", "", INFINITY, &request) &&
+                 !ParseScroll("scroll_into_view", "vertical", "", absent, &request),
+             "BG01_scroll_units_and_readback")) return false;
+  for (int failure = 0; failure < 13; ++failure) {
+    FakeScrollOperations ops;
+    if (failure == 0) ops.call_ok = false;
+    if (failure == 1) ops.throw_call = true;
+    if (failure == 2) ops.read_ok = false;
+    if (failure == 3) ops.applies = false;
+    if (failure == 4) ops.window_ok = false;
+    if (failure == 5) ops.takeover = true;
+    if (failure == 6) ops.current.horizontal_percent = 50;
+    if (failure == 7) ops.current.vertical_view = absent;
+    if (failure == 8) ops.current.vertical_scrollable = false;
+    if (failure == 9) { ops.applies = false; ops.current.vertical_percent = 30; }
+    if (failure == 10) {
+      ParseScroll("set_scroll_percent", "vertical", "", 80, &ops.request);
+      ops.applies = false; ops.current.vertical_percent = 60;
+    }
+    if (failure == 11) ops.current.vertical_view = 30;
+    if (failure == 12) { ops.before.vertical_percent = ops.current.vertical_percent = 100; ops.applies = false; }
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.calls == 1 &&
+                   ops.timed_calls == 1 && ops.finishes == 1 && ops.monitor.Snapshot().unknown_effect &&
+                   ops.forbidden == std::array<int, 6>{},
+               "BG06_scroll_unknown_never_retries_or_falls_back")) return false;
+  }
+  {
+    FakeScrollOperations ops;
+    ops.before.horizontal_scrollable = ops.current.horizontal_scrollable = false;
+    ops.before.horizontal_percent = ops.current.horizontal_percent = -1;
+    ops.before.horizontal_view = ops.current.horizontal_view = 100;
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kCompleted && ops.calls == 1 &&
+                   ops.horizontal == FakeScrollOperations::kNone,
+               "BG01_scroll_units_and_readback")) return false;
+  }
+  for (int failure = 0; failure < 5; ++failure) {
+    FakeScrollOperations ops;
+    if (failure == 0) ops.initial_read = false;
+    if (failure == 1) ops.before.vertical_percent = absent;
+    if (failure == 2) ops.before.vertical_view = 101;
+    if (failure == 3) { ops.before.vertical_scrollable = false; ops.before.vertical_percent = -1; }
+    if (failure == 4) ops.expected_epoch = 2;
+    const auto outcome = RunBackgroundExecutor(ops);
+    if (!check((outcome == Outcome::kRejected || outcome == Outcome::kAwaitingForegroundHandoff) &&
+                   ops.calls == 0 && ops.timed_calls == 0, "BG01_scroll_units_and_readback")) return false;
+  }
+  return true;
+}
 } // namespace windows_background_executor_test

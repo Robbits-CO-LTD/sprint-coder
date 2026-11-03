@@ -977,6 +977,9 @@ struct WindowsBackgroundPatternOperations {
   ComRef<IUIAutomationSelectionItemPattern> select;
   ComRef<IUIAutomationValuePattern> value;
   ComRef<IUIAutomationExpandCollapsePattern> expand;
+  ComRef<IUIAutomationScrollPattern> scroll;
+  windows_background_executor_detail::ScrollRequest scroll_request;
+  windows_background_executor_detail::ScrollSnapshot scroll_before;
   std::wstring text;
   BstrHolder text_value;
   bool desired = false;
@@ -997,6 +1000,35 @@ struct WindowsBackgroundPatternOperations {
       return Preparation::kRejected;
     if (!enabled) return Preparation::kHandoff;
     Preparation ready = Preparation::kRejected;
+    if (work.kind == "semantic_scroll") {
+      std::string operation, axis, amount;
+      double percent = std::numeric_limits<double>::quiet_NaN();
+      if (!ReadJsonString(work.metadata, "operation", &operation) ||
+          !ReadJsonString(work.metadata, "axis", &axis)) return Preparation::kRejected;
+      if (operation == "scroll") {
+        if (work.metadata.find("\"percent\"") != std::string::npos ||
+            !ReadJsonString(work.metadata, "amount", &amount)) return Preparation::kRejected;
+      } else if (operation == "set_scroll_percent") {
+        if (work.metadata.find("\"amount\"") != std::string::npos) return Preparation::kRejected;
+        const auto key = work.metadata.find("\"percent\"");
+        if (key == std::string::npos) return Preparation::kRejected;
+        auto cursor = work.metadata.find_first_not_of(" \t\r\n", key + 9);
+        if (cursor == std::string::npos || work.metadata[cursor] != ':') return Preparation::kRejected;
+        cursor = work.metadata.find_first_not_of(" \t\r\n", cursor + 1);
+        const auto end = work.metadata.find_first_of(",}", cursor);
+        if (cursor == std::string::npos || end == std::string::npos) return Preparation::kRejected;
+        const auto last = work.metadata.find_last_not_of(" \t\r\n", end - 1);
+        if (last < cursor || !windows_background_executor_detail::ParseScrollPercent(
+                std::string_view(work.metadata).substr(cursor, last - cursor + 1), &percent))
+          return Preparation::kRejected;
+      }
+      if (!windows_background_executor_detail::ParseScroll(operation, axis, amount, percent, &scroll_request))
+        return Preparation::kRejected;
+      ready = Pattern(UIA_ScrollPatternId, scroll);
+      if (ready != Preparation::kReady) return ready;
+      if (!ReadScroll(&scroll_before)) return Preparation::kRejected;
+      return windows_background_executor_detail::PrepareScroll(scroll_request, scroll_before);
+    }
     if (work.kind == "invoke") return Pattern(UIA_InvokePatternId, invoke);
     if (work.kind == "toggle") {
       const bool on = work.metadata.find("\"value\":true") != std::string::npos;
@@ -1073,6 +1105,20 @@ struct WindowsBackgroundPatternOperations {
     *matches = (raw ? std::wstring_view(raw, SysStringLen(raw)) : std::wstring_view{}) == text;
     return true;
   }
+  bool ReadScroll(windows_background_executor_detail::ScrollSnapshot *snapshot) {
+    auto *pattern = scroll.Get();
+    BOOL horizontal_scrollable = FALSE, vertical_scrollable = FALSE;
+    double horizontal_percent = -1, vertical_percent = -1, horizontal_view = 0, vertical_view = 0;
+    if (!WindowsV1UiaRead(horizontal_scrollable, [&] { return pattern->get_CurrentHorizontallyScrollable(&horizontal_scrollable); }) ||
+        !WindowsV1UiaRead(vertical_scrollable, [&] { return pattern->get_CurrentVerticallyScrollable(&vertical_scrollable); }) ||
+        !WindowsV1UiaRead(horizontal_percent, [&] { return pattern->get_CurrentHorizontalScrollPercent(&horizontal_percent); }) ||
+        !WindowsV1UiaRead(vertical_percent, [&] { return pattern->get_CurrentVerticalScrollPercent(&vertical_percent); }) ||
+        !WindowsV1UiaRead(horizontal_view, [&] { return pattern->get_CurrentHorizontalViewSize(&horizontal_view); }) ||
+        !WindowsV1UiaRead(vertical_view, [&] { return pattern->get_CurrentVerticalViewSize(&vertical_view); })) return false;
+    *snapshot = {horizontal_scrollable != FALSE, vertical_scrollable != FALSE,
+                 horizontal_percent, vertical_percent, horizontal_view, vertical_view};
+    return true;
+  }
   std::uint64_t Claim() {
     auto *pending = windows_semantic_operation;
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
@@ -1095,12 +1141,23 @@ struct WindowsBackgroundPatternOperations {
   }
   bool Call() {
     HRESULT result = E_FAIL;
+    if (scroll.Get()) {
+      result = windows_background_executor_detail::CallScroll(
+          scroll.Get(), scroll_request, ScrollAmount_NoAmount, ScrollAmount_SmallDecrement,
+          ScrollAmount_LargeDecrement, ScrollAmount_SmallIncrement, ScrollAmount_LargeIncrement,
+          [&](auto &&call) { return WindowsV1UiaContact(result, call); });
+      return WindowsV1UiaOk(result) && WindowsV1UiaMayCall();
+    }
     result = windows_background_executor_detail::CallPattern(
         invoke.Get(), toggle.Get(), select.Get(), value.Get(), expand.Get(), *text_value.Receive(), desired,
         [&](auto &&call) { return WindowsV1UiaContact(result, call); }, E_FAIL);
     return WindowsV1UiaOk(result) && WindowsV1UiaMayCall();
   }
   bool Readback() {
+    if (scroll.Get()) {
+      windows_background_executor_detail::ScrollSnapshot after;
+      return ReadScroll(&after) && windows_background_executor_detail::ScrollMatches(scroll_request, scroll_before, after);
+    }
     if (invoke.Get()) return true; // Invoke may change Name or siblings; only the window is revalidated.
     if (toggle.Get()) {
       ToggleState state = ToggleState_Indeterminate;

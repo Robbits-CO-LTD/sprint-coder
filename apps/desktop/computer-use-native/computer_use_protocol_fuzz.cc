@@ -9672,6 +9672,7 @@ int main() {
   if (!CheckApprovalRoundTripState()) return 1;
   if (!CheckBackgroundMonitor()) return 1;
   if (!windows_background_executor_test::CheckBackgroundExecutor()) return 1;
+  if (!windows_background_executor_test::CheckBackgroundScroll()) return 1;
   if (!Check(CheckBackgroundInputWire(), "background-input-wire")) return 1;
   if (!Check(CheckWindowsBackgroundObservation(), "background-observation")) return 1;
   if (!Check(sprint_coder::computer_use::windows_background_binding_test::Check(), "background-binding")) return 1;
