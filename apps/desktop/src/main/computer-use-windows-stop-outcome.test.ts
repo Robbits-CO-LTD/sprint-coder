@@ -286,6 +286,13 @@ type Case = {
   mayStart: boolean;
 };
 const cases: Case[] = [
+  ...(['E3', 'E4'] as const).map((entry): Case => ({
+    name: 'PR11 R0 ' + entry + ' before helper launch',
+    input: state({ entry, helperLaunched: false }),
+    event: { kind: 'not_submitted', helperGeneration: 1, otherUnconfirmedOwners: false },
+    expected: { confirmation: 'not_submitted', cleanup: 'stop_owner', refusal: null },
+    mayStart: true,
+  })),
   {
     name: 'R0 unsubmitted E3',
     input: state({ entry: 'E3' }),

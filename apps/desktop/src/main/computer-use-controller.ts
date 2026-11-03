@@ -1,4 +1,7 @@
-import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
+import {
+  ComputerUseDiscoveryScope,
+  type ComputerUseDiscoveryResult,
+} from './computer-use-discovery-scope';
 import {
   sameWindowsStopOwner,
   windowsStopPhaseOrder,
@@ -306,6 +309,7 @@ export type ComputerUseNativeApprovalApproveResult =
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
 export type ComputerUsePendingStartStop =
   | ComputerUseGenerationTerminated
+  | Readonly<{ kind: 'termination_requested' }>
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'closed'; inputReceipt: ComputerUseNativeInputReceipt }>;
 
@@ -748,6 +752,7 @@ export type ComputerUseControllerDeps = Readonly<{
    */
   publishGrantRequest?: (request: ComputerAppGrantRequest) => void;
   publishStatus?: (status: ComputerUseSessionStatus) => void;
+  publishDiscoveryResult?: (result: ComputerUseDiscoveryResult) => void;
   emergencyStopReady?: () => boolean;
   armEmergencyStop?: (
     sessionId: string,
@@ -1358,6 +1363,9 @@ export class ComputerUseController {
       this.deps.native,
       () => this.discoveryScopes.delete(scope),
       signal,
+      this.deps.native.subscribeWindowsStop === undefined
+        ? undefined
+        : this.deps.publishDiscoveryResult,
     );
     this.discoveryScopes.add(scope);
     return scope;
@@ -1365,11 +1373,15 @@ export class ComputerUseController {
 
   private stopDiscoveriesWhere(
     matches: (scope: ComputerUseDiscoveryScope) => boolean,
-  ): Promise<void> {
-    const stops = [...this.discoveryScopes].filter(matches).map((scope) => scope.stop());
+    reason: ComputerUseStopReason = 'user_stop',
+  ) {
+    const stops = [...this.discoveryScopes]
+      .filter(matches)
+      .map((scope) => scope.stop(true, reason));
     return Promise.allSettled(stops).then((results) => {
-      if (results.some((result) => result.status === 'rejected'))
-        throw new Error('Computer Use native_stop_unconfirmed');
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+      return results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
     });
   }
 
@@ -1443,7 +1455,8 @@ export class ComputerUseController {
       },
       cancel: async () => {
         try {
-          await scope.stop(false);
+          const result = await scope.stop(false);
+          return this.deps.native.subscribeWindowsStop === undefined ? undefined : result;
         } finally {
           scope.finish();
         }
@@ -1769,7 +1782,10 @@ export class ComputerUseController {
     // Starts in flight, before anything reaches `sessions`. A start that is waiting on native or on
     // the planner would otherwise finish and become a live session for an application the user has
     // just revoked — the same hole `policyEpochChanged` closes for a permission change.
-    const discoveryStop = this.stopDiscoveriesWhere((scope) => [...scope.profileIds].some(revoked));
+    const discoveryStop = this.stopDiscoveriesWhere(
+      (scope) => [...scope.profileIds].some(revoked),
+      'policy_changed',
+    );
     const pendingStops = this.stopStartingWhere(
       (starting) => revoked(starting.profileId),
       'policy_changed',
@@ -4130,7 +4146,10 @@ export class ComputerUseController {
       let closed = false;
       for (
         let attempt = 0;
-        attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT &&
+        attempt <
+          (this.deps.native.subscribeWindowsStop !== undefined
+            ? 1
+            : COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT) &&
         !closed &&
         !this.windowsStopResults.has(sessionId);
         attempt += 1
@@ -4155,6 +4174,10 @@ export class ComputerUseController {
           throw new Error('Pending stop unavailable');
         const result = await this.deps.native.stopPendingStart(sessionId);
         if (result.kind === 'closed') inputReceipt = result.inputReceipt;
+        if (result.kind === 'termination_requested') {
+          acknowledged = false;
+          terminationResult = result.kind;
+        }
         if (result.kind === 'terminated') terminationResult = result.result;
       } catch {
         acknowledged = false;
@@ -4235,7 +4258,10 @@ export class ComputerUseController {
     let nativeClosed = false;
     for (
       let attempt = 0;
-      attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT &&
+      attempt <
+        (this.deps.native.subscribeWindowsStop !== undefined
+          ? 1
+          : COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT) &&
       !nativeClosed &&
       !this.windowsStopResults.has(sessionId);
       attempt += 1
@@ -4327,7 +4353,7 @@ export class ComputerUseController {
     taskId: string,
     reason: Extract<ComputerUseStopReason, 'task_changed' | 'turn_started'>,
   ): Promise<void> {
-    const discoveryStop = this.stopDiscoveriesWhere((scope) => scope.taskId === taskId);
+    const discoveryStop = this.stopDiscoveriesWhere((scope) => scope.taskId === taskId, reason);
     const pendingStops = this.stopStartingWhere((starting) => starting.taskId === taskId, reason);
     if (this.startingTaskId === taskId && this.startingController !== null)
       this.startingController.abort(new Error(`Computer Use stopped while starting: ${reason}`));
@@ -4341,7 +4367,10 @@ export class ComputerUseController {
   }
 
   async stopOutsideTask(selectedTaskId: string): Promise<void> {
-    const discoveryStop = this.stopDiscoveriesWhere((scope) => scope.taskId !== selectedTaskId);
+    const discoveryStop = this.stopDiscoveriesWhere(
+      (scope) => scope.taskId !== selectedTaskId,
+      'task_changed',
+    );
     // The card lives in one Task's conversation. Once the user is looking somewhere else it is no
     // longer in front of them, and a card nobody can see must not keep a tool call waiting.
     this.withdrawAppGrantCardFor((pending) => pending.taskId !== selectedTaskId);
@@ -4580,6 +4609,7 @@ export class ComputerUseController {
   turnEnded(taskId: string, turnId: string): void {
     void this.stopDiscoveriesWhere(
       (scope) => scope.taskId === taskId && scope.turnId === turnId,
+      'turn_started',
     ).catch(() => undefined);
     // The Turn that asked is gone, so there is nobody left to answer to. The card is withdrawn
     // rather than left for the next Turn to inherit a decision it never asked for.
@@ -4622,7 +4652,9 @@ export class ComputerUseController {
       void stopping.catch(() => undefined);
     if (this.startingTaskId === taskId)
       this.startingController?.abort(new Error('Computer Use Task closed while starting'));
-    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId).catch(() => undefined);
+    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId, 'task_changed').catch(
+      () => undefined,
+    );
     this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
     this.taskScopedGrants.delete(taskId);
     this.revokeTargetTokens(taskId);
@@ -4731,7 +4763,9 @@ export class ComputerUseController {
   }
 
   policyEpochChanged(taskId: string): void {
-    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId).catch(() => undefined);
+    void this.stopDiscoveriesWhere((scope) => scope.taskId === taskId, 'policy_changed').catch(
+      () => undefined,
+    );
     // An artifact is bound to the epoch it was copied under; a changed epoch ends it (design 4.2).
     this.artifacts.dropTask(taskId);
     this.forgetCopiedArtifactReferences(taskId);
@@ -4761,7 +4795,7 @@ export class ComputerUseController {
    * new session can start; this ends what was already running or starting, as a policy change.
    */
   async featureDisabled(): Promise<void> {
-    const discoveryStop = this.stopDiscoveriesWhere(() => true);
+    const discoveryStop = this.stopDiscoveriesWhere(() => true, 'policy_changed');
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'policy_changed');
     this.startingController?.abort(new Error('Computer Use was turned off'));
@@ -4773,7 +4807,7 @@ export class ComputerUseController {
   }
 
   async rendererInvalidated(): Promise<void> {
-    const discoveryStop = this.stopDiscoveriesWhere(() => true);
+    const discoveryStop = this.stopDiscoveriesWhere(() => true, 'renderer_reloaded');
     // The window that was showing the card is gone, so the click it was waiting for can never come.
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'renderer_reloaded');
@@ -4786,7 +4820,7 @@ export class ComputerUseController {
   }
 
   async dispose(): Promise<void> {
-    const discoveryStop = this.stopDiscoveriesWhere(() => true);
+    const discoveryStop = this.stopDiscoveriesWhere(() => true, 'app_closed');
     this.disposed = true;
     this.unsubscribeApprovalStop?.();
     this.unsubscribeWindowsStops();

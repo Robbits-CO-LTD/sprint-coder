@@ -8,6 +8,7 @@ import { WindowsStopDelivery, type WindowsStopOwner } from './computer-use-windo
 import {
   createComputerUseDiscoveryManager,
   type ComputerUseDiscoveryHandle,
+  type ComputerUseGenerationTerminated,
 } from './computer-use-native-discovery';
 import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-types';
 import {
@@ -1246,7 +1247,6 @@ export function createComputerUseNativeHost(
     attempts: Set<symbol>;
     stopped: boolean;
     nativeInvoked: boolean;
-    delivered?: true;
     discoveryPending: number;
     discoveryUnconfirmed: boolean;
     discoveries: Set<ComputerUseDiscoveryHandle<readonly unknown[]>>;
@@ -1304,10 +1304,26 @@ export function createComputerUseNativeHost(
       return addon?.cancelUnsubmittedDiscovery?.(id) ?? 'unknown';
     },
     timeoutMs: options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
-    attemptLimit: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+    attemptLimit: terminationEnabled ? 1 : COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
+    retainStop: terminationEnabled,
     unconfirmedError: () => new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
     ...(terminationEnabled
       ? {
+          terminate: async (generation: number) => {
+            const result = await stopWithTermination(
+              async () => {
+                throw new Error('native_stop_unconfirmed');
+              },
+              () => generation,
+            );
+            if (result.kind === 'termination_requested')
+              throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+            return result;
+          },
+          terminationResult: (generation: number) =>
+            ledgerState(generation).result === 'terminated_target_suspect'
+              ? 'terminated_target_suspect'
+              : 'terminated_clean',
           generationAvailable: (generation: number) => !ledgerState(generation).exitConfirmed,
           generationKillRequested: (generation: number) => ledgerState(generation).killRequested,
         }
@@ -1595,6 +1611,76 @@ export function createComputerUseNativeHost(
     return confirmation === undefined ? finish() : confirmation.then(finish);
   };
 
+  const stopWithTermination = async <T>(
+    work: () => Promise<T>,
+    generationOf: () => number | null | undefined,
+  ): Promise<T | ComputerUseGenerationTerminated | Readonly<{ kind: 'termination_requested' }>> => {
+    if (!terminationEnabled) return work();
+    const outcome = () => {
+      const generation = generationOf();
+      if (generation == null)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      const state = ledgerState(generation);
+      return state.exitConfirmed
+        ? {
+            kind: 'terminated' as const,
+            helperGeneration: generation,
+            result:
+              state.result === 'terminated_target_suspect'
+                ? ('terminated_target_suspect' as const)
+                : ('terminated_clean' as const),
+          }
+        : { kind: 'termination_requested' as const };
+    };
+    const generation = generationOf();
+    if (generation != null && ledgerState(generation).exitConfirmed) return outcome();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('native_stop_unconfirmed')),
+            options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch {
+      if (generationOf() == null)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      if (ledgerState(generationOf()!).exitConfirmed) return outcome();
+      // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
+      return await new Promise<ReturnType<typeof outcome>>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          clearTimeout(wait);
+          resolve(outcome());
+        };
+        const unsubscribe = stopDelivery.subscribe((event) => {
+          if (
+            event.kind === 'notification' &&
+            event.notification.owner.helperGeneration === generationOf() &&
+            (event.notification.phase === 'exit_confirmed' ||
+              ledgerState(generationOf()!).exitWaitExceeded)
+          )
+            finish();
+        });
+        const wait = setTimeout(finish, 2_000);
+        addon?.requestWindowsTermination?.();
+        if (
+          ledgerState(generationOf()!).exitConfirmed ||
+          ledgerState(generationOf()!).exitWaitExceeded
+        )
+          finish();
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const completeNativePendingStop = async (
     owner: StartOwner,
   ): Promise<ComputerUsePendingStartStop> => {
@@ -1611,7 +1697,11 @@ export function createComputerUseNativeHost(
     }
     owner.unconfirmed = true;
     let failure: unknown = new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-    for (let attempt = 0; attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < (terminationEnabled ? 1 : COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT);
+      attempt += 1
+    ) {
       try {
         const evidence = await stopWithDeadline('stopPendingStart', { sessionId: owner.sessionId });
         const result = computerUseNativeCloseReceiptSchema.safeParse(evidence);
@@ -1664,10 +1754,16 @@ export function createComputerUseNativeHost(
     if (owner.terminal !== null) return owner.terminal;
     owner.unconfirmed = true;
     // Independent native lifetimes stop concurrently; neither proof stands in for the other.
-    const [discovery, native] = await Promise.allSettled([
-      stopOwnerDiscoveries(owner),
-      completeNativePendingStop(owner),
-    ]);
+    const operations = [stopOwnerDiscoveries(owner), completeNativePendingStop(owner)] as const;
+    const [discovery, native] = await (terminationEnabled
+      ? Promise.all(operations).then(
+          ([discovery, native]) =>
+            [
+              { status: 'fulfilled' as const, value: discovery },
+              { status: 'fulfilled' as const, value: native },
+            ] as const,
+        )
+      : Promise.allSettled(operations));
     if (owner.terminated && owner.terminal !== null) return owner.terminal;
     if (owner.terminal !== null) return owner.terminal;
     if (discovery.status === 'rejected' || native.status === 'rejected')
@@ -1689,9 +1785,12 @@ export function createComputerUseNativeHost(
     });
     owner.stopPromise = stopping;
     latchStartOwner(owner);
-    void completePendingStop(owner).then(resolveStop, (error) => {
-      // Keep the latch and quarantine, but allow a later logical Stop to request fresh evidence.
-      if (owner.stopPromise === stopping) owner.stopPromise = null;
+    void stopWithTermination(
+      () => completePendingStop(owner),
+      () => owner.helperGeneration,
+    ).then(resolveStop, (error) => {
+      // Only the disabled compatibility path may request fresh evidence after failure.
+      if (!terminationEnabled && owner.stopPromise === stopping) owner.stopPromise = null;
       rejectStop(error);
     });
     return stopping;
@@ -1794,6 +1893,7 @@ export function createComputerUseNativeHost(
         } catch (error) {
           if (
             platform !== 'win32' ||
+            (terminationEnabled && method !== 'close') ||
             typeof error !== 'object' ||
             error === null ||
             !('code' in error) ||
@@ -2995,7 +3095,6 @@ export function createComputerUseNativeHost(
           await host.close(started).catch(() => undefined);
           throw new ComputerUseNativeUnavailableError('native_approval_ceiling_mismatch');
         }
-        owner.delivered = true;
         return started;
       } catch (error) {
         // An active Cancel/Close owns its cleanup. A late resume must not create a second
@@ -3009,10 +3108,11 @@ export function createComputerUseNativeHost(
           !sessions.has(input.sessionId)
         )
           await stopStartOwner(owner).catch(() => undefined);
-        // A settled start request is a new opportunity to query terminal evidence, not itself
+        // In the disabled compatibility path, a settled start can query evidence; it is not itself
         // a stop receipt. One bounded recheck cannot resurrect the stopped lifetime or bypass
         // an unfinished/uncertain launch-capable discovery.
         if (
+          !terminationEnabled &&
           stoppedBeforeSettlement &&
           // R23 pause is not a user Stop; retain evidence until an explicit Stop or exit.
           !owner.foregroundUnconfirmed &&
@@ -3446,7 +3546,7 @@ export function createComputerUseNativeHost(
           stopWithDeadline('close', {
             ...internal.raw,
             cancelEpoch,
-            ...(terminationEnabled && owner?.delivered ? { killStopClose: true } : {}),
+            ...(terminationEnabled ? { killStopClose: true } : {}),
           }),
         ]);
         if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
@@ -3507,66 +3607,7 @@ export function createComputerUseNativeHost(
           trimStartOwners();
         }
       };
-      // A failed start whose native session was never delivered is E3 until PR11.
-      if (!terminationEnabled || !startOwners.get(session.sessionId)?.delivered) return close();
-      const owner = startOwners.get(session.sessionId);
-      const generation = owner?.helperGeneration;
-      if (generation == null)
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      const outcome = () => {
-        const state = ledgerState(generation);
-        return state.exitConfirmed
-          ? {
-              kind: 'terminated' as const,
-              helperGeneration: generation,
-              result:
-                state.result === 'terminated_target_suspect'
-                  ? ('terminated_target_suspect' as const)
-                  : ('terminated_clean' as const),
-            }
-          : { kind: 'termination_requested' as const };
-      };
-      if (ledgerState(generation).exitConfirmed) return outcome();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          close(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('native_stop_unconfirmed')),
-              options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
-            );
-          }),
-        ]);
-      } catch {
-        if (ledgerState(generation).exitConfirmed) return outcome();
-        // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
-        return await new Promise<ReturnType<typeof outcome>>((resolve) => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            unsubscribe();
-            clearTimeout(wait);
-            resolve(outcome());
-          };
-          const unsubscribe = stopDelivery.subscribe((event) => {
-            if (
-              event.kind === 'notification' &&
-              event.notification.owner.helperGeneration === generation &&
-              (event.notification.phase === 'exit_confirmed' ||
-                ledgerState(generation).exitWaitExceeded)
-            )
-              finish();
-          });
-          const wait = setTimeout(finish, 2_000);
-          addon?.requestWindowsTermination?.();
-          if (ledgerState(generation).exitConfirmed || ledgerState(generation).exitWaitExceeded)
-            finish();
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+      return stopWithTermination(close, () => startOwners.get(session.sessionId)?.helperGeneration);
     },
   };
   return Object.freeze({ ...host, restoreWindowsLedger });

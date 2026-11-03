@@ -941,7 +941,9 @@ class WindowsComputerUseHelperClient {
         { operation: 'stop_window_discovery', discoveryId: id },
         frameIdFromText(`discovery:${id}`),
         newComputerUseNativeFrameId(),
-        operationTimeoutMilliseconds('stop_window_discovery'),
+        this.termination !== undefined
+          ? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS
+          : operationTimeoutMilliseconds('stop_window_discovery'),
         true,
         () => {
           if (this.discoveries.get(id) !== owner || owner.helper !== this.helperGeneration)
@@ -1152,7 +1154,8 @@ class WindowsComputerUseHelperClient {
         requestKey === undefined
           ? newComputerUseNativeFrameId()
           : frameIdFromText(`request:${requestKey}`),
-        this.termination !== undefined && operation === 'close_session' && killStopClose
+        this.termination !== undefined &&
+          ((operation === 'close_session' && killStopClose) || operation === 'stop_pending_start')
           ? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS
           : operationTimeoutMilliseconds(operation),
         isComputerUseStopOperation(operation),

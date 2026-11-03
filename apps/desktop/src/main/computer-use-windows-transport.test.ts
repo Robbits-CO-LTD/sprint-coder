@@ -1,3 +1,4 @@
+import type { ComputerUseDiscoveryResult } from './computer-use-discovery-scope';
 import type * as FsPromises from 'node:fs/promises';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type {
@@ -582,6 +583,7 @@ function createTarget(
 function controllerFor(
   host: ReturnType<typeof createComputerUseNativeHost>,
   profiles: ComputerAppProfileRecord[] = [profile],
+  publishDiscoveryResult?: (result: ComputerUseDiscoveryResult) => void,
 ) {
   const unused = (): never => {
     throw new Error('Unexpected persistence call');
@@ -603,6 +605,7 @@ function controllerFor(
   return new ComputerUseController({
     persistence,
     native: host,
+    ...(publishDiscoveryResult === undefined ? {} : { publishDiscoveryResult }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
     repositionEmergencyStop: () => true,
@@ -5777,7 +5780,7 @@ int main() {
 
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
-  it('PR10 leaves E3 start-receipt cleanup on the legacy deadline', async () => {
+  it('PR11 terminates E3 start-receipt cleanup at C', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(
       () => child as unknown as NodeChildProcess.ChildProcess,
@@ -5799,10 +5802,122 @@ int main() {
     target.helper().holdOnly('close_session');
     const starting = startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(child.killCalls).toBe(0);
+    expect(child.killCalls).toBe(1);
     child.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(0);
     await starting;
+  });
+
+  it.each([
+    ['E3', false, false],
+    ['E3', true, false],
+    ['E4', false, false],
+    ['E4', true, false],
+    ['E3', true, true],
+    ['E4', true, true],
+  ] as const)(
+    'PR11 bounds %s by C + T without resending (exit=%s, suspect=%s)',
+    async (entry, exit, suspect) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const events: WindowsStopDeliveryEvent[] = [];
+      target.host.subscribeWindowsStop!((event) => events.push(event));
+      const keeper = await startSession(target.host, 'keeper', 'turn-keeper');
+      if (suspect) {
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        await target.dispatch(keeper);
+      }
+      const operation = entry === 'E3' ? 'stop_pending_start' : 'stop_window_discovery';
+      target.helper().holdOnly(operation);
+      let stop: () => Promise<unknown>;
+      if (entry === 'E3') {
+        target.helper().holdOnly('start_session');
+        void startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        stop = () => target.host.stopPendingStart!('pending');
+      } else {
+        target.helper().holdOnly('list_windows_cancellable');
+        const discovery = target.host.beginWindowDiscovery!(profile);
+        await vi.advanceTimersByTimeAsync(0);
+        stop = () => discovery.stop();
+      }
+      let settled = false;
+      const stopping = stop().then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.killCalls).toBe(1);
+      expect(settled).toBe(false);
+      if (exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBe(true);
+      const outcome = await stopping;
+      if (exit) {
+        expect(outcome).toMatchObject({
+          kind: 'terminated',
+          result: suspect ? 'terminated_target_suspect' : 'terminated_clean',
+        });
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            kind: 'notification',
+            notification: expect.objectContaining({
+              owner: expect.objectContaining({ id: 'keeper' }),
+              internalReason: 'shared_helper_stop',
+              phase: 'exit_confirmed',
+            }),
+          }),
+        );
+      } else if (entry === 'E3') expect(outcome).toEqual({ kind: 'termination_requested' });
+      else expect(outcome).toBeInstanceOf(Error);
+      const count = sockets[0]!.writes.length;
+      await stop().catch(() => undefined);
+      expect(sockets[0]!.writes).toHaveLength(count);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it('PR11 Controller delivers sessionless E4 to its Task without resending', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    target.helper().holdOnly('list_windows_cancellable');
+    target.helper().refuse('stop_window_discovery');
+    const publish = vi.fn();
+    const controller = controllerFor(target.host, [profile], publish);
+    const intent = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    const reading = intent.result.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = controller.stopForTask('task-a', 'task_changed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await stopping;
+    expect(publish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        kind: 'discovery_result',
+        taskId: 'task-a',
+        reason: 'task_changed',
+        results: [expect.objectContaining({ kind: 'terminated', result: 'terminated_clean' })],
+      }),
+    );
+    expect(await reading).toHaveProperty('discoveryResult.reason', 'task_changed');
+    expect(() => intent.commit(() => 'stale')).toThrow();
+    await controller.dispose();
   });
 
   it.each([true, false])('PR10 bounds cancel + close by 1 + C + T (exit=%s)', async (exit) => {
@@ -6144,10 +6259,8 @@ int main() {
         expect(target.rows.size).toBe(0);
         expect(target.host.availability().control).toBe(false);
         expect(child.killCalls).toBe(1);
-        if (entry === 'close') {
-          await vi.advanceTimersByTimeAsync(2_000);
-          expect(await close).toBe('resolved');
-        } else expect(await close).toBe('rejected');
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(await close).toBe('resolved');
         child.emit('exit', 0, null);
         await vi.advanceTimersByTimeAsync(0);
         expect(decide.mock.results.at(-1)!.value.state.result).toBe('terminated_clean');
