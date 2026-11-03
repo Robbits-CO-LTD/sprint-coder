@@ -22,6 +22,7 @@
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
 #include "computer_use_windows_approval_wire_test.h"
+#include "computer_use_windows_approval_handlers_test.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -9474,6 +9475,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
+  if (!Check(windows_approval_handlers_test::Check(), "windows-approval-handlers")) return 1;
   if (!Check(CheckWindowsApprovalWire(kWindowsApprovalWireFixture), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";

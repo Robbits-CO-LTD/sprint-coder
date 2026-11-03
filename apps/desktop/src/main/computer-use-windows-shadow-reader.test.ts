@@ -47,6 +47,7 @@ describe('Windows shadow reader is portable and decides nothing', () => {
     const allowedIncludes = new Set([
       '"computer_use_windows_shadow.h"',
       '<cstddef>',
+      '<array>',
       '<cstdint>',
       '<string>',
       '<string_view>',
@@ -214,6 +215,7 @@ describe('Windows UI Automation source only reads', () => {
       'GetNextSiblingElement',
       'CompareElements',
       'get_CurrentControlType',
+      'get_CurrentBoundingRectangle',
       'get_CurrentClassName',
       'get_CurrentName',
       'get_CurrentAutomationId',
@@ -451,6 +453,7 @@ describe('Windows UI Automation source only reads', () => {
       'Array',
 
       'ActionStillValid',
+      'TargetFrame',
       'At',
       'AtPoint',
       'BstrHolder',
@@ -1255,16 +1258,26 @@ describe('Windows UI Automation source only reads', () => {
       expect(harness, id).toContain(id);
   });
 
-  it('is included by the host, and the reader is reached only through the scheduler (S5-b-2b)', () => {
+  it('reaches the reader through the scheduler or the bounded approval measurement', () => {
     expect(host).toContain('#include "computer_use_windows_uia_source.h"');
-    // The host names neither the reader, the classifier nor the gate: the scheduler owns them.
+    const approval = between(
+      host,
+      'sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(',
+      'sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(',
+    );
+    expect(approval).toContain('RunWindowsOpenMeasurement<WindowsApprovalSample>');
+    expect(approval).toContain('reader.ReadChainIdentity(true)');
+    expect(approval).toContain('reader.ReadTargetFrame(');
+    expect(approval).toContain('MeasureWindowsApprovalSample(');
+    expect(approval).not.toMatch(/SendInput\(|SetCursorPos\(|InvokeWindowsSemanticInput\(/u);
+    // Outside this measured entry the scheduler still owns the reader, classifier and gate.
     for (const name of [
       'WindowsShadowReader',
       'WindowsShadowClassify',
       'BuildWindowsShadowFacts',
       'ShadowGate',
     ])
-      expect(code(host), name).not.toContain(name);
+      expect(code(host.replace(approval, '')), name).not.toContain(name);
     // The version stays where the V1 preflight puts it, and the win32 v2 refusal is untouched.
     expect(host).toContain('kNativePreflightClassifierVersion');
     expect(host).not.toMatch(
