@@ -209,10 +209,12 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         expect(result.stdout).toContain(
           mode === 'cross-owner-stop'
             ? 'PASS: terminal owner Stop is served while another discovery remains held'
-            : 'PASS: discovery terminal before read release',
+            : 'PASS: discovery terminal after synchronous I/O cancellation',
         );
         expect(result.stdout).toContain(
-          'PASS: owned discovery stopped, late actual read and cleanup, no input',
+          mode === 'cross-owner-stop'
+            ? 'PASS: owned discovery stopped, late actual read and cleanup, no input'
+            : 'PASS: owned discovery stopped, synchronous I/O canceled, no input',
         );
       }
     } finally {
@@ -264,10 +266,19 @@ bool HoldListOpen(const std::wstring& path, LockedWindowsExecutable* output) {
   const unsigned attempt = open_attempts.fetch_add(1);
   io_thread.store(GetCurrentThreadId());
   if (held_worker.value != nullptr && held_worker.value != INVALID_HANDLE_VALUE) CloseHandle(held_worker.value);
-  Require(DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&held_worker.value,SYNCHRONIZE,FALSE,0),"consumer thread handle");
-  if (!cross_owner_mode.load() || attempt != 0) {
-    entered_start.store(true);while(hold_start.load())Sleep(1);
+  Require(DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&held_worker.value,SYNCHRONIZE|THREAD_QUERY_LIMITED_INFORMATION,FALSE,0),"consumer thread handle");
+  if (!cross_owner_mode.load()) {
+    ScopedKernelHandle reader, writer;
+    Require(CreatePipe(&reader.value, &writer.value, nullptr, 0),"owned synchronous I/O pipe");
+    entered_start.store(true);
+    char byte = 0; DWORD read = 0;
+    const BOOL completed = ReadFile(reader.value, &byte, 1, &read, nullptr);
+    const DWORD error = GetLastError();
+    Require(!completed && error == ERROR_OPERATION_ABORTED,"consumer I/O canceled by Stop/deadline/EOF");
+    actual_reads.fetch_add(1);
+    return false;
   }
+  if (attempt != 0) { entered_start.store(true);while(hold_start.load())Sleep(1); }
   const bool read=OpenLockedWindowsExecutable(path,output);
   if(read)tracked_file.store(output->file);
   actual_reads.fetch_add(1);if(read)successful_reads.fetch_add(1);return read;
@@ -366,7 +377,7 @@ int wmain(int argc,wchar_t** argv){
    const auto held_ms=GetTickCount64()-started;
    hold_start.store(false);reader.join();
    Require(received_stop.load()&&received_second.load(),"both responses after release");
-   Require(WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0&&actual_reads.load()==2&&successful_reads.load()==2&&file_releases.load()==2&&!WindowsTargetListWorkerRunning().load(),"both actual reads cleaned");
+   Require(GetThreadId(held_worker.value)==consumer_thread.load()&&actual_reads.load()==2&&successful_reads.load()==2&&file_releases.load()==2&&!WindowsTargetListWorkerRunning().load(),"both actual reads cleaned");
    std::cout<<"RECEIPT:"<<receipt<<"\nRCA: terminal owner Stop heldMs="<<held_ms<<"\n";
    Send(client.value,7,7,Stop("pending"));auto control=Read(client.value,7,MessageType::kProbeResult);std::cout<<"CONTROL:"<<Payload(control)<<"\n";
    CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served&&sessions.empty(),"cross-owner final cleanup");
@@ -384,23 +395,23 @@ int wmain(int argc,wchar_t** argv){
    std::cout<<"PASS: twenty queue-expired owners reclaimed before I/O\n";
  }
  Send(client.value,2,8,List());
- for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()!=consumer_thread.load(),"list identity I/O is on the worker");std::cerr<<"phase=start-gate\n"<<std::flush;
+ for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);
+ Require(entered_start.load(),"start gate entered");
+ Require(io_thread.load()==consumer_thread.load(),"identity I/O runs on consumer");
  const auto serial=WindowsTargetListControl().stop_serial.load();
  if(mode==L"eof") {
    CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;
    serve.join();Require(!served,"closed pipe cannot publish pending query");
-   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->stopped.load()&&owner->terminal&&owner->references.load()!=0,"EOF latches discovery while read remains");}
-   Require(hold_start.load()&&actual_reads.load()==0&&WindowsTargetListWorkerRunning().load(),"EOF returns without read completion");
-   hold_start.store(false);
-   Require(WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0&&actual_reads.load()==1&&successful_reads.load()==1&&file_releases.load()==1&&!WindowsTargetListWorkerRunning().load(),"EOF late read cleanup");
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->stopped.load()&&owner->terminal&&owner->references.load()==0,"EOF cancels and retires synchronous measurement");}
+   Require(actual_reads.load()==1&&!WindowsTargetListWorkerRunning().load(),"EOF cancels I/O before returning");
    for(auto& entry:sessions)ReleaseWindowsSessionResources(&entry.second);sessions.clear();
    finished.store(true);std::cout<<"PASS: EOF latches discovery before held read cleanup, no launch or input\n";return 0;
  }
  if(mode==L"deadline") {
    clock_offset.store(kWindowsDiscoveryBudgetMs+1);
    auto expired=Read(client.value,2,MessageType::kError);
-   Require(Payload(expired).find("window_discovery_unavailable")!=std::string::npos&&hold_start.load()&&actual_reads.load()==0,"deadline rejects before read or Stop");
-   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->stopped.load()&&owner->terminal&&owner->references.load()!=0,"deadline retains held worker");}
+   Require(Payload(expired).find("window_discovery_unavailable")!=std::string::npos&&actual_reads.load()==1,"deadline cancels I/O without Stop");
+   {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->terminal&&owner->references.load()==0&&!owner->completed,"deadline cannot adopt result");}
    std::cout<<"PASS: deadline alone rejects held query before Stop\n";
  }
  const auto stop_started=GetTickCount64();Send(client.value,3,8,DiscoveryStop("discovery:1"));
@@ -408,20 +419,17 @@ int wmain(int argc,wchar_t** argv){
    auto rejected=Read(client.value,2,MessageType::kError);Require(Payload(rejected).find("window_discovery_unavailable")!=std::string::npos,"stopped query rejected");
  }
  auto terminal=Read(client.value,3,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(terminal)<<"\n";
- Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"terminal before read release");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->terminal&&owner->stopped.load()&&owner->references.load()!=0&&WindowsTargetListWorkerRunning().load(),"worker ownership retained");Require(sessions.size()==1&&!WindowsStarts().owners.at(FrameIdKey(Id(7)))->stopped.load(),"discovery stop leaves control alive");}
+ Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==1,"Stop cancels synchronous I/O without fixture release");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->terminal&&owner->stopped.load()&&owner->references.load()==0&&!WindowsTargetListWorkerRunning().load(),"no residual measurement after receipt");Require(sessions.size()==1&&!WindowsStarts().owners.at(FrameIdKey(Id(7)))->stopped.load(),"discovery stop leaves control alive");}
  Require(WindowsTargetListControl().stop_serial.load()==serial&&cancellation_epoch.load()==9,"discovery stop does not alter input epoch or serial");
  Send(client.value,4,9,DiscoveryStop("unknown"));Read(client.value,4,MessageType::kError);
  Send(client.value,5,8,DiscoveryStop("wrong"));Read(client.value,5,MessageType::kError);
  Send(client.value,6,8,List());Read(client.value,6,MessageType::kError);
- Require(actual_reads.load()==0,"duplicate query cannot restart the held read");
- std::cout<<"PASS: discovery terminal before read release\n";
- hold_start.store(false);
- Require(held_worker.value!=nullptr&&WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0,"read worker exits");
- Require(actual_reads.load()==1&&successful_reads.load()==1&&file_releases.load()==1&&!WindowsTargetListWorkerRunning().load(),"late actual read and cleanup");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->references.load()==0&&owner->launch_attempts==0,"late result cannot regain a lease or launch");}
+ Require(actual_reads.load()==1&&successful_reads.load()==0,"duplicate query cannot restart canceled I/O");
+ std::cout<<"PASS: discovery terminal after synchronous I/O cancellation\n";
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->references.load()==0&&owner->launch_attempts==0,"canceled result cannot regain a lease or launch");}
  Send(client.value,7,7,Stop("pending"));auto control=Read(client.value,7,MessageType::kProbeResult);std::cout<<"CONTROL:"<<Payload(control)<<"\n";
- std::cerr<<"phase=cleanup\n"<<std::flush;CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
- Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: owned discovery stopped, late actual read and cleanup, no input\n";return 0;
+ CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
+ Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: owned discovery stopped, synchronous I/O canceled, no input\n";return 0;
 }
 `;

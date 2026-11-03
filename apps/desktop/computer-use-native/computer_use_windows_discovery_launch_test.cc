@@ -323,19 +323,6 @@ void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring&
   CloseHandle(pipe.release());
   // The observer, not the helper, keeps the kill-on-close job open. Helper exit therefore
   // cannot hide an abandoned child by accidentally triggering fixture cleanup.
-  if (mode == "helper-exit-control") {
-    Check(WaitForSingleObject(helper.process.value, 5000) == WAIT_OBJECT_0, "old helper exits while worker is held");
-    DWORD helper_code = 99;
-    Check(GetExitCodeProcess(helper.process.value, &helper_code) && helper_code == 0, "old helper normal exit");
-    Check(WaitForSingleObject(child_observer.load(), 5000) == WAIT_OBJECT_0 && exit_state->reads == 0 &&
-          exit_state->terminations == 0, "job removes held unverified child on helper exit");
-    std::cout << "CONTROLSTATE:{\"helperExit\":" << helper_code
-              << ",\"childAlive\":false,\"reads\":" << exit_state->reads
-              << ",\"terminations\":" << exit_state->terminations << "}\n";
-    Check(harness.Cleanup(), "observer completes own cleanup");
-    std::cout << "CONTROL: normal helper exit removed held unverified child\n";
-    return;
-  }
   Check(WaitForSingleObject(helper.process.value, 500) == WAIT_TIMEOUT &&
         WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT && exit_state->reads == 0,
         "helper retains launch guard while post-create read is held");
@@ -351,6 +338,8 @@ void RunHelperExitCase(const LockedWindowsExecutable& image, const std::wstring&
     Check(exit_state->terminations == 0 && WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT,
           "verified child is not rolled back on helper exit");
   Check(harness.Cleanup(), "observer completes own cleanup");
+  if (mode == "helper-exit-control")
+    std::cout << "CONTROL: synchronous consumer retains launch without exit drain\n";
   std::cout << "PASS: " << mode << " helper lifetime preserves launch ownership\n";
 }
 }
@@ -432,17 +421,26 @@ int wmain(int argc, wchar_t** argv) {
     if (held) {
       Check(WaitForSingleObject(gate_entered.value, 10000) == WAIT_OBJECT_0, "held boundary");
       const auto began = GetTickCount64(); pipe.Send(3, stop);
-      Check(pipe.Read(2, MessageType::kError).find("window_discovery_unavailable") != std::string::npos,
-            "query stops before held unit returns");
-      if (mode == "before-claim") receipt = pipe.Read(3, MessageType::kProbeResult);
-      else Check(pipe.Read(3, MessageType::kError).find("window_discovery_unconfirmed") != std::string::npos,
-                 "claimed unit stays unconfirmed");
-      Check(GetTickCount64() - began < 1000, "bounded Stop answer");
+      bool stopped = false;
+      while (!stopped && GetTickCount64() - began < 1000) {
+        { std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+          FrameId key; key.bytes[0] = 21;
+          stopped = WindowsDiscoveries().owners.at(FrameIdKey(key))->stopped.load(); }
+        Sleep(1);
+      }
+      Check(stopped, "reader latches owner Stop during synchronous measurement");
+      Sleep(200);
+      DWORD available = 0;
+      Check(PeekNamedPipe(pipe.client.value, nullptr, 0, nullptr, &available, nullptr) && available == 0,
+            "no drained receipt before synchronous launch unit retires");
       if (mode == "termination-unconfirmed") {
         Check(child_observer.load() && WaitForSingleObject(child_observer.load(), 0) == WAIT_TIMEOUT,
               "failed termination retains live child");
         Check(::TerminateProcess(child_observer.load(), 0), "fixture releases owned child");
       } else SetEvent(gate_release.value);
+      Check(pipe.Read(2, MessageType::kError).find("window_discovery_unavailable") != std::string::npos,
+            "late measurement cannot publish after Stop");
+      receipt = pipe.Read(3, MessageType::kProbeResult);
     } else if (mode == "post-create-exception") {
       Check(pipe.Read(2, MessageType::kError).find("window_discovery_unavailable") != std::string::npos,
             "post-create exception reported");
@@ -453,8 +451,8 @@ int wmain(int argc, wchar_t** argv) {
       Check(pipe.Read(4, MessageType::kError).find("discovery_id_reuse") != std::string::npos,
             "fresh wire cannot repeat a completed query");
     }
-    Check(worker_observer.load() && WaitForSingleObject(worker_observer.load(), 5000) == WAIT_OBJECT_0,
-          "worker exits before final proof");
+    Check(worker_observer.load() && !WindowsTargetListWorkerRunning().load(),
+          "synchronous measurement retires before final proof");
     pipe.Send(5, stop); receipt = pipe.Read(5, MessageType::kProbeResult);
     std::uint64_t attempts = 99;
     Check(ReadJsonUint64(receipt, "launchAttemptCount", &attempts) &&

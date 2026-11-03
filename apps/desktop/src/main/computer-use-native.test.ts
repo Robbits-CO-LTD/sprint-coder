@@ -778,6 +778,89 @@ describe('Windows native helper compile boundary', () => {
     expect(cleanupOrder).toEqual([...cleanupOrder].sort((left, right) => left - right));
   });
 
+  it('N5-I measures discovery on the consumer and joins its owner Stop pump before responding', () => {
+    const source = readWindowsHostSource();
+    const run = source.slice(
+      source.indexOf('bool RunWindowsDiscovery('),
+      source.indexOf('bool StopWindowsDiscovery('),
+    );
+    expect(run).not.toContain('std::thread');
+    expect(run).not.toContain('WindowsDiscoveryPending');
+    expect(run).toContain('WindowsNewStartIoRegistration cancellation;');
+    expect(run).toContain('MeasureWindowsDiscovery(metadata, work, &windows, reason)');
+    expect(run).toContain('control.running.store(true, std::memory_order_release)');
+    expect(run).toContain('WindowsDiscoveryCurrent(owner, serial)');
+    expect(source).not.toContain('struct WindowsDiscoveryWaitGuard');
+    const order = [
+      'WindowsNewStartIoRegistration cancellation;',
+      'WindowsDiscoveryPumpScope pump(',
+      'MeasureWindowsDiscovery(metadata, work, &windows, reason)',
+      '} catch (...) {',
+      'FinishWindowsDiscovery(owner, ok)',
+    ].map((step) => run.indexOf(step));
+    expect(order.every((position) => position >= 0)).toBe(true);
+    for (const [index, position] of order.entries()) {
+      if (index > 0) expect(order[index - 1]).toBeLessThan(position);
+    }
+    const pump = source.slice(
+      source.indexOf('struct WindowsDiscoveryPumpScope {'),
+      source.indexOf('bool RunWindowsDiscovery('),
+    );
+    expect(pump).not.toContain('detach');
+    expect(pump).toMatch(
+      /~WindowsDiscoveryPumpScope\(\)\s*\{\s*finished.store\(true, std::memory_order_release\);\s*if \(pump.joinable\(\)\) pump.join\(\);\s*\}/u,
+    );
+  });
+
+  it('N5-I keeps cancelling every pump cycle after Stop service fails or throws', () => {
+    const source = readWindowsHostSource();
+    const pump = source.slice(
+      source.indexOf('struct WindowsDiscoveryPumpScope {'),
+      source.indexOf('bool RunWindowsDiscovery('),
+    );
+    const loop = pump.slice(
+      pump.indexOf('while (!finished.load'),
+      pump.indexOf('~WindowsDiscoveryPumpScope'),
+    );
+    expect(loop).not.toMatch(/\b(?:return|break)\b/u);
+    expect(loop).toMatch(
+      /if \(!WindowsDiscoveryCurrent\(owner, serial\)\)\s*CancelWindowsNewStartMeasurementLocked\(control\);/u,
+    );
+    expect(loop).toMatch(
+      /if \(!stop_pump->failed\)\s*\{\s*try\s*\{\s*if \(!stop_pump->service\(owner->key\)\) fail\(\);\s*\} catch \(\.\.\.\) \{ fail\(\); \}\s*\}\s*Sleep\(20\);/u,
+    );
+  });
+
+  it('N5-I rejects picked identity after Close or Cancel during the dialog', () => {
+    const source = readWindowsHostSource();
+    expect(source).toMatch(
+      /PickWindowsExecutable\(&response, &reason,\s*queued_stop_serial.value_or\(WindowsTargetListControl\(\).stop_serial.load\(std::memory_order_acquire\)\)\)/u,
+    );
+    const pickerStart = source.indexOf('bool PickWindowsExecutable(');
+    const measurementStart = source.indexOf('bool MeasureWindowsPickedIdentity(', pickerStart);
+    const picker = source.slice(pickerStart, measurementStart);
+    const serial = picker.indexOf('std::uint64_t serial)');
+    expect(serial).toBeGreaterThan(0);
+    expect(serial).toBeLessThan(picker.indexOf('dialog->Show(nullptr)'));
+    expect(picker.slice(0, picker.indexOf('MeasureWindowsPickedIdentity(path,'))).not.toMatch(
+      /serial\s*=/u,
+    );
+    expect(picker).toContain('MeasureWindowsPickedIdentity(path, &identity, serial)');
+    const measurement = source.slice(
+      measurementStart,
+      source.indexOf('// BEGIN windows cancellable discovery measurement'),
+    );
+    expect(measurement).toContain('std::uint64_t serial)');
+    expect(measurement).not.toContain('const auto serial =');
+    expect(measurement).toContain('control.stop_serial.load(std::memory_order_acquire) == serial');
+    expect(measurement).toContain(
+      'if (cancellation.thread == nullptr || !current()) return false;',
+    );
+    expect(measurement).toMatch(
+      /std::lock_guard lock\(control.stop_mutex\);\s*if \(!current\(\)\) return false;\s*\*identity =/u,
+    );
+  });
+
   it('allows only same-path same-signer Windows updates to refresh the executable digest', () => {
     const source = readWindowsHostSource();
     const listSource = source.slice(

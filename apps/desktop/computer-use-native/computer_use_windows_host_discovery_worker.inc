@@ -1,3 +1,21 @@
+// The registration type follows discovery's declarations in the assembled host.
+bool MeasureWindowsPickedIdentity(const std::wstring& path, WindowsExecutableIdentity* identity,
+                                  std::uint64_t serial) {
+  auto& control = WindowsTargetListControl();
+  WindowsNewStartIoRegistration cancellation;
+  const auto current = [&] {
+    return !parent_process_dead.load(std::memory_order_acquire) &&
+        control.stop_serial.load(std::memory_order_acquire) == serial;
+  };
+  if (cancellation.thread == nullptr || !current()) return false;
+  WindowsExecutableIdentity measured;
+  if (!BuildWindowsExecutableIdentity(path, &measured)) return false;
+  std::lock_guard lock(control.stop_mutex);
+  if (!current()) return false;
+  *identity = std::move(measured);
+  return true;
+}
+
 // BEGIN windows cancellable discovery measurement
 struct WindowsDiscoveryWorkControl {
   std::function<bool()> current;
@@ -141,39 +159,48 @@ std::string WindowsDiscoveryReceiptJson(std::string_view id, std::string_view re
       "\",\"drained\":true,\"launchAttemptCount\":" + std::to_string(launches) + "}";
 }
 
-struct WindowsDiscoveryPending {
-  std::mutex mutex;
-  std::condition_variable ready;
-  HANDLE thread = nullptr;
-  bool done = false;
-  bool ok = false;
-  std::string windows;
-  std::string reason = "window_discovery_unavailable";
-};
-
-struct WindowsDiscoveryWaitGuard {
-  std::shared_ptr<WindowsDiscoveryOwner> owner;
-  std::shared_ptr<WindowsDiscoveryPending> pending;
-  bool completed = false;
-  ~WindowsDiscoveryWaitGuard() {
-    if (completed) return;
-    std::lock_guard lock(pending->mutex);
-    {
-      std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
-      owner->stopped.store(true, std::memory_order_release);
-      if (!owner->launch_in_flight) { owner->terminal = true; owner->completed = false; }
-    }
-    if (pending->thread != nullptr) CancelSynchronousIo(pending->thread);
-  }
-};
-
-// Only the consumer services these queued owner-specific Stops, so response/cache writes stay serial.
+// Only this pump services foreign-owner Stops while the consumer measures. It is joined
+// before the consumer touches the response cache again; no other request is dispatched here.
 struct WindowsDiscoveryStopPump {
   std::function<bool(const std::string&)> service;
   bool failed = false;
-  bool Poll(const std::string& waiting_owner) {
-    if (!failed && !service(waiting_owner)) failed = true;
-    return !failed;
+};
+
+struct WindowsDiscoveryPumpScope {
+  std::atomic<bool> finished{false};
+  std::thread pump;
+  WindowsDiscoveryPumpScope(WindowsDiscoveryStopPump* stop_pump,
+                            const std::shared_ptr<WindowsDiscoveryOwner>& owner,
+                            std::uint64_t serial) {
+    if (stop_pump == nullptr) return;
+    pump = std::thread([this, stop_pump, owner, serial] {
+      const auto fail = [&] {
+        auto& control = WindowsTargetListControl();
+        std::lock_guard lock(control.stop_mutex);
+        owner->stopped.store(true, std::memory_order_release);
+        CancelWindowsNewStartMeasurementLocked(control);
+        stop_pump->failed = true;
+      };
+      while (!finished.load(std::memory_order_acquire)) {
+        {
+          auto& control = WindowsTargetListControl();
+          std::lock_guard lock(control.stop_mutex);
+          if (!WindowsDiscoveryCurrent(owner, serial))
+            CancelWindowsNewStartMeasurementLocked(control);
+        }
+        // A failed service must still cancel I/O that starts after the first cancellation.
+        if (!stop_pump->failed) {
+          try {
+            if (!stop_pump->service(owner->key)) fail();
+          } catch (...) { fail(); }
+        }
+        Sleep(20);
+      }
+    });
+  }
+  ~WindowsDiscoveryPumpScope() {
+    finished.store(true, std::memory_order_release);
+    if (pump.joinable()) pump.join();
   }
 };
 
@@ -185,9 +212,6 @@ bool RunWindowsDiscovery(const std::string& metadata,
   if (!lease || !ClaimWindowsDiscoveryQuery(lease)) return false;
   const auto owner = lease->owner;
   auto& control = WindowsTargetListControl();
-  std::shared_ptr<WindowsDiscoveryPending> pending;
-  try { pending = std::make_shared<WindowsDiscoveryPending>(); }
-  catch (...) { FinishWindowsDiscovery(owner, false); return false; }
   {
     std::lock_guard stop_lock(control.stop_mutex);
     if (!WindowsDiscoveryCurrent(owner, serial) || control.running.load(std::memory_order_acquire)) {
@@ -197,89 +221,62 @@ bool RunWindowsDiscovery(const std::string& metadata,
     }
     control.running.store(true, std::memory_order_release);
   }
-  WindowsDiscoveryWaitGuard guard{owner, pending};
-  try {
-    std::thread([pending, lease, metadata, serial]() mutable {
-      const auto owner = lease->owner;
-      bool ok = false;
-      std::string windows, reason = "window_discovery_unavailable";
-      {
-        ScopedKernelHandle thread;
-        try {
-          if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
-                              &thread.value, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
-            {
-              std::lock_guard lock(pending->mutex);
-              pending->thread = thread.value;
-            }
-            WindowsDiscoveryWorkControl work;
-            work.current = [owner, serial] { return WindowsDiscoveryCurrent(owner, serial); };
-            work.remaining = [owner](DWORD maximum) {
-              const auto elapsed = GetTickCount64() - owner->admitted_at;
-              return elapsed >= kWindowsDiscoveryBudgetMs ? DWORD{0} :
-                  static_cast<DWORD>(std::min<std::uint64_t>(maximum, kWindowsDiscoveryBudgetMs - elapsed));
-            };
-            work.claim_launch = [owner, serial] {
-              std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-              if (WindowsSemanticInputInFlightLocked() || !WindowsDiscoveryCurrent(owner, serial) || owner->terminal || owner->launch_attempts != 0)
-                return false;
-              owner->launch_attempts = 1;
-              owner->launch_in_flight = true;
-              return true;
-            };
-            work.retire_launch = [owner] {
-              std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-              owner->launch_in_flight = false;
-              if (owner->stopped.load(std::memory_order_acquire)) {
-                owner->terminal = true; owner->completed = false;
-              }
-            };
-            ok = MeasureWindowsDiscovery(metadata, work, &windows, &reason);
-          }
-        } catch (...) {
-          ok = false;
-          reason = "window_discovery_unavailable";
-        }
-        // Withdrawing the alias and cancelling it are ordered by the same pending mutex.
-        std::lock_guard lock(pending->mutex);
-        pending->thread = nullptr;
-      }
-      FinishWindowsDiscovery(owner, ok);
+  struct Slot {
+    std::shared_ptr<WindowsDiscoveryLease>& lease;
+    ~Slot() {
       lease.reset();
-      {
-        std::lock_guard lock(pending->mutex);
-        pending->windows = std::move(windows);
-        pending->reason = std::move(reason);
-        pending->ok = ok;
-        pending->done = true;
-        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-      }
-      pending->ready.notify_one();
-    }).detach();
+      WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
+    }
+  } slot{lease};
+  bool ok = false;
+  std::string windows;
+  try {
+    WindowsNewStartIoRegistration cancellation;
+    // The pump cancels only this consumer's registration, including deadline/pipe-end latches.
+    // Non-I/O stalls are bounded by Main's E4/normal request termination, not by this thread.
+    WindowsDiscoveryPumpScope pump(stop_pump, owner, serial);
+    if (cancellation.thread != nullptr) {
+      WindowsDiscoveryWorkControl work;
+      work.current = [owner, serial] { return WindowsDiscoveryCurrent(owner, serial); };
+      work.remaining = [owner](DWORD maximum) {
+        const auto elapsed = GetTickCount64() - owner->admitted_at;
+        return elapsed >= kWindowsDiscoveryBudgetMs ? DWORD{0} :
+            static_cast<DWORD>(std::min<std::uint64_t>(maximum, kWindowsDiscoveryBudgetMs - elapsed));
+      };
+      work.claim_launch = [owner, serial] {
+        std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+        if (WindowsSemanticInputInFlightLocked() || !WindowsDiscoveryCurrent(owner, serial) || owner->terminal || owner->launch_attempts != 0)
+          return false;
+        owner->launch_attempts = 1;
+        owner->launch_in_flight = true;
+        return true;
+      };
+      work.retire_launch = [owner] {
+        std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+        owner->launch_in_flight = false;
+        if (owner->stopped.load(std::memory_order_acquire)) {
+          owner->terminal = true; owner->completed = false;
+        }
+      };
+      ok = MeasureWindowsDiscovery(metadata, work, &windows, reason);
+    }
   } catch (...) {
-    FinishWindowsDiscovery(owner, false);
-    control.running.store(false, std::memory_order_release);
+    ok = false;
+    *reason = "window_discovery_unavailable";
+  }
+  FinishWindowsDiscovery(owner, ok);
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!WindowsDiscoveryCurrent(owner, serial) || (stop_pump != nullptr && stop_pump->failed)) {
+    *reason = "window_discovery_unavailable";
     return false;
   }
-  std::unique_lock lock(pending->mutex);
-  while (!pending->done && WindowsDiscoveryCurrent(owner, serial)) {
-    // A different owner may already be terminal while this measurement is still blocked.
-    lock.unlock();
-    if (stop_pump != nullptr && !stop_pump->Poll(owner->key)) return false;
-    lock.lock();
-    if (!pending->done && WindowsDiscoveryCurrent(owner, serial))
-      pending->ready.wait_for(lock, std::chrono::milliseconds(20));
-  }
-  std::lock_guard stop_lock(control.stop_mutex);
-  if (!WindowsDiscoveryCurrent(owner, serial)) return false;
-  if (!pending->ok) { *reason = pending->reason; return false; }
+  if (!ok) return false;
   if (!owner->terminal || !owner->completed || owner->launch_in_flight) return false;
   std::string built = WindowsDiscoveryReceiptJson(owner->id, "completed", owner->launch_attempts);
   built.pop_back();
-  built += ",\"windows\":" + pending->windows + "}";
+  built += ",\"windows\":" + windows + "}";
   if (built.size() > kMaxMetadataBytes) return false;
   *response = std::move(built);
-  guard.completed = true;
   return true;
 }
 
@@ -303,9 +300,9 @@ bool StopWindowsDiscovery(const std::string& key, const std::string& metadata,
 
 void DrainWindowsDiscoveryLaunchesForExit() {
   StopWindowsDiscoveriesForPipeEnd();
-  // Returning from main does not unwind detached workers. Keep their launch guards alive
-  // until verification or actual failed-child exit retires the claimed unit. Read-only
-  // workers cannot claim a launch after this latch and do not delay process exit.
+  // The consumer now unwinds its launch guard before ServePipe returns. Keep the exit
+  // barrier as a final ownership check: only verification or actual failed-child exit
+  // retires a claim, never an early Stop receipt.
   for (;;) {
     {
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);

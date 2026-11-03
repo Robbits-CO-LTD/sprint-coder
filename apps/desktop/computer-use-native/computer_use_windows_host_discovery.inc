@@ -77,6 +77,10 @@ std::string WindowsPackageIdentityJson(const WindowsExecutableIdentity &identity
 }
 // END windows package identity
 
+// Defined with the discovery measurement (discovery_worker.inc), which registers cancellable I/O.
+bool MeasureWindowsPickedIdentity(const std::wstring& path, WindowsExecutableIdentity* identity,
+                                  std::uint64_t serial);
+
 std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
                                 std::uint32_t pid = 0) {
   return "{\"platform\":\"win32\",\"identityDigest\":\"" +
@@ -95,7 +99,8 @@ std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
          (pid == 0 ? "" : ",\"pid\":" + std::to_string(pid)) + "}";
 }
 
-bool PickWindowsExecutable(std::string *response, std::string *reason) {
+bool PickWindowsExecutable(std::string *response, std::string *reason,
+                           std::uint64_t serial) {
   if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
     *reason = "picker_unavailable";
     return false;
@@ -149,7 +154,7 @@ bool PickWindowsExecutable(std::string *response, std::string *reason) {
     return false;
   }
   WindowsExecutableIdentity identity;
-  if (!BuildWindowsExecutableIdentity(path, &identity)) {
+  if (!MeasureWindowsPickedIdentity(path, &identity, serial)) {
     *reason = "identity_unavailable";
     return false;
   }
@@ -1111,7 +1116,7 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
       if (!verified && process.value != nullptr && process.value != INVALID_HANDLE_VALUE) {
         if (WaitForSingleObject(process.value, 0) != WAIT_OBJECT_0)
           TerminateProcess(process.value, ERROR_INVALID_IMAGE_HASH);
-        // A failed termination is not a cleanup receipt. This worker and its launch unit stay
+        // A failed termination is not a cleanup receipt. The consumer and its launch unit stay
         // owned until exit is observed; no consumer/Stop mutex is held while waiting.
         while (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) Sleep(1000);
       }

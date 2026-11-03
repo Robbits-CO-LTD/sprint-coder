@@ -129,8 +129,8 @@ function componentSource(): string {
   generated = generated.slice(0, measureFrom) + measure + generated.slice(measureTo);
   generated = replaceOne(
     generated,
-    '    std::thread([pending, lease, metadata, serial]() mutable {',
-    '    std::thread([pending, lease, metadata, serial]() mutable {\n      FixtureWorkerStarted();',
+    '      ok = MeasureWindowsDiscovery(metadata, work, &windows, reason);',
+    '      FixtureWorkerStarted();\n      ok = MeasureWindowsDiscovery(metadata, work, &windows, reason);',
   );
   generated = replaceOne(
     generated,
@@ -142,6 +142,12 @@ function componentSource(): string {
     .replaceAll('SetForegroundWindow(', 'RefuseFocus(')
     .replaceAll('SendInput(', 'RefuseInput(');
 }
+
+it('waits multiple pump cycles before excluding a premature Stop receipt', () => {
+  expect(program).toMatch(
+    /Check\(stopped, "reader latches owner Stop during synchronous measurement"\);\s*Sleep\(200\);\s*DWORD available = 0;\s*Check\(PeekNamedPipe/u,
+  );
+});
 
 it('keeps launch guards and real image/exit work while limiting qualification to the owned fixture', () => {
   const generated = componentSource();
@@ -257,15 +263,8 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         }
         if (mode === 'helper-exit-control') {
           expect(result.stdout).toContain(
-            'CONTROL: normal helper exit removed held unverified child',
+            'CONTROL: synchronous consumer retains launch without exit drain',
           );
-          const state = result.stdout
-            .split(/\r?\n/u)
-            .find((line) => line.startsWith('CONTROLSTATE:'));
-          const facts: unknown = JSON.parse(state!.slice('CONTROLSTATE:'.length));
-          expect(facts).toEqual({ helperExit: 0, childAlive: false, reads: 0, terminations: 0 });
-          console.log(JSON.stringify({ kind: 'native_discovery_helper_exit_control', facts }));
-          continue;
         }
         if (mode.startsWith('helper-exit-')) {
           expect(result.stdout).toContain(
