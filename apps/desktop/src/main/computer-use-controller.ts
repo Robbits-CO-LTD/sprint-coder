@@ -66,6 +66,7 @@ import {
   type ComputerUseApproval,
   type ComputerUseAvailability,
   type ComputerUseMode,
+  type ComputerUseInputSession,
   type ComputerUseObservation,
   type ComputerUsePolicyLanguage,
   type ComputerUseSessionStatus,
@@ -246,6 +247,8 @@ export type ComputerUseNativeWindow = ComputerUseWindowCandidate &
     screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   }>;
 export type ComputerUseNativeSession = Readonly<{
+  /** Absent for legacy helpers; the optional extension never enables an execution route. */
+  inputSession?: ComputerUseInputSession;
   inputReceipt?: ComputerUseNativeInputReceipt;
   sessionId: string;
   platform: 'darwin' | 'win32';

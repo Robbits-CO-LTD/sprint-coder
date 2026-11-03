@@ -1,4 +1,41 @@
 import { randomBytes } from 'node:crypto';
+import {
+  computerUseInputPathSchema,
+  computerUseWindowsBackgroundCapabilitySchema,
+  type ComputerUseInputPath,
+  type ComputerUseWindowsBackgroundCapability,
+} from '@sprint-coder/contracts';
+
+// Compile-time internal gate. No environment, Renderer or model override.
+export const COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED = false;
+
+/** Absence or an incompatible declaration closes background only, never legacy foreground. */
+export function parseComputerUseWindowsBackgroundCapability(
+  handshake: unknown,
+): ComputerUseWindowsBackgroundCapability | null {
+  if (typeof handshake !== 'object' || handshake === null || Array.isArray(handshake)) return null;
+  const record = handshake as Record<string, unknown>;
+  if (record['platform'] !== 'win32') return null;
+  const parsed = computerUseWindowsBackgroundCapabilitySchema.safeParse(
+    record['windowsBackgroundInput'],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+export function computerUseWindowsBackgroundInputAvailable(handshake: unknown): boolean {
+  return (
+    COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED &&
+    parseComputerUseWindowsBackgroundCapability(handshake) !== null
+  );
+}
+
+export function computerUseInputPathToLedgerPath(
+  path: ComputerUseInputPath,
+): 'normal' | 'background_semantic' {
+  return computerUseInputPathSchema.parse(path) === 'background_semantic'
+    ? 'background_semantic'
+    : 'normal';
+}
 
 export const COMPUTER_USE_NATIVE_PROTOCOL_VERSION = 1 as const;
 export const COMPUTER_USE_NATIVE_API_VERSION = 3 as const;
