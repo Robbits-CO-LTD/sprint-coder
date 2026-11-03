@@ -24,6 +24,11 @@ export class ComputerUseDiscoveryScope {
   private stopping: Promise<ComputerUseDiscoveryResult> | null = null;
   private readonly stopOwners = new Map<string, WindowsStopOwner>();
   private readonly lateResults = new Set<string>();
+  // Owner ids whose Stop is unconfirmed (termination requested, no exit yet); the subscription
+  // outlives the finished scope until each one exits or its generation retires the owner.
+  private readonly pendingExits = new Set<string>();
+  private readonly unconfirmedHandles = new Set<string>();
+  private subscribed = true;
   private readonly unsubscribeStop: (() => void) | undefined;
   private requestedReason: ComputerUseStopReason | null = null;
   // One stop per handle, kept so a handle that completes after an earlier drain is still included.
@@ -62,48 +67,65 @@ export class ComputerUseDiscoveryScope {
     void this.canceled.catch(() => undefined);
     this.unsubscribeStop = native.subscribeWindowsStop?.((event) => {
       if (event.kind === 'registered') {
+        // A handle may already have completed before its owner is registered.
         if (
           event.owner.kind === 'discovery' &&
-          [...this.handles].some((handle) => handle.id === event.owner.id)
-        )
+          [...this.handles, ...this.completedHandles].some((handle) => handle.id === event.owner.id)
+        ) {
           this.stopOwners.set(event.owner.id, event.owner);
+          if (this.unconfirmedHandles.has(event.owner.id)) this.pendingExits.add(event.owner.id);
+        }
         return;
       }
-      if (event.kind !== 'notification') return;
+      if (event.kind === 'retired') {
+        const owner = this.stopOwners.get(event.owner.id);
+        if (owner !== undefined && sameWindowsStopOwner(owner, event.owner)) {
+          this.pendingExits.delete(owner.id);
+          this.retireIfFinished();
+        }
+        return;
+      }
       const notification = event.notification;
       const owner = this.stopOwners.get(notification.owner.id);
       if (owner === undefined || !sameWindowsStopOwner(owner, notification.owner)) return;
       if (notification.reason === 'native_unavailable') this.interrupted = true;
-      // An internal failure's automatic Stop registers this owner too. Its late exit is reported
-      // as native_unavailable below rather than dropped; no requested reason is invented.
-      if (
-        notification.phase !== 'exit_confirmed' ||
-        !notification.late ||
-        notification.result === 'termination_requested' ||
-        this.lateResults.has(owner.lifetimeId)
-      )
+      if (notification.phase === 'termination_pending') {
+        this.pendingExits.add(owner.id);
         return;
-      this.lateResults.add(owner.lifetimeId);
-      this.publish({
-        kind: 'discovery_result',
-        late: true,
-        taskId: this.taskId,
-        turnId: this.turnId,
-        reason:
-          notification.reason === 'requested_reason'
-            ? (this.requestedReason ?? 'native_unavailable')
-            : 'native_unavailable',
-        results: [
-          {
-            kind: 'terminated',
-            helperGeneration: owner.helperGeneration,
-            result: notification.result,
-          },
-        ],
-      });
+      }
+      // An internal failure's automatic Stop registers this owner too. Its late exit is reported
+      // as native_unavailable rather than dropped; no requested reason is invented.
+      if (
+        notification.phase === 'exit_confirmed' &&
+        notification.late &&
+        notification.result !== 'termination_requested' &&
+        !this.lateResults.has(owner.lifetimeId)
+      )
+        this.publishLate(owner, notification.reason, notification.result);
+      this.pendingExits.delete(owner.id);
+      this.retireIfFinished();
     });
     externalSignal?.addEventListener('abort', this.forward, { once: true });
     if (externalSignal?.aborted) this.forward();
+  }
+
+  private publishLate(
+    owner: WindowsStopOwner,
+    reason: 'requested_reason' | 'native_unavailable',
+    result: 'terminated_clean' | 'terminated_target_suspect',
+  ): void {
+    this.lateResults.add(owner.lifetimeId);
+    this.publish({
+      kind: 'discovery_result',
+      late: true,
+      taskId: this.taskId,
+      turnId: this.turnId,
+      reason:
+        reason === 'requested_reason'
+          ? (this.requestedReason ?? 'native_unavailable')
+          : 'native_unavailable',
+      results: [{ kind: 'terminated', helperGeneration: owner.helperGeneration, result }],
+    });
   }
 
   get signal(): AbortSignal {
@@ -206,18 +228,9 @@ export class ComputerUseDiscoveryScope {
         resolve(result);
         this.publish(result);
       },
-      () => {
+      (stopError: unknown) => {
         if (this.stopping === stopping) this.stopFailed = true;
-        const error = Object.assign(new Error('Computer Use native_stop_unconfirmed'), {
-          discoveryResult: {
-            kind: 'discovery_result',
-            late: false,
-            taskId: this.taskId,
-            turnId: this.turnId,
-            reason: 'native_stop_unconfirmed',
-            results: [],
-          } satisfies ComputerUseDiscoveryResult,
-        });
+        const error = this.unconfirmed(stopError);
         this.rejectCanceled(error);
         reject(error);
         this.publish(error.discoveryResult);
@@ -263,10 +276,18 @@ export class ComputerUseDiscoveryScope {
   ): Promise<ComputerUseDiscoveryStop> {
     let stopping = this.drained.get(handle);
     if (stopping === undefined) {
-      stopping = handle.stop().then((result) => {
-        this.handles.delete(handle);
-        return result;
-      });
+      stopping = handle.stop().then(
+        (result) => {
+          this.handles.delete(handle);
+          return result;
+        },
+        (error: unknown) => {
+          // Unconfirmed: a late exit may still arrive for this owner.
+          this.unconfirmedHandles.add(handle.id);
+          if (this.stopOwners.has(handle.id)) this.pendingExits.add(handle.id);
+          throw error;
+        },
+      );
       this.drained.set(handle, stopping);
     }
     return stopping;
@@ -291,20 +312,23 @@ export class ComputerUseDiscoveryScope {
         return results;
       },
       (stopError: unknown) => {
-        // A fresh error: the drained Promise hands the same rejection to every reader.
-        const failure = Object.assign(
-          new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
-          {
-            cause: stopError,
-            discoveryResult: this.discoveryResult('native_stop_unconfirmed', []),
-          },
-        );
+        const failure = this.unconfirmed(stopError);
         this.rejectCanceled(failure);
         this.publish(failure.discoveryResult);
         throw failure;
       },
     );
     return this.internal;
+  }
+
+  /** A fresh error: the drained Promise hands the same rejection to every reader. */
+  private unconfirmed(
+    stopError: unknown,
+  ): ComputerUseNativeUnavailableError & { discoveryResult: ComputerUseDiscoveryResult } {
+    return Object.assign(
+      new ComputerUseNativeUnavailableError('native_stop_unconfirmed', { cause: stopError }),
+      { discoveryResult: this.discoveryResult('native_stop_unconfirmed', []) },
+    );
   }
 
   private discoveryResult(
@@ -338,12 +362,13 @@ export class ComputerUseDiscoveryScope {
   }
 
   private retireIfFinished(): void {
-    if (this.finished && this.handles.size === 0) {
-      this.unsubscribeStop?.();
-      this.stopOwners.clear();
-      this.lateResults.clear();
-      // Completed proofs stay: a Stop after retirement still reports them. The scope is per Turn.
-      this.retired();
-    }
+    if (!this.finished || this.handles.size !== 0) return;
+    // Completed proofs stay: a Stop after retirement still reports them. The scope is per Turn.
+    this.retired();
+    if (!this.subscribed || this.pendingExits.size !== 0) return;
+    this.subscribed = false;
+    this.unsubscribeStop?.();
+    this.stopOwners.clear();
+    this.lateResults.clear();
   }
 }

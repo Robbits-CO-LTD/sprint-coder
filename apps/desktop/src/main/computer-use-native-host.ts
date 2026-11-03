@@ -185,8 +185,11 @@ export const COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT = 2;
 const WINDOWS_LEDGER_STORAGE_TIMEOUT_MS = 2_000;
 
 export class ComputerUseNativeUnavailableError extends Error {
-  constructor(readonly reasonCode: string) {
-    super(reasonCode);
+  constructor(
+    readonly reasonCode: string,
+    options?: ErrorOptions,
+  ) {
+    super(reasonCode, options);
     this.name = 'ComputerUseNativeUnavailableError';
   }
 }
@@ -1656,9 +1659,7 @@ export function createComputerUseNativeHost(
       // one work() addressed, so the Stop stays unconfirmed (fail-closed).
       const generation = started;
       if (generation == null)
-        throw Object.assign(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'), {
-          cause: failure,
-        });
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed', { cause: failure });
       if (ledgerState(generation).exitConfirmed) return outcome(generation);
       // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
       return await new Promise<ReturnType<typeof outcome>>((resolve, reject) => {

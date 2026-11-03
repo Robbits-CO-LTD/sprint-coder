@@ -368,3 +368,188 @@ it('wraps a non-Error stop failure without throwing it raw', async () => {
     discoveryResult: { reason: 'native_stop_unconfirmed' },
   });
 });
+
+type StopListener = Parameters<
+  NonNullable<ConstructorParameters<typeof ComputerUseDiscoveryScope>[4]['subscribeWindowsStop']>
+>[0];
+const lateExit = (
+  owner: { kind: 'discovery'; id: string; helperGeneration: number; lifetimeId: string },
+  reason: 'requested_reason' | 'native_unavailable' = 'requested_reason',
+) =>
+  ({
+    kind: 'notification',
+    notification: {
+      owner,
+      phase: 'exit_confirmed',
+      result: 'terminated_clean',
+      late: true,
+      reason,
+      internalReason: 'requested_stop',
+    },
+  }) as const;
+
+it('keeps listening after run() fails and finishes until the unconfirmed owner exits', async () => {
+  let listener: StopListener = () => {};
+  const unsubscribe = vi.fn();
+  const publish = vi.fn();
+  let retireGeneration!: (proof: { kind: 'terminated'; helperGeneration: number }) => void;
+  const handle = {
+    id: 'discovery',
+    result: Promise.reject(new Error('native_stop_unconfirmed')),
+    terminal: new Promise<{ kind: 'terminated'; helperGeneration: number }>((resolve) => {
+      retireGeneration = resolve;
+    }),
+    stop: vi.fn(async () => {
+      throw new Error('native_stop_unconfirmed');
+    }),
+  };
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      beginWindowDiscovery: () => handle,
+      listWindows: async () => [],
+      subscribeWindowsStop: (next) => {
+        listener = next;
+        return unsubscribe;
+      },
+    },
+    vi.fn(),
+    undefined,
+    publish,
+  );
+  const owner = {
+    kind: 'discovery',
+    id: 'discovery',
+    helperGeneration: 1,
+    lifetimeId: 'lifetime',
+  } as const;
+  await expect(
+    scope.run(async () => {
+      const pending = scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]);
+      listener({ kind: 'registered', owner });
+      listener({
+        kind: 'notification',
+        notification: {
+          owner,
+          phase: 'termination_pending',
+          result: 'termination_requested',
+          late: false,
+          reason: 'requested_reason',
+          internalReason: 'requested_stop',
+        },
+      });
+      return await pending;
+    }),
+  ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+  // The generation's cleanup resolves the handle's terminal before its late exit is delivered.
+  retireGeneration({ kind: 'terminated', helperGeneration: 1 });
+  await handle.terminal;
+  await Promise.resolve();
+  expect(unsubscribe).not.toHaveBeenCalled();
+  publish.mockClear();
+  listener(lateExit(owner));
+  listener(lateExit(owner));
+  expect(publish).toHaveBeenCalledExactlyOnceWith({
+    kind: 'discovery_result',
+    late: true,
+    taskId: 'task',
+    turnId: 'turn',
+    reason: 'native_unavailable',
+    results: [{ kind: 'terminated', helperGeneration: 1, result: 'terminated_clean' }],
+  });
+  expect(unsubscribe).toHaveBeenCalledTimes(1);
+});
+
+it('registers the stop owner of a handle that completed before its registration', async () => {
+  let listener: StopListener = () => {};
+  const publish = vi.fn();
+  const handle = {
+    id: 'discovery',
+    result: Promise.resolve([]),
+    terminal: Promise.resolve({ kind: 'completed', launchAttemptCount: 1 } as const),
+    stop: vi.fn(async () => {
+      throw new Error('native_stop_unconfirmed');
+    }),
+  };
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      beginWindowDiscovery: () => handle,
+      listWindows: async () => [],
+      subscribeWindowsStop: (next) => {
+        listener = next;
+        return () => {};
+      },
+    },
+    vi.fn(),
+    undefined,
+    publish,
+  );
+  await scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]);
+  await handle.terminal;
+  await Promise.resolve();
+  const owner = {
+    kind: 'discovery',
+    id: 'discovery',
+    helperGeneration: 1,
+    lifetimeId: 'lifetime',
+  } as const;
+  listener({ kind: 'registered', owner });
+  await expect(scope.stop(true, 'task_changed')).rejects.toMatchObject({
+    reasonCode: 'native_stop_unconfirmed',
+    cause: expect.any(Error),
+    discoveryResult: { reason: 'native_stop_unconfirmed' },
+  });
+  publish.mockClear();
+  listener(lateExit(owner));
+  expect(publish).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ late: true, reason: 'task_changed' }),
+  );
+});
+
+it.each([
+  { proof: null, aborts: true },
+  { proof: { kind: 'terminated', helperGeneration: 1 } as const, aborts: true },
+  { proof: { kind: 'not_submitted' } as const, aborts: false },
+  { proof: { kind: 'stopped', launchAttemptCount: 1 } as const, aborts: false },
+  { proof: { kind: 'completed', launchAttemptCount: 0 } as const, aborts: false },
+])('aborts the whole scope only for an unconfirmed or terminated stop ($proof)', async (row) => {
+  const failure = new Error('query failed');
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      listWindows: async () => [],
+      beginWindowDiscovery: () => ({
+        id: 'discovery',
+        result: Promise.reject(failure),
+        terminal: new Promise(() => {}),
+        stop: async () => {
+          if (row.proof === null) throw new Error('unconfirmed');
+          return row.proof;
+        },
+      }),
+      subscribeWindowsStop: () => () => {},
+    },
+    vi.fn(),
+  );
+  const rejection = await scope
+    .read({ id: 'profile' } as Parameters<typeof scope.read>[0])
+    .catch((error: unknown) => error);
+  expect(scope.signal.aborted).toBe(row.aborts);
+  if (row.aborts) {
+    expect(rejection).not.toBe(failure);
+    expect(() => scope.check()).toThrow();
+  } else {
+    expect(rejection).toBe(failure);
+    expect(() => scope.check()).not.toThrow();
+  }
+});
