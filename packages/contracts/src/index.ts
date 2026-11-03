@@ -5839,6 +5839,7 @@ export const computerUseSessionStatusSchema = z
     terminationResult: z
       .enum(['terminated_clean', 'terminated_target_suspect', 'termination_requested'])
       .optional(),
+    stopCause: z.literal('shared_helper_stop').optional(),
     /**
      * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
      * it when the session ends, and it is never persisted, logged or given to the outer agent.

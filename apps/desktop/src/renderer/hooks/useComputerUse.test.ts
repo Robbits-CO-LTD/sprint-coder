@@ -256,6 +256,23 @@ describe('Computer Use renderer projection', () => {
   });
 });
 
+it.each(['termination_requested', 'terminated_clean', 'terminated_target_suspect'] as const)(
+  'PR10 explains a shared-helper stop and preserves the warning: %s',
+  (terminationResult) => {
+    const notice = computerUseTerminalNotice({
+      state: 'stopped',
+      stopReason: 'native_unavailable',
+      stopCause: 'shared_helper_stop',
+      terminationResult,
+    } as ComputerUseSessionStatus);
+    expect(notice).toContain('別の操作の停止のため、Computer Use が止まった');
+    if (terminationResult === 'termination_requested')
+      expect(notice).toContain('停止を確認できませんでした');
+    if (terminationResult === 'terminated_target_suspect')
+      expect(notice).toContain('終了するか再開を承認するまで操作しない');
+  },
+);
+
 it('PR10 does not describe a confirmed shared-helper exit as unconfirmed', () => {
   expect(
     computerUseTerminalNotice({

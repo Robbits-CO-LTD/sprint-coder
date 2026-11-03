@@ -849,6 +849,7 @@ type PendingAppGrantRequest = {
 };
 
 type StartingSession = {
+  requestedStopReason?: ComputerUseStopReason;
   controller: AbortController;
   reason: ComputerUseStopReason | null;
   taskId: string;
@@ -862,6 +863,7 @@ type StartingSession = {
 };
 
 type SessionRecord = {
+  requestedStopReason?: ComputerUseStopReason;
   status: ComputerUseSessionStatus;
   profile: ComputerAppProfileRecord;
   /** Present for a session `computer_start` created; null for one a person started. */
@@ -1100,6 +1102,10 @@ export class ComputerUseController {
 
   private readonly windowsRequestedReasons = new Map<string, ComputerUseStopReason>();
   private readonly windowsStopResults = new Map<string, WindowsOwnerStopNotification['result']>();
+  private readonly promotedWindowsSessions = new WeakMap<
+    StartingSession | SessionRecord,
+    SessionRecord
+  >();
   private readonly unsubscribeWindowsStops: () => void;
   private readonly unsubscribeApprovalStop: (() => void) | undefined;
 
@@ -1133,15 +1139,25 @@ export class ComputerUseController {
       let bound = this.sessions.get(owner.id) ?? this.startingSessions.get(owner.id);
       if (bound === undefined) return undefined;
       return {
-        requestedReason: () =>
-          this.windowsRequestedReasons.get(owner.id) ??
-          this.startingSessions.get(owner.id)?.reason ??
-          bound?.status.stopReason ??
-          null,
+        requestedReason: () => {
+          if (bound !== undefined) bound = this.promotedWindowsSessions.get(bound) ?? bound;
+          return (
+            this.windowsRequestedReasons.get(owner.id) ??
+            this.startingSessions.get(owner.id)?.reason ??
+            bound?.requestedStopReason ??
+            bound?.status.stopReason ??
+            null
+          );
+        },
         receive: (notification) => {
           const current = this.sessions.get(owner.id) ?? this.startingSessions.get(owner.id);
-          bound = current ?? bound;
+          bound =
+            current ??
+            (bound === undefined ? undefined : this.promotedWindowsSessions.get(bound)) ??
+            bound;
           if (bound === undefined) return;
+          if (notification.internalReason === 'shared_helper_stop')
+            bound.status = { ...bound.status, stopCause: 'shared_helper_stop' };
           this.windowCandidatePermits.clear();
           this.targetAppTokens.clear();
           this.targetEnumerations.clear();
@@ -1150,30 +1166,42 @@ export class ComputerUseController {
               record.binding.windowsGeneration?.helper.helperGeneration === owner.helperGeneration
             )
               this.targetTokens.delete(token);
-          if (current === undefined) {
+          if (
+            current === undefined ||
+            (current.stopPromise !== null && notification.phase === 'exit_confirmed')
+          ) {
             if (notification.phase !== 'exit_confirmed') return;
-            bound.status = {
-              ...bound.status,
-              stopReason: notification.stopReason,
-              terminationResult:
-                notification.result === 'terminated_target_suspect'
-                  ? 'terminated_target_suspect'
-                  : 'terminated_clean',
-            };
-            captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
-              capture.record({
-                type: 'stop_acknowledged',
-                sessionDigest: computerUseCaptureDigest(owner.id),
-                nativeAcknowledged: true,
+            if (current !== undefined) this.windowsStopResults.set(owner.id, notification.result);
+            const terminal = bound;
+            const confirm = () => {
+              terminal.status = {
+                ...terminal.status,
+                state: 'stopped',
+                stopReason: notification.stopReason,
                 terminationResult:
                   notification.result === 'terminated_target_suspect'
                     ? 'terminated_target_suspect'
                     : 'terminated_clean',
-              }),
-            );
-            this.statusRevisionBySession.set(owner.id, bound.status.statusRevision);
-            this.emit(bound.status);
-            this.statusRevisionBySession.delete(owner.id);
+              };
+              captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+                capture.record({
+                  type: 'stop_acknowledged',
+                  sessionDigest: computerUseCaptureDigest(owner.id),
+                  nativeAcknowledged: true,
+                  terminationResult:
+                    notification.result === 'terminated_target_suspect'
+                      ? 'terminated_target_suspect'
+                      : 'terminated_clean',
+                }),
+              );
+              this.statusRevisionBySession.set(owner.id, terminal.status.statusRevision);
+              this.emit(terminal.status);
+              this.statusRevisionBySession.delete(owner.id);
+            };
+            // Cleanup may already have read its result before its final await. Publish after
+            // it settles so that the terminal status cannot overwrite a confirmed exit.
+            if (current?.stopPromise) void current.stopPromise.then(confirm).catch(() => undefined);
+            else confirm();
             return;
           }
           this.windowsStopResults.set(owner.id, notification.result);
@@ -3881,6 +3909,8 @@ export class ComputerUseController {
         [COMPUTER_OBSERVE_TOOL.toolId, COMPUTER_ACT_TOOL.toolId],
       );
       this.sessions.set(sessionId, record);
+      // Native registers the owner during start; its first notification can arrive after cleanup.
+      this.promotedWindowsSessions.set(starting, record);
       this.startingSessions.delete(sessionId);
       // Bound before any round can start. Digest of the limits only; no policy body or identifier.
       captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
@@ -4048,6 +4078,7 @@ export class ComputerUseController {
   }
 
   private async completeStartingStop(starting: StartingSession): Promise<void> {
+    starting.requestedStopReason = starting.reason ?? 'error';
     const sessionId = starting.status.sessionId;
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
@@ -4144,6 +4175,7 @@ export class ComputerUseController {
   }
 
   private async completeStop(record: SessionRecord, reason: ComputerUseStopReason): Promise<void> {
+    record.requestedStopReason = reason;
     const sessionId = record.status.sessionId;
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({

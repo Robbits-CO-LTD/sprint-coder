@@ -736,14 +736,21 @@ export function computerUseWindowViews(
 
 export function computerUseTerminalNotice(status: ComputerUseSessionStatus): string | null {
   if (status.state !== 'stopped') return null;
+  const sharedStop =
+    status.stopCause === 'shared_helper_stop'
+      ? '別の操作の停止のため、Computer Use が止まった。'
+      : '';
   if (status.terminationResult === 'terminated_target_suspect')
-    return '停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない';
+    return `${sharedStop}停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない`;
   if (status.terminationResult === 'terminated_clean')
-    return status.stopReason === 'native_unavailable'
-      ? 'Computer Useは停止しました。再開する場合は対象アプリの状態を確認してください。'
-      : null;
+    return (
+      sharedStop ||
+      (status.stopReason === 'native_unavailable'
+        ? 'Computer Useは停止しました。再開する場合は対象アプリの状態を確認してください。'
+        : null)
+    );
   if (status.stopReason === 'native_unavailable')
-    return 'Computer Useの停止を確認できませんでした。対象アプリの状態を確認し、再開できない場合はSprint Coderを再起動してください。';
+    return `${sharedStop}Computer Useの停止を確認できませんでした。対象アプリの状態を確認し、再開できない場合はSprint Coderを再起動してください。`;
   return status.stopReason === 'error'
     ? 'Computer Useは安全のため停止しました。対象アプリ、OSの許可、Provider設定を確認してから再度開始してください。'
     : null;

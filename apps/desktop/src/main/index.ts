@@ -473,6 +473,10 @@ async function disposeApplicationResources(): Promise<void> {
   }
   try {
     windowsKillStop?.close();
+  } catch (error) {
+    secureLogger.error('Windows kill-stop shutdown did not complete cleanly', error);
+  }
+  try {
     persistence?.close();
   } catch (error) {
     secureLogger.error('Persistence shutdown did not complete cleanly', error);

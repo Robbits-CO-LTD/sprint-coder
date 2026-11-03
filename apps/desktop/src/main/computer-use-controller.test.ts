@@ -298,6 +298,8 @@ function createFixture(
     /** Opens the native approval path on the fake host (a production host never reports it). */
     helperGeneration?: () => number | null;
     subscribeWindowsStop?: ComputerUseNativeHost['subscribeWindowsStop'];
+    onNativeStart?: (sessionId: string) => void;
+    disarmEmergencyStop?: ComputerUseControllerDeps['disarmEmergencyStop'];
     nativeApproval?: {
       enabled?: boolean;
       /** Per-session answer (C5-1); default: `enabled` for every session. */
@@ -424,6 +426,7 @@ function createFixture(
       })),
     startSession: async (input) => {
       nativeLog.push('startSession');
+      options.onNativeStart?.(input.sessionId);
       startRoutes.push(input.classifierRoute);
       // Counted before the gate, so a test can observe "native startup has begun and is still
       // running" — the window in which a session exists only in `startingSessions`.
@@ -705,6 +708,9 @@ function createFixture(
           armEmergencyStop: (sessionId: string): Promise<boolean> =>
             options.armEmergencyStop!(sessionId, controllerRef!),
         }),
+    ...(options.disarmEmergencyStop === undefined
+      ? {}
+      : { disarmEmergencyStop: options.disarmEmergencyStop }),
     repositionEmergencyStop: options.repositionEmergencyStop ?? (() => true),
     ...(options.visualActionBlocked === true ? { visualActionBlocked: () => true } : {}),
   });
@@ -2804,6 +2810,133 @@ describe('ComputerUseController', () => {
       await second.controller.dispose();
     },
   );
+
+  it.each(['after_cleanup', 'shared_after_cleanup', 'same_tick', 'during_cleanup'] as const)(
+    'PR10 preserves the native-start owner through %s exit confirmation',
+    async (timing) => {
+      const listeners = new Set<WindowsStopListener>();
+      let owner!: { kind: 'session'; helperGeneration: number; lifetimeId: string; id: string };
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let cleanupEntered = false;
+      const fixture = createFixture({
+        subscribeWindowsStop: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+        onNativeStart: (id) => {
+          owner = { kind: 'session', helperGeneration: 1, lifetimeId: 'native-start', id };
+          for (const listener of listeners) listener({ kind: 'registered', owner });
+        },
+        closeResult: { kind: 'termination_requested' },
+        disarmEmergencyStop: async () => {
+          cleanupEntered = true;
+          if (timing === 'during_cleanup') await gate;
+        },
+      });
+      const session = await start(fixture);
+      const notify = (confirmed: boolean) => {
+        for (const listener of listeners)
+          listener({
+            kind: 'notification',
+            notification: {
+              owner,
+              phase: confirmed ? 'exit_confirmed' : 'termination_pending',
+              result: confirmed ? 'terminated_target_suspect' : 'termination_requested',
+              late: confirmed,
+              reason: timing === 'after_cleanup' ? 'requested_reason' : 'native_unavailable',
+              internalReason: timing === 'after_cleanup' ? 'requested_stop' : 'shared_helper_stop',
+            },
+          });
+      };
+      if (timing === 'after_cleanup') {
+        await fixture.controller.stop(session.sessionId, 'user_stop');
+        notify(false);
+      } else {
+        notify(false);
+        if (timing === 'shared_after_cleanup')
+          await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        if (timing === 'during_cleanup') await vi.waitFor(() => expect(cleanupEntered).toBe(true));
+      }
+      expect(() => notify(true)).not.toThrow();
+      release();
+      await vi.waitFor(() =>
+        expect(fixture.statuses.at(-1)).toMatchObject({
+          state: 'stopped',
+          stopReason: timing === 'after_cleanup' ? 'user_stop' : 'native_unavailable',
+          ...(timing === 'after_cleanup' ? {} : { stopCause: 'shared_helper_stop' }),
+          terminationResult: 'terminated_target_suspect',
+        }),
+      );
+      await fixture.controller.dispose();
+    },
+  );
+
+  it('PR10 applies exit confirmation during the final pending-start cleanup await', async () => {
+    const listeners = new Set<WindowsStopListener>();
+    let owner!: { kind: 'session'; helperGeneration: number; lifetimeId: string; id: string };
+    let releaseStart!: () => void;
+    let releaseCleanup!: () => void;
+    let cleanupEntered = false;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const fixture = createFixture({
+      startSessionGate: startGate,
+      subscribeWindowsStop: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      onNativeStart: (id) => {
+        owner = { kind: 'session', helperGeneration: 1, lifetimeId: 'pending-start', id };
+        for (const listener of listeners) listener({ kind: 'registered', owner });
+      },
+      disarmEmergencyStop: async () => {
+        cleanupEntered = true;
+        await cleanupGate;
+      },
+    });
+    const starting = start(fixture).catch(() => undefined);
+    await vi.waitFor(() => expect(owner).toBeDefined());
+    const notify = (confirmed: boolean) => {
+      for (const listener of listeners)
+        listener({
+          kind: 'notification',
+          notification: {
+            owner,
+            phase: confirmed ? 'exit_confirmed' : 'termination_pending',
+            result: confirmed ? 'terminated_clean' : 'termination_requested',
+            late: confirmed,
+            reason: 'native_unavailable',
+            internalReason: 'shared_helper_stop',
+          },
+        });
+    };
+    notify(false);
+    await vi.waitFor(() => expect(cleanupEntered).toBe(true));
+    notify(true);
+    releaseCleanup();
+    await vi.waitFor(() =>
+      expect(fixture.statuses.at(-1)).toMatchObject({
+        state: 'stopped',
+        stopReason: 'native_unavailable',
+        terminationResult: 'terminated_clean',
+        stopCause: 'shared_helper_stop',
+      }),
+    );
+    releaseStart();
+    await starting;
+    await fixture.controller.dispose();
+  });
 
   it.each([false, true])(
     'PR10 consumes a trusted quarantine approval before a fresh start (%s)',

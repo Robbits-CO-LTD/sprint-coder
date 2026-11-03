@@ -5837,7 +5837,8 @@ int main() {
     );
   });
 
-  it('PR7b rejects a crash-raced Host close until exit transfer succeeds', async () => {
+  it('PR7b confirms a crash-raced close while blocking the target until exit transfer succeeds', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -5848,18 +5849,27 @@ int main() {
     await target.dispatch(session);
     target.control.reflectWait = gate;
     target.control.deleteCalls.length = 0;
-    const close = target.host.close(session).then(
-      () => 'resolved',
-      () => 'rejected',
-    );
+    const close = target.host.close(session);
     await vi.advanceTimersByTimeAsync(0);
     expect(target.control.deleteCalls).toEqual(['session-a']);
     target.control.failTransfer = true;
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     release();
-    expect(await close).toBe('resolved');
+    expect(await close).toEqual({
+      kind: 'terminated',
+      result: 'terminated_target_suspect',
+      helperGeneration: 1,
+    });
     expect(target.rows.size).toBe(1);
+    const exit = decide.mock.results.find(
+      (_, index) => decide.mock.calls[index]![1].kind === 'exit_confirmed',
+    )!.value;
+    expect(exit.state.nativeBlockers.length).toBeGreaterThan(0);
+    await expect(startSession(target.host, 'blocked-session', 'blocked-turn')).rejects.toThrow(
+      'native_stop_unconfirmed',
+    );
+    expect(decide.mock.results.at(-1)!.value.state.nativeBlockers.length).toBeGreaterThan(0);
     target.control.failTransfer = false;
     target.control.failReflect = false;
     await target.host.listTargets!().catch(() => undefined);
@@ -5868,6 +5878,8 @@ int main() {
       result: 'terminated_target_suspect',
       helperGeneration: 1,
     });
+    expect(decide.mock.results.at(-1)!.value.state.nativeBlockers).toHaveLength(0);
+    decide.mockRestore();
   });
   it('PR7b refuses new discovery stops after kill without writing to the old pipe', async () => {
     const child = new ControlledHelperChild();

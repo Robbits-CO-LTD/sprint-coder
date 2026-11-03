@@ -1,7 +1,38 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import { configureWindowsKillStop } from './computer-use-windows-product';
 
 describe('PR10a product wiring', () => {
+  it('closes persistence even when Windows kill-stop shutdown throws', async () => {
+    const source = readFileSync(join(__dirname, 'index.ts'), 'utf8');
+    const start = source.indexOf('async function disposeApplicationResources()');
+    const end = source.indexOf('\nfunction createWindow()', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const close = vi.fn();
+    const error = vi.fn();
+    await runInNewContext(
+      ts.transpileModule(`${source.slice(start, end)}\ndisposeApplicationResources();`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText,
+      {
+        autoUpdateController: undefined,
+        router: { dispose: async () => undefined },
+        windowsKillStop: {
+          close: () => {
+            throw new Error('synthetic shutdown failure');
+          },
+        },
+        persistence: { close },
+        secureLogger: { error },
+      },
+    );
+    expect(close).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledOnce();
+  });
   it('keeps product activation off by default and on macOS', () => {
     const open = vi.fn(() => {
       throw new Error('must not open');
