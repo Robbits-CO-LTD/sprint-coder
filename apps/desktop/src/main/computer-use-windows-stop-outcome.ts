@@ -278,7 +278,8 @@ export type WindowsStopEvent =
   | Readonly<{
       kind: 'restore_read';
       holdId: string;
-      rows: readonly WindowsLedgerRow[];
+      rows: readonly unknown[];
+      quarantines?: readonly unknown[];
       storage: StorageWrite;
     }>
   /** R20: PR4 parses stored rows; this kernel only records the minimal diagnostic. */
@@ -615,7 +616,8 @@ const ROW_STATES: readonly unknown[] = ['awaiting_response', 'effect_unconfirmed
  * Runtime shape check for a ledger row. Restored rows (R20) come from storage, so every field is
  * treated as unknown here; a live row failing it is an invariant violation instead.
  */
-function storedRowProblem(row: WindowsLedgerRow): 'invalid_format' | 'missing_identity' | null {
+export function storedRowProblem(row: unknown): 'invalid_format' | 'missing_identity' | null {
+  if (typeof row !== 'object' || row === null || Array.isArray(row)) return 'invalid_format';
   const loose = row as Readonly<Partial<Record<keyof WindowsLedgerRow, unknown>>>;
   const identity = loose.identity as Readonly<Partial<Record<'pid' | 'creationTime', unknown>>>;
   if (
@@ -639,6 +641,42 @@ function storedRowProblem(row: WindowsLedgerRow): 'invalid_format' | 'missing_id
     typeof loose.sessionId === 'string' &&
     typeof loose.requestId === 'string';
   return formatOk ? null : 'invalid_format';
+}
+
+export function isStoredWindowsLedgerRow(value: unknown): value is WindowsLedgerRow {
+  return storedRowProblem(value) === null;
+}
+
+export function storedQuarantineProblem(
+  value: unknown,
+): 'invalid_format' | 'missing_identity' | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'invalid_format';
+  const identity = 'identity' in value ? value.identity : null;
+  if (
+    typeof identity !== 'object' ||
+    identity === null ||
+    !('pid' in identity) ||
+    typeof identity.pid !== 'number' ||
+    !('creationTime' in identity) ||
+    typeof identity.creationTime !== 'string' ||
+    !validIdentity({ pid: identity.pid, creationTime: identity.creationTime })
+  )
+    return 'missing_identity';
+  return 'reason' in value &&
+    typeof value.reason === 'string' &&
+    [
+      'response_lost',
+      'effect_unconfirmed',
+      'takeover_conflict',
+      'exit_suspect',
+      'restored',
+    ].includes(value.reason)
+    ? null
+    : 'invalid_format';
+}
+
+export function isStoredWindowsQuarantine(value: unknown): value is WindowsTargetQuarantine {
+  return storedQuarantineProblem(value) === null;
 }
 
 function entryAllowsNonSubmission(entry: WindowsStopEntry): boolean {
@@ -1175,15 +1213,30 @@ export function decideWindowsStop(
       // R20: a malformed or identity-less stored row is discarded with a minimal diagnostic; it is
       // ordinary input, never an exception or a permanent host hold.
       const discarded: WindowsStopDiagnostic[] = [];
-      const rows = event.rows.filter((item) => {
+      const rows = event.rows.filter((item): item is WindowsLedgerRow => {
         const problem = storedRowProblem(item);
         if (problem === null) return true;
-        const kind: unknown = (item as Readonly<{ kind?: unknown }>).kind;
-        discarded.push({ kind: typeof kind === 'string' ? kind : 'unknown', reason: problem });
+        const kind: unknown =
+          item == null ? undefined : (item as Readonly<{ kind?: unknown }>).kind;
+        discarded.push({
+          kind:
+            typeof kind === 'string' && [...CONTROL_KINDS, 'foreground'].includes(kind)
+              ? kind
+              : 'unknown',
+          reason: problem,
+        });
         return false;
       });
+      const quarantines = [...state.quarantines];
+      for (const item of event.quarantines ?? []) {
+        if (!isStoredWindowsQuarantine(item)) {
+          discarded.push({ kind: 'quarantine', reason: storedQuarantineProblem(item)! });
+        } else if (!quarantines.some((q) => sameTarget(q.identity, item.identity))) {
+          quarantines.push(item);
+        }
+      }
       const restored = decideWindowsStop(
-        { ...state, rows, holds: state.holds.filter((item) => item.id !== hold.id) },
+        { ...state, rows, quarantines, holds: state.holds.filter((item) => item.id !== hold.id) },
         { kind: 'restart', storage: event.storage },
       );
       return { ...restored, diagnostics: [...discarded, ...restored.diagnostics] };

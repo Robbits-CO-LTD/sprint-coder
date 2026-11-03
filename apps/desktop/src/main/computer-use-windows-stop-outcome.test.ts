@@ -945,6 +945,24 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     },
   );
 
+  it('R20 restore discards null rows without throwing or permanently blocking the host', () => {
+    const held = decideWindowsStop(state({ helperLaunched: false }), {
+      kind: 'store_unreadable',
+      holdId: 'null-read',
+      targets: 'unknown',
+    }).state;
+    const restored = decideWindowsStop(held, {
+      kind: 'restore_read',
+      holdId: 'null-read',
+      rows: [null, row] as unknown as WindowsLedgerRow[],
+      storage: written,
+    });
+    expect(restored.diagnostics).toEqual([{ kind: 'unknown', reason: 'invalid_format' }]);
+    expect(restored.state.holds).toEqual([]);
+    expect(windowsTargetMayStart(restored.state, target)).toBe(false);
+    expect(windowsTargetMayStart(restored.state, otherTarget)).toBe(true);
+  });
+
   it('R20 restore discards malformed or identity-less stored rows with a diagnostic, not an exception', () => {
     const held = decideWindowsStop(state({ helperLaunched: false }), {
       kind: 'store_unreadable',
