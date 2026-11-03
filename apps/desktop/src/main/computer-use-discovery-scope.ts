@@ -135,7 +135,21 @@ export class ComputerUseDiscoveryScope {
         throw this.signal.reason;
       }
       this.cancelWork(error);
-      const results = await this.drain();
+      const results = await this.drain().catch((stopError: unknown) => {
+        if (stopError instanceof Error)
+          Object.assign(stopError, {
+            cause: error,
+            discoveryResult: {
+              kind: 'discovery_result',
+              late: false,
+              taskId: this.taskId,
+              turnId: this.turnId,
+              reason: 'native_stop_unconfirmed',
+              results: [],
+            } satisfies ComputerUseDiscoveryResult,
+          });
+        throw stopError;
+      });
       if (error instanceof Error && results.some((result) => result.kind === 'terminated'))
         Object.assign(error, {
           discoveryResult: {

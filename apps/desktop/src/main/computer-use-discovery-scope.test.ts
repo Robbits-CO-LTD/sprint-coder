@@ -2,6 +2,81 @@ import { expect, it, vi } from 'vitest';
 import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
 import { createComputerUseDiscoveryManager } from './computer-use-native-discovery';
 
+it('retains the read failure as cause and reports unconfirmed native drain through run', async () => {
+  const failure = new Error('query failed');
+  const stopFailure = new Error('handle stop failed');
+  const stop = vi.fn(async () => {
+    throw stopFailure;
+  });
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      listWindows: async () => [],
+      beginWindowDiscovery: () => ({
+        id: 'discovery',
+        result: Promise.reject(failure),
+        terminal: new Promise(() => {}),
+        stop,
+      }),
+    },
+    vi.fn(),
+  );
+  const reading = scope.run(() =>
+    scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]),
+  );
+  await expect(reading).rejects.toBe(stopFailure);
+  expect(stopFailure).toMatchObject({
+    cause: failure,
+    discoveryResult: {
+      kind: 'discovery_result',
+      late: false,
+      taskId: 'task',
+      turnId: 'turn',
+      reason: 'native_stop_unconfirmed',
+      results: [],
+    },
+  });
+  expect(stop).toHaveBeenCalledTimes(1);
+});
+
+it('includes a handle completed after an earlier drain in the next Stop', async () => {
+  const proof = { kind: 'not_submitted' } as const;
+  let complete!: (value: typeof proof) => void;
+  const terminal = new Promise<typeof proof>((resolve) => {
+    complete = resolve;
+  });
+  const stop = vi.fn(async () => proof);
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      listWindows: async () => [],
+      beginWindowDiscovery: () => ({
+        id: 'late',
+        result: Promise.reject(new Error('query failed')),
+        terminal,
+        stop,
+      }),
+    },
+    vi.fn(),
+  );
+  await expect(scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0])).rejects.toThrow(
+    'query failed',
+  );
+  complete(proof);
+  await terminal;
+  expect(await scope.stop(true, 'policy_changed')).toMatchObject({
+    reason: 'policy_changed',
+    results: [proof],
+  });
+  expect(stop).toHaveBeenCalledTimes(1);
+});
+
 it.each([
   { result: 'terminated_clean', automatic: false },
   { result: 'terminated_target_suspect', automatic: false },

@@ -1647,6 +1647,9 @@ export function createComputerUseNativeHost(
         }),
       ]);
     } catch {
+      // Both timeout and work() rejection enter here. With no initial owner, intentionally
+      // replace even work()'s original error with native_stop_unconfirmed: inability to prove
+      // Stop takes priority, and the caller discards the session handle as on close failure.
       // Fixed for the whole kill wait: the owner may be gone or replaced by another generation.
       // Without an owner before the race, a later owner may belong to a newer helper than the
       // one work() addressed, so the Stop stays unconfirmed (fail-closed).

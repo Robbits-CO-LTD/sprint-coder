@@ -7277,6 +7277,103 @@ int main() {
     ).toBe(true);
   });
 
+  it.each(['timeout', 'reject', 'replacement'] as const)(
+    'PR11 fixes the Stop generation before work and throughout kill wait (%s)',
+    async (mode) => {
+      let callbacks!: WindowsTerminationCallbacks;
+      let owners: { map: Map<unknown, unknown> } | undefined;
+      let originalOwner: object | undefined;
+      const originalSet = Map.prototype.set;
+      // Capture the private owner map at its normal insertion boundary, without exposing a
+      // production test API. Only this session's StartOwner insertion matches.
+      const insertion = vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+        this: Map<unknown, unknown>,
+        key: unknown,
+        value: unknown,
+      ) {
+        if (
+          key === 'generation-race' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'nativeInvoked' in value
+        ) {
+          owners = { map: this };
+          originalOwner = value;
+        }
+        return originalSet.call(this, key, value);
+      });
+      const kill = vi.fn();
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          configureWindowsTermination: (value) => {
+            callbacks = value;
+            addon.configureWindowsTermination!(value);
+          },
+          requestWindowsTermination: kill,
+          close: () => {
+            closeWork();
+            return mode === 'reject'
+              ? Promise.reject(new Error('original close failure'))
+              : new Promise(() => {});
+          },
+        }),
+        true,
+      );
+      let session: Awaited<ReturnType<typeof startSession>>;
+      try {
+        session = await startSession(target.host, 'generation-race', 'turn-race');
+      } finally {
+        insertion.mockRestore();
+      }
+      if (owners === undefined || originalOwner === undefined)
+        throw new Error('Missing StartOwner');
+      const ownerMap = owners.map;
+      const replacement = { ...originalOwner, helperGeneration: 2 };
+      if (mode !== 'replacement') ownerMap.delete(session.sessionId);
+      const closeWork = () => {
+        if (mode !== 'replacement') ownerMap.set(session.sessionId, replacement);
+      };
+      let settled = false;
+      const stopping = target.host.close(session);
+      void stopping.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      const rejected =
+        mode === 'replacement'
+          ? undefined
+          : expect(stopping).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+      if (mode !== 'replacement') {
+        await rejected;
+        expect(kill).not.toHaveBeenCalled();
+        expect(ownerMap.get(session.sessionId)).toBe(replacement);
+        return;
+      }
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      ownerMap.set(session.sessionId, replacement);
+      callbacks.started(2);
+      callbacks.owned!(2, 'session', session.sessionId);
+      callbacks.exited(2, 'stop');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      callbacks.exited(1, 'stop');
+      await expect(stopping).resolves.toEqual({
+        kind: 'terminated',
+        helperGeneration: 1,
+        result: 'terminated_clean',
+      });
+      expect(kill).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('PR7c-2 rejects discovery completion after kill begins until exit cleanup', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(
