@@ -37,15 +37,6 @@ struct WindowsSessionIdentityResult {
   bool elevated = true;
 };
 
-struct WindowsValidationPending {
-  std::mutex mutex;
-  std::condition_variable ready;
-  std::atomic<bool> abandoned{false};
-  std::uint64_t job_id = 0;
-  bool done = false;
-  WindowsSessionIdentityResult result;
-};
-
 struct WindowsValidationWork {
   std::uint32_t pid = 0;
   std::string process_start;
@@ -56,30 +47,14 @@ struct WindowsValidationWork {
   std::uint64_t stop_serial = 0;
   ScopedKernelHandle process;
   ScopedKernelHandle executable;
-  std::shared_ptr<WindowsValidationPending> pending;
 };
-
-struct WindowsValidationState {
-  std::mutex mutex;
-  std::condition_variable wake;
-  std::unique_ptr<WindowsValidationWork> queued;
-  std::uint64_t active_job_id = 0;
-  std::uint64_t next_job_id = 0;
-  HANDLE cancellation_thread = nullptr;
-  bool worker_started = false;
-};
-
-WindowsValidationState &WindowsValidationControl() {
-  // One reusable reader for the helper's lifetime. An uninterruptible driver must not race static
-  // destruction, and a stopped job must not cause another worker to be created.
-  static auto *state = new WindowsValidationState;
-  return *state;
-}
 
 WindowsSessionIdentityResult MeasureWindowsSessionIdentity(const WindowsValidationWork &work) {
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::Validation);
+#endif
   const auto still_valid = [&] {
-    return !work.pending->abandoned.load(std::memory_order_acquire) &&
-        WindowsValidationStillCurrent(work.epoch, work.stop_serial);
+    return WindowsValidationStillCurrent(work.epoch, work.stop_serial);
   };
   WindowsSessionIdentityResult result;
   std::string process_start;
@@ -87,7 +62,7 @@ WindowsSessionIdentityResult MeasureWindowsSessionIdentity(const WindowsValidati
   std::wstring current_path;
   WindowsFileIdentity held_file_identity;
   // Keep both start-time checks that Validate performed, including the held-process check. These
-  // reads are fresh for every call; the worker never caches a preceding validation's answer.
+  // reads are fresh for every call; no preceding validation's answer is cached.
   if (!still_valid() || work.process.value == nullptr ||
       GetProcessId(work.process.value) != work.pid ||
       WaitForSingleObject(work.process.value, 0) != WAIT_TIMEOUT || !still_valid() ||
@@ -106,145 +81,47 @@ WindowsSessionIdentityResult MeasureWindowsSessionIdentity(const WindowsValidati
   return still_valid() ? result : WindowsSessionIdentityResult{};
 }
 
-void CancelWindowsValidationJob(std::uint64_t job_id) {
-  auto &state = WindowsValidationControl();
-  std::lock_guard lock(state.mutex);
-  // The physical thread is reused. An old caller may cancel only its still-active job, never the
-  // next job that happens to be on that same thread.
-  if (state.active_job_id == job_id && job_id != 0 && state.cancellation_thread != nullptr)
-    CancelSynchronousIo(state.cancellation_thread);
-}
-
-void WindowsValidationWorkerLoop(WindowsValidationState *state) {
-  // The reusable thread owns its cancellation handle for its lifetime; state exposes an alias only
-  // while one job owns the shared measurement slot. No COM apartment or input API is needed here.
-  ScopedKernelHandle thread;
-  const bool thread_ready =
-      DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread.value,
-                      0, FALSE, DUPLICATE_SAME_ACCESS) &&
-      thread.value != nullptr && thread.value != INVALID_HANDLE_VALUE;
-  for (;;) {
-    std::unique_ptr<WindowsValidationWork> work;
-    {
-      std::unique_lock lock(state->mutex);
-      state->wake.wait(lock, [&] { return state->queued != nullptr; });
-      work = std::move(state->queued);
-      state->cancellation_thread = thread_ready ? thread.value : nullptr;
-    }
-    const auto pending = work->pending;
-    const std::uint64_t job_id = pending->job_id;
-    WindowsSessionIdentityResult result;
-    try {
-      if (thread_ready) result = MeasureWindowsSessionIdentity(*work);
-    } catch (...) {
-      result = {};
-    }
-    // The worker closes the job's duplicated process/exe handles, even after the session was closed.
-    work.reset();
-    {
-      std::lock_guard lock(state->mutex);
-      if (state->active_job_id == job_id) {
-        state->cancellation_thread = nullptr;
-        state->active_job_id = 0;
-        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-      }
-    }
-    // Job retirement precedes result publication. Nothing below touches the shared slot or alias:
-    // a new request may already own them while the old consumer is abandoning this result.
-    {
-      std::lock_guard lock(pending->mutex);
-      if (!pending->abandoned.load(std::memory_order_acquire)) pending->result = result;
-      pending->done = true;
-    }
-    pending->ready.notify_one();
-  }
-}
-
-struct WindowsValidationSubmission {
-  std::unique_ptr<WindowsValidationWork> work;
-  bool claimed = false;
-  ~WindowsValidationSubmission() {
-    if (!claimed) return;
-    // Not accepted by the worker: the original session still owns its handles on this consumer.
-    work.reset();
-    WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-  }
-};
-
-struct WindowsValidationWaitGuard {
-  std::shared_ptr<WindowsValidationPending> pending;
-  ~WindowsValidationWaitGuard() {
-    std::lock_guard lock(pending->mutex);
-    if (pending->done) return;
-    pending->abandoned.store(true, std::memory_order_release);
-    // Lock order: pending -> state. The worker retires state before locking pending.
-    CancelWindowsValidationJob(pending->job_id);
-  }
-};
-
 bool ReadWindowsSessionIdentityOnLane(const WindowsSession &session, std::uint64_t stop_serial,
                                       WindowsSessionIdentityResult *result) {
-  auto pending = std::make_shared<WindowsValidationPending>();
-  WindowsValidationSubmission submission;
-  submission.work = std::make_unique<WindowsValidationWork>();
-  auto &work = *submission.work;
+  const std::uint64_t epoch = session.cancel_epoch;
+  auto &control = WindowsTargetListControl();
+  {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!WindowsValidationStillCurrent(epoch, stop_serial) ||
+        control.running.exchange(true, std::memory_order_acq_rel))
+      return false;
+  }
+  // Keep the shared slot through handle cleanup. Main's E1/E2 kill-stop bounds a
+  // blocked consumer; synchronous I/O remains cancellable by the pipe reader.
+  struct Slot {
+    ~Slot() { WindowsTargetListWorkerRunning().store(false, std::memory_order_release); }
+  } slot;
+  WindowsValidationWork work;
   work.pid = session.pid;
   work.process_start = session.process_start;
   work.canonical_path = session.canonical_path;
   work.volume_serial = session.executable_volume_serial;
   work.file_id = session.executable_file_id;
-  work.epoch = session.cancel_epoch;
+  work.epoch = epoch;
   work.stop_serial = stop_serial;
-  work.pending = pending;
-  const std::uint64_t epoch = work.epoch;
-  {
-    auto &control = WindowsTargetListControl();
-    std::lock_guard stop_lock(control.stop_mutex);
-    if (!WindowsValidationStillCurrent(epoch, stop_serial) ||
-        control.running.exchange(true, std::memory_order_acq_rel))
-      return false;
-    submission.claimed = true;
-  }
-  // Duplicate while the consumer still owns the session. The worker never borrows handles that a
-  // later Close can release or reuse. A submission failure is cleaned before this frame returns.
   if (session.process_handle == nullptr || session.executable_file == INVALID_HANDLE_VALUE ||
       !DuplicateHandle(GetCurrentProcess(), session.process_handle, GetCurrentProcess(), &work.process.value,
                        0, FALSE, DUPLICATE_SAME_ACCESS) ||
       !DuplicateHandle(GetCurrentProcess(), session.executable_file, GetCurrentProcess(), &work.executable.value,
                        0, FALSE, DUPLICATE_SAME_ACCESS))
     return false;
-  auto &state = WindowsValidationControl();
+  WindowsSessionIdentityResult measured;
   try {
-    std::lock_guard lock(state.mutex);
-    if (state.active_job_id != 0 || state.queued != nullptr ||
-        state.next_job_id == std::numeric_limits<std::uint64_t>::max())
-      return false;
-    if (!state.worker_started) {
-      std::thread(WindowsValidationWorkerLoop, &state).detach();
-      state.worker_started = true;
-    }
-    pending->job_id = ++state.next_job_id;
-    state.active_job_id = pending->job_id;
-    state.queued = std::move(submission.work);
-    submission.claimed = false;
+    WindowsNewStartIoRegistration cancellation;
+    if (cancellation.thread == nullptr) return false;
+    measured = MeasureWindowsSessionIdentity(work);
   } catch (...) {
     return false;
   }
-  state.wake.notify_one();
-  WindowsValidationWaitGuard guard{pending};
-  std::unique_lock lock(pending->mutex);
-  for (;;) {
-    {
-      // Lock order: pending -> stop. The reader takes only stop_mutex.
-      std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
-      if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;
-      if (pending->done) {
-        *result = pending->result;
-        return true;
-      }
-    }
-    pending->ready.wait_for(lock, std::chrono::milliseconds(20));
-  }
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;
+  *result = measured;
+  return true;
 }
 // END windows session identity validation
 

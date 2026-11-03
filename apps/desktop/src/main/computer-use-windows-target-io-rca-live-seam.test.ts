@@ -592,25 +592,10 @@ function instrumentedHost(): string {
   );
   const identityTo = source.indexOf('// END windows session identity validation', identityFrom);
   if (identityFrom < 0 || identityTo < 0) throw new Error('Validation identity boundary changed');
-  let identity = replaceOnce(
+  const identity = replaceOnce(
     source.slice(identityFrom, identityTo),
     'ReadWindowsFileIdentity(work.executable.value, &held_file_identity)',
     'Sc940ValidationFileIdentity(work, &held_file_identity)',
-  );
-  identity = replaceOnce(
-    identity,
-    'void WindowsValidationWorkerLoop(WindowsValidationState *state) {',
-    'void WindowsValidationWorkerLoop(WindowsValidationState *state) {\n  Sc940ValidationWorkerStarted();',
-  );
-  identity = replaceOnce(
-    identity,
-    '    CancelSynchronousIo(state.cancellation_thread);',
-    '    { Sc940ValidationCancelAttempt(job_id, GetThreadId(state.cancellation_thread)); CancelSynchronousIo(state.cancellation_thread); }',
-  );
-  identity = replaceOnce(
-    identity,
-    '    // Job retirement precedes result publication. Nothing below touches the shared slot or alias:',
-    '    Sc940ValidationRetired(job_id);\n    // Job retirement precedes result publication. Nothing below touches the shared slot or alias:',
   );
   source = source.slice(0, identityFrom) + identity + source.slice(identityTo);
   const from = source.indexOf('bool ValidateWindowsSession(\n');
@@ -793,9 +778,6 @@ void Sc940RejudgeRetired(std::uint64_t job_id);
 void Sc940RejudgeContextGate(const WindowsV2RejudgeWork &work);
 std::string Sc940RejudgeProbe(const std::string &metadata);
 bool Sc940ValidationFileIdentity(const WindowsValidationWork &work, WindowsFileIdentity *identity);
-void Sc940ValidationWorkerStarted();
-void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id);
-void Sc940ValidationRetired(std::uint64_t job_id);
 std::string Sc940ValidationProbe(const std::string &metadata);
 bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
 struct WindowsExistingStartWork;
@@ -911,14 +893,10 @@ std::atomic<DWORD> resume_consumer_thread{0};
 std::atomic<unsigned> resume_pin_checks{0};
 HANDLE resume_other_file = INVALID_HANDLE_VALUE;
 std::atomic<bool> validation_case_active{false};
-std::atomic<unsigned> validation_file_reads{0}, validation_file_successes{0}, validation_workers{0};
-std::atomic<unsigned> validation_cancel_attempts{0}, validation_retired_jobs{0};
+std::atomic<unsigned> validation_file_reads{0}, validation_file_successes{0};
 std::atomic<unsigned> validation_gate_read{0};
-std::atomic<DWORD> validation_thread_id{0};
+std::atomic<bool> validation_io_hold{false}, validation_io_canceled{false};
 std::atomic<HANDLE> validation_source_process{nullptr}, validation_source_file{INVALID_HANDLE_VALUE};
-std::atomic<std::uint64_t> validation_last_cancel_id{0}, validation_last_retired_id{0};
-std::mutex validation_pending_mutex;
-std::shared_ptr<WindowsValidationPending> validation_first_pending, validation_last_pending;
 const WindowsSession *validation_probe_source = nullptr;
 std::atomic<const WindowsSession *> rejudge_probe_source{nullptr};
 std::atomic<DWORD> rca_consumer_thread_id{0};
@@ -1041,43 +1019,32 @@ std::string Sc940RejudgeProbe(const std::string &metadata) {
       std::to_string(source.input_api_attempts->load()) + "}";
 }
 
-void Sc940ValidationWorkerStarted() {
-  if (!validation_case_active.load()) return;
-  validation_workers.fetch_add(1);
-  validation_thread_id.store(GetCurrentThreadId());
-}
 bool Sc940ValidationFileIdentity(const WindowsValidationWork &work, WindowsFileIdentity *identity) {
   if (!validation_case_active.load()) return ReadWindowsFileIdentity(work.executable.value, identity);
   if (work.pid != fixture_pids[0] || GetProcessId(work.process.value) != fixture_pids[0] ||
       work.process.value == validation_source_process.load() || work.executable.value == validation_source_file.load() ||
-      GetCurrentThreadId() != validation_thread_id.load()) {
+      GetCurrentThreadId() != rca_consumer_thread_id.load()) {
     wrong_measurement.store(true);
     return false;
   }
-  {
-    std::lock_guard lock(validation_pending_mutex);
-    if (validation_first_pending == nullptr) validation_first_pending = work.pending;
-    validation_last_pending = work.pending;
-  }
   const unsigned ordinal = validation_file_reads.fetch_add(1) + 1;
   if (ordinal == validation_gate_read.load()) {
+    if (validation_io_hold.load()) {
+      ScopedKernelHandle reader, writer;
+      Require(CreatePipe(&reader.value, &writer.value, nullptr, 0), "validation_sync_pipe");
+      SetEvent(gate_entered);
+      char byte = 0;
+      DWORD read = 0;
+      const BOOL completed = ReadFile(reader.value, &byte, 1, &read, nullptr);
+      validation_io_canceled.store(!completed && GetLastError() == ERROR_OPERATION_ABORTED);
+      return false;
+    }
     SetEvent(gate_entered);
     if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
   }
   const bool read = ReadWindowsFileIdentity(work.executable.value, identity);
   if (read) validation_file_successes.fetch_add(1);
   return read;
-}
-void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id) {
-  if (!validation_case_active.load()) return;
-  if (thread_id == 0 || thread_id != validation_thread_id.load()) wrong_measurement.store(true);
-  validation_last_cancel_id.store(job_id);
-  validation_cancel_attempts.fetch_add(1);
-}
-void Sc940ValidationRetired(std::uint64_t job_id) {
-  if (!validation_case_active.load()) return;
-  validation_last_retired_id.store(job_id);
-  validation_retired_jobs.fetch_add(1);
 }
 
 std::string Sc940ValidationProbe(const std::string &metadata) {
@@ -3490,33 +3457,13 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
   }
 }
 
-struct ValidationStateView {
-  std::uint64_t active = 0, next = 0;
-  DWORD thread = 0;
-  bool queued = false, started = false;
-};
-ValidationStateView ValidationState() {
-  auto &state = WindowsValidationControl();
-  std::lock_guard lock(state.mutex);
-  return {state.active_job_id, state.next_job_id,
-          state.cancellation_thread == nullptr ? 0 : GetThreadId(state.cancellation_thread),
-          state.queued != nullptr, state.worker_started};
-}
-std::shared_ptr<WindowsValidationPending> ValidationPending(bool first) {
-  std::lock_guard lock(validation_pending_mutex);
-  return first ? validation_first_pending : validation_last_pending;
-}
-bool WaitValidationDone(const std::shared_ptr<WindowsValidationPending> &pending, DWORD milliseconds) {
-  if (pending == nullptr) return false;
-  const ULONGLONG deadline = GetTickCount64() + milliseconds;
-  do {
-    {
-      std::lock_guard lock(pending->mutex);
-      if (pending->done) return true;
-    }
-    Sleep(1);
-  } while (GetTickCount64() < deadline);
-  return false;
+bool ValidationIoRegistered(bool pending = false) {
+  auto &control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  if (control.new_start_thread == nullptr ||
+      GetThreadId(control.new_start_thread) != rca_consumer_thread_id.load()) return false;
+  BOOL io_pending = FALSE;
+  return !pending || (GetThreadIOPendingFlag(control.new_start_thread, &io_pending) && io_pending);
 }
 ValidationProbeResult RunValidationProbe(RcaRun &run, std::uint8_t request, std::string_view mode) {
   run.Send(MessageType::kProbe, request,
@@ -3536,19 +3483,20 @@ int DiagnoseValidation(std::wstring_view scenario) {
   ULONGLONG stop_ms = 0, close_ms = 0;
   double repeat_ms = 0;
   unsigned repeat_calls = 0;
-  std::uint64_t first_job = 0, next_job = 0;
   try {
     validation_case_active.store(true);
     run.StartFixture(true);
     run.PrepareValidationProbe();
     run.StartPipe(false, !repeat, !repeat);
+    const auto input_attempts = repeat ? run.validation_probe_session.input_api_attempts :
+        sessions.at(FrameIdKey(Id(7))).input_api_attempts;
     run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":3}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "validation_handshake");
     if (repeat) {
       const ValidationProbeResult result = RunValidationProbe(run, 2, "repeat");
       Require(result.available && result.matches && result.calls == 16 && result.successes == 16 &&
-                  validation_file_reads.load() == 16 && validation_file_successes.load() == 16 &&
-                  validation_retired_jobs.load() == 16, "validation_every_call_reads_identity");
+                  validation_file_reads.load() == 16 && validation_file_successes.load() == 16,
+              "validation_every_call_reads_identity");
       repeat_ms = result.elapsed_ms;
       repeat_calls = 16;
       std::uint8_t request = 10;
@@ -3557,58 +3505,46 @@ int DiagnoseValidation(std::wstring_view scenario) {
         Require(refused.available && !refused.matches && refused.successes == 0,
                 "validation_bad_identity_or_real_read_failure_refused");
       }
-      Require(validation_file_reads.load() == 18 && validation_file_successes.load() == 17 &&
-                  validation_retired_jobs.load() == 20, "validation_failure_calls_are_real");
+      Require(validation_file_reads.load() == 18 && validation_file_successes.load() == 17,
+              "validation_failure_calls_are_real");
       const ValidationProbeResult fresh = RunValidationProbe(run, 20, "normal");
       Require(fresh.available && fresh.matches && validation_file_reads.load() == 19 &&
                   validation_file_successes.load() == 18, "validation_failure_not_cached");
     } else {
       validation_gate_read.store(1);
+      validation_io_hold.store(cancel);
       hold_point.store(queued ? HoldPoint::kConsumer : HoldPoint::kNone);
-      // The be6 path: a real preflight reaches actual Validate with owned process/exe handles.
       const std::string preflight = "{\"requestId\":\"held-file-rca\",\"actionDigest\":\"" + std::string(64, 'a') +
           "\",\"cancelEpoch\":1,\"observationRevision\":1,\"type\":\"invoke\",\"targetId\":\"fixture\"}";
       run.Send(MessageType::kPreflight, 2, preflight);
       Require(WaitForSingleObject(run.entered.value, 10'000) == WAIT_OBJECT_0 &&
                   WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "validation_fault_gate_entered");
-      const ValidationStateView before = ValidationState();
-      if (queued) {
-        Require(!before.started && before.active == 0 && !before.queued && validation_file_reads.load() == 0 &&
-                    !WindowsTargetListWorkerRunning().load(), "validation_queued_frame_has_no_worker");
-      } else {
-        const auto pending = ValidationPending(true);
-        Require(pending != nullptr, "validation_first_job_recorded");
-        first_job = pending->job_id;
-        Require(before.started && before.active == first_job && !before.queued &&
-                    before.thread == validation_thread_id.load() && validation_workers.load() == 1 &&
-                    validation_file_reads.load() == 1 && validation_file_successes.load() == 0 &&
-                    WindowsTargetListWorkerRunning().load(), "validation_owned_duplicate_held");
-      }
+      Require(queued ? (!ValidationIoRegistered() && validation_file_reads.load() == 0) :
+                  (ValidationIoRegistered() && validation_file_reads.load() == 1 &&
+                   WindowsTargetListWorkerRunning().load()), "validation_consumer_registration");
       if (cancel) {
+        const ULONGLONG ready_deadline = GetTickCount64() + 5000;
+        while (!ValidationIoRegistered(true) && GetTickCount64() < ready_deadline) Sleep(1);
+        Require(ValidationIoRegistered(true), "validation_real_sync_io_pending");
         const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
         const ULONGLONG sent = GetTickCount64();
         run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
         Require(WaitStopSerial(serial, 1000) && run.Wait(2, 1000) && run.PreflightDenied(2) &&
                     run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
-                "validation_cancel_alone_drains_before_close");
+                "validation_cancel_interrupts_consumer_io");
         stop_ms = GetTickCount64() - sent;
-        Require(stop_ms < 1000 && validation_file_successes.load() == 0 &&
-                    WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-                "validation_cancel_ack_while_real_read_held");
-        const ValidationProbeResult busy = RunValidationProbe(run, 6, "normal");
-        const ValidationStateView after = ValidationState();
-        Require(!busy.available && !busy.matches && after.active == first_job && after.next == before.next &&
-                    !after.queued && after.thread == before.thread && validation_file_reads.load() == 1 &&
-                    validation_workers.load() == 1, "validation_fresh_busy_request_enqueues_nothing");
+        Require(stop_ms < 1000 && validation_io_canceled.load() && !ValidationIoRegistered() &&
+                    validation_file_successes.load() == 0, "validation_single_cancel_aborts_pending_io");
       }
-      // For Close-only and prequeued Close no Cancel frame has been sent.
       const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
       const ULONGLONG close_sent = GetTickCount64();
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":" +
           std::to_string(cancel ? 3 : 2) + "}");
       Require(WaitStopSerial(serial, 1000), "validation_close_reader_progress");
-      if (queued) {
-        Require(cancellation_epoch.load() == 1 && validation_workers.load() == 0, "validation_close_prequeued_serial_only");
+      if (!cancel) {
+        // The event wait is not cancellable I/O. Return it after the barrier to test late rejection;
+        // the permanently held consumer is covered by the E1/E2 hung-helper seam.
+        Require(!run.Wait(2, 50), "validation_no_response_while_consumer_held");
         hold_point.store(HoldPoint::kNone);
         SetEvent(run.release.value);
       }
@@ -3616,87 +3552,40 @@ int DiagnoseValidation(std::wstring_view scenario) {
                   run.Receipt(4, MessageType::kProbeResult, "closed", cancel ? 3 : 2), "validation_close_drains");
       close_ms = GetTickCount64() - close_sent;
       Require(close_ms < 1000 && !sessions.contains(FrameIdKey(Id(7))) &&
-                  !ticket_states.contains(FrameIdKey(Id(7))), "validation_original_session_closed_without_ticket");
-      if (!queued) {
-        Require(validation_file_successes.load() == 0 && WindowsTargetListWorkerRunning().load() &&
-                    WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-                "validation_close_precedes_duplicate_read_release");
-        validation_gate_read.store(0);
-        SetEvent(run.release.value);
-        const auto pending = ValidationPending(true);
-        Require(run.WaitWorkerIdle(15'000) && WaitValidationDone(pending, 1000), "validation_old_job_drained");
-        {
-          std::lock_guard lock(pending->mutex);
-          Require(pending->abandoned.load() && !pending->result.identity_matches,
-                  "validation_late_result_not_adopted");
-        }
-        Require(validation_file_reads.load() == 1 && validation_file_successes.load() == 1 &&
-                    validation_retired_jobs.load() == 1 && validation_last_retired_id.load() == first_job &&
-                    run.ReplyCount(2) == 1, "validation_real_duplicate_read_after_close");
-      } else {
-        Require(!ValidationState().started && validation_file_reads.load() == 0 &&
-                    validation_workers.load() == 0, "validation_prequeued_close_creates_no_job");
-      }
+                  !ticket_states.contains(FrameIdKey(Id(7))) && run.ReplyCount(2) == 1,
+              "validation_late_result_not_adopted_or_ticketed");
+      Require(validation_file_reads.load() == (queued ? 0u : 1u) &&
+                  validation_file_successes.load() == (!queued && !cancel ? 1u : 0u),
+              "validation_stale_queued_frame_never_measured");
+      validation_gate_read.store(0);
+      validation_io_hold.store(false);
+      const ValidationProbeResult fresh = RunValidationProbe(run, 20, "normal");
+      Require(fresh.available && fresh.matches && !ValidationIoRegistered(),
+              "validation_fresh_read_after_cleanup");
       if (cancel) {
-        ResetEvent(run.entered.value);
-        ResetEvent(run.release.value);
-        validation_gate_read.store(2);
-        run.Send(MessageType::kProbe, 20, "{\"operation\":\"sc940_validation_probe\",\"mode\":\"normal\"}");
-        Require(WaitForSingleObject(run.entered.value, 5000) == WAIT_OBJECT_0, "validation_next_job_held");
-        const auto next = ValidationPending(false);
-        Require(next != nullptr && next->job_id != first_job, "validation_next_job_has_new_id");
-        next_job = next->job_id;
-        const ValidationStateView active = ValidationState();
-        const unsigned attempts = validation_cancel_attempts.load();
-        Require(active.active == next_job && active.thread == before.thread && !active.queued &&
-                    attempts > 0 && validation_last_cancel_id.load() == first_job &&
-                    WindowsTargetListWorkerRunning().load(), "validation_same_physical_thread_new_job");
-        CancelWindowsValidationJob(first_job);
-        const ValidationStateView unchanged = ValidationState();
-        Require(validation_cancel_attempts.load() == attempts && unchanged.active == next_job &&
-                    unchanged.thread == active.thread && WindowsTargetListWorkerRunning().load() &&
-                    WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-                "validation_old_id_cannot_cancel_next_job");
-        validation_gate_read.store(0);
-        SetEvent(run.release.value);
-        ValidationProbeResult fresh;
-        Require(run.Wait(20, 5000) && run.ValidationReply(20, &fresh) && fresh.available && fresh.matches &&
-                    WaitValidationDone(next, 1000) && validation_file_successes.load() == 2,
-                "validation_explicit_retry_survives_old_cancel");
         const ValidationProbeResult repeated = RunValidationProbe(run, 21, "repeat");
         Require(repeated.available && repeated.matches && repeated.successes == 16 &&
-                    validation_file_reads.load() == 18 && validation_file_successes.load() == 18 &&
-                    validation_retired_jobs.load() == 18, "validation_reused_worker_never_caches");
+                    validation_file_reads.load() == 18 && validation_file_successes.load() == 17,
+                "validation_consumer_never_caches");
         repeat_ms = repeated.elapsed_ms;
         repeat_calls = 16;
-      } else {
-        validation_gate_read.store(0);
-        const ValidationProbeResult fresh = RunValidationProbe(run, 20, "normal");
-        Require(fresh.available && fresh.matches && validation_file_successes.load() == (queued ? 1u : 2u),
-                "validation_fresh_read_after_cleanup");
       }
     }
-    const ValidationStateView idle = ValidationState();
-    Require(run.WaitWorkerIdle(1000) && idle.active == 0 && !idle.queued && idle.thread == 0 && idle.started &&
-                validation_workers.load() == 1 && !wrong_measurement.load() && !gate_timed_out.load(),
-            "validation_jobs_and_duplicate_cleanup_complete");
+    Require(run.WaitWorkerIdle(1000) && !ValidationIoRegistered() &&
+                !wrong_measurement.load() && !gate_timed_out.load(), "validation_registration_cleanup_complete");
+    Require(input_attempts->load() == 0, "validation_zero_input_attempts");
     run.Cleanup();
     Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "validation_fixture_cleanup");
-    // The reusable native thread is intentionally idle until helper exit. threadsJoined refers
-    // only to this harness's pipe/reader/watchdog threads, not that persistent native worker.
     std::cout << "{\"case\":\"" << label << "\",\"stopMs\":" << stop_ms << ",\"closeMs\":" << close_ms
               << ",\"primitiveCostOnly\":true,\"stopPath\":\"" << (repeat ? "none" : "preflight_validate")
               << "\",\"inputLatencyMeasured\":false,\"repeatCalls\":" << repeat_calls
               << ",\"repeatMs\":" << repeat_ms << ",\"fileReads\":" << validation_file_reads.load()
               << ",\"fileReadSuccesses\":" << validation_file_successes.load()
-              << ",\"validationWorkerThreads\":" << validation_workers.load()
-              << ",\"validationRetiredJobs\":" << validation_retired_jobs.load()
+              << ",\"validationWorkerThreads\":0,\"consumerMeasurement\":true,\"registrationCleared\":true"
+              << ",\"syncIoCanceled\":" << (validation_io_canceled.load() ? "true" : "false")
               << ",\"instrumentedPrimitiveTiming\":true"
               << ",\"fixtureLaunchPathCanonicalized\":" << (run.fixture_launch_path_canonicalized ? "true" : "false")
-              << ",\"fixtureProcessPathMatchesHeld\":true"
-              << ",\"cancelAttempts\":" << validation_cancel_attempts.load() << ",\"firstJobId\":" << first_job
-              << ",\"reusedJobId\":" << next_job << ",\"validationJobDrained\":true,\"duplicateCleanupObserved\":true"
-              << ",\"validationWorkerJoined\":false,\"joinedThreads\":\"pipe-reader-watchdog\",\"inputAttempts\":0"
+              << ",\"fixtureProcessPathMatchesHeld\":true,\"joinedThreads\":\"pipe-reader-watchdog\",\"inputAttempts\":0"
               << ",\"childExited\":true,\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
   } catch (const std::exception &error) {
@@ -4794,13 +4683,9 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('!Sc940ValidationFileIdentity(work, &held_file_identity)')).toHaveLength(
       2,
     );
-    expect(generated.split('  Sc940ValidationWorkerStarted();')).toHaveLength(2);
-    expect(
-      generated.split(
-        'Sc940ValidationCancelAttempt(job_id, GetThreadId(state.cancellation_thread));',
-      ),
-    ).toHaveLength(2);
-    expect(generated.split('    Sc940ValidationRetired(job_id);')).toHaveLength(2);
+    expect(generated).not.toContain('WindowsValidationWorkerLoop');
+    expect(program).toContain('validation_single_cancel_aborts_pending_io');
+    expect(program).toContain('validation_late_result_not_adopted_or_ticketed');
     expect(program).toContain(
       'const bool read = ReadWindowsFileIdentity(work.executable.value, identity);',
     );
@@ -5082,19 +4967,11 @@ describe.skipIf(
               stopPath: scenario === 'validation-repeat' ? 'none' : 'preflight_validate',
               inputLatencyMeasured: false,
               fixtureProcessPathMatchesHeld: true,
-              validationWorkerThreads: 1,
-              validationRetiredJobs:
-                scenario === 'validation-cancel'
-                  ? 18
-                  : scenario === 'validation-close'
-                    ? 2
-                    : scenario === 'validation-repeat'
-                      ? 21
-                      : 1,
+              validationWorkerThreads: 0,
+              consumerMeasurement: true,
+              registrationCleared: true,
+              syncIoCanceled: scenario === 'validation-cancel',
               instrumentedPrimitiveTiming: true,
-              validationJobDrained: true,
-              duplicateCleanupObserved: true,
-              validationWorkerJoined: false,
               joinedThreads: 'pipe-reader-watchdog',
               inputAttempts: 0,
               childExited: true,
@@ -5105,7 +4982,7 @@ describe.skipIf(
           } catch {
             validationFailures.push(`${scenario}: metadata_assertion`);
           }
-          // Process exit is distinct from the persistent native worker being idle above.
+          // Process exit is distinct from the shared measurement slot being idle above.
           console.log(
             JSON.stringify({ case: scenario, kind: 'helper_exit', helperProcessExited: true }),
           );

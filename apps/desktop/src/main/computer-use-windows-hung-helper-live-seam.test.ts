@@ -1101,6 +1101,7 @@ const sessionCaseNames = [
   'terminates existing start hung in CreateFileW through E3 kill-stop',
   'cancels a pending Controller start in WinVerifyTrust',
   'cancels a pending Controller start in CreateFileW',
+  'terminates validation hung outside cancellable I/O within the E1 Stop budget',
   'stops observation hung in UiaCall through the worker cancellation path',
   'stops observation hung in Capture through the worker cancellation path',
   'retains claimed semantic input after Controller native_unavailable',
@@ -1132,6 +1133,14 @@ describe('hung helper seam static contracts (#1002)', () => {
     expect(killBudget).toBe(41_000);
     expect(killStopBudget).toBe(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS + WINDOWS_STOP_EXIT_MS);
     expect(killStopBudget).toBe(12_000);
+    expect(WINDOWS_STOP_DEADLINE_MS.E1).toBe(cancelBudget + killStopBudget);
+    expect(WINDOWS_STOP_DEADLINE_MS.E2).toBe(cancelBudget + killStopBudget);
+    const validation = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_session.inc'),
+      'utf8',
+    );
+    expect(validation).toContain('WindowsTestHang(WindowsTestHangPoint::Validation);');
+    expect(validation).toContain('WindowsNewStartIoRegistration cancellation;');
     expect(uiaWatchdog).toBe(470);
     expect(readFileSync(source, 'utf8')).toContain('#include "computer_use_windows_test_hang.h"');
     // The workflow isolation (one job, one env entry) is checked in workflow-security.test.ts.
@@ -1520,6 +1529,41 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       caseTimeout,
     );
   }
+
+  it(
+    'terminates validation hung outside cancellable I/O within the E1 Stop budget',
+    async (context) => {
+      live(context);
+      observeChildren();
+      arm('');
+      const killStop = killStopOptions();
+      const target = await prepare(context, hung, undefined, killStop);
+      const session = await target.start();
+      arm('Validation');
+      const observation = settle(
+        target.addon.observe!({
+          sessionId: session.sessionId,
+          requestId: 'validation-hang',
+          cancelEpoch: 0,
+        }),
+      );
+      await awaitHang(observation, operationTimeoutMilliseconds('observe') - margin);
+      const origin = performance.now();
+      await target.controller.stopForTask('seam-task', 'task_changed');
+      const elapsed = performance.now() - origin;
+      expect(elapsed).toBeLessThan(WINDOWS_STOP_DEADLINE_MS.E1 + margin);
+      expect(target.controller.getStatus(session.sessionId)).toMatchObject({ state: 'stopped' });
+      const helpers = children.filter((row) => row.temp);
+      expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+      expect(helpers.every((row) => row.exited)).toBe(true);
+      const outcome = await observation;
+      expect(outcome).toBeInstanceOf(Error);
+      expect(helperReply(outcome)).toBeNull();
+      expect(killStop.rows.filter((row) => row.at >= origin)).toEqual([]);
+      report(context.task.name, origin, outcome, elapsed);
+    },
+    caseTimeout,
+  );
 
   for (const point of ['UiaCall', 'Capture']) {
     it(

@@ -40,6 +40,35 @@ import {
 
 const roots: string[] = [];
 
+it('measures validation identity on the consumer with cancellable I/O and fresh Stop guards', () => {
+  const source = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host_session.inc'),
+    'utf8',
+  ).split('// END windows session identity validation')[0]!;
+  expect(source).not.toMatch(
+    /WindowsValidation(?:Pending|State|WorkerLoop|WaitGuard)|job_id|\.detach\(/u,
+  );
+  expect(source).toContain('WindowsNewStartIoRegistration cancellation;');
+  expect(source).toContain('measured = MeasureWindowsSessionIdentity(work);');
+  expect(source).toContain('if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;');
+  expect(
+    source.indexOf('if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;'),
+  ).toBeLessThan(source.indexOf('*result = measured;'));
+  expect(source).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
+  expect(source).toContain(
+    'WindowsTargetListWorkerRunning().store(false, std::memory_order_release)',
+  );
+  expect(source).toContain('process_start != work.process_start');
+  expect(source).toContain('current_start != work.process_start');
+  expect(source).toContain('SameWindowsPath(current_path, work.canonical_path)');
+  expect(source).toContain('held_file_identity.volume_serial != work.volume_serial');
+  expect(source).toContain(
+    'std::memcmp(held_file_identity.file_id.Identifier, work.file_id.Identifier,',
+  );
+  expect(source).toContain('result.elevated = IsProcessElevated(work.pid);');
+  expect(source).toContain('return still_valid() ? result : WindowsSessionIdentityResult{};');
+});
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
