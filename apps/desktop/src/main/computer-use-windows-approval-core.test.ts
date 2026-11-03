@@ -172,7 +172,10 @@ describe('Windows portable approval core (N8-1a)', () => {
     expect(windows).toContain('BuildWindowsShadowFacts(');
     expect(windows).toContain('WindowsCaptureChainOwnedBy(');
     expect(windows).toContain('WindowsCaptureTargetNotWeb(');
-    expect(windows).toContain('return MeasureApprovalFromFacts(shared, built.facts);');
+    // P2c keeps the shared facts result, binding only eligible background authority to the target.
+    expect(windows).toMatch(
+      /auto result = MeasureApprovalFromFacts\(shared, built\.facts\);\s*if \(input\.background && result\.eligible\)\s*result\.authority_digest = Sha256Hex\(result\.authority_digest \+ input\.current_background_binding\);\s*return result;/u,
+    );
     for (const name of readdirSync(directory).filter(
       (name) => name.startsWith('computer_use_windows') && /\.(h|cc|inc)$/u.test(name),
     )) {

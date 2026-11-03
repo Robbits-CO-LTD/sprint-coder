@@ -12,7 +12,7 @@ struct WindowsUiaRisk;
 enum class WindowsV1UiaStop;
 bool ObserveValidate(const WindowsSession&, RECT*, std::string*, WindowsDialogSetSnapshot*);
 bool ObserveTree(std::uint32_t, HWND, std::string*, std::size_t*, bool);
-bool ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*);
+bool ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*, bool);
 WindowsUiaRisk ObserveFocus(std::uint32_t);
 bool ObserveSignature(std::uint32_t, const RECT&, std::string*);
 bool ObserveScreen(HWND, RECT*);
@@ -50,8 +50,8 @@ bool ObserveTree(std::uint32_t pid, HWND window, std::string* tree, std::size_t*
   Check(pid == 7 && window == target && bg == background);
   *tree = "{}"; *nodes = 1; return tree_ok;
 }
-bool ObserveBindings(std::uint32_t pid, HWND window, WindowsControlBindings*) {
-  Check(pid == 7 && window == target); return true;
+bool ObserveBindings(std::uint32_t pid, HWND window, WindowsControlBindings*, bool bg) {
+  Check(pid == 7 && window == target && bg == background); return true;
 }
 WindowsUiaRisk ObserveFocus(std::uint32_t pid) {
   Check(pid == 7 && !background); ++focus_reads; return {};

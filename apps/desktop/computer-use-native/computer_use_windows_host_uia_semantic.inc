@@ -421,6 +421,137 @@ bool ComputeWindowsControlSignature(IUIAutomationElement *element,
   return signature->size() == 64;
 }
 
+bool ReadWindowsBackgroundRuntimeId(IUIAutomationElement *element,
+                                    sprint_coder::computer_use::WindowsBackgroundAncestor *node) {
+  int pid = 0;
+  struct Runtime {
+    SAFEARRAY *value = nullptr;
+    ~Runtime() { if (value != nullptr) SafeArrayDestroy(value); }
+  } runtime;
+  SAFEARRAY *&runtime_id = runtime.value;
+  if (!WindowsV1UiaRead(pid, [&] { return element->get_CurrentProcessId(&pid); }) || pid <= 0 ||
+      !WindowsV1UiaRead(runtime_id, [&] { return element->GetRuntimeId(&runtime_id); }) ||
+      runtime.value == nullptr || SafeArrayGetDim(runtime.value) != 1 ||
+      SafeArrayGetElemsize(runtime.value) != sizeof(LONG)) return false;
+  LONG lower = 0, upper = -1;
+  if (FAILED(SafeArrayGetLBound(runtime.value, 1, &lower)) ||
+      FAILED(SafeArrayGetUBound(runtime.value, 1, &upper)) ||
+      upper < lower || static_cast<std::int64_t>(upper) - lower >= 64) return false;
+  node->pid = static_cast<std::uint32_t>(pid);
+  for (std::int64_t index = lower; index <= upper; ++index) {
+    LONG at = static_cast<LONG>(index), value = 0;
+    if (FAILED(SafeArrayGetElement(runtime.value, &at, &value))) return false;
+    node->runtime_id.push_back(value);
+  }
+  return WindowsV1UiaMayCall();
+}
+
+bool ComputeWindowsBackgroundControlSignature(IUIAutomationElement *element,
+    std::uint32_t pid, HWND window, std::string *signature) {
+  using namespace sprint_coder::computer_use;
+  using windows_uia_source_detail::ComRef;
+  if (element == nullptr || signature == nullptr || window == nullptr) return false;
+  signature->clear();
+  WindowsBackgroundBindingFacts facts;
+  facts.pid = pid;
+  facts.window = reinterpret_cast<std::uintptr_t>(window);
+  if (!ComputeWindowsControlSignature(element, pid, nullptr, &facts.control_signature)) return false;
+  const auto text = [&](PROPERTYID property, std::string *out) {
+    VARIANT value;
+    VariantInit(&value);
+    const bool read = WindowsV1UiaRead(value.vt, [&] {
+      return element->GetCurrentPropertyValueEx(property, TRUE, &value);
+    });
+    bool ok = read && value.vt == VT_BSTR && value.bstrVal != nullptr &&
+              SysStringLen(value.bstrVal) <= 4096;
+    if (ok) {
+      const auto wide = std::wstring_view(value.bstrVal, SysStringLen(value.bstrVal));
+      *out = Utf8FromWide(wide);
+      ok = (wide.empty() || !out->empty()) && out->size() <= 4096;
+    }
+    VariantClear(&value);
+    return ok;
+  };
+  if (!text(UIA_NamePropertyId, &facts.name) ||
+      !text(UIA_ItemStatusPropertyId, &facts.item_status) ||
+      !text(UIA_ProviderDescriptionPropertyId, &facts.provider)) return false;
+  // Descriptions are evidence of exclusion, not an attestation of stable item identity.
+  // Unknown provider/runtime combinations stay closed until the versioned provider table exists.
+  const auto provider = LowercaseAscii(facts.provider);
+  if (provider.find("proxy") != std::string::npos || provider.find("msaa") != std::string::npos)
+    facts.proxy = WindowsBackgroundProxy::kIndex;
+  if (facts.proxy != WindowsBackgroundProxy::kStable) return false;
+  for (const auto property : {UIA_IsValuePatternAvailablePropertyId, UIA_IsRangeValuePatternAvailablePropertyId}) {
+    VARIANT value;
+    VariantInit(&value);
+    const bool ok = WindowsV1UiaRead(value.vt, [&] {
+      return element->GetCurrentPropertyValueEx(property, TRUE, &value);
+    }) && value.vt == VT_BOOL;
+    if (ok && value.boolVal == VARIANT_TRUE)
+      facts.value_kind |= property == UIA_IsValuePatternAvailablePropertyId ? 1u : 2u;
+    VariantClear(&value);
+    if (!ok) return false;
+  }
+  ComRef<IUIAutomation> automation;
+  ComRef<IUIAutomationTreeWalker> walker;
+  ComRef<IUIAutomationElement> root;
+  auto *&automation_raw = *automation.Receive();
+  if (FAILED(CreateWindowsV1Automation(&automation_raw)) || automation.Get() == nullptr) return false;
+  auto *&root_raw = *root.Receive();
+  auto *&walker_raw = *walker.Receive();
+  if (!WindowsV1UiaOk(WindowsV1UiaContact(root_raw, [&] { return automation_raw->ElementFromHandle(window, &root_raw); })) ||
+      root.Get() == nullptr ||
+      !WindowsV1UiaRead(walker_raw, [&] { return automation_raw->get_RawViewWalker(&walker_raw); }) ||
+      walker.Get() == nullptr) return false;
+  element->AddRef();
+  ComRef<IUIAutomationElement> current(element);
+  for (std::size_t depth = 0; depth <= 16; ++depth) {
+    WindowsBackgroundAncestor node;
+    if (!ReadWindowsBackgroundRuntimeId(current.Get(), &node) || node.pid != pid) return false;
+    facts.ancestors.push_back(std::move(node));
+    BOOL at_root = FALSE;
+    if (!WindowsV1UiaRead(at_root, [&] {
+      return automation_raw->CompareElements(current.Get(), root.Get(), &at_root);
+    })) return false;
+    if (at_root) {
+      facts.reached_root = true;
+      if (depth == 0) facts.sibling_count = 1;
+      break;
+    }
+    ComRef<IUIAutomationElement> parent;
+    auto *&parent_raw = *parent.Receive();
+    if (!WindowsV1UiaOk(WindowsV1UiaCall(parent_raw, [&] { return walker_raw->GetParentElement(current.Get(), &parent_raw); })) || parent.Get() == nullptr) return false;
+    if (depth == 0) {
+      ComRef<IUIAutomationElement> sibling;
+      auto *&child_raw = *sibling.Receive();
+      if (!WindowsV1UiaOk(WindowsV1UiaCall(child_raw, [&] { return walker_raw->GetFirstChildElement(parent.Get(), &child_raw); }))) return false;
+      std::set<std::vector<std::int32_t>> identities;
+      std::size_t matches = 0;
+      while (sibling.Get() != nullptr) {
+        if (facts.sibling_count >= 5000) return false;
+        WindowsBackgroundAncestor identity;
+        if (!ReadWindowsBackgroundRuntimeId(sibling.Get(), &identity) || identity.pid != pid ||
+            !identities.insert(identity.runtime_id).second) return false;
+        BOOL same = FALSE;
+        if (!WindowsV1UiaRead(same, [&] {
+          return automation_raw->CompareElements(element, sibling.Get(), &same);
+        })) return false;
+        if (same) { ++matches; facts.sibling_index = facts.sibling_count; }
+        ++facts.sibling_count;
+        ComRef<IUIAutomationElement> next;
+        auto *&next_raw = *next.Receive();
+        if (!WindowsV1UiaOk(WindowsV1UiaCall(next_raw, [&] { return walker_raw->GetNextSiblingElement(sibling.Get(), &next_raw); }))) return false;
+        sibling = std::move(next);
+      }
+      if (matches != 1) return false;
+    }
+    current = std::move(parent);
+  }
+  facts.complete = WindowsV1UiaMayCall();
+  *signature = WindowsBackgroundBindingDigest(facts);
+  return !signature->empty();
+}
+
 struct WindowsControlBindings {
   std::unordered_map<std::string, std::string> semantic;
   std::set<std::string> visual;
@@ -468,7 +599,8 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
                                    std::uint32_t expected_pid, std::size_t depth,
                                    std::size_t *nodes,
                                    WindowsControlBindings *bindings,
-                                   std::set<std::string> *duplicate_targets) {
+                                   std::set<std::string> *duplicate_targets,
+                                   HWND background_window = nullptr) {
   if (element == nullptr || walker == nullptr || nodes == nullptr || bindings == nullptr ||
       duplicate_targets == nullptr || depth > 16 || *nodes >= 5'000 || !WindowsV1UiaMayCall())
     return false;
@@ -479,6 +611,9 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
   if (!ComputeWindowsControlSignature(element, expected_pid, nullptr, &signature))
     return false;
   bindings->visual.insert(signature);
+  if (background_window != nullptr &&
+      !ComputeWindowsBackgroundControlSignature(element, expected_pid, background_window, &signature))
+    signature.clear();
 
   std::string target_id;
   if (!ReadWindowsElementTargetId(element, &target_id))
@@ -509,7 +644,7 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
   }
   while (child != nullptr) {
     if (!CollectWindowsControlBindings(child, walker, expected_pid, depth + 1, nodes,
-                                       bindings, duplicate_targets)) {
+                                       bindings, duplicate_targets, background_window)) {
       return false;
     }
     next = nullptr;
@@ -525,7 +660,7 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
 }
 
 bool CaptureWindowsControlBindingsOnWorker(std::uint32_t pid, HWND window,
-                                  WindowsControlBindings *bindings) {
+                                  WindowsControlBindings *bindings, bool background = false) {
   if (bindings == nullptr)
     return false;
   struct Objects {
@@ -552,20 +687,20 @@ bool CaptureWindowsControlBindingsOnWorker(std::uint32_t pid, HWND window,
   std::set<std::string> duplicate_targets;
   const bool complete =
       initialized && CollectWindowsControlBindings(root, walker, pid, 0, &nodes, bindings,
-                                                   &duplicate_targets);
+                                                   &duplicate_targets, background ? window : nullptr);
   return complete && nodes > 0 && nodes <= 5'000;
 }
 
 bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
-                                  WindowsControlBindings *bindings) {
+                                  WindowsControlBindings *bindings, bool background = false) {
   if (bindings == nullptr) return false;
   // MSVC containers can allocate in a move constructor. Publish only ownership under the
   // engine's locks; swap/destroy the caller's old value after those locks have been released.
   std::unique_ptr<WindowsControlBindings> measured;
   if (!RunWindowsUiaRead<std::unique_ptr<WindowsControlBindings>>(false,
-      [pid, window]() -> std::optional<std::unique_ptr<WindowsControlBindings>> {
+      [pid, window, background]() -> std::optional<std::unique_ptr<WindowsControlBindings>> {
         auto value = std::make_unique<WindowsControlBindings>();
-        if (!CaptureWindowsControlBindingsOnWorker(pid, window, value.get())) return std::nullopt;
+        if (!CaptureWindowsControlBindingsOnWorker(pid, window, value.get(), background)) return std::nullopt;
         return value;
       }, [&measured](std::unique_ptr<WindowsControlBindings> value) { measured = std::move(value); }))
     return false;
@@ -751,6 +886,30 @@ bool FindWindowsSemanticTarget(HWND window,
   *output = match;
   match = nullptr;
   return true;
+}
+
+// Shared by ordinary preflight and every approval remeasurement. No focus fallback.
+bool ValidateWindowsBackgroundActionBinding(const WindowsSession &session,
+                                            const std::string &metadata) {
+  using namespace sprint_coder::computer_use;
+  if (session.input_session.kind != InputSessionKind::kBackground) return true;
+  std::string target;
+  if (!ReadJsonString(metadata, "targetId", &target) || target.empty()) return false;
+  const auto observed = session.semantic_control_signatures.find(target);
+  if (observed == session.semantic_control_signatures.end()) return false;
+  std::string current;
+  const auto pid = session.pid;
+  const auto window = session.active_window;
+  if (!RunWindowsUiaRead<std::string>(false,
+      [pid, window, target]() -> std::optional<std::string> {
+        windows_uia_source_detail::ComRef<IUIAutomationElement> element;
+        std::string reason, signature;
+        if (!FindWindowsSemanticTarget(window, target, element.Receive(), &reason) ||
+            !ComputeWindowsBackgroundControlSignature(element.Get(), pid, window, &signature))
+          return std::nullopt;
+        return signature;
+      }, [&current](std::string signature) { current = std::move(signature); })) return false;
+  return WindowsBackgroundBindingMatches(true, observed->second, current);
 }
 
 bool Utf16FromUtf8(std::string_view value, std::wstring *output) {

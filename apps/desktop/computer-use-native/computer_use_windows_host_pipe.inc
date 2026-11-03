@@ -40,7 +40,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   WindowsControlBindings bindings;
   if (!CaptureWindowsControlBindings(session.pid, dialogs.active_window,
-                                     &bindings)) {
+                                     &bindings, background)) {
     *reason = unreadable("accessibility_binding_unavailable");
     return false;
   }
@@ -54,7 +54,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   WindowsControlBindings stable_bindings;
   if (!CaptureWindowsControlBindings(session.pid, dialogs.active_window,
-                                     &stable_bindings) ||
+                                     &stable_bindings, background) ||
       stable_bindings.semantic != bindings.semantic ||
       stable_bindings.visual != bindings.visual) {
     *reason = unreadable("observation_stale");

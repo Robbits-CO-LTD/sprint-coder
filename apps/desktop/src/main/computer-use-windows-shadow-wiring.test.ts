@@ -319,11 +319,15 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
 
   it('changes no version and no receipt: the V1 answer is unchanged', () => {
     expect(host).toContain('kNativePreflightClassifierVersion');
-    // The receipt constructor and its two calls still build the V1 answer from V1 inputs only.
+    // Receipt calls still build the V1 answer without shadow inputs.
     const text = code(preflight);
     // replay, a failed binding, the gated approval refusal (#991 N8-2c), the two spellings of an
-    // interlock refusal, the V1 answer
-    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(6);
+    // interlock refusal, the V1 answer, plus P2c's background binding refusal. The added call
+    // rejects a stale background target before V1/shadow; it does not rewrite the V1 answer.
+    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(7);
+    expect(text).toMatch(
+      /if \(!ValidateWindowsBackgroundActionBinding\(session, metadata\)\) \{\s*return Respond\(pipe, request, MessageType::kPreflightResult,\s*WindowsPreflightReceipt\(session, request_id, cancel_epoch, observation_revision,\s*"denied", "native_stale_target", ""\)\);\s*\}\s*if \(!ValidateWindowsDispatchBinding\(/u,
+    );
     const gated = text.slice(
       text.indexOf('if (WindowsApprovalGate(session))'),
       text.indexOf('WindowsInterlockRefusal('),
