@@ -3,7 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
-import { configureWindowsKillStop } from './computer-use-windows-product';
+import type { openWindowsLedgerStore } from './computer-use-windows-ledger-store';
+import {
+  configureWindowsKillStop,
+  WINDOWS_KILL_STOP_ENABLED,
+} from './computer-use-windows-product';
 
 describe('PR10a product wiring', () => {
   it('closes persistence even when Windows kill-stop shutdown throws', async () => {
@@ -33,12 +37,31 @@ describe('PR10a product wiring', () => {
     expect(close).toHaveBeenCalledOnce();
     expect(error).toHaveBeenCalledOnce();
   });
-  it('keeps product activation off by default and on macOS', () => {
+  it('turns product activation on by default on Windows and never on macOS (PR10b)', () => {
+    expect(WINDOWS_KILL_STOP_ENABLED).toBe(true);
+    const store = { close: vi.fn() };
+    const opened = vi.fn(() => store as unknown as ReturnType<typeof openWindowsLedgerStore>);
+    const windows = configureWindowsKillStop({
+      platform: 'win32',
+      userData: 'C:/synthetic',
+      open: opened,
+    });
+    expect(opened).toHaveBeenCalledOnce();
+    expect(windows.options).toMatchObject({
+      windowsKillStopTermination: { enabled: true },
+      windowsStartIdentity: { enabled: true },
+      windowsLedger: store,
+    });
     const open = vi.fn(() => {
       throw new Error('must not open');
     });
     expect(
-      configureWindowsKillStop({ platform: 'win32', userData: 'C:/synthetic', open }).options,
+      configureWindowsKillStop({
+        platform: 'win32',
+        userData: 'C:/synthetic',
+        enabled: false,
+        open,
+      }).options,
     ).toEqual({});
     expect(
       configureWindowsKillStop({ platform: 'darwin', userData: '/synthetic', enabled: true, open })

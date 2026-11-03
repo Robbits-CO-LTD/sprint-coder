@@ -2,8 +2,9 @@ import type { ComputerUseNativeHostOptions } from './computer-use-native-host';
 import { openWindowsLedgerStore } from './computer-use-windows-ledger-store';
 import { secureLogger } from './secure-logger';
 
-// PR10b changes this default only after the complete PR10a connection is verified.
-export const WINDOWS_KILL_STOP_ENABLED = false;
+// PR10b: Windows kill-stop (E1 / E2, R11 / R12 / R13 and the PR5b, PR8 and PR9 paths) is on in
+// the product. E3 / E4 stay on their current paths until PR11.
+export const WINDOWS_KILL_STOP_ENABLED = true;
 
 export function configureWindowsKillStop(input: {
   platform: NodeJS.Platform;
