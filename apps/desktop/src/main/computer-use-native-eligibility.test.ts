@@ -43,6 +43,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
           mode,
           ...table.versions[platform][mode === 'v1-allowlist' ? 'v1' : 'v2'],
           ticketRequired: table.ticketRequired[platform],
+          interlockEnforced: platform === 'win32' && mode === 'v2-denylist',
         });
         expect(
           computerUseEligibilitySchema.safeParse(eligibilityDeclaration(mode, platform)).success,
@@ -119,6 +120,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       'kNativeEligibilityClassifierVersion',
       'kNativeEligibilityLexiconVersion',
       'kNativeEligibilityTicketRequired',
+      'kNativeEligibilityInterlockEnforced',
     ])
       expect(handshake).toContain(name);
     const attested = section(handshake, 'napi_value eligibility;', '"eligibility", eligibility');
@@ -155,6 +157,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       'kNativeEligibilityClassifierVersion',
       'kNativeEligibilityLexiconVersion',
       'kNativeEligibilityTicketRequired',
+      'kNativeEligibilityInterlockEnforced',
     ])
       expect(probe).toContain(name);
     expect(probe).not.toMatch(/getenv|GetEnvironmentVariable|argv/u);

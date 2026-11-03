@@ -6690,6 +6690,8 @@ export const computerUseEligibilitySchema = z
     lexiconVersion: z.number().int().positive().max(0xffff),
     // The native requires a ticket for every input (ADR S4-4 addendum).
     ticketRequired: z.boolean(),
+    // Absent on older artifacts; Windows v2 requires an explicit true attestation (ADR G).
+    interlockEnforced: z.boolean().optional(),
   })
   .strict();
 export type ComputerUseEligibility = z.infer<typeof computerUseEligibilitySchema>;

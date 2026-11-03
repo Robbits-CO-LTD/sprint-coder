@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import console from 'node:console';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +39,17 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
   });
 
   it.each(cases)(
+    'keeps legacy %s %s claims accepted without interlockEnforced',
+    (platform, expectedMode) => {
+      const { interlockEnforced: _claim, ...legacy } = declare(expectedMode, platform);
+      void _claim;
+      expect(
+        eligibilityProblems({ platform, expectedMode, manifest: legacy, attested: legacy }),
+      ).toEqual([]);
+    },
+  );
+
+  it.each(cases)(
     'rejects every field of a %s %s artifact that differs between manifest and handshake',
     (platform, expected) => {
       const declaration = declare(expected, platform);
@@ -47,6 +59,7 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
         classifierVersion: declaration.classifierVersion + 1,
         lexiconVersion: declaration.lexiconVersion + 1,
         ticketRequired: !declaration.ticketRequired,
+        interlockEnforced: !declaration.interlockEnforced,
       };
       for (const [key, value] of Object.entries(changes)) {
         // The handshake is the one that lies.

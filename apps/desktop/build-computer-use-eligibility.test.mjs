@@ -61,6 +61,7 @@ describe('Computer Use native eligibility declaration', () => {
           classifierVersion: 1,
           lexiconVersion: 1,
           ticketRequired: true,
+          interlockEnforced: platform === 'win32' && mode === 'v2-denylist',
         });
       }
     }
@@ -109,6 +110,7 @@ describe('Computer Use native eligibility declaration', () => {
               mode,
               ...(source[platform]?.[key] ?? source),
               ticketRequired: true,
+              interlockEnforced: platform === 'win32' && mode === 'v2-denylist',
             });
           }
         }
@@ -131,6 +133,7 @@ describe('Computer Use native eligibility declaration', () => {
         classifierVersion: table.versions[platform].v1.classifierVersion,
         lexiconVersion: table.versions[platform].v1.lexiconVersion,
         ticketRequired: table.ticketRequired[platform],
+        interlockEnforced: false,
       });
       // Each native refuses every input without a ticket (macOS: N2b-4 PR 5, Windows: S5-a).
       expect(v1.ticketRequired).toBe(true);
@@ -149,6 +152,10 @@ describe('Computer Use native eligibility declaration', () => {
   it('writes a header that carries exactly the declaration', () => {
     const header = eligibilityBuildHeader(eligibilityDeclaration('v2-denylist', 'darwin'));
     expect(header).toContain('#pragma once');
+    expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED 0');
+    expect(eligibilityBuildHeader(eligibilityDeclaration('v2-denylist', 'win32'))).toContain(
+      '#define SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED 1',
+    );
     // The harness conditions its default-value checks on this macro.
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_FROM_BUILD 1');
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_V2 1');
