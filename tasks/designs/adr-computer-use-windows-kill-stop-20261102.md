@@ -223,6 +223,16 @@ PR7c-1 で核の通知型を次の union に確定する。製品の配送は有
 
 R8・R11 の配送・owner 照合は PR7c-2、Controller への接続と表示は PR10。セッションが無い E4 の最終配送先と settle の具体的な時間は、引き続き §6.1 の 8・9 に従って決める。
 
+#### PR7c-2: Main 内部の配送契約（既定で無効）
+
+- Host は `subscribeWindowsStop` で登録・退役・段階通知を配送する。`windowsKillStopTermination` と台帳が両方有効な場合だけ口を公開し、IPC・Renderer・公開の StopReason は変更しない。購読を native 呼出しの前に置き、client は送信前に owner を登録する。登録通知で受信先を owner に結び付けるため、送信中の同期 exit も同じ登録に届く。
+- owner は `(helperGeneration, kind, id, lifetimeId)` で照合する。`lifetimeId` は Host が発行する。現在の client では native の開始待ちから session まで同じ session owner を使い、開始前の discovery は独立の discovery owner、picker は呼出しごとの owner とする。後から同じ id が使われても、古い世代・lifetime の通知で新しい登録を更新しない。
+- Stop の進行中は世代につき1件ではなく owner の集合で保持する。核に渡す `entry` は残っている停止 owner の先頭から投影し、`initiatorReason` はその世代に停止 owner が残っている場合だけ `requested_reason` になる。B の stopping を A の存在で捨てない。検証済み session receipt は対象 session の owner だけを解く。E4 の正常な completion・receipt・ローカルの `not_submitted` はその discovery の lifetime だけを解く。kill 開始後は receipt で解かず exit を待つ。
+- 各 owner の段階は `termination_pending` → `exit_confirmed` → `cleanup_completed` の順とし、それぞれ一度だけ配送する。期限内の exit は pending を経由しない。R19c は exit の確認を先に配送し、保存成功と Host/client の後始末の後に cleanup を配送する。保存再試行で exit を再発行しない。未解決 owner は件数上限で追い出さず、正常終端または cleanup まで保持する。
+- R8 は停止を要求した owner の元の理由を受信口に保持する。pending の公開理由は `native_unavailable`、exit 確認以降は保持した理由を使う。R11 は公開理由 `native_unavailable` と内部理由 `crash` / `abortTransport`、R12 の巻き込まれた owner は公開理由 `native_unavailable` と内部理由 `shared_helper_stop` を別々に持つ。B 自身も停止中なら B の元の理由を保持する。遅い exit の `late` と clean / suspect は理由と別に配送する。
+- R13 の遅い receipt・応答、二重 exit は通知の根拠にしない。受信口も owner 照合と段階の重複・逆行を拒否する。購読解除で受信記録を解放する。返却済み Promise・session・ticket を復活させない。
+- Controller 側は `subscribeComputerUseWindowsStops` という明示的に購読する最小の受信口と試験のみを用意する。製品の Controller はまだこれを呼ばない。§3.1 の token・承認失効、artifact 破棄、表示への接続は §4.1 の PR10、session の無い E4 の最終配送先は PR11 に残す。
+
 ## 3. 変更
 
 ### 3.1 Main

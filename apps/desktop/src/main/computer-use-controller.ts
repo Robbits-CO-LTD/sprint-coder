@@ -1,4 +1,11 @@
 import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
+import {
+  sameWindowsStopOwner,
+  windowsStopPhaseOrder,
+  type WindowsStopOwner,
+  type WindowsStopListener,
+  type WindowsOwnerStopNotification,
+} from './computer-use-windows-stop-delivery';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ComputerUseDiscoveryHandle } from './computer-use-native-discovery';
 import {
@@ -287,7 +294,73 @@ export type ComputerUsePendingStartStop =
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'closed'; inputReceipt: ComputerUseNativeInputReceipt }>;
 
+/** Opt-in Main-only receiver. PR10 binds handlers to records and enables product cleanup. */
+export function subscribeComputerUseWindowsStops(
+  native: Pick<ComputerUseNativeHost, 'subscribeWindowsStop'>,
+  bind: (owner: WindowsStopOwner) =>
+    | Readonly<{
+        requestedReason(): ComputerUseStopReason | null;
+        receive(
+          notification: WindowsOwnerStopNotification &
+            Readonly<{ stopReason: ComputerUseStopReason }>,
+        ): void;
+      }>
+    | undefined,
+): () => void {
+  const records = new Map<
+    string,
+    {
+      owner: WindowsStopOwner;
+      phase: number;
+      requestedReason: ComputerUseStopReason | null;
+      handler: NonNullable<ReturnType<typeof bind>>;
+    }
+  >();
+  let disposed = false;
+  const unsubscribe = native.subscribeWindowsStop?.((event) => {
+    if (disposed) return;
+    const owner = event.kind === 'notification' ? event.notification.owner : event.owner;
+    const key = JSON.stringify([owner.helperGeneration, owner.kind, owner.id, owner.lifetimeId]);
+    if (event.kind === 'registered') {
+      const existing = records.get(key);
+      if (existing !== undefined && sameWindowsStopOwner(existing.owner, owner)) return;
+      const handler = bind(owner);
+      records.delete(key);
+      if (handler !== undefined)
+        records.set(key, { owner, phase: 0, requestedReason: null, handler });
+      return;
+    }
+    const record = records.get(key);
+    if (record === undefined || !sameWindowsStopOwner(record.owner, owner)) return;
+    if (event.kind === 'retired') {
+      records.delete(key);
+      return;
+    }
+    const notification = event.notification;
+    const phase = windowsStopPhaseOrder[notification.phase];
+    if (phase <= record.phase) return;
+    record.phase = phase;
+    if (notification.reason === 'requested_reason')
+      record.requestedReason ??= record.handler.requestedReason();
+    record.handler.receive({
+      ...notification,
+      stopReason:
+        notification.reason === 'requested_reason' && notification.phase !== 'termination_pending'
+          ? (record.requestedReason ?? 'native_unavailable')
+          : 'native_unavailable',
+    });
+  });
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    records.clear();
+    unsubscribe?.();
+  };
+}
+
 export interface ComputerUseNativeHost {
+  /** No IPC exposure. Subscribe before invoking native; disabled unless termination is enabled. */
+  subscribeWindowsStop?(listener: WindowsStopListener): () => void;
   /** Private discovery seam; Controller exposure and token binding are a separate step. */
   listTargets?(): Promise<ComputerUseNativeTargetList>;
   availability(): ComputerUseAvailability;
