@@ -317,6 +317,20 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 
 各実装 PR は対象 typecheck と関連 Vitest、C++ 変更では native seam を行う。最終受入は N2 の装置の全停止点、保存費用、Main 再起動、承認カードを含む。UI 操作は Computer Use で確認し、未実施の session 必須 live は NOT_RUN / BLOCKED のまま扱う。S4（N5）の worker 整理・サロゲートペア変更、一時フォルダの起動時掃除（§5 の 13）は N3 に混ぜない。
 
+### 4.2 PR10 前提 3: 再起動後の承認と有効化の条件
+
+`windowsKillStopTermination` は既定で無効のままとする。有効化には、PR5b の最後の await の後・`socket.write` 直前の start/resume ゲート、R8/R11 の通知、共有隔離の revision を同一トランザクションで比較する解除、再起動後の承認カードの接続がすべて必要である。
+
+前提 3 では Main 内部の `approveWindowsQuarantineResume` に `restoredTarget` を加える。Main が承認対象として保持する pid・作成時刻と、カードで選択した窓の identity が一致し、窓 ID・identity digest が有効で、`trustedActivation` がある場合だけ進む。旧 session の `resumeTargets`・`startOwners` は必要としない。再起動は旧 helper の終了証拠ではないため、核の承認種別は `restored` とし、exit や receipt を捏造しない。承認時の共有 revision を取得し、対象を再観測し、保存済みの隔離と保留を確認してから既存の条件付き解除を使う。別 Main が新しい証拠を保存した場合は解除を拒否する。
+
+窓の情報は Main が保持するカードの証拠に限定し、Renderer・モデルの申告をそのまま渡してはならない。カードの表示、選択窓への証拠の束縛、trusted activation の消費、新しい session の開始と再観測をつなぐ製品実装は PR10 本体に残す。この内部入口の追加だけを製品接続の完了とは扱わない。
+
+未知の reason・形式の保存行との衝突で移管が失敗し続ける場合は、まずその形式を理解できる新しい版で復元・移管を処理する経路を採用する。現在の Host は未知の行を承認対象の隔離として採用できず、未移管の行・保留がある間は承認で迂回しない。新しい版で既知の隔離へ移した後は上記と共通の承認カード入口で解除する。ストアの `releaseQuarantine(identity, revision)` 自体は reason に依存せず、未知の行でも revision 一致時だけ同じトランザクションで削除できるが、それを Main の保留確認を迂回する入口として公開しない。R15 の条件なし解除は対象の終了が確認された場合に限る。
+
+共有隔離の読取り中にこの Main が追加・保存した隔離は、古い読取り結果で消さない。突き合わせは object identity による安全側の方式を維持し、核で object が差し替わった場合は隔離が残り、次の安定した読取りで共有解除が反映される。PR10 の配線では保存先の SID 共通 SQLite と realpath に基づく instanceId の方式も確認する。
+
+世代の後始末で終端化された StartOwner の stop・pending-stop・close は、discovery と共通の `{ kind: 'terminated', helperGeneration }` を返す。通常の close の戻り値は維持する。receipt 確認後は `confirmedClosed` で再送せず、`completedLifetimes` は sessionGenerations から削除済みのため世代掃除に依存せず上限 128 件で保持する。
+
 ## 5. 残るリスク
 
 1. `termination_requested` のまま signaled にならない環境（壊れたドライバ）では、終了を確認できるまで隔離を保ち、新しい helper は起動しない。Main を終了すると、libuv の job が helper を強制終了しようとするが（§3.1 の 7）、カーネルの中で止まって終了できない helper はそれでも残る。このため再起動は古い helper の終了の証拠にはしないが、対象ごとの隔離へ移す根拠にはする（§2.2）。頻度は実機で測る。

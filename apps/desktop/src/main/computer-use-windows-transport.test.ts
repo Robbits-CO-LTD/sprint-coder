@@ -1963,6 +1963,136 @@ describe('Computer Use Windows helper transport', () => {
     }
   });
 
+  it('PR10 refresh retains isolation committed after the shared read started', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-read-race-'));
+    const store = openWindowsLedgerStore({
+      path: join(directory, 'shared.sqlite'),
+      userData: 'C:/synthetic/read-race',
+    });
+    const spy = backgroundReceiptSpy();
+    let finishRead: ((rows: readonly unknown[]) => void) | undefined;
+    let delayRead = false;
+    try {
+      const target = ledgerTarget(true, undefined, true, {
+        ...store,
+        readQuarantines: () =>
+          delayRead
+            ? new Promise<readonly unknown[]>((resolve) => {
+                finishRead = resolve;
+              })
+            : store.readQuarantines(),
+      });
+      const session = await startSession(target.host, 'read-race', 'turn-race');
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session, ledgerActions[4]);
+      // Exit persistence can finish while a different entry is refreshing shared isolation.
+      delayRead = true;
+      const reading = target.host.restoreWindowsLedger();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finishRead).toBeDefined();
+      children[0]!.emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.readQuarantines()).toHaveLength(1);
+      delayRead = false;
+      finishRead!([]);
+      await reading;
+      await expect(startSession(target.host, 'after-read', 'turn-after')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(store.readQuarantines()).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('PR10 a quarantine replaced during refresh is retained until the next read', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-clone-race-'));
+    const store = openWindowsLedgerStore({
+      path: join(directory, 'shared.sqlite'),
+      userData: 'C:/synthetic/clone',
+    });
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    let finishRead: ((rows: readonly unknown[]) => void) | undefined;
+    let delayRead = false;
+    const decide = stopKernel.decideWindowsStop;
+    const spy = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      if (event.kind === 'receipt' && event.status === 'received')
+        state = {
+          ...state,
+          rows: state.rows.map((row) => ({
+            ...row,
+            kind: 'semantic',
+            inputPath: 'background_semantic',
+          })),
+        };
+      const decision = decide(state, event);
+      return decision.kind === 'kill_requested'
+        ? {
+            ...decision,
+            state: {
+              ...decision.state,
+              quarantines: decision.state.quarantines.map((q) => ({ ...q })),
+            },
+          }
+        : decision;
+    });
+    let callbacks!: WindowsTerminationCallbacks;
+    try {
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          configureWindowsTermination: (value) => {
+            callbacks = value;
+            addon.configureWindowsTermination!(value);
+          },
+        }),
+        true,
+        {
+          ...store,
+          readQuarantines: () =>
+            delayRead
+              ? new Promise<readonly unknown[]>((resolve) => {
+                  finishRead = resolve;
+                })
+              : store.readQuarantines(),
+        },
+      );
+      const session = await startSession(target.host, 'clone-race', 'turn-race');
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session, ledgerActions[4]);
+      await target.host.close(session);
+      const quarantine = store.readQuarantines()[0];
+      expect(quarantine).toBeDefined();
+      delayRead = true;
+      const reading = target.host.restoreWindowsLedger();
+      await vi.advanceTimersByTimeAsync(0);
+      target.addon.requestWindowsTermination!();
+      delayRead = false;
+      finishRead!([]);
+      await reading;
+      callbacks.event(1, 'exit_wait_exceeded');
+      expect(spy.mock.calls.at(-1)![0].quarantines).toContainEqual(quarantine);
+      const identity = { pid: 42, creationTime: '133000000000000001' };
+      store.releaseQuarantine(identity);
+      await target.host.restoreWindowsLedger();
+      callbacks.event(1, 'exit_wait_exceeded');
+      expect(spy.mock.calls.at(-1)![0].quarantines).toEqual([]);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      spy.mockRestore();
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it('PR9 refresh drops a shared quarantine another Host released', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ledger-shared-release-'));
     const path = join(directory, 'shared.sqlite');
@@ -4856,6 +4986,7 @@ int main() {
       throwRelease: false,
       revision: 'stored' as 'stored' | 'null' | 'throw',
       releases: 0,
+      releaseRevisions: [] as (number | undefined)[],
       releaseWait: null as Promise<void> | null,
       identityResult: { result: 'alive' } as
         | { result: 'alive' }
@@ -4990,8 +5121,9 @@ int main() {
             if (control.revision === 'throw') throw new Error('synthetic revision failure');
             return control.revision === 'null' || quarantines.length === 0 ? null : 1;
           },
-          releaseQuarantine: async () => {
+          releaseQuarantine: async (_identity, revision) => {
             control.releases += 1;
+            control.releaseRevisions.push(revision);
             if (control.releaseWait !== null) await control.releaseWait;
             if (control.throwRelease) throw new Error('synthetic release failure');
             if (control.failRelease) return false;
@@ -5369,6 +5501,55 @@ int main() {
     }
   });
 
+  it.each(['exception', 'unknown', 'empty', 'multiple', 'alive'] as const)(
+    'PR10 approval never uses R15 for an unproven observation (%s)',
+    async (mode) => {
+      const spy = backgroundReceiptSpy();
+      let uncertain = false;
+      try {
+        const target = ledgerTarget(
+          true,
+          (addon) => ({
+            ...addon,
+            checkTargetIdentity: async (...args) => {
+              if (!uncertain) return addon.checkTargetIdentity!(...args);
+              if (mode === 'exception') throw new Error('synthetic observation failure');
+              if (mode === 'empty') return [];
+              if (mode === 'multiple') return [{ result: 'alive' }, { result: 'alive' }];
+              return mode === 'alive'
+                ? [{ result: 'alive' }]
+                : [{ result: 'unverifiable', reason: 'access_denied' }];
+            },
+          }),
+          true,
+        );
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        await startSession(target.host, 'keeper', 'turn-2');
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        await target.dispatch(session, ledgerActions[4]);
+        await target.host.close(session);
+        target.control.throwRelease = true;
+        await expect(
+          target.host.approveWindowsQuarantineResume!({
+            previousSessionId: session.sessionId,
+            newSessionId: 'new-session',
+            trustedActivation: true,
+          }),
+        ).resolves.toBe(false);
+        const releases = target.control.releases;
+        uncertain = true;
+        await target.host.listTargets!().catch(() => undefined);
+        expect(target.quarantines).toHaveLength(1);
+        expect(target.control.releases).toBe(mode === 'alive' ? releases + 1 : releases);
+        expect(target.control.releaseRevisions.every((revision) => revision !== undefined)).toBe(
+          true,
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
   it('PR9 a failed approval release hands over to R15 once the target exits', async () => {
     const spy = backgroundReceiptSpy();
     try {
@@ -5462,6 +5643,73 @@ int main() {
     },
   );
 
+  it.each(['unchanged', 'newer-evidence', 'unverifiable'] as const)(
+    'PR10 restores approval without old session memory and checks the selected window identity (%s)',
+    async (mode) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ledger-restored-approval-'));
+      const path = join(directory, 'shared.sqlite');
+      const identity = { pid: 42, creationTime: '133000000000000001' };
+      const original = openWindowsLedgerStore({ path, userData: 'C:/synthetic/restart' });
+      original.restoreQuarantines([{ identity, reason: 'exit_suspect' }]);
+      original.close();
+      const store = openWindowsLedgerStore({ path, userData: 'C:/synthetic/restart' });
+      try {
+        const target = ledgerTarget(true, undefined, true, store);
+        await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
+        const request = {
+          restoredTarget: {
+            identity,
+            approvedWindow: { windowId: '100', windowIdentityDigest, identity },
+          },
+          newSessionId: 'restored-session',
+          trustedActivation: true,
+        };
+        await expect(
+          target.host.approveWindowsQuarantineResume!({ ...request, trustedActivation: false }),
+        ).resolves.toBe(false);
+        await expect(
+          target.host.approveWindowsQuarantineResume!({
+            ...request,
+            restoredTarget: {
+              ...request.restoredTarget,
+              approvedWindow: {
+                ...request.restoredTarget.approvedWindow,
+                identity: { ...identity, creationTime: '133000000000000002' },
+              },
+            },
+          }),
+        ).resolves.toBe(false);
+        expect(store.readQuarantines()).toHaveLength(1);
+        if (mode === 'newer-evidence')
+          target.control.onIdentityCheck = () => {
+            target.control.onIdentityCheck = undefined;
+            store.restoreQuarantines([{ identity, reason: 'exit_suspect' }]);
+          };
+        if (mode === 'unverifiable')
+          target.control.identityResult = { result: 'unverifiable', reason: 'access_denied' };
+        await expect(target.host.approveWindowsQuarantineResume!(request)).resolves.toBe(
+          mode === 'unchanged',
+        );
+        if (mode !== 'unchanged') {
+          expect(store.readQuarantines()).toHaveLength(1);
+          await expect(
+            startSession(target.host, request.newSessionId, 'restored-turn'),
+          ).rejects.toThrow('native_unavailable');
+          return;
+        }
+        expect(store.readQuarantines()).toEqual([]);
+        await expect(
+          startSession(target.host, request.newSessionId, 'restored-turn'),
+        ).resolves.toMatchObject({
+          sessionId: request.newSessionId,
+        });
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('PR9 approval entry is absent by default', () => {
     expect(ledgerTarget(true).host.approveWindowsQuarantineResume).toBeUndefined();
   });
@@ -5543,7 +5791,10 @@ int main() {
     target.control.failTransfer = false;
     target.control.failReflect = false;
     await target.host.listTargets!().catch(() => undefined);
-    await expect(target.host.close(session)).resolves.toBeUndefined();
+    await expect(target.host.close(session)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
   });
   it('PR7b refuses new discovery stops after kill without writing to the old pipe', async () => {
     const child = new ControlledHelperChild();
@@ -5648,7 +5899,10 @@ int main() {
     await expect(closeLedger.verified(1, session.sessionId, vi.fn())).resolves.toEqual({
       status: 'confirmed',
     });
-    await expect(target.host.close(session)).resolves.toBeUndefined();
+    await expect(target.host.close(session)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
     expect(target.control.transfers).toBe(transfers);
     expect(sockets[0]!.writes).toHaveLength(writes);
   });
@@ -5674,19 +5928,17 @@ int main() {
     );
     await startSession(target.host, 'keeper', 'turn-keeper');
     await startSession(target.host, 'pending', 'turn-pending');
-    const stop = target.host.stopPendingStart!('pending').then(
-      () => 'resolved',
-      () => 'rejected',
-    );
+    const stop = target.host.stopPendingStart!('pending').catch(() => 'rejected');
     await vi.advanceTimersByTimeAsync(0);
     expect(verifying).toBe(true);
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     release();
-    expect(await stop).toBe('rejected');
-    await expect(target.host.stopPendingStart!('pending')).rejects.toThrow(
-      'native_stop_unconfirmed',
-    );
+    expect(await stop).toEqual({ kind: 'terminated', helperGeneration: 1 });
+    await expect(target.host.stopPendingStart!('pending')).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
   });
   it('PR7b R12 removes both sessions after the shared generation exits', async () => {
     const child = new ControlledHelperChild();
@@ -5699,8 +5951,14 @@ int main() {
     target.addon.requestWindowsTermination!();
     child.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(0);
-    await expect(target.host.close(first)).resolves.toBeUndefined();
-    await expect(target.host.close(second)).resolves.toBeUndefined();
+    await expect(target.host.close(first)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
+    await expect(target.host.close(second)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(target.quarantines).toEqual([]);
     await expect(startSession(target.host, 'session-c', 'turn-c')).resolves.toMatchObject({
@@ -5750,7 +6008,10 @@ int main() {
     target.control.failTransfer = false;
     await target.host.listTargets!().catch(() => undefined);
     expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
-    await expect(target.host.close(session)).resolves.toBeUndefined();
+    await expect(target.host.close(session)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
     expect(target.quarantines).toHaveLength(1);
   });
   it.each(['close', 'stopPendingStart'] as const)(
@@ -5788,7 +6049,10 @@ int main() {
         await vi.advanceTimersByTimeAsync(0);
         expect(decide.mock.results.at(-1)!.value.state.result).toBe('terminated_clean');
         expect(target.quarantines).toEqual([]);
-        await expect(target.host.close(session)).resolves.toBeUndefined();
+        await expect(target.host.close(session)).resolves.toEqual({
+          kind: 'terminated',
+          helperGeneration: 1,
+        });
       } finally {
         decide.mockRestore();
       }
@@ -6001,7 +6265,10 @@ int main() {
     expect(terminal).toBe(false);
     expect(children[1]!.killed).toBe(false);
     expect((await target.dispatch(fresh)).outcome).toBe('resolved');
-    await expect(target.host.close(old)).resolves.toBeUndefined();
+    await expect(target.host.close(old)).resolves.toEqual({
+      kind: 'terminated',
+      helperGeneration: 1,
+    });
     await expect(target.host.close(fresh)).resolves.toBeUndefined();
     expect(children[1]!.killed).toBe(false);
     target.helper().releaseLast('list_windows_cancellable');
@@ -6606,6 +6873,44 @@ int main() {
       }
     },
   );
+  it.each(['timeout', 'write-failure'] as const)(
+    'PR10 picker delivery retains its owner until exit cleanup (%s)',
+    async (failure) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const events: WindowsStopDeliveryEvent[] = [];
+      target.host.subscribeWindowsStop!((event) => events.push(event));
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.helper().holdOnly('pick_application');
+      if (failure === 'write-failure') sockets[0]!.holdWriteCallbacks = true;
+      const picking = expect(
+        target.addon.pickApplication!({ activationToken: 'synthetic', pickerKind: 'application' }),
+      ).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      if (failure === 'timeout') await vi.advanceTimersByTimeAsync(5 * 60_000);
+      else sockets[0]!.writeCallbacks.at(-1)!(new Error('synthetic write failure'));
+      await picking;
+      const pickerEvents = () =>
+        events.filter(
+          (event) =>
+            (event.kind === 'notification' ? event.notification.owner : event.owner).kind ===
+            'picker',
+        );
+      expect(pickerEvents().some((event) => event.kind === 'retired')).toBe(false);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        pickerEvents().flatMap((event) =>
+          event.kind === 'notification' ? [event.notification.phase] : [],
+        ),
+      ).toEqual(['exit_confirmed', 'cleanup_completed']);
+      expect(pickerEvents().at(-1)?.kind).toBe('retired');
+    },
+  );
+
   it.each(['success', 'error'] as const)(
     'PR7c-2 retires a settled picker after %s',
     async (outcome) => {
@@ -7717,6 +8022,88 @@ int main() {
       spy.mockRestore();
     }
   });
+  it.each(['unknown-hold', 'invalid-window'] as const)(
+    'PR10 discovery rejects unsafe candidates after enumeration (%s)',
+    async (mode) => {
+      let unreadable = false;
+      const target = createTarget(
+        responders(),
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            restoreQuarantines: () => true,
+            read: () => {
+              if (unreadable) throw new Error('synthetic read failure');
+              return { rows: [], quarantines: [] };
+            },
+          },
+        },
+        (addon) => ({
+          ...addon,
+          discoverWindows: async (input) => {
+            const result = computerUseNativeDiscoveryResultSchema.parse(
+              await addon.discoverWindows!(input),
+            );
+            if (result.result !== 'completed') return result;
+            if (mode === 'invalid-window') return { ...result, windows: [null] };
+            unreadable = true;
+            await target.host.restoreWindowsLedger();
+            return { ...result, windows: [...result.windows, ...result.windows] };
+          },
+        }),
+      );
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      if (mode === 'invalid-window')
+        await expect(discovery.result).rejects.toMatchObject({
+          reasonCode: 'native_window_invalid',
+        });
+      else await expect(discovery.result).resolves.toEqual([]);
+    },
+  );
+
+  it('PR10 cached admission rechecks every candidate after a later identity observation', async () => {
+    let unreadable = false;
+    const check = vi.fn(async () => {
+      unreadable = true;
+      await target.host.restoreWindowsLedger();
+      return [{ result: 'unverifiable' as const, reason: 'access_denied' as const }];
+    });
+    const target = createTarget(
+      {
+        ...responders(),
+        list_windows: (metadata) => {
+          const [type, value] = responders()['list_windows']!(metadata);
+          const row = (value as Record<string, unknown>[])[0]!;
+          return [type, [row, { ...row, windowId: '101' }, { ...row, pid: 43, windowId: '102' }]];
+        },
+      },
+      undefined,
+      {
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+          read: () => {
+            if (unreadable) throw new Error('synthetic read failure');
+            return {
+              rows: [],
+              quarantines: [
+                { identity: { pid: 43, creationTime: '133000000000000001' }, reason: 'restored' },
+              ],
+            };
+          },
+        },
+      },
+      (addon) => ({ ...addon, checkTargetIdentity: check }),
+    );
+    await expect(target.host.beginWindowDiscovery!(profile).result).resolves.toEqual([]);
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
   it('PR8 filters mixed-process windows once per PID despite a cached isolated PID', async () => {
     let isolated = false;
     const read = vi.fn(() => ({

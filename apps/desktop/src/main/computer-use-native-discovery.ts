@@ -5,8 +5,12 @@ import {
 } from '@sprint-coder/contracts';
 import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-types';
 
+export type ComputerUseGenerationTerminated = Readonly<{
+  kind: 'terminated';
+  helperGeneration: number;
+}>;
 export type ComputerUseDiscoveryStop =
-  | Readonly<{ kind: 'terminated'; helperGeneration: number }>
+  | ComputerUseGenerationTerminated
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'completed' | 'stopped'; launchAttemptCount: 0 | 1 }>;
 export type ComputerUseDiscoveryHandle<T> = Readonly<{

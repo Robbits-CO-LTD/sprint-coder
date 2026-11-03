@@ -298,7 +298,7 @@ export type WindowsStopEvent =
       kind: 'approve_new_session';
       identity: WindowsTargetIdentity;
       trustedActivation: boolean;
-      previousStop: 'exit' | 'receipt';
+      previousStop: 'exit' | 'receipt' | 'restored';
       previousGeneration: number;
       previousSessionId: string;
       newSessionId: string;

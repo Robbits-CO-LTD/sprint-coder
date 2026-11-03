@@ -226,8 +226,9 @@ export type ComputerUseNativeHostOptions = Readonly<{
    * PR5b's start/resume ledger gate immediately before socket.write is also required.
    * PR5b Host identity wiring and pre-send recording are complete; activate with PR10.
    * New-start quarantine matching (PR8) remains a separate prerequisite.
-   * Generation-checked quarantine release and approval of restored quarantines without old
-   * session memory (PR9) are also required before activation.
+   * Revision-checked quarantine release and approval of restored quarantines without old
+   * session memory are required. PR10 must bind Main-owned window evidence to the card and
+   * consume trusted activation before calling the default-off internal approval entry.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
@@ -1294,6 +1295,7 @@ export function createComputerUseNativeHost(
     for (const [id, owner] of startOwners) {
       if (owner.helperGeneration !== generation || owner.terminated) continue;
       owner.terminated = true;
+      owner.terminal = { kind: 'terminated', helperGeneration: generation };
       owner.stopped = true;
       owner.unconfirmed = false;
       owner.discoveryUnconfirmed = false;
@@ -1625,6 +1627,9 @@ export function createComputerUseNativeHost(
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
   };
 
+  const terminatedStart = (owner: StartOwner | undefined) =>
+    owner?.terminal?.kind === 'terminated' ? owner.terminal : undefined;
+
   const completePendingStop = async (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
     if (owner.terminal !== null) return owner.terminal;
     owner.unconfirmed = true;
@@ -1633,19 +1638,18 @@ export function createComputerUseNativeHost(
       stopOwnerDiscoveries(owner),
       completeNativePendingStop(owner),
     ]);
-    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+    if (owner.terminated && owner.terminal !== null) return owner.terminal;
     if (owner.terminal !== null) return owner.terminal;
     if (discovery.status === 'rejected' || native.status === 'rejected')
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     const finishing = finishStartOwner(owner, native.value);
     if (finishing !== undefined) await finishing;
-    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+    if (owner.terminated && owner.terminal !== null) return owner.terminal;
     return native.value;
   };
 
   const stopStartOwner = (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
-    if (owner.terminated)
-      return Promise.reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'));
+    if (owner.terminated && owner.terminal !== null) return Promise.resolve(owner.terminal);
     if (owner.stopPromise !== null) return owner.stopPromise;
     let resolveStop!: (value: ComputerUsePendingStartStop) => void;
     let rejectStop!: (error: unknown) => void;
@@ -2363,34 +2367,54 @@ export function createComputerUseNativeHost(
   const host: ComputerUseNativeHost = {
     ...(terminationEnabled
       ? {
-          approveWindowsQuarantineResume: async (input: {
-            previousSessionId: string;
-            newSessionId: string;
-            trustedActivation: boolean;
-          }): Promise<boolean> => {
-            const identity = resumeTargets.get(input.previousSessionId);
-            const owner = startOwners.get(input.previousSessionId);
-            const previousGeneration = owner?.helperGeneration;
+          approveWindowsQuarantineResume: async (
+            input: Parameters<
+              NonNullable<ComputerUseNativeHost['approveWindowsQuarantineResume']>
+            >[0],
+          ): Promise<boolean> => {
+            // PR10 must bind this evidence to the card and consume trusted activation. This
+            // internal entry is default-off; it neither accepts IPC evidence nor displays a card.
+            const restored = input.restoredTarget;
+            const previousSessionId = input.previousSessionId ?? '';
+            const identity = restored?.identity ?? resumeTargets.get(previousSessionId);
+            const owner = startOwners.get(previousSessionId);
+            const previousGeneration = restored === undefined ? owner?.helperGeneration : -1;
+            if (
+              restored !== undefined &&
+              (!Number.isSafeInteger(restored.identity.pid) ||
+                restored.identity.pid < 1 ||
+                restored.identity.pid > 0xffff_ffff ||
+                !validStartTime(restored.identity.creationTime) ||
+                !sameIdentity(restored.identity, restored.approvedWindow.identity) ||
+                restored.approvedWindow.windowId.length === 0 ||
+                !/^[a-f0-9]{64}$/u.test(restored.approvedWindow.windowIdentityDigest))
+            )
+              return false;
             if (
               !input.trustedActivation ||
               identity === undefined ||
-              owner === undefined ||
+              (restored === undefined && owner === undefined) ||
               previousGeneration == null ||
               input.newSessionId.length === 0 ||
               input.newSessionId === input.previousSessionId ||
               startOwners.has(input.newSessionId) ||
               confirmedClosed.has(input.newSessionId) ||
-              (!owner.receiptConfirmed && !owner.terminated) ||
+              (restored === undefined && !owner?.receiptConfirmed && !owner?.terminated) ||
               ledger?.releaseQuarantine === undefined ||
               ledger.quarantineRevision === undefined ||
               addon?.checkTargetIdentity === undefined
             )
               return false;
-            const previousStop = owner.terminated ? ('exit' as const) : ('receipt' as const);
+            const previousStop =
+              restored !== undefined
+                ? ('restored' as const)
+                : owner?.terminated
+                  ? ('exit' as const)
+                  : ('receipt' as const);
             // K-5 (R24) releases only a K-1 quarantine after receipt; exit approval (R17) any reason.
             const releasable = (q: WindowsTargetQuarantine) =>
               sameIdentity(q.identity, identity) &&
-              (previousStop === 'exit' ||
+              (previousStop !== 'receipt' ||
                 ['response_lost', 'effect_unconfirmed', 'takeover_conflict'].includes(q.reason));
             const blocked = (holdId?: string) =>
               inputQuarantined() ||
@@ -2464,7 +2488,7 @@ export function createComputerUseNativeHost(
               trustedActivation: true,
               previousStop,
               previousGeneration,
-              previousSessionId: input.previousSessionId,
+              previousSessionId,
               newSessionId: input.newSessionId,
             } as const;
             const decision = ledgerEvent(generation, {
@@ -3203,14 +3227,15 @@ export function createComputerUseNativeHost(
       return inputReceipt(result, session.sessionId, cancelEpoch);
     },
 
-    close: async (session): Promise<void> => {
+    close: async (session) => {
+      const owner = startOwners.get(session.sessionId);
+      if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
       const internal = sessions.get(session.sessionId);
       if (internal === undefined) {
         if (confirmedClosed.has(session.sessionId)) return;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
       activeStopQuarantines.add(session.sessionId);
-      const owner = startOwners.get(session.sessionId);
       if (owner !== undefined) latchStartOwner(owner);
       const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
       stopEpochs.set(session.sessionId, cancelEpoch);
@@ -3218,6 +3243,7 @@ export function createComputerUseNativeHost(
         owner === undefined ? Promise.resolve() : stopOwnerDiscoveries(owner),
         stopWithDeadline('close', { ...internal.raw, cancelEpoch }),
       ]);
+      if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
       if (nativeClose.status === 'rejected')
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       if (owner?.terminal !== null && owner?.terminal !== undefined) return;
@@ -3245,7 +3271,7 @@ export function createComputerUseNativeHost(
       }
       const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
       if (confirming !== undefined) await confirming;
-      if (owner?.terminated) return;
+      if (owner?.terminated) return terminatedStart(owner);
       if (
         terminationEnabled &&
         !owner?.receiptConfirmed &&
