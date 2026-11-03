@@ -10,6 +10,7 @@ import {
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
 import { classifyTarget, denyRulesetVersion } from './computer-use-target-eligibility';
+import type { ComputerTargetWindowsGeneration } from './computer-use-target-model';
 
 type NativeSelectableTarget = Extract<
   ComputerWindowsNativeTargetList['targets'][number],
@@ -18,6 +19,7 @@ type NativeSelectableTarget = Extract<
 
 /** Main-only evidence; never an agent-tool or Renderer result. */
 export type ComputerUseNativeTargetList = Readonly<{
+  windowsGeneration?: ComputerTargetWindowsGeneration;
   generation: number;
   rulesetVersion: number;
   truncated: boolean;

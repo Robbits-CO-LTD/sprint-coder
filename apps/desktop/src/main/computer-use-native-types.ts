@@ -122,6 +122,8 @@ export type ComputerUseNativeAddon = Readonly<{
   configureWindowsTermination?(callbacks: WindowsTerminationCallbacks): void;
   configureWindowsAdmission?(check: WindowsAdmissionCheck): void;
   captureWindowsGeneration?(): WindowsGenerationToken | null;
+  /** Exact transport response ownership, never inferred from the currently connected helper. */
+  windowsGenerationFor?(response: unknown): WindowsGenerationToken | null;
   isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
   cleanupWindowsGeneration?(generation: number): void;
   /** Internal Stop seam; inert unless Host configured the termination callbacks. */

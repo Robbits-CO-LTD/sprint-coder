@@ -87,6 +87,8 @@ import {
   type ComputerTargetAppTokenRecord,
   type ComputerTargetTokenBinding,
   type ComputerTargetTokenRecord,
+  computerTargetWindowsGenerationMatches,
+  type ComputerTargetWindowsGeneration,
 } from './computer-use-target-model';
 import {
   computerAppGrantIdentityFrom,
@@ -134,6 +136,7 @@ import {
   ComputerUseNativeUnavailableError,
 } from './computer-use-native-host';
 import type { ComputerUseNativeTargetList } from './computer-use-native-targets';
+import type { WindowsGenerationToken } from './computer-use-native-types';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
   ComputerUseArtifactStore,
@@ -229,6 +232,7 @@ export const COMPUTER_USE_MAIN_POLICY_VERSION = 1 as const;
 
 export type ComputerUseNativeWindow = ComputerUseWindowCandidate &
   Readonly<{
+    windowsGeneration?: ComputerTargetWindowsGeneration;
     platform: 'darwin' | 'win32';
     /** Fresh native-only executable bytes binding; never exposed over IPC. */
     executableDigest?: string | null;
@@ -416,6 +420,8 @@ export interface ComputerUseNativeHost {
       trustedActivation: boolean;
     }>,
   ): Promise<boolean>;
+  captureWindowsGeneration?(): WindowsGenerationToken | null;
+  isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
   /** No IPC exposure. Subscribe before invoking native; disabled unless termination is enabled. */
   subscribeWindowsStop?(listener: WindowsStopListener): () => void;
   /** Private discovery seam; Controller exposure and token binding are a separate step. */
@@ -434,6 +440,8 @@ export interface ComputerUseNativeHost {
   ): ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>;
   startSession(
     input: Readonly<{
+      /** Main-only consumed-token guard, rechecked at the transport write boundary. */
+      assertTargetCurrent?: () => void;
       profile: ComputerAppProfileRecord;
       windowId: string;
       sessionId: string;
@@ -959,6 +967,7 @@ type TargetEnumerationSnapshot = Readonly<{
 }>;
 
 type WindowCandidatePermit = Readonly<{
+  validateTarget?: () => void;
   profileId: string;
   profileRevision: number;
   native: ComputerUseNativeWindow;
@@ -975,6 +984,7 @@ export class ComputerUseController {
   private readonly windowCandidatePermits = new Map<string, WindowCandidatePermit>();
   /** Agent-facing tokens (ADR v2 §5.3). Never persisted, and rotated on every list call. */
   private readonly targetTokens = new Map<string, ComputerTargetTokenRecord>();
+  private readonly targetEnumerations = new Map<string, symbol>();
   private readonly targetAppTokens = new Map<string, ComputerTargetAppTokenRecord>();
   /**
    * "Allow once" grants, by Task then by `${platform}:${grantIdentityDigest}` (ADR v2 §6.1).
@@ -1274,6 +1284,7 @@ export class ComputerUseController {
               executableDigest: _executableDigest,
               windowId: _nativeWindowId,
               screenBounds: _screenBounds,
+              windowsGeneration: _windowsGeneration,
               ...candidate
             } = native;
             return computerUseWindowCandidateSchema.parse({
@@ -1793,6 +1804,8 @@ export class ComputerUseController {
         ? null
         : this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
     this.revokeTargetTokens(context.taskId);
+    const enumeration = Symbol('target-enumeration');
+    this.targetEnumerations.set(context.taskId, enumeration);
     const egressBinding =
       this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
     const expiresAt = this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS;
@@ -1803,6 +1816,7 @@ export class ComputerUseController {
       appToken: string;
       targetToken: string;
       labelled: boolean;
+      generationBound: boolean;
       target: SelectableComputerTarget;
     }[] = [];
     const snapshots = new Map<string, TargetEnumerationSnapshot>();
@@ -1833,6 +1847,18 @@ export class ComputerUseController {
         throw new Error('Computer Use policy epoch changed');
       }
       const appToken = randomUUID();
+      const windowsGeneration = windows[0]?.windowsGeneration;
+      if (
+        windows.some(
+          (window) =>
+            !computerTargetWindowsGenerationMatches(window.windowsGeneration, windowsGeneration),
+        ) ||
+        (windowsGeneration !== undefined &&
+          (profile.platform !== 'win32' ||
+            this.targetEnumerations.get(context.taskId) !== enumeration ||
+            !this.windowsTargetGenerationCurrent(windowsGeneration)))
+      )
+        throw new Error('Computer Use target generation changed');
       const appBinding = {
         taskId: context.taskId,
         turnId: context.turnId,
@@ -1840,6 +1866,7 @@ export class ComputerUseController {
         platform: profile.platform,
         appIdentityDigest: profile.identityDigest,
         profileRevision: profile.revision,
+        ...(windowsGeneration === undefined ? {} : { windowsGeneration }),
       } as const;
       const grantState = this.appGrantState(profile, context.taskId);
       snapshots.set(profile.id, { profile, grantState });
@@ -1887,6 +1914,7 @@ export class ComputerUseController {
             }),
             profileId: profile.id,
             expiresAt,
+            ...(windowsGeneration === undefined ? {} : { enumeration }),
           }),
         );
         scope.onCancel(() => this.targetTokens.delete(targetToken));
@@ -1896,6 +1924,7 @@ export class ComputerUseController {
           appToken,
           targetToken,
           labelled,
+          generationBound: windowsGeneration !== undefined,
           target: row.data,
         });
       }
@@ -1903,7 +1932,12 @@ export class ComputerUseController {
         scope.onCancel(() => this.targetAppTokens.delete(appToken));
         this.targetAppTokens.set(
           appToken,
-          Object.freeze({ binding: appBinding, profileId: profile.id, expiresAt }),
+          Object.freeze({
+            binding: appBinding,
+            profileId: profile.id,
+            expiresAt,
+            ...(windowsGeneration === undefined ? {} : { enumeration }),
+          }),
         );
       }
       if (truncated) break;
@@ -1928,7 +1962,11 @@ export class ComputerUseController {
       if (!this.targetProfileUnchanged(snapshot, context.taskId)) stale.add(profileId);
     const targets: ComputerTarget[] = [];
     for (const row of pending) {
-      if (!stale.has(row.profileId)) {
+      const record = this.targetTokens.get(row.targetToken);
+      if (
+        !stale.has(row.profileId) &&
+        (!row.generationBound || (record !== undefined && this.targetRecordCurrent(record)))
+      ) {
         targets.push(row.target);
         continue;
       }
@@ -1973,10 +2011,24 @@ export class ComputerUseController {
    */
   targetTokenBinding(token: string): ComputerTargetTokenBinding | null {
     const record = this.targetTokens.get(token);
-    if (record === undefined) return null;
+    if (record === undefined || !this.targetRecordCurrent(record)) return null;
     return (
       resolveComputerTargetToken(this.targetTokens, token, record.binding, this.now())?.binding ??
       null
+    );
+  }
+
+  private windowsTargetGenerationCurrent(generation: ComputerTargetWindowsGeneration): boolean {
+    return this.deps.native.isWindowsGenerationCurrent?.(generation.helper) === true;
+  }
+
+  private targetRecordCurrent(record: ComputerTargetAppTokenRecord): boolean {
+    const generation = record.binding.windowsGeneration;
+    return (
+      generation === undefined ||
+      (this.now() < record.expiresAt &&
+        record.enumeration === this.targetEnumerations.get(record.binding.taskId) &&
+        this.windowsTargetGenerationCurrent(generation))
     );
   }
 
@@ -2062,7 +2114,7 @@ export class ComputerUseController {
         ? undefined
         : profiles.find((candidate) => candidate.id === claimed.profileId);
     const resolved =
-      profile === undefined
+      profile === undefined || claimed === undefined || !this.targetRecordCurrent(claimed)
         ? null
         : resolveComputerTargetAppToken(
             this.targetAppTokens,
@@ -2074,6 +2126,11 @@ export class ComputerUseController {
               platform: profile.platform,
               appIdentityDigest: profile.identityDigest,
               profileRevision: profile.revision,
+              ...(claimed.binding.windowsGeneration === undefined
+                ? {}
+                : {
+                    windowsGeneration: claimed.binding.windowsGeneration,
+                  }),
             },
             this.now(),
           );
@@ -2089,6 +2146,7 @@ export class ComputerUseController {
    * lifetime of the process.
    */
   private revokeTargetTokens(taskId: string): void {
+    this.targetEnumerations.delete(taskId);
     const now = this.now();
     for (const [token, record] of this.targetTokens)
       if (record.binding.taskId === taskId || now >= record.expiresAt)
@@ -2749,6 +2807,10 @@ export class ComputerUseController {
     this.targetTokens.delete(input.targetToken);
     if (binding === null || record === undefined)
       throw new Error('Computer Use target token is not valid');
+    const validateTarget = (): void => {
+      if (!this.targetRecordCurrent(record))
+        throw new Error('Computer Use target token is not valid');
+    };
     const policyEpoch = this.currentPolicyEpoch(context.taskId);
     if (
       binding.taskId !== context.taskId ||
@@ -2792,6 +2854,7 @@ export class ComputerUseController {
     // window and start driving it.
     signal?.throwIfAborted();
     const observed = await this.refetchAppGrantFacts(profile.id, scope);
+    validateTarget();
     scope.check();
     signal?.throwIfAborted();
     if (
@@ -2801,6 +2864,7 @@ export class ComputerUseController {
     )
       throw new Error('Computer Use app identity changed');
     const windows = await this.listNativeWindows(observed.profile, scope);
+    validateTarget();
     scope.check();
     signal?.throwIfAborted();
     const candidate = windows.find(
@@ -2808,6 +2872,10 @@ export class ComputerUseController {
         window.windowId === binding.nativeWindowId &&
         window.windowIdentityDigest === binding.windowIdentityDigest &&
         window.appIdentityDigest === binding.appIdentityDigest &&
+        computerTargetWindowsGenerationMatches(
+          window.windowsGeneration,
+          binding.windowsGeneration,
+        ) &&
         window.eligible !== false,
     );
     if (candidate === undefined) throw new Error('Computer Use window identity changed');
@@ -2821,6 +2889,7 @@ export class ComputerUseController {
         profileId: observed.profile.id,
         profileRevision: observed.profile.revision,
         native: candidate,
+        ...(binding.windowsGeneration === undefined ? {} : { validateTarget }),
         expiresAt: this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
       }),
     );
@@ -3287,6 +3356,7 @@ export class ComputerUseController {
     )
       throw new Error('Computer Use window candidate is stale');
     const candidates = await this.listNativeWindows(profile, scope);
+    permit.validateTarget?.();
     scope.check();
     controller.signal.throwIfAborted();
     if (this.disposed) throw new Error('Computer Use controller is disposed');
@@ -3296,6 +3366,10 @@ export class ComputerUseController {
         window.appIdentityDigest === permit.native.appIdentityDigest &&
         window.windowIdentityDigest === permit.native.windowIdentityDigest &&
         window.revision === permit.native.revision &&
+        computerTargetWindowsGenerationMatches(
+          window.windowsGeneration,
+          permit.native.windowsGeneration,
+        ) &&
         window.eligible,
     );
     if (candidate === undefined) throw new Error('Computer Use window candidate is stale');
@@ -3373,8 +3447,12 @@ export class ComputerUseController {
       )
         throw new Error('Computer Use emergency stop could not be armed');
       controller.signal.throwIfAborted();
+      permit.validateTarget?.();
       starting.nativeStarted = true;
       const native = await this.deps.native.startSession({
+        ...(permit.validateTarget === undefined
+          ? {}
+          : { assertTargetCurrent: permit.validateTarget }),
         profile: selectedProfile,
         windowId: candidate.windowId,
         sessionId,
@@ -4283,6 +4361,7 @@ export class ComputerUseController {
     this.statusRevisionBySession.clear();
     this.windowCandidatePermits.clear();
     this.targetTokens.clear();
+    this.targetEnumerations.clear();
     this.targetAppTokens.clear();
     this.taskScopedGrants.clear();
     this.accessRequestsByTurn.clear();
