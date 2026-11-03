@@ -22,6 +22,10 @@ MSI has one execution slot; moving every shard to it would serialize that work.
 GitHub-hosted runners remain the default. Fork PRs and Dependabot always retain
 GitHub-hosted runners in this workflow; internal PRs, main pushes and manual runs
 can use the pilot. No `pull_request_target` execution is introduced.
+Check both the triggering actor and the PR author for Dependabot, including when
+a maintainer reopens its PR. Each MSI job verifies the dedicated service SID,
+non-administrator token and Session0, and exposes the installed Git Bash through
+job-scoped `GITHUB_PATH`; no machine PATH or runner restart is required.
 
 Runner group `windows-ci-msi` must allow the current private repository IDs plus
 only `Robbits-CO-LTD/sprint-coder` as a public repository. Use selected repository

@@ -253,7 +253,14 @@ describe('CI scope wiring', () => {
       'ci-host-msi',
     ];
     const repository = 'Robbits-CO-LTD/sprint-coder';
-    const route = (output, enabled, eventName, headRepo, actor = 'maintainer') => {
+    const route = (
+      output,
+      enabled,
+      eventName,
+      headRepo,
+      actor = 'maintainer',
+      author = 'maintainer',
+    ) => {
       const expression = workflow.jobs.classify.outputs[output];
       return JSON.parse(
         runInNewContext(expression.slice(3, -2), {
@@ -262,7 +269,12 @@ describe('CI scope wiring', () => {
             repository,
             actor,
             event_name: eventName,
-            event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+            event: {
+              pull_request: {
+                head: { repo: { full_name: headRepo } },
+                user: { login: author },
+              },
+            },
           },
         }),
       );
@@ -280,6 +292,9 @@ describe('CI scope wiring', () => {
       expect(route(output, 'true', 'pull_request', repository, 'dependabot[bot]')).toEqual([
         fallback,
       ]);
+      expect(
+        route(output, 'true', 'pull_request', repository, 'maintainer', 'dependabot[bot]'),
+      ).toEqual([fallback]);
       expect(route(output, 'true', 'pull_request_target', repository)).toEqual([fallback]);
     }
     for (const job of ['quality', 'package-tests'])
@@ -293,6 +308,13 @@ describe('CI scope wiring', () => {
     expect(workflow.jobs['package-linux']['runs-on']).toBe('ubuntu-latest');
     expect(workflow.jobs['renderer-tests']['runs-on']).toBe('ubuntu-latest');
     expect(workflow.jobs['package-windows']['runs-on']).toBe('windows-2022');
+    for (const job of ['quality', 'package-tests', 'sandbox-rust-windows']) {
+      const preflight = workflow.jobs[job].steps.find(
+        (step) => step.uses === './.github/actions/prepare-msi',
+      );
+      expect(preflight.if).toBe("runner.name == 'MSI-ci'");
+      expect(workflow.jobs[job].steps.indexOf(preflight)).toBe(1);
+    }
   });
 
   it.each([
