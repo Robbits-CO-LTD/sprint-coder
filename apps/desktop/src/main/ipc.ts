@@ -1078,14 +1078,9 @@ export function createComputerUseControllerForIpc(
     ...deps,
     publishDiscoveryResult: (result) => {
       if (result.taskId === null) return;
-      // A Turn's in-deadline result belongs to its rejected tool call. A session-less candidate
-      // list (no Turn) has no such payload: its public error drops the proof, so an in-deadline
-      // termination is recorded here once instead.
-      if (
-        !result.late &&
-        (result.turnId !== null || !result.results.some((item) => item.kind === 'terminated'))
-      )
-        return;
+      // The public tool error drops the proof (providerWorkspaceToolFailure keeps only a code),
+      // with or without a Turn, so an in-deadline termination is recorded here once instead.
+      if (!result.late && !result.results.some((item) => item.kind === 'terminated')) return;
       publish(persistence.recordComputerUseDiscoveryResult({ ...result, taskId: result.taskId }));
     },
   });

@@ -1655,7 +1655,7 @@ describe('Computer Use target tools end to end', () => {
   );
 
   it.each(['turn-1', null])(
-    'PR11 records an in-time E4 termination once only for a session-less candidate list (turn=%s)',
+    'PR11 records an in-time E4 termination once, with or without a Turn (turn=%s)',
     async (turnId) => {
       const proof = {
         kind: 'terminated',
@@ -1703,24 +1703,21 @@ describe('Computer Use target tools end to end', () => {
       expect(await reading).toHaveProperty('discoveryResult.results', [proof]);
       // The IPC handler's cleanup after the rejected result must not report the Stop again.
       await intent?.cancel();
-      if (turnId !== null) {
-        expect(recorded).toEqual([]);
-        expect(fixture.delivered).not.toHaveBeenCalled();
-      } else {
-        expect(recorded).toHaveLength(1);
-        expect(fixture.delivered).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({
-            type: 'computer_use.discovery_result',
-            taskId: 'task-1',
-            turnId: null,
-            result: expect.objectContaining({
-              late: false,
-              reason: 'task_changed',
-              results: [proof],
-            }),
+      // The rejected tool call reaches the Provider as a bare error code, so the proof is
+      // recorded for a Turn's call too.
+      expect(recorded).toHaveLength(1);
+      expect(fixture.delivered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'computer_use.discovery_result',
+          taskId: 'task-1',
+          turnId,
+          result: expect.objectContaining({
+            late: false,
+            reason: 'task_changed',
+            results: [proof],
           }),
-        );
-      }
+        }),
+      );
       expect(stop).toHaveBeenCalledTimes(1);
       await fixture.controller.dispose();
     },
