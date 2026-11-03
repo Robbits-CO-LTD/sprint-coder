@@ -122,6 +122,48 @@ function nativeFixture() {
 }
 
 describe('Windows native targets independently classified in Main', () => {
+  it('N6 carries exact response ownership separately from the native list generation', async () => {
+    const fixture = nativeFixture();
+    const helper = Object.freeze({ helperGeneration: 4 });
+    let current = true;
+    const value = envelope();
+    fixture.listTargets.mockReturnValue(value);
+    const host = createComputerUseNativeHost(
+      {
+        ...fixture.binding,
+        addon: {
+          ...fixture.binding.addon!,
+          captureWindowsGeneration: () => (current ? helper : null),
+          windowsGenerationFor: (response) => (response === value ? helper : null),
+          isWindowsGenerationCurrent: (token) => current && token === helper,
+        },
+      },
+      'win32',
+      {
+        ...fixture.options,
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+        },
+        windowsKillStopTermination: { enabled: true },
+      },
+    );
+    const result = await host.listTargets!();
+    expect(result.windowsGeneration).toEqual({
+      helper,
+      listGeneration: value.generation,
+      rulesetVersion: value.rulesetVersion,
+    });
+    expect(result.windowsGeneration?.helper).toBe(helper);
+    expect(host.captureWindowsGeneration!()).toBe(helper);
+    current = false;
+    expect(host.isWindowsGenerationCurrent!(helper)).toBe(false);
+    await expect(host.listTargets!()).rejects.toThrow('native_target_generation_changed');
+    expect(fixture.binding.addon!.startSession).not.toHaveBeenCalled();
+  });
+
   it('PR8 excludes the isolated process from cross-application discovery and retains another process', async () => {
     const fixture = nativeFixture();
     fixture.listTargets.mockReturnValue(envelope([row(), row(), { ...row(), pid: 43 }]));

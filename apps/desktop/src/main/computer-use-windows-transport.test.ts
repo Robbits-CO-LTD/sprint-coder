@@ -7256,6 +7256,68 @@ int main() {
       expect(await target.host.listWindows(profile)).toEqual([]);
     },
   );
+  it('N6 rechecks a consumed token at the transport send boundary', async () => {
+    let current = true;
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        startSession: (input, assertSend, callbacks) => {
+          current = false;
+          return addon.startSession!(input, assertSend, callbacks);
+        },
+      }),
+      true,
+    );
+    await expect(
+      target.host.startSession({
+        profile,
+        windowId: '100',
+        sessionId: 'n6-stale',
+        taskId: 'task-1',
+        turnId: 'turn-a',
+        cancelEpoch: 0,
+        assertTargetCurrent: () => {
+          if (!current) throw new Error('target generation changed');
+        },
+      }),
+    ).rejects.toThrow('target generation changed');
+    expect(target.helper().served).not.toContain('start_session');
+  });
+
+  it('N6 binds a target-list response to its exact helper capability', async () => {
+    const target = createTarget(
+      {
+        ...responders(),
+        list_targets: () => [
+          'probe_result',
+          {
+            generation: 17,
+            rulesetVersion: 2,
+            targets: [],
+            truncated: false,
+          },
+        ],
+      },
+      undefined,
+      {
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+        },
+        windowsKillStopTermination: { enabled: true },
+      },
+    );
+    const response = await target.addon.listTargets!({});
+    const token = target.addon.captureWindowsGeneration!();
+    expect(token).not.toBeNull();
+    expect(target.addon.windowsGenerationFor?.(response)).toBe(token);
+    expect(target.addon.windowsGenerationFor?.({})).toBeNull();
+    expect(target.helper().served).not.toContain('start_session');
+  });
+
   it('PR8 Host rejects a ticket when the helper changes between preflight and dispatch', async () => {
     const oldToken = { helperGeneration: 1 };
     let current = oldToken;

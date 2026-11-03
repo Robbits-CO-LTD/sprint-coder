@@ -161,6 +161,7 @@ export function createWindowsComputerUseNativeAddon(
     checkTargetIdentity: (targets, checked) => client.checkTargetIdentity(targets, checked),
     configureWindowsAdmission: (check) => client.configureWindowsAdmission(check),
     captureWindowsGeneration: () => client.captureWindowsGeneration(),
+    windowsGenerationFor: (response) => client.windowsGenerationFor(response),
     isWindowsGenerationCurrent: (token) => client.isWindowsGenerationCurrent(token),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
@@ -378,6 +379,7 @@ class WindowsComputerUseHelperClient {
   private termination: WindowsTerminationCallbacks | undefined;
   private admission: WindowsAdmissionCheck | undefined;
   private generationToken: WindowsGenerationToken | null = null;
+  private readonly targetListGenerations = new WeakMap<object, WindowsGenerationToken>();
   private readonly generations = new Map<number, HelperGeneration>();
   private readonly sessionGenerations = new Map<string, number>();
 
@@ -432,6 +434,12 @@ class WindowsComputerUseHelperClient {
   captureWindowsGeneration(): WindowsGenerationToken | null {
     const token = this.generationToken;
     return token !== null && this.isWindowsGenerationCurrent(token) ? token : null;
+  }
+
+  windowsGenerationFor(response: unknown): WindowsGenerationToken | null {
+    return typeof response === 'object' && response !== null
+      ? (this.targetListGenerations.get(response) ?? null)
+      : null;
   }
 
   isWindowsGenerationCurrent(token: WindowsGenerationToken): boolean {
@@ -1088,6 +1096,11 @@ class WindowsComputerUseHelperClient {
       );
       if (this.termination !== undefined && this.generations.get(helper)?.exited !== false)
         throw new Error('native_stop_unconfirmed');
+      if (operation === 'list_targets' && this.termination !== undefined) {
+        this.assertGenerationToken(generationToken);
+        if (generationToken !== null && typeof result === 'object' && result !== null)
+          this.targetListGenerations.set(result, generationToken);
+      }
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);

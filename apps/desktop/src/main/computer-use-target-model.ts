@@ -5,6 +5,25 @@ import {
   type ComputerTargetUntrustedLabel,
 } from '@sprint-coder/contracts';
 import { computerTargetToolKind } from '@sprint-coder/domain';
+import type { WindowsGenerationToken } from './computer-use-native-types';
+
+/** Main-only ownership evidence; helper lifetime and native list revision are independent. */
+export type ComputerTargetWindowsGeneration = Readonly<{
+  helper: WindowsGenerationToken;
+  listGeneration: number;
+  rulesetVersion: number;
+}>;
+
+export function computerTargetWindowsGenerationMatches(
+  left: ComputerTargetWindowsGeneration | undefined,
+  right: ComputerTargetWindowsGeneration | undefined,
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : left.helper === right.helper &&
+        left.listGeneration === right.listGeneration &&
+        left.rulesetVersion === right.rulesetVersion;
+}
 
 /**
  * Pure model behind the agent-facing target tools (ADR v2 §5.2, §5.3).
@@ -93,6 +112,7 @@ export type ComputerTargetAppBinding = Readonly<{
   platform: 'darwin' | 'win32';
   appIdentityDigest: string;
   profileRevision: number;
+  windowsGeneration?: ComputerTargetWindowsGeneration;
 }>;
 
 /**
@@ -105,12 +125,14 @@ export type ComputerTargetTokenBinding = ComputerTargetAppBinding &
   Readonly<{ windowIdentityDigest: string; nativeWindowId: string }>;
 
 export type ComputerTargetAppTokenRecord = Readonly<{
+  enumeration?: symbol;
   binding: ComputerTargetAppBinding;
   profileId: string;
   expiresAt: number;
 }>;
 
 export type ComputerTargetTokenRecord = Readonly<{
+  enumeration?: symbol;
   binding: ComputerTargetTokenBinding;
   profileId: string;
   expiresAt: number;
@@ -134,7 +156,8 @@ export function computerTargetAppBindingMatches(
     binding.policyEpoch === expected.policyEpoch &&
     binding.platform === expected.platform &&
     binding.appIdentityDigest === expected.appIdentityDigest &&
-    binding.profileRevision === expected.profileRevision
+    binding.profileRevision === expected.profileRevision &&
+    computerTargetWindowsGenerationMatches(binding.windowsGeneration, expected.windowsGeneration)
   );
 }
 

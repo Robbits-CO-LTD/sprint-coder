@@ -63,6 +63,7 @@ import type {
   WindowsDispatchCallbacks,
   WindowsStartCallbacks,
   WindowsCloseConfirmation,
+  WindowsGenerationToken,
 } from './computer-use-native-types';
 import {
   decideWindowsStop,
@@ -1895,10 +1896,15 @@ export function createComputerUseNativeHost(
   };
 
   const startNative = async (
-    input: Omit<Parameters<ComputerUseNativeHost['startSession']>[0], 'classifierRoute'>,
+    input: Omit<
+      Parameters<ComputerUseNativeHost['startSession']>[0],
+      'classifierRoute' | 'assertTargetCurrent'
+    >,
     nativeRoute: 'v1' | 'v2' | undefined,
     owner: StartOwner,
+    assertTargetCurrent?: () => void,
   ): Promise<ComputerUseNativeSession> => {
+    assertTargetCurrent?.();
     assertStartOwner(owner);
     if (
       startIdentityEnabled &&
@@ -1910,6 +1916,9 @@ export function createComputerUseNativeHost(
       throw new ComputerUseNativeUnavailableError('native_unavailable');
     let checkedGeneration: number | undefined;
     const sendStart = async (request: Record<string, unknown>, creationTime: unknown) => {
+      assertTargetCurrent?.();
+      if (assertTargetCurrent !== undefined && !terminationEnabled)
+        throw new ComputerUseNativeUnavailableError('native_target_generation_changed');
       if (ledger === undefined) return await invoke('startSession', request);
       requireMethod('startSession');
       const start = addon?.startSession;
@@ -2009,6 +2018,7 @@ export function createComputerUseNativeHost(
         return await start(
           startRequest,
           () => {
+            assertTargetCurrent?.();
             assertStartOwner(owner);
             if (
               ledgerBlocked(
@@ -2213,6 +2223,13 @@ export function createComputerUseNativeHost(
 
   const host: ComputerUseNativeHost = {
     ...(terminationEnabled ? { subscribeWindowsStop: stopDelivery.subscribe } : {}),
+    ...(terminationEnabled
+      ? {
+          captureWindowsGeneration: () => addon?.captureWindowsGeneration?.() ?? null,
+          isWindowsGenerationCurrent: (token: WindowsGenerationToken) =>
+            addon?.isWindowsGenerationCurrent?.(token) === true,
+        }
+      : {}),
     listTargets: async () => {
       if (ledger !== undefined) await retryLedger();
       const requireDiscovery = (): void => {
@@ -2229,10 +2246,31 @@ export function createComputerUseNativeHost(
       requireDiscovery();
       if (ledger !== undefined) (await prepareTargetAdmission({}, false))();
       const value = await invoke('listTargets', {});
+      const helper = terminationEnabled ? addon?.windowsGenerationFor?.(value) : undefined;
+      const requireGeneration = (): void => {
+        if (
+          terminationEnabled &&
+          (helper == null || addon?.isWindowsGenerationCurrent?.(helper) !== true)
+        )
+          throw new ComputerUseNativeUnavailableError('native_target_generation_changed');
+      };
+      requireGeneration();
       requireDiscovery();
-      const result = parseWindowsComputerUseTargets(value);
-      if (result === null)
+      const parsed = parseWindowsComputerUseTargets(value);
+      if (parsed === null)
         throw new ComputerUseNativeUnavailableError('native_target_list_invalid');
+      const result = {
+        ...parsed,
+        ...(helper == null
+          ? {}
+          : {
+              windowsGeneration: Object.freeze({
+                helper,
+                listGeneration: parsed.generation,
+                rulesetVersion: parsed.rulesetVersion,
+              }),
+            }),
+      };
       if (ledger !== undefined) {
         const targets = [...result.targets];
         const prepare = admissionBatch();
@@ -2253,6 +2291,7 @@ export function createComputerUseNativeHost(
           }
         }
         requireDiscovery();
+        requireGeneration();
         return { ...result, targets };
       }
       return result;
@@ -2318,7 +2357,8 @@ export function createComputerUseNativeHost(
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
       if (ledger === undefined) requireMethod('startSession');
-      const { classifierRoute, ...input } = startInput;
+      const { classifierRoute, assertTargetCurrent, ...input } = startInput;
+      assertTargetCurrent?.();
       if (!Number.isSafeInteger(input.cancelEpoch) || input.cancelEpoch < 0)
         throw new ComputerUseNativeUnavailableError('native_session_invalid');
       let owner = startOwners.get(input.sessionId);
@@ -2401,6 +2441,7 @@ export function createComputerUseNativeHost(
           input,
           binding === undefined ? undefined : binding.expectedVersion === 2 ? 'v2' : 'v1',
           owner,
+          assertTargetCurrent,
         );
       } catch (error) {
         // An active Cancel/Close owns its cleanup. A late resume must not create a second
