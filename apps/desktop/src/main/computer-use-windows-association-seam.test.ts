@@ -219,6 +219,16 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       expect(measured.status, measured.output).toBe(0);
       return measured;
     };
+    // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
+    // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
+    const measureUntilComplete = (): string | undefined => {
+      const deadline = Date.now() + 3_000;
+      for (;;) {
+        const complete = measure().facts.get('complete');
+        if (complete === '1' || Date.now() >= deadline) return complete;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      }
+    };
     const flags = [
       'delegate_execute',
       'drop_target',
@@ -318,7 +328,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
         // Removing the handler leaves an empty ContextMenuHandlers key behind: it holds no handler.
         if (entry.remove[1]!.endsWith('\\ContextMenuHandlers\\Synthetic'))
           expect(reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(0);
-        expect(measure().facts.get('complete'), `${label} removed`).toBe('1');
+        expect(measureUntilComplete(), `${label} removed`).toBe('1');
       }
 
       // The perceived type's SystemFileAssociations layer (a type of its own, not the user's "text").
