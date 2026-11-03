@@ -101,6 +101,14 @@
 //     kWindowsTargetDescendantInspectLimit descendants within kWindowsTargetDescendantBudgetMs;
 //     beyond that the descendant facts are not measured.
 
+// Production builds inject this literal through the generated build header. Standalone harnesses
+// default to ordinary mode; no request, environment or mutable context can enable acceptance.
+#ifndef SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD
+#define SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD 0
+#endif
+inline constexpr bool kWindowsTargetAcceptanceMode =
+    SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1;
+
 inline constexpr std::size_t kWindowsTargetDescendantLimit = 1024;
 // The descendants of one target that are read from their images, and the time that may take.
 // More than that, or longer: the descendant facts are not measured (unresolvable).
@@ -125,13 +133,12 @@ struct WindowsTargetRenameProbe {
 };
 
 // What the caller knows that the target cannot tell: the roots (in precedence order), the process
-// whose descendants are Sprint Coder's own, this helper's signer, and the acceptance mode.
+// whose descendants are Sprint Coder's own, and this helper's signer.
 struct WindowsTargetFactsContext {
   std::optional<std::vector<sprint_coder::computer_use::WindowsImageRootPrefix>> roots;
   std::uint32_t lineage_root_pid = 0;
   std::uint64_t lineage_root_creation = 0;
   std::string self_signer_thumbprint;
-  bool acceptance_mode = false;
   // The one-time rename-follow probe (WindowsTargetRenameFollows): whether the kernel image name
   // follows a rename on the probed (temp) volume, and that volume's file system. The running-image
   // anchor rests on it, so a target matches only when the probe followed and the target's own file
@@ -534,7 +541,6 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
 // unset, so the target is unresolvable rather than wrongly not-own).
 WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pid,
                                                            std::string self_signer_thumbprint,
-                                                           bool acceptance_mode,
                                                            const std::function<bool()> &still_valid = {}) {
   WindowsTargetFactsContext context;
   if (still_valid && !still_valid()) return context;
@@ -550,7 +556,6 @@ WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pi
     context.lineage_root_creation = *creation;
   }
   context.self_signer_thumbprint = std::move(self_signer_thumbprint);
-  context.acceptance_mode = acceptance_mode;
   if (still_valid && !still_valid()) return WindowsTargetFactsContext{};
   context.rename_probe = WindowsTargetRenameFollows(still_valid);
   return context;
@@ -1740,7 +1745,7 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
       }
     }
     facts.acceptance_fixture =
-        context.acceptance_mode &&
+        kWindowsTargetAcceptanceMode &&
         target_eligibility_detail::AsciiLower(*facts.image_leaf) == kWindowsTargetFixtureLeaf;
   }
   facts.image_volume = WindowsTargetVolumeKind(held.file.value);

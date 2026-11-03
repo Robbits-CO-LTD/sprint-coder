@@ -397,7 +397,6 @@ int wmain(int argc, wchar_t **argv) {
   outsider.roots = CurrentWindowsTargetRoots(L"");
   outsider.lineage_root_pid = idle.info.dwProcessId;
   outsider.lineage_root_creation = WindowsTargetCreationTime(idle.info.hProcess).value_or(0);
-  outsider.acceptance_mode = true;
   // The rename-follow probe runs once and must confirm it on this (NTFS) machine, with the move
   // followed and the probe volume's file system reported; the measurements below rely on it.
   const std::optional<WindowsTargetRenameProbe> rename_probe = WindowsTargetRenameFollows();
@@ -478,12 +477,12 @@ int wmain(int argc, wchar_t **argv) {
   }
   // This program stands in for Main: CurrentWindowsTargetFactsContext takes Main's pid as the
   // lineage root, so this process (and its children) are Sprint Coder's own.
-  WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "", true);
+  WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "");
   own.roots = outsider.roots;
   Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId() &&
             own.rename_probe.has_value() && own.rename_probe->follows,
         "contexts_built");
-  Check(CurrentWindowsTargetFactsContext(0, "", true).lineage_root_pid == 0,
+  Check(CurrentWindowsTargetFactsContext(0, "").lineage_root_pid == 0,
         "lineage_root_unmeasured_without_main");
 
   // The snapshot gives every process its creation time without opening it, so a process this
@@ -1355,6 +1354,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           '/DWIN32_LEAN_AND_MEAN',
           '/D_WIN32_WINNT=0x0A00',
           `/I${nativeDirectory}`,
+          '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
           seamSource,
           `/Fe:${binary}`,
           `/Fo:${binary}.obj`,

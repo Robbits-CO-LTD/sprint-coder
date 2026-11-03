@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { nativeAcceptanceBuildHeader } from './build-computer-use-acceptance.mjs';
 import {
   nativeBuildFailureDetail,
   sanitizedNativeBuildEnvironment,
@@ -48,6 +49,7 @@ if (target === 'win32' && architecture !== 'x64')
 // ADR v2 D7: the eligibility mode is fixed here, by the build argument alone, and recorded in the
 // manifest and compiled into the native. `--eligibility=v1|v2` defaults to v1.
 const eligibilityMode = parseEligibilityMode(process.argv, target);
+const acceptanceBuildHeader = nativeAcceptanceBuildHeader(process.env, target);
 
 mkdirSync(outputDirectory, { recursive: true });
 
@@ -240,6 +242,8 @@ if (sanitizerSelfCheckOnly) {
     );
     const eligibilityHeader = join(outputDirectory, 'computer_use_build_eligibility.h');
     writeFileSync(eligibilityHeader, eligibilityBuildHeader(declaration), { mode: 0o600 });
+    const acceptanceHeader = join(outputDirectory, 'computer_use_build_acceptance.h');
+    writeFileSync(acceptanceHeader, acceptanceBuildHeader, { mode: 0o600 });
     const compiler = process.env['CXX'] ?? process.env['CC'] ?? 'cl.exe';
     // The Windows runner is intentionally built with the host's MSVC developer environment.  A
     // missing compiler is an explicit Gate 0 failure; falling back to a PATH binary would make the
@@ -265,6 +269,7 @@ if (sanitizerSelfCheckOnly) {
       '/DSPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE=1',
       `/FI${provenanceHeader}`,
       `/FI${eligibilityHeader}`,
+      `/FI${acceptanceHeader}`,
       `/I${nativeDirectory}`,
       join(nativeDirectory, 'computer_use_windows_host.cc'),
       `/Fe:${executable}`,

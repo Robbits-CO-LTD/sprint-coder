@@ -73,7 +73,7 @@ function componentSource(): string {
   let shared = source.slice(begin, end);
   shared = replaceOne(
     shared,
-    /CurrentWindowsTargetFactsContext\(input\.main_pid,\s*std::move\(signer\),\s*\/\*acceptance_mode=\*\/false,\s*still_valid\)/gu,
+    /CurrentWindowsTargetFactsContext\(input\.main_pid,\s*std::move\(signer\),\s*still_valid\)/gu,
     'ComponentContext(input.main_pid)',
   );
   shared = replaceOne(
