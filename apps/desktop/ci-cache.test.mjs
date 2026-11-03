@@ -507,11 +507,14 @@ describe('full CI partition contract', () => {
         .map((step) => ({ job, step })),
     );
     expect(cargoSteps).toHaveLength(1);
-    expect(cargoSteps[0].job).toBe('sandbox-rust-windows');
-    expect(workflow.jobs['sandbox-rust-windows'].if).toBe(
-      "needs.classify.outputs.full_matrix == 'true'",
-    );
+    expect(cargoSteps[0].job).toBe('computer-use-native-gate');
+    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
+    const rust = workflow.jobs['sandbox-rust-windows'];
+    expect(rust.if).toBe("needs.classify.outputs.full_matrix == 'true'");
+    const build = rust.steps.find((step) => step.run?.includes('cargo build --release'));
+    expect(build.run).toContain('cargo test --no-run --locked');
+    expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;
     const macRows = workflow.jobs['test-macos'].strategy.matrix.include;

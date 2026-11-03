@@ -3,9 +3,18 @@
 ## Scope
 
 Use the existing non-administrator Organization runner `MSI-ci` (ID3741) for the
-three quality jobs (typecheck, lint, format), contracts/domain tests, and the existing
-Windows Rust `windows_command` integration suite. Extract that suite from native Gate 0
-without changing its command or dropping it from the required full CI gate.
+three quality jobs (typecheck, lint, format), contracts/domain tests, and Windows Rust
+release/test compilation. Keep the existing Windows Rust `windows_command` integration
+suite in hosted native Gate0, with its exact command and required gate intact.
+
+The first real MSI service run41552277415 exposed two host differences: Git Bash was
+not on the dedicated service PATH, and `windows_command` failed its first AppContainer
+execution assertion (the shared test mutex then poisoned four remaining cases).
+Job-scoped PATH preparation repairs the first issue. The AppContainer failure's precise
+cause is unresolved; do not weaken its boundary, elevate the service, or skip its tests.
+Retain those five integration cases on the proven hosted Windows job. The separate MSI
+Rust job builds the release binary and compiles all tests with `--no-run`; it does not
+claim to execute or pass them. Further AppContainer migration needs separate acceptance.
 
 Keep macOS/Linux platform coverage, Windows desktop shards/bridges, packaging,
 release/signing/attestation and Computer Use acceptance on GitHub-hosted runners.
