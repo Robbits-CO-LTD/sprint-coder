@@ -10726,6 +10726,7 @@ if (runsWithElectronAbi)
         { version: 101 },
         { version: 102 },
         { version: 103 },
+        { version: 104 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
