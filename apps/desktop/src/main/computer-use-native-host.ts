@@ -1633,8 +1633,8 @@ export function createComputerUseNativeHost(
           }
         : { kind: 'termination_requested' as const };
     };
-    const generation = generationOf();
-    if (generation != null && ledgerState(generation).exitConfirmed) return outcome(generation);
+    const started = generationOf();
+    if (started != null && ledgerState(started).exitConfirmed) return outcome(started);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -1647,7 +1647,8 @@ export function createComputerUseNativeHost(
         }),
       ]);
     } catch {
-      const generation = generationOf();
+      // The owner may already be gone when work() cleaned up; the generation it ran on still decides.
+      const generation = generationOf() ?? started;
       if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       if (ledgerState(generation).exitConfirmed) return outcome(generation);
