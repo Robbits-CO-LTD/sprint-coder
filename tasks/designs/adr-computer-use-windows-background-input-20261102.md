@@ -20,6 +20,8 @@
 
 ## 2. 決定（案）
 
+**保存先の読み替え（2026-11-03）**: K-1・K-3 の「SQLite のストア」は、kill-stop ADR §2.2 の 5 で採用した B（Windows の SID ごとの LocalAppData の共通 SQLite）を指す。台帳は instanceId ごと、対象の隔離は共有し、移管は原子的に行い、最初にコミットされた理由を保持する。
+
 ### 2.1 入力経路とセッションの形
 
 **現状**: `native/computer_use_windows_host.cc:9408` の semantic worker は Invoke、Value、SelectionItem、Toggle、ExpandCollapse を処理する（各呼出しは `:9445`、`:9470`、`:9499`、`:9528`、`:9556`）。`:10454` はこれらを dispatch し、`:10459` の後検証（`RevalidateWindowsTarget`、`:9803` で前面を要求）を通れば completed とする。つまり今の semantic 入力は「前面での UIA pattern の呼出し」である。scroll は `:10327` の座標入力であり、`:10363` でカーソルを動かし、`:10391` / `:10403` で wheel を送る。ScrollPattern の背景入力はこの分岐にはない。開始と再開は、対象が前面でなければ `:5652` / `:6140` で `SetForegroundWindow` を呼ぶ。現行のセッションは「開始時に前面に出し、前面での UIA 呼出しと SendInput を続けて送る」形である。監査には `main/computer-use-action.ts:12` の `computerUseActionRoute`（`'semantic' | 'visual' | 'none'`、操作の種類からの分類）が `main/computer-use-controller.ts:5181` / `:5451` で route として記録される。

@@ -42,6 +42,8 @@ import type {
   WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 import * as stopKernel from './computer-use-windows-stop-outcome';
+import { openWindowsLedgerStore } from './computer-use-windows-ledger-store';
+import Database from 'better-sqlite3';
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
   createWindowsComputerUseNativeAddon,
@@ -651,6 +653,180 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  it('PR4 startup discards corrupt rows, retains valid isolation and persists restoration', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-restore-'));
+    const path = join(directory, 'shared.sqlite');
+    const store = openWindowsLedgerStore({ path, userData: 'C:\\synthetic\\restore' });
+    const db = new Database(path);
+    const row: WindowsLedgerRow = {
+      helperGeneration: 1,
+      sessionId: 'old-session',
+      requestId: 'old-request',
+      kind: 'semantic',
+      inputPath: 'normal',
+      state: 'awaiting_response',
+      identity: { pid: 4242, creationTime: 'synthetic-time' },
+    };
+    const diagnostics: stopKernel.WindowsStopDiagnostic[] = [];
+    try {
+      store.write(row);
+      store.write({ ...row, requestId: 'foreground', kind: 'foreground', inputPath: 'foreground' });
+      const invalid = [null, {}, { ...row, state: 12 }];
+      invalid.forEach((value, index) =>
+        db
+          .prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)')
+          .run(store.instanceId, 1, 'corrupt-session', String(index), JSON.stringify(value)),
+      );
+      db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(99, 'corrupt', 'null');
+      const target = createTarget(responders(), undefined, {
+        windowsLedger: store,
+        windowsLedgerDiagnostic: (value) => diagnostics.push(value),
+      });
+      await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
+      expect(diagnostics).toEqual(
+        expect.arrayContaining([
+          { kind: 'unknown', reason: 'invalid_format' },
+          { kind: 'unknown', reason: 'missing_identity' },
+          { kind: 'semantic', reason: 'invalid_format' },
+          { kind: 'quarantine', reason: 'invalid_format' },
+        ]),
+      );
+      expect(store.read()).toEqual({
+        rows: [],
+        quarantines: [{ identity: row.identity, reason: 'restored' }],
+      });
+      expect(JSON.stringify(diagnostics)).not.toMatch(/4242|synthetic-time/);
+      // R20 does not permanently isolate the host for an invalid row.
+      await expect(startSession(target.host, 'unrelated-start', 'turn-a')).resolves.toMatchObject({
+        sessionId: 'unrelated-start',
+      });
+    } finally {
+      db.close();
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('PR4 failed startup transfer holds the target until a successful retry', async () => {
+    let healthy = false;
+    const row: WindowsLedgerRow = {
+      helperGeneration: 1,
+      sessionId: 'old-session',
+      requestId: 'old-request',
+      kind: 'semantic',
+      inputPath: 'normal',
+      state: 'awaiting_response',
+      identity: { pid: 4242, creationTime: 'synthetic-time' },
+    };
+    const transfer = vi.fn(() => healthy);
+    const diagnostic = vi.fn();
+    const foreground: WindowsLedgerRow = {
+      ...row,
+      requestId: 'foreground',
+      kind: 'foreground',
+      inputPath: 'foreground',
+    };
+    const target = createTarget(responders(), undefined, {
+      windowsLedgerDiagnostic: diagnostic,
+      windowsLedger: {
+        write: () => true,
+        update: () => true,
+        delete: () => true,
+        restoreQuarantines: () => true,
+        transferReceipt: transfer,
+        read: () => ({ rows: [row, foreground], quarantines: [] }),
+      },
+    });
+    await expect(startSession(target.host, 'blocked-transfer', 'turn-a')).rejects.toThrow(
+      'native_unavailable',
+    );
+    expect(spawn).not.toHaveBeenCalled();
+    healthy = true;
+    await expect(
+      startSession(target.host, 'unrelated-after-retry', 'turn-a'),
+    ).resolves.toMatchObject({ sessionId: 'unrelated-after-retry' });
+    expect(transfer).toHaveBeenCalledWith(
+      [row, foreground],
+      [{ identity: row.identity, reason: 'restored' }],
+    );
+    expect(diagnostic).toHaveBeenCalledWith({
+      kind: 'foreground',
+      reason: 'foreground_restart_discard',
+    });
+  });
+  it('PR4 restores another instance quarantine and denies a known-identity resume', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-host-'));
+    const path = join(directory, 'shared.sqlite');
+    const a = openWindowsLedgerStore({ path, userData: 'C:\\synthetic\\a' });
+    const b = openWindowsLedgerStore({ path, userData: 'C:\\synthetic\\b' });
+    try {
+      const original = responders();
+      const target = createTarget(
+        {
+          ...original,
+          start_session: (metadata) => {
+            const [type, result] = original['start_session']!(metadata);
+            return [
+              type,
+              {
+                ...(result as Record<string, unknown>),
+                pid: 4242,
+                processStartTime: '133000000000000001',
+              },
+            ];
+          },
+        },
+        undefined,
+        { windowsLedger: b },
+      );
+      await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
+      const session = await startSession(target.host, 'shared-session', 'turn-a');
+      a.restoreQuarantines([
+        { identity: { pid: 4242, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+      ]);
+      await expect(startSession(target.host, session.sessionId, 'turn-a')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(1);
+    } finally {
+      a.close();
+      b.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['throw', 'timeout'] as const)(
+    'PR4 unreadable startup blocks before helper launch and recovers (%s)',
+    async (failure) => {
+      let healthy = false;
+      const target = createTarget(responders(), undefined, {
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+          transferReceipt: () => true,
+          read: () => {
+            if (healthy) return { rows: [], quarantines: [] };
+            if (failure === 'throw') throw new Error('synthetic read failure');
+            return new Promise(() => {});
+          },
+        },
+      });
+      const attempt = startSession(target.host, 'blocked-start', 'turn-a').catch(
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(2001);
+      expect(await attempt).toMatchObject({ message: 'native_unavailable' });
+      expect(spawn).not.toHaveBeenCalled();
+      if (failure === 'throw') {
+        healthy = true;
+        await expect(startSession(target.host, 'recovered-start', 'turn-b')).resolves.toMatchObject(
+          { sessionId: 'recovered-start' },
+        );
+      }
+    },
+  );
   const identityTargets = [{ pid: 4242, processStartTime: '133000000000000001' }];
 
   it('checks target identities as the first operation with mixed results in request order and no identities', async () => {
@@ -3065,6 +3241,7 @@ int main() {
       undefined,
       {
         windowsLedger: {
+          restoreQuarantines: () => true,
           write: async (row) => {
             order.push('write');
             rows.set(row.requestId, row);
@@ -4807,6 +4984,7 @@ int main() {
         {
           windowsPhysicalBoundsToDip: (value) => value,
           windowsLedger: {
+            restoreQuarantines: () => true,
             write: () => {
               if (eventKind === 'dispatch_canceled') abort.abort();
               return true;
@@ -5869,22 +6047,25 @@ int main() {
 
   it('R19a storage reflection has a bounded wait and keeps its hold', async () => {
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
-    const target = ledgerTarget();
-    const session = await startSession(target.host, 'session-1', 'turn-1');
-    target.control.reflectWait = new Promise<void>(() => undefined);
-    let settled = false;
-    const result = target.dispatch(session).then((value) => {
-      settled = true;
-      return value;
-    });
-    await vi.advanceTimersByTimeAsync(2_001);
-    expect(settled).toBe(true);
-    expect(await result).toMatchObject({ outcome: 'resolved', value: { result: 'completed' } });
-    expect(target.rows.size).toBe(1);
-    expect(decide.mock.results.at(-1)?.value.state.holds).toMatchObject([
-      { operation: 'response', writeUncertain: true },
-    ]);
-    decide.mockRestore();
+    try {
+      const target = ledgerTarget();
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.control.reflectWait = new Promise<void>(() => undefined);
+      let settled = false;
+      const result = target.dispatch(session).then((value) => {
+        settled = true;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(settled).toBe(true);
+      expect(await result).toMatchObject({ outcome: 'resolved', value: { result: 'completed' } });
+      expect(target.rows.size).toBe(1);
+      expect(decide.mock.results.at(-1)?.value.state.holds).toMatchObject([
+        { operation: 'response', writeUncertain: true },
+      ]);
+    } finally {
+      decide.mockRestore();
+    }
   });
 
   it('R18 a timed out initial write blocks the target until the late unsent row is removed', async () => {

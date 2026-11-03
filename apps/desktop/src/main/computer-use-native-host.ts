@@ -63,6 +63,8 @@ import type {
 import {
   decideWindowsStop,
   windowsTargetMayStart,
+  isStoredWindowsLedgerRow,
+  type WindowsStopDiagnostic,
   type WindowsLedgerRow,
   type WindowsStopState,
   type WindowsStopEvent,
@@ -72,26 +74,35 @@ import {
 
 /**
  * Each row is keyed by (helperGeneration, sessionId, requestId); the wire request id alone can repeat
- * across sessions, so an implementation must not key rows by requestId only.
+ * across sessions, so an implementation must not key rows by requestId only. Stores scope these
+ * keys to their stable instanceId. Writes and completion notifications must be serialized on
+ * each connection; shared quarantines keep the first committed reason across connections.
  */
 export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
-  /** Adds quarantines; an existing quarantine for the same target keeps its first reason. */
-  restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
+  /** Adds quarantines; an existing quarantine for the same target keeps its first committed reason. */
+  restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
+  /** Startup snapshot: only this instance's rows, with all shared quarantines. */
+  read?(): WindowsLedgerSnapshot | Promise<WindowsLedgerSnapshot>;
+  /** Refresh shared isolation without replaying this Main's live ledger rows. */
+  readQuarantines?(): readonly unknown[] | Promise<readonly unknown[]>;
   /**
    * Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent.
    * Quarantines are never removed here, and an existing quarantine keeps its first committed reason.
    * Receipt and exit transfers of one generation can run concurrently, so commit order may differ
    * from the core's order (a late receipt's response_lost can land before an exit's exit_suspect).
-   * TODO(PR4): decide the reason precedence under concurrent commits (for example exit_suspect wins)
-   * and pin it, with the no-removal rule, in a contract test shared by every store implementation.
+   * Reasons are diagnostic, not admission criteria. Preserve first commit order, not core order.
    */
   transferReceipt?(
     rows: readonly WindowsLedgerRow[],
     quarantines: readonly WindowsTargetQuarantine[],
   ): boolean | Promise<boolean>;
+}>;
+export type WindowsLedgerSnapshot = Readonly<{
+  rows: readonly unknown[];
+  quarantines: readonly unknown[];
 }>;
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
@@ -126,7 +137,7 @@ export const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
  * repeating a literal that only happens to line up.
  */
 export const COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT = 2;
-// PR4 will revisit this bound with measured storage cost; currently the same 2s as T.
+// Same 2s as T; SQLite's 250ms busy timeout stays inside this deadline.
 const WINDOWS_LEDGER_STORAGE_TIMEOUT_MS = 2_000;
 
 export class ComputerUseNativeUnavailableError extends Error {
@@ -167,8 +178,9 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
-  /** PR5a opt-in only. Persistence implementation and foreground handoffs belong to PR4/PR5b. */
+  /** Opt-in storage and startup restoration. Product wiring remains PR10; handoffs remain PR5b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
+  windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
   /**
    * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
    * them, a helper whose exit never arrives keeps refusing connections with no user notification.
@@ -201,7 +213,7 @@ export function createComputerUseNativeHost(
   binding: ComputerUseNativeBinding,
   platform: NodeJS.Platform = process.platform,
   options: ComputerUseNativeHostOptions = {},
-): ComputerUseNativeHost {
+): ComputerUseNativeHost & { restoreWindowsLedger(): Promise<boolean> } {
   const addon = binding.addon;
   const runtimePlatform = runtimePlatformFor(platform);
   const acceptanceMode = computerUseCompiledAcceptanceMode();
@@ -286,6 +298,7 @@ export function createComputerUseNativeHost(
     const previous = ledgerState(generation);
     const decision = decideWindowsStop(previous, event);
     ledgerStates.set(generation, decision.state);
+    for (const diagnostic of decision.diagnostics) options.windowsLedgerDiagnostic?.(diagnostic);
     for (const hold of previous.holds) {
       if (
         hold.operation === 'receipt_transfer' &&
@@ -332,7 +345,7 @@ export function createComputerUseNativeHost(
     const quarantines = hold.quarantinesToRestore;
     pendingWrites.set(holdId, {
       generation,
-      write: () => ledger?.restoreQuarantines?.(quarantines) ?? false,
+      write: () => ledger?.restoreQuarantines(quarantines) ?? false,
     });
     return true;
   };
@@ -385,7 +398,70 @@ export function createComputerUseNativeHost(
         });
     }
   };
+  // Separate startup/refresh states never represent a launched helper. Retrying a read must not
+  // replay restart over a live generation's kill state, owners or pending transfers (R19/R7).
+  let startupRead = false;
+  let restoreTask: Promise<boolean> | undefined;
+  const restoreWindowsLedger = async (): Promise<boolean> => {
+    if (ledger?.read === undefined) return true;
+    if (restoreTask !== undefined) return tryWrite(() => restoreTask!);
+    const generation = startupRead ? -2 : -1;
+    const readHold = `restore-read:${generation}`;
+    const current = ledgerState(generation);
+    ledgerStates.set(generation, { ...current, helperLaunched: false });
+    if (!current.holds.some((hold) => hold.id === readHold))
+      ledgerEvent(generation, { kind: 'store_unreadable', holdId: readHold, targets: 'unknown' });
+    const task = Promise.resolve()
+      .then(async () => {
+        const snapshot = startupRead
+          ? {
+              rows: [],
+              quarantines:
+                ledger.readQuarantines !== undefined
+                  ? await ledger.readQuarantines()
+                  : (await ledger.read!()).quarantines,
+            }
+          : await ledger.read!();
+        if (!Array.isArray(snapshot.rows) || !Array.isArray(snapshot.quarantines)) return false;
+        const rows = snapshot.rows.filter(isStoredWindowsLedgerRow);
+        const holdId = `restore-write:${++holdSequence}`;
+        const event = {
+          kind: 'restore_read',
+          holdId: readHold,
+          rows: snapshot.rows,
+          quarantines: snapshot.quarantines,
+        } as const;
+        const preview = decideWindowsStop(ledgerState(generation), {
+          ...event,
+          storage: { status: 'written' },
+        });
+        const write = () => ledger.transferReceipt?.(rows, preview.state.quarantines) ?? false;
+        let written = rows.length === 0;
+        if (!written) {
+          try {
+            written = await write();
+          } catch {
+            written = false;
+          }
+        }
+        const decision = ledgerEvent(generation, {
+          ...event,
+          storage: written ? { status: 'written' } : { status: 'failed', holdId },
+        });
+        startupRead = true;
+        if (!written && decision.state.holds.some((hold) => hold.id === holdId))
+          pendingWrites.set(holdId, { generation, write });
+        return written;
+      })
+      .catch(() => false)
+      .finally(() => {
+        restoreTask = undefined;
+      });
+    restoreTask = task;
+    return tryWrite(() => task);
+  };
   const retryLedger = async (): Promise<void> => {
+    await restoreWindowsLedger();
     let attempts = 0;
     for (const holdId of [...pendingWrites.keys()]) {
       const pending = pendingWrites.get(holdId);
@@ -419,6 +495,12 @@ export function createComputerUseNativeHost(
     addon?.configureWindowsTermination?.({
       prepare: async () => {
         await retryLedger();
+        if (
+          [...ledgerStates.values()].some((state) =>
+            state.holds.some((hold) => hold.recovery === 'restore_store'),
+          )
+        )
+          throw new Error('native_unavailable');
         if ([...ledgerStates.values()].some((state) => state.killRequested && !state.exitConfirmed))
           throw new Error('native_stop_unconfirmed');
       },
@@ -685,6 +767,8 @@ export function createComputerUseNativeHost(
               return written === true;
             },
             () => {
+              // A rejected write has settled before socket.write: no input was sent. Unlike a
+              // deadline, it has no outstanding completion to await; restart handles any stale row.
               settled = true;
               return false;
             },
@@ -2289,7 +2373,7 @@ export function createComputerUseNativeHost(
       }
     },
   };
-  return Object.freeze(host);
+  return Object.freeze({ ...host, restoreWindowsLedger });
 }
 
 /** Default for unit/embedded callers that do not provide a loaded native binding. */
