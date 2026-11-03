@@ -107,6 +107,22 @@ afterEach(() => {
 });
 
 describe('application approval card focus', () => {
+  it('explains Windows generation loss without live buttons or taking focus', () => {
+    const composer = document.createElement('textarea');
+    document.body.append(composer);
+    composer.focus();
+    const view = mountCard({
+      ...card(),
+      state: 'canceled',
+      revision: 2,
+      noticeCode: 'generation_changed',
+    });
+    expect(view.container.textContent).toContain('対象の一覧または操作用プロセスが更新されたため');
+    expect(view.container.querySelector('button')).toBeNull();
+    expect(document.activeElement).toBe(composer);
+    view.unmount();
+  });
+
   it('takes no focus at all when it appears', () => {
     const before = document.activeElement;
     const view = mountCard();

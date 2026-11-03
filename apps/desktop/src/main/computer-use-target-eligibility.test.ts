@@ -50,10 +50,30 @@ const golden = materializeGoldenCases(model);
 const RULESET_LEDGER: Readonly<Record<string, Readonly<Record<number, string>>>> = {
   win32: {
     2: '06a9ae9573a2a192bb80a00a713736576bcdcade21eb199d12efb26952a4fb4f',
+    3: '6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584',
   },
 };
 
 describe('target eligibility core golden vectors', () => {
+  it('separates the static C ceiling from the browser ceiling, including overlapping rules', () => {
+    const base = golden[0]!.facts as unknown as TargetFacts;
+    for (const patch of [
+      { signature: 'unsigned' as const },
+      { descendantShell: true },
+      { descendantPseudoConsole: true },
+      { signerOrganization: 'jetbrains s.r.o.' },
+    ]) {
+      expect(classifyTarget({ ...base, ...patch })).toEqual({
+        kind: 'upper',
+        maximumMode: 'supervised',
+      });
+      expect(classifyTarget({ ...base, ...patch, imageLeaf: 'chrome.exe' })).toEqual({
+        kind: 'upper',
+        maximumMode: 'observe_only',
+      });
+    }
+  });
+
   it('keeps the private native wire facts aligned with every generated Windows signal', () => {
     const signals = DENY_RULESET.signals.filter((signal) => signal.platforms.includes('win32'));
     expect(Object.keys(computerWindowsTargetFactsSchema.shape).sort()).toEqual(
@@ -80,7 +100,11 @@ describe('target eligibility core golden vectors', () => {
   it.each(golden.map((entry) => [entry.name, entry] as const))('%s', (_name, entry) => {
     const facts = entry.facts as unknown as TargetFacts;
     const explained = classifyTargetExplained(facts);
-    expect({ kind: explained.verdict.kind, class: explained.denyClass }).toEqual(entry.expect);
+    expect({
+      kind: explained.verdict.kind,
+      class: explained.denyClass,
+      maximumMode: 'maximumMode' in explained.verdict ? explained.verdict.maximumMode : null,
+    }).toEqual(entry.expect);
     expect(classifyTarget(facts)).toEqual(explained.verdict);
     const admitted = entry.expect.kind === 'eligible' || entry.expect.kind === 'upper';
     expect(explained.route !== null).toBe(admitted);
@@ -105,9 +129,7 @@ describe('target eligibility core golden vectors', () => {
         expect(Object.keys(verdict)).toEqual(['kind']);
       else {
         expect(Object.keys(verdict).sort()).toEqual(['kind', 'maximumMode']);
-        expect(verdict.maximumMode).toBe(
-          verdict.kind === 'eligible' ? 'full_access_app' : 'observe_only',
-        );
+        expect(verdict.maximumMode).toBe(entry.expect.maximumMode);
       }
     }
   });
@@ -251,11 +273,9 @@ describe('target eligibility outward types', () => {
   it('types each admitted kind with the mode the generated ruleset gives it', () => {
     type Eligible = Extract<TargetEligibility, { kind: 'eligible' }>;
     type Upper = Extract<TargetEligibility, { kind: 'upper' }>;
-    expectTypeOf<Upper['maximumMode']>().toEqualTypeOf<'observe_only'>();
+    expectTypeOf<Upper['maximumMode']>().toEqualTypeOf<'observe_only' | 'supervised'>();
     expectTypeOf<Eligible['maximumMode']>().toEqualTypeOf<'full_access_app'>();
-    expectTypeOf<TargetUpperMode>().toEqualTypeOf<
-      (typeof DENY_RULESET.platforms)['win32']['upperMaximumMode']
-    >();
+    expectTypeOf<TargetUpperMode>().toEqualTypeOf<'observe_only' | 'supervised'>();
     expectTypeOf<TargetEligibleMode>().toEqualTypeOf<
       (typeof DENY_RULESET.platforms)['win32']['eligibleMaximumMode']
     >();
@@ -264,7 +284,7 @@ describe('target eligibility outward types', () => {
     if (verdict.kind === 'upper') expect(verdict.maximumMode === 'observe_only').toBe(true);
     const upper = golden.find((entry) => entry.expect.kind === 'upper')!;
     const capped = classifyTarget(upper.facts as unknown as TargetFacts);
-    expect(capped.kind === 'upper' && capped.maximumMode === 'observe_only').toBe(true);
+    expect(capped.kind === 'upper' && capped.maximumMode === upper.expect.maximumMode).toBe(true);
   });
 });
 

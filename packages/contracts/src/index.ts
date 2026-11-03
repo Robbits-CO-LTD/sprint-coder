@@ -4747,14 +4747,16 @@ const computerWindowsNativeTargetSchema = z
     bounds: computerUseBoundsSchema,
     screenBounds: computerUseBoundsSchema,
     boundsUnit: z.literal('physical_px'),
-    maximumMode: z.enum(['full_access_app', 'observe_only']),
+    maximumMode: computerUseModeSchema,
     identity: computerWindowsTargetIdentitySchema,
     facts: computerWindowsTargetFactsSchema,
   })
   .strict()
   .refine(
     (target) =>
-      target.maximumMode === (target.kind === 'eligible' ? 'full_access_app' : 'observe_only') &&
+      (target.kind === 'eligible'
+        ? target.maximumMode === 'full_access_app'
+        : target.maximumMode !== 'full_access_app') &&
       target.identity.maximumMode === target.maximumMode &&
       target.appIdentityDigest === target.identity.identityDigest &&
       target.executableDigest === target.identity.executableDigest,
@@ -5485,7 +5487,10 @@ export const computerAppGrantRequestSchema = z
      * Why a card closed without a decision. A closed product vocabulary the Renderer turns into a
      * sentence, so no Main string — and certainly no native or model string — becomes UI text.
      */
-    noticeCode: z.enum(['timed_out', 'withdrawn', 'identity_changed']).nullable().default(null),
+    noticeCode: z
+      .enum(['timed_out', 'withdrawn', 'identity_changed', 'generation_changed'])
+      .nullable()
+      .default(null),
     verified: z
       .object({
         platform: computerUsePlatformSchema,

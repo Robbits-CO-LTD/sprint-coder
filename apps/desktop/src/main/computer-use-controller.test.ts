@@ -1615,6 +1615,31 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(sessionId);
     });
 
+    it('N8-5 lowers the ceiling and revokes the card when the gate closes without a generation change', async () => {
+      let open = true;
+      const { fixture, acting, sessionId } = await offered({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => 1,
+        sessionMaximumMode: 'supervised',
+        nativeApproval: { pathFor: () => open },
+      });
+      await viWait();
+      open = false;
+      await clickCard(fixture);
+      await acting.catch(() => undefined);
+      expect(fixture.statuses.at(-1)).toMatchObject({
+        maximumMode: 'observe_only',
+        mode: 'observe_only',
+        pendingApproval: null,
+      });
+      open = true;
+      await expect(fixture.controller.observe(sessionId)).rejects.toThrow();
+      expect(fixture.statuses.at(-1)?.maximumMode).toBe('observe_only');
+      expect(fixture.approvedDispatches).toHaveLength(0);
+      await fixture.controller.stop(sessionId);
+    });
+
     it('N8-4 invalidates an existing Windows plan when the helper generation changes', async () => {
       let generation = 1;
       const fixture = createFixture({

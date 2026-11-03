@@ -101,7 +101,7 @@ bool CheckGolden(const std::vector<TargetGoldenCase> &cases) {
     const TargetClassification explained = ClassifyTargetExplained(entry.facts);
     const TargetVerdict verdict = ClassifyTarget(entry.facts);
     if (explained.verdict.kind != entry.kind || explained.deny_class != entry.deny_class ||
-        verdict.kind != entry.kind) {
+        verdict.kind != entry.kind || verdict.maximum_mode != entry.maximum_mode) {
       std::cerr << "golden case \"" << entry.name << "\": got "
                 << TargetVerdictKindName(explained.verdict.kind) << ' ' << explained.deny_class
                 << ", want " << TargetVerdictKindName(entry.kind) << ' ' << entry.deny_class

@@ -162,6 +162,7 @@ export function createWindowsComputerUseNativeAddon(
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
+    windowsApprovalAvailable: () => client.windowsApprovalAvailable(),
     windowsApprovalReady: (sessionId) => client.windowsApprovalReady(sessionId),
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
     checkTargetIdentity: (targets, checked) => client.checkTargetIdentity(targets, checked),
@@ -405,11 +406,13 @@ class WindowsComputerUseHelperClient {
   private readonly approvalSessionGenerations = new Map<string, number>();
   private approvalHandshakeSupported = false;
 
+  windowsApprovalAvailable(): boolean {
+    return this.socket !== null && !this.socket.destroyed && this.approvalHandshakeSupported;
+  }
+
   windowsApprovalReady(sessionId: string): boolean {
     return (
-      this.socket !== null &&
-      !this.socket.destroyed &&
-      this.approvalHandshakeSupported &&
+      this.windowsApprovalAvailable() &&
       this.approvalSessionGenerations.get(sessionId) === this.helperGeneration &&
       this.starts.get(sessionId)?.stopped === false
     );
@@ -1133,9 +1136,13 @@ class WindowsComputerUseHelperClient {
         {
           ...input,
           operation,
-          ...(['preflight', 'approval_approve', 'approval_discard', 'dispatch_approved'].includes(
-            operation,
-          )
+          ...([
+            'start_session',
+            'preflight',
+            'approval_approve',
+            'approval_discard',
+            'dispatch_approved',
+          ].includes(operation)
             ? { helperGeneration: helper }
             : {}),
         },

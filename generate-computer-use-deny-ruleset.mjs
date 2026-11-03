@@ -198,12 +198,19 @@ export function loadDenyRuleset(text = readFileSync(DENY_RULESET_PATHS.source, '
   if (!Array.isArray(json.rules) || json.rules.length === 0) fail('rules must be a list');
   const rules = json.rules.map((rule, index) => {
     const where = `rules[${index}]`;
-    onlyKeys(rule, ['class', 'platforms', 'note', 'when'], where);
+    onlyKeys(rule, ['class', 'platforms', 'note', 'when', 'maximumMode'], where);
     if (!verdictByClass.has(rule.class)) fail(`${where}.class is unknown`);
+    if (
+      rule.maximumMode !== undefined &&
+      (verdictByClass.get(rule.class) !== 'upper' ||
+        !['observe_only', 'supervised'].includes(rule.maximumMode))
+    )
+      fail(`${where}.maximumMode must cap an upper rule`);
     if (rule.class === 'W-NR') fail(`${where}: W-NR is the no-route outcome, not a rule`);
     const platforms = checkPlatforms(rule.platforms, where);
     return {
       class: rule.class,
+      ...(rule.maximumMode === undefined ? {} : { maximumMode: rule.maximumMode }),
       verdict: verdictByClass.get(rule.class),
       platforms,
       when: conditions(rule.when, where, false, platforms),
@@ -266,6 +273,7 @@ export function denyRulesetCanonicalText(model, platform) {
   for (const rule of model.rules)
     if (rule.platforms.includes(platform)) {
       lines.push(`rule\t${rule.class}\t${rule.verdict}`);
+      if (rule.maximumMode !== undefined) lines.push(`ceiling\t${rule.maximumMode}`);
       for (const condition of rule.when) lines.push(when(condition));
     }
   return `${lines.join('\n')}\n`;
@@ -386,6 +394,7 @@ export function renderCppHeader(model) {
     '};',
     '',
     'struct TargetRule {',
+    '  std::string_view maximum_mode;',
     '  std::string_view class_id;',
     '  TargetRuleVerdict verdict;',
     '  std::uint32_t platforms;',
@@ -453,7 +462,7 @@ export function renderCppHeader(model) {
   out.push('inline constexpr TargetRule kTargetRules[] = {');
   model.rules.forEach((rule, index) =>
     out.push(
-      `    {"${rule.class}", TargetRuleVerdict::k${pascal(rule.verdict)}, ${platformMask(rule.platforms)}u, ${ruleWhen[index]}},`,
+      `    {"${rule.maximumMode ?? ''}", "${rule.class}", TargetRuleVerdict::k${pascal(rule.verdict)}, ${platformMask(rule.platforms)}u, ${ruleWhen[index]}},`,
     ),
   );
   out.push('};', '');
@@ -556,7 +565,15 @@ export function materializeGoldenCases(
       throw new Error(`${entry.name} expects an unknown kind`);
     if ((expect.kind === 'denied') !== (typeof expect.class === 'string'))
       throw new Error(`${entry.name}: a denied case names its class, and only it does`);
-    return { name: entry.name, facts, expect: { kind: expect.kind, class: expect.class ?? null } };
+    return {
+      name: entry.name,
+      facts,
+      expect: {
+        kind: expect.kind,
+        class: expect.class ?? null,
+        maximumMode: expect.maximumMode ?? null,
+      },
+    };
   });
 }
 
@@ -608,6 +625,7 @@ export function renderCppGolden(model, cases) {
     '  TargetFacts facts;',
     '  TargetVerdictKind kind;',
     '  std::string_view deny_class;',
+    '  std::string_view maximum_mode;',
     '};',
     '',
     'inline std::vector<TargetGoldenCase> TargetGoldenCases() {',
@@ -618,7 +636,7 @@ export function renderCppGolden(model, cases) {
     out.push('  {', '    TargetFacts facts;');
     for (const line of cppFactsStatements(model, 'facts', entry.facts)) out.push(`    ${line}`);
     out.push(
-      `    cases.push_back({${cppStringLiteral(entry.name)}, facts, TargetVerdictKind::${kind[entry.expect.kind]}, ${cppStringLiteral(entry.expect.class ?? '')}});`,
+      `    cases.push_back({${cppStringLiteral(entry.name)}, facts, TargetVerdictKind::${kind[entry.expect.kind]}, ${cppStringLiteral(entry.expect.class ?? '')}, ${cppStringLiteral(entry.expect.maximumMode ?? '')}});`,
       '  }',
     );
   }

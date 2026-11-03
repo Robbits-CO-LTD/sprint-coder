@@ -40,6 +40,7 @@ import {
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
 
 /**
  * `computer_request_access` and `computer_start` (ADR v2 §5.2, §6.1, §6.1.1).
@@ -564,7 +565,7 @@ describe('N6-3 generation-bound approval', () => {
       throw new Error('invalid golden');
     const parsed = parseWindowsComputerUseTargets({
       generation: 17,
-      rulesetVersion: 2,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       truncated: false,
       targets: [
         {
@@ -586,7 +587,11 @@ describe('N6-3 generation-bound approval', () => {
     });
     if (parsed === null) throw new Error('invalid targets');
     const helper = Object.freeze({ helperGeneration: 1 });
-    const windowsGeneration = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const windowsGeneration = {
+      helper,
+      listGeneration: 17,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+    };
     const fixture = createFixture({
       profiles: [],
       windowsTargetDiscoveryEnabled: true,
@@ -606,6 +611,82 @@ describe('N6-3 generation-bound approval', () => {
     const start = vi.spyOn(fixture.native, 'startSession');
     return { ...fixture, start, windowsGeneration };
   }
+
+  it.each([false, true])(
+    'audits candidate input before dispatch (write failure: %s)',
+    async (failWrite) => {
+      const fixture = candidateFixture({
+        plan: async (round) =>
+          round === 1
+            ? { type: 'click', x: 0.5, y: 0.5, button: 'left' }
+            : { type: 'finish', answerBoolean: true },
+        onAuditRecord: () => {
+          if (failWrite) throw new Error('synthetic audit failure');
+        },
+      });
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const card = fixture.pending();
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+        intentFor(card, 'allow_always'),
+      );
+      expect(await pending).toMatchObject({ granted: true });
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: target.targetToken, goal: 'synthetic goal' },
+          context,
+        ),
+      );
+      expect(fixture.profiles).toEqual([]);
+      if (failWrite) {
+        expect(fixture.dispatchedActions()).toEqual([]);
+        expect(fixture.audits()).toEqual([]);
+      } else {
+        expect(fixture.dispatchedActions()).toContainEqual({
+          type: 'click',
+          x: 0.5,
+          y: 0.5,
+          button: 'left',
+        });
+        expect(fixture.audits()).toContainEqual(
+          expect.objectContaining({
+            profileId: expect.stringMatching(/^native-target:/),
+            candidateProfileDisplayName: 'Synthetic editor',
+            actionKind: 'click',
+            state: 'applied',
+          }),
+        );
+      }
+    },
+  );
+
+  it.each(['helper', 'list'] as const)(
+    'withdraws a Windows card when its %s generation is lost without a click',
+    async (kind) => {
+      const fixture = candidateFixture();
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'synthetic request' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.pending();
+      if (kind === 'helper') fixture.native.isWindowsGenerationCurrent = () => false;
+      else fixture.native.isWindowsTargetGenerationCurrent = () => false;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(fixture.published.at(-1)).toMatchObject({
+        state: 'canceled',
+        noticeCode: 'generation_changed',
+      });
+      expect(await pending).toMatchObject({ granted: false });
+      expect(fixture.grants.size).toBe(0);
+    },
+  );
 
   it('approves an unregistered candidate and carries its list generation into start', async () => {
     const fixture = candidateFixture({
@@ -739,7 +820,11 @@ describe('N6-3 generation-bound approval', () => {
       }),
     );
     const helper = Object.freeze({ helperGeneration: 1 });
-    const generation = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const generation = {
+      helper,
+      listGeneration: 17,
+      rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+    };
     let current = true;
     const fixture = createFixture({
       profiles: [profile],

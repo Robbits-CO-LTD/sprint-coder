@@ -143,6 +143,7 @@ export type ComputerUseNativeAddon = Readonly<{
   approvalDiscard?(input: unknown): unknown;
   /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
   dispatchApproved?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
+  windowsApprovalAvailable?(): boolean;
   windowsApprovalReady?(sessionId: string): boolean;
   dispatch?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
   dispatchLedgerSupported?: true;
