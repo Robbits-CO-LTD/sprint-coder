@@ -299,15 +299,15 @@ export function createComputerUseNativeHost(
     }
     if (
       terminationEnabled &&
-      decision.cleanup === 'generation_after_transfer' &&
-      decision.cleanupGeneration !== null &&
+      typeof decision.cleanup === 'object' &&
+      decision.cleanup.kind === 'ready' &&
       decision.awaitingHoldId === null
     ) {
-      const completions = exitCompletions.get(decision.cleanupGeneration);
-      exitCompletions.delete(decision.cleanupGeneration);
+      const completions = exitCompletions.get(decision.cleanup.helperGeneration);
+      exitCompletions.delete(decision.cleanup.helperGeneration);
       for (const complete of completions ?? []) complete();
-      cleanupGeneration(decision.cleanupGeneration);
-      addon?.cleanupWindowsGeneration?.(decision.cleanupGeneration);
+      cleanupGeneration(decision.cleanup.helperGeneration);
+      addon?.cleanupWindowsGeneration?.(decision.cleanup.helperGeneration);
     }
     return decision;
   };

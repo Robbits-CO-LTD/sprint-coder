@@ -4249,6 +4249,7 @@ int main() {
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
       const result = original(state, event);
       if (event.kind !== 'start_generation') return result;
+      if (result.kind !== 'generation_started') throw new Error('Expected generation start');
       // PR5b will supply foreground rows; seed that future ledger input at the kernel boundary.
       return {
         ...result,
@@ -4645,8 +4646,7 @@ int main() {
       )!.value;
       expect(exit).toMatchObject({
         helper: 'may_start',
-        cleanup: 'deferred_until_transfer',
-        cleanupGeneration: 1,
+        cleanup: { kind: 'deferred', helperGeneration: 1, holdId: expect.any(String) },
       });
       expect(exit.state.result).toBe('terminated_target_suspect');
       expect(exit.state.nativeBlockers).toHaveLength(1);
@@ -5678,6 +5678,8 @@ int main() {
           }
           const decision = realDecide(next, event);
           if (event.kind !== 'response') return decision;
+          if (decision.kind !== 'ledger_updated')
+            throw new Error('Expected response ledger update');
           return {
             ...decision,
             state: {

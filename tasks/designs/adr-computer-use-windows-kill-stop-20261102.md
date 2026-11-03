@@ -170,10 +170,10 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 | R5 | 同上、台帳の全種類（SendInput・paste を含み、前面化は除く）で応答待ち／accepted=true 効果未確認あり | exit 時に `terminated_target_suspect` | identity の対象隔離へ永続移管。移管前に行を失わない | 世代後始末。E1〜E3 は要求理由維持、session が無い E4 の理由値は PR11 で決める。遅延反映の注意。同対象不可、他対象可 | §2.2、§3.1 の 4・5 |
 | R6 | R5 の未確認行が SendInput／paste、または Stop 中に transport timeout | R5 と同じ | `pending` 消失に関係なく台帳から隔離 | 再送しない。他対象可 | §2.2、§4 の S2 |
 | R7 | kill 要求後、T 内に exit なし | 停止は未確定。`termination_requested` を返す | 台帳・隔離を維持 | child 保持、全操作・新 helper を拒否。E1〜E3 の理由は `native_unavailable`。E4 は `native_stop_unconfirmed` を伝達し、session が無い通知先・理由値は PR11 で決める | §2.2、§3.1 の 1・6 |
-| R8 | R7 の後で exit 到着 | 到着時に R4 / R5 へ遷移 | その世代の台帳で判定 | 該当世代だけ解除・後始末。遅延通知の具体形は未決 | §2.2、§6.1 の 8 |
+| R8 | R7 の後で exit 到着 | 到着時に R4 / R5 へ遷移 | その世代の台帳で判定 | 該当世代だけ解除・後始末。核は `generation_exit` に終了原因と `late: true` を別々に保持し、Stop 起点なら元の要求理由を示す。配送は PR7c-2 | §2.2、§6.1 の 8 |
 | R9 | 未確認 discovery／start owner のみ残る、exit 確認 | `terminated_clean` | identity のない owner を対象隔離に変えない | discovery／start のブロック解除。その対象に既存の隔離が無ければ開始可（他の対象の隔離は関係しない） | §2.2 の 2、§3.1 の 5 |
 | R10 | 未確認 discovery と未確認 control が同居、exit 確認 | `terminated_target_suspect` | control の identity だけ隔離 | discovery も終了。対象不明として host 全体を残さない | §2.2 の 2、§3.1 の 5 |
-| R11 | Stop 外の crash／abortTransport、exit 確認 | exit 時に R4 / R5 と同じ判定 | 同じ台帳規則 | 全 owner を後始末。Stop 外の理由値・通知表現は未決 | §2.2、§2.5、§6.1 の 8 |
+| R11 | Stop 外の crash／abortTransport、exit 確認 | exit 時に R4 / R5 と同じ判定 | 同じ台帳規則 | 全 owner を後始末。核は `generation_exit` に crash / abortTransport、遅延の有無、clean / suspect、`native_unavailable` を保持する。配送は PR7c-2 | §2.2、§2.5、§6.1 の 8 |
 | R12 | A の Stop で共有 helper 終了、B／picker／開始待ちも存在 | 同じ exit に結び付ける | 全 session の未確認行を対象別に判定 | 全 owner と token を失効。B に「別の操作の停止のため…」 | §2.5、§3.1 の 2・5 |
 | R13 | 古い世代の exit の確認後に、その古い世代の receipt／応答が遅着 | 新世代の証拠にしない。分類を変えない | 台帳の行を消さず、対象の隔離を変えない | 旧 session・ticket を変えず、新世代の owner・ticket・隔離も誤解除しない。N9a の「遅い成功 receipt だけで旧 ticket や旧世代の session を復活させない」と同じ | §3.1 の 2・6、N9a §2.5 |
 | R14 | 応答待ち／効果未確認／R7 のまま Main 再起動 | 再起動を exit 証拠にしない | 残った行（前面化を除く）を対象の隔離へ復元。前面化の行は R23 のとおり破棄 | 最初の helper で照合。同対象は照合・承認まで不可 | §2.2 の 5、§3.3 |
@@ -207,7 +207,16 @@ R19a〜R19c の保留中の書込み・移管は Host が持ち、開始・再�
 
 R13 の遅着は古い世代の exit の確認の後にしか起きず、新しい世代の起動の前後は問わないため、同じ Main で古い世代の終了待ち中に新しい helper を起動しないという上の規則と両立する。
 
-R8・R11 とセッションが無い E4 の通知先・理由値、settle の具体的な時間は未決で、§6.1 の 8・9 に従って実装 PR で決める。
+PR7c-1 で核の通知型を次の union に確定する。製品の配送は有効化しない。
+
+- `unchanged`: 通知なし。古い receipt・応答・二重 exit（R13）はこの値とし、終了分類を変えない。
+- `termination_pending`: T 超過時に一度だけ停止未確定を通知する。理由は既存の `native_unavailable`。exit が来なくても返す。
+- `generation_exit`: `cause`（stop / crash / abortTransport）、`late`、`result`（terminated_clean / terminated_target_suspect）、`initiatorReason` を保持する。Stop 起点は `requested_reason`、Stop 外は `native_unavailable` とする。遅延と原因を混同せず、公開 StopReason は増やさない。
+- `discovery_result`: E4 の Stop 結果。停止成功と `native_stop_unconfirmed` は既存の結果型を使う。session が無い場合の最終配送先は PR11。
+
+`WindowsStopDecision` は入力イベントでなく結果の種類を判別子にする。`GenerationCleanup` は `ready`（世代必須）/ `deferred`（世代と保存待ち ID 必須）の union とする。R19c は `exit_confirmed` で終了と保存待ちを返し、保存回復時の `storage_recovered` で同じ世代の後始末を許可する。終了通知を再発行せず、解消済み hold の再試行は拒否する。終了確認と後始末の配送段階への対応は PR7c-2 で定義する。
+
+R8・R11 の配送・owner 照合は PR7c-2、Controller への接続と表示は PR10。セッションが無い E4 の最終配送先と settle の具体的な時間は、引き続き §6.1 の 8・9 に従って決める。
 
 ## 3. 変更
 
@@ -217,7 +226,7 @@ R8・R11 とセッションが無い E4 の通知先・理由値、settle の具
    - Stop の入口は 4 つある。以下の括弧内の再送は現行経路の説明であり、N3 では次項に従って廃止する。開始済みのセッションの close（Controller の `completeStop` → Host の `close`）、native がある開始待ちのセッション（Controller が cancel と close の再送を自分で行う）、native が無い開始待ちのセッション（Controller が `starting.native === null` かつ `nativeStarted` のとき Host の `stopPendingStart` を呼ぶ。Host は `stopStartOwner` → `completePendingStop` → `completeNativePendingStop` と進み、`stopWithDeadline('stopPendingStart')` を `COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT` 回まで再送する）。helper が `start_session` の中で固まった場合（S1 が挙げる WinVerifyTrust や process / exe の open）は 3 つ目の経路で、最初の `stopPendingStart` の期限 C の切れを終了の契機とし、Stop 開始から C + T 以内に §2.2 の判定へ進む。4 つ目は、セッションに属さない discovery の Stop である（候補一覧の取消し、Task の切替え・終了、grant の取消しなど。Controller の `beginWindowCandidates` や `stopDiscoveriesWhere` → `ComputerUseDiscoveryScope.stop` → discovery handle の `stop()` → discovery manager の `completeStop`（`attemptLimit` 回まで再送）→ Host の manager から `invoke('stopWindowDiscovery')` で addon を呼ぶ経路）。この入口の期限切れ・失敗も、同じ世代の終了と §2.2 の判定・§2.5 の後始末へつなぐ。この入口も C = 10 秒を使い、別の期限は作らない。Stop の開始から C + T 以内に結果を返す。
    - Windows では Controller の 2 回目の close、Host の pending-stop の再送（`completeNativePendingStop`、失敗後の `stopPromise` の再取得を含む）、discovery manager の再送、discovery scope の `stop(retry=true)`、`startSession` の catch での再確認を廃止し、同じ終端処理へ寄せる。例外は close の `semantic_input_in_flight` に対する C 内の 50 ms ごとの再試行だけとする。C の後は再送しない。discovery manager の `attemptLimit` と transport の close の期限（今は再送を見込んで 10 秒 × 3）も、Windows では同じ C の期限と終端処理に合わせる。macOS は今のまま。
    - 終了を起こすのは Host の Stop の入口（`close`、`stopPendingStart`、セッションに属さない discovery の Stop）で、契機は、期限 C の切れと、Stop の入口が期限 C より前に検証済みの receipt を得られずに失敗したとき（close の `semantic_input_in_flight` を除く helper の error 応答、receipt の parse・identity（sessionId / discoveryId を含む）・epoch・count の検証の失敗、discovery の停止の失敗、`confirmSessionClosed` の失敗のどれでも）とする。今のコードでの例は、Host の `close` での receipt の parse か `inputReceipt` の検証の失敗、`discoveryUnconfirmed` か discovery の停止の失敗、`confirmSessionClosed` の proof の不一致、`completeNativePendingStop` での receipt の parse の失敗や epoch・count の後退、`completePendingStop` での discovery の停止の失敗、discovery manager の `completeStop` での receipt の parse か `discoveryId` の不一致である。この例外以外で失敗したときは再送せず、すぐに helper を終了して §2.2 の判定へ進む（§2.2 の (c)）。今は、検証の失敗の多くで終了の契機が無い（parse の失敗などでは close の応答の後の idle teardown が偶然 helper を終了させ、semantic の proof の不一致や discovery の停止の失敗では helper が残る）。§2.2 の (b) はその idle teardown も止める。child の終了と `exit` の観測は addon の client が受け持つ。Controller は終了を起こさず、Stop の結果として §2.2 の状態を受け取る。今の Host の `close` は `Promise<void>` を返すので、`close` と `stopPendingStart` が §2.2 の状態を返すように型を変える。
-   - Controller の扱い: `terminated_clean` と `terminated_target_suspect` は Stop の確定として `nativeAcknowledged` を真にし（固まった helper では cancel の ack が先に失敗するが、その失敗は終了による確定で上書きする。開始待ちの経路も同じ）、停止理由は要求された理由のままにする。今のように `native_unavailable` に置き換えない。`terminated_target_suspect` の UI は「停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない」とする。`termination_requested` は今と同じ `native_unavailable` とし、UI は §2.2 の文言にする。R8 の遅い exit、R11 の Stop 外の終了、E4 のセッションが無い場合の通知先・理由値は未決で、PR7・PR11 で決めて本 ADR に書き戻す。終了で確定した場合の `stop_acknowledged` の capture には、receipt の代わりに終了の種別を記録する。
+   - Controller の扱い: `terminated_clean` と `terminated_target_suspect` は Stop の確定として `nativeAcknowledged` を真にし（固まった helper では cancel の ack が先に失敗するが、その失敗は終了による確定で上書きする。開始待ちの経路も同じ）、停止理由は要求された理由のままにする。今のように `native_unavailable` に置き換えない。`terminated_target_suspect` の UI は「停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない」とする。`termination_requested` は今と同じ `native_unavailable` とし、UI は §2.2 の文言にする。R8・R11 の核の通知型は §2.6 に定義する。配送・owner 照合は PR7c-2、E4 のセッションが無い場合の最終配送先は PR11 で決めて本 ADR に書き戻す。終了で確定した場合の `stop_acknowledged` の capture には、receipt の代わりに終了の種別を記録する。
    - discovery の結果は `ComputerUseDiscoveryStop`、scope の `stop`、Controller の `stopDiscoveriesWhere`、通知まで通す。`terminated_clean` / `terminated_target_suspect` は停止成功、`termination_requested` は `native_stop_unconfirmed` とする。
    - kill を始めた後に正常な receipt が届いても終了処理は取り消さず、結果を確定する証拠は exit の確認を優先する。exit 確認前に Host が receipt を検証したときに限り通常の台帳行を効果確定として消す（K-3 の背景行は隔離へ移管する）。exit 確認後の遅着は R13 に従い、行・分類・対象の隔離・旧 session・ticket を変えない。clean / suspect は exit の時点の台帳で決め、旧 ticket や session を復活させない。
    - C の上限は 10 秒とする。Host の `stopWithDeadline` と discovery manager は 10 秒を超える期限を拒否するので、S1 の実測で 10 秒を超える C が要るなら、N3 でこの 2 つの上限も変える。
@@ -337,7 +346,7 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 5. receipt の parse の失敗、identity / epoch / count / proof の不一致、discovery の失敗を同じ終端処理へ入れる（§2.2 の (c)、§3.1 の 1）。
 6. close が `semantic_input_in_flight` を返した場合だけ C 内で 50 ms ごとに再試行し、期限を延長しない。それ以外の失敗は即時に終端処理へ入る。「C を待つ」は応答待ちとこの例外に適用する（§2.5、§3.1 の 1）。
 7. kill 開始後の正常 receipt で終了処理を取り消さず、結果の確定は exit を優先する。exit 確認前に Host が検証した receipt でのみ通常行を効果確定として消す。exit 確認後の遅着は R13 に従う。K-3 の背景行は隔離へ移管する。clean / suspect は exit 時点の台帳で決める（§3.1 の 1）。
-8. R8 の遅い exit、R11 の Stop 外の終了、E4 の session が無い場合の通知先と理由値は未決。N3 の PR7・PR11 で決め、本 ADR に書き戻す（§4.1）。
+8. R8・R11 の核の通知型と理由の扱いは PR7c-1 で §2.6 に確定。配送・owner 照合は PR7c-2、E4 の session が無い場合の最終配送先は PR11 で決め、本 ADR に書き戻す（§4.1）。
 9. settle の具体的な時間は未決。PR7 で実測して決めるまでは「短い待ち」とする（§3.1 の 3）。
 10. N-W1 は、現在の libuv の job の採用経路では代替策を足さない。将来その前提を外すときに再設計する（§5 の 11・12）。
 11. 一時フォルダの起動時掃除は N3 の必須受入から外し、後のスライスへ回す（§5 の 13）。
