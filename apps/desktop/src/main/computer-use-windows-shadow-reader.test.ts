@@ -45,6 +45,7 @@ function interfaceMethods(): string[] {
 describe('Windows shadow reader is portable and decides nothing', () => {
   it('has no platform header, clock, thread, I/O or approval vocabulary', () => {
     const allowedIncludes = new Set([
+      '"computer_use_origin_classify.h"',
       '"computer_use_windows_shadow.h"',
       '<cstddef>',
       '<array>',
