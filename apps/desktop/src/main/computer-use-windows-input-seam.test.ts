@@ -39,11 +39,29 @@ describe.skipIf(process.platform === 'win32')(
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 using UINT = unsigned;
+using BOOL = int;
+constexpr BOOL FALSE = 0;
 struct RECT {};
 struct INPUT {};
 using LPINPUT = INPUT*;
-struct WindowsSession { std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts = std::make_shared<std::atomic<std::uint64_t>>(0); };
+struct WindowsSession {
+  std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts = std::make_shared<std::atomic<std::uint64_t>>(0);
+  // Approved-input fields (N8-2c); zero keeps the ordinary path this seam covers.
+  std::uint64_t approved_started_ns = 0;
+  std::uint64_t approved_deadline_ns = 0;
+  std::uint64_t approved_helper_generation = 0;
+  std::uint64_t approved_stop_serial = 0;
+  std::uint64_t cancel_epoch = 0;
+};
+struct TargetListControl { std::mutex stop_mutex; };
+TargetListControl &WindowsTargetListControl() { static TargetListControl control; return control; }
+std::uint64_t windows_helper_generation = 0;
+std::uint64_t MonotonicNowNs() { return 1; }
+bool WindowsValidationStillCurrent(std::uint64_t, std::uint64_t) { return true; }
+bool WindowsSemanticInputInFlightLocked() { return false; }
+BOOL SetCursorPos(int, int) { return 1; }
 bool valid = true;
 bool semanticInputInFlight = false;
 unsigned calls = 0;
