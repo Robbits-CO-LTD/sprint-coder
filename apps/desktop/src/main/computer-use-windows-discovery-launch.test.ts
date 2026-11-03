@@ -232,6 +232,7 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
         'observer-rights',
         'normal',
         'create-failure',
+        'identity-only',
         'before-claim',
         'claim-before-api',
         'after-create-read',
@@ -288,7 +289,9 @@ describe.skipIf(process.platform !== 'win32')('Windows discovery launch lifetime
           JSON.parse(lines[0]!.slice(8)),
         );
         expect(receipt.discoveryId).toBe('launch:' + mode);
-        expect(receipt.launchAttemptCount).toBe(mode === 'before-claim' ? 0 : 1);
+        expect(receipt.launchAttemptCount).toBe(
+          mode === 'before-claim' || mode === 'identity-only' ? 0 : 1,
+        );
         console.log(
           JSON.stringify({
             kind: 'native_discovery_launch_component',

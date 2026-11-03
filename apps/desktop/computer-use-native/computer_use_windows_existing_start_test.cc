@@ -20,6 +20,8 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid);
 bool ComponentAdmit(const WindowsStartInput&, WindowsExistingStartMeasurement*);
 bool ComponentElevated(std::uint32_t);
 BOOL ComponentWindow(HWND);
+bool ComponentStartTime(HANDLE, std::string*);
+DWORD ComponentWindowOwner(HWND, LPDWORD);
 bool ComponentApplicationWindow(HWND);
 bool ComponentClientBounds(HWND, RECT*);
 bool ComponentTargetFacts(std::uint32_t, HWND, RECT*);
@@ -49,6 +51,10 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 namespace {
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool bound_start = false, bad_start = false, identity_read_failure = false;
+  bool window_replaced = false, late_window = false, stop_identity = false;
+  bool iconic = false, focus_failure = false, dialog_focus = false;
+  unsigned expected_focus_calls = 0;
   bool v2 = false, unsigned_image = false, bad_signer = false, bad_digest = false;
   bool bad_identity = false, bad_path = false, bad_window_identity = false;
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
@@ -63,6 +69,7 @@ struct Case {
   std::uint64_t session_epoch = 0;
 };
 Case current;
+unsigned identity_reads = 0;
 std::wstring canonical;
 std::atomic<unsigned> workers{0}, reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
 std::mutex handles_mutex;
@@ -121,6 +128,19 @@ bool ComponentAdmit(const WindowsStartInput&, WindowsExistingStartMeasurement* m
 }
 bool ComponentElevated(std::uint32_t) { return current.elevated; }
 BOOL ComponentWindow(HWND) { return TRUE; }
+bool ComponentStartTime(HANDLE process, std::string* output) {
+  ++identity_reads;
+  if (current.stop_identity && identity_reads == 2) WindowsTargetListControl().stop_serial.fetch_add(1);
+  if (current.identity_read_failure) { SetLastError(ERROR_ACCESS_DENIED); return false; }
+  return ReadProcessStartIdentity(process, output);
+}
+DWORD ComponentWindowOwner(HWND window, LPDWORD pid) {
+  *pid = (current.window_replaced && (!current.dialog_focus ||
+      window == reinterpret_cast<HWND>(static_cast<UINT_PTR>(3)))) ||
+      (current.late_window && identity_reads >= 3)
+      ? GetCurrentProcessId() + 1 : GetCurrentProcessId();
+  return 1;
+}
 bool ComponentApplicationWindow(HWND) { return true; }
 bool ComponentClientBounds(HWND, RECT* output) {
   *output = {current.bad_before_geometry ? 5 : 0, 0, 100, 80}; return true;
@@ -132,7 +152,7 @@ bool ComponentScreenBounds(HWND, RECT* output) { *output = {0, 0, 800, 600}; ret
 HWND ComponentForeground() { return reinterpret_cast<HWND>(static_cast<UINT_PTR>(current.move_focus && !focused ? 2 : 1)); }
 BOOL ComponentEnabled(HWND) { return TRUE; }
 bool ComponentResolve(WindowsSession*, HWND* output, std::string* reason) {
-  resumes.fetch_add(1);*output=reinterpret_cast<HWND>(static_cast<UINT_PTR>(1));
+  resumes.fetch_add(1);*output=reinterpret_cast<HWND>(static_cast<UINT_PTR>(current.dialog_focus ? 3 : 1));
   if(current.resolver_failure){*reason="native_dialog_user_takeover";return false;}return true;
 }
 bool ComponentRefocus(const WindowsSession&, HWND* output, std::string* reason) {
@@ -144,7 +164,7 @@ bool ComponentDialogs(const WindowsSession& session, WindowsDialogSetSnapshot* o
   output->digest=session.dialog_set_digest;output->active_window=session.active_window;
   output->active_identity=session.active_window_identity;output->active_kind=session.active_window_kind;return true;
 }
-BOOL ComponentIconic(HWND) { return FALSE; }
+BOOL ComponentIconic(HWND) { return current.iconic ? TRUE : FALSE; }
 BOOL ComponentShow(HWND, int) { input_calls.fetch_add(1); return TRUE; }
 BOOL ComponentFocus(HWND) { input_calls.fetch_add(1); focused=true; return TRUE; }
 HRESULT ComponentCoInitialize(LPVOID reserved, DWORD flags) {
@@ -174,6 +194,7 @@ void WaitWorkers() {
   Check(workers.load() == 0 && !WindowsTargetListWorkerRunning().load(), "worker retirement");
 }
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
+  identity_reads = 0;
   current=config;reads=0;contexts=0;com_calls=0;com_releases=0;input_calls=0;
   held_reads=0;thread_attempts=0;resumes=0;refocuses=0;focused=false;
   held_entered=false;release_held=false;released_reads=0;
@@ -187,6 +208,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   input.canonical_path=canonical;input.bounds_width=100;input.bounds_height=80;input.explicit_resume=config.resume;
   input.cancel_epoch=config.input_epoch;input.profile_revision=4;input.ruleset_version=1;
   std::string created;Check(ReadProcessStartIdentity(GetCurrentProcess(),&created),"own creation time");
+  if (config.bound_start) input.expected_process_start = config.bad_start ? "1" : created;
   const auto identity=Sha256String("computer-window-identity-v1\n"+input.app_identity+"\n"+created+"\n1");
   input.expected_window_identity=config.bad_window_identity?std::string(64,'f'):identity;
   ScopedKernelHandle process(::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,GetCurrentProcessId()));
@@ -218,8 +240,18 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   const auto& remaining=sessions.at(input.session_key);
   Check(remaining.eligibility_basis==input.eligibility_basis&&remaining.cancel_epoch==config.session_epoch,"basis and session epoch retained");
   Check(remaining.input_api_attempts->load()==input_calls.load(),"all attempted focus units counted");
+  if (config.bound_start) {
+    Check(input_calls.load() == config.expected_focus_calls, "bound start focus count");
+    Check(input.start_result->attempt_count == input_calls.load(), "per-request count survives failure");
+    input.start_result->pid = input.pid; input.start_result->process_start = input.expected_process_start;
+    const auto result = AppendWindowsStartResult(succeeded ? response : ErrorPayload(failure), *input.start_result, succeeded);
+    std::string outcome;
+    Check(ReadJsonString(result, "foregroundResult", &outcome) && outcome ==
+        (input_calls.load() == 0 ? "not_attempted" : succeeded ? "confirmed" : "unconfirmed"), "foreground result");
+  }
   if(!config.v2)Check(contexts.load()==0&&com_calls.load()==0&&!WindowsV2FactsContextCache(),"V1 context and COM independence");
   Check(com_calls.load()==com_releases.load()+(config.v2&&config.com_failure?1u:0u),"COM balance");
+  Check(remaining.process_start == created, "existing identity never overwritten");
   if(expected){
     std::string process_start;
     Check(ReadJsonString(response,"processStartTime",&process_start)&&process_start==created&&
@@ -275,6 +307,22 @@ int wmain() {
     c.input_epoch=7;Run("v2-epoch-entry",c,false,"session_start_canceled",1);
     c={};c.v2=true;c.duplicate_failure=true;Run("v2-dup-entry",c,false,"session_target_rejected",1);
     c={};c.v2=true;c.move_focus=true;c.after_stop=true;Run("v2-after-stop-counter",c,false,"session_start_canceled",1);
+    for (const bool v2 : {false, true}) {
+      c = {}; c.v2 = v2; c.bound_start = true; c.move_focus = true; c.expected_focus_calls = 1;
+      Run(v2 ? "v2-bound" : "v1-bound", c, true, "", 2);
+      c.bad_start = true; c.expected_focus_calls = 0; Run("bound-pid-reuse", c, false, "session_identity_changed", 1);
+      c.bad_start = false; c.identity_read_failure = true; Run("bound-access-denied", c, false, "session_identity_changed", 1);
+      c.identity_read_failure = false; c.window_replaced = true; Run("bound-window-replaced", c, false, "session_identity_changed", 1);
+      c.window_replaced = false; c.stop_identity = true; Run("bound-stop-at-focus", c, false, "session_start_canceled", 1);
+      c.stop_identity = false; c.iconic = true; c.late_window = true; c.expected_focus_calls = 1;
+      Run("bound-change-after-restore", c, false, "session_identity_changed", 1);
+      c.iconic = false; c.late_window = false; c.after_read_failure = true;
+      Run("bound-failure-after-focus", c, false, "session_refocus_stale", 1);
+      c.after_read_failure = false; c.resume = true; c.dialog_focus = true; c.iconic = true;
+      c.expected_focus_calls = 3; Run("bound-dialog-three-units", c, true, "", 2);
+      c.window_replaced = true; c.expected_focus_calls = 0;
+      Run("bound-foreign-dialog", c, false, "session_identity_changed", 1);
+    }
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }

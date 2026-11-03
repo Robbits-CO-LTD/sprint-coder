@@ -123,10 +123,15 @@ function componentSource(): string {
     '  ComponentBeforeTicket();\n  if (!v2 && before.identity_verified) {',
   );
   expect(shared).not.toMatch(/\b(?:ShowWindow|SetForegroundWindow|SendInput|TargetWindowFacts)\(/u);
-  return (source.slice(0, begin) + shared + source.slice(end)).replaceAll(
-    'CloseHandle(',
-    'ComponentCloseHandle(',
-  );
+  const identityBegin = source.indexOf('bool CheckWindowsStartFocusIdentity(');
+  const identityEnd = source.indexOf('bool WindowsSessionProcessMatches(', identityBegin);
+  const identity = source
+    .slice(identityBegin, identityEnd)
+    .replaceAll('ReadProcessStartIdentity(', 'ComponentStartTime(')
+    .replaceAll('GetWindowThreadProcessId(', 'ComponentWindowOwner(')
+    .replaceAll('IsWindow(', 'ComponentWindow(');
+  const prefix = source.slice(0, identityBegin) + identity + source.slice(identityEnd, begin);
+  return (prefix + shared + source.slice(end)).replaceAll('CloseHandle(', 'ComponentCloseHandle(');
 }
 
 it('limits component substitutions to the shared worker and retains real eligibility predicates', () => {
@@ -212,7 +217,7 @@ describe.skipIf(process.platform !== 'win32')(
         });
         expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
         expect(result.stdout).toContain(
-          'PASS: 30 component cases, controlled focus only, no OS input',
+          'PASS: 48 component cases, controlled focus only, no OS input',
         );
       } finally {
         rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

@@ -284,11 +284,13 @@ struct WindowsStartParameters {
   double expected_bounds_width = 0;
   double expected_bounds_height = 0;
   bool explicit_resume = false;
+  std::string expected_process_start;
 };
 
 bool ParseWindowsStartParameters(const std::string& metadata, WindowsStartParameters* output) {
-  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume] = *output;
+  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume, expected_process_start] = *output;
   (void)expected_signer_digest;
+  if (!ReadWindowsStartIdentity(metadata, &expected_process_start)) return false;
   if (!ReadJsonUint64(metadata, "pid", &pid_value) || pid_value == 0 ||
       pid_value > std::numeric_limits<DWORD>::max() ||
       !ReadJsonUint64(metadata, "windowId", &window_value) ||
@@ -318,12 +320,13 @@ bool ParseWindowsStartParameters(const std::string& metadata, WindowsStartParame
 bool StartWindowsSession(const Frame &request, const std::string &metadata,
                          std::string *response, std::string *reason,
                          std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
-                         std::shared_ptr<WindowsStartLease> start_lease = nullptr) {
+                         std::shared_ptr<WindowsStartLease> start_lease = nullptr,
+                         std::shared_ptr<WindowsStartResult> start_result = std::make_shared<WindowsStartResult>()) {
   if (WindowsSemanticInputInFlight()) { *reason = "semantic_input_in_flight"; return false; }
   const auto start_serial = queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
   WindowsStartParameters parsed;
   if (!ParseWindowsStartParameters(metadata, &parsed)) { *reason = "session_input_invalid"; return false; }
-  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume] = parsed;
+  auto& [pid_value, window_value, cancel_epoch, session_id, app_identity, expected_window_identity, canonical_path_utf8, expected_executable_digest, expected_signer_digest, expected_bounds_x, expected_bounds_y, expected_bounds_width, expected_bounds_height, explicit_resume, expected_process_start] = parsed;
   if (!start_lease) start_lease = AdmitWindowsStart(FrameIdKey(request.header.session_id), session_id,
       ResponseCacheKey(request), RequestPayloadDigest(request), reason, cancel_epoch);
   if (!start_lease || start_lease->owner->session_id != session_id ||
@@ -376,6 +379,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     WindowsStartInput input;
     input.eligibility_basis = eligibility_basis;
     input.start_lease = start_lease;
+    input.expected_process_start = expected_process_start;
+    input.start_result = start_result;
     input.pid = pid;
     input.window = window;
     input.window_value = window_value;
@@ -404,6 +409,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     if constexpr (sprint_coder::computer_use::kNativeEligibilityIsV2) {
       WindowsStartInput input;
       input.start_lease = start_lease;
+      input.expected_process_start = expected_process_start;
+      input.start_result = start_result;
       input.pid = pid;
       input.window = window;
       input.window_value = window_value;
@@ -434,6 +441,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     WindowsStartInput input;
     input.eligibility_basis = eligibility_basis;
     input.start_lease = start_lease;
+    input.expected_process_start = expected_process_start;
+    input.start_result = start_result;
     input.pid = pid;
     input.window = window;
     input.window_value = window_value;

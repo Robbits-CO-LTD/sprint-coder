@@ -11,7 +11,7 @@ struct WindowsExecutableIdentity;
 struct LockedWindowsExecutable;
 bool FixtureSupported(const WindowsExecutableIdentity&);
 bool FixtureEnumerate(const std::wstring&, std::string_view, std::string_view, std::string_view,
-                      std::vector<std::string>*, const std::function<bool()>&);
+                      std::vector<std::string>*, const std::function<bool()>&, bool);
 void FixtureBeforeClaim();
 BOOL FixtureCreate(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
                    LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
@@ -49,8 +49,9 @@ bool FixtureSupported(const WindowsExecutableIdentity& identity) {
 }
 bool FixtureEnumerate(const std::wstring& path, std::string_view, std::string_view,
                       std::string_view, std::vector<std::string>* rows,
-                      const std::function<bool()>& current) {
+                      const std::function<bool()>& current, bool include_start_identity) {
   Check(SameWindowsPath(path, owned_path), "enumeration seam is owned-only");
+  Check(include_start_identity == (mode == "identity-only"), "discovery opt-in forwarded");
   if (!current()) return false;
   if (created_children.load() != 0) rows->push_back("{\"diagnostic\":\"owned-child\"}");
   return true;
@@ -402,11 +403,14 @@ int wmain(int argc, wchar_t** argv) {
     owned_path = image.identity.path;
     if (mode.starts_with("helper-exit-")) { RunHelperExitCase(image, exit_name, harness); return 0; }
     const auto id = "launch:" + mode;
-    const std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"" + id +
+    std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"" + id +
         "\",\"canonicalPath\":\"" + JsonEscape(Utf8FromWide(owned_path)) + "\",\"identityDigest\":\"" +
         image.identity.identity_digest + "\",\"executableDigest\":\"" + image.identity.executable_digest +
         "\",\"signerDigest\":\"" + image.identity.signer_digest + "\"}";
     const std::string stop = "{\"operation\":\"stop_window_discovery\",\"discoveryId\":\"" + id + "\"}";
+    if (mode == "identity-only") {
+      query.pop_back(); query += ",\"includeStartIdentity\":true}";
+    }
     Pipe pipe;
     pipe.Send(1, "{\"protocolVersion\":1,\"apiVersion\":3}", MessageType::kHandshake);
     pipe.Read(1, MessageType::kHandshakeResult);
@@ -443,8 +447,10 @@ int wmain(int argc, wchar_t** argv) {
     pipe.Send(5, stop); receipt = pipe.Read(5, MessageType::kProbeResult);
     std::uint64_t attempts = 99;
     Check(ReadJsonUint64(receipt, "launchAttemptCount", &attempts) &&
-          attempts == (mode == "before-claim" ? 0u : 1u), "claim counter");
-    if (mode == "before-claim" || mode == "create-failure") Check(created_children.load() == 0, "no child");
+          attempts == (mode == "before-claim" || mode == "identity-only" ? 0u : 1u), "claim counter");
+    if (mode == "identity-only") Check(create_entries.load() == 0, "identity discovery never launches");
+    if (mode == "before-claim" || mode == "create-failure" || mode == "identity-only")
+      Check(created_children.load() == 0, "no child");
     else if (mode == "image-mismatch" || mode == "post-create-exception" || mode == "termination-unconfirmed")
       Check(child_observer.load() && WaitForSingleObject(child_observer.load(), 0) == WAIT_OBJECT_0,
             "unverified child exit precedes terminal proof");

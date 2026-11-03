@@ -17,6 +17,8 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid);
 bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement*);
 bool ComponentElevated(std::uint32_t);
 BOOL ComponentWindow(HWND);
+bool ComponentStartTime(HANDLE, std::string*);
+DWORD ComponentWindowOwner(HWND, LPDWORD);
 bool ComponentApplicationWindow(HWND);
 bool ComponentClientBounds(HWND, RECT*);
 bool ComponentTargetFacts(std::uint32_t, HWND, RECT*);
@@ -43,6 +45,10 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 namespace {
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool bound_start = false, bad_start = false, identity_read_failure = false;
+  bool window_replaced = false, late_window = false, stop_identity = false;
+  bool iconic = false, focus_failure = false;
+  unsigned expected_focus_calls = 0;
   bool v2 = false, unsigned_image = false, bad_signer = false, bad_digest = false;
   bool bad_identity = false, bad_path = false, bad_window_identity = false;
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
@@ -53,6 +59,7 @@ struct Case {
   std::optional<std::uint64_t> adopt_epoch;
 };
 Case current;
+unsigned identity_reads = 0;
 std::wstring canonical;
 std::atomic<unsigned> workers{0}, reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
 std::mutex handles_mutex;
@@ -105,18 +112,29 @@ bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement* measur
 }
 bool ComponentElevated(std::uint32_t) { return current.elevated; }
 BOOL ComponentWindow(HWND) { return TRUE; }
+bool ComponentStartTime(HANDLE process, std::string* output) {
+  ++identity_reads;
+  if (current.stop_identity && identity_reads == 2) WindowsTargetListControl().stop_serial.fetch_add(1);
+  if (current.identity_read_failure) { SetLastError(ERROR_ACCESS_DENIED); return false; }
+  return ReadProcessStartIdentity(process, output);
+}
+DWORD ComponentWindowOwner(HWND, LPDWORD pid) {
+  *pid = current.window_replaced || (current.late_window && identity_reads >= 3)
+      ? GetCurrentProcessId() + 1 : GetCurrentProcessId();
+  return 1;
+}
 bool ComponentApplicationWindow(HWND) { return true; }
 bool ComponentClientBounds(HWND, RECT* output) {
   *output = {current.bad_before_geometry ? 5 : 0, 0, 100, 80}; return true;
 }
 bool ComponentTargetFacts(std::uint32_t, HWND, RECT* output) {
-  *output = {current.changed_after_geometry ? 5 : 0, 0, 100, 80}; return true;
+  *output = {current.changed_after_geometry ? 5 : 0, 0, 100, 80}; return !current.focus_failure;
 }
 bool ComponentScreenBounds(HWND, RECT* output) { *output = {0, 0, 800, 600}; return true; }
-HWND ComponentForeground() { return reinterpret_cast<HWND>(static_cast<UINT_PTR>(1)); }
+HWND ComponentForeground() { return reinterpret_cast<HWND>(static_cast<UINT_PTR>(current.bound_start ? 2 : 1)); }
 BOOL ComponentEnabled(HWND) { return TRUE; }
 bool ComponentTakeover(HWND) { return false; }
-BOOL ComponentIconic(HWND) { return FALSE; }
+BOOL ComponentIconic(HWND) { return current.iconic ? TRUE : FALSE; }
 BOOL ComponentShow(HWND, int) { input_calls.fetch_add(1); return TRUE; }
 BOOL ComponentFocus(HWND) { input_calls.fetch_add(1); return TRUE; }
 HRESULT ComponentCoInitialize(LPVOID reserved, DWORD flags) {
@@ -138,7 +156,80 @@ void WaitWorkers() {
   while ((workers.load() != 0 || WindowsTargetListWorkerRunning().load()) && GetTickCount64() < until) Sleep(1);
   Check(workers.load() == 0 && !WindowsTargetListWorkerRunning().load(), "worker retirement");
 }
+void CheckStartContract() {
+  std::string start;
+  Check(ReadWindowsStartIdentity("{}", &start) && start.empty(), "legacy start has no new identity");
+  for (const auto value : {"1", "18446744073709551615"}) {
+    Check(ReadWindowsStartIdentity("{\"requireStartIdentity\":true,\"expectedProcessStartTime\":\"" +
+        std::string(value) + "\"}", &start) && start == value, "decimal string preserved");
+  }
+  for (const auto value : {"", "0", "01", "-1", "1.5", "1e2", "18446744073709551616"}) {
+    Check(!ReadWindowsStartIdentity("{\"requireStartIdentity\":true,\"expectedProcessStartTime\":\"" +
+        std::string(value) + "\"}", &start), "invalid identity refused");
+  }
+  for (const auto metadata : {
+      "{\"requireStartIdentity\":true}",
+      "{\"expectedProcessStartTime\":\"1\"}",
+      "{\"requireStartIdentity\":false,\"expectedProcessStartTime\":\"1\"}",
+      "{\"requireStartIdentity\":true,\"expectedProcessStartTime\":1}",
+      "{\"requireStartIdentity\":true,\"expectedProcessStartTime\":\"1\"x}",
+      "{\"requireStartIdentity\":true,\"expectedProcessStartTime\"::\"1\"}",
+      "{\"requireStartIdentity\":true,\"expectedProcessStartTime\":\"1\",\"expectedProcessStartTime\":\"2\"}",
+      "{\"requireStartIdentity\":true,\"requireStartIdentity\":false,\"expectedProcessStartTime\":\"1\"}"}) {
+    Check(!ReadWindowsStartIdentity(metadata, &start), "missing or ambiguous expected identity refused");
+  }
+  WindowsStartResult result;
+  Check(AppendWindowsStartResult("{}", result, false) == "{}", "legacy response unchanged");
+  result.pid = 7; result.process_start = "18446744073709551615";
+  Check(AppendWindowsStartResult("{}", result, false).find("\"foregroundResult\":\"not_attempted\"") !=
+      std::string::npos, "verified no attempt");
+  result.execution_unknown = true;
+  Check(AppendWindowsStartResult(ErrorPayload("request_id_reuse"), result, false).find(
+      "\"foregroundResult\":\"unconfirmed\"") != std::string::npos, "admission conflict is not zero-effect proof");
+  result.execution_unknown = false;
+  result.attempt_count = 2;
+  Check(AppendWindowsStartResult(ErrorPayload("focus_required"), result, false).find(
+      "\"foregroundResult\":\"unconfirmed\"") != std::string::npos, "failure retains uncertain effect");
+  Check(AppendWindowsStartResult("{}", result, true).find("\"foregroundResult\":\"confirmed\"") !=
+      std::string::npos, "successful result");
+  const std::string query = "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"synthetic\","
+      "\"canonicalPath\":\"C:\\\\synthetic.exe\",\"identityDigest\":\"" + std::string(64, 'a') +
+      "\",\"executableDigest\":\"" + std::string(64, 'b') + "\",\"signerDigest\":\"\"";
+  WindowsDiscoveryParameters parsed;
+  Check(ReadWindowsDiscoveryQuery(query + "}", &parsed) && !parsed.include_start_identity, "legacy discovery");
+  Check(ReadWindowsDiscoveryQuery(query + ",\"includeStartIdentity\":true}", &parsed) &&
+      parsed.include_start_identity, "identity discovery opt-in");
+  Check(ReadWindowsDiscoveryQuery(query + ",\"includeStartIdentity\":false}", &parsed) &&
+      !parsed.include_start_identity, "explicit legacy discovery");
+  for (const auto suffix : {",\"includeStartIdentity\":\"true\"}", ",\"includeStartIdentity\":truex}",
+      ",\"includeStartIdentity\":true,\"includeStartIdentity\":false}", ",\"unexpected\":true}"}) {
+    Check(!ReadWindowsDiscoveryQuery(query + suffix, &parsed), "strict discovery opt-in");
+  }
+  // Serialization only: the synthetic facts are not evidence of target eligibility.
+  using namespace sprint_coder::computer_use;
+  WindowsV2Judgement judged;
+  judged.app_identity = std::string(64, 'a');
+  judged.process_start = "18446744073709551615";
+  judged.executable.identity.path_utf8 = "C:\\synthetic.exe";
+  WindowsV2RowWindow window;
+  window.pid = 7; window.handle = 9; window.title = "Synthetic";
+  TargetFacts facts; facts.platform = TargetPlatform::kWin32;
+  const TargetVerdict verdict{TargetVerdictKind::kEligible, "observe_only"};
+  const auto legacy = WindowsV2SelectableRow(judged, verdict, facts, window);
+  const auto bound = WindowsV2SelectableRow(judged, verdict, facts, window, true);
+  Check(legacy.find("processStartTime") == std::string::npos, "legacy discovery identity not exposed");
+  Check(ReadJsonString(bound, "processStartTime", &start) && start == judged.process_start,
+      "opt-in discovery decimal preserved");
+  std::string digest;
+  Check(ReadJsonString(bound, "windowIdentityDigest", &digest) && digest ==
+      Sha256String("computer-window-identity-v1\n" + judged.app_identity + "\n" + start + "\n9"),
+      "discovery creation time bound to selected window");
+  judged.executable.identity.path_utf8.clear();
+  Check(WindowsV2SelectableRow(judged, verdict, facts, window, true) == "{\"kind\":\"unresolvable\"}",
+      "refused discovery never reveals identity");
+}
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
+  identity_reads = 0;
   current = config; reads = 0; contexts = 0; com_calls = 0; com_releases = 0; input_calls = 0;
   parent_process_dead = false; cancellation_epoch = config.global_epoch;
   last_closed_cancel_epoch = config.closed_epoch; WindowsTargetListControl().stop_serial = 0;
@@ -156,6 +247,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   input.cancel_epoch = config.input_epoch; input.profile_revision = 4;
   input.ruleset_version = 1; input.requested_generation = 1;
   std::string created; Check(ReadProcessStartIdentity(GetCurrentProcess(), &created), "own creation time");
+  if (config.bound_start) input.expected_process_start = config.bad_start ? "1" : created;
   input.expected_window_identity = config.bad_window_identity ? std::string(64, 'f') :
       Sha256String("computer-window-identity-v1\n" + input.app_identity + "\n" + created + "\n1");
   ticket_states[input.session_key].generation = 10;
@@ -166,7 +258,16 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   Check(succeeded == expected, name);
   if (!expected) Check(failure == reason, "expected refusal reason");
   Check(ticket_states[input.session_key].generation == 10 + ticket_calls, "ticket invalidation count");
-  Check(input_calls.load() == 0, "no native input API in component cases");
+  Check(input_calls.load() == config.expected_focus_calls, "controlled focus calls match expectation");
+  if (config.bound_start) {
+    Check(input_calls.load() == config.expected_focus_calls, "bound start focus count");
+    Check(input.start_result->attempt_count == input_calls.load(), "per-request count survives failure");
+    input.start_result->pid = input.pid; input.start_result->process_start = input.expected_process_start;
+    const auto result = AppendWindowsStartResult(succeeded ? response : ErrorPayload(failure), *input.start_result, succeeded);
+    std::string outcome;
+    Check(ReadJsonString(result, "foregroundResult", &outcome) && outcome ==
+        (input_calls.load() == 0 ? "not_attempted" : succeeded ? "confirmed" : "unconfirmed"), "foreground result");
+  }
   if (!config.v2) Check(contexts.load() == 0 && com_calls.load() == 0 && !WindowsV2FactsContextCache(), "V1 has no V2 context or COM prerequisite");
   Check(com_calls.load() == com_releases.load() + (config.v2 && config.com_failure ? 1u : 0u), "COM balance");
   if (expected) {
@@ -181,7 +282,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
           process_start == session.process_start, "bound process creation time");
     std::uint64_t reply_epoch = 0, count = 1;
     Check(ReadJsonUint64(response, "cancelEpoch", &reply_epoch) && reply_epoch == epoch &&
-          ReadJsonUint64(response, "inputAttemptCount", &count) && count == 0, "bound receipt fields");
+          ReadJsonUint64(response, "inputAttemptCount", &count) && count == config.expected_focus_calls, "bound receipt fields");
     WindowsFileIdentity actual;
     Check(ReadWindowsFileIdentity(session.executable_file, &actual) && actual.volume_serial == session.executable_volume_serial &&
           std::memcmp(actual.file_id.Identifier, session.executable_file_id.Identifier, sizeof(actual.file_id.Identifier)) == 0, "real held FileId handoff");
@@ -194,6 +295,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
 }
 int wmain() {
   try {
+    CheckStartContract();
     std::vector<wchar_t> system(32768); const auto length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
     Check(length != 0 && length < system.size(), "system directory"); canonical.assign(system.data(), length); canonical += L"\\notepad.exe";
     Run("v1-normal", {}, true, "", 2);
@@ -225,6 +327,19 @@ int wmain() {
     c.changed_after_geometry = true; Run("v2-after-geometry", c, false, "window_geometry_changed", 1);
     c = {}; c.v2 = true; c.resume = true; c.bad_before_geometry = true; Run("v2-resume-before-geometry", c, false, "session_input_invalid", 1);
     c = {}; c.v2 = true; c.adopt_epoch = 7; Run("v2-initial-epoch-cas", c, false, "session_start_canceled", 1);
-    std::cout << "PASS: " << case_count << " component cases, no GUI or input\n"; return 0;
+    for (const bool v2 : {false, true}) {
+      const unsigned tickets = v2 ? 1 : 2;
+      c = {}; c.v2 = v2; c.bound_start = true; c.expected_focus_calls = 1;
+      Run(v2 ? "v2-bound" : "v1-bound", c, true, "", tickets);
+      c.bad_start = true; c.expected_focus_calls = 0; Run("bound-pid-reuse", c, false, "session_identity_changed", 1);
+      c.bad_start = false; c.identity_read_failure = true; Run("bound-access-denied", c, false, "session_identity_changed", 1);
+      c.identity_read_failure = false; c.window_replaced = true; Run("bound-window-replaced", c, false, "session_identity_changed", 1);
+      c.window_replaced = false; c.stop_identity = true; Run("bound-stop-at-focus", c, false, "session_start_canceled", 1);
+      c.stop_identity = false; c.iconic = true; c.late_window = true; c.expected_focus_calls = 1;
+      Run("bound-change-after-restore", c, false, "session_identity_changed", 1);
+      c.iconic = false; c.late_window = false; c.focus_failure = true;
+      Run("bound-failure-after-focus", c, false, "focus_required", 1);
+    }
+    std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }
 }
