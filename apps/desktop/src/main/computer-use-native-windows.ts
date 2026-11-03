@@ -140,6 +140,7 @@ export type WindowsComputerUseHelperAttestation = Readonly<{
   signerThumbprint: string | null;
 }>;
 type PendingRequest = Readonly<{
+  order: number;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
@@ -401,9 +402,56 @@ type HelperGeneration = {
   cause: 'stop' | 'crash' | 'abortTransport';
   exited: boolean;
   timer?: NodeJS.Timeout;
+  deferredRequests: Array<{ order: number; duration: number }>;
+  deferredTimer?: NodeJS.Timeout;
 };
 
 class WindowsComputerUseHelperClient {
+  private requestOrder = 0;
+
+  private clearDeferredRequests(generation: HelperGeneration): void {
+    clearTimeout(generation.deferredTimer);
+    delete generation.deferredTimer;
+    generation.deferredRequests.length = 0;
+  }
+
+  private reevaluateDeferredRequests(generation: HelperGeneration): void {
+    if (
+      generation.exited ||
+      generation.killRequested ||
+      this.generations.get(generation.id) !== generation ||
+      generation.id !== this.helperGeneration ||
+      generation.deferredTimer !== undefined
+    )
+      return;
+    const head = generation.deferredRequests[0];
+    if (head === undefined) return;
+    const earlierPending = () =>
+      [...this.pending.values()].some(
+        (request) =>
+          request.helperGeneration === generation.id &&
+          request.order < head.order &&
+          request.deadline > Date.now(),
+      );
+    if (earlierPending()) return;
+    // Settling the preceding request approximates dequeue; retain the timed-out request's D.
+    generation.deferredTimer = setTimeout(() => {
+      delete generation.deferredTimer;
+      if (
+        generation.exited ||
+        generation.killRequested ||
+        this.generations.get(generation.id) !== generation ||
+        generation.id !== this.helperGeneration
+      )
+        return;
+      if (!earlierPending())
+        this.requestTermination(
+          generation,
+          new Error('Computer Use Windows helper request timed out'),
+        );
+    }, head.duration);
+  }
+
   private readonly interactionEvents = new WindowsInteractionEvents();
   private readonly interactionListeners = new Set<WindowsInteractionListener>();
   subscribeWindowsInteraction(listener: WindowsInteractionListener): () => void {
@@ -633,6 +681,7 @@ class WindowsComputerUseHelperClient {
   ): void {
     if (record.exited || record.killRequested) return;
     record.killRequested = true;
+    this.clearDeferredRequests(record);
     record.cause = cause;
     this.termination!.event(record.id, 'kill_requested');
     record.timer = setTimeout(() => {
@@ -1376,6 +1425,10 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(operation = ''): Promise<void> {
+    if (isComputerUseStopOperation(operation)) {
+      const generation = this.generations.get(this.helperGeneration);
+      if (generation !== undefined) this.clearDeferredRequests(generation);
+    }
     if (this.termination !== undefined) {
       const stopExistingHelper = isComputerUseStopOperation(operation) && this.socket !== null;
       await this.termination.prepare(stopExistingHelper ? 'stop_existing_helper' : 'work');
@@ -1439,6 +1492,7 @@ class WindowsComputerUseHelperClient {
             killRequested: false,
             cause: 'crash',
             exited: false,
+            deferredRequests: [],
           };
     if (generation !== undefined) {
       this.generationToken = Object.freeze({ helperGeneration: generation.id });
@@ -1455,6 +1509,7 @@ class WindowsComputerUseHelperClient {
       if (generation !== undefined) {
         if (generation.exited) return;
         generation.exited = true;
+        this.clearDeferredRequests(generation);
         clearTimeout(generation.timer);
         if (this.child === child) {
           this.failAll(new Error('Computer Use Windows helper exited'));
@@ -1598,8 +1653,12 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
-    const send = (): Promise<unknown> =>
-      new Promise((resolve, reject) => {
+    if (isComputerUseStopOperation(String(metadata['operation']))) {
+      const generation = this.generations.get(helperGeneration);
+      if (generation !== undefined) this.clearDeferredRequests(generation);
+    }
+    const send = (): Promise<unknown> => {
+      const result = new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
           if (this.pending.get(requestId.hex) !== pending) return;
           // Map insertion order follows sends; a serial consumer may still be serving the head.
@@ -1623,7 +1682,17 @@ class WindowsComputerUseHelperClient {
             generation !== undefined &&
             !isComputerUseStopOperation(String(metadata['operation']))
           ) {
-            if (!earlierRequestWithinDeadline) this.requestTermination(generation, error);
+            if (
+              earlierRequestWithinDeadline ||
+              generation.deferredRequests.some((request) => request.order < pending.order)
+            ) {
+              generation.deferredRequests.push({
+                order: pending.order,
+                duration: timeoutMilliseconds,
+              });
+              generation.deferredRequests.sort((a, b) => a.order - b.order);
+              this.reevaluateDeferredRequests(generation);
+            } else this.requestTermination(generation, error);
             return;
           }
           // Only Stop operations or configurations without kill-stop reach this legacy path.
@@ -1649,6 +1718,7 @@ class WindowsComputerUseHelperClient {
           reject,
           timeout,
           deadline: Date.now() + timeoutMilliseconds,
+          order: ++this.requestOrder,
           sessionId,
           stopsSession,
           retainAfterKill:
@@ -1699,6 +1769,11 @@ class WindowsComputerUseHelperClient {
           this.abortTransport(failure);
         }
       });
+      const generation = this.generations.get(helperGeneration);
+      return generation === undefined
+        ? result
+        : result.finally(() => this.reevaluateDeferredRequests(generation));
+    };
     const prepareAndSend = async (): Promise<unknown> => {
       if (dispatchCallbacks !== undefined) {
         this.preparingDispatches.add(requestId.hex);
