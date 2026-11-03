@@ -8129,44 +8129,65 @@ int main() {
     expect(child.killCalls).toBe(0);
   });
 
-  it.each(['exit', 'stop'] as const)(
-    'deferred_watch_cleared_on_exit_and_stop (%s)',
-    async (ending) => {
-      const child = new ControlledHelperChild();
-      vi.mocked(spawn).mockImplementationOnce(
-        () => child as unknown as NodeChildProcess.ChildProcess,
-      );
-      const target = ledgerTarget(true, undefined, true);
-      const session = await startSession(target.host, 'deferred-old', 'turn-1');
-      const helper = target.helper();
-      helper.hold('observe');
-      helper.hold('list_targets');
-      const observe = observeThroughTransport(target.addon, session.sessionId);
-      await vi.advanceTimersByTimeAsync(1_000);
-      const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(await queued).toBe('rejected');
-      helper.release('observe');
-      await vi.advanceTimersByTimeAsync(0);
-      expect(await observe).toBe('resolved');
-      const timersBefore = vi.getTimerCount();
-      if (ending === 'stop') {
-        helper.holdOnly('list_targets');
-        await target.addon.cancel!({ sessionId: session.sessionId, cancelEpoch: 1 });
-      } else child.emit('exit', 0, null);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(vi.getTimerCount()).toBeLessThan(timersBefore);
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(child.killCalls).toBe(0);
-      if (ending === 'stop') child.emit('exit', 0, null);
-      await vi.advanceTimersByTimeAsync(0);
-      await startSession(target.host, 'deferred-new', 'turn-2');
-      helper.release('list_targets');
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(children.at(-1)?.killed).toBe(false);
-      expect(spawn).toHaveBeenCalledTimes(2);
-    },
-  );
+  it('deferred_watch_cleared_on_exit', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-old', 'turn-1');
+    const helper = target.helper();
+    helper.hold('observe');
+    helper.hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    helper.release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    const timersBefore = vi.getTimerCount();
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBeLessThan(timersBefore);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.killCalls).toBe(0);
+    await startSession(target.host, 'deferred-new', 'turn-2');
+    helper.release('list_targets');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(children.at(-1)?.killed).toBe(false);
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('deferred_watch_survives_an_unrelated_stop', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-stop', 'turn-1');
+    const helper = target.helper();
+    helper.hold('observe');
+    helper.hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    helper.release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    // A Stop of the session proves nothing about the deferred list read the helper is stuck on.
+    helper.holdOnly('list_targets');
+    await target.addon.cancel!({ sessionId: session.sessionId, cancelEpoch: 1 });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(child.killCalls).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+  });
 
   it('normal_deadline_exit_missing_preserves_isolation', async () => {
     const child = new ControlledHelperChild();

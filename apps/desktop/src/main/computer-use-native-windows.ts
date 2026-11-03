@@ -1444,10 +1444,6 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(operation = ''): Promise<void> {
-    if (isComputerUseStopOperation(operation)) {
-      const generation = this.generations.get(this.helperGeneration);
-      if (generation !== undefined) this.clearDeferredRequests(generation);
-    }
     if (this.termination !== undefined) {
       const stopExistingHelper = isComputerUseStopOperation(operation) && this.socket !== null;
       await this.termination.prepare(stopExistingHelper ? 'stop_existing_helper' : 'work');
@@ -1672,10 +1668,8 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
-    if (isComputerUseStopOperation(String(metadata['operation']))) {
-      const generation = this.generations.get(helperGeneration);
-      if (generation !== undefined) this.clearDeferredRequests(generation);
-    }
+    // A Stop for one session proves nothing about a deferred request it did not own, so the watch
+    // stays until the generation exits, is killed, or the helper answers that request late.
     const send = (): Promise<unknown> => {
       const result = new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
