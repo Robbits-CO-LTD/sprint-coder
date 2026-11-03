@@ -1763,11 +1763,14 @@ class WindowsComputerUseHelperClient {
       if (!this.interactionEvents.receive(event, this.helperGeneration)) {
         // It may precede, in the same read, the start response or begin_result it depends on.
         const start = this.starts.get(event.sessionId);
-        this.interactionEvents.hold(
-          event,
-          this.helperGeneration,
-          start !== undefined && start.attempts.size !== 0 && !start.stopped,
-        );
+        const startPending = start !== undefined && start.attempts.size !== 0 && !start.stopped;
+        this.interactionEvents.hold(event, this.helperGeneration, startPending);
+        // A started session that was never bound cannot deliver it; fail it closed instead.
+        if (
+          !startPending &&
+          this.approvalSessionGenerations.get(event.sessionId) === this.helperGeneration
+        )
+          this.interactionEvents.revokeUnbound(event.sessionId);
         return;
       }
       this.deliverInteraction([event]);

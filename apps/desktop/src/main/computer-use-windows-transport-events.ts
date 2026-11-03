@@ -66,6 +66,8 @@ export class WindowsInteractionEvents {
   private readonly held = new Map<string, HeldInteractionEvent[]>();
   /** Sessions whose held queue overflowed: one lost event must still fail them closed. */
   private readonly overflowed = new Set<string>();
+  /** Started sessions that were never bound but received an event: blocked like a revocation. */
+  private readonly unboundRevoked = new Set<string>();
   /** Returns the held events that the new binding accepted, in order, for the caller to deliver. */
   bind(binding: WindowsInteractionBinding, interactionEpoch = 0): WindowsInteractionEvent[] {
     const previous = this.sessions.get(binding.sessionId);
@@ -152,7 +154,10 @@ export class WindowsInteractionEvents {
     this.held.set(event.sessionId, queue);
   }
   blocked(sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.revoked === true;
+    return this.sessions.get(sessionId)?.revoked === true || this.unboundRevoked.has(sessionId);
+  }
+  revokeUnbound(sessionId: string): void {
+    if (!this.sessions.has(sessionId)) this.unboundRevoked.add(sessionId);
   }
   /** Fail closed for one session (for example a listener that threw while delivering). */
   revoke(sessionId: string): void {
@@ -163,6 +168,7 @@ export class WindowsInteractionEvents {
     this.sessions.delete(sessionId);
     this.held.delete(sessionId);
     this.overflowed.delete(sessionId);
+    this.unboundRevoked.delete(sessionId);
   }
   /** Whether an event is waiting for a binding that does not exist yet. */
   waitsForBinding(sessionId: string): boolean {
