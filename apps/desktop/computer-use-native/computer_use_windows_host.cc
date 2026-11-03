@@ -300,19 +300,20 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
           // then end the process (its job ends any unverified child).
           const ULONGLONG grace_end = GetTickCount64() + kWindowsParentDeathGraceMs;
           auto &control = WindowsTargetListControl();
-          bool published = false, disconnected = false;
+          // Parent death reaches the input gate at once, before the lock and before the pipe ends:
+          // every gate check after this store refuses input, even while the lock is held elsewhere.
+          parent_process_dead.store(true, std::memory_order_release);
+          bool epoch_raised = false, disconnected = false;
           while (serving.load(std::memory_order_acquire)) {
             if (control.stop_mutex.try_lock()) {
               std::lock_guard stop_lock(control.stop_mutex, std::adopt_lock);
-              if (!published) {
-                parent_process_dead.store(true, std::memory_order_release);
+              if (!epoch_raised) {
                 cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
-                published = true;
+                epoch_raised = true;
               }
               CancelWindowsNewStartMeasurementLocked(control);
             }
-            // Parent death reaches the input gate before the pipe ends.
-            if (published && !disconnected) {
+            if (!disconnected) {
               disconnected = true;
               CancelIoEx(pipe, nullptr);
               DisconnectNamedPipe(pipe);

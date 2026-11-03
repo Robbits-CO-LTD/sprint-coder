@@ -82,11 +82,13 @@ it('measures validation identity on the consumer with cancellable I/O and fresh 
     host.indexOf('parent_watcher = std::thread('),
     host.indexOf('ServePipe(pipe, probe);'),
   );
-  const parentLock = watcher.slice(
-    watcher.indexOf('if (control.stop_mutex.try_lock()) {'),
-    watcher.indexOf('CancelIoEx(pipe, nullptr);'),
-  );
-  expect(parentLock).toContain('parent_process_dead.store(true, std::memory_order_release);');
+  // Parent death is published before the lock is tried, so a held lock cannot delay the gate.
+  const published = watcher.indexOf('parent_process_dead.store(true, std::memory_order_release);');
+  const tried = watcher.indexOf('if (control.stop_mutex.try_lock()) {');
+  expect(published).toBeGreaterThan(-1);
+  expect(published).toBeLessThan(tried);
+  const parentLock = watcher.slice(tried, watcher.indexOf('CancelIoEx(pipe, nullptr);'));
+  expect(parentLock).toContain('cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);');
   expect(parentLock).toContain('CancelWindowsNewStartMeasurementLocked(control);');
   // A cancel can miss the next I/O, a stall outside I/O never returns, and a thread may hold
   // stop_mutex: keep cancelling without waiting on the lock, then end the helper after the grace
