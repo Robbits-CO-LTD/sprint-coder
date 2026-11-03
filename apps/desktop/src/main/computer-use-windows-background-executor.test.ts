@@ -57,6 +57,14 @@ describe('background executor native entry', () => {
     expect(executor).toContain('timed([&] { return scroll->Scroll(horizontal, vertical); })');
     expect(executor).toContain('scroll->SetScrollPercent(horizontal_percent, vertical_percent)');
     expect(semantic).toContain('work.kind == "semantic_scroll"');
+    // The background dispatch entry routes semantic_scroll to the executor, not to a handoff.
+    const input = native('computer_use_windows_host_input.inc');
+    const background = input.slice(
+      input.indexOf('if (!RevalidateWindowsTarget(session, bounds, expected_epoch)) {'),
+    );
+    expect(background.slice(0, background.indexOf('#endif'))).toContain(
+      'kind != "semantic_scroll"',
+    );
     expect(semantic).toContain('UIA_ScrollPatternId');
     expect(semantic).toContain('windows_background_executor_detail::CallScroll(');
     expect(semantic).toContain('return WindowsV1UiaContact(result, call);');
