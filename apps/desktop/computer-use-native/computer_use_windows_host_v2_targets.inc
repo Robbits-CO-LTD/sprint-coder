@@ -367,8 +367,7 @@ const WindowsTargetFactsContext &WindowsV2FactsContext() {
     return *unknown;
   auto &context = WindowsV2FactsContextCache();
   if (!context.has_value())
-    context = CurrentWindowsTargetFactsContext(windows_v2_main_pid, WindowsV2SelfSignerThumbprint(),
-                                               /*acceptance_mode=*/false);
+    context = CurrentWindowsTargetFactsContext(windows_v2_main_pid, WindowsV2SelfSignerThumbprint());
   return *context;
 }
 
@@ -795,7 +794,7 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
   const auto &cached = WindowsV2FactsContextCache();
   const bool had_cached_context = cached.has_value();
   WindowsTargetFactsContext context = had_cached_context ? *cached : CurrentWindowsTargetFactsContext(
-      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), /*acceptance_mode=*/false, context_valid);
+      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), context_valid);
   if (context.lineage_root_pid == 0) {
     *reason = "list_targets_unavailable";
     return false;
@@ -1088,7 +1087,7 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
     std::string signer = WindowsV2SelfSignerThumbprint();
     if (!still_valid()) return result;
     context = CurrentWindowsTargetFactsContext(work.main_pid, std::move(signer),
-                                               /*acceptance_mode=*/false, still_valid);
+                                               still_valid);
   }
   if (!still_valid() || context.lineage_root_pid != work.main_pid) return result;
   WindowsV2Judgement judged;
@@ -1489,7 +1488,7 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
   if (v2) {
     context = input.context.has_value() ? *input.context :
         CurrentWindowsTargetFactsContext(input.main_pid, WindowsV2SelfSignerThumbprint(),
-                                        /*acceptance_mode=*/false, still_valid);
+                                        still_valid);
     if (!still_valid() || context->lineage_root_pid != input.main_pid || !AdmitWindowsV2StartInContext(
             input.pid, input.window, *process_executable, *context, input.ruleset_version,
             input.requested_generation, input.generation, /*new_session=*/true,
@@ -1924,7 +1923,7 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsE
       std::string signer = WindowsV2SelfSignerThumbprint();
       if (!still_valid()) return measured;
       context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),
-                                                 /*acceptance_mode=*/false, still_valid);
+                                                 still_valid);
     }
     if (!still_valid() || context.lineage_root_pid != input.main_pid) return measured;
     // A completed context may be retained on a target refusal, just as in the synchronous admission.
