@@ -16,7 +16,7 @@ export type WindowsDispatchCallbacks = Readonly<{
 
 export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
 export type WindowsTerminationCallbacks = Readonly<{
-  prepare(): Promise<void>;
+  prepare(operation?: 'work' | 'stop_existing_helper'): Promise<void>;
   started(generation: number): void;
   owned?(generation: number, kind: 'session' | 'discovery' | 'picker', id: string): string | void;
   completed?(

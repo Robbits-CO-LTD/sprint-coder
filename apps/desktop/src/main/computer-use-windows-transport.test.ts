@@ -658,6 +658,178 @@ describe('Computer Use Windows helper transport', () => {
     onSocket = null;
   });
 
+  it.each(['read-failure', 'retry-exception'] as const)(
+    'PR10 sends existing-helper Stop despite %s and refuses new work',
+    async (failure) => {
+      let failed = false;
+      const read = vi.fn(() => {
+        if (failed) throw new Error('synthetic read failure');
+        return { rows: [], quarantines: [] };
+      });
+      const base = responders();
+      const target = createTarget(
+        {
+          ...base,
+          stop_pending_start: (metadata) => base['close_session']!({ ...metadata, cancelEpoch: 1 }),
+        },
+        undefined,
+        {
+          windowsKillStopTermination: { enabled: true },
+          windowsLedger: {
+            read,
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            restoreQuarantines: () => true,
+          },
+        },
+      );
+      await target.addon.startSession!({ profile, sessionId: 'keeper' });
+      failed = true;
+      const original = stopKernel.decideWindowsStop;
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      if (failure === 'retry-exception') {
+        decide.mockImplementation((state, event) => {
+          if (event.kind === 'store_unreadable') throw new Error('synthetic retry failure');
+          return original(state, event);
+        });
+      }
+      try {
+        await expect(
+          target.addon.startSession!({ profile, sessionId: 'blocked-first' }),
+        ).rejects.toThrow();
+        await expect(
+          target.addon.startSession!({ profile, sessionId: 'keeper' }),
+        ).rejects.toThrow();
+        await expect(
+          target.addon.discoverWindows!({ ...profile, discoveryId: 'blocked' }),
+        ).rejects.toThrow();
+        const readsBeforeStop = read.mock.calls.length;
+        await expect(
+          target.addon.cancel!({ sessionId: 'keeper', cancelEpoch: 1 }),
+        ).resolves.toBeDefined();
+        await expect(
+          target.addon.stopPendingStart!({ sessionId: 'keeper' }),
+        ).resolves.toBeDefined();
+        await expect(
+          target.addon.close!({ sessionId: 'keeper', cancelEpoch: 1 }),
+        ).resolves.toBeDefined();
+        expect(target.helper().served).toEqual(
+          expect.arrayContaining(['cancel', 'stop_pending_start', 'close_session']),
+        );
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(read).toHaveBeenCalledTimes(readsBeforeStop);
+        await expect(target.addon.startSession!({ profile, sessionId: 'new' })).rejects.toThrow();
+        expect(
+          target.helper().served.filter((operation) => operation === 'start_session'),
+        ).toHaveLength(1);
+        expect(target.helper().served).not.toContain('list_windows_cancellable');
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+
+  it('PR10 does not launch a helper for Stop when the store is unreadable', async () => {
+    const target = createTarget(responders(), undefined, {
+      windowsKillStopTermination: { enabled: true },
+      windowsLedger: {
+        read: () => {
+          throw new Error('synthetic read failure');
+        },
+        write: () => true,
+        update: () => true,
+        delete: () => true,
+        restoreQuarantines: () => true,
+      },
+    });
+    await expect(
+      target.addon.cancel!({ sessionId: 'old-session', cancelEpoch: 1 }),
+    ).rejects.toThrow('native_stop_unconfirmed');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('PR10 keeps termination disabled by default even with a ledger', () => {
+    const configure = vi.fn();
+    createTarget(
+      responders(),
+      undefined,
+      {
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+        },
+      },
+      (addon) => ({ ...addon, configureWindowsTermination: configure }),
+    );
+    expect(configure).not.toHaveBeenCalled();
+  });
+
+  it.each(['timeout', 'write-callback', 'write-throw'] as const)(
+    'PR10 picker %s reports kill_requested before finally completed',
+    async (failure) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = createTarget({
+        ...responders(),
+        pick_application: () => ['probe_result', null],
+      });
+      const order: string[] = [];
+      const completed = vi.fn(() => {
+        order.push('completed');
+      });
+      target.addon.configureWindowsTermination!({
+        prepare: async () => undefined,
+        started: () => undefined,
+        owned: (_generation, kind) => (kind === 'picker' ? 'picker-lifetime' : undefined),
+        completed,
+        event: (_generation, kind) => {
+          order.push(kind);
+        },
+        exited: () => undefined,
+      });
+      await target.addon.startSession!({ profile, sessionId: 'keeper' });
+      target.helper().holdOnly('pick_application');
+      const socket = sockets[0]!;
+      if (failure === 'write-callback') socket.holdWriteCallbacks = true;
+      const write =
+        failure === 'write-throw'
+          ? vi.spyOn(socket, 'write').mockImplementation(() => {
+              throw new Error('synthetic write failure');
+            })
+          : undefined;
+      try {
+        const picking = expect(
+          target.addon.pickApplication!({
+            activationToken: 'synthetic',
+            pickerKind: 'application',
+          }),
+        ).rejects.toThrow();
+        await vi.advanceTimersByTimeAsync(0);
+        if (failure === 'timeout') await vi.advanceTimersByTimeAsync(5 * 60_000);
+        if (failure === 'write-callback')
+          socket.writeCallbacks.at(-1)!(new Error('synthetic write failure'));
+        await picking;
+        expect(order.indexOf('kill_requested')).toBeGreaterThanOrEqual(0);
+        expect(order.indexOf('completed')).toBeGreaterThan(order.indexOf('kill_requested'));
+        expect(completed).toHaveBeenCalledExactlyOnceWith(
+          1,
+          'picker',
+          expect.any(String),
+          'picker-lifetime',
+        );
+        expect(child.killCalls).toBe(1);
+      } finally {
+        write?.mockRestore();
+        child.emit('exit', 0, null);
+      }
+    },
+  );
+
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
   it('PR5b refuses an identity-bound start when the connected helper has no capability', async () => {
     const target = createTarget();
@@ -834,7 +1006,7 @@ describe('Computer Use Windows helper transport', () => {
       );
       expect(store.read()).toEqual({
         rows: [],
-        quarantines: [{ identity: row.identity, reason: 'restored' }],
+        quarantines: [null, { identity: row.identity, reason: 'restored' }],
       });
       expect(JSON.stringify(diagnostics)).not.toMatch(/4242|synthetic-time/);
       // R20 does not permanently isolate the host for an invalid row.
