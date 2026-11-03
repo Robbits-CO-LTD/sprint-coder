@@ -4819,6 +4819,7 @@ int main() {
       closeResponse: null as HelperResponse | null,
       failRelease: false,
       throwRelease: false,
+      revision: 'stored' as 'stored' | 'null' | 'throw',
       releases: 0,
       releaseWait: null as Promise<void> | null,
       identityResult: { result: 'alive' } as
@@ -4950,7 +4951,10 @@ int main() {
             return true;
           },
           restoreQuarantines: () => control.restoreQuarantines(),
-          quarantineRevision: () => (quarantines.length === 0 ? null : 1),
+          quarantineRevision: () => {
+            if (control.revision === 'throw') throw new Error('synthetic revision failure');
+            return control.revision === 'null' || quarantines.length === 0 ? null : 1;
+          },
           releaseQuarantine: async () => {
             control.releases += 1;
             if (control.releaseWait !== null) await control.releaseWait;
@@ -5262,6 +5266,71 @@ int main() {
       a.close();
       b.close();
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['null', 'throw'] as const)(
+    'PR9 approval release refuses without a release call when the revision is unreadable (%s)',
+    async (revision) => {
+      const spy = backgroundReceiptSpy();
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        await startSession(target.host, 'other-session', 'turn-2');
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        await target.dispatch(session, ledgerActions[4]);
+        await target.host.close(session);
+        target.control.revision = revision;
+        await expect(
+          target.host.approveWindowsQuarantineResume!({
+            previousSessionId: session.sessionId,
+            newSessionId: 'fresh-session',
+            trustedActivation: true,
+          }),
+        ).resolves.toBe(false);
+        // Never an unconditional delete: without a revision the approval cannot release.
+        expect(target.control.releases).toBe(0);
+        expect(target.quarantines).toHaveLength(1);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it('PR9 an R15 handover whose own save fails settles once the store recovers', async () => {
+    const spy = backgroundReceiptSpy();
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await startSession(target.host, 'other-session', 'turn-2');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session, ledgerActions[4]);
+      await target.host.close(session);
+      target.control.throwRelease = true;
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      // The exit is proven but the R15 release save keeps failing: the reused PID stays refused.
+      target.control.exitedCreationTime = '133000000000000001';
+      target.control.creationTime = '133000000000000002';
+      const before = target.control.releases;
+      await expect(startSession(target.host, 'reused-1', 'turn-3')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(target.control.releases).toBeGreaterThan(before);
+      expect(target.quarantines).toHaveLength(1);
+      // The store recovers: a later write retries the R15 release and the hold settles.
+      target.control.throwRelease = false;
+      await expect(startSession(target.host, 'reused-2', 'turn-4')).resolves.toMatchObject({
+        sessionId: 'reused-2',
+      });
+      expect(target.quarantines).toEqual([]);
+    } finally {
+      spy.mockRestore();
     }
   });
 
