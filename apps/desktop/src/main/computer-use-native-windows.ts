@@ -278,6 +278,7 @@ export function createWindowsComputerUseNativeAddon(
 }
 
 type StartTransmission = {
+  stopLifetimeId?: string;
   helper: number | null;
   sessionId: string;
   stopped: boolean;
@@ -287,6 +288,7 @@ type StartTransmission = {
 };
 
 type DiscoveryTransmission = {
+  stopLifetimeId?: string;
   id: string;
   stopped: boolean;
   everSent: boolean;
@@ -385,12 +387,14 @@ class WindowsComputerUseHelperClient {
             this.sessionGenerations.delete(sessionId);
             break;
           }
-      this.termination.owned?.(generation, 'session', owner.sessionId);
+      const lifetimeId = this.termination.owned?.(generation, 'session', owner.sessionId);
+      if (typeof lifetimeId === 'string') owner.stopLifetimeId = lifetimeId;
     }
     for (const owner of this.discoveries.values()) {
       if (owner.helper !== null) continue;
       owner.helper = generation;
-      this.termination.owned?.(generation, 'discovery', owner.id);
+      const lifetimeId = this.termination.owned?.(generation, 'discovery', owner.id);
+      if (typeof lifetimeId === 'string') owner.stopLifetimeId = lifetimeId;
     }
   }
 
@@ -675,6 +679,8 @@ class WindowsComputerUseHelperClient {
     if (owner.helper !== null) this.termination?.stopping?.(owner.helper, 'E3', sessionId);
     owner.stopped = true;
     if (owner.everSent) return 'may_have_been_sent';
+    if (owner.helper !== null && owner.stopLifetimeId !== undefined)
+      this.termination?.completed?.(owner.helper, 'session', sessionId, owner.stopLifetimeId);
     // Main consumes this proof after a failed call has settled. Until then, keep it distinct
     // from an unknown ID; once no attempt remains, no continuation can still write.
     if (owner.attempts.size === 0 && this.starts.get(sessionId) === owner)
@@ -689,6 +695,7 @@ class WindowsComputerUseHelperClient {
     if (owner.helper !== null) this.termination?.stopping?.(owner.helper, 'E4', id);
     owner.stopped = true;
     if (owner.everSent) return 'may_have_been_sent';
+    this.completeDiscoveryOwner(owner);
     if (owner.attempts.size === 0 && this.discoveries.get(id) === owner)
       this.discoveries.delete(id);
     this.shutdownIfIdle();
@@ -771,11 +778,14 @@ class WindowsComputerUseHelperClient {
         throw new Error('Invalid discovery completion binding');
       owner.launches = proof.launchAttemptCount;
       owner.closed = true;
+      this.completeDiscoveryOwner(owner);
       return proof;
     } catch (error) {
       // The branded local proof is already sufficient for Main; no later cleanup call is required.
-      if (error instanceof ComputerUseDiscoveryNotSubmittedError && !owner.everSent)
+      if (error instanceof ComputerUseDiscoveryNotSubmittedError && !owner.everSent) {
         owner.closed = true;
+        this.completeDiscoveryOwner(owner);
+      }
       throw error;
     } finally {
       owner.attempts.delete(attempt);
@@ -828,12 +838,18 @@ class WindowsComputerUseHelperClient {
         throw new Error('Invalid discovery Stop binding');
       owner.launches = proof.launchAttemptCount;
       owner.closed = true;
+      this.completeDiscoveryOwner(owner);
       return proof;
     } finally {
       owner.attempts.delete(attempt);
       // This closes a discovery, not an active session. It never arms helper teardown.
       this.shutdownIfIdle();
     }
+  }
+
+  private completeDiscoveryOwner(owner: DiscoveryTransmission): void {
+    if (owner.helper !== null && owner.stopLifetimeId !== undefined)
+      this.termination?.completed?.(owner.helper, 'discovery', owner.id, owner.stopLifetimeId);
   }
 
   async checkTargetIdentity(input: unknown): Promise<readonly WindowsTargetIdentityResult[]> {
@@ -939,6 +955,7 @@ class WindowsComputerUseHelperClient {
     }
     const activity = this.activityGeneration;
     let helper: number | undefined;
+    let picker: { id: string; lifetimeId: string } | undefined;
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
@@ -956,6 +973,11 @@ class WindowsComputerUseHelperClient {
       if (owner !== undefined) {
         if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
           throw new Error('Computer Use start canceled before send');
+      }
+      if (operation === 'pick_application' && this.termination !== undefined) {
+        const id = randomBytes(16).toString('hex');
+        const lifetimeId = this.termination.owned?.(helper, 'picker', id);
+        if (typeof lifetimeId === 'string') picker = { id, lifetimeId };
       }
       const result = await this.sendConnected(
         messageType,
@@ -990,6 +1012,8 @@ class WindowsComputerUseHelperClient {
       );
       if (this.termination !== undefined && this.generations.get(helper)?.exited !== false)
         throw new Error('native_stop_unconfirmed');
+      if (picker !== undefined)
+        this.termination?.completed?.(helper, 'picker', picker.id, picker.lifetimeId);
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);

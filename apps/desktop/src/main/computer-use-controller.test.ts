@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { WindowsStopListener } from './computer-use-windows-stop-delivery';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -22,6 +23,7 @@ import type {
 } from './persistence';
 import {
   ComputerUseController,
+  subscribeComputerUseWindowsStops,
   type ComputerUseControllerDeps,
   type ComputerUseNativeActionResult,
   type ComputerUseNativeApprovalApproveResult,
@@ -5573,3 +5575,64 @@ describe('ComputerUseController', () => {
 async function viWait(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
+
+describe('PR7c-2 internal stop subscription', () => {
+  it('ignores old lifetimes and generations, deduplicates phases, and preserves the requested reason', () => {
+    let emit: WindowsStopListener = () => undefined;
+    const detached = vi.fn();
+    const receive = vi.fn();
+    const requestedReason = vi.fn((): 'task_changed' | 'user_stop' => 'task_changed');
+    const unsubscribe = subscribeComputerUseWindowsStops(
+      {
+        subscribeWindowsStop: (listener) => {
+          emit = listener;
+          return detached;
+        },
+      },
+      () => ({ requestedReason, receive }),
+    );
+    const old = { helperGeneration: 1, kind: 'session', id: 'same-id', lifetimeId: 'old' } as const;
+    const current = { ...old, helperGeneration: 2, lifetimeId: 'current' };
+    emit({ kind: 'registered', owner: old });
+    emit({ kind: 'registered', owner: current });
+    const notification = {
+      owner: old,
+      phase: 'exit_confirmed',
+      result: 'terminated_clean',
+      late: true,
+      reason: 'requested_reason',
+      internalReason: 'requested_stop',
+    } as const;
+    emit({ kind: 'notification', notification });
+    emit({
+      kind: 'notification',
+      notification: { ...notification, owner: { ...current, lifetimeId: 'old' } },
+    });
+    expect(receive).not.toHaveBeenCalled();
+    emit({ kind: 'notification', notification: { ...notification, owner: current } });
+    emit({ kind: 'notification', notification: { ...notification, owner: current } });
+    emit({
+      kind: 'notification',
+      notification: {
+        ...notification,
+        owner: current,
+        phase: 'termination_pending',
+        result: 'termination_requested',
+      },
+    });
+    emit({ kind: 'retired', owner: old });
+    requestedReason.mockReturnValue('user_stop');
+    emit({
+      kind: 'notification',
+      notification: { ...notification, owner: current, phase: 'cleanup_completed' },
+    });
+    expect(receive.mock.calls.map(([value]) => [value.phase, value.stopReason])).toEqual([
+      ['exit_confirmed', 'task_changed'],
+      ['cleanup_completed', 'task_changed'],
+    ]);
+    unsubscribe();
+    emit({ kind: 'registered', owner: { ...current, lifetimeId: 'after-dispose' } });
+    expect(detached).toHaveBeenCalledOnce();
+    expect(receive).toHaveBeenCalledTimes(2);
+  });
+});

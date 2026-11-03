@@ -1,4 +1,8 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
+import type {
+  WindowsStopDeliveryEvent,
+  WindowsOwnerStopNotification,
+} from './computer-use-windows-stop-delivery';
 import type { ComputerAppProfileRecord } from './persistence';
 import {
   ComputerUseController,
@@ -3312,6 +3316,7 @@ int main() {
       ...responders(),
       dispatch: () => ['dispatch_result', { result: 'completed' }],
     });
+    expect(target.host.subscribeWindowsStop).toBeUndefined();
     await startSession(target.host, 'session-1', 'turn-1');
     let settled = false;
     const result = Promise.resolve(
@@ -3929,6 +3934,10 @@ int main() {
       }),
       true,
     );
+    const notifications: WindowsOwnerStopNotification[] = [];
+    const unsubscribe = target.host.subscribeWindowsStop!((event) => {
+      if (event.kind === 'notification') notifications.push(event.notification);
+    });
     const old = await startSession(target.host, 'old', 'turn-old');
     target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
     await target.dispatch(old);
@@ -3936,6 +3945,9 @@ int main() {
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     expect(cleanup).not.toHaveBeenCalled();
+    expect(
+      notifications.map(({ phase, reason, internalReason }) => [phase, reason, internalReason]),
+    ).toEqual([['exit_confirmed', 'native_unavailable', 'crash']]);
     target.control.pid = 43;
     target.control.response = null;
     await target.host.listWindows(profile);
@@ -3951,6 +3963,13 @@ int main() {
     target.control.failTransfer = false;
     await target.host.listTargets!().catch(() => undefined);
     expect(cleanup.mock.calls).toEqual([[1]]);
+    expect(
+      notifications.map(({ owner, phase }) => [owner.id, owner.helperGeneration, phase]),
+    ).toEqual([
+      ['old', 1, 'exit_confirmed'],
+      ['old', 1, 'cleanup_completed'],
+    ]);
+    unsubscribe();
     expect(terminal).toBe(false);
     expect(children[1]!.killed).toBe(false);
     expect((await target.dispatch(fresh)).outcome).toBe('resolved');
@@ -4559,6 +4578,195 @@ int main() {
       }
     },
   );
+  it('PR7c-2 delivers R8/R12 once per phase and only to the exiting generation', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const events: WindowsStopDeliveryEvent[] = [];
+    const unsubscribe = target.host.subscribeWindowsStop!((event) => events.push(event));
+    await startSession(target.host, 'A', 'turn-a');
+    await startSession(target.host, 'B', 'turn-b');
+    expect(
+      events.flatMap((event) =>
+        event.kind === 'registered' && event.owner.kind === 'session' ? [event.owner.id] : [],
+      ),
+    ).toEqual(['A', 'B']);
+    target.helper().holdOnly('pick_application');
+    const picking = Promise.resolve(
+      target.addon.pickApplication!({ activationToken: 'synthetic', pickerKind: 'application' }),
+    ).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      events.filter((event) => event.kind === 'registered' && event.owner.kind === 'picker'),
+    ).toHaveLength(1);
+    target.helper().holdOnly('close_session');
+    const closing = Promise.resolve(target.addon.close!({ sessionId: 'A', cancelEpoch: 1 })).catch(
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.emit('error', new Error('synthetic transport failure'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await closing;
+    await picking;
+    child.emit('exit', 0, null);
+    const notifications = events.flatMap((event) =>
+      event.kind === 'notification' ? [event.notification] : [],
+    );
+    for (const id of ['A', 'B']) {
+      const owned = notifications.filter(({ owner }) => owner.id === id);
+      expect(owned.map(({ phase }) => phase)).toEqual([
+        'termination_pending',
+        'exit_confirmed',
+        'cleanup_completed',
+      ]);
+      expect(owned.every(({ owner }) => owner.helperGeneration === 1)).toBe(true);
+      expect(owned.at(-1)).toMatchObject({
+        reason: id === 'A' ? 'requested_reason' : 'native_unavailable',
+        internalReason: id === 'A' ? 'requested_stop' : 'shared_helper_stop',
+        late: true,
+      });
+    }
+    await startSession(target.host, 'C', 'turn-c');
+    child.emit('exit', 0, null);
+    expect(events.filter((event) => event.kind === 'notification')).toHaveLength(9);
+    unsubscribe();
+  });
+
+  it('PR7c-2 preserves the initiating session while its start waits for discovery', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    const notifications: WindowsOwnerStopNotification[] = [];
+    target.host.subscribeWindowsStop!((event) => {
+      if (event.kind === 'notification') notifications.push(event.notification);
+    });
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    target.helper().holdOnly('list_windows_cancellable');
+    const starting = startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    target.helper().holdOnly('stop_window_discovery');
+    const stopping = target.host.stopPendingStart!('pending').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.emit('error', new Error('synthetic transport failure'));
+    await vi.advanceTimersByTimeAsync(0);
+    await starting;
+    await stopping;
+    expect(notifications.filter(({ owner }) => owner.id === 'pending')).toMatchObject([
+      { phase: 'exit_confirmed', reason: 'requested_reason', internalReason: 'requested_stop' },
+      { phase: 'cleanup_completed', reason: 'requested_reason', internalReason: 'requested_stop' },
+    ]);
+  });
+
+  it('PR7c-2 clears E4 not_submitted before a later session Stop fails', async () => {
+    let release = () => undefined as void;
+    const prepared = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let hold = false;
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        configureWindowsTermination: (callbacks) =>
+          addon.configureWindowsTermination!({
+            ...callbacks,
+            prepare: async () => {
+              if (hold) await prepared;
+              await callbacks.prepare();
+            },
+          }),
+      }),
+      true,
+    );
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    try {
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      hold = true;
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      const result = discovery.result.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(discovery.stop()).resolves.toMatchObject({ kind: 'not_submitted' });
+      hold = false;
+      release();
+      await result;
+      target.helper().holdOnly('close_session');
+      const closing = Promise.resolve(
+        target.addon.close!({ sessionId: 'keeper', cancelEpoch: 1 }),
+      ).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.emit('error', new Error('synthetic transport failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.results.map(({ value }) => value.notification)).toContainEqual({
+        kind: 'generation_exit',
+        cause: 'abortTransport',
+        late: false,
+        result: 'terminated_clean',
+        initiatorReason: 'requested_reason',
+      });
+      await closing;
+    } finally {
+      release();
+      decide.mockRestore();
+    }
+  });
+
+  it('PR7c-2 clears a normal E4 receipt before a later session Stop fails', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.helper().holdOnly('list_windows_cancellable');
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      await vi.advanceTimersByTimeAsync(0);
+      await discovery.stop();
+      target.helper().holdOnly('close_session');
+      const closing = Promise.resolve(
+        target.addon.close!({ sessionId: 'keeper', cancelEpoch: 1 }),
+      ).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.emit('error', new Error('synthetic transport failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.results.map(({ value }) => value.notification)).toContainEqual({
+        kind: 'generation_exit',
+        cause: 'abortTransport',
+        late: false,
+        result: 'terminated_clean',
+        initiatorReason: 'requested_reason',
+      });
+      await closing;
+    } finally {
+      decide.mockRestore();
+    }
+  });
+
+  it.each(['A', 'B'] as const)(
+    'PR7c-2 receipt for %s preserves the other stopping owner',
+    async (closed) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        const a = await startSession(target.host, 'A', 'turn-a');
+        const b = await startSession(target.host, 'B', 'turn-b');
+        await target.addon.cancel!({ sessionId: 'A', cancelEpoch: 1 });
+        await target.addon.cancel!({ sessionId: 'B', cancelEpoch: 1 });
+        await target.host.close(closed === 'A' ? a : b);
+        sockets[0]!.emit('error', new Error('synthetic transport failure'));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(decide.mock.results.map(({ value }) => value.notification)).toContainEqual({
+          kind: 'generation_exit',
+          cause: 'abortTransport',
+          late: false,
+          result: 'terminated_clean',
+          initiatorReason: 'requested_reason',
+        });
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+
   it('PR7c records sessionless E4 before a transport failure and preserves late exit', async () => {
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     const child = new ControlledHelperChild();
