@@ -46,7 +46,7 @@ function findBuild(): Build | null {
   };
 }
 
-// Component integration: seed an existing V1 lifetime to reach its worker executable read.
+// Component integration: seed an existing V1 lifetime to reach its consumer executable read.
 // No public Start/grant or target-app acceptance is claimed. Reads name only this process
 // with a deliberately wrong path; focus/input calls are replaced with failing tripwires.
 const nativeSource = readWindowsHostSource();
@@ -72,7 +72,7 @@ it('instruments the existing-start executable read without changing its qualific
 });
 
 describe.skipIf(process.platform !== 'win32')('Windows V1 existing-start terminal pipe', () => {
-  it('returns a terminal stop while the V1 existing identity read is still held', ({ skip }) => {
+  it('discards the held V1 existing identity read after Stop and drains on release', ({ skip }) => {
     const build = findBuild();
     if (!build) {
       if (process.env.CI) throw new Error('MSVC required');
@@ -150,10 +150,10 @@ describe.skipIf(process.platform !== 'win32')('Windows V1 existing-start termina
       expect(receipts[0]!.cancelEpoch).toBeGreaterThan(9);
       expect(receipts[0]!.inputAttemptCount).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: terminal receipt before held V1 existing read release',
+        'PASS: consumer registered for cancellation, Stop latched before release',
       );
       expect(result.stdout).toContain(
-        'PASS: late read discarded, actual handles and worker reclaimed, no input',
+        'PASS: late read discarded, actual handles and consumer slot reclaimed, no input',
       );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
@@ -178,7 +178,7 @@ void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<s
 std::atomic<DWORD> consumer_thread{0}, io_thread{0};
 std::atomic<unsigned> actual_reads{0}, successful_reads{0}, process_releases{0}, file_releases{0};
 std::atomic<HANDLE> tracked_process{nullptr}, tracked_file{INVALID_HANDLE_VALUE};
-ScopedKernelHandle held_worker;
+
 namespace {
 BOOL RcaRefuseShow(HWND, int) { Require(false,"unexpected show window");return FALSE; }
 BOOL RcaRefuseForeground(HWND) { Require(false,"unexpected foreground input");return FALSE; }
@@ -197,7 +197,7 @@ bool HoldStartOpen(HANDLE process, LockedWindowsExecutable* output) {
   if(tracked) {
     tracked_process.store(process);
     io_thread.store(GetCurrentThreadId());
-    Require(DuplicateHandle(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),&held_worker.value,SYNCHRONIZE,FALSE,0),"worker handle");
+    {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(GetThreadId(WindowsTargetListControl().new_start_thread)==GetCurrentThreadId(),"consumer registered for synchronous I/O cancellation");}
     entered_start.store(true);while(hold_start.load())Sleep(1);
   }
   const bool result=OpenLockedProcessExecutable(process,output);
@@ -247,21 +247,23 @@ int wmain(){
  std::thread serve([&]{consumer_thread.store(GetCurrentThreadId());const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
  Send(client.value,2,7,Start("pending",9));
- for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()!=consumer_thread.load(),"existing identity I/O is on the worker");std::cerr<<"phase=start-gate\n"<<std::flush;
+ for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()==consumer_thread.load(),"existing identity I/O is on the consumer");std::cerr<<"phase=start-gate\n"<<std::flush;
  const auto stop_started=GetTickCount64();Send(client.value,3,7,Stop("pending"));
  bool latched=false;
  for(int i=0;i<3000&&!latched;i++){{std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto found=WindowsStarts().owners.find(FrameIdKey(Id(7)));latched=found!=WindowsStarts().owners.end()&&found->second->stopped.load();}if(!latched)Sleep(1);}
  std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");
+ // This gate is not cancellable I/O. A permanently held call is covered by the Host E3
+ // cases in hung-helper-live-seam; here release it to test rejection and native cleanup.
+ Require(hold_start.load()&&actual_reads.load()==0,"Stop latched while read is held");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(WindowsTargetListControl().new_start_thread!=nullptr&&WindowsTargetListWorkerRunning().load(),"consumer remains registered while held");}
+ std::cout<<"PASS: consumer registered for cancellation, Stop latched before release\n";
+ hold_start.store(false);
  auto rejected=Read(client.value,2,MessageType::kError);Require(Payload(rejected).find("session_start_canceled")!=std::string::npos,"stopped existing start rejected");
  auto terminal=Read(client.value,3,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(terminal)<<"\n";
- Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"terminal before held I/O release");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->terminal&&owner->pending_requests.load()!=0&&WindowsTargetListWorkerRunning().load(),"terminal retains worker lifetime");}
- std::cout<<"PASS: terminal receipt before held V1 existing read release\n";
- hold_start.store(false);
- Require(held_worker.value!=nullptr&&WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0,"worker exits after actual read");
+ Require(GetTickCount64()-stop_started<1000,"terminal after released read budget");
  Require(actual_reads.load()==1&&successful_reads.load()==1&&process_releases.load()==1&&file_releases.load()==1,"actual read and handle cleanup");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->pending_requests.load()==0&&!WindowsTargetListWorkerRunning().load(),"late result discarded and lease reclaimed");}
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->terminal&&owner->pending_requests.load()==0&&!WindowsTargetListWorkerRunning().load()&&WindowsTargetListControl().new_start_thread==nullptr,"late result discarded and consumer registration reclaimed");}
  std::cerr<<"phase=cleanup\n"<<std::flush;CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
- Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: late read discarded, actual handles and worker reclaimed, no input\n";return 0;
+ Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: late read discarded, actual handles and consumer slot reclaimed, no input\n";return 0;
 }
 `;

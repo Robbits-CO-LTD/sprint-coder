@@ -128,13 +128,8 @@ function instrumentedHost(): string {
   );
   resume = replaceOnce(
     resume,
-    '  // Existing start worker entry; this job owns its thread and source duplicates.',
-    '  // Existing start worker entry; this job owns its thread and source duplicates.\n  Sc940ResumeWorkerStarted(*work);',
-  );
-  resume = replaceOnce(
-    resume,
-    '  if (pending->thread.value != nullptr) CancelSynchronousIo(pending->thread.value);',
-    '  if (pending->thread.value != nullptr) { Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value); }',
+    '    if (cancellation.thread == nullptr) return false;',
+    '    if (cancellation.thread == nullptr) return false;\n    Sc940ResumeMeasurementScope measurement(*work);',
   );
   const ticketInvalidation = 'InvalidateWindowsTicket(input.session_key);';
   if (resume.split(ticketInvalidation).length !== 4)
@@ -804,14 +799,16 @@ void Sc940ValidationRetired(std::uint64_t job_id);
 std::string Sc940ValidationProbe(const std::string &metadata);
 bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
 struct WindowsExistingStartWork;
-struct WindowsExistingStartPending;
 struct WindowsExistingStartMeasurement;
 bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsExistingStartMeasurement &before);
 bool Sc940ResumeOpen(const WindowsExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output);
 bool Sc940ResumeFileIdentity(const WindowsExistingStartWork &work, WindowsFileIdentity *identity);
 void Sc940ResumeContextGate(const WindowsExistingStartWork &work);
-void Sc940ResumeWorkerStarted(const WindowsExistingStartWork &work);
-void Sc940ResumeCancelAttempt();
+struct Sc940ResumeMeasurementScope {
+  bool active;
+  explicit Sc940ResumeMeasurementScope(const WindowsExistingStartWork &work);
+  ~Sc940ResumeMeasurementScope();
+};
 void Sc940ResumeInvalidateTicket(const std::string &session_key);
 bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason);
 bool Sc940ResumeRefocus(const WindowsSession &session, HWND *window, std::string *reason);
@@ -907,12 +904,10 @@ std::atomic<bool> resume_hold_before{false}, resume_hold_after{false}, resume_ho
 std::atomic<bool> resume_fail_after_read{false};
 std::atomic<unsigned> resume_before_calls{0}, resume_before_successes{0};
 std::atomic<unsigned> resume_after_reads{0}, resume_after_successes{0}, resume_context_calls{0};
-std::atomic<unsigned> resume_workers{0}, resume_cancel_attempts{0}, resume_ticket_invalidations{0};
+std::atomic<unsigned> resume_measurements{0}, resume_active{0}, resume_ticket_invalidations{0};
 std::atomic<unsigned> resume_before_jobs{0}, resume_after_jobs{0}, resume_before_file_reads{0};
 std::atomic<HANDLE> resume_source_process{nullptr}, resume_source_file{INVALID_HANDLE_VALUE};
-std::mutex resume_threads_mutex;
-std::vector<std::pair<std::shared_ptr<WindowsExistingStartPending>, HANDLE>> resume_threads;
-std::shared_ptr<WindowsExistingStartPending> resume_held_pending;
+std::atomic<DWORD> resume_consumer_thread{0};
 std::atomic<unsigned> resume_pin_checks{0};
 HANDLE resume_other_file = INVALID_HANDLE_VALUE;
 std::atomic<bool> validation_case_active{false};
@@ -1127,37 +1122,29 @@ bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output) {
   if (opened) start_open_successes.fetch_add(1);
   return opened;
 }
-void Sc940ResumeWorkerStarted(const WindowsExistingStartWork &work) {
-  if (!resume_diagnostic_active.load()) return;
-  resume_workers.fetch_add(1);
+Sc940ResumeMeasurementScope::Sc940ResumeMeasurementScope(const WindowsExistingStartWork &work)
+    : active(resume_diagnostic_active.load()) {
+  if (!active) return;
+  resume_active.fetch_add(1);
+  resume_measurements.fetch_add(1);
   if (work.phase == WindowsExistingStartPhase::BeforeFocus) resume_before_jobs.fetch_add(1);
   else resume_after_jobs.fetch_add(1);
-  HANDLE thread = nullptr;
-  if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
-                       SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+  const DWORD thread = GetCurrentThreadId();
+  const DWORD prior = resume_consumer_thread.exchange(thread);
+  if (prior != 0 && prior != thread) wrong_measurement.store(true);
+  auto& control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  if (control.new_start_thread == nullptr || GetThreadId(control.new_start_thread) != thread)
     wrong_measurement.store(true);
-    return;
-  }
-  try {
-    std::lock_guard lock(resume_threads_mutex);
-    resume_threads.emplace_back(work.pending, thread);
-  } catch (...) {
-    CloseHandle(thread);
-    wrong_measurement.store(true);
-  }
+}
+Sc940ResumeMeasurementScope::~Sc940ResumeMeasurementScope() {
+  if (active) resume_active.fetch_sub(1);
 }
 void Sc940ResumeInvalidateTicket(const std::string &session_key) {
   if (resume_diagnostic_active.load()) resume_ticket_invalidations.fetch_add(1);
   InvalidateWindowsTicket(session_key);
 }
-void Sc940ResumeCancelAttempt() {
-  if (resume_diagnostic_active.load()) resume_cancel_attempts.fetch_add(1);
-}
-void Sc940ResumeHold(const WindowsExistingStartWork &work) {
-  {
-    std::lock_guard lock(resume_threads_mutex);
-    resume_held_pending = work.pending;
-  }
+void Sc940ResumeHold(const WindowsExistingStartWork &) {
   SetEvent(gate_entered);
   if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
 }
@@ -1190,39 +1177,12 @@ void Sc940ResumeContextGate(const WindowsExistingStartWork &work) {
   resume_context_calls.fetch_add(1);
   if (resume_hold_context.load()) Sc940ResumeHold(work);
 }
-std::shared_ptr<WindowsExistingStartPending> ResumeHeldPending() {
-  std::lock_guard lock(resume_threads_mutex);
-  return resume_held_pending;
-}
-bool WaitResumeThread(const std::shared_ptr<WindowsExistingStartPending> &pending, DWORD budget = 5000) {
-  HANDLE thread = nullptr;
-  {
-    std::lock_guard lock(resume_threads_mutex);
-    for (const auto &entry : resume_threads) if (entry.first == pending) thread = entry.second;
-  }
-  return thread != nullptr && WaitForSingleObject(thread, budget) == WAIT_OBJECT_0;
-}
-bool WaitAllResumeThreads() {
-  std::vector<HANDLE> threads;
-  {
-    std::lock_guard lock(resume_threads_mutex);
-    for (const auto &entry : resume_threads) threads.push_back(entry.second);
-  }
+bool WaitResumeMeasurements() {
   const ULONGLONG deadline = GetTickCount64() + 5000;
-  for (HANDLE thread : threads) {
-    const ULONGLONG now = GetTickCount64();
-    if (WaitForSingleObject(thread, now >= deadline ? 0 : static_cast<DWORD>(deadline - now)) != WAIT_OBJECT_0)
-      return false;
-  }
-  return threads.size() == resume_workers.load();
-}
-bool CloseResumeThreadEvidence() {
-  std::lock_guard lock(resume_threads_mutex);
-  bool closed = true;
-  for (const auto &entry : resume_threads) closed = CloseHandle(entry.second) != FALSE && closed;
-  resume_threads.clear();
-  resume_held_pending.reset();
-  return closed;
+  while (resume_active.load() != 0 && GetTickCount64() < deadline) Sleep(1);
+  auto& control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  return resume_active.load() == 0 && control.new_start_thread == nullptr;
 }
 bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason) {
   if (!resume_diagnostic_active.load()) return ResolveWindowsExplicitResumeTarget(session, window, reason);
@@ -2531,13 +2491,13 @@ struct RcaRun {
     worker_idle = WaitUiaWorkerIdle(15'000) && worker_idle;
     worker_idle = WaitCaptureWorkerIdle(15'000) && worker_idle;
     if (resume_diagnostic_active.load()) {
-      if (!worker_idle || !WaitAllResumeThreads()) {
+      if (!worker_idle || !WaitResumeMeasurements()) {
         watchdog_fired.store(true);
         if (job.value != nullptr) TerminateJobObject(job.value, 90);
         TerminateProcess(GetCurrentProcess(), 90);
         std::terminate();
       }
-      worker_idle = CloseResumeThreadEvidence() && worker_idle;
+      worker_idle = WaitResumeMeasurements() && worker_idle;
     }
     ReleaseWindowsSessionResources(&validation_probe_session);
     validation_probe_source = nullptr;
@@ -3183,11 +3143,11 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
             "resume_real_identity_admission_baseline");
     if (normal) {
       run.Send(MessageType::kProbe, 21, ResumeMetadata(listed, 1, true, true));
-      Require(run.Wait(21, 15'000) && ResumeSucceeded(run, 21, listed) && WaitAllResumeThreads() &&
+      Require(run.Wait(21, 15'000) && ResumeSucceeded(run, 21, listed) && WaitResumeMeasurements() &&
                   resume_before_jobs.load() == 1 && resume_after_jobs.load() == 1 && resume_after_reads.load() == 1,
               "resume_live_success_without_generation");
       run.Send(MessageType::kProbe, 22, ResumeMetadata(listed, 1, false, false, true));
-      Require(run.Wait(22, 15'000) && ResumeSucceeded(run, 22, listed) && WaitAllResumeThreads() &&
+      Require(run.Wait(22, 15'000) && ResumeSucceeded(run, 22, listed) && WaitResumeMeasurements() &&
                   resume_before_jobs.load() == 2 && resume_after_jobs.load() == 2 && resume_after_reads.load() == 2 &&
                   resume_ticket_invalidations.load() == 4, "refocus_live_success_with_stale_generation");
       std::string mismatch = ResumeMetadata(listed, 1);
@@ -3197,7 +3157,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       run.Send(MessageType::kProbe, 23, mismatch);
       // The header/metadata ID pair is immutable in API 3. A different owner is rejected
       // before the existing session's tickets or measurement state can be touched.
-      Require(run.Wait(23, 15'000) && run.Error(23, "session_id_reuse") && WaitAllResumeThreads() &&
+      Require(run.Wait(23, 15'000) && run.Error(23, "session_id_reuse") && WaitResumeMeasurements() &&
                   resume_ticket_invalidations.load() == 4 && resume_after_jobs.load() == 2,
               "resume_sid_alias_refused_without_ticket_mutation");
       mismatch = ResumeMetadata(listed, 1);
@@ -3205,12 +3165,12 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       Require(digest != std::string::npos, "resume_app_negative_field");
       mismatch.replace(digest, listed.app.size(), std::string(64, '0'));
       run.Send(MessageType::kProbe, 24, mismatch);
-      Require(run.Wait(24, 15'000) && run.Error(24, "session_target_rejected") && WaitAllResumeThreads() &&
+      Require(run.Wait(24, 15'000) && run.Error(24, "session_target_rejected") && WaitResumeMeasurements() &&
                   resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
               "resume_refused_attempt_also_invalidates_ticket");
     } else if (repeat) {
       SendResumeComponent(run, listed, 21, "repeat");
-      Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 3) && WaitAllResumeThreads() &&
+      Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 3) && WaitResumeMeasurements() &&
                   resume_before_jobs.load() == 3 && resume_before_calls.load() == 3 &&
                   resume_before_file_reads.load() == 3 && resume_after_jobs.load() == 3 &&
                   resume_after_reads.load() == 3 && resume_after_successes.load() == 3 &&
@@ -3223,21 +3183,21 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
         const unsigned successes = resume_after_successes.load();
         SendResumeComponent(run, listed, request, mode);
         Require(run.Wait(request, 15'000) && ResumeComponentReply(run, request, !before_failure, false, 0) &&
-                    WaitAllResumeThreads(), "resume_binding_or_real_read_failure_refused");
+                    WaitResumeMeasurements(), "resume_binding_or_real_read_failure_refused");
         Require(resume_after_reads.load() == reads + (before_failure ? 0u : 1u) &&
                     resume_after_successes.load() == successes + (before_failure || std::string_view(mode) == "after_read_failure" ? 0u : 1u),
                 "resume_negative_keeps_actual_second_phase_read");
         ++request;
       }
       SendResumeComponent(run, listed, 40);
-      Require(run.Wait(40, 15'000) && ResumeComponentReply(run, 40, true, true, 1) && WaitAllResumeThreads(),
+      Require(run.Wait(40, 15'000) && ResumeComponentReply(run, 40, true, true, 1) && WaitResumeMeasurements(),
               "resume_negative_result_not_cached");
       // Ticket lifecycle unit fixture only: no preflight, dispatch, grant, or input is performed.
       // Keep the exact same binding and clock for the post-rejection Consume, so neither epoch nor
       // expiry can explain why the old ticket becomes unusable.
       const std::string key = FrameIdKey(Id(7));
       const auto epoch = cancellation_epoch.load();
-      const unsigned workers = resume_workers.load();
+      const unsigned workers = resume_measurements.load();
       auto &owner = sessions.at(key);
       const auto binding = WindowsTicketBinding(owner, "resume-ticket-unit", std::string(64, 'a'),
                                                 std::string(64, 'b'), epoch, 1);
@@ -3253,7 +3213,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       run.Send(MessageType::kProbe, 41, ResumeMetadata(listed, epoch + 1));
       Require(run.Wait(41, 1000) && run.Error(41, "session_start_canceled") &&
                   cancellation_epoch.load() == epoch && owner.cancel_epoch == epoch &&
-                  resume_workers.load() == workers && !ticket.slot.occupied() && ticket.generation == 2 &&
+                  resume_measurements.load() == workers && !ticket.slot.occupied() && ticket.generation == 2 &&
                   !ticket.slot.Consume(token, binding, now), "resume_future_epoch_refusal_burns_old_ticket");
       ForgetWindowsTicket(key);
     } else {
@@ -3269,13 +3229,12 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       else run.Send(MessageType::kProbe, 2, ResumeMetadata(listed, 1));
       Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0 &&
                   WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "resume_fault_gate_entered");
-      const auto pending = ResumeHeldPending();
       const auto attempts = sessions.at(FrameIdKey(Id(7))).input_api_attempts;
-      const unsigned workers = resume_workers.load();
+      const unsigned workers = resume_measurements.load();
       if (queued) Require(workers == 0 && !WindowsTargetListWorkerRunning().load(), "resume_prequeued_no_job");
       else if (focus_stop) Require(workers == 1 && resume_focus_attempts.load() == 1 && attempts->load() == 1,
                                   "resume_first_real_focus_unit_complete");
-      else Require(pending != nullptr && WindowsTargetListWorkerRunning().load() &&
+      else Require(resume_active.load() == 1 && WindowsTargetListWorkerRunning().load() &&
                        workers == (after ? 2u : 1u), "resume_actual_phase_worker_held");
       const auto response_refused = [&] {
         return component_after ? ResumeComponentReply(run, 2, true, false, 0) : run.Error(2, "session_start_canceled");
@@ -3285,25 +3244,36 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
         const ULONGLONG sent = GetTickCount64();
         run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
         Require(WaitStopSerial(serial, 1000), "resume_cancel_reader_progress");
-        if (focus_stop) { resume_hold_focus_unit.store(false); SetEvent(run.release.value); }
+        Require(!run.Wait(2, 50), "resume_does_not_publish_while_held");
+        if (!after && !focus_stop) {
+          // Keep the old epoch on the wire. A diagnostic component made after Cancel
+          // would copy the updated session epoch when the consumer eventually executes it.
+          run.Send(MessageType::kProbe, 6, ResumeMetadata(listed, 1));
+          Require(!run.Wait(6, 50) && resume_measurements.load() == workers,
+                  "resume_busy_starts_no_extra_measurement");
+        }
+        resume_hold_before.store(false); resume_hold_after.store(false); resume_hold_context.store(false);
+        resume_hold_focus_unit.store(false); SetEvent(run.release.value);
         Require(run.Wait(2, 1000) && response_refused() && run.Wait(3, 1000) &&
                     run.Receipt(3, MessageType::kDispatchResult, "canceled", 2, 7, "sc940-new", expected_input_attempts),
                 "resume_cancel_alone_drains_before_close");
         stop_ms = GetTickCount64() - sent;
         Require(stop_ms < 1000, "resume_cancel_receipt_budget");
-        if (!after && !focus_stop) {
-          SendResumeComponent(run, listed, 6);
-          Require(run.Wait(6, 1000) && ResumeComponentReply(run, 6, false, false, 0) &&
-                      resume_workers.load() == workers && WindowsTargetListWorkerRunning().load(), "resume_busy_starts_no_extra_job");
-        }
+        if (!after && !focus_stop)
+          Require(run.Wait(6, 1000) && run.Error(6, "session_start_canceled") &&
+                      resume_measurements.load() == workers, "resume_queued_stale_measurement_refused");
       }
       const auto serial = WindowsTargetListControl().stop_serial.load();
       const ULONGLONG sent = GetTickCount64();
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(cancel ? 3 : 2) + "}");
       Require(WaitStopSerial(serial, 1000), "resume_close_reader_progress");
       if (queued) {
-        Require(cancellation_epoch.load() == 1 && resume_workers.load() == 0, "resume_prequeued_close_uses_enqueue_serial");
+        Require(cancellation_epoch.load() == 1 && resume_measurements.load() == 0, "resume_prequeued_close_uses_enqueue_serial");
         hold_point.store(HoldPoint::kNone);
+      }
+      if (!cancel) {
+        Require(!run.Wait(2, 50), "resume_close_cannot_publish_held_measurement");
+        resume_hold_before.store(false); resume_hold_after.store(false); resume_hold_context.store(false);
         SetEvent(run.release.value);
       }
       Require(run.Wait(2, 1000) && response_refused() && run.Wait(4, 1000) &&
@@ -3312,41 +3282,18 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       close_ms = GetTickCount64() - sent;
       Require(close_ms < 1000 && sessions.empty() && ticket_states.empty() && attempts->load() == expected_input_attempts,
               "resume_original_session_closed");
+      Require(WaitResumeMeasurements() && run.WaitWorkerIdle(1000), "resume_measurement_cleanup_complete");
       if (!queued && !focus_stop) {
-        Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT && WindowsTargetListWorkerRunning().load(),
-                "resume_receipts_precede_worker_release");
-        const unsigned reads = resume_after_successes.load();
-        if (cold) Require(!WindowsV2FactsContextCache().has_value(), "resume_cold_context_not_adopted");
-        resume_hold_before.store(false); resume_hold_after.store(false); resume_hold_context.store(false);
-        SetEvent(run.release.value);
-        Require(WaitResumeThread(pending) && WaitAllResumeThreads() && run.WaitWorkerIdle(1000), "resume_worker_actually_exited_after_close");
-        {
-          std::lock_guard lock(pending->mutex);
-          Require(pending->done && pending->abandoned.load() && pending->thread.value == nullptr &&
-                      !pending->result.succeeded && !pending->result.context.has_value(), "resume_late_result_discarded");
-        }
-        if (after) Require(resume_after_successes.load() == reads + 1, "resume_dup_real_read_after_original_close");
-        else Require(resume_before_successes.load() == 1, "resume_real_open_completed_after_close");
+        if (after) Require(resume_after_successes.load() == 1, "resume_late_real_read_rejected");
+        else Require(resume_before_successes.load() == 1, "resume_late_real_open_rejected");
         if (cold) Require(!WindowsV2FactsContextCache().has_value() && resume_context_calls.load() == 1,
                           "resume_late_cold_context_discarded");
         late_rejected = true;
-      } else Require(WaitAllResumeThreads() && (!focus_stop || resume_after_jobs.load() == 0), "resume_consumer_gate_cleanup");
+      } else Require(!focus_stop || resume_after_jobs.load() == 0, "resume_consumer_gate_cleanup");
       if (!live) {
         SeedResumeSession(listed, created);
-        if (cancel && !after) {
-          ResetEvent(run.entered.value); ResetEvent(run.release.value);
-          resume_hold_before.store(true);
-          SendResumeComponent(run, listed, 21);
-          Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "resume_retry_worker_held");
-          const auto next = ResumeHeldPending();
-          const unsigned cancels = resume_cancel_attempts.load();
-          Require(next != nullptr && next != pending && WaitResumeThread(pending, 0), "resume_old_thread_really_finished");
-          CancelWindowsExistingStartJob(pending);
-          Require(resume_cancel_attempts.load() == cancels && WindowsTargetListWorkerRunning().load() &&
-                      WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "resume_old_pending_cannot_cancel_new_job");
-          resume_hold_before.store(false); SetEvent(run.release.value);
-        } else SendResumeComponent(run, listed, 21);
-        Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 1) && WaitAllResumeThreads(),
+        SendResumeComponent(run, listed, 21);
+        Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 1) && WaitResumeMeasurements(),
                 "resume_explicit_fresh_component_retry");
         if (cold) Require(WindowsV2FactsContextCache().has_value() && resume_context_calls.load() == 2,
                           "resume_only_fresh_retry_adopts_context");
@@ -3358,21 +3305,21 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
       run.Send(MessageType::kProbe, 50, "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(epoch) + "}");
       Require(run.Wait(50, 1000) && run.Receipt(50, MessageType::kProbeResult, "closed", epoch, 7, "sc940-new"), "resume_final_diagnostic_close");
     }
-    Require(WaitAllResumeThreads() && run.WaitWorkerIdle(1000) && sessions.empty() && ticket_states.empty() &&
+    Require(WaitResumeMeasurements() && run.WaitWorkerIdle(1000) && sessions.empty() && ticket_states.empty() &&
                 resume_before_calls.load() == resume_before_jobs.load() && resume_after_reads.load() == resume_after_jobs.load() &&
-                resume_workers.load() == resume_before_jobs.load() + resume_after_jobs.load() &&
+                resume_measurements.load() == resume_before_jobs.load() + resume_after_jobs.load() &&
                 (!live ? resume_resolve_attempts.load() == 0 && resume_focus_attempts.load() == 0 : true) &&
                 (!focus_stop || (resume_focus_attempts.load() == 1 && resume_focus_setup_minimized.load())) && !wrong_measurement.load() && !gate_timed_out.load(),
             "resume_phases_threads_and_no_unexpected_input");
-    const unsigned workers = resume_workers.load();
+    const unsigned workers = resume_measurements.load();
     run.Cleanup();
     Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "resume_owned_cleanup");
     std::cout << "{\"case\":\"" << label << "\",\"componentIntegrationOnly\":" << (live ? "false" : "true")
               << ",\"realIdentityAdmissionBaseline\":true,\"realListMode\":\"observe_only\",\"stopMs\":" << stop_ms
               << ",\"closeMs\":" << close_ms << ",\"beforeJobs\":" << resume_before_jobs.load() << ",\"afterJobs\":" << resume_after_jobs.load()
               << ",\"beforeFileReads\":" << resume_before_file_reads.load() << ",\"afterFileReads\":" << resume_after_reads.load()
-              << ",\"workerThreads\":" << workers << ",\"workerThreadsExited\":true,\"threadHandlesClosed\":true"
-              << ",\"workerThreadsJoined\":false,\"joinedThreads\":\"pipe-reader-watchdog\""
+              << ",\"measurementPhases\":" << workers << ",\"consumerMeasurementsRetired\":true,\"cancellationUnregistered\":true"
+              << ",\"detachedMeasurementWorkers\":0,\"joinedThreads\":\"pipe-reader-watchdog\""
               << ",\"sourcePinChecks\":" << resume_pin_checks.load() << ",\"lateResultRejected\":" << (late_rejected ? "true" : "false")
               << ",\"resolveAttempts\":" << resume_resolve_attempts.load() << ",\"focusApiAttempts\":" << resume_focus_attempts.load()
               << ",\"inputAttempts\":" << expected_input_attempts << ",\"foregroundRequired\":" << (live ? "true" : "false")
@@ -4785,15 +4732,13 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('Sc940ResumeForeground(refocus_window);')).toHaveLength(2);
     expect(generated.split('operation == "sc940_resume_baseline"')).toHaveLength(2);
     expect(generated.split('!Sc940ResumeFileIdentity(work, &held)')).toHaveLength(3);
-    expect(generated.split('  Sc940ResumeWorkerStarted(*work);')).toHaveLength(2);
+    expect(generated.split('    Sc940ResumeMeasurementScope measurement(*work);')).toHaveLength(2);
     expect(generated.split('    Sc940ResumeContextGate(work);')).toHaveLength(2);
     expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(4);
-    expect(
-      generated.split('Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value);'),
-    ).toHaveLength(2);
-    expect(program).toContain('WaitForSingleObject(thread, budget) == WAIT_OBJECT_0');
+    expect(program).toContain('GetThreadId(control.new_start_thread) != thread');
     expect(program).toContain('run.Error(2, "session_start_canceled")');
-    expect(program).toContain('CancelWindowsExistingStartJob(pending);');
+    expect(program).toContain('resume_does_not_publish_while_held');
+    expect(program).not.toContain('WindowsExistingStartPending');
     expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
     expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
     expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);
@@ -5009,9 +4954,9 @@ describe.skipIf(
               closeMs: expect.any(Number),
               beforeJobs: expect.any(Number),
               afterJobs: expect.any(Number),
-              workerThreadsExited: true,
-              threadHandlesClosed: true,
-              workerThreadsJoined: false,
+              consumerMeasurementsRetired: true,
+              cancellationUnregistered: true,
+              detachedMeasurementWorkers: 0,
               joinedThreads: 'pipe-reader-watchdog',
               inputAttempts: scenario === 'resume-live-focus-stop' ? 1 : 0,
               foregroundRequired: scenario.startsWith('resume-live-'),
@@ -5742,7 +5687,7 @@ describe.skipIf(
     ]);
   }, 700_000);
 
-  it('keeps resume measurement Stop responsive and both phases fresh without foreground', async () => {
+  it('rejects late synchronous resume measurements and keeps both phases fresh without foreground', async () => {
     await runScenarios([
       'resume-before-cancel',
       'resume-before-close',
