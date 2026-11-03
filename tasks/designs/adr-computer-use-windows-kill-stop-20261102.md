@@ -418,3 +418,10 @@ PR11 は既定で有効な Windows kill-stop に E3 / E4 を接続する。C = 1
 - BOT 4454559234: kill 待ちへ入る catch で generation を固定し、finish 内の outcome の例外は reject へ変換する。回帰試験では close の後始末後に対象 owner を退役させる境界を注入した。修正前の実装では timer の finish → outcome から `native_stop_unconfirmed` が投げられることを確認し、修正後は exit あり／なしの双方で Promise が決着した。
 - 検証環境: Windows、指定の sandbox-vite-shim、`--pool=threads`。通常の `node` はこの環境の v24.13.0 を使用（Node 22 での再実行は未実施）。指定 8 ファイルの一括実行は 2,402 PASS / 1 FAIL / 1 SKIP。唯一の FAIL は既知の `ipc.test.ts:819` の保護フォルダ警告で、今回変更していないフォルダ判定の試験である。後から追加した条件も含む focused 回帰は 8 PASS（自動停止／共有終了 × clean／suspect、Task／終了済み Turn の late 配送、owner 退役時の exit あり／なし）。contracts は 88 PASS、Timeline の単体試験は 6 PASS。bundled Electron の ABI で実行した SQLite の focused 試験は 1 PASS（終了済み Turn、次の Turn の維持、別 Task の Turn の拒否、再読込）。対象 tsc、変更した TypeScript/TSX の ESLint・Prettier check、`git diff --check` は PASS。
 - 実アプリの Computer Use による表示・操作確認は未実施。上記の Timeline 単体試験を実機 E2E の PASS とは扱わない。Git の index・branch・履歴を変更せず、変更は未コミットで残す。gh・ネットワーク・再委任は行っていない。
+
+#### PR11 段 C の修正（2026-11-03）
+
+- アプリ単位の回復（BOT 4455179622・4455322047）: Scope の `read` は通常の探索失敗で Scope 全体を中断しない。macOS（handle なし）は base どおりそのアプリだけを失敗にする。Windows はその query の停止を確かめ、停止が確認でき世代も生きていればそのアプリだけを失敗にする。Scope 全体を失効させるのは、明示的な Stop、世代の終了（`terminated`）、停止の未確認だけとする。
+- 内部停止の結果（BOT 4455179632・4455322065）: 内部失敗の後始末は要求理由をラッチせず、期限内に停止を確認できなければ明示的な Stop の失敗と同じ `native_stop_unconfirmed` の `discoveryResult` を新しい error に付けて投げ、`publishDiscoveryResult` へ一度通知する。期限後の exit は要求理由が無くても捨てず、理由 `native_unavailable` で元の Task / Turn へ一度だけ届ける。
+- 期限内の E4 結果（BOT 4455322056）: F1 の「イベントへは `late: true` だけ」を改め、Turn の無い候補一覧の期限内の結果のうち `terminated` を含むものだけを同じ経路で一度記録する。Turn のある結果は従来どおり呼出元の reject に含める。候補一覧の失敗後の cleanup は `user_stop` の Stop を起こさず、IPC の後片付けでも二重に通知しない。表示は期限内なら「遅れて」を付けない。
+- 軽微（BOT 4455194194・4455193440）: drain の共有 rejection を書き換えず、`cause` に停止の error（Error 以外も可）を持つ新しい error を投げる。kill 待ち前に owner が無いときに置き換えた元の error は `cause` に残す。

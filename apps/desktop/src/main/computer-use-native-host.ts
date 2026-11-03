@@ -1646,16 +1646,19 @@ export function createComputerUseNativeHost(
           );
         }),
       ]);
-    } catch {
+    } catch (failure) {
       // Both timeout and work() rejection enter here. With no initial owner, intentionally
       // replace even work()'s original error with native_stop_unconfirmed: inability to prove
       // Stop takes priority, and the caller discards the session handle as on close failure.
+      // The replaced error stays as the cause for diagnostics.
       // Fixed for the whole kill wait: the owner may be gone or replaced by another generation.
       // Without an owner before the race, a later owner may belong to a newer helper than the
       // one work() addressed, so the Stop stays unconfirmed (fail-closed).
       const generation = started;
       if (generation == null)
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        throw Object.assign(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'), {
+          cause: failure,
+        });
       if (ledgerState(generation).exitConfirmed) return outcome(generation);
       // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
       return await new Promise<ReturnType<typeof outcome>>((resolve, reject) => {

@@ -78,6 +78,40 @@ describe('Timeline history (issue #842)', () => {
     expect(html.indexOf('操作補助プロセス')).toBeGreaterThan(html.indexOf('元の回答'));
     expect(html.indexOf('操作補助プロセス')).toBeLessThan(html.indexOf('次の依頼'));
   });
+  it('PR11 shows an in-time session-less discovery termination without calling it late', async () => {
+    useAppStore.setState({
+      messagesByTask: { 'task-1': [message({ id: 'u1' })] },
+      discoveryResultsByTask: {},
+    });
+    handleTurnEvent(
+      'task-1',
+      {
+        type: 'computer_use.discovery_result' as const,
+        seq: 11,
+        taskId: 'task-1',
+        turnId: null,
+        result: {
+          kind: 'discovery_result' as const,
+          late: false,
+          taskId: 'task-1',
+          turnId: null,
+          reason: 'task_changed' as const,
+          results: [
+            {
+              kind: 'terminated' as const,
+              helperGeneration: 1,
+              result: 'terminated_target_suspect' as const,
+            },
+          ],
+        },
+      },
+      (update) => useAppStore.setState(update),
+    );
+    const html = await render();
+    expect(html).toContain('Computer Use：操作補助プロセスの終了を確認しました。');
+    expect(html).toContain('操作対象への影響が不明');
+    expect(html).not.toContain('遅れて');
+  });
   it('marks a Turn a restart interrupted under its partial reply, and leaves finished Turns alone', async () => {
     useAppStore.setState({
       messagesByTask: {

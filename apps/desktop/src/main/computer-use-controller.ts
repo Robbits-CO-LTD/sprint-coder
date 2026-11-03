@@ -1395,6 +1395,7 @@ export class ComputerUseController {
     const scope = this.discoveryScope(taskId, null, undefined, null, actor);
     scope.profileIds.add(profileId);
     let windows: ComputerUseNativeWindow[] | null = null;
+    let failed = false;
     const result = priorStop
       .then(() => {
         scope.check();
@@ -1405,8 +1406,10 @@ export class ComputerUseController {
           windows = value;
         },
         async (error: unknown) => {
+          failed = true;
           try {
-            await scope.stop(false);
+            // An internal failure is not a user Stop: clean up without latching a Stop reason.
+            await scope.fail(error);
           } finally {
             scope.finish();
           }
@@ -1455,6 +1458,9 @@ export class ComputerUseController {
       },
       cancel: async () => {
         try {
+          // The failed result already cleaned up and reported once; a second Stop would report
+          // the same native proof again under an invented reason.
+          if (failed) return undefined;
           const result = await scope.stop(false);
           return this.deps.native.subscribeWindowsStop === undefined ? undefined : result;
         } finally {

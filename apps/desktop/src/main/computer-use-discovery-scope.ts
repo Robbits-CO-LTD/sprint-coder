@@ -6,6 +6,7 @@ import type {
   ComputerUseDiscoveryHandle,
   ComputerUseDiscoveryStop,
 } from './computer-use-native-discovery';
+import { ComputerUseNativeUnavailableError } from './computer-use-native-host';
 
 import type { ComputerUseDiscoveryResult } from '@sprint-coder/contracts';
 export type { ComputerUseDiscoveryResult } from '@sprint-coder/contracts';
@@ -31,6 +32,8 @@ export class ComputerUseDiscoveryScope {
     Promise<ComputerUseDiscoveryStop>
   >();
   private interrupted = false;
+  // Cleanup after an internal failure: shared by every reader, never latches a Stop reason.
+  private internal: Promise<ComputerUseDiscoveryStop[]> | null = null;
   private finished = false;
   private stopFailed = false;
   private readonly rollback = new Set<() => void>();
@@ -71,8 +74,9 @@ export class ComputerUseDiscoveryScope {
       const owner = this.stopOwners.get(notification.owner.id);
       if (owner === undefined || !sameWindowsStopOwner(owner, notification.owner)) return;
       if (notification.reason === 'native_unavailable') this.interrupted = true;
+      // An internal failure's automatic Stop registers this owner too. Its late exit is reported
+      // as native_unavailable below rather than dropped; no requested reason is invented.
       if (
-        (this.requestedReason === null && !this.interrupted) ||
         notification.phase !== 'exit_confirmed' ||
         !notification.late ||
         notification.result === 'termination_requested' ||
@@ -130,38 +134,33 @@ export class ComputerUseDiscoveryScope {
       this.check();
       return windows;
     } catch (error) {
+      if (this.signal.aborted) return await this.rethrowCanceled();
+      // macOS makes no native drain claim: the failed application alone is skipped, as before.
+      if (handle === undefined) throw error;
+      const proof = await this.stopHandle(handle).catch(() => null);
+      // This query's stop is confirmed and its helper lives on, so the other applications stay
+      // usable: only this application fails.
+      const ownFailure = proof !== null && proof.kind !== 'terminated';
       if (this.signal.aborted) {
-        await (this.stopping ?? this.drain());
-        throw this.signal.reason;
+        // A Stop arrived while this query's own failure was being confirmed.
+        await (this.stopping ?? this.settleInternally(this.signal.reason));
+        throw ownFailure ? error : this.signal.reason;
       }
-      this.cancelWork(error);
-      const results = await this.drain().catch((stopError: unknown) => {
-        if (stopError instanceof Error)
-          Object.assign(stopError, {
-            cause: error,
-            discoveryResult: {
-              kind: 'discovery_result',
-              late: false,
-              taskId: this.taskId,
-              turnId: this.turnId,
-              reason: 'native_stop_unconfirmed',
-              results: [],
-            } satisfies ComputerUseDiscoveryResult,
-          });
-        throw stopError;
+      if (ownFailure) throw error;
+      if (proof === null) {
+        // Unconfirmed stop invalidates the whole scope; this rejects with that result.
+        await this.settleInternally(error);
+        throw error;
+      }
+      // The helper generation ended under every query of this scope.
+      const failure = new Error(
+        error instanceof Error ? error.message : 'Computer Use discovery failed',
+        { cause: error },
+      );
+      const results = await this.settleInternally(failure);
+      throw Object.assign(failure, {
+        discoveryResult: this.discoveryResult('native_unavailable', results),
       });
-      if (error instanceof Error && results.some((result) => result.kind === 'terminated'))
-        Object.assign(error, {
-          discoveryResult: {
-            kind: 'discovery_result',
-            late: false,
-            taskId: this.taskId,
-            turnId: this.turnId,
-            reason: 'native_unavailable',
-            results,
-          } satisfies ComputerUseDiscoveryResult,
-        });
-      throw error;
     }
   }
 
@@ -234,13 +233,17 @@ export class ComputerUseDiscoveryScope {
       if (!this.finished) this.check();
       return result;
     } catch (error) {
-      this.cancelWork(error);
-      if (this.stopping !== null) await this.stopping;
-      else await this.drain();
+      await this.fail(error);
       throw error;
     } finally {
       this.finish();
     }
+  }
+
+  /** Internal failure cleanup; rejects only when native cleanup cannot be confirmed. */
+  async fail(error: unknown): Promise<void> {
+    if (this.stopping !== null) await this.stopping;
+    else await this.settleInternally(error);
   }
 
   finish(): void {
@@ -250,22 +253,72 @@ export class ComputerUseDiscoveryScope {
     this.retireIfFinished();
   }
 
+  private async rethrowCanceled(): Promise<never> {
+    await (this.stopping ?? this.settleInternally(this.signal.reason));
+    throw this.signal.reason;
+  }
+
+  private stopHandle(
+    handle: ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>,
+  ): Promise<ComputerUseDiscoveryStop> {
+    let stopping = this.drained.get(handle);
+    if (stopping === undefined) {
+      stopping = handle.stop().then((result) => {
+        this.handles.delete(handle);
+        return result;
+      });
+      this.drained.set(handle, stopping);
+    }
+    return stopping;
+  }
+
   private drain(): Promise<ComputerUseDiscoveryStop[]> {
-    // Internal failure needs native cleanup, but must not invent a requested Stop reason.
     const all = [...new Set([...this.completedHandles, ...this.handles])];
-    for (const handle of all)
-      if (!this.drained.has(handle))
-        this.drained.set(
-          handle,
-          handle.stop().then((result) => {
-            this.handles.delete(handle);
-            return result;
-          }),
-        );
-    return Promise.all(all.map((handle) => this.drained.get(handle)!)).catch((error: unknown) => {
+    return Promise.all(all.map((handle) => this.stopHandle(handle))).catch((error: unknown) => {
       this.stopFailed = true;
       throw error;
     });
+  }
+
+  /** Internal failure needs native cleanup, but must not invent a requested Stop reason. */
+  private settleInternally(error: unknown): Promise<ComputerUseDiscoveryStop[]> {
+    this.cancelWork(error);
+    this.internal ??= this.drain().then(
+      (results) => {
+        this.rejectCanceled(this.signal.reason);
+        if (results.some((result) => result.kind === 'terminated'))
+          this.publish(this.discoveryResult('native_unavailable', results));
+        return results;
+      },
+      (stopError: unknown) => {
+        // A fresh error: the drained Promise hands the same rejection to every reader.
+        const failure = Object.assign(
+          new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
+          {
+            cause: stopError,
+            discoveryResult: this.discoveryResult('native_stop_unconfirmed', []),
+          },
+        );
+        this.rejectCanceled(failure);
+        this.publish(failure.discoveryResult);
+        throw failure;
+      },
+    );
+    return this.internal;
+  }
+
+  private discoveryResult(
+    reason: ComputerUseDiscoveryResult['reason'],
+    results: ComputerUseDiscoveryStop[],
+  ): ComputerUseDiscoveryResult {
+    return {
+      kind: 'discovery_result',
+      late: false,
+      taskId: this.taskId,
+      turnId: this.turnId,
+      reason,
+      results,
+    };
   }
 
   private cancelWork(error: unknown): void {

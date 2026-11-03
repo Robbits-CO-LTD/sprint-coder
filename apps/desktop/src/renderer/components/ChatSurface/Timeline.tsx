@@ -63,11 +63,12 @@ function DiscoveryResultNotice({ event }: { event: (typeof NO_DISCOVERY_RESULTS)
   const suspect = event.result.results.some(
     (result) => result.kind === 'terminated' && result.result === 'terminated_target_suspect',
   );
+  const confirmed = event.result.late
+    ? 'Computer Use：遅れて操作補助プロセスの終了を確認しました。'
+    : 'Computer Use：操作補助プロセスの終了を確認しました。';
   return (
     <p role="status">
-      {suspect
-        ? 'Computer Use：遅れて操作補助プロセスの終了を確認しました。操作対象への影響が不明なため、安全確認が必要です。'
-        : 'Computer Use：遅れて操作補助プロセスの終了を確認しました。'}
+      {suspect ? `${confirmed}操作対象への影響が不明なため、安全確認が必要です。` : confirmed}
     </p>
   );
 }

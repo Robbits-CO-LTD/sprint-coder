@@ -1654,6 +1654,78 @@ describe('Computer Use target tools end to end', () => {
     },
   );
 
+  it.each(['turn-1', null])(
+    'PR11 records an in-time E4 termination once only for a session-less candidate list (turn=%s)',
+    async (turnId) => {
+      const proof = {
+        kind: 'terminated',
+        helperGeneration: 1,
+        result: 'terminated_target_suspect',
+      } as const;
+      let finish!: (value: ComputerUseDiscoveryStop) => void;
+      const terminal = new Promise<ComputerUseDiscoveryStop>((resolve) => {
+        finish = resolve;
+      });
+      const stop = vi.fn(async () => {
+        finish(proof);
+        return proof;
+      });
+      const begin = vi.fn(() => ({
+        id: 'discovery-1',
+        result: new Promise<never>(() => {}),
+        terminal,
+        stop,
+      }));
+      const recorded: TurnEvent[] = [];
+      const fixture = endToEnd({
+        discoveryNative: { beginWindowDiscovery: begin, subscribeWindowsStop: () => () => {} },
+        recordDiscovery: (result) => {
+          const event = {
+            type: 'computer_use.discovery_result' as const,
+            taskId: 'task-1',
+            turnId: result.turnId,
+            seq: recorded.length + 1,
+            result,
+          };
+          recorded.push(event);
+          return event;
+        },
+      });
+      const intent =
+        turnId === null
+          ? fixture.controller.beginWindowCandidates(fixture.profile.id, 'task-1', 'frame-1')
+          : null;
+      const reading = (intent?.result ?? fixture.controller.listTargets({}, turnContext)).catch(
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
+      await fixture.controller.stopForTask('task-1', 'task_changed');
+      expect(await reading).toHaveProperty('discoveryResult.results', [proof]);
+      // The IPC handler's cleanup after the rejected result must not report the Stop again.
+      await intent?.cancel();
+      if (turnId !== null) {
+        expect(recorded).toEqual([]);
+        expect(fixture.delivered).not.toHaveBeenCalled();
+      } else {
+        expect(recorded).toHaveLength(1);
+        expect(fixture.delivered).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            type: 'computer_use.discovery_result',
+            taskId: 'task-1',
+            turnId: null,
+            result: expect.objectContaining({
+              late: false,
+              reason: 'task_changed',
+              results: [proof],
+            }),
+          }),
+        );
+      }
+      expect(stop).toHaveBeenCalledTimes(1);
+      await fixture.controller.dispose();
+    },
+  );
+
   it('publishes, guards, authorizes, and executes computer_list_targets with no Workspace', async () => {
     const { harness, controller, profile } = endToEnd();
     // A Task with no Workspace at all: the surface carries the desktop tools and nothing else.

@@ -7277,7 +7277,7 @@ int main() {
     ).toBe(true);
   });
 
-  it.each(['timeout', 'reject', 'replacement'] as const)(
+  it.each(['timeout', 'reject', 'replacement', 'success'] as const)(
     'PR11 fixes the Stop generation before work and throughout kill wait (%s)',
     async (mode) => {
       let callbacks!: WindowsTerminationCallbacks;
@@ -7312,8 +7312,10 @@ int main() {
             addon.configureWindowsTermination!(value);
           },
           requestWindowsTermination: kill,
-          close: () => {
+          close: (input) => {
             closeWork();
+            // A verified close before the deadline returns normally even without an initial owner.
+            if (mode === 'success') return addon.close!(input);
             return mode === 'reject'
               ? Promise.reject(new Error('original close failure'))
               : new Promise(() => {});
@@ -7345,10 +7347,19 @@ int main() {
           settled = true;
         },
       );
+      if (mode === 'success') {
+        await expect(stopping).resolves.toBeUndefined();
+        expect(kill).not.toHaveBeenCalled();
+        return;
+      }
       const rejected =
         mode === 'replacement'
           ? undefined
-          : expect(stopping).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+          : expect(stopping).rejects.toMatchObject({
+              reasonCode: 'native_stop_unconfirmed',
+              // The replaced work() / deadline error is kept for diagnostics.
+              cause: expect.any(Error),
+            });
       await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
       if (mode !== 'replacement') {
         await rejected;
@@ -7363,7 +7374,9 @@ int main() {
       callbacks.owned!(2, 'session', session.sessionId);
       callbacks.exited(2, 'stop');
       await vi.advanceTimersByTimeAsync(0);
+      // Another generation's exit settles nothing, and its owner never gets a kill of its own.
       expect(settled).toBe(false);
+      expect(kill).toHaveBeenCalledTimes(1);
       callbacks.exited(1, 'stop');
       await expect(stopping).resolves.toEqual({
         kind: 'terminated',

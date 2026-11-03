@@ -1077,8 +1077,15 @@ export function createComputerUseControllerForIpc(
   return new ComputerUseController({
     ...deps,
     publishDiscoveryResult: (result) => {
-      // In-deadline results belong to the rejected caller Promise, not a second notification.
-      if (!result.late || result.taskId === null) return;
+      if (result.taskId === null) return;
+      // A Turn's in-deadline result belongs to its rejected tool call. A session-less candidate
+      // list (no Turn) has no such payload: its public error drops the proof, so an in-deadline
+      // termination is recorded here once instead.
+      if (
+        !result.late &&
+        (result.turnId !== null || !result.results.some((item) => item.kind === 'terminated'))
+      )
+        return;
       publish(persistence.recordComputerUseDiscoveryResult({ ...result, taskId: result.taskId }));
     },
   });

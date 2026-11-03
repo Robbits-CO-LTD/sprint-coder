@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
 import { createComputerUseDiscoveryManager } from './computer-use-native-discovery';
 
-it('retains the read failure as cause and reports unconfirmed native drain through run', async () => {
+it('keeps the stop failure as cause and reports unconfirmed native drain through run', async () => {
   const failure = new Error('query failed');
   const stopFailure = new Error('handle stop failed');
   const stop = vi.fn(async () => {
@@ -27,9 +27,17 @@ it('retains the read failure as cause and reports unconfirmed native drain throu
   const reading = scope.run(() =>
     scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]),
   );
-  await expect(reading).rejects.toBe(stopFailure);
-  expect(stopFailure).toMatchObject({
-    cause: failure,
+  const rejection = await reading.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  // A fresh error: the drained rejection is shared, so it is never mutated.
+  expect(rejection).not.toBe(stopFailure);
+  expect(stopFailure).not.toHaveProperty('discoveryResult');
+  expect(stopFailure).not.toHaveProperty('cause');
+  expect(rejection).toMatchObject({
+    reasonCode: 'native_stop_unconfirmed',
+    cause: stopFailure,
     discoveryResult: {
       kind: 'discovery_result',
       late: false,
@@ -127,7 +135,15 @@ it.each([
     });
     if (!automatic) manager.terminateGeneration(1);
     await rejected;
-    expect(publish).not.toHaveBeenCalled();
+    // The same in-time result reaches the Controller once; IPC decides where it belongs.
+    expect(publish).toHaveBeenCalledExactlyOnceWith({
+      kind: 'discovery_result',
+      late: false,
+      taskId: 'task',
+      turnId: 'turn',
+      reason: 'native_unavailable',
+      results: [{ kind: 'terminated', helperGeneration: 1, result }],
+    });
     expect(await scope.stop(true, 'policy_changed')).toMatchObject({
       reason: 'policy_changed',
       results: [{ kind: 'terminated', helperGeneration: 1, result }],
@@ -243,4 +259,112 @@ it('shares internal native cleanup with a later policy Stop without latching its
   expect(publish).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ reason: 'policy_changed' }),
   );
+});
+
+it('reports an internal unconfirmed stop in time and delivers its late exit once as native_unavailable', async () => {
+  let listener: Parameters<
+    NonNullable<ConstructorParameters<typeof ComputerUseDiscoveryScope>[4]['subscribeWindowsStop']>
+  >[0] = () => {};
+  const publish = vi.fn();
+  const stopFailure = new Error('native_stop_unconfirmed');
+  const handle = {
+    id: 'discovery',
+    // The manager's automatic Stop after the query failure could not be confirmed.
+    result: Promise.reject(new Error('native_stop_unconfirmed')),
+    terminal: new Promise<never>(() => {}),
+    stop: vi.fn(async () => {
+      throw stopFailure;
+    }),
+  };
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      beginWindowDiscovery: () => handle,
+      listWindows: async () => [],
+      subscribeWindowsStop: (next) => {
+        listener = next;
+        return () => {};
+      },
+    },
+    vi.fn(),
+    undefined,
+    publish,
+  );
+  const owner = {
+    kind: 'discovery',
+    id: 'discovery',
+    helperGeneration: 1,
+    lifetimeId: 'lifetime',
+  } as const;
+  const reading = scope.run(async () => {
+    const pending = scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]);
+    listener({ kind: 'registered', owner });
+    return await pending;
+  });
+  const failure = await reading.then(
+    () => {
+      throw new Error('expected rejection');
+    },
+    (error: unknown) => error,
+  );
+  expect(failure).not.toBe(stopFailure);
+  expect(failure).toMatchObject({
+    message: 'native_stop_unconfirmed',
+    cause: stopFailure,
+    discoveryResult: { late: false, reason: 'native_stop_unconfirmed', results: [] },
+  });
+  expect(stopFailure).not.toHaveProperty('discoveryResult');
+  expect(publish).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ late: false, reason: 'native_stop_unconfirmed' }),
+  );
+  const notification = {
+    owner,
+    phase: 'exit_confirmed',
+    result: 'terminated_target_suspect',
+    late: true,
+    reason: 'requested_reason',
+    internalReason: 'requested_stop',
+  } as const;
+  listener({ kind: 'notification', notification });
+  listener({ kind: 'notification', notification });
+  expect(publish).toHaveBeenCalledTimes(2);
+  expect(publish).toHaveBeenLastCalledWith({
+    kind: 'discovery_result',
+    late: true,
+    taskId: 'task',
+    turnId: 'turn',
+    reason: 'native_unavailable',
+    results: [{ kind: 'terminated', helperGeneration: 1, result: 'terminated_target_suspect' }],
+  });
+  expect(handle.stop).toHaveBeenCalledTimes(1);
+});
+
+it('wraps a non-Error stop failure without throwing it raw', async () => {
+  const scope = new ComputerUseDiscoveryScope(
+    'task',
+    'turn',
+    null,
+    null,
+    {
+      listWindows: async () => [],
+      beginWindowDiscovery: () => ({
+        id: 'discovery',
+        result: Promise.reject(new Error('query failed')),
+        terminal: new Promise(() => {}),
+        stop: () => Promise.reject('opaque'),
+      }),
+      subscribeWindowsStop: () => () => {},
+    },
+    vi.fn(),
+  );
+  await expect(
+    scope.read({ id: 'profile' } as Parameters<typeof scope.read>[0]),
+  ).rejects.toMatchObject({
+    message: 'native_stop_unconfirmed',
+    cause: 'opaque',
+    discoveryResult: { reason: 'native_stop_unconfirmed' },
+  });
 });
