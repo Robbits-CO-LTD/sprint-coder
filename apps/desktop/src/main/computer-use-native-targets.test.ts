@@ -124,13 +124,20 @@ function nativeFixture() {
 describe('Windows native targets independently classified in Main', () => {
   it('PR8 excludes the isolated process from cross-application discovery and retains another process', async () => {
     const fixture = nativeFixture();
-    fixture.listTargets.mockReturnValue(envelope([row(), { ...row(), pid: 43 }]));
+    fixture.listTargets.mockReturnValue(envelope([row(), row(), { ...row(), pid: 43 }]));
+    const checkTargetIdentity = vi.fn(async () => [{ result: 'alive' as const }]);
+    const read = vi.fn(() => ({
+      rows: [],
+      quarantines: [
+        { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+      ],
+    }));
     const host = createComputerUseNativeHost(
       {
         ...fixture.binding,
         addon: {
           ...fixture.binding.addon!,
-          checkTargetIdentity: async () => [{ result: 'alive' }],
+          checkTargetIdentity,
         },
       },
       'win32',
@@ -141,19 +148,17 @@ describe('Windows native targets independently classified in Main', () => {
           update: () => true,
           delete: () => true,
           restoreQuarantines: () => true,
-          read: () => ({
-            rows: [],
-            quarantines: [
-              { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
-            ],
-          }),
+          read,
         },
       },
     );
     expect((await host.listTargets!()).targets).toMatchObject([
       { kind: 'denied' },
+      { kind: 'denied' },
       { kind: 'selectable', native: { pid: 43 } },
     ]);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(checkTargetIdentity).toHaveBeenCalledTimes(1);
   });
   it.each([
     ['eligible', false, 'full_access_app'],

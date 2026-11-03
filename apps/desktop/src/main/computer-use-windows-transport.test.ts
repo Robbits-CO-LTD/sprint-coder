@@ -5771,6 +5771,59 @@ int main() {
       spy.mockRestore();
     }
   });
+  it('PR8 filters mixed-process windows once per PID despite a cached isolated PID', async () => {
+    let isolated = false;
+    const read = vi.fn(() => ({
+      rows: [],
+      quarantines: isolated
+        ? [{ identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' }]
+        : [],
+    }));
+    const check = vi.fn((): HelperResponse => [
+      'target_identity_result',
+      { results: [{ result: 'alive' }] },
+    ]);
+    const target = createTarget(
+      {
+        ...responders(),
+        check_target_identity: check,
+        list_windows: (metadata) => {
+          const [type, value] = responders()['list_windows']!(metadata);
+          const row = (value as Record<string, unknown>[])[0]!;
+          return [
+            type,
+            [
+              { ...row, pid: 43 },
+              { ...row, windowId: '101' },
+              { ...row, windowId: '102' },
+            ],
+          ];
+        },
+      },
+      undefined,
+      {
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+          read,
+        },
+      },
+    );
+    await target.host.listWindows(profile);
+    isolated = true;
+    read.mockClear();
+    expect(await target.host.listWindows(profile)).toMatchObject([{ windowId: '100' }]);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(1);
+    isolated = false;
+    await target.host.listWindows(profile);
+    isolated = true;
+    await expect(startSession(target.host, 'other-process', 'turn-a')).resolves.toMatchObject({
+      sessionId: 'other-process',
+    });
+  });
   it.each(['alive', 'access_denied', 'win32_error'] as const)(
     'PR8 refuses new starts and discovery for a quarantined process (%s)',
     async (status) => {
@@ -5811,13 +5864,18 @@ int main() {
         'native_unavailable',
       );
       expect(target.helper().served).not.toContain('start_session');
-      await expect(target.host.listWindows(profile)).rejects.toThrow('native_unavailable');
+      await expect(target.host.listWindows(profile)).resolves.toEqual([]);
     },
   );
 
-  it.each([42, 43])(
-    'PR8 permits PID reuse or another process without releasing quarantine (isolated PID: %s)',
-    async (pid) => {
+  it.each([
+    [42, 'signaled'],
+    [42, 'start_time_mismatch'],
+    [42, 'no_process'],
+    [43, 'start_time_mismatch'],
+  ] as const)(
+    'PR8 releases a terminated identity before PID reuse (isolated PID: %s, %s)',
+    async (pid, reason) => {
       const quarantines = [
         { identity: { pid, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
       ];
@@ -5826,7 +5884,7 @@ int main() {
           ...responders(),
           check_target_identity: () => [
             'target_identity_result',
-            { results: [{ result: 'terminated', reason: 'start_time_mismatch' }] },
+            { results: [{ result: 'terminated', reason }] },
           ],
         },
         undefined,
@@ -5836,6 +5894,10 @@ int main() {
             update: () => true,
             delete: () => true,
             restoreQuarantines: () => true,
+            releaseQuarantine: () => {
+              quarantines.splice(0);
+              return true;
+            },
             read: () => ({ rows: [], quarantines }),
           },
         },
@@ -5844,45 +5906,88 @@ int main() {
         sessionId: 'reused-pid',
       });
       expect(target.helper().served.includes('check_target_identity')).toBe(pid === 42);
-      expect(quarantines).toHaveLength(1);
+      expect(quarantines).toHaveLength(pid === 42 ? 0 : 1);
     },
   );
-  it('PR8 invalidates internal generation tokens and refuses an old ticket after restart', async () => {
-    const child = new ControlledHelperChild();
-    vi.mocked(spawn).mockImplementationOnce(
-      () => child as unknown as NodeChildProcess.ChildProcess,
-    );
-    const target = ledgerTarget(true, undefined, true);
-    await startSession(target.host, 'old-generation', 'turn-a');
-    const token = target.addon.captureWindowsGeneration?.();
-    expect(token).toBeDefined();
-    expect(token).not.toBeNull();
-    expect(target.addon.isWindowsGenerationCurrent?.({ ...token! })).toBe(false);
-    const receipt = (await target.addon.preflight!({
-      sessionId: 'old-generation',
-      requestId: 'old-ticket',
+  it.each(['signaled', 'start_time_mismatch', 'no_process'])(
+    'PR8 retains isolation when release persistence fails (%s)',
+    async (reason) => {
+      const releaseQuarantine = vi.fn(() => false);
+      const target = createTarget(
+        {
+          ...responders(),
+          check_target_identity: () => [
+            'target_identity_result',
+            { results: [{ result: 'terminated', reason }] },
+          ],
+        },
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            restoreQuarantines: () => true,
+            releaseQuarantine,
+            read: () => ({
+              rows: [],
+              quarantines: [
+                {
+                  identity: { pid: 42, creationTime: '133000000000000001' },
+                  reason: 'exit_suspect',
+                },
+              ],
+            }),
+          },
+        },
+      );
+      await expect(startSession(target.host, 'failed-release', 'turn-a')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(releaseQuarantine).toHaveBeenCalled();
+      expect(target.helper().served).not.toContain('start_session');
+      expect(await target.host.listWindows(profile)).toEqual([]);
+    },
+  );
+  it('PR8 Host rejects a ticket when the helper changes between preflight and dispatch', async () => {
+    const oldToken = { helperGeneration: 1 };
+    let current = oldToken;
+    const nativeDispatch = vi.fn(async () => ({
+      result: 'completed',
+      inputAttemptCount: 1,
       cancelEpoch: 0,
-    })) as Record<string, unknown>;
-    target.addon.requestWindowsTermination!();
-    expect(target.addon.isWindowsGenerationCurrent?.(token!)).toBe(false);
-    expect(target.addon.captureWindowsGeneration?.()).toBeNull();
-    child.emit('exit', 1, null);
-    await vi.advanceTimersByTimeAsync(0);
-    await startSession(target.host, 'new-generation', 'turn-b');
-    expect(target.addon.isWindowsGenerationCurrent?.(token!)).toBe(false);
-    const next = target.addon.captureWindowsGeneration?.();
-    expect(next).not.toBe(token);
-    expect(target.addon.isWindowsGenerationCurrent?.(next!)).toBe(true);
-    await expect(
-      target.addon.dispatch!({
-        sessionId: 'old-generation',
-        requestId: 'old-ticket',
-        cancelEpoch: 0,
-        type: 'click',
-        ticket: receipt['ticket'],
+    }));
+    const isCurrent = vi.fn((token) => token === current);
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        captureWindowsGeneration: () => current,
+        isWindowsGenerationCurrent: isCurrent,
+        // Keep the transport/session guards out of this Host boundary test.
+        dispatch: nativeDispatch,
+        preflight: async (input) => {
+          const receipt = await addon.preflight!(input);
+          current = { helperGeneration: 2 };
+          return receipt;
+        },
       }),
-    ).rejects.toThrow('native_stop_unconfirmed');
-    expect(target.helper().served).not.toContain('dispatch');
+      true,
+    );
+    const session = await startSession(target.host, 'old-generation', 'turn-a');
+    await expect(
+      target.host.dispatch({
+        session,
+        requestId: 'old-ticket',
+        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+        observationRevision: 1,
+        cancelEpoch: 0,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'native_unavailable' });
+    expect(current.helperGeneration).toBe(2);
+    expect(isCurrent).toHaveBeenCalledWith(oldToken);
+    expect(nativeDispatch).not.toHaveBeenCalled();
   });
 
   it('PR8 reobserves isolation after discovery and before start transmission', async () => {
@@ -5908,6 +6013,7 @@ int main() {
           update: () => true,
           delete: () => true,
           restoreQuarantines: () => true,
+          releaseQuarantine: () => true,
           read: () => ({
             rows: [],
             quarantines: [
@@ -5981,7 +6087,7 @@ int main() {
       ).toHaveLength(resume ? 1 : 0);
     },
   );
-  it('PR8 cancels discovery while the initial identity check is pending without sending it', async () => {
+  it('PR8 discards discovery when canceled during candidate identity checking', async () => {
     const quarantines: WindowsTargetQuarantine[] = [];
     const target = createTarget(
       {
@@ -6009,7 +6115,7 @@ int main() {
     });
     target.helper().holdOnly('check_target_identity');
     const discovery = target.host.beginWindowDiscovery!(profile);
-    const result = discovery.result.catch(() => undefined);
+    const result = expect(discovery.result).rejects.toThrow('native_discovery_canceled');
     await vi.advanceTimersByTimeAsync(0);
     const stopped = discovery.stop().catch(() => undefined);
     target.helper().release('check_target_identity');
@@ -6017,7 +6123,7 @@ int main() {
     await result;
     expect(
       target.helper().served.filter((operation) => operation === 'list_windows_cancellable'),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
   it('PR6 emits verified only after storage finishes and keeps in-flight rows', async () => {
     const spy = vi.spyOn(stopKernel, 'decideWindowsStop');
@@ -6516,7 +6622,7 @@ int main() {
       const pending =
         path === 'reflect'
           ? target.dispatch(session)
-          : expect(target.host.listWindows(profile)).rejects.toThrow('native_unavailable');
+          : expect(target.host.listWindows(profile)).resolves.toEqual([]);
       await vi.advanceTimersByTimeAsync(2_001);
       await pending;
       target.control.reflectWait = null;
@@ -6610,7 +6716,7 @@ int main() {
           });
         const pending =
           path === 'retry-timeout'
-            ? expect(target.host.listWindows(profile)).rejects.toThrow('native_unavailable')
+            ? expect(target.host.listWindows(profile)).resolves.toEqual([])
             : target.dispatch(session);
         if (path !== 'written') {
           await vi.advanceTimersByTimeAsync(2_001);
@@ -6631,12 +6737,12 @@ int main() {
           else resume();
           await vi.advanceTimersByTimeAsync(1);
         } else await pending;
-        await expect(target.host.listWindows(profile)).rejects.toThrow('native_unavailable');
+        await expect(target.host.listWindows(profile)).resolves.toEqual([]);
         expect(decide.mock.results.at(-1)?.value.state.holds).toMatchObject([
           { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
         ]);
         failRestore = false;
-        await expect(target.host.listWindows(profile)).rejects.toThrow('native_unavailable');
+        await expect(target.host.listWindows(profile)).resolves.toEqual([]);
         expect(target.control.restoreQuarantines).toHaveBeenCalled();
         expect(storedQuarantine).toBe(true);
         if (path !== 'exception') expect(order.slice(-2)).toEqual(['release', 'restore']);
