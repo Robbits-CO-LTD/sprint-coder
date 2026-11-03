@@ -164,6 +164,7 @@ describe('required CI result aggregation', () => {
     'classify',
     'quality',
     'package-tests',
+    'sandbox-rust-windows',
     'computer-use-native-gate',
     'computer-use-windows-v2-harness',
     'computer-use-hung-helper',

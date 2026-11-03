@@ -243,6 +243,107 @@ describe('CI cache reuse and fallback', () => {
 });
 
 describe('CI scope wiring', () => {
+  it('routes only opted-in trusted events to MSI and preserves hosted OS coverage', () => {
+    const labels = [
+      'self-hosted',
+      'Windows',
+      'X64',
+      'robbits-ci',
+      'robbits-ci-ready',
+      'ci-host-msi',
+    ];
+    const repository = 'Robbits-CO-LTD/sprint-coder';
+    const route = (
+      output,
+      enabled,
+      eventName,
+      headRepo,
+      actor = 'maintainer',
+      author = 'maintainer',
+    ) => {
+      const expression = workflow.jobs.classify.outputs[output];
+      return JSON.parse(
+        runInNewContext(expression.slice(3, -2), {
+          vars: { SPRINT_CODER_MSI_CI_ENABLED: enabled },
+          github: {
+            repository,
+            actor,
+            event_name: eventName,
+            event: {
+              pull_request: {
+                head: { repo: { full_name: headRepo } },
+                user: { login: author },
+              },
+            },
+          },
+        }),
+      );
+    };
+    for (const [output, fallback] of [
+      ['common_runner', 'ubuntu-latest'],
+      ['rust_runner', 'windows-2022'],
+    ]) {
+      for (const enabled of ['', 'false'])
+        expect(route(output, enabled, 'pull_request', repository)).toEqual([fallback]);
+      for (const eventName of ['push', 'workflow_dispatch', 'pull_request'])
+        expect(route(output, 'true', eventName, repository)).toEqual(labels);
+      expect(route(output, 'true', 'pull_request', 'outside/fork')).toEqual([fallback]);
+      expect(route(output, 'true', 'pull_request', undefined)).toEqual([fallback]);
+      expect(route(output, 'true', 'pull_request', repository, 'dependabot[bot]')).toEqual([
+        fallback,
+      ]);
+      expect(
+        route(output, 'true', 'pull_request', repository, 'maintainer', 'dependabot[bot]'),
+      ).toEqual([fallback]);
+      expect(route(output, 'true', 'pull_request_target', repository)).toEqual([fallback]);
+    }
+    for (const job of ['quality', 'package-tests'])
+      expect(workflow.jobs[job]['runs-on']).toBe(
+        '${{ fromJSON(needs.classify.outputs.common_runner) }}',
+      );
+    expect(depsAction.inputs['cache-installed-tree'].default).toBe('true');
+    expect(depsAction.runs.steps.find((step) => step.id === 'dependencies').if).toBe(
+      "inputs.cache-installed-tree == 'true'",
+    );
+    for (const job of ['quality', 'package-tests'])
+      expect(
+        workflow.jobs[job].steps.find((step) => step.uses === './.github/actions/install-deps')
+          .with['cache-installed-tree'],
+      ).toBe("${{ runner.name != 'MSI-ci' }}");
+    expect(workflow.jobs['sandbox-rust-windows']['runs-on']).toBe(
+      '${{ fromJSON(needs.classify.outputs.rust_runner) }}',
+    );
+    expect(workflow.jobs['test-macos']['runs-on']).toBe('macos-latest');
+    expect(workflow.jobs['package-linux']['runs-on']).toBe('ubuntu-latest');
+    expect(workflow.jobs['renderer-tests']['runs-on']).toBe('ubuntu-latest');
+    expect(workflow.jobs['package-windows']['runs-on']).toBe('windows-2022');
+    for (const job of ['quality', 'package-tests', 'sandbox-rust-windows']) {
+      const preflight = workflow.jobs[job].steps.find(
+        (step) => step.uses === './.github/actions/prepare-msi',
+      );
+      expect(preflight.if).toBe("runner.name == 'MSI-ci'");
+      expect(workflow.jobs[job].steps.indexOf(preflight)).toBe(1);
+    }
+    const matrix = workflow.jobs.quality.strategy.matrix.include;
+    const qualityRows = (runner) =>
+      runInNewContext(matrix.slice(3, -2), {
+        fromJSON: JSON.parse,
+        contains: (value, token) => value.includes(token),
+        needs: { classify: { outputs: { common_runner: JSON.stringify(runner) } } },
+      });
+    expect(qualityRows(labels)).toEqual([{ label: 'shared', command: 'shared' }]);
+    expect(qualityRows(['ubuntu-latest'])).toEqual([
+      { label: 'typecheck', command: 'typecheck' },
+      { label: 'lint', command: 'lint' },
+      { label: 'format', command: 'format:check' },
+    ]);
+    const shared = workflow.jobs.quality.steps.find(
+      (step) => step.if === "matrix.command == 'shared'",
+    );
+    expect(shared.run).toContain("'typecheck', 'lint', 'format:check'");
+    expect(shared.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+  });
+
   it.each([
     ['README.md', ['classify', 'required']],
     ['website/index.html', ['classify', 'website', 'required']],
@@ -436,6 +537,11 @@ describe('full CI partition contract', () => {
     expect(cargoSteps[0].job).toBe('computer-use-native-gate');
     expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
+    const rust = workflow.jobs['sandbox-rust-windows'];
+    expect(rust.if).toBe("needs.classify.outputs.full_matrix == 'true'");
+    const build = rust.steps.find((step) => step.run?.includes('cargo build --release'));
+    expect(build.run).toContain('cargo test --no-run --locked');
+    expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;
     const macRows = workflow.jobs['test-macos'].strategy.matrix.include;
