@@ -875,7 +875,7 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
   bool round_trip_completed = false;
   sprint_coder::computer_use::WindowsRoundTripPreflightGuard round_trip_guard{
-      session.round_trip.get(), round_trip_completed};
+      session.round_trip.get(), &round_trip_completed};
   const auto previous_approval = approval_states.find(session_key);
   if (previous_approval != approval_states.end()) previous_approval->second.Invalidate();
   WindowsTicketState &state = ticket_states[session_key];

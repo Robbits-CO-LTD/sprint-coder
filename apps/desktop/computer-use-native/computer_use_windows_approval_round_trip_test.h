@@ -140,7 +140,7 @@ inline bool CheckApprovalRoundTripState() {
     if (!begin(s) || !s.Return(binding, 101) || !s.Returned(binding, 102)) return false;
     bool completed = false;
     {
-      WindowsRoundTripPreflightGuard guard{&s, completed};
+      WindowsRoundTripPreflightGuard guard{&s, &completed};
       completed = s.Offer(binding, 8, 103);
     }
     s.Observe(Focus::kSprintCoder, true, true, 104);
@@ -157,7 +157,7 @@ inline bool CheckApprovalRoundTripState() {
     State s;
     if (!begin(s) || !s.Return(binding, 101) || !s.Returned(binding, 102)) return false;
     const bool completed = false;
-    { WindowsRoundTripPreflightGuard guard{&s, completed}; }
+    { WindowsRoundTripPreflightGuard guard{&s, &completed}; }
     if (!check(s.Failed() && !s.MayBegin() && !s.MayInput(103) &&
         !s.Exchange(binding, 8, 4, 103), route)) return false;
   }

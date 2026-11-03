@@ -151,11 +151,12 @@ private:
   std::string failure_ = "none";
 };
 // Every preflight exit must either commit an exchange/offer or latch failure.
+// Holds a pointer, not a reference: an aggregate reference member can bind to a temporary.
 struct WindowsRoundTripPreflightGuard {
   WindowsApprovalRoundTrip *state;
-  const bool &completed;
+  const bool *completed;
   ~WindowsRoundTripPreflightGuard() {
-    if (!completed && state && !state->MayLegacyStart()) state->Invalidate();
+    if (!*completed && state && !state->MayLegacyStart()) state->Invalidate();
   }
 };
 } // namespace sprint_coder::computer_use
