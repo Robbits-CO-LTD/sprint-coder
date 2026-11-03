@@ -6685,6 +6685,74 @@ bool CheckNativeInterlockCapture() {
 
 // ---- Classifier v2, S5-c-1: the Windows synchronous interlock evaluation (nothing calls it yet) ---
 
+bool CheckWindowsOrdinaryApprovalClosed() {
+  using namespace sprint_coder::computer_use;
+  const EffectRuleset enabled{true, true};
+  const WindowsStrictCaptureIdentity strict{true, 4242, true};
+  for (const auto effect : {NativeApprovalEffect::kSupervisedAction,
+                            NativeApprovalEffect::kHighImpactConfirmation,
+                            NativeApprovalEffect::kDownloadOpen,
+                            NativeApprovalEffect::kFileManagerOpen}) {
+    auto capture = UiaBase();
+    auto request = UiaRequest("invoke");
+    if (effect == NativeApprovalEffect::kSupervisedAction)
+      request.maximum_mode = "supervised";
+    if (effect == NativeApprovalEffect::kHighImpactConfirmation)
+      capture.chain[0].name = "Place order";
+    if (effect == NativeApprovalEffect::kDownloadOpen ||
+        effect == NativeApprovalEffect::kFileManagerOpen) {
+      capture.item_kind = ShadowItemKind::kFile;
+      capture.item_name_read = true;
+      capture.item_name_is_real_path = true;
+      capture.item_name = "C:\\fixture\\report.pdf";
+      if (effect == NativeApprovalEffect::kDownloadOpen) {
+        capture.window_class = "Chrome_WidgetWin_1";
+        capture.process_path = "C:\\fixture\\browser.exe";
+        capture.chain = {UiaNode("Button", "Open"), UiaNode("Document", "Downloads"),
+                         UiaNode("Window", "Browser")};
+        capture.document_url_read = true;
+        capture.document_url = "chrome://downloads/";
+      } else {
+        capture.window_class = "CabinetWClass";
+        capture.process_path = "C:\\Windows\\explorer.exe";
+        capture.chain = {UiaNode("ListItem", "report.pdf"), UiaNode("Window", "Files")};
+      }
+    }
+    for (auto &node : capture.chain) {
+      node.process_id = 4242;
+      node.framework_read = true;
+      node.framework_id = "Win32";
+    }
+    const auto facts = BuildWindowsShadowFacts(capture, request).facts;
+    const auto decision = ClassifyEffect(facts, enabled);
+    if (!Check(decision.kind == DecisionKind::kApproval && decision.approval_effect == effect,
+               "windows-ordinary-approval-positive-classification")) return false;
+    const auto evaluation = EvaluateWindowsInterlockFromCapture(capture, request, false, enabled, strict);
+    const auto ordinary = ApplyIncompletePolicy(evaluation, IncompletePolicy::kTakeover);
+    if (!Check(ordinary.Refuses() && ordinary.verdict.reason == InterlockReason::kApprovalClosed &&
+                   ordinary.verdict.DecisionName() == "blocked" &&
+                   ordinary.verdict.DispatchCode() == "approval_not_enabled",
+               "windows-ordinary-approval-closed")) return false;
+    const auto legacy = ApplyIncompletePolicy(evaluation, IncompletePolicy::kDeferToV1);
+    const auto original = InterlockForFacts(facts, enabled);
+    if (!Check(legacy.verdict.outcome == original.outcome && legacy.verdict.reason == original.reason,
+               "windows-ordinary-approval-v1-unchanged")) return false;
+    capture.chain[0].process_id = 0;
+    const auto unowned = ApplyIncompletePolicy(
+        EvaluateWindowsInterlockFromCapture(capture, request, false, enabled, strict),
+        IncompletePolicy::kTakeover);
+    if (!Check(unowned.Refuses() && unowned.verdict.reason == InterlockReason::kUnclassified,
+               "windows-ordinary-approval-owned-chain-required")) return false;
+  }
+  auto capture = UiaBase();
+  for (auto &node : capture.chain) node.process_id = 4242;
+  const auto ordinary = ApplyIncompletePolicy(
+      EvaluateWindowsInterlockFromCapture(capture, UiaRequest(), false, enabled, strict),
+      IncompletePolicy::kTakeover);
+  if (!Check(!ordinary.Refuses(), "windows-ordinary-approval-ordinary-unchanged")) return false;
+  return true;
+}
+
 bool CheckWindowsInterlockCapture() {
   using namespace sprint_coder::computer_use;
   const auto no_verdict = [](const InterlockEvaluation &evaluation, InterlockNoVerdict why,
@@ -9425,6 +9493,7 @@ int main() {
   if (!CheckNativeInterlockMap()) return 1;
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
+  if (!CheckWindowsOrdinaryApprovalClosed()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckWindowsShellNameMatch()) return 1;
   if (!CheckWindowsV1DefaultRisk()) return 1;
