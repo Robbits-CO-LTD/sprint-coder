@@ -147,6 +147,14 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
       add(quarantines);
       return true;
     }).immediate,
+    releaseQuarantine(identity: WindowsTargetQuarantine['identity']) {
+      assertVersion();
+      db.prepare('DELETE FROM quarantines WHERE pid = ? AND creation_time = ?').run(
+        identity.pid,
+        identity.creationTime,
+      );
+      return true;
+    },
     transferReceipt: db.transaction(
       (rows: readonly WindowsLedgerRow[], quarantines: readonly WindowsTargetQuarantine[]) => {
         assertVersion();

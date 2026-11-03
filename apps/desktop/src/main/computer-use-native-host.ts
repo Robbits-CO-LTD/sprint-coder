@@ -90,6 +90,8 @@ export type WindowsDispatchLedgerStorage = Readonly<{
    * Concurrent connections may commit in a different order from the core's events.
    */
   restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
+  /** Remove only the proven terminated process identity; retries are idempotent. */
+  releaseQuarantine?(identity: WindowsTargetQuarantine['identity']): boolean | Promise<boolean>;
   /** Startup snapshot: only this instance's rows, with all shared quarantines. */
   read?(): WindowsLedgerSnapshot | Promise<WindowsLedgerSnapshot>;
   /** Refresh shared isolation without replaying this Main's live ledger rows. */
@@ -593,11 +595,13 @@ export function createComputerUseNativeHost(
         ledgerStates.set(generation, stopDelivery.project(state));
       },
       event: (generation, kind) => {
+        if (kind === 'kill_requested') pidsByIdentity.clear();
         ledgerEvent(generation, { kind, helperGeneration: generation });
       },
       exited: (generation, cause) => {
         const state = ledgerState(generation);
         if (state.exitConfirmed) return;
+        pidsByIdentity.clear();
         const rows = state.rows;
         const quarantines: WindowsTargetQuarantine[] = rows
           .filter((row) => row.kind !== 'foreground')
@@ -673,6 +677,119 @@ export function createComputerUseNativeHost(
               hold.targets.some((t) => pid === undefined || t.pid === pid),
           ),
     );
+  const prepareTargetAdmission = async (
+    input: Readonly<Record<string, unknown>>,
+    refresh = true,
+  ): Promise<() => void> => {
+    if (ledger === undefined) return () => undefined;
+    if (refresh) await restoreWindowsLedger();
+    const pid = input['pid'];
+    const creationTime =
+      typeof input['processStartTime'] === 'string' ? input['processStartTime'] : undefined;
+    const key = (identity: WindowsTargetQuarantine['identity']) =>
+      `${identity.pid}:${identity.creationTime}`;
+    const quarantines = () =>
+      [...ledgerStates.values()]
+        .flatMap((state) => state.quarantines)
+        .filter(
+          (item) =>
+            item.identity.pid === pid &&
+            (creationTime === undefined || item.identity.creationTime === creationTime),
+        );
+    const assertAdmission = () => {
+      const blocked =
+        pid === undefined
+          ? [...ledgerStates.values()].some((state) =>
+              state.holds.some((hold) => hold.targets === 'unknown'),
+            )
+          : ledgerBlocked(pid, creationTime);
+      if (blocked || quarantines().length !== 0)
+        throw new ComputerUseNativeUnavailableError('native_unavailable');
+    };
+    // A new start has no creation time yet. Check the stored pair, never treat PID alone as
+    // identity: persist the core's R15 release before permitting PID reuse.
+    if (creationTime === undefined) {
+      const seen = new Set<string>();
+      for (const { identity } of quarantines()) {
+        if (seen.has(key(identity))) continue;
+        seen.add(key(identity));
+        if (addon?.checkTargetIdentity === undefined)
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+        const result = await addon
+          .checkTargetIdentity([{ pid: identity.pid, processStartTime: identity.creationTime }])
+          .catch(() => {
+            throw new ComputerUseNativeUnavailableError('native_unavailable');
+          });
+        if (result.length !== 1 || result[0]?.result !== 'terminated')
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+        const evidence =
+          result[0].reason === 'signaled'
+            ? 'signaled'
+            : result[0].reason === 'start_time_mismatch'
+              ? 'creation_mismatch'
+              : 'pid_absent';
+        for (const [generation, state] of ledgerStates) {
+          if (!state.quarantines.some((item) => key(item.identity) === key(identity))) continue;
+          const holdId = `reconcile:${++holdSequence}`;
+          ledgerEvent(generation, {
+            kind: 'reconcile',
+            identity,
+            evidence,
+            storage: { status: 'failed', holdId },
+          });
+          pendingWrites.set(holdId, {
+            generation,
+            write: () => ledger.releaseQuarantine?.(identity) ?? false,
+          });
+          await writePending(holdId);
+        }
+      }
+    }
+    assertAdmission();
+    return assertAdmission;
+  };
+  if (ledger !== undefined)
+    // Discovery enumerates windows; exclude quarantined candidates individually, not by cached PID.
+    addon?.configureWindowsAdmission?.((input) =>
+      input['discoveryId'] === undefined
+        ? prepareTargetAdmission(input)
+        : prepareTargetAdmission({}, false),
+    );
+  const admissionBatch = () => {
+    const checks = new Map<string, Promise<() => void>>();
+    return (input: Readonly<Record<string, unknown>>) => {
+      const key = `${String(input['pid'])}:${String(input['processStartTime'])}`;
+      let check = checks.get(key);
+      if (check === undefined) {
+        check = prepareTargetAdmission(input, false);
+        checks.set(key, check);
+      }
+      return check;
+    };
+  };
+  const checkDiscoveredTargets = async (value: readonly unknown[]): Promise<readonly unknown[]> => {
+    if (ledger === undefined) return value;
+    const prepare = admissionBatch();
+    const admitted: Array<{ candidate: unknown; check: () => void }> = [];
+    for (const candidate of value) {
+      const raw = asRecord(candidate, 'native_window_invalid');
+      try {
+        admitted.push({ candidate, check: await prepare(raw) });
+      } catch (error) {
+        // Exclude this target only; an unexpected failure is not a refusal and must surface.
+        if (!(error instanceof ComputerUseNativeUnavailableError)) throw error;
+      }
+    }
+    return admitted.flatMap(({ candidate, check }) => {
+      try {
+        check();
+        return [candidate];
+      } catch (error) {
+        if (!(error instanceof ComputerUseNativeUnavailableError)) throw error;
+        return [];
+      }
+    });
+  };
   const dispatchLedger = (
     input: Parameters<ComputerUseNativeHost['dispatch']>[0],
     internal: InternalNativeSession,
@@ -934,10 +1051,17 @@ export function createComputerUseNativeHost(
       let method: (input: unknown) => unknown;
       try {
         method = requireMethod('discoverWindows');
-      } catch {
+      } catch (cause) {
         throw new ComputerUseDiscoveryNotSubmittedError(
           'Native discovery unavailable before invocation',
+          { cause },
         );
+      }
+      if (ledger !== undefined) {
+        const assertAdmission = await prepareTargetAdmission({}, false).catch((cause: unknown) => {
+          throw new ComputerUseDiscoveryNotSubmittedError('native_unavailable', { cause });
+        });
+        assertAdmission();
       }
       return await Promise.resolve(method({ ...input, discoveryId: id }));
     },
@@ -1618,9 +1742,12 @@ export function createComputerUseNativeHost(
     const raw = beginRawDiscovery(discoveryInput(profile));
     let stopped = false;
     const result = raw.result.then((value) => {
-      if (stopped || (terminationEnabled && !discoveryManager.resultAvailable(raw.id)))
-        throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
-      return parseWindows(profile, value, () => !stopped);
+      const adopt = (candidates: readonly unknown[] = value) => {
+        if (stopped || (terminationEnabled && !discoveryManager.resultAvailable(raw.id)))
+          throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
+        return parseWindows(profile, candidates, () => !stopped);
+      };
+      return ledger === undefined ? adopt() : checkDiscoveredTargets(value).then(adopt);
     });
     void result.catch(() => undefined);
     return Object.freeze({
@@ -1718,6 +1845,11 @@ export function createComputerUseNativeHost(
         ...nativeRouteField(existing.platform, nativeRoute),
       };
       assertStartOwner(owner);
+      if (ledger !== undefined) {
+        const assertAdmission = await prepareTargetAdmission(request);
+        assertStartOwner(owner);
+        assertAdmission();
+      }
       owner.nativeInvoked = true;
       const value = await sendStart(request, existing.raw.processStartTime);
       assertStartOwner(owner);
@@ -1818,6 +1950,11 @@ export function createComputerUseNativeHost(
       ledgerBlocked(pid, sessions.get(input.sessionId)?.raw.processStartTime)
     )
       throw new ComputerUseNativeUnavailableError('native_unavailable');
+    if (ledger !== undefined) {
+      const assertAdmission = await prepareTargetAdmission(request);
+      assertStartOwner(owner);
+      assertAdmission();
+    }
     owner.nativeInvoked = true;
     const value = await sendStart(request, processStartTime);
     assertStartOwner(owner);
@@ -1861,11 +1998,34 @@ export function createComputerUseNativeHost(
         requireMethod('listTargets');
       };
       requireDiscovery();
+      if (ledger !== undefined) (await prepareTargetAdmission({}, false))();
       const value = await invoke('listTargets', {});
       requireDiscovery();
       const result = parseWindowsComputerUseTargets(value);
       if (result === null)
         throw new ComputerUseNativeUnavailableError('native_target_list_invalid');
+      if (ledger !== undefined) {
+        const targets = [...result.targets];
+        const prepare = admissionBatch();
+        const guards: Array<{ index: number; check: () => void }> = [];
+        for (const [index, target] of targets.entries()) {
+          if (target.kind !== 'selectable') continue;
+          try {
+            guards.push({ index, check: await prepare(target.native) });
+          } catch {
+            targets[index] = { kind: 'denied' };
+          }
+        }
+        for (const { index, check } of guards) {
+          try {
+            check();
+          } catch {
+            targets[index] = { kind: 'denied' };
+          }
+        }
+        requireDiscovery();
+        return { ...result, targets };
+      }
       return result;
     },
     availability: (): ComputerUseAvailability => {
@@ -2280,6 +2440,7 @@ export function createComputerUseNativeHost(
       // digest and source commit, so only an unpinned development run can pair them differently
       // (a stale helper then fails closed on the unknown message type).
       let ticket: string | null = null;
+      const generationToken = terminationEnabled ? addon?.captureWindowsGeneration?.() : undefined;
       if (hasMethod(addon, 'preflight')) {
         let receipt: unknown;
         try {
@@ -2345,6 +2506,14 @@ export function createComputerUseNativeHost(
       let value: unknown;
       const callbacks = dispatchLedger(input, internal);
       try {
+        if (
+          terminationEnabled &&
+          (generationToken == null || addon?.isWindowsGenerationCurrent?.(generationToken) !== true)
+        )
+          throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
+            code: 'UNAVAILABLE',
+            accepted: false,
+          });
         const request = ticket === null ? dispatchRequest : { ...dispatchRequest, ticket };
         if (callbacks === undefined) value = await invoke('dispatch', request);
         else {
