@@ -1,3 +1,4 @@
+import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type * as NodeChildProcess from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -56,6 +57,22 @@ vi.mock('node:child_process', async (original) => {
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const source = join(nativeDirectory, 'computer_use_windows_hung_helper_test.cc');
+// Component seam: the owned V1 control seed is not a V2-admitted target (it is Main's descendant).
+// Only this diagnostic binary routes its preflight through the real rejudge consumer. No dispatch
+// is submitted. V2 input routing and qualification remain covered by the v2-targets and RCA seams.
+function rejudgeHungSource(): string {
+  const boundary = 'bool JudgeWindowsV2Input(const WindowsSession &session, std::string *reason) {';
+  const host = readWindowsHostSource();
+  if (host.split(boundary).length !== 2) throw new Error('Rejudge hang boundary changed');
+  const routed = host.replace(
+    boundary,
+    boundary + '\n  return RejudgeWindowsV2Session(session, &session.v2_input_not_web, reason);',
+  );
+  const fixture = readFileSync(source, 'utf8');
+  const include = '#include "computer_use_windows_host.cc"';
+  if (fixture.split(include).length !== 2) throw new Error('Hung helper include changed');
+  return fixture.replace(include, routed);
+}
 const commit = '0123456789abcdef0123456789abcdef01234567';
 const enabled = process.env['SPRINT_CODER_HUNG_HELPER_SEAM'] === '1';
 const ci = Boolean(process.env['CI']);
@@ -138,6 +155,7 @@ const controllers: ComputerUseController[] = [];
 let scratch: string | undefined;
 let hung = '';
 let healthy = '';
+let rejudgeHung = '';
 let unavailable = 'live seam requires SPRINT_CODER_HUNG_HELPER_SEAM=1';
 let ready = false;
 const probes = new Map<string, Record<string, unknown>>();
@@ -262,7 +280,7 @@ function attestWarmup() {
     '$self = Get-Process -Id $PID -ErrorAction Stop',
     'try { $null = $self.MainModule.FileName } finally { $self.Dispose() }',
     '$mainModuleMs = $stage.ElapsedMilliseconds',
-    '$images = foreach ($imagePath in @($env:SPRINT_CODER_SEAM_WARM_HUNG, $env:SPRINT_CODER_SEAM_WARM_HEALTHY)) {',
+    '$images = foreach ($imagePath in @($env:SPRINT_CODER_SEAM_WARM_HUNG, $env:SPRINT_CODER_SEAM_WARM_HEALTHY, $env:SPRINT_CODER_SEAM_WARM_REJUDGE)) {',
     '  $stage.Restart()',
     '  $stream = [System.IO.File]::Open($imagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)',
     '  try {',
@@ -289,6 +307,7 @@ function attestWarmup() {
         ...process.env,
         SPRINT_CODER_SEAM_WARM_HUNG: hung,
         SPRINT_CODER_SEAM_WARM_HEALTHY: healthy,
+        SPRINT_CODER_SEAM_WARM_REJUDGE: rejudgeHung,
       },
     },
   );
@@ -308,8 +327,8 @@ function attestWarmup() {
   if (warm.status !== 0) throw failure('nonzero_exit');
   const stages = record(JSON.parse(warm.stdout.trim()) as unknown);
   const images = Array.isArray(stages['images']) ? stages['images'].map(record) : [];
-  if (images.length !== 2) throw failure('missing_image_stages');
-  for (const [index, binary] of [hung, healthy].entries()) {
+  if (images.length !== 3) throw failure('missing_image_stages');
+  for (const [index, binary] of [hung, healthy, rejudgeHung].entries()) {
     // The warm-up hashed the same file the product will attest.
     const digest = createHash('sha256').update(readFileSync(binary)).digest('hex');
     if (images[index]?.['digest'] !== digest) throw failure('image_digest_mismatch');
@@ -337,9 +356,13 @@ beforeAll(async () => {
   writeFileSync(provenance, `#define SPRINT_CODER_SOURCE_COMMIT "${commit}"\n`);
   hung = join(scratch, 'hung.exe');
   healthy = join(scratch, 'healthy.exe');
+  rejudgeHung = join(scratch, 'rejudge-hung.exe');
+  const rejudgeSource = join(scratch, 'rejudge-hung.cc');
+  writeFileSync(rejudgeSource, rejudgeHungSource());
   for (const [binary, flag] of [
     [hung, true],
     [healthy, false],
+    [rejudgeHung, true],
   ] as const) {
     const args = [
       '/nologo',
@@ -356,7 +379,7 @@ beforeAll(async () => {
       `/FI${provenance}`,
       `/I${nativeDirectory}`,
       ...(flag ? ['/DSPRINT_CODER_COMPUTER_USE_TEST_HANG=1'] : []),
-      source,
+      binary === rejudgeHung ? rejudgeSource : source,
       `/Fe:${binary}`,
       `/Fo:${binary}.obj`,
       '/link',
@@ -384,7 +407,7 @@ beforeAll(async () => {
   }
   attestWarmup();
   ready = true;
-}, 650_000);
+}, 950_000);
 
 // ---- Attestation diagnosis (begin) ----
 // In the CI live job every production attestation of a spawned helper expired at its 10 s deadline
@@ -1103,6 +1126,7 @@ const sessionCaseNames = [
   'cancels a pending Controller start in WinVerifyTrust',
   'cancels a pending Controller start in CreateFileW',
   'terminates validation hung outside cancellable I/O within the E1 Stop budget',
+  'terminates component rejudge hung outside cancellable I/O within the E1 Stop budget',
   'stops observation hung in UiaCall through the worker cancellation path',
   'stops observation hung in Capture through the worker cancellation path',
   'retains claimed semantic input after Controller native_unavailable',
@@ -1142,6 +1166,15 @@ describe('hung helper seam static contracts (#1002)', () => {
     );
     expect(validation).toContain('WindowsTestHang(WindowsTestHangPoint::Validation);');
     expect(validation).toContain('WindowsNewStartIoRegistration cancellation;');
+    const rejudge = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_v2_targets.inc'),
+      'utf8',
+    );
+    expect(rejudge).toContain('WindowsTestHang(WindowsTestHangPoint::Rejudge);');
+    expect(rejudge).toContain('return MeasureWindowsV2Rejudge(work);');
+    expect(rejudgeHungSource()).toContain(
+      'bool JudgeWindowsV2Input(const WindowsSession &session, std::string *reason) {\n  return RejudgeWindowsV2Session(session, &session.v2_input_not_web, reason);',
+    );
     expect(uiaWatchdog).toBe(470);
     expect(readFileSync(source, 'utf8')).toContain('#include "computer_use_windows_test_hang.h"');
     // The workflow isolation (one job, one env entry) is checked in workflow-security.test.ts.
@@ -1635,6 +1668,70 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       caseTimeout,
     );
   }
+  it(
+    'terminates component rejudge hung outside cancellable I/O within the E1 Stop budget',
+    async (context) => {
+      live(context);
+      observeChildren();
+      arm('');
+      const killStop = killStopOptions();
+      const target = await prepare(context, rejudgeHung, undefined, killStop);
+      const session = await target.start();
+      const observation = record(
+        await target.addon.observe!({
+          sessionId: session.sessionId,
+          requestId: 'rejudge-observe',
+          cancelEpoch: 0,
+        }),
+      );
+      const nodes: Record<string, unknown>[] = [];
+      const visit = (value: unknown) => {
+        if (Array.isArray(value)) {
+          value.forEach(visit);
+          return;
+        }
+        const node = record(value);
+        nodes.push(node);
+        if (Array.isArray(node['children'])) node['children'].forEach(visit);
+      };
+      visit(JSON.parse(String(observation['tree'])) as unknown);
+      const edit = nodes.find((node) => node['role'] === 'UIATextField');
+      expect(edit, 'classic Notepad edit control').toBeDefined();
+      const targetId = edit?.['identifier'] || edit?.['title'];
+      expect(typeof targetId).toBe('string');
+      const action = {
+        sessionId: session.sessionId,
+        requestId: 'rejudge-hang',
+        cancelEpoch: 0,
+        observationRevision: observation['revision'],
+        type: 'set_text',
+        targetId,
+        text: 'synthetic seam value',
+      };
+      const request = {
+        ...action,
+        actionDigest: createHash('sha256').update(JSON.stringify(action)).digest('hex'),
+      };
+      arm('Rejudge');
+      const preflight = settle(target.addon.preflight!(request));
+      await awaitHang(preflight, operationTimeoutMilliseconds('preflight') - margin);
+      const origin = performance.now();
+      await target.controller.stopForTask('seam-task', 'task_changed');
+      const elapsed = performance.now() - origin;
+      expect(elapsed).toBeLessThan(WINDOWS_STOP_DEADLINE_MS.E1 + margin);
+      expect(target.controller.getStatus(session.sessionId)).toMatchObject({ state: 'stopped' });
+      const helpers = children.filter((row) => row.temp);
+      expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+      expect(helpers.every((row) => row.exited)).toBe(true);
+      const outcome = await preflight;
+      expect(outcome).toBeInstanceOf(Error);
+      expect(helperReply(outcome)).toBeNull();
+      expect(killStop.rows.filter((row) => row.at >= origin)).toEqual([]);
+      report(context.task.name, origin, outcome, elapsed);
+    },
+    caseTimeout,
+  );
+
   it(
     'retains claimed semantic input after Controller native_unavailable',
     async (context) => {

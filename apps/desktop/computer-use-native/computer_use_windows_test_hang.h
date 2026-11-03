@@ -19,7 +19,7 @@
 extern "C" __declspec(dllexport) inline const char sprint_coder_test_hang_marker[] =
     "SPRINT_CODER_COMPUTER_USE_TEST_HANG_MARKER";
 
-enum class WindowsTestHangPoint { UiaCall, SemanticPattern, Capture, WinVerifyTrust, CreateFileW, Validation };
+enum class WindowsTestHangPoint { UiaCall, SemanticPattern, Capture, WinVerifyTrust, CreateFileW, Validation, Rejudge };
 
 // UiaCall hangs at the first contact; the existing 470 ms watchdog returns accessibility_timeout.
 // Stop is not held up by this hang, and the occupied worker makes later UIA reads unavailable.
@@ -60,7 +60,8 @@ inline void WindowsTestHang(WindowsTestHangPoint point) {
   if (first == std::string_view::npos) return;
   selected = selected.substr(first, selected.find_last_not_of(" \t\r\n") - first + 1);
   if (selected != "UiaCall" && selected != "SemanticPattern" && selected != "Capture" &&
-      selected != "WinVerifyTrust" && selected != "CreateFileW" && selected != "Validation") {
+      selected != "WinVerifyTrust" && selected != "CreateFileW" && selected != "Validation" &&
+      selected != "Rejudge") {
     invalid_selection();
     return;
   }
@@ -72,6 +73,7 @@ inline void WindowsTestHang(WindowsTestHangPoint point) {
   case WindowsTestHangPoint::WinVerifyTrust: name = "WinVerifyTrust"; break;
   case WindowsTestHangPoint::CreateFileW: name = "CreateFileW"; break;
   case WindowsTestHangPoint::Validation: name = "Validation"; break;
+  case WindowsTestHangPoint::Rejudge: name = "Rejudge"; break;
   }
   if (name == nullptr || selected != name) return;
   // No handle is shared or signaled. Process termination can end this user-mode wait.
