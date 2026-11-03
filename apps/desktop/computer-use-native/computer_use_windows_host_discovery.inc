@@ -77,6 +77,10 @@ std::string WindowsPackageIdentityJson(const WindowsExecutableIdentity &identity
 }
 // END windows package identity
 
+// Defined with the discovery measurement (discovery_worker.inc), which registers cancellable I/O.
+bool MeasureWindowsPickedIdentity(const std::wstring& path, WindowsExecutableIdentity* identity,
+                                  std::uint64_t serial);
+
 std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
                                 std::uint32_t pid = 0) {
   return "{\"platform\":\"win32\",\"identityDigest\":\"" +
@@ -94,9 +98,6 @@ std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
          "\"" +
          (pid == 0 ? "" : ",\"pid\":" + std::to_string(pid)) + "}";
 }
-
-bool MeasureWindowsPickedIdentity(const std::wstring& path, WindowsExecutableIdentity* identity,
-                                  std::uint64_t serial);
 
 bool PickWindowsExecutable(std::string *response, std::string *reason,
                            std::uint64_t serial) {
