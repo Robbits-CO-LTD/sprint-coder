@@ -50,9 +50,15 @@ type StoredRecord = { rowid: number; payload: string };
 /** 2 adds the shared quarantine revision (approval releases are conditional on it). */
 const STORE_VERSION = 2;
 
-/** The caller owns lifetime. This is deliberately not opened from the product index.ts yet. */
-export function openWindowsLedgerStore(options: { userData: string; path?: string }) {
-  const instanceId = windowsLedgerInstanceId(options.userData);
+/** The caller owns lifetime. Product wiring opens it only when the internal policy is enabled. */
+export function openWindowsLedgerStore(options: {
+  userData: string;
+  path?: string;
+  requireRealpath?: boolean;
+}) {
+  const instanceId = windowsLedgerInstanceId(
+    options.requireRealpath ? realpathSync.native(options.userData) : options.userData,
+  );
   const path = options.path ?? windowsLedgerStorePath();
   mkdirSync(dirname(path), { recursive: true });
   // Synchronous transactions serialize writes and their completions on each connection.

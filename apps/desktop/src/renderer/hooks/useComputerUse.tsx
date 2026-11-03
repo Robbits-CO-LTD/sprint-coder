@@ -85,6 +85,9 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
+  const [pendingStop, setPendingStop] = useState<{ sessionId: string; taskId: string } | null>(
+    null,
+  );
   const sessionModeRef = useRef<ComputerUseSessionStatus['mode'] | null>(null);
   const [policyEpoch, setPolicyEpoch] = useState<number | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -120,7 +123,8 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     };
   }, []);
 
-  const sessionId = session?.sessionId ?? null;
+  const sessionId =
+    session?.sessionId ?? (pendingStop?.taskId === taskId ? pendingStop.sessionId : null);
   useEffect(() => {
     if (sessionId === null) return;
     const api = window.sprintCoder?.computerUse;
@@ -129,6 +133,11 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       const previousMode = sessionModeRef.current;
       const adjustment =
         previousMode === null ? null : computerUseModeAdjustmentNotice(previousMode, status.mode);
+      setPendingStop(
+        status.terminationResult === 'termination_requested'
+          ? { sessionId: status.sessionId, taskId: status.taskId }
+          : null,
+      );
       sessionModeRef.current = status.state === 'stopped' ? null : status.mode;
       setSession(status.state === 'stopped' ? null : status);
       if (status.state === 'stopped') {
@@ -432,6 +441,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
           maxRounds: input.maxRounds ?? 25,
           expectedPolicyEpoch,
           expectedWindowRevision: windowCandidate.revision,
+          ...(input.quarantineResume ? { quarantineResume: true as const } : {}),
           expectedProfileRevision: input.profileRevision,
         };
         const status = await api.start(request);
@@ -717,6 +727,7 @@ export function computerUseWindowViews(
       revision: candidate.revision,
       profileRevision,
       label: candidate.title,
+      ...(candidate.quarantineResume ? { quarantineResume: true as const } : {}),
       detail: candidate.modal ? '確認ダイアログ' : 'メインウィンドウ',
       policyLanguage: candidate.policyLanguage,
       maximumMode: candidate.maximumMode,
@@ -725,8 +736,21 @@ export function computerUseWindowViews(
 
 export function computerUseTerminalNotice(status: ComputerUseSessionStatus): string | null {
   if (status.state !== 'stopped') return null;
+  const sharedStop =
+    status.stopCause === 'shared_helper_stop'
+      ? '別の操作の停止のため、Computer Use が止まった。'
+      : '';
+  if (status.terminationResult === 'terminated_target_suspect')
+    return `${sharedStop}停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない`;
+  if (status.terminationResult === 'terminated_clean')
+    return (
+      sharedStop ||
+      (status.stopReason === 'native_unavailable'
+        ? 'Computer Useは停止しました。再開する場合は対象アプリの状態を確認してください。'
+        : null)
+    );
   if (status.stopReason === 'native_unavailable')
-    return 'Computer Useの停止を確認できませんでした。対象アプリの状態を確認し、再開できない場合はSprint Coderを再起動してください。';
+    return `${sharedStop}Computer Useの停止を確認できませんでした。対象アプリの状態を確認し、再開できない場合はSprint Coderを再起動してください。`;
   return status.stopReason === 'error'
     ? 'Computer Useは安全のため停止しました。対象アプリ、OSの許可、Provider設定を確認してから再度開始してください。'
     : null;

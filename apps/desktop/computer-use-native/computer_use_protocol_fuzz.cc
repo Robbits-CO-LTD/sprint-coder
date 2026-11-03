@@ -1389,7 +1389,7 @@ bool EffTakeover(const EffectFacts &facts, const EffectRuleset &ruleset = Effect
 const ActionKind kEffAllInputs[] = {
     ActionKind::kClick,   ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
     ActionKind::kType,    ActionKind::kKey,         ActionKind::kScroll, ActionKind::kSelect,
-    ActionKind::kToggle,  ActionKind::kExpandCollapse};
+    ActionKind::kToggle,  ActionKind::kExpandCollapse, ActionKind::kSemanticScroll};
 
 using sprint_coder::computer_use::ShadowAxNode;
 using sprint_coder::computer_use::ShadowBudget;
@@ -1476,7 +1476,7 @@ bool CheckEffectShadow() {
            {"invoke", ActionKind::kInvoke}, {"set_text", ActionKind::kSetText},
            {"select", ActionKind::kSelect}, {"toggle", ActionKind::kToggle},
            {"expand_collapse", ActionKind::kExpandCollapse}, {"type", ActionKind::kType},
-           {"key", ActionKind::kKey}}) {
+           {"key", ActionKind::kKey}, {"semantic_scroll", ActionKind::kSemanticScroll}}) {
     if (!Check(BuildShadowFacts(ShadowBase(), ShadowRequest(entry.first)).facts.action == entry.second,
                "shadow-action-mapping")) return false;
   }
@@ -7445,7 +7445,7 @@ const ApprovalOperationCase kApprovalOperationCases[] = {
     {sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction,
      {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
       ActionKind::kType, ActionKind::kKey, ActionKind::kScroll, ActionKind::kSelect,
-      ActionKind::kToggle, ActionKind::kExpandCollapse}},
+      ActionKind::kToggle, ActionKind::kExpandCollapse, ActionKind::kSemanticScroll}},
     {sprint_coder::computer_use::NativeApprovalEffect::kHighImpactConfirmation,
      {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kToggle,
       ActionKind::kSelect, ActionKind::kKey}},
@@ -9582,10 +9582,10 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kApprovalRoundTripEvent) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-approved-dispatch-unknown"))
+             "message-type-after-approval-round-trip-event-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');

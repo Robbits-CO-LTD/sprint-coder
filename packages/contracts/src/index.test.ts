@@ -2386,6 +2386,18 @@ describe('Computer Use contracts', () => {
     for (const maxRounds of [0, 26, 1.5, NaN])
       expect(contracts.computerUseRoundLimitSchema.safeParse(maxRounds).success).toBe(false);
     expect(
+      contracts.computerUseSessionStatusSchema.parse({
+        ...status,
+        state: 'stopped',
+        stopReason: 'native_unavailable',
+        stopCause: 'shared_helper_stop',
+      }),
+    ).toMatchObject({ stopCause: 'shared_helper_stop' });
+    expect(
+      contracts.computerUseSessionStatusSchema.safeParse({ ...status, stopCause: 'unknown' })
+        .success,
+    ).toBe(false);
+    expect(
       contracts.computerUseSessionStatusSchema.safeParse({ ...status, maxRounds: 3, round: 4 })
         .success,
     ).toBe(false);

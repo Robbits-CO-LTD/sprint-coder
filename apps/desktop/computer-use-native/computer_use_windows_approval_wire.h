@@ -6,7 +6,11 @@
 #include "computer_use_native_approval_offer.h"
 #include "computer_use_preflight_classifier.h"
 
+#include "computer_use_protocol.h"
+
+#include <algorithm>
 #include <optional>
+#include <variant>
 
 namespace sprint_coder::computer_use {
 
@@ -59,7 +63,8 @@ inline bool OperationAllowed(const WindowsApprovalDisplay &display) {
     return opens || operation == "toggle" || operation == "select";
   case NativeApprovalEffect::kSupervisedAction:
     return opens || operation == "toggle" || operation == "select" || operation == "set_text" ||
-           operation == "type" || operation == "scroll" || operation == "expand_collapse";
+           operation == "type" || operation == "scroll" || operation == "expand_collapse" ||
+           operation == "semantic_scroll";
   case NativeApprovalEffect::kInvalid:
     return false;
   }
@@ -113,4 +118,120 @@ inline bool OperationAllowed(const WindowsApprovalDisplay &display) {
   return receipt;
 }
 
+} // namespace sprint_coder::computer_use
+
+// P1b closed metadata extension. The future JSON adapter must preserve duplicate members when
+// constructing fields. Validation here is shape-only, never session admission or ticket authority.
+
+namespace sprint_coder::computer_use {
+using ApprovalRoundTripValue = std::variant<std::string, std::uint64_t, bool>;
+using ApprovalRoundTripFields = std::vector<std::pair<std::string, ApprovalRoundTripValue>>;
+
+namespace approval_round_trip_wire_detail {
+inline bool Id(std::string_view value) {
+  return !value.empty() && value.size() <= 256 &&
+      std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '.' || c == ':' || c == '-';
+      });
+}
+inline bool OneOf(std::string_view value, std::initializer_list<std::string_view> choices) {
+  return std::find(choices.begin(), choices.end(), value) != choices.end();
+}
+inline bool ProcessStart(std::string_view value) {
+  if (value.empty() || value.size() > 20 || value.front() == '0') return false;
+  if (!std::all_of(value.begin(), value.end(), [](char c) { return c >= '0' && c <= '9'; }))
+    return false;
+  return value.size() < 20 || value <= "18446744073709551615";
+}
+} // namespace approval_round_trip_wire_detail
+
+[[nodiscard]] inline bool ValidateApprovalRoundTripFields(const ApprovalRoundTripFields &fields) {
+  using namespace approval_round_trip_wire_detail;
+  const auto get = [&](std::string_view key) -> const ApprovalRoundTripValue* {
+    const ApprovalRoundTripValue* result = nullptr;
+    for (const auto &[name, value] : fields) if (name == key) {
+      if (result) return nullptr;
+      result = &value;
+    }
+    return result;
+  };
+  const auto str = [&](std::string_view key) -> std::string_view {
+    const auto value = get(key);
+    const auto text = value ? std::get_if<std::string>(value) : nullptr;
+    return text ? *text : std::string_view{};
+  };
+  const auto number = [&](std::string_view key, std::uint64_t min, std::uint64_t max) {
+    const auto value = get(key);
+    const auto n = value ? std::get_if<std::uint64_t>(value) : nullptr;
+    return n && *n >= min && *n <= max;
+  };
+  std::vector<std::string_view> keys{
+      "version", "roundTripId", "sessionId", "taskId", "turnId", "helperGeneration", "cancelEpoch", "kind"};
+  if (!number("version", kApprovalRoundTripVersion, kApprovalRoundTripVersion) ||
+      !number("helperGeneration", 1, kNativeApprovalGenerationMax) ||
+      !number("cancelEpoch", 0, kNativeApprovalGenerationMax)) return false;
+  for (const auto key : {"roundTripId", "sessionId", "taskId", "turnId"})
+    if (!Id(str(key))) return false;
+  const auto kind = str("kind");
+  if (kind == "begin") {
+    keys.insert(keys.end(), {"durationMs", "mainPid", "mainProcessStartTime", "mainImageIdentity"});
+    const auto image = str("mainImageIdentity");
+    if (!number("durationMs", 1, kApprovalRoundTripMaxDurationMs) ||
+        !number("mainPid", 1, 0xffffffffULL) || !ProcessStart(str("mainProcessStartTime")) ||
+        image.size() != 64 || !std::all_of(image.begin(), image.end(), [](char c) {
+          return (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9');
+        })) return false;
+  } else if (kind == "end") {
+    keys.push_back("reason");
+    if (!OneOf(str("reason"), {"approved", "rejected", "expired", "stopped", "generation_changed"})) return false;
+  } else if (kind == "approve") {
+    keys.insert(keys.end(), {"approvalGeneration", "observationRevision"});
+    if (!number("approvalGeneration", 1, kNativeApprovalGenerationMax) ||
+        !number("observationRevision", 1, kNativeApprovalGenerationMax)) return false;
+  } else if (kind == "begin_result" || kind == "end_result") {
+    keys.insert(keys.end(), {"accepted", "failureReason", "failureLatched"});
+    const auto a = get("accepted"), l = get("failureLatched");
+    const auto accepted = a ? std::get_if<bool>(a) : nullptr;
+    const auto latched = l ? std::get_if<bool>(l) : nullptr;
+    const auto reason = str("failureReason");
+    if (!accepted || !latched ||
+        !OneOf(reason, {"none", "third_window", "expired", "rejected", "stopped", "generation_changed",
+                       "target_changed", "dialog_changed", "unattributed_target_event", "monitor_failed",
+                       "id_mismatch", "ended", "invalid_state"}) ||
+        *accepted != (reason == "none") || (*accepted && *latched) ||
+        (!OneOf(reason, {"none", "id_mismatch", "ended", "invalid_state"}) && !*latched)) return false;
+  } else if (kind == "event") {
+    keys.insert(keys.end(), {"sequence", "state", "foreground", "failureReason", "failureLatched"});
+    const auto state = str("state"), foreground = str("foreground"), reason = str("failureReason");
+    const auto value = get("failureLatched");
+    const auto latched = value ? std::get_if<bool>(value) : nullptr;
+    const bool failed = state == "failed";
+    if (!number("sequence", 1, kNativeApprovalGenerationMax) || !latched ||
+        !OneOf(state, {"active", "ended", "failed"}) ||
+        !OneOf(foreground, {"target", "sprint_coder", "other"}) ||
+        !OneOf(reason, {"none", "third_window", "expired", "rejected", "stopped", "generation_changed",
+                       "target_changed", "dialog_changed", "unattributed_target_event", "monitor_failed"}) ||
+        failed != *latched || failed != (reason != "none") ||
+        (foreground == "other" && !failed) || (reason == "third_window" && foreground != "other")) return false;
+  } else if (kind != "return") return false;
+  if (keys.size() != fields.size()) return false;
+  for (const auto key : keys) if (!get(key)) return false;
+  return true;
+}
+
+// Invalid/missing/unknown/duplicate members cannot be emitted. No OS operation is performed.
+[[nodiscard]] inline std::string ApprovalRoundTripWire(const ApprovalRoundTripFields &fields) {
+  if (!ValidateApprovalRoundTripFields(fields)) return {};
+  std::string result = "{";
+  for (const auto &[key, value] : fields) {
+    if (result.size() > 1) result += ',';
+    result += windows_approval_wire_detail::Quote(key) + ':';
+    if (const auto text = std::get_if<std::string>(&value))
+      result += windows_approval_wire_detail::Quote(*text);
+    else if (const auto n = std::get_if<std::uint64_t>(&value)) result += std::to_string(*n);
+    else result += std::get<bool>(value) ? "true" : "false";
+  }
+  return result + '}';
+}
 } // namespace sprint_coder::computer_use

@@ -37,6 +37,12 @@ constexpr std::uint16_t kCancelMessageType = 9;
 
 // N9 P1a: wire vocabulary only. No production start or dispatch consumes this extension yet.
 inline constexpr bool kWindowsBackgroundInputEnabled = false;
+// P1b metadata extension. No runtime consumer or capability advertisement yet.
+inline constexpr std::uint32_t kApprovalRoundTripVersion = 1;
+inline constexpr std::uint32_t kApprovalRoundTripMaxDurationMs = 60'000;
+// Begin ack precedes the focus exception. Duration starts at native receipt on its monotonic
+// clock, capped by remaining native intent lifetime. Return/approvalApprove carry the live id;
+// end follows fresh observation/classification/exchange and never clears a failed-id latch.
 inline constexpr std::uint32_t kWindowsBackgroundCapabilityVersion = 1;
 inline constexpr std::uint32_t kWindowsBackgroundCapabilityTableVersion = 1;
 inline constexpr std::uint32_t kInputAuthorityVersion = 1;
@@ -173,6 +179,11 @@ enum class MessageType : std::uint16_t {
   kApprovalDiscardResult = 18,
   kDispatchApproved = 19,
   kDispatchApprovedResult = 20,
+  kApprovalRoundTripBegin = 21,
+  kApprovalRoundTripBeginResult = 22,
+  kApprovalRoundTripEnd = 23,
+  kApprovalRoundTripEndResult = 24,
+  kApprovalRoundTripEvent = 25,
 };
 
 // Windows identityBoundStart capability (no new MessageType):
@@ -195,7 +206,7 @@ struct Frame {
 
 [[nodiscard]] inline bool IsKnownMessageType(std::uint16_t value) noexcept {
   return value >= static_cast<std::uint16_t>(MessageType::kHandshake) &&
-         value <= static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult);
+         value <= static_cast<std::uint16_t>(MessageType::kApprovalRoundTripEvent);
 }
 
 [[nodiscard]] inline bool ValidateHeader(const FrameHeader &header) noexcept {

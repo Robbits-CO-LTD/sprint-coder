@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { ComputerAppGrantView } from '@sprint-coder/contracts';
 import {
   ComputerUseAcceptanceBuildNotice,
+  ComputerUseApprovalCard,
   ComputerUseGrantSection,
   ComputerUseOnboarding,
   ComputerUseSessionRail,
@@ -696,4 +697,29 @@ describe('Computer Use granted applications', () => {
     expect(on).toContain('computer-use-grants');
     expect(on).toContain('許可を取り消す');
   });
+});
+
+it('PR10 renders quarantine approval with the existing card and an exact trusted start intent', () => {
+  const html = renderToStaticMarkup(
+    <ComputerUseApprovalCard
+      approval={{
+        id: 'synthetic',
+        actionLabel: '対象アプリの再開を承認',
+        targetLabel: '<synthetic>',
+        impactLabel: '未確認の操作',
+        escapedPreview: null,
+        allowedDecisions: ['allow_once'],
+        activationIntents: { allow_once: 'synthetic-intent' },
+      }}
+      activationKind="start"
+      allowOnceLabel="確認して再開"
+      onApproval={() => undefined}
+    />,
+  );
+  expect(html).toContain('computer-use-approval');
+  expect(html).toContain('aria-live="polite"');
+  expect(html).toContain('data-computer-use-activation="start"');
+  expect(html).toContain('data-computer-use-intent="synthetic-intent"');
+  expect(html).toContain('&lt;synthetic&gt;');
+  expect(html).not.toContain('autofocus');
 });

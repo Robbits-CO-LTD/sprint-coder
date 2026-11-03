@@ -82,6 +82,7 @@ enum class ActionKind : std::uint8_t {
   kSelect,
   kToggle,
   kExpandCollapse,
+  kSemanticScroll,
 };
 
 enum class SessionMode : std::uint8_t { kObserveOnly, kSupervised, kFullAccess };

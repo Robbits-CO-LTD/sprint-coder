@@ -20,6 +20,7 @@ export type ComputerUseStartActivationIntent = Readonly<{
   windowId?: string;
   expectedWindowRevision?: number;
   resumeSessionId?: string;
+  quarantineResume?: true;
 }>;
 
 export type ComputerUseApprovalActivationIntent = Readonly<{
@@ -76,6 +77,7 @@ export function startActivationIntent(
     expectedProfileRevision: input.expectedProfileRevision,
     windowId: input.windowId,
     expectedWindowRevision: input.expectedWindowRevision,
+    ...(input.quarantineResume === true ? { quarantineResume: true as const } : {}),
     ...(input.resumeSessionId === undefined ? {} : { resumeSessionId: input.resumeSessionId }),
   });
 }

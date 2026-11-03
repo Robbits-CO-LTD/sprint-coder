@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  computerUseApprovalRoundTripWireSchema,
   computerUseInputAuthoritySchema,
   computerUseInputSessionSchema,
   computerUseWindowsBackgroundCapabilitySchema,
@@ -189,5 +190,241 @@ describe('Windows background input wire (P1a)', () => {
       backgroundCapabilityVersion: 1,
     });
     expect(computerUseInputAuthoritySchema.parse(fixtures[2])).toEqual(authority);
+  });
+});
+
+const roundTripBinding = {
+  version: 1,
+  roundTripId: 'round-trip-1',
+  sessionId: 'session-1',
+  taskId: 'task-1',
+  turnId: 'turn-1',
+  helperGeneration: 1,
+  cancelEpoch: 0,
+};
+const roundTripBegin = {
+  ...roundTripBinding,
+  kind: 'begin',
+  durationMs: 60000,
+  mainPid: 42,
+  mainProcessStartTime: '123',
+  mainImageIdentity: 'a'.repeat(64),
+};
+const roundTripMessages = [
+  roundTripBegin,
+  { ...roundTripBinding, kind: 'end', reason: 'approved' },
+  { ...roundTripBinding, kind: 'return' },
+  { ...roundTripBinding, kind: 'approve', approvalGeneration: 1, observationRevision: 2 },
+  {
+    ...roundTripBinding,
+    kind: 'event',
+    sequence: 1,
+    state: 'active',
+    foreground: 'sprint_coder',
+    failureReason: 'none',
+    failureLatched: false,
+  },
+  {
+    ...roundTripBinding,
+    kind: 'event',
+    sequence: 2,
+    state: 'failed',
+    foreground: 'other',
+    failureReason: 'third_window',
+    failureLatched: true,
+  },
+];
+
+describe('Windows approval round trip wire (P1b)', () => {
+  it('accepts complete begin/end/return/approve and latched event contracts', () => {
+    for (const value of roundTripMessages)
+      expect(computerUseApprovalRoundTripWireSchema.parse(value)).toEqual(value);
+  });
+  it('rejects every missing or unknown field, including return/approve id', () => {
+    for (const value of roundTripMessages) {
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...value, extra: true }).success,
+      ).toBe(false);
+      for (const key of Object.keys(value)) {
+        const incomplete: Record<string, unknown> = { ...value };
+        delete incomplete[key];
+        expect(
+          computerUseApprovalRoundTripWireSchema.safeParse(incomplete).success,
+          `${value.kind}.${key}`,
+        ).toBe(false);
+      }
+    }
+  });
+  it('accepts only positive integer durations up to 60 seconds, not absolute deadlines', () => {
+    for (const durationMs of [1, 59999, 60000])
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...roundTripBegin, durationMs }).success,
+      ).toBe(true);
+    for (const durationMs of [0, -1, 60001, 1.5, '60000', null, Infinity])
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...roundTripBegin, durationMs }).success,
+      ).toBe(false);
+    expect(
+      computerUseApprovalRoundTripWireSchema.safeParse({ ...roundTripBegin, expiresAt: 60000 })
+        .success,
+    ).toBe(false);
+  });
+  it('rejects unbound identities and unsafe counters', () => {
+    for (const patch of [
+      { roundTripId: '' },
+      { roundTripId: 'x'.repeat(257) },
+      { version: 2 },
+      { helperGeneration: 0 },
+      { cancelEpoch: -1 },
+      { cancelEpoch: Number.MAX_SAFE_INTEGER + 1 },
+      { mainPid: 0 },
+      { mainProcessStartTime: '0' },
+      { mainImageIdentity: 'unknown' },
+    ])
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...roundTripBegin, ...patch }).success,
+      ).toBe(false);
+  });
+  it('does not permit third windows or failures without native failure retention', () => {
+    const failed = roundTripMessages[5]!;
+    for (const patch of [
+      { failureLatched: false },
+      { failureReason: 'none' },
+      { state: 'active' },
+      { foreground: 'unknown' },
+      { sequence: 0 },
+    ])
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...failed, ...patch }).success,
+      ).toBe(false);
+    expect(
+      computerUseApprovalRoundTripWireSchema.safeParse({
+        ...roundTripMessages[4],
+        foreground: 'other',
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('P1b transport vocabulary', () => {
+  it('assigns matching native frame numbers to begin/end acknowledgements and events', async () => {
+    const protocol = await import('./computer-use-native-protocol');
+    const names = protocol.computerUseNativeMessageTypeNames();
+    const expected = [
+      'approval_round_trip_begin',
+      'approval_round_trip_begin_result',
+      'approval_round_trip_end',
+      'approval_round_trip_end_result',
+      'approval_round_trip_event',
+    ];
+    for (const name of expected) expect(names).toContain(name);
+  });
+  it('requires an explicit acknowledgement before the focus exception', () => {
+    for (const kind of ['begin_result', 'end_result']) {
+      const ack = {
+        ...roundTripBinding,
+        kind,
+        accepted: true,
+        failureReason: 'none',
+        failureLatched: false,
+      };
+      expect(computerUseApprovalRoundTripWireSchema.safeParse(ack).success).toBe(true);
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...ack, accepted: false }).success,
+      ).toBe(false);
+    }
+  });
+});
+
+describe('P1b native producer parity', () => {
+  it('pins every native fixture to the strict schema and rejects missing members', () => {
+    const source = readFileSync(
+      join(
+        __dirname,
+        '../../computer-use-native/computer_use_windows_approval_round_trip_wire_test.h',
+      ),
+      'utf8',
+    );
+    const fixtures: unknown[] = [...source.matchAll(/R"wire\((.*?)\)wire"/gu)].map((match) =>
+      JSON.parse(match[1]!),
+    );
+    expect(fixtures).toHaveLength(8);
+    for (const [index, fixture] of fixtures.entries()) {
+      const parsed = computerUseApprovalRoundTripWireSchema.parse(fixture);
+      if (index < roundTripMessages.length) expect(parsed).toEqual(roundTripMessages[index]);
+      for (const key of Object.keys(parsed)) {
+        const incomplete: Record<string, unknown> = { ...parsed };
+        delete incomplete[key];
+        expect(computerUseApprovalRoundTripWireSchema.safeParse(incomplete).success).toBe(false);
+      }
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...parsed, unknown: true }).success,
+      ).toBe(false);
+    }
+    const harness = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_windows_approval_wire_test.h'),
+      'utf8',
+    );
+    expect(harness).toContain('if (!CheckApprovalRoundTripWire()) return false;');
+  });
+  it('pins frame ids in C++ and TypeScript without changing existing ids', async () => {
+    const protocol = await import('./computer-use-native-protocol');
+    const source = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_protocol.h'),
+      'utf8',
+    );
+    for (const [type, name, value] of [
+      ['approval_round_trip_begin', 'Begin', 21],
+      ['approval_round_trip_begin_result', 'BeginResult', 22],
+      ['approval_round_trip_end', 'End', 23],
+      ['approval_round_trip_end_result', 'EndResult', 24],
+      ['approval_round_trip_event', 'Event', 25],
+    ] as const) {
+      expect(protocol.computerUseNativeMessageTypeValue(type)).toBe(value);
+      expect(source).toContain(`kApprovalRoundTrip${name} = ${value},`);
+      const frame = {
+        messageType: type,
+        flags: 0,
+        requestId: protocol.newComputerUseNativeFrameId(),
+        sessionId: protocol.newComputerUseNativeFrameId(),
+        cancelId: null,
+        metadata: Buffer.from('{}'),
+        binary: Buffer.alloc(0),
+      };
+      expect(
+        protocol.decodeComputerUseNativeFrame(protocol.encodeComputerUseNativeFrame(frame))
+          .messageType,
+      ).toBe(type);
+    }
+    expect(protocol.computerUseNativeMessageTypeValue('dispatch_approved_result')).toBe(20);
+    expect(protocol.isKnownComputerUseNativeMessageType(26)).toBe(false);
+  });
+});
+
+describe('P1b malformed wire rejection', () => {
+  it('returns rejection rather than throwing for malformed process creation times', () => {
+    for (const mainProcessStartTime of ['invalid', '1.5', '', '01', '18446744073709551616']) {
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({
+          ...roundTripBegin,
+          mainProcessStartTime,
+        }).success,
+      ).toBe(false);
+    }
+  });
+  it('requires retained failure in rejected acknowledgements for native failure causes', () => {
+    for (const kind of ['begin_result', 'end_result']) {
+      const ack = {
+        ...roundTripBinding,
+        kind,
+        accepted: false,
+        failureReason: 'expired',
+        failureLatched: true,
+      };
+      expect(computerUseApprovalRoundTripWireSchema.safeParse(ack).success).toBe(true);
+      expect(
+        computerUseApprovalRoundTripWireSchema.safeParse({ ...ack, failureLatched: false }).success,
+      ).toBe(false);
+    }
   });
 });

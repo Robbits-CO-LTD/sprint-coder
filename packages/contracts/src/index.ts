@@ -4483,6 +4483,11 @@ export const computerUseActionKindSchema = z.enum([
   'copy',
 ]);
 export type ComputerUseActionKind = z.infer<typeof computerUseActionKindSchema>;
+/** Internal N9 vocabulary; the public action kinds remain unchanged. */
+export const computerUseInternalActionKindSchema = z.enum([
+  ...computerUseActionKindSchema.options,
+  'semantic_scroll',
+]);
 
 export const computerUseKeySchema = z.enum([
   'Enter',
@@ -4793,6 +4798,7 @@ export const computerUseWindowCandidateSchema = z
     bounds: computerUseBoundsSchema,
     focused: z.boolean(),
     eligible: z.boolean(),
+    quarantineResume: z.literal(true).optional(),
     ownerKind: z.enum(['application', 'dialog', 'unknown']),
     modal: z.boolean(),
     revision: z.number().int().nonnegative(),
@@ -5584,6 +5590,7 @@ export const computerUseStartInputSchema = z
     taskId: computerUseIdSchema,
     /** Reuses the start consent lane to resume the exact paused ephemeral session. */
     resumeSessionId: computerUseIdSchema.optional(),
+    quarantineResume: z.literal(true).optional(),
     maxRounds: computerUseRoundLimitSchema.optional(),
     profileId: computerUseIdSchema,
     windowId: computerUseIdSchema,
@@ -5839,6 +5846,10 @@ export const computerUseSessionStatusSchema = z
     expiresAt: timestampSchema,
     lastObservationAt: timestampSchema.nullable(),
     stopReason: computerUseStopReasonSchema.nullable(),
+    terminationResult: z
+      .enum(['terminated_clean', 'terminated_target_suspect', 'termination_requested'])
+      .optional(),
+    stopCause: z.literal('shared_helper_stop').optional(),
     /**
      * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
      * it when the session ends, and it is never persisted, logged or given to the outer agent.
@@ -5900,6 +5911,28 @@ export type ComputerUseStopInput = z.infer<typeof computerUseStopInputSchema>;
 
 const normalizedCoordinateSchema = z.number().finite().min(0).max(1);
 const semanticTargetSchema = z.string().min(1).max(128);
+/** N9 internal definition only; this does not enable execution or provider exposure. */
+export const computerUseSemanticScrollActionSchema = z.discriminatedUnion('operation', [
+  z
+    .object({
+      type: z.literal('semantic_scroll'),
+      targetId: semanticTargetSchema,
+      operation: z.literal('scroll'),
+      axis: z.enum(['horizontal', 'vertical']),
+      amount: z.enum(['small_decrement', 'large_decrement', 'small_increment', 'large_increment']),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('semantic_scroll'),
+      targetId: semanticTargetSchema,
+      operation: z.literal('set_scroll_percent'),
+      axis: z.enum(['horizontal', 'vertical']),
+      percent: z.number().finite().min(0).max(100),
+    })
+    .strict(),
+]);
+export type ComputerUseSemanticScrollAction = z.infer<typeof computerUseSemanticScrollActionSchema>;
 const semanticArgumentsSchema = z
   .record(z.string(), z.json())
   .refine((value) => Object.keys(value).length <= 64, 'Too many semantic action arguments');
@@ -6296,6 +6329,7 @@ export const computerUseWindowsApprovalDisplaySchema = z.discriminatedUnion('eff
       ...computerUseWindowsDisplayFields,
       effect: z.literal('supervised_action'),
       operation: z.enum([
+        'semantic_scroll',
         'click',
         'double_click',
         'invoke',
@@ -6480,6 +6514,126 @@ export const computerUseInputAuthoritySchema = z.discriminatedUnion('inputPath',
     .strict(),
 ]);
 export type ComputerUseInputAuthority = z.infer<typeof computerUseInputAuthoritySchema>;
+
+// P1b: internal wire vocabulary only; runtime admission remains disabled until P3c/P5b.
+// durationMs is measured from receipt using the native monotonic clock. Native-card admission
+// must also cap it to the intent's remaining lifetime; no process-to-process deadline is sent.
+const computerUseRoundTripIdSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_.:-]+$/u);
+const computerUseRoundTripCounterSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const computerUseRoundTripBindingFields = {
+  version: z.literal(1),
+  roundTripId: computerUseRoundTripIdSchema,
+  sessionId: computerUseRoundTripIdSchema,
+  taskId: computerUseRoundTripIdSchema,
+  turnId: computerUseRoundTripIdSchema,
+  helperGeneration: computerUseRoundTripCounterSchema.min(1),
+  cancelEpoch: computerUseRoundTripCounterSchema,
+};
+export const computerUseApprovalRoundTripFailureSchema = z.enum([
+  'third_window',
+  'expired',
+  'rejected',
+  'stopped',
+  'generation_changed',
+  'target_changed',
+  'dialog_changed',
+  'unattributed_target_event',
+  'monitor_failed',
+]);
+const computerUseRoundTripAckFields = {
+  ...computerUseRoundTripBindingFields,
+  accepted: z.boolean(),
+  failureReason: z.union([
+    z.literal('none'),
+    computerUseApprovalRoundTripFailureSchema,
+    z.enum(['id_mismatch', 'ended', 'invalid_state']),
+  ]),
+  failureLatched: z.boolean(),
+};
+export const computerUseApprovalRoundTripWireSchema = z
+  .discriminatedUnion('kind', [
+    z.object({ ...computerUseRoundTripAckFields, kind: z.literal('begin_result') }).strict(),
+    z.object({ ...computerUseRoundTripAckFields, kind: z.literal('end_result') }).strict(),
+    z
+      .object({
+        ...computerUseRoundTripBindingFields,
+        kind: z.literal('begin'),
+        durationMs: z.number().int().min(1).max(60000),
+        mainPid: z.number().int().min(1).max(0xffffffff),
+        mainProcessStartTime: z
+          .string()
+          .regex(/^[1-9][0-9]{0,19}$/u)
+          .refine((value) => value.length < 20 || value <= '18446744073709551615'),
+        mainImageIdentity: z.string().regex(/^[a-f0-9]{64}$/u),
+      })
+      .strict(),
+    z
+      .object({
+        ...computerUseRoundTripBindingFields,
+        kind: z.literal('end'),
+        reason: z.enum(['approved', 'rejected', 'expired', 'stopped', 'generation_changed']),
+      })
+      .strict(),
+    // Return extends existing-session foreground activation; approve extends approvalApprove.
+    // Neither is a standalone grant. The live owner must reject mismatched/ended/failed ids,
+    // require trusted activation for return, and freshly measured authority for exchange.
+    z.object({ ...computerUseRoundTripBindingFields, kind: z.literal('return') }).strict(),
+    z
+      .object({
+        ...computerUseRoundTripBindingFields,
+        kind: z.literal('approve'),
+        approvalGeneration: computerUseRoundTripCounterSchema.min(1),
+        observationRevision: computerUseRoundTripCounterSchema.min(1),
+      })
+      .strict(),
+    z
+      .object({
+        ...computerUseRoundTripBindingFields,
+        kind: z.literal('event'),
+        sequence: computerUseRoundTripCounterSchema.min(1),
+        state: z.enum(['active', 'ended', 'failed']),
+        foreground: z.enum(['target', 'sprint_coder', 'other']),
+        failureReason: z.union([z.literal('none'), computerUseApprovalRoundTripFailureSchema]),
+        failureLatched: z.boolean(),
+      })
+      .strict(),
+  ])
+  .superRefine((value, context) => {
+    if (value.kind === 'begin_result' || value.kind === 'end_result') {
+      if (
+        value.accepted !== (value.failureReason === 'none') ||
+        (value.accepted && value.failureLatched) ||
+        (computerUseApprovalRoundTripFailureSchema.safeParse(value.failureReason).success &&
+          !value.failureLatched)
+      )
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Invalid round trip acknowledgement',
+        });
+      return;
+    }
+    if (value.kind !== 'event') return;
+    const failed = value.state === 'failed';
+    if (
+      failed !== value.failureLatched ||
+      failed !== (value.failureReason !== 'none') ||
+      (value.foreground === 'other' && !failed) ||
+      (value.failureReason === 'third_window' && value.foreground !== 'other')
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Invalid round trip failure retention',
+      });
+    }
+  });
+export type ComputerUseApprovalRoundTripWire = z.infer<
+  typeof computerUseApprovalRoundTripWireSchema
+>;
+
 /**
  * How a native build decides which applications are eligible (ADR v2 D7). It is fixed when the
  * native is compiled and recorded in the manifest; Main compiles the same value in, the native

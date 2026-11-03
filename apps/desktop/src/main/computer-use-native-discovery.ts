@@ -7,6 +7,7 @@ import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-typ
 
 export type ComputerUseGenerationTerminated = Readonly<{
   kind: 'terminated';
+  result?: 'terminated_clean' | 'terminated_target_suspect';
   helperGeneration: number;
 }>;
 export type ComputerUseDiscoveryStop =

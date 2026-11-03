@@ -67,7 +67,12 @@ export type ComputerUseNativeMessageType =
   | 'approval_discard'
   | 'approval_discard_result'
   | 'dispatch_approved'
-  | 'dispatch_approved_result';
+  | 'dispatch_approved_result'
+  | 'approval_round_trip_begin'
+  | 'approval_round_trip_begin_result'
+  | 'approval_round_trip_end'
+  | 'approval_round_trip_end_result'
+  | 'approval_round_trip_event';
 
 const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Object.freeze({
   handshake: 1,
@@ -90,6 +95,11 @@ const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Ob
   approval_discard_result: 18,
   dispatch_approved: 19,
   dispatch_approved_result: 20,
+  approval_round_trip_begin: 21,
+  approval_round_trip_begin_result: 22,
+  approval_round_trip_end: 23,
+  approval_round_trip_end_result: 24,
+  approval_round_trip_event: 25,
 });
 const MESSAGE_TYPES_BY_NUMBER = new Map(
   Object.entries(MESSAGE_TYPES).map(([name, value]) => [

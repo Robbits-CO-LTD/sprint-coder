@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type Ref, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   bindComputerUseMaximumMode,
   bindComputerUsePolicyLanguage,
@@ -49,6 +49,7 @@ export type ComputerUseProfileView = Readonly<{
 }>;
 
 export type ComputerUseWindowView = Readonly<{
+  quarantineResume?: true;
   id: string;
   revision?: number;
   profileRevision: number;
@@ -67,6 +68,7 @@ export type ComputerUseProviderView = Readonly<{
 }>;
 
 export type ComputerUseStartView = Readonly<{
+  quarantineResume?: true;
   maxRounds?: number;
   profileId: string;
   profileRevision: number;
@@ -145,6 +147,7 @@ const WINDOWS_OPERATION_LABELS: Readonly<
   type: '文字を入力',
   key: 'キーを入力',
   scroll: 'スクロール',
+  semantic_scroll: '一覧・文書をスクロール',
   select: '項目を選択',
   toggle: '設定を切り替え',
   expand_collapse: '表示を切り替え',
@@ -663,6 +666,7 @@ export function ComputerUseOnboarding({
           expectedProfileRevision: selectedWindow.profileRevision,
           windowId: selectedWindow.id,
           expectedWindowRevision: selectedWindow.revision ?? 0,
+          ...(selectedWindow.quarantineResume ? { quarantineResume: true as const } : {}),
         })
       : undefined;
 
@@ -751,7 +755,7 @@ export function ComputerUseOnboarding({
     setError(null);
     try {
       const candidates = await onResolveWindows(profile.id);
-      if (candidates.length !== 1) {
+      if (candidates.length !== 1 || candidates[0]?.quarantineResume) {
         setProfileId(profile.id);
         setWindows(candidates);
         setWindowId(candidates[0]?.id ?? '');
@@ -819,12 +823,13 @@ export function ComputerUseOnboarding({
     }
   }
 
-  async function start(): Promise<void> {
+  async function start(approvedQuarantine = false): Promise<void> {
     if (
       selectedProfile === null ||
       selectedProvider === undefined ||
       selectedWindow === null ||
       windowId === '' ||
+      (selectedWindow.quarantineResume && !approvedQuarantine) ||
       !roundLimitValid ||
       !egressConfirmed
     )
@@ -835,6 +840,7 @@ export function ComputerUseOnboarding({
         profileId: selectedProfile.id,
         profileRevision: selectedWindow.profileRevision,
         windowCandidateId: windowId,
+        ...(selectedWindow.quarantineResume ? { quarantineResume: true as const } : {}),
         mode: effectiveMode,
         connectionId: selectedProvider.connectionId,
         modelId: selectedProvider.modelId,
@@ -1159,6 +1165,27 @@ export function ComputerUseOnboarding({
           </p>
         ) : null}
 
+        {step === 2 && selectedWindow?.quarantineResume ? (
+          <ComputerUseApprovalCard
+            approval={{
+              id: selectedWindow.id,
+              actionLabel: '対象アプリの再開を承認',
+              targetLabel: selectedWindow.label,
+              impactLabel:
+                '最後の操作が後から反映される可能性があります。確認して、この対象の隔離を解除し、新しいセッションを開始します。',
+              escapedPreview: null,
+              allowedDecisions: ['allow_once'],
+              activationIntents: startIntent === undefined ? {} : { allow_once: startIntent },
+            }}
+            activationKind="start"
+            titleId="computer-use-quarantine-title"
+            allowOnceLabel="確認して再開"
+            busy={busy || startIntent === undefined}
+            onApproval={() => {
+              void start(true);
+            }}
+          />
+        ) : null}
         <footer className="computer-use-dialog__actions">
           {step === 2 ? (
             <button type="button" disabled={busy} onClick={() => setStep(1)}>
@@ -1174,6 +1201,7 @@ export function ComputerUseOnboarding({
             data-computer-use-intent={step === 2 ? startIntent : undefined}
             disabled={
               busy ||
+              (step === 2 && selectedWindow?.quarantineResume === true) ||
               (step === 1
                 ? selectedProfile === null || !selectedProfile.available
                 : selectedProvider === undefined ||
@@ -1364,164 +1392,14 @@ export function ComputerUseSessionRail({
         ) : null}
       </div>
       {approval === null ? null : (
-        <section
-          key={approval.id}
-          ref={approvalSectionRef}
-          className="computer-use-approval"
-          aria-labelledby="computer-use-approval-title"
-          aria-live="polite"
-        >
-          <div>
-            <span className="computer-use-eyebrow">ACTION CHECK</span>
-            <h3 id="computer-use-approval-title">{approval.actionLabel}</h3>
-            <dl>
-              <div>
-                <dt>対象</dt>
-                <dd>{approval.targetLabel}</dd>
-              </div>
-              <div>
-                <dt>影響</dt>
-                <dd>{approval.impactLabel}</dd>
-              </div>
-            </dl>
-            {approval.display === undefined ? null : (
-              <div role="group" aria-label="native測定情報">
-                <p>native測定情報</p>
-                <dl>
-                  <div>
-                    <dt>測定された操作</dt>
-                    <dd>{WINDOWS_OPERATION_LABELS[approval.display.operation]}</dd>
-                  </div>
-                  <div>
-                    <dt>効果</dt>
-                    <dd>{WINDOWS_EFFECT_LABELS[approval.display.effect]}</dd>
-                  </div>
-                  <div>
-                    <dt>対象のラベル</dt>
-                    <dd>
-                      {approval.display.targetLabel ??
-                        (approval.display.effect === 'supervised_action'
-                          ? 'ラベル未検証の一般操作'
-                          : '対象のラベルを検証できません')}
-                    </dd>
-                  </div>
-                  {approval.display.extension === null ? null : (
-                    <div>
-                      <dt>拡張子（native測定）</dt>
-                      <dd>{approval.display.extension}</dd>
-                    </div>
-                  )}
-                  <div>
-                    <dt>外部アプリ</dt>
-                    <dd>
-                      {approval.display.externalApplication === 'may_open'
-                        ? '外部アプリが開く可能性があります'
-                        : '該当しません'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>承認期限</dt>
-                    <dd>
-                      {approvalExpired ? (
-                        '承認期限切れ'
-                      ) : (
-                        <time dateTime={approval.expiresAt}>
-                          {approval.expiresAt === undefined
-                            ? ''
-                            : new Date(approval.expiresAt).toLocaleTimeString()}
-                        </time>
-                      )}
-                    </dd>
-                  </div>
-                </dl>
-                {approval.display.unsignedWarning === 'main_image_only' ? (
-                  <p role="note">
-                    このアプリは署名で本人確認できません。更新・変更後は再確認が必要です。確認するのは主実行ファイルの一致であり、DLL・プラグイン・スクリプト等の安全性は保証しません。
-                  </p>
-                ) : null}
-                <p>
-                  Tab / Shift+Tab またはクリックでボタンを選び、Enter / Space /
-                  クリックで決定してください。
-                </p>
-                {stopping ? <p>停止中のため承認できません</p> : null}
-              </div>
-            )}
-            {approval.transfer === undefined ? null : (
-              <div
-                className="computer-use-approval__transfer"
-                role="group"
-                aria-label="貼り付ける内容"
-              >
-                <dl>
-                  <div>
-                    <dt>コピー元</dt>
-                    <dd>{approval.transfer.sourceLabel}</dd>
-                  </div>
-                  <div>
-                    <dt>貼り付け先</dt>
-                    <dd>
-                      {approval.transfer.destinationLabel}
-                      {approval.transfer.destinationTarget === null
-                        ? ''
-                        : ` · ${approval.transfer.destinationTarget}`}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>大きさ</dt>
-                    <dd>{ARTIFACT_SIZE_LABELS[approval.transfer.sizeClass]}</dd>
-                  </div>
-                  <div>
-                    <dt>内容</dt>
-                    <dd>
-                      <code className="computer-use-approval__excerpt">
-                        {approval.transfer.excerpt}
-                      </code>
-                    </dd>
-                  </div>
-                </dl>
-                <ExcerptLegend excerpts={[approval.transfer.excerpt]} />
-              </div>
-            )}
-            {approval.escapedPreview === null ? null : (
-              <code className="computer-use-approval__preview">{approval.escapedPreview}</code>
-            )}
-          </div>
-          <div className="computer-use-approval__actions">
-            {approval.allowedDecisions.includes('allow_once') ? (
-              <button
-                type="button"
-                data-computer-use-activation="approval"
-                data-computer-use-intent={approval.activationIntents?.allow_once}
-                disabled={approvalDisabled}
-                onClick={() => onApproval('allow_once')}
-              >
-                今回のみ許可
-              </button>
-            ) : null}
-            {approval.allowedDecisions.includes('allow_plan') ? (
-              <button
-                type="button"
-                data-computer-use-activation="approval"
-                data-computer-use-intent={approval.activationIntents?.allow_plan}
-                onClick={() => onApproval('allow_plan')}
-              >
-                この計画で許可
-              </button>
-            ) : null}
-            {approval.allowedDecisions.includes('deny') ? (
-              <button
-                type="button"
-                className="danger"
-                data-computer-use-activation="approval"
-                data-computer-use-intent={approval.activationIntents?.deny}
-                disabled={approvalDisabled}
-                onClick={() => onApproval('deny')}
-              >
-                拒否
-              </button>
-            ) : null}
-          </div>
-        </section>
+        <ComputerUseApprovalCard
+          approval={approval}
+          sectionRef={approvalSectionRef}
+          onApproval={onApproval}
+          actionsDisabled={approvalDisabled}
+          expired={approvalExpired}
+          stopping={stopping}
+        />
       )}
       {error === null || error === undefined ? null : (
         <p className="computer-use-error" role="alert">
@@ -1574,4 +1452,187 @@ function formatRemainingTime(expiresAt: string, now: number): string {
 
 function messageOf(cause: unknown, fallback: string): string {
   return cause instanceof Error && cause.message.trim() !== '' ? cause.message : fallback;
+}
+
+export function ComputerUseApprovalCard({
+  approval,
+  sectionRef,
+  onApproval,
+  activationKind = 'approval',
+  titleId = 'computer-use-approval-title',
+  allowOnceLabel = '今回のみ許可',
+  busy = false,
+  actionsDisabled = false,
+  expired = false,
+  stopping = false,
+}: {
+  approval: ComputerUseApprovalView;
+  sectionRef?: Ref<HTMLElement>;
+  onApproval: (decision: ComputerUseApprovalDecision) => void;
+  activationKind?: 'approval' | 'start';
+  titleId?: string;
+  allowOnceLabel?: string;
+  busy?: boolean;
+  /** Expired, stopping or no longer pending (N8-6); allow_plan keeps only busy. */
+  actionsDisabled?: boolean;
+  expired?: boolean;
+  stopping?: boolean;
+}) {
+  return (
+    <section
+      key={approval.id}
+      ref={sectionRef}
+      className="computer-use-approval"
+      aria-labelledby={titleId}
+      aria-live="polite"
+    >
+      <div>
+        <span className="computer-use-eyebrow">ACTION CHECK</span>
+        <h3 id={titleId}>{approval.actionLabel}</h3>
+        <dl>
+          <div>
+            <dt>対象</dt>
+            <dd>{approval.targetLabel}</dd>
+          </div>
+          <div>
+            <dt>影響</dt>
+            <dd>{approval.impactLabel}</dd>
+          </div>
+        </dl>
+        {approval.display === undefined ? null : (
+          <div role="group" aria-label="native測定情報">
+            <p>native測定情報</p>
+            <dl>
+              <div>
+                <dt>測定された操作</dt>
+                <dd>{WINDOWS_OPERATION_LABELS[approval.display.operation]}</dd>
+              </div>
+              <div>
+                <dt>効果</dt>
+                <dd>{WINDOWS_EFFECT_LABELS[approval.display.effect]}</dd>
+              </div>
+              <div>
+                <dt>対象のラベル</dt>
+                <dd>
+                  {approval.display.targetLabel ??
+                    (approval.display.effect === 'supervised_action'
+                      ? 'ラベル未検証の一般操作'
+                      : '対象のラベルを検証できません')}
+                </dd>
+              </div>
+              {approval.display.extension === null ? null : (
+                <div>
+                  <dt>拡張子（native測定）</dt>
+                  <dd>{approval.display.extension}</dd>
+                </div>
+              )}
+              <div>
+                <dt>外部アプリ</dt>
+                <dd>
+                  {approval.display.externalApplication === 'may_open'
+                    ? '外部アプリが開く可能性があります'
+                    : '該当しません'}
+                </dd>
+              </div>
+              <div>
+                <dt>承認期限</dt>
+                <dd>
+                  {expired ? (
+                    '承認期限切れ'
+                  ) : (
+                    <time dateTime={approval.expiresAt}>
+                      {approval.expiresAt === undefined
+                        ? ''
+                        : new Date(approval.expiresAt).toLocaleTimeString()}
+                    </time>
+                  )}
+                </dd>
+              </div>
+            </dl>
+            {approval.display.unsignedWarning === 'main_image_only' ? (
+              <p role="note">
+                このアプリは署名で本人確認できません。更新・変更後は再確認が必要です。確認するのは主実行ファイルの一致であり、DLL・プラグイン・スクリプト等の安全性は保証しません。
+              </p>
+            ) : null}
+            <p>
+              Tab / Shift+Tab またはクリックでボタンを選び、Enter / Space /
+              クリックで決定してください。
+            </p>
+            {stopping ? <p>停止中のため承認できません</p> : null}
+          </div>
+        )}
+        {approval.transfer === undefined ? null : (
+          <div className="computer-use-approval__transfer" role="group" aria-label="貼り付ける内容">
+            <dl>
+              <div>
+                <dt>コピー元</dt>
+                <dd>{approval.transfer.sourceLabel}</dd>
+              </div>
+              <div>
+                <dt>貼り付け先</dt>
+                <dd>
+                  {approval.transfer.destinationLabel}
+                  {approval.transfer.destinationTarget === null
+                    ? ''
+                    : ` · ${approval.transfer.destinationTarget}`}
+                </dd>
+              </div>
+              <div>
+                <dt>大きさ</dt>
+                <dd>{ARTIFACT_SIZE_LABELS[approval.transfer.sizeClass]}</dd>
+              </div>
+              <div>
+                <dt>内容</dt>
+                <dd>
+                  <code className="computer-use-approval__excerpt">
+                    {approval.transfer.excerpt}
+                  </code>
+                </dd>
+              </div>
+            </dl>
+            <ExcerptLegend excerpts={[approval.transfer.excerpt]} />
+          </div>
+        )}
+        {approval.escapedPreview === null ? null : (
+          <code className="computer-use-approval__preview">{approval.escapedPreview}</code>
+        )}
+      </div>
+      <div className="computer-use-approval__actions">
+        {approval.allowedDecisions.includes('allow_once') ? (
+          <button
+            type="button"
+            disabled={busy || actionsDisabled}
+            data-computer-use-activation={activationKind}
+            data-computer-use-intent={approval.activationIntents?.allow_once}
+            onClick={() => onApproval('allow_once')}
+          >
+            {allowOnceLabel}
+          </button>
+        ) : null}
+        {approval.allowedDecisions.includes('allow_plan') ? (
+          <button
+            type="button"
+            disabled={busy}
+            data-computer-use-activation={activationKind}
+            data-computer-use-intent={approval.activationIntents?.allow_plan}
+            onClick={() => onApproval('allow_plan')}
+          >
+            この計画で許可
+          </button>
+        ) : null}
+        {approval.allowedDecisions.includes('deny') ? (
+          <button
+            type="button"
+            disabled={busy || actionsDisabled}
+            className="danger"
+            data-computer-use-activation={activationKind}
+            data-computer-use-intent={approval.activationIntents?.deny}
+            onClick={() => onApproval('deny')}
+          >
+            拒否
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
 }

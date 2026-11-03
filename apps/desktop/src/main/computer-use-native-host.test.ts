@@ -417,6 +417,25 @@ describe('Computer Use native Main adapter', () => {
     ).resolves.toMatchObject({ maximumMode: 'observe_only' });
   });
 
+  it('PR10 refuses an enabled Windows path without a ledger or termination-capable helper', () => {
+    const surface = {
+      probe: () => ({}),
+      pickApplication: () => null,
+      listWindows: () => [],
+      startSession: () => ({}),
+      observe: () => ({}),
+      dispatch: () => ({}),
+      cancel: () => undefined,
+      close: () => undefined,
+      stopPendingStart: () => ({}),
+    };
+    const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
+      windowsPhysicalBoundsToDip: (bounds) => bounds,
+      windowsKillStopTermination: { enabled: true },
+    });
+    expect(host.availability().available).toBe(false);
+  });
+
   it('converts Windows physical client bounds to Electron DIP before returning candidates', async () => {
     const appIdentityDigest = digest('a');
     const executableDigest = digest('b');
