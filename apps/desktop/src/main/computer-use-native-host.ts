@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { WindowsStopDelivery, type WindowsStopOwner } from './computer-use-windows-stop-delivery';
 import {
   createComputerUseDiscoveryManager,
   type ComputerUseDiscoveryHandle,
@@ -258,6 +259,7 @@ export function createComputerUseNativeHost(
   const terminationEnabled =
     ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
   const ledgerStates = new Map<number, WindowsStopState>();
+  const stopDelivery = new WindowsStopDelivery();
   let holdSequence = 0;
   const pendingWrites = new Map<
     string,
@@ -296,11 +298,25 @@ export function createComputerUseNativeHost(
     }
     return state;
   };
-  const ledgerEvent = (generation: number, event: WindowsStopEvent) => {
-    const previous = ledgerState(generation);
+  const ledgerEvent = (
+    generation: number,
+    event: WindowsStopEvent,
+    receiptOwner?: WindowsStopOwner,
+  ) => {
+    const current = ledgerState(generation);
+    const previous =
+      terminationEnabled && event.kind === 'receipt'
+        ? { ...current, entry: stopDelivery.receiptEntry(generation, current.stopOwnerId) }
+        : current;
     const decision = decideWindowsStop(previous, event);
     ledgerStates.set(generation, decision.state);
     for (const diagnostic of decision.diagnostics) options.windowsLedgerDiagnostic?.(diagnostic);
+    if (terminationEnabled) {
+      if (decision.kind === 'receipt_confirmed' && receiptOwner !== undefined)
+        stopDelivery.complete(generation, 'session', previous.stopOwnerId, receiptOwner.lifetimeId);
+      ledgerStates.set(generation, stopDelivery.project(decision.state));
+      stopDelivery.deliver(decision);
+    }
     for (const hold of previous.holds) {
       if (
         hold.operation === 'receipt_transfer' &&
@@ -323,6 +339,8 @@ export function createComputerUseNativeHost(
       for (const complete of completions ?? []) complete();
       cleanupGeneration(decision.cleanup.helperGeneration);
       addon?.cleanupWindowsGeneration?.(decision.cleanup.helperGeneration);
+      stopDelivery.cleanup(decision.cleanup.helperGeneration);
+      ledgerStates.set(generation, stopDelivery.project(ledgerState(generation)));
     }
     return decision;
   };
@@ -516,37 +534,53 @@ export function createComputerUseNativeHost(
         ledgerEvent(generation, { kind: 'start_generation', nextHelperGeneration: generation });
       },
       owned: (generation, kind, id) => {
+        const registered = stopDelivery.register(generation, kind, id);
         if (kind === 'discovery') {
           discoveryManager.bindGeneration(id, generation);
           for (const owner of startOwners.values())
-            if ([...owner.discoveries].some((discovery) => discovery.id === id))
+            if ([...owner.discoveries].some((discovery) => discovery.id === id)) {
               owner.helperGeneration ??= generation;
-        } else {
+              owner.stopOwner ??= stopDelivery.register(generation, 'session', owner.sessionId);
+            }
+        } else if (kind === 'session') {
           const owner = startOwners.get(id);
-          if (owner !== undefined) owner.helperGeneration ??= generation;
+          if (owner !== undefined) {
+            owner.helperGeneration ??= generation;
+            owner.stopOwner ??= registered;
+          }
         }
+        ledgerStates.set(generation, stopDelivery.project(ledgerState(generation)));
+        return registered.lifetimeId;
+      },
+      completed: (generation, kind, id, lifetimeId) => {
+        const state = ledgerState(generation);
+        if (state.exitConfirmed || state.killRequested) return;
+        stopDelivery.complete(generation, kind, id, lifetimeId);
+        ledgerStates.set(generation, stopDelivery.project(state));
       },
       stopping: (generation, entry, ownerId) => {
         const state = ledgerState(generation);
-        if (state.exitConfirmed || state.entry !== null) return;
+        if (state.exitConfirmed) return;
         const startOwner =
           entry === 'E4'
             ? [...startOwners.values()].find((owner) =>
                 [...owner.discoveries].some((discovery) => discovery.id === ownerId),
               )
             : undefined;
-        ledgerStates.set(generation, {
-          ...state,
-          entry:
-            startOwner !== undefined
-              ? sessions.has(startOwner.sessionId)
-                ? 'E1'
-                : 'E3'
-              : entry === 'E1' && !sessions.has(ownerId)
-                ? 'E2'
-                : entry,
-          stopOwnerId: startOwner?.sessionId ?? ownerId,
-        });
+        stopDelivery.stop(
+          generation,
+          entry === 'E4' ? 'discovery' : 'session',
+          ownerId,
+          startOwner !== undefined
+            ? sessions.has(startOwner.sessionId)
+              ? 'E1'
+              : 'E3'
+            : entry === 'E1' && !sessions.has(ownerId)
+              ? 'E2'
+              : entry,
+          startOwner?.stopOwner,
+        );
+        ledgerStates.set(generation, stopDelivery.project(state));
       },
       event: (generation, kind) => {
         ledgerEvent(generation, { kind, helperGeneration: generation });
@@ -848,6 +882,7 @@ export function createComputerUseNativeHost(
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
   type StartOwner = {
+    stopOwner?: WindowsStopOwner;
     helperGeneration: number | null;
     terminated: boolean;
     receiptConfirmed: boolean;
@@ -1040,6 +1075,7 @@ export function createComputerUseNativeHost(
         );
       },
       verified: async (generation, sessionId, persisted) => {
+        const receiptOwner = stopDelivery.find(generation, 'session', sessionId);
         if (!terminationEnabled || !ledgerState(generation).exitConfirmed) await retryLedger();
         const state = ledgerState(generation);
         if (terminationEnabled && state.exitConfirmed) {
@@ -1081,14 +1117,19 @@ export function createComputerUseNativeHost(
                 status: written ? 'written' : 'failed',
                 ...(uncertain ? { uncertain: true } : {}),
               });
-            ledgerStates.set(generation, { ...current, stopOwnerId: sessionId });
-            const decision = ledgerEvent(generation, {
-              kind: 'receipt',
-              helperGeneration: generation,
-              status: 'verified',
-              closeDeadlineExceeded: false,
-              storage: written ? { status: 'written' } : { status: 'failed', holdId },
-            });
+            if (!terminationEnabled || !current.exitConfirmed)
+              ledgerStates.set(generation, { ...current, stopOwnerId: sessionId });
+            const decision = ledgerEvent(
+              generation,
+              {
+                kind: 'receipt',
+                helperGeneration: generation,
+                status: 'verified',
+                closeDeadlineExceeded: false,
+                storage: written ? { status: 'written' } : { status: 'failed', holdId },
+              },
+              receiptOwner,
+            );
             const owner = startOwners.get(sessionId);
             if (decision.confirmation === 'host_receipt' && owner?.helperGeneration === generation)
               owner.receiptConfirmed = true;
@@ -1158,6 +1199,19 @@ export function createComputerUseNativeHost(
       activeStopQuarantines.delete(owner.sessionId);
       owner.terminal = result;
       owner.unconfirmed = false;
+      if (terminationEnabled && result.kind === 'not_submitted' && owner.stopOwner !== undefined) {
+        const registered = owner.stopOwner;
+        stopDelivery.complete(
+          registered.helperGeneration,
+          registered.kind,
+          registered.id,
+          registered.lifetimeId,
+        );
+        ledgerStates.set(
+          registered.helperGeneration,
+          stopDelivery.project(ledgerState(registered.helperGeneration)),
+        );
+      }
       confirmedClosed.add(owner.sessionId);
       if (confirmedClosed.size > 128) {
         const oldest = confirmedClosed.values().next().value;
@@ -1759,6 +1813,7 @@ export function createComputerUseNativeHost(
   };
 
   const host: ComputerUseNativeHost = {
+    ...(terminationEnabled ? { subscribeWindowsStop: stopDelivery.subscribe } : {}),
     listTargets: async () => {
       if (ledger !== undefined) await retryLedger();
       const requireDiscovery = (): void => {
