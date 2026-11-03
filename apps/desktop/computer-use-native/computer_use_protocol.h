@@ -82,6 +82,12 @@ enum class MessageType : std::uint16_t {
   kPreflightResult = 12,
   kCheckTargetIdentity = 13,
   kTargetIdentityResult = 14,
+  kApprovalApprove = 15,
+  kApprovalApproveResult = 16,
+  kApprovalDiscard = 17,
+  kApprovalDiscardResult = 18,
+  kDispatchApproved = 19,
+  kDispatchApprovedResult = 20,
 };
 
 struct Frame {
@@ -92,7 +98,7 @@ struct Frame {
 
 [[nodiscard]] inline bool IsKnownMessageType(std::uint16_t value) noexcept {
   return value >= static_cast<std::uint16_t>(MessageType::kHandshake) &&
-         value <= static_cast<std::uint16_t>(MessageType::kTargetIdentityResult);
+         value <= static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult);
 }
 
 [[nodiscard]] inline bool ValidateHeader(const FrameHeader &header) noexcept {

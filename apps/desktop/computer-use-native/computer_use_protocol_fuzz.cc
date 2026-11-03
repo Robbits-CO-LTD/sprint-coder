@@ -21,6 +21,7 @@
 #include "computer_use_windows_shell_name_match.h"
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
+#include "computer_use_windows_approval_wire_test.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -9402,6 +9403,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
+  if (!Check(CheckWindowsApprovalWire(), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;
@@ -9487,9 +9489,12 @@ int main() {
   if (!Check(!EncodeFrame(cancel_header, metadata).empty(), "cancel-id-valid"))
     return 1;
 
-  // The preflight and target identity pairs are known; the number after target identity is not.
+  // The approval request/result pairs are known; the next number is not.
   for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult,
-                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult}) {
+                          MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult,
+                          MessageType::kApprovalApprove, MessageType::kApprovalApproveResult,
+                          MessageType::kApprovalDiscard, MessageType::kApprovalDiscardResult,
+                          MessageType::kDispatchApproved, MessageType::kDispatchApprovedResult}) {
     auto known_type_header = ValidHeader();
     known_type_header.message_type = static_cast<std::uint16_t>(type);
     if (!Check(!EncodeFrame(known_type_header, metadata).empty() &&
@@ -9499,10 +9504,10 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kTargetIdentityResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-target-identity-unknown"))
+             "message-type-after-approved-dispatch-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');
