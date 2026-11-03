@@ -19,6 +19,12 @@ inline bool CheckWindowsApprovalWire(std::string_view golden_receipt) {
                       effect == NativeApprovalEffect::kFileManagerOpen;
     display.extension = open ? std::optional<std::string>("c++") : std::nullopt;
     if (WindowsApprovalOfferReceipt(context, offer, display).empty()) return false;
+    auto semantic_scroll = display;
+    semantic_scroll.operation = "semantic_scroll";
+    const auto scroll_receipt = WindowsApprovalOfferReceipt(context, offer, semantic_scroll);
+    if (scroll_receipt.empty() != (effect != NativeApprovalEffect::kSupervisedAction)) return false;
+    if (effect == NativeApprovalEffect::kSupervisedAction &&
+        scroll_receipt.find("\"operation\":\"semantic_scroll\"") == std::string::npos) return false;
     auto invalid = display;
     invalid.operation = "observe";
     if (!WindowsApprovalOfferReceipt(context, offer, invalid).empty()) return false;

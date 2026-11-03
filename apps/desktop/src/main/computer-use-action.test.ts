@@ -1,7 +1,13 @@
 import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { ComputerUseAction, ProviderConnection, TaskSummary } from '@sprint-coder/contracts';
-import { computerUseActionDigest } from './computer-use-action';
+import * as contracts from '@sprint-coder/contracts';
+import { computerUseActionJsonSchema } from './computer-use-planner';
+import {
+  computerUseActionDigest,
+  computerUseActionRoute,
+  computerUseActionKind,
+} from './computer-use-action';
 import { COMPUTER_USE_PROVIDER_ADAPTER_VERSION } from './computer-use-adapter-version';
 import {
   computerUseProviderEndpointRevision,
@@ -28,6 +34,104 @@ import type { ProviderRuntime } from './provider-runtime';
  */
 
 const SECRET = '482913';
+
+describe('semantic scroll internal contract (N9 P1c)', () => {
+  const amount = {
+    type: 'semantic_scroll',
+    targetId: 'scroll-container',
+    operation: 'scroll',
+    axis: 'vertical',
+    amount: 'large_increment',
+  } as const;
+  const percent = {
+    type: 'semantic_scroll',
+    targetId: 'scroll-container',
+    operation: 'set_scroll_percent',
+    axis: 'horizontal',
+    percent: 50,
+  } as const;
+
+  it('defines explicit UIA units and routes both operations as semantic', () => {
+    for (const input of [amount, percent]) {
+      const action = contracts.computerUseSemanticScrollActionSchema.parse(input);
+      expect(action).toEqual(input);
+      expect(computerUseActionRoute(action)).toBe('semantic');
+      expect(computerUseActionKind(action)).toBe('semantic_scroll');
+    }
+  });
+
+  it('rejects wheel units, ScrollIntoView, mixed payloads and invalid targets or percentages', () => {
+    for (const input of [
+      { ...amount, deltaY: 120 },
+      { ...amount, amount: 120 },
+      { ...amount, operation: 'scroll_into_view' },
+      { ...amount, axis: 'both' },
+      { ...amount, targetId: '' },
+      { ...amount, percent: 50 },
+      { ...percent, percent: -1 },
+      { ...percent, percent: 101 },
+      { ...percent, percent: Infinity },
+      { ...percent, amount: 'small_increment' },
+    ])
+      expect(contracts.computerUseSemanticScrollActionSchema.safeParse(input).success).toBe(false);
+    for (const value of [0, 100])
+      expect(
+        contracts.computerUseSemanticScrollActionSchema.safeParse({ ...percent, percent: value })
+          .success,
+      ).toBe(true);
+  });
+
+  it('keeps semantic scroll out of executable and planner schemas and provider grammar', () => {
+    for (const action of [amount, percent]) {
+      expect(contracts.computerUseActionSchema.safeParse(action).success).toBe(false);
+      expect(contracts.computerUsePlannedActionSchema.safeParse(action).success).toBe(false);
+    }
+    expect(JSON.stringify(computerUseActionJsonSchema)).not.toContain('semantic_scroll');
+    expect(contracts.computerUseActionKindSchema.safeParse('semantic_scroll').success).toBe(false);
+    expect(contracts.computerUsePlanEligibleActionKinds).not.toContain('semantic_scroll');
+  });
+
+  it('preserves the coordinate wheel defaults, bounds and visual route', () => {
+    const wheel = contracts.computerUseActionSchema.parse({
+      type: 'scroll',
+      x: 0,
+      y: 1,
+      deltaY: 120,
+    });
+    expect(wheel).toEqual({ type: 'scroll', x: 0, y: 1, deltaX: 0, deltaY: 120 });
+    expect(computerUseActionRoute(wheel)).toBe('visual');
+    for (const patch of [
+      { deltaY: 0 },
+      { deltaY: 10001 },
+      { deltaY: 0.5 },
+      { x: -1 },
+      { targetId: 'scroll-container' },
+    ])
+      expect(contracts.computerUseActionSchema.safeParse({ ...wheel, ...patch }).success).toBe(
+        false,
+      );
+  });
+
+  it('allows the new approval operation only for supervised actions', () => {
+    for (const effect of [
+      'supervised_action',
+      'high_impact_confirmation',
+      'download_open',
+      'file_manager_open',
+    ]) {
+      expect(
+        contracts.computerUseWindowsApprovalDisplaySchema.safeParse({
+          effect,
+          operation: 'semantic_scroll',
+          targetLabel: 'Fixture',
+          extension: null,
+          externalApplication: 'not_applicable',
+          unsignedWarning: 'none',
+        }).success,
+      ).toBe(effect === 'supervised_action');
+    }
+  });
+});
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);

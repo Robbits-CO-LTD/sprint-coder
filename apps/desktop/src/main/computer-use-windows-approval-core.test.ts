@@ -2,6 +2,7 @@ import { readWindowsHostSource } from '../../../../computer-use-windows-host-sou
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { computerUseWindowsApprovalDisplaySchema } from '@sprint-coder/contracts';
 
 const directory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string =>
@@ -127,6 +128,18 @@ const shell = [
 ];
 
 describe('Windows portable approval core (N8-1a)', () => {
+  it('pins the semantic scroll producer, classifier mapping and receipt fixture', () => {
+    expect(read('computer_use_effect_shadow.h')).toContain(
+      '{"semantic_scroll", ActionKind::kSemanticScroll}',
+    );
+    expect(read('computer_use_windows_approval_wire.h')).toContain(
+      'operation == "semantic_scroll"',
+    );
+    expect(read('computer_use_windows_approval_wire_test.h')).toContain(
+      'semantic_scroll.operation = "semantic_scroll"',
+    );
+    expect(harness).toContain('{"semantic_scroll", ActionKind::kSemanticScroll}');
+  });
   it('freezes each substring side without overlap', () => {
     const confirmation = terms('kConfirmationSubstring');
     const other = terms('kOtherSubstring');
@@ -230,6 +243,7 @@ describe('Windows portable approval core (N8-1a)', () => {
       kSelect: 'select',
       kToggle: 'toggle',
       kExpandCollapse: 'expand_collapse',
+      kSemanticScroll: 'semantic_scroll',
     };
     const table = /kApprovalOperationCases\[\] = \{([\s\S]*?)\n\};/u.exec(harness)![1]!;
     const rows = [...table.matchAll(/NativeApprovalEffect::(\w+),\s*\{([^}]+)\}/gu)];
@@ -240,11 +254,28 @@ describe('Windows portable approval core (N8-1a)', () => {
       const line = adr.split(/\r?\n/u).find((line) => line.startsWith(`| \`${effect}\` |`));
       expect(line).toBeDefined();
       const operations = [...line!.split('|')[2]!.matchAll(/`([^`]+)`/gu)].map((entry) => entry[1]);
+      // N9 extends the N8 table without changing the existing operations or effects.
+      if (effect === 'supervised_action') operations.push('semantic_scroll');
       const positive = [...row[2]!.matchAll(/ActionKind::(\w+)/gu)].map(
         (entry) => actions[entry[1]!],
       );
       expect(positive).not.toContain(undefined);
       expect(positive.sort()).toEqual(operations.sort());
+      for (const operation of Object.values(actions)) {
+        expect(
+          computerUseWindowsApprovalDisplaySchema.safeParse({
+            effect,
+            operation,
+            targetLabel: 'Fixture',
+            extension: effect === 'download_open' || effect === 'file_manager_open' ? 'txt' : null,
+            externalApplication:
+              effect === 'download_open' || effect === 'file_manager_open'
+                ? 'may_open'
+                : 'not_applicable',
+            unsignedWarning: 'none',
+          }).success,
+        ).toBe(positive.includes(operation));
+      }
     }
     const existing =
       /for \(const ActionKind action : \{([^}]+)\}\) \{\s*const auto decision = ClassifyEffect\(EffLabel\(label, action\)\);[\s\S]*?"effect-confirm"/u.exec(
