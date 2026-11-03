@@ -199,13 +199,14 @@ inline void AppendWhen(std::string *text, const TargetCondition &condition) {
     result.deny_class = "W-NR";
     return result;
   }
+  result.verdict = {TargetVerdictKind::kEligible, ruleset->eligible_maximum_mode};
   for (const TargetRule &rule : kTargetRules)
     if (rule.verdict == TargetRuleVerdict::kUpper && (rule.platforms & bit) != 0 &&
         AllHold(facts, rule.when)) {
-      result.verdict = {TargetVerdictKind::kUpper, ruleset->upper_maximum_mode};
-      return result;
+      const auto ceiling = rule.maximum_mode.empty() ? ruleset->upper_maximum_mode : rule.maximum_mode;
+      if (result.verdict.kind != TargetVerdictKind::kUpper || result.verdict.maximum_mode != "observe_only")
+        result.verdict = {TargetVerdictKind::kUpper, ceiling};
     }
-  result.verdict = {TargetVerdictKind::kEligible, ruleset->eligible_maximum_mode};
   return result;
 }
 
@@ -274,6 +275,11 @@ inline void AppendWhen(std::string *text, const TargetCondition &condition) {
     text += '\t';
     text += VerdictName(rule.verdict);
     text += '\n';
+    if (!rule.maximum_mode.empty()) {
+      text += "ceiling\t";
+      text += rule.maximum_mode;
+      text += '\n';
+    }
     for (const TargetCondition &condition : rule.when) AppendWhen(&text, condition);
   }
   return text;

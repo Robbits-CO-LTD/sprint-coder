@@ -123,8 +123,13 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
     expect(start).not.toMatch(/maximum_mode|policy_language/u);
   });
 
-  it('is sent to the macOS addon only: the Windows host does not know the key', () => {
-    expect(windows).not.toContain('classifierRoute');
+  it('reaches the Windows host only as the approval gate route binding (N8-5)', () => {
+    // The Windows host reads the key solely into the session approval_route_v2 flag; it never
+    // selects a classifier from it, and Main sends it only to a helper with verified approval
+    // evidence (computer-use-native-host.ts nativeRouteField).
+    const reads = windows.split('\n').filter((line) => line.includes('"classifierRoute"'));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const line of reads) expect(line).toContain('approval_route_v2 =');
     expect(windows).not.toContain('classifier_route');
   });
 });

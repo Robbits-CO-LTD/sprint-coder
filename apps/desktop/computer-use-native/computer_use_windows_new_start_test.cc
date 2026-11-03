@@ -45,6 +45,7 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 namespace {
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool supervised_ceiling = false;
   bool bound_start = false, bad_start = false, identity_read_failure = false;
   bool window_replaced = false, late_window = false, stop_identity = false;
   bool iconic = false, focus_failure = false;
@@ -108,7 +109,7 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
   contexts.fetch_add(1); WindowsTargetFactsContext value; value.lineage_root_pid = pid; return value;
 }
 bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement* measured) {
-  measured->maximum_mode = "observe_only"; return true;
+  measured->maximum_mode = current.supervised_ceiling ? "supervised" : "observe_only"; return true;
 }
 bool ComponentElevated(std::uint32_t) { return current.elevated; }
 BOOL ComponentWindow(HWND) { return TRUE; }
@@ -324,6 +325,8 @@ int wmain() {
     c = {}; c.allocation_failure = true; Run("v1-allocation-failure", c, false, "allocation_failure", 1);
     c = {}; c.com_failure = true; Run("v1-no-com-dependency", c, true, "", 2);
     c = {}; c.v2 = true; Run("v2-normal", c, true, "", 1);
+    c.supervised_ceiling = true; Run("v2-approval-ceiling-closed", c, true, "", 1);
+    c.supervised_ceiling = false;
     c.changed_after_geometry = true; Run("v2-after-geometry", c, false, "window_geometry_changed", 1);
     c = {}; c.v2 = true; c.resume = true; c.bad_before_geometry = true; Run("v2-resume-before-geometry", c, false, "session_input_invalid", 1);
     c = {}; c.v2 = true; c.adopt_epoch = 7; Run("v2-initial-epoch-cas", c, false, "session_start_canceled", 1);

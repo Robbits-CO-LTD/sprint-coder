@@ -1,3 +1,4 @@
+import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -62,7 +63,7 @@ function row(kind: 'eligible' | 'upper' = 'eligible'): Selectable {
 }
 
 function envelope(targets: ComputerWindowsNativeTargetList['targets'] = [row()]) {
-  return { generation: 4_503_599_627_370_000, rulesetVersion: 2, truncated: true, targets };
+  return { generation: 4_503_599_627_370_000, rulesetVersion: 3, truncated: true, targets };
 }
 
 function nativeFixture() {
@@ -83,7 +84,7 @@ function nativeFixture() {
       // Injected inactive v2 binding. Production manifest admission stays closed until PR-6.
       eligibility: {
         mode: 'v2-denylist',
-        rulesetVersion: 2,
+        rulesetVersion: 3,
         classifierVersion: 1,
         lexiconVersion: 1,
         ticketRequired: true,
@@ -406,4 +407,105 @@ describe('inactive native discovery host seam', () => {
     listTargets.mockReturnValue({ private: 'must not be printed' });
     await expect(host.listTargets!()).rejects.toThrow('native_target_list_invalid');
   });
+});
+
+it('N8-5 caps the presented C ceiling without build evidence', () => {
+  const target = {
+    ...row('upper'),
+    maximumMode: 'supervised',
+    identity: { ...row('upper').identity, maximumMode: 'supervised' },
+    facts: { ...facts, descendantShell: true },
+  };
+  const value = { ...envelope(), targets: [target] };
+  expect(parseWindowsComputerUseTargets(value)?.targets[0]).toMatchObject({
+    kind: 'selectable',
+    maximumMode: 'observe_only',
+  });
+});
+
+it('N8-5 presents C only with matching approval evidence and never calls the session predicate', async () => {
+  const target = {
+    ...row('upper'),
+    maximumMode: 'supervised',
+    identity: { ...row('upper').identity, maximumMode: 'supervised' },
+    facts: { ...facts, descendantShell: true },
+  };
+  const value = { ...envelope(), targets: [target] };
+  const eligibility = {
+    mode: 'v2-denylist',
+    classifierVersion: 2,
+    rulesetVersion: 3,
+    lexiconVersion: 3,
+    ticketRequired: true,
+  };
+  const viewers = { version: 1, digest: 'a'.repeat(16) };
+  const declaration = { eligibility, windowsDocumentViewers: viewers };
+  const handshake = {
+    ...declaration,
+    protocolVersion: 1,
+    apiVersion: 3,
+    napiVersion: 10,
+    platform: 'win32',
+    capabilities: { approval: true, approvalWire: 3 },
+  };
+  const variants: unknown[][] = [[declaration, declaration, handshake]];
+  for (const side of [0, 1, 2])
+    for (const changed of [
+      undefined,
+      { version: 2, digest: viewers.digest },
+      { version: 1, digest: 'b'.repeat(16) },
+    ])
+      variants.push(
+        [declaration, declaration, handshake].map((entry, index) =>
+          index === side ? { ...entry, windowsDocumentViewers: changed } : entry,
+        ),
+      );
+  variants.push([declaration, declaration, { ...handshake, capabilities: {} }]);
+  variants.push([declaration, declaration, handshake]);
+  for (const [index, evidence] of variants.entries()) {
+    const fixture = nativeFixture();
+    fixture.listTargets.mockReturnValue(value);
+    const sessionPredicate = vi.fn(() => {
+      throw new Error('discovery must not query a session');
+    });
+    const host = createComputerUseNativeHost(
+      {
+        ...fixture.binding,
+        windowsApprovalVerified: windowsApprovalEvidenceMatches(
+          evidence[0],
+          evidence[1],
+          evidence[2],
+        ),
+        addon: {
+          ...fixture.binding.addon!,
+          windowsApprovalAvailable: () => index !== variants.length - 1,
+          windowsApprovalReady: sessionPredicate,
+          preflight: vi.fn(),
+          approvalApprove: vi.fn(),
+          approvalDiscard: vi.fn(),
+          dispatchApproved: vi.fn(),
+        },
+      },
+      'win32',
+      { ...fixture.options, classifierV2Attested: true, windowsApprovalInterlockForTesting: true },
+    );
+    const list = await host.listTargets!();
+    const maximumMode = index === 0 ? 'supervised' : 'observe_only';
+    expect(list.targets[0]).toMatchObject({ kind: 'selectable', maximumMode });
+    const candidates = windowsComputerTargetCandidates({
+      ...list,
+      windowsGeneration: {
+        helper: { helperGeneration: 1 },
+        listGeneration: list.generation,
+        rulesetVersion: list.rulesetVersion,
+      },
+    });
+    expect(candidates[0]?.profile.identity['maximumMode']).toBe(maximumMode);
+    expect(candidates[0]?.profile.identityDigest).toBe(target.appIdentityDigest);
+    expect(sessionPredicate).not.toHaveBeenCalled();
+  }
+  const browser = { ...target, facts: { ...target.facts, signerOrganization: 'google llc' } };
+  expect(
+    parseWindowsComputerUseTargets({ ...value, targets: [browser] }, true)?.targets[0],
+  ).toMatchObject({ maximumMode: 'observe_only' });
 });

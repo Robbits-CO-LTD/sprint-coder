@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "platforms": {
     "win32": {
-      "rulesetVersion": 2,
+      "rulesetVersion": 3,
       "eligibleMaximumMode": "full_access_app",
       "upperMaximumMode": "observe_only"
     }
@@ -874,6 +874,7 @@
     },
     {
       "class": "C",
+      "maximumMode": "supervised",
       "platforms": ["win32"],
       "when": [
         {
@@ -884,6 +885,7 @@
     },
     {
       "class": "C",
+      "maximumMode": "supervised",
       "platforms": ["win32"],
       "when": [
         {
@@ -894,8 +896,9 @@
     },
     {
       "class": "C",
+      "maximumMode": "supervised",
       "platforms": ["win32"],
-      "note": "Decision C: unsigned is capped until the Windows approval path exists.",
+      "note": "Decision C: static potential ceiling; Windows approval evidence must also admit control.",
       "when": [
         {
           "signal": "signature",
@@ -906,6 +909,7 @@
     },
     {
       "class": "C",
+      "maximumMode": "supervised",
       "platforms": ["win32"],
       "note": "IDE, container and launcher publishers.",
       "when": [
@@ -918,6 +922,7 @@
     },
     {
       "class": "C",
+      "maximumMode": "observe_only",
       "platforms": ["win32"],
       "note": "Decision D: browsers stay observe_only in S5-c-3.",
       "when": [
@@ -936,6 +941,7 @@
     },
     {
       "class": "C",
+      "maximumMode": "observe_only",
       "platforms": ["win32"],
       "note": "Decision D: browsers by leaf as well.",
       "when": [

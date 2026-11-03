@@ -26,6 +26,7 @@ export type DenyRulesetModel = {
   routes: { id: string; platforms: string[]; when: DenyRulesetCondition[] }[];
   rules: {
     class: string;
+    maximumMode?: 'observe_only' | 'supervised';
     verdict: 'denied' | 'upper';
     platforms: string[];
     when: DenyRulesetCondition[];
@@ -34,7 +35,11 @@ export type DenyRulesetModel = {
 export type DenyRulesetGoldenCase = {
   name: string;
   facts: Record<string, string | boolean | null>;
-  expect: { kind: 'eligible' | 'upper' | 'denied' | 'unresolvable'; class: string | null };
+  expect: {
+    kind: 'eligible' | 'upper' | 'denied' | 'unresolvable';
+    class: string | null;
+    maximumMode: string | null;
+  };
 };
 export const DENY_RULESET_PATHS: Readonly<{
   source: string;

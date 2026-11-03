@@ -520,8 +520,9 @@ WindowsInterlockRefusal(const WindowsSession &session, const std::string &metada
 // N8-2c keeps this gate closed. The authenticated generation is nevertheless mandatory, including
 // fixture builds; a missing generation cannot become a wildcard when N8-3 connects Main.
 bool WindowsApprovalGate(const WindowsSession &session) {
-  return kWindowsApprovalHandlersEnabled && windows_helper_generation != 0 &&
-      session.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist &&
+  const bool open = WindowsApprovalSessionGate(session);
+  if (!open && session.maximum_mode == "supervised") session.approval_revoked = true;
+  return open &&
       (session.maximum_mode == "supervised" || session.maximum_mode == "full_access_app");
 }
 

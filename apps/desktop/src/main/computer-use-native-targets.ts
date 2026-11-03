@@ -77,7 +77,7 @@ export function windowsComputerTargetCandidates(
       label: native.identity.displayName,
       canonicalPath: native.identity.executablePath,
       appUrl: null,
-      identity: native.identity,
+      identity: { ...native.identity, maximumMode },
       identityDigest: native.appIdentityDigest,
       version: null,
       executableDigest: native.executableDigest,
@@ -109,7 +109,10 @@ export function windowsComputerTargetCandidates(
 }
 
 /** Malformed evidence invalidates the whole response; ordinary refusals carry only their kind. */
-export function parseWindowsComputerUseTargets(value: unknown): ComputerUseNativeTargetList | null {
+export function parseWindowsComputerUseTargets(
+  value: unknown,
+  windowsApprovalAvailable = false,
+): ComputerUseNativeTargetList | null {
   const parsed = computerWindowsNativeTargetListSchema.safeParse(value);
   if (!parsed.success || parsed.data.rulesetVersion !== denyRulesetVersion('win32')) return null;
   const targets: ComputerUseNativeTargetList['targets'][number][] = [];
@@ -143,7 +146,11 @@ export function parseWindowsComputerUseTargets(value: unknown): ComputerUseNativ
     targets.push({
       kind: 'selectable',
       native,
-      maximumMode: bindComputerUseMaximumMode(native.maximumMode, verdict.maximumMode),
+      maximumMode: bindComputerUseMaximumMode(
+        native.maximumMode,
+        verdict.maximumMode,
+        verdict.kind === 'upper' && !windowsApprovalAvailable ? 'observe_only' : 'full_access_app',
+      ),
     });
   }
   return { ...parsed.data, targets };

@@ -186,6 +186,9 @@ struct WindowsSession {
   std::string signer_digest;
   std::string policy_language = "unknown";
   std::string maximum_mode = "observe_only";
+  bool approval_route_v2 = false;
+  std::uint64_t approval_helper_generation = 0;
+  mutable bool approval_revoked = false;
   // What the session's eligibility stands on, bound when it is created and never changed by a resume
   // (S5-c-3 PR-3). It selects the interlocks' policy: kDeferToV1 for v1, kTakeover for v2.
   sprint_coder::computer_use::EligibilityBasis eligibility_basis =
@@ -213,6 +216,18 @@ struct WindowsSession {
   std::unordered_map<std::string, std::string> semantic_control_signatures;
   std::set<std::string> visual_control_signatures;
 };
+
+// Start evaluates capability and binding before the operation-mode check.
+bool WindowsApprovalSessionBindingCurrent(const WindowsSession &session) {
+  return !session.approval_revoked &&
+      session.approval_route_v2 && windows_helper_generation != 0 &&
+      session.approval_helper_generation == windows_helper_generation &&
+      session.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+}
+
+bool WindowsApprovalSessionGate(const WindowsSession &session) {
+  return kWindowsApprovalHandlersEnabled && WindowsApprovalSessionBindingCurrent(session);
+}
 
 bool WindowsSemanticInputInFlightLocked();
 bool WindowsSemanticInputInFlight();

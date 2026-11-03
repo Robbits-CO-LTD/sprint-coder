@@ -408,6 +408,9 @@ sprint_coder::computer_use::TargetVerdict
 WindowsV2VerdictFor(const WindowsTargetFactsMeasurement &measured) {
   using namespace sprint_coder::computer_use;
   TargetVerdict verdict = ClassifyTarget(measured.facts);
+  if (verdict.kind == TargetVerdictKind::kUpper &&
+      (!kWindowsApprovalHandlersEnabled || windows_helper_generation == 0))
+    verdict.maximum_mode = "observe_only";
   if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
       (measured.image_path.empty() || IsKnownProxyExecutable(measured.image_path) ||
        IsDisallowedTargetExecutable(measured.image_path) || IsProcessElevated(measured.pid)))
@@ -1264,6 +1267,11 @@ bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> 
 // the interlock of the same frame. A v1 session: nothing, as before.
 bool JudgeWindowsV2Input(const WindowsSession &session, std::string *reason) {
   session.v2_input_not_web.reset();
+  if (session.maximum_mode == "supervised" && !WindowsApprovalSessionGate(session)) {
+    session.approval_revoked = true;
+    *reason = "native_approval_closed";
+    return false;
+  }
   if (session.eligibility_basis != sprint_coder::computer_use::EligibilityBasis::kV2Denylist)
     return true;
   if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
@@ -1334,6 +1342,8 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
 }
 // BEGIN windows shared new start
 struct WindowsStartInput {
+  bool approval_route_v2 = false;
+  std::uint64_t approval_helper_generation = 0;
   std::string expected_process_start;
   std::shared_ptr<WindowsStartResult> start_result = std::make_shared<WindowsStartResult>();
   sprint_coder::computer_use::EligibilityBasis eligibility_basis =
@@ -1695,6 +1705,12 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   session.policy_language = measured.executable.policy_language;
   session.maximum_mode = measured.maximum_mode;
   session.eligibility_basis = input.eligibility_basis;
+  session.approval_route_v2 = input.approval_route_v2;
+  session.approval_helper_generation = input.approval_helper_generation;
+  if (session.maximum_mode == "supervised" && !WindowsApprovalSessionGate(session)) {
+    session.maximum_mode = "observe_only";
+    session.approval_revoked = true;
+  }
   session.not_web_file = measured.not_web_file;
   std::uint64_t effective_epoch = std::max(input.cancel_epoch, cancellation_epoch.load(std::memory_order_acquire));
   const auto build_response = [&](std::uint64_t response_epoch) {
@@ -1702,7 +1718,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       "\",\"platform\":\"win32\",\"appIdentityDigest\":\"" + input.app_identity +
       "\",\"windowIdentityDigest\":\"" + measured.window_identity + "\",\"windowId\":\"" +
       std::to_string(input.window_value) + "\",\"policyLanguage\":\"" + measured.executable.policy_language +
-      "\",\"maximumMode\":\"" + measured.maximum_mode + "\",\"screenBounds\":" + RectJson(screen_bounds) +
+      "\",\"maximumMode\":\"" + session.maximum_mode + "\",\"screenBounds\":" + RectJson(screen_bounds) +
       ",\"profileRevision\":" + std::to_string(input.profile_revision) +
       ",\"cancelEpoch\":" + std::to_string(response_epoch) +
       ",\"inputAttemptCount\":" + std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
