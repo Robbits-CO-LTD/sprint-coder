@@ -19,7 +19,7 @@
 extern "C" __declspec(dllexport) inline const char sprint_coder_test_hang_marker[] =
     "SPRINT_CODER_COMPUTER_USE_TEST_HANG_MARKER";
 
-enum class WindowsTestHangPoint { UiaCall, SemanticPattern, Capture, WinVerifyTrust, CreateFileW };
+enum class WindowsTestHangPoint { UiaCall, SemanticPattern, Capture, WinVerifyTrust, CreateFileW, Validation };
 
 // UiaCall hangs at the first contact; the existing 470 ms watchdog returns accessibility_timeout.
 // Stop is not held up by this hang, and the occupied worker makes later UIA reads unavailable.
@@ -60,7 +60,7 @@ inline void WindowsTestHang(WindowsTestHangPoint point) {
   if (first == std::string_view::npos) return;
   selected = selected.substr(first, selected.find_last_not_of(" \t\r\n") - first + 1);
   if (selected != "UiaCall" && selected != "SemanticPattern" && selected != "Capture" &&
-      selected != "WinVerifyTrust" && selected != "CreateFileW") {
+      selected != "WinVerifyTrust" && selected != "CreateFileW" && selected != "Validation") {
     invalid_selection();
     return;
   }
@@ -71,6 +71,7 @@ inline void WindowsTestHang(WindowsTestHangPoint point) {
   case WindowsTestHangPoint::Capture: name = "Capture"; break;
   case WindowsTestHangPoint::WinVerifyTrust: name = "WinVerifyTrust"; break;
   case WindowsTestHangPoint::CreateFileW: name = "CreateFileW"; break;
+  case WindowsTestHangPoint::Validation: name = "Validation"; break;
   }
   if (name == nullptr || selected != name) return;
   // No handle is shared or signaled. Process termination can end this user-mode wait.

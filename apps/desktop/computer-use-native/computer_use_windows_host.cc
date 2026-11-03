@@ -206,6 +206,9 @@ int ProbeMain() {
   return 0;
 }
 
+// After Main dies, how long the consumer has to return before the helper ends itself.
+inline constexpr ULONGLONG kWindowsParentDeathGraceMs = 2'000;
+
 int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   if (pipe_name.size() < 10 || pipe_name.size() > 240 ||
       pipe_name.rfind(L"\\\\.\\pipe\\sprint-coder-computer-use-", 0) != 0)
@@ -287,24 +290,43 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     // its pipe accepted, fixed before the first request (the facts context reads it once, then).
     windows_v2_main_pid = static_cast<std::uint32_t>(client_pid);
     parent_watcher = std::thread([parent, pipe, &serving]() {
+      // `serving` stays true until the exit cleanup below is done, so this watcher also bounds it.
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {
-          {
-            std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
-            parent_process_dead.store(true, std::memory_order_release);
-            cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+          // A start or session identity measurement runs on the consumer itself (N5-C/G/H), and with
+          // Main gone no E1/E2 kill follows. A cancel can land just before the consumer issues its
+          // next I/O, a stall outside I/O never returns, a thread may hold stop_mutex, and the exit
+          // cleanup may stall: keep cancelling for a short grace period without waiting on the lock,
+          // then end the process (its job ends any unverified child).
+          const ULONGLONG grace_end = GetTickCount64() + kWindowsParentDeathGraceMs;
+          auto &control = WindowsTargetListControl();
+          // Parent death reaches the input gate at once, before the lock and before the pipe ends:
+          // every gate check after this store refuses input, even while the lock is held elsewhere.
+          parent_process_dead.store(true, std::memory_order_release);
+          bool epoch_raised = false, disconnected = false;
+          while (serving.load(std::memory_order_acquire)) {
+            if (control.stop_mutex.try_lock()) {
+              std::lock_guard stop_lock(control.stop_mutex, std::adopt_lock);
+              if (!epoch_raised) {
+                cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+                epoch_raised = true;
+              }
+              CancelWindowsNewStartMeasurementLocked(control);
+            }
+            if (!disconnected) {
+              disconnected = true;
+              CancelIoEx(pipe, nullptr);
+              DisconnectNamedPipe(pipe);
+            }
+            if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8);
+            Sleep(20);
           }
-          CancelIoEx(pipe, nullptr);
-          DisconnectNamedPipe(pipe);
           break;
         }
       }
     });
     ServePipe(pipe, probe);
-    serving.store(false, std::memory_order_release);
   }
-  if (parent_watcher.joinable())
-    parent_watcher.join();
   DisconnectNamedPipe(pipe);
   for (auto &entry : sessions)
     ReleaseWindowsSessionResources(&entry.second);
@@ -313,6 +335,9 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   DrainWindowsDiscoveryLaunchesForExit();
   if (SUCCEEDED(initialized))
     CoUninitialize();
+  serving.store(false, std::memory_order_release);
+  if (parent_watcher.joinable())
+    parent_watcher.join();
   CloseHandle(pipe);
   CloseHandle(parent);
   return 0;

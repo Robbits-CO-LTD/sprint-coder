@@ -40,6 +40,90 @@ import {
 
 const roots: string[] = [];
 
+it('measures validation identity on the consumer with cancellable I/O and fresh Stop guards', () => {
+  const source = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host_session.inc'),
+    'utf8',
+  ).split('// END windows session identity validation')[0]!;
+  expect(source).not.toMatch(
+    /WindowsValidation(?:Pending|State|WorkerLoop|WaitGuard)|job_id|\.detach\(/u,
+  );
+  expect(source).toContain('WindowsNewStartIoRegistration cancellation;');
+  expect(source).toContain('measured = MeasureWindowsSessionIdentity(work);');
+  expect(source).toContain('if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;');
+  expect(
+    source.indexOf('if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;'),
+  ).toBeLessThan(source.indexOf('*result = measured;'));
+  // The order the safety rests on: the slot outlives the duplicated handles, the measurement runs
+  // inside the cancellation registration, and the result is adopted under the Stop lock.
+  const lane = source.slice(source.indexOf('bool ReadWindowsSessionIdentityOnLane('));
+  const at = (needle: string) => {
+    const index = lane.indexOf(needle);
+    expect(index, needle).toBeGreaterThan(-1);
+    return index;
+  };
+  const slot = at('struct Slot {');
+  const work = at('WindowsValidationWork work;');
+  const registration = at('WindowsNewStartIoRegistration cancellation;');
+  const measure = at('measured = MeasureWindowsSessionIdentity(work);');
+  const catchAt = at('} catch (...) {');
+  expect(slot).toBeLessThan(work);
+  expect(registration).toBeLessThan(measure);
+  expect(measure).toBeLessThan(catchAt);
+  expect(lane.slice(catchAt).replace(/\s+/gu, ' ')).toContain(
+    'std::lock_guard stop_lock(control.stop_mutex); if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false; *result = measured;',
+  );
+  // With Main gone nothing kills the helper, so parent death cancels the consumer's own I/O.
+  const host = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+    'utf8',
+  );
+  const watcher = host.slice(
+    host.indexOf('parent_watcher = std::thread('),
+    host.indexOf('ServePipe(pipe, probe);'),
+  );
+  // Parent death is published before the lock is tried, so a held lock cannot delay the gate.
+  const published = watcher.indexOf('parent_process_dead.store(true, std::memory_order_release);');
+  const tried = watcher.indexOf('if (control.stop_mutex.try_lock()) {');
+  expect(published).toBeGreaterThan(-1);
+  expect(published).toBeLessThan(tried);
+  const parentLock = watcher.slice(tried, watcher.indexOf('CancelIoEx(pipe, nullptr);'));
+  expect(parentLock).toContain('cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);');
+  expect(parentLock).toContain('CancelWindowsNewStartMeasurementLocked(control);');
+  // A cancel can miss the next I/O, a stall outside I/O never returns, and a thread may hold
+  // stop_mutex: keep cancelling without waiting on the lock, then end the helper after the grace
+  // period rather than leave it holding the target's handles.
+  const flat = watcher.replace(/\s+/gu, ' ');
+  expect(flat).not.toContain('std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);');
+  expect(flat).toContain(
+    'if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8); Sleep(20); }',
+  );
+  expect(host).toContain("inline constexpr ULONGLONG kWindowsParentDeathGraceMs = 2'000;");
+  // The watcher runs until the exit cleanup is done, so a stalled drain is bounded too.
+  const exit = host.slice(host.indexOf('ServePipe(pipe, probe);'), host.indexOf('int wmain('));
+  const cleaned = exit.indexOf('DrainWindowsDiscoveryLaunchesForExit();');
+  const finished = exit.indexOf('serving.store(false, std::memory_order_release);');
+  expect(cleaned).toBeGreaterThan(-1);
+  expect(finished).toBeGreaterThan(cleaned);
+  expect(exit.indexOf('parent_watcher.join();')).toBeGreaterThan(finished);
+  expect(exit.indexOf('CloseHandle(pipe);')).toBeGreaterThan(
+    exit.indexOf('parent_watcher.join();'),
+  );
+  expect(source).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
+  expect(source).toContain(
+    'WindowsTargetListWorkerRunning().store(false, std::memory_order_release)',
+  );
+  expect(source).toContain('process_start != work.process_start');
+  expect(source).toContain('current_start != work.process_start');
+  expect(source).toContain('SameWindowsPath(current_path, work.canonical_path)');
+  expect(source).toContain('held_file_identity.volume_serial != work.volume_serial');
+  expect(source).toContain(
+    'std::memcmp(held_file_identity.file_id.Identifier, work.file_id.Identifier,',
+  );
+  expect(source).toContain('result.elevated = IsProcessElevated(work.pid);');
+  expect(source).toContain('return still_valid() ? result : WindowsSessionIdentityResult{};');
+});
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
