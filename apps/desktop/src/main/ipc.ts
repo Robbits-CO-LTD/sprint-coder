@@ -2597,6 +2597,7 @@ export class IpcRouter {
         if (
           !directActivationMatches &&
           (input.resumeSessionId !== undefined ||
+            input.quarantineResume === true ||
             this.consumeComputerUseQuickStartLatch(event, input) === null)
         )
           throw new SecurityError();
@@ -2609,7 +2610,12 @@ export class IpcRouter {
           );
         if (this.persistence.getActiveTurnId(input.taskId) !== null) throw new TurnActiveError();
         if (this.teamCoordinator.hasBusyWorkers(input.taskId)) throw new TurnActiveError();
-        return this.computerUseController.start(input);
+        return this.computerUseController.start({
+          ...input,
+          ...(input.quarantineResume === true && directActivationMatches
+            ? { quarantineResumeTrusted: true }
+            : {}),
+        });
       },
     );
     this.handle(

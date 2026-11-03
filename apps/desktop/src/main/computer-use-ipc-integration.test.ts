@@ -705,6 +705,28 @@ describe('Computer Use Main IPC integration', () => {
     );
   });
 
+  it('PR10 requires the exact quarantine-card intent and passes only consumed trust to Controller', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
+    const ordinary = quickStartInput();
+    const input = { ...ordinary, quarantineResume: true as const };
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'ordinary',
+      intent: startActivationIntent(ordinary),
+    });
+    await expect(handler(input, {}, {})).rejects.toBeTruthy();
+    expect(fixture.controller.start).not.toHaveBeenCalled();
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'card',
+      intent: startActivationIntent(input),
+    });
+    await handler(input, {}, {});
+    expect(fixture.controller.start).toHaveBeenCalledWith({
+      ...input,
+      quarantineResumeTrusted: true,
+    });
+  });
+
   it('rejects changing a round limit after the trusted start gesture', async () => {
     const fixture = captureComputerUseHandlers();
     const handler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;

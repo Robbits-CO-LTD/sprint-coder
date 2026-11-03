@@ -190,6 +190,18 @@ describe('Computer Use renderer projection', () => {
     ).toBeNull();
   });
 
+  it('explains target isolation after a confirmed suspect termination', () => {
+    expect(
+      computerUseTerminalNotice({
+        state: 'stopped',
+        stopReason: 'user_stop',
+        terminationResult: 'terminated_target_suspect',
+      } as ComputerUseSessionStatus),
+    ).toBe(
+      '停止した。最後の操作が対象に後から反映される可能性がある。そのアプリは、終了するか再開を承認するまで操作しない',
+    );
+  });
+
   it('does not present an unconfirmed native stop as verified', () => {
     const notice = computerUseTerminalNotice({
       state: 'stopped',
@@ -242,4 +254,31 @@ describe('Computer Use renderer projection', () => {
       '手動で許可',
     );
   });
+});
+
+it.each(['termination_requested', 'terminated_clean', 'terminated_target_suspect'] as const)(
+  'PR10 explains a shared-helper stop and preserves the warning: %s',
+  (terminationResult) => {
+    const notice = computerUseTerminalNotice({
+      state: 'stopped',
+      stopReason: 'native_unavailable',
+      stopCause: 'shared_helper_stop',
+      terminationResult,
+    } as ComputerUseSessionStatus);
+    expect(notice).toContain('別の操作の停止のため、Computer Use が止まった');
+    if (terminationResult === 'termination_requested')
+      expect(notice).toContain('停止を確認できませんでした');
+    if (terminationResult === 'terminated_target_suspect')
+      expect(notice).toContain('終了するか再開を承認するまで操作しない');
+  },
+);
+
+it('PR10 does not describe a confirmed shared-helper exit as unconfirmed', () => {
+  expect(
+    computerUseTerminalNotice({
+      state: 'stopped',
+      stopReason: 'native_unavailable',
+      terminationResult: 'terminated_clean',
+    } as ComputerUseSessionStatus),
+  ).not.toContain('停止を確認できません');
 });

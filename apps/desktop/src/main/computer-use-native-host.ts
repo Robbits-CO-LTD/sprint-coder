@@ -219,7 +219,7 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
-  /** Opt-in storage and startup restoration. Product activation remains PR10. */
+  /** Opt-in storage and startup restoration. Product activation remains PR10b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
   /** Main-only PR5b policy. Product activation is coordinated with PR10. */
@@ -231,8 +231,8 @@ export type ComputerUseNativeHostOptions = Readonly<{
    * PR5b Host identity wiring and pre-send recording are complete; activate with PR10.
    * New-start quarantine matching (PR8) remains a separate prerequisite.
    * Revision-checked quarantine release and approval of restored quarantines without old
-   * session memory are required. PR10 must bind Main-owned window evidence to the card and
-   * consume trusted activation before calling the default-off internal approval entry.
+   * session memory are required. PR10a binds Main-owned window evidence to the card and
+   * consumes trusted activation; the product default remains off until PR10b.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
@@ -276,6 +276,12 @@ export function createComputerUseNativeHost(
   const pickerReady = hasMethod(addon, 'pickApplication');
   const coordinateReady = platform !== 'win32' || options.windowsPhysicalBoundsToDip !== undefined;
   const controllerReady =
+    (platform !== 'win32' ||
+      options.windowsKillStopTermination?.enabled !== true ||
+      (options.windowsLedger !== undefined &&
+        typeof addon?.configureWindowsTermination === 'function' &&
+        typeof addon.requestWindowsTermination === 'function' &&
+        typeof addon.cleanupWindowsGeneration === 'function')) &&
     coordinateReady &&
     pickerReady &&
     (platform === 'win32'
@@ -309,6 +315,14 @@ export function createComputerUseNativeHost(
   const terminationEnabled =
     ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
   const ledgerStates = new Map<number, WindowsStopState>();
+  let windowEvidenceSequence = 0;
+  const discoveredWindows = new Map<
+    string,
+    {
+      identity: WindowsTargetQuarantine['identity'];
+      windowIdentityDigest: string;
+    }
+  >();
   const resumeTargets = new Map<string, WindowsTargetQuarantine['identity']>();
   const sameIdentity = (
     a: WindowsTargetQuarantine['identity'],
@@ -709,13 +723,17 @@ export function createComputerUseNativeHost(
         ledgerStates.set(generation, stopDelivery.project(state));
       },
       event: (generation, kind) => {
-        if (kind === 'kill_requested') pidsByIdentity.clear();
+        if (kind === 'kill_requested') {
+          pidsByIdentity.clear();
+          discoveredWindows.clear();
+        }
         ledgerEvent(generation, { kind, helperGeneration: generation });
       },
       exited: (generation, cause) => {
         const state = ledgerState(generation);
         if (state.exitConfirmed) return;
         pidsByIdentity.clear();
+        discoveredWindows.clear();
         const rows = state.rows;
         const quarantines: WindowsTargetQuarantine[] = rows
           .filter((row) => row.kind !== 'foreground')
@@ -1228,6 +1246,7 @@ export function createComputerUseNativeHost(
     attempts: Set<symbol>;
     stopped: boolean;
     nativeInvoked: boolean;
+    delivered?: true;
     discoveryPending: number;
     discoveryUnconfirmed: boolean;
     discoveries: Set<ComputerUseDiscoveryHandle<readonly unknown[]>>;
@@ -1299,7 +1318,14 @@ export function createComputerUseNativeHost(
     for (const [id, owner] of startOwners) {
       if (owner.helperGeneration !== generation || owner.terminated) continue;
       owner.terminated = true;
-      owner.terminal = { kind: 'terminated', helperGeneration: generation };
+      owner.terminal = {
+        kind: 'terminated',
+        helperGeneration: generation,
+        result:
+          ledgerState(generation).result === 'terminated_target_suspect'
+            ? 'terminated_target_suspect'
+            : 'terminated_clean',
+      };
       owner.stopped = true;
       owner.unconfirmed = false;
       owner.discoveryUnconfirmed = false;
@@ -1941,6 +1967,10 @@ export function createComputerUseNativeHost(
     if (!Array.isArray(value))
       throw new ComputerUseNativeUnavailableError('native_windows_invalid');
     const pids: number[] = [];
+    const evidence = new Map<
+      string,
+      { identity: WindowsTargetQuarantine['identity']; windowIdentityDigest: string }
+    >();
     const windows = value.map((candidate) => {
       const raw = asRecord(candidate, 'native_window_invalid');
       const executableDigest = nativeWindowExecutableDigest(raw, profile);
@@ -1949,6 +1979,7 @@ export function createComputerUseNativeHost(
         pids.push(resolvedPid);
       const publicCandidate = stripNativeEphemeralFields(raw);
       delete publicCandidate['processStartTime'];
+      delete publicCandidate['quarantineResume'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
       publicCandidate['maximumMode'] = presentedMaximumMode(raw);
@@ -1965,14 +1996,36 @@ export function createComputerUseNativeHost(
       }
       delete publicCandidate['screenBounds'];
       const parsed = computerUseWindowCandidateSchema.parse(publicCandidate);
+      if (
+        terminationEnabled &&
+        typeof resolvedPid === 'number' &&
+        Number.isSafeInteger(resolvedPid) &&
+        resolvedPid > 0 &&
+        resolvedPid <= 0xffffffff &&
+        validStartTime(raw['processStartTime'])
+      )
+        evidence.set(parsed.windowId, {
+          identity: { pid: resolvedPid, creationTime: raw['processStartTime'] },
+          windowIdentityDigest: parsed.windowIdentityDigest,
+        });
       return Object.freeze({
         ...parsed,
+        ...(evidence.has(parsed.windowId) &&
+        [...ledgerStates.values()].some((state) =>
+          state.quarantines.some((q) =>
+            sameIdentity(q.identity, evidence.get(parsed.windowId)!.identity),
+          ),
+        )
+          ? { quarantineResume: true as const }
+          : {}),
         platform: profile.platform,
         executableDigest,
         screenBounds,
       }) as ComputerUseNativeWindow;
     });
     if (!current()) throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
+    discoveredWindows.clear();
+    for (const [id, value] of evidence) discoveredWindows.set(id, value);
     for (const pid of pids) pidsByIdentity.set(profile.identityDigest, pid);
     return windows;
   };
@@ -1990,21 +2043,46 @@ export function createComputerUseNativeHost(
     if (ledger === undefined) requireMethod('discoverWindows');
     return discoveryManager.begin({
       ...input,
-      ...(startIdentityEnabled ? { includeStartIdentity: true } : {}),
+      ...(startIdentityEnabled || terminationEnabled ? { includeStartIdentity: true } : {}),
     });
   };
   const beginWindowDiscovery = (
     profile: Parameters<ComputerUseNativeHost['listWindows']>[0],
   ): ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]> => {
+    const sequence = ++windowEvidenceSequence;
+    if (terminationEnabled) discoveredWindows.clear();
     const raw = beginRawDiscovery(discoveryInput(profile));
     let stopped = false;
     const result = raw.result.then((value) => {
       const adopt = (candidates: readonly unknown[] = value) => {
         if (stopped || (terminationEnabled && !discoveryManager.resultAvailable(raw.id)))
           throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
-        return parseWindows(profile, candidates, () => !stopped);
+        return parseWindows(
+          profile,
+          candidates,
+          () => !stopped && (!terminationEnabled || sequence === windowEvidenceSequence),
+        );
       };
-      return ledger === undefined ? adopt() : checkDiscoveredTargets(value).then(adopt);
+      return ledger === undefined
+        ? adopt()
+        : checkDiscoveredTargets(value).then((admitted) =>
+            adopt(
+              value.filter((candidate) => {
+                if (admitted.includes(candidate)) return true;
+                const raw = asRecord(candidate, 'native_window_invalid');
+                return (
+                  terminationEnabled &&
+                  [...ledgerStates.values()].some((state) =>
+                    state.quarantines.some(
+                      (q) =>
+                        q.identity.pid === raw['pid'] &&
+                        q.identity.creationTime === raw['processStartTime'],
+                    ),
+                  )
+                );
+              }),
+            ),
+          );
     });
     void result.catch(() => undefined);
     return Object.freeze({
@@ -2413,14 +2491,42 @@ export function createComputerUseNativeHost(
   const host: ComputerUseNativeHost = {
     ...(terminationEnabled
       ? {
+          approveWindowsWindowResume: async (input) => {
+            const evidence = discoveredWindows.get(input.windowId);
+            if (
+              evidence === undefined ||
+              evidence.windowIdentityDigest !== input.windowIdentityDigest
+            )
+              return false;
+            return host.approveWindowsQuarantineResume!({
+              newSessionId: input.newSessionId,
+              trustedActivation: input.trustedActivation,
+              restoredTarget: {
+                identity: evidence.identity,
+                approvedWindow: { ...evidence, windowId: input.windowId },
+              },
+            });
+          },
           approveWindowsQuarantineResume: async (
             input: Parameters<
               NonNullable<ComputerUseNativeHost['approveWindowsQuarantineResume']>
             >[0],
           ): Promise<boolean> => {
-            // PR10 must bind this evidence to the card and consume trusted activation. This
-            // internal entry is default-off; it neither accepts IPC evidence nor displays a card.
+            // The Controller consumes the card intent; this entry independently binds its
+            // Main-owned evidence to the latest native window discovery.
             const restored = input.restoredTarget;
+            const observedWindow =
+              restored === undefined
+                ? undefined
+                : discoveredWindows.get(restored.approvedWindow.windowId);
+            if (
+              restored !== undefined &&
+              (observedWindow === undefined ||
+                observedWindow.windowIdentityDigest !==
+                  restored.approvedWindow.windowIdentityDigest ||
+                !sameIdentity(observedWindow.identity, restored.identity))
+            )
+              return false;
             const previousSessionId = input.previousSessionId ?? '';
             const identity = restored?.identity ?? resumeTargets.get(previousSessionId);
             const owner = startOwners.get(previousSessionId);
@@ -2889,6 +2995,7 @@ export function createComputerUseNativeHost(
           await host.close(started).catch(() => undefined);
           throw new ComputerUseNativeUnavailableError('native_approval_ceiling_mismatch');
         }
+        owner.delivered = true;
         return started;
       } catch (error) {
         // An active Cancel/Close owns its cleanup. A late resume must not create a second
@@ -3322,75 +3429,143 @@ export function createComputerUseNativeHost(
     },
 
     close: async (session) => {
-      const owner = startOwners.get(session.sessionId);
-      if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
-      const internal = sessions.get(session.sessionId);
-      if (internal === undefined) {
-        if (confirmedClosed.has(session.sessionId)) return;
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      }
-      activeStopQuarantines.add(session.sessionId);
-      if (owner !== undefined) latchStartOwner(owner);
-      const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
-      stopEpochs.set(session.sessionId, cancelEpoch);
-      const [discoveryStop, nativeClose] = await Promise.allSettled([
-        owner === undefined ? Promise.resolve() : stopOwnerDiscoveries(owner),
-        stopWithDeadline('close', { ...internal.raw, cancelEpoch }),
-      ]);
-      if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
-      if (nativeClose.status === 'rejected')
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      if (owner?.terminal !== null && owner?.terminal !== undefined) return;
-      const parsed = computerUseNativeCloseReceiptSchema.safeParse(nativeClose.value);
-      if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      inputReceipt(parsed.data, session.sessionId, cancelEpoch);
-      const terminal: ComputerUsePendingStartStop = {
-        kind: 'closed',
-        inputReceipt: {
-          sessionId: parsed.data.sessionId,
-          cancelEpoch: parsed.data.cancelEpoch,
-          inputAttemptCount: parsed.data.inputAttemptCount,
-        },
+      const close = async () => {
+        const owner = startOwners.get(session.sessionId);
+        if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
+        const internal = sessions.get(session.sessionId);
+        if (internal === undefined) {
+          if (confirmedClosed.has(session.sessionId)) return;
+          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        }
+        activeStopQuarantines.add(session.sessionId);
+        if (owner !== undefined) latchStartOwner(owner);
+        const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
+        stopEpochs.set(session.sessionId, cancelEpoch);
+        const [discoveryStop, nativeClose] = await Promise.allSettled([
+          owner === undefined ? Promise.resolve() : stopOwnerDiscoveries(owner),
+          stopWithDeadline('close', {
+            ...internal.raw,
+            cancelEpoch,
+            ...(terminationEnabled && owner?.delivered ? { killStopClose: true } : {}),
+          }),
+        ]);
+        if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
+        if (nativeClose.status === 'rejected')
+          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        if (owner?.terminal !== null && owner?.terminal !== undefined) return;
+        const parsed = computerUseNativeCloseReceiptSchema.safeParse(nativeClose.value);
+        if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        inputReceipt(parsed.data, session.sessionId, cancelEpoch);
+        const terminal: ComputerUsePendingStartStop = {
+          kind: 'closed',
+          inputReceipt: {
+            sessionId: parsed.data.sessionId,
+            cancelEpoch: parsed.data.cancelEpoch,
+            inputAttemptCount: parsed.data.inputAttemptCount,
+          },
+        };
+        if (owner !== undefined) {
+          owner.nativeTerminal = terminal;
+          owner.nativeTerminalEvidence = nativeClose.value;
+        }
+        if (
+          owner?.discoveryUnconfirmed ||
+          (discoveryStop.status === 'rejected' &&
+            owner !== undefined &&
+            owner.discoveries.size !== 0)
+        ) {
+          if (owner !== undefined) owner.unconfirmed = true;
+          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        }
+        const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
+        if (confirming !== undefined) await confirming;
+        if (owner?.terminated) return terminatedStart(owner);
+        if (
+          terminationEnabled &&
+          !owner?.receiptConfirmed &&
+          owner?.helperGeneration != null &&
+          (ledgerState(owner.helperGeneration).killRequested ||
+            ledgerState(owner.helperGeneration).exitConfirmed)
+        )
+          throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+        sessions.delete(session.sessionId);
+        classifierBindings.delete(session.sessionId);
+        inputAttemptsBySession.delete(session.sessionId);
+        stopEpochs.delete(session.sessionId);
+        revisionsBySession.delete(session.sessionId);
+        confirmedClosed.add(session.sessionId);
+        if (confirmedClosed.size > 128)
+          confirmedClosed.delete(confirmedClosed.values().next().value!);
+        // Only a verified close releases the process-local quarantine. Late/failed completion
+        // leaves the old session tracked and cannot open a new input lane.
+        activeStopQuarantines.delete(session.sessionId);
+        if (owner !== undefined) {
+          owner.terminal = terminal;
+          owner.nativeTerminalEvidence = null;
+          owner.unconfirmed = false;
+          owner.stopPromise ??= Promise.resolve(owner.terminal);
+          trimStartOwners();
+        }
       };
-      if (owner !== undefined) {
-        owner.nativeTerminal = terminal;
-        owner.nativeTerminalEvidence = nativeClose.value;
-      }
-      if (
-        owner?.discoveryUnconfirmed ||
-        (discoveryStop.status === 'rejected' && owner !== undefined && owner.discoveries.size !== 0)
-      ) {
-        if (owner !== undefined) owner.unconfirmed = true;
+      // A failed start whose native session was never delivered is E3 until PR11.
+      if (!terminationEnabled || !startOwners.get(session.sessionId)?.delivered) return close();
+      const owner = startOwners.get(session.sessionId);
+      const generation = owner?.helperGeneration;
+      if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      }
-      const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
-      if (confirming !== undefined) await confirming;
-      if (owner?.terminated) return terminatedStart(owner);
-      if (
-        terminationEnabled &&
-        !owner?.receiptConfirmed &&
-        owner?.helperGeneration != null &&
-        (ledgerState(owner.helperGeneration).killRequested ||
-          ledgerState(owner.helperGeneration).exitConfirmed)
-      )
-        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      sessions.delete(session.sessionId);
-      classifierBindings.delete(session.sessionId);
-      inputAttemptsBySession.delete(session.sessionId);
-      stopEpochs.delete(session.sessionId);
-      revisionsBySession.delete(session.sessionId);
-      confirmedClosed.add(session.sessionId);
-      if (confirmedClosed.size > 128)
-        confirmedClosed.delete(confirmedClosed.values().next().value!);
-      // Only a verified close releases the process-local quarantine. Late/failed completion
-      // leaves the old session tracked and cannot open a new input lane.
-      activeStopQuarantines.delete(session.sessionId);
-      if (owner !== undefined) {
-        owner.terminal = terminal;
-        owner.nativeTerminalEvidence = null;
-        owner.unconfirmed = false;
-        owner.stopPromise ??= Promise.resolve(owner.terminal);
-        trimStartOwners();
+      const outcome = () => {
+        const state = ledgerState(generation);
+        return state.exitConfirmed
+          ? {
+              kind: 'terminated' as const,
+              helperGeneration: generation,
+              result:
+                state.result === 'terminated_target_suspect'
+                  ? ('terminated_target_suspect' as const)
+                  : ('terminated_clean' as const),
+            }
+          : { kind: 'termination_requested' as const };
+      };
+      if (ledgerState(generation).exitConfirmed) return outcome();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          close(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('native_stop_unconfirmed')),
+              options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } catch {
+        if (ledgerState(generation).exitConfirmed) return outcome();
+        // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
+        return await new Promise<ReturnType<typeof outcome>>((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            unsubscribe();
+            clearTimeout(wait);
+            resolve(outcome());
+          };
+          const unsubscribe = stopDelivery.subscribe((event) => {
+            if (
+              event.kind === 'notification' &&
+              event.notification.owner.helperGeneration === generation &&
+              (event.notification.phase === 'exit_confirmed' ||
+                ledgerState(generation).exitWaitExceeded)
+            )
+              finish();
+          });
+          const wait = setTimeout(finish, 2_000);
+          addon?.requestWindowsTermination?.();
+          if (ledgerState(generation).exitConfirmed || ledgerState(generation).exitWaitExceeded)
+            finish();
+        });
+      } finally {
+        clearTimeout(timer);
       }
     },
   };

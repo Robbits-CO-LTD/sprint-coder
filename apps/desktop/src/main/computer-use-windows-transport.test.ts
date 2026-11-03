@@ -5028,6 +5028,9 @@ int main() {
             (value as Record<string, unknown>[]).map((row) => ({
               ...row,
               pid: control.discoveryPid ?? control.pid,
+              ...(metadata['includeStartIdentity'] === true
+                ? { processStartTime: control.creationTime }
+                : {}),
             })),
           ];
         },
@@ -5670,6 +5673,9 @@ int main() {
           newSessionId: 'restored-session',
           trustedActivation: true,
         };
+        await expect(target.host.approveWindowsQuarantineResume!(request)).resolves.toBe(false);
+        const windows = await target.host.listWindows(profile);
+        expect(windows[0]).toMatchObject({ windowId: '100', quarantineResume: true });
         await expect(
           target.host.approveWindowsQuarantineResume!({ ...request, trustedActivation: false }),
         ).resolves.toBe(false);
@@ -5771,7 +5777,74 @@ int main() {
 
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
-  it('PR7b rejects a crash-raced Host close until exit transfer succeeds', async () => {
+  it('PR10 leaves E3 start-receipt cleanup on the legacy deadline', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        startSession: async (input) => {
+          const result = await addon.startSession!(input);
+          if (typeof result !== 'object' || result === null)
+            throw new Error('synthetic invalid response');
+          return { ...result, inputAttemptCount: -1 };
+        },
+      }),
+      true,
+    );
+    await target.host.listWindows(profile);
+    target.helper().holdOnly('close_session');
+    const starting = startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.killCalls).toBe(0);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await starting;
+  });
+
+  it.each([true, false])('PR10 bounds cancel + close by 1 + C + T (exit=%s)', async (exit) => {
+    const child = new ControlledHelperChild();
+    const kill = vi.spyOn(child, 'kill');
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'session-a', 'turn-a');
+    target.helper().holdOnly('close_session');
+    let settled = false;
+    target.helper().holdOnly('cancel');
+    const closing = target.host
+      .cancel(session, 1)
+      .catch(() => undefined)
+      .then(() => target.host.close(session))
+      .then(
+        (result) => {
+          settled = true;
+          return result;
+        },
+        () => {
+          settled = true;
+          return null;
+        },
+      );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
+    expect(kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(kill).toHaveBeenCalledTimes(1);
+    if (exit) child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(settled).toBe(true);
+    expect(await closing).toMatchObject(
+      exit ? { kind: 'terminated', result: 'terminated_clean' } : { kind: 'termination_requested' },
+    );
+  });
+
+  it('PR7b confirms a crash-raced close while blocking the target until exit transfer succeeds', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -5782,25 +5855,37 @@ int main() {
     await target.dispatch(session);
     target.control.reflectWait = gate;
     target.control.deleteCalls.length = 0;
-    const close = target.host.close(session).then(
-      () => 'resolved',
-      () => 'rejected',
-    );
+    const close = target.host.close(session);
     await vi.advanceTimersByTimeAsync(0);
     expect(target.control.deleteCalls).toEqual(['session-a']);
     target.control.failTransfer = true;
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     release();
-    expect(await close).toBe('rejected');
+    expect(await close).toEqual({
+      kind: 'terminated',
+      result: 'terminated_target_suspect',
+      helperGeneration: 1,
+    });
     expect(target.rows.size).toBe(1);
+    const exit = decide.mock.results.find(
+      (_, index) => decide.mock.calls[index]![1].kind === 'exit_confirmed',
+    )!.value;
+    expect(exit.state.nativeBlockers.length).toBeGreaterThan(0);
+    await expect(startSession(target.host, 'blocked-session', 'blocked-turn')).rejects.toThrow(
+      'native_stop_unconfirmed',
+    );
+    expect(decide.mock.results.at(-1)!.value.state.nativeBlockers.length).toBeGreaterThan(0);
     target.control.failTransfer = false;
     target.control.failReflect = false;
     await target.host.listTargets!().catch(() => undefined);
     await expect(target.host.close(session)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_target_suspect',
       helperGeneration: 1,
     });
+    expect(decide.mock.results.at(-1)!.value.state.nativeBlockers).toHaveLength(0);
+    decide.mockRestore();
   });
   it('PR7b refuses new discovery stops after kill without writing to the old pipe', async () => {
     const child = new ControlledHelperChild();
@@ -5907,6 +5992,7 @@ int main() {
     });
     await expect(target.host.close(session)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_target_suspect',
       helperGeneration: 1,
     });
     expect(target.control.transfers).toBe(transfers);
@@ -5940,9 +6026,14 @@ int main() {
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     release();
-    expect(await stop).toEqual({ kind: 'terminated', helperGeneration: 1 });
+    expect(await stop).toEqual({
+      kind: 'terminated',
+      result: 'terminated_clean',
+      helperGeneration: 1,
+    });
     await expect(target.host.stopPendingStart!('pending')).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_clean',
       helperGeneration: 1,
     });
   });
@@ -5959,10 +6050,12 @@ int main() {
     await vi.advanceTimersByTimeAsync(0);
     await expect(target.host.close(first)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_clean',
       helperGeneration: 1,
     });
     await expect(target.host.close(second)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_clean',
       helperGeneration: 1,
     });
     expect(spawn).toHaveBeenCalledTimes(1);
@@ -6016,6 +6109,7 @@ int main() {
     expect(target.addon.hasUnconfirmedSemanticInputs!()).toBe(false);
     await expect(target.host.close(session)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_target_suspect',
       helperGeneration: 1,
     });
     expect(target.quarantines).toHaveLength(1);
@@ -6050,13 +6144,17 @@ int main() {
         expect(target.rows.size).toBe(0);
         expect(target.host.availability().control).toBe(false);
         expect(child.killCalls).toBe(1);
-        expect(await close).toBe('rejected');
+        if (entry === 'close') {
+          await vi.advanceTimersByTimeAsync(2_000);
+          expect(await close).toBe('resolved');
+        } else expect(await close).toBe('rejected');
         child.emit('exit', 0, null);
         await vi.advanceTimersByTimeAsync(0);
         expect(decide.mock.results.at(-1)!.value.state.result).toBe('terminated_clean');
         expect(target.quarantines).toEqual([]);
         await expect(target.host.close(session)).resolves.toEqual({
           kind: 'terminated',
+          result: 'terminated_clean',
           helperGeneration: 1,
         });
       } finally {
@@ -6273,6 +6371,7 @@ int main() {
     expect((await target.dispatch(fresh)).outcome).toBe('resolved');
     await expect(target.host.close(old)).resolves.toEqual({
       kind: 'terminated',
+      result: 'terminated_target_suspect',
       helperGeneration: 1,
     });
     await expect(target.host.close(fresh)).resolves.toBeUndefined();
@@ -7595,7 +7694,7 @@ int main() {
     }
   });
   it.each(['ledger-only', 'switch-only'] as const)(
-    'PR7a %s preserves the PR6 exit path',
+    'PR10 %s preserves the legacy gate or refuses missing storage',
     async (mode) => {
       const configure = vi.fn();
       const adapt = (addon: ComputerUseNativeAddon) => ({
@@ -7611,9 +7710,16 @@ int main() {
               { windowsKillStopTermination: { enabled: true } },
               adapt,
             );
-      const session = await startSession(target.host, 'session-1', 'turn-1');
-      await target.host.close(session);
-      expect(children[0]!.killed).toBe(true);
+      if (mode === 'switch-only') {
+        await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
+          'native_controller_unavailable',
+        );
+        expect(children).toHaveLength(0);
+      } else {
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        await target.host.close(session);
+        expect(children[0]!.killed).toBe(true);
+      }
       expect(configure).not.toHaveBeenCalled();
     },
   );

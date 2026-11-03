@@ -147,6 +147,7 @@ const eventSchema = z.discriminatedUnion('type', [
       ...base,
       type: z.literal('stop_acknowledged'),
       nativeAcknowledged: z.boolean(),
+      terminationResult: z.enum(['terminated_clean', 'terminated_target_suspect']).optional(),
       inputAttemptCount: integer.optional(),
       cancelEpoch: integer.optional(),
     })
