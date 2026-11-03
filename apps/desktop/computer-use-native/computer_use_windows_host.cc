@@ -104,9 +104,11 @@
 #include "computer_use_windows_test_hang.h"
 #include "computer_use_windows_approval_handlers.h"
 #include "computer_use_windows_approval_round_trip.h"
+#include "computer_use_windows_background_monitor.h"
 
 namespace {
 #include "computer_use_windows_host_common.inc"
+#include "computer_use_windows_host_background_monitor.inc"
 #include "computer_use_windows_host_identity.inc"
 #include "computer_use_windows_host_target_facts.inc"
 #include "computer_use_windows_host_discovery.inc"

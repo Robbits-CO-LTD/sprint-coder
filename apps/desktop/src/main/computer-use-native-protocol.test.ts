@@ -15,6 +15,35 @@ import {
 } from './computer-use-native-protocol';
 import { parseNativeHandshake } from './computer-use-native-handshake';
 
+describe('Windows background monitor (P3a)', () => {
+  it('registers the native BG02/BG03 matrix without opening the public gate', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckBackgroundMonitor()');
+    expect(native('computer_use_windows_background_monitor_test.h')).toContain(
+      'BG03_lost_event_cannot_bypass_epoch',
+    );
+    expect(native('computer_use_windows_host_background_monitor.inc')).toContain('WH_MOUSE_LL');
+    const validation = native('computer_use_windows_host_session.inc').split(
+      'bool ValidateWindowsSession(',
+    )[1]!;
+    expect(validation.split('bool ReadExact(')[0]).toContain(
+      'if (!WindowsBackgroundMonitorCurrent(session))',
+    );
+    const start = native('computer_use_windows_host_v2_targets.inc');
+    expect(start).toContain(
+      'StartWindowsBackgroundMonitor(session, input.pid, input.window, false, reason)',
+    );
+    expect(start).toContain(
+      'StartWindowsBackgroundMonitor(session, input.pid, input.window, input.explicit_resume, reason)',
+    );
+    expect(native('computer_use_windows_background_monitor_test.cc')).toContain(
+      '#include "computer_use_windows_host_background_monitor.inc"',
+    );
+    expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
+  });
+});
+
 describe('Windows approval round trip state (P3c)', () => {
   it('registers the native state machine and keeps the background gate closed', () => {
     const native = (name: string) =>
