@@ -98,6 +98,8 @@ struct ShadowUiaCapture {
   // The URL of the page (the Document in the chain), when there is one and it could be read.
   bool document_url_read = false;
   std::string document_url;
+  // N11-B metadata only. No action, approval, diagnostic or wire payload consumes this state.
+  OriginState page_origin = OriginState::kUnknown;
   // The call or time budget ran out, or a property of the target failed to read.
   bool budget_exhausted = false;
   bool read_failed = false;

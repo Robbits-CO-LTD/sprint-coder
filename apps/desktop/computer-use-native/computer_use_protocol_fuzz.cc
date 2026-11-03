@@ -2959,6 +2959,7 @@ public:
   long core_calls = 0;
   long item_calls = 0;
   long url_calls = 0;
+  std::function<void()> url_read_hook;
   long value_calls = 0;
   Element last_tab = kNoElement;
   // Time that passes inside the shell lookup (a slow Explorer).
@@ -3060,6 +3061,7 @@ public:
                                std::string *output) override {
     Tick();
     ++url_calls;
+    if (url_read_hook) url_read_hook();
     const FakeUiaNode &node = nodes[element];
     if (node.url_result != ShadowReadResult::kOk) return node.url_result;
     if (!node.has_url) return ShadowReadResult::kAbsent;
@@ -3186,6 +3188,164 @@ struct FakeExplorer {
     form.Node(item).item_is_folder = folder;
   }
 };
+
+bool CheckWindowsPageOrigin() {
+  const auto page = [] {
+    FakeForm form;
+    form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+    form.source.process_path = "C:\\Apps\\chrome.exe";
+    form.Node(form.pane).control_type = "Document";
+    form.Node(form.pane).has_url = true;
+    form.Node(form.pane).url = "https://login.example.test/path";
+    return form;
+  };
+  const auto read = [](FakeForm &form) {
+    return WindowsShadowReader(form.source).Capture("click", "");
+  };
+  {
+    auto form = page();
+    WindowsShadowReader reader(form.source);
+    const auto capture = reader.Capture("click", "");
+    if (!Check(capture.page_origin == OriginState::kSensitive,
+               "winorigin-unique-chrome-document")) return false;
+    auto ignored = capture;
+    ignored.page_origin = OriginState::kUnknown;
+    const auto before = WindowsShadowClassify(capture, UiaRequest("click"), true);
+    const auto after = WindowsShadowClassify(ignored, UiaRequest("click"), true);
+    if (!Check(before.kind == after.kind && before.gaps == after.gaps,
+               "winorigin-metadata-never-enables-actions")) return false;
+    form.Node(form.pane).url.clear();
+    if (!Check(reader.Capture("click", "").page_origin == OriginState::kUnknown,
+               "winorigin-empty-never-reuses-origin")) return false;
+  }
+  // Origin-only work must not change the legacy capture when its own budget runs out.
+  for (int mode = 0; mode < 3; ++mode) {
+    auto baseline = page();
+    baseline.source.process_path = "C:\\Apps\\browser.exe"; // Skip Chrome-only metadata.
+    WindowsShadowReader baseline_reader(baseline.source);
+    const auto before = baseline_reader.Capture("click", "");
+    auto form = page();
+    if (mode == 0) {
+      for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
+    } else {
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2)
+          form.source.now += mode == 1 ? 30'000'001 : kShadowDeadlineNs + 1;
+      };
+    }
+    WindowsShadowReader reader(form.source);
+    const auto capture = reader.Capture("click", "");
+    if (!Check(!capture.budget_exhausted && !capture.read_failed &&
+                   capture.page_origin == OriginState::kUnknown &&
+                   capture.chain_reached_root && capture.neighbors_complete &&
+                   capture.chain.size() == before.chain.size() &&
+                   capture.neighbors.size() == before.neighbors.size() &&
+                   capture.document_url == before.document_url &&
+                   form.source.calls - baseline.source.calls <= 128 &&
+                   reader.Gate().Calls() == baseline_reader.Gate().Calls(),
+               "winorigin-budget-isolated-from-legacy-capture")) return false;
+    const auto old_record = WindowsShadowClassify(before, UiaRequest("click"), true);
+    const auto record = WindowsShadowClassify(capture, UiaRequest("click"), true);
+    const auto old_interlock = EvaluateWindowsInterlockFromCapture(before, UiaRequest("click"), false);
+    const auto interlock = EvaluateWindowsInterlockFromCapture(capture, UiaRequest("click"), false);
+    if (!Check(record.kind == old_record.kind && record.gaps == old_record.gaps &&
+                   record.reason == old_record.reason && record.effect_class == old_record.effect_class &&
+                   interlock.no_verdict == old_interlock.no_verdict &&
+                   interlock.no_verdict != sprint_coder::computer_use::InterlockNoVerdict::kBudget &&
+                   interlock.strict_verdict.reason == old_interlock.strict_verdict.reason &&
+                   interlock.strict_verdict.outcome == old_interlock.strict_verdict.outcome &&
+                   interlock.verdict.reason == old_interlock.verdict.reason &&
+                   interlock.verdict.outcome == old_interlock.verdict.outcome,
+               "winorigin-budget-preserves-classification-and-interlock")) return false;
+    std::string signature;
+    (void)reader.ReadTargetSignature(&signature);
+    (void)baseline_reader.ReadTargetSignature(&signature);
+    if (!Check(!reader.Gate().Stopped() &&
+                   reader.Gate().Calls() == baseline_reader.Gate().Calls(),
+               "winorigin-budget-preserves-subsequent-read")) return false;
+  }
+  for (const auto result : {ShadowReadResult::kAbsent, ShadowReadResult::kFailed,
+                            ShadowReadResult::kTooLong, ShadowReadResult::kStopped}) {
+    auto form = page();
+    form.Node(form.pane).url_result = result;
+    if (!Check(read(form).page_origin == OriginState::kUnknown,
+               "winorigin-url-read-gap")) return false;
+  }
+  for (const auto path : {"C:\\Apps\\msedge.exe", "C:\\Apps\\firefox.exe",
+                          "C:\\Apps\\browser.exe", "C:\\Apps\\electron.exe"}) {
+    auto form = page();
+    form.source.process_path = path;
+    if (!Check(read(form).page_origin == OriginState::kUnknown,
+               "winorigin-unmeasured-browser")) return false;
+  }
+  for (int mode = 0; mode < 21; ++mode) {
+    auto form = page();
+    switch (mode) {
+    case 0: form.source.Add(form.window, "Document"); break;
+    case 1: form.Node(form.pane).parent = -1; break;
+    case 2: form.Node(form.pane).parent_result = ShadowReadResult::kFailed; break;
+    case 3: form.source.root_result = ShadowReadResult::kFailed; break;
+    case 4: form.Node(form.window).children_result = ShadowReadResult::kFailed; break;
+    case 5: form.source.same_fails_with = form.window; break;
+    case 6: form.source.step_ns = kShadowDeadlineNs / 4; break;
+    case 7: form.source.cancel_after = 20; break;
+    case 8:
+      for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
+      break;
+    case 9: {
+      int parent = form.pane;
+      for (int i = 0; i < 20; ++i) parent = form.source.Add(parent, "Pane");
+      form.source.point = parent;
+      break;
+    }
+    case 10: form.source.point = form.window; break;
+    case 11: form.Node(form.window).class_name = "MozillaWindowClass"; break;
+    case 12:
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2) form.source.now += kShadowDeadlineNs + 1;
+      };
+      break;
+    case 13:
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2) form.Node(form.pane).parent = -1;
+      };
+      break;
+    case 14:
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2) form.source.cancel_after = form.source.calls;
+      };
+      break;
+    case 15: {
+      int parent = form.window;
+      for (int i = 0; i < 20; ++i) parent = form.source.Add(parent, "Pane");
+      break;
+    }
+    case 16: form.Node(form.pane).url = std::string(2049, 'x'); break;
+    case 17: form.source.process_result = ShadowReadResult::kFailed; break;
+    case 18:
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2)
+          form.Node(form.pane).url_result = ShadowReadResult::kFailed;
+      };
+      break;
+    case 19:
+      form.source.url_read_hook = [&] {
+        if (form.source.url_calls == 2) form.Node(form.pane).url.clear();
+      };
+      break;
+    case 20:
+      form.source.point = form.source.Add(form.source.Add(form.desktop, "Window"), "Document");
+      break;
+    }
+    if (!Check(read(form).page_origin == OriginState::kUnknown,
+               "winorigin-ambiguous-incomplete-or-unbound")) {
+      std::cerr << "winorigin case: " << mode << '\n';
+      return false;
+    }
+  }
+  std::cout << "Computer Use Windows page origin: PASS\n";
+  return true;
+}
 
 bool CheckWindowsShadowReader() {
   // A click on a field: the target, its parents up to the bound window, the other children of the
@@ -9530,6 +9690,7 @@ int main() {
   if (!CheckWindowsShadowCore()) return 1;
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
+  if (!CheckWindowsPageOrigin()) return 1;
   if (!CheckWindowsShadowScheduler()) return 1;
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
