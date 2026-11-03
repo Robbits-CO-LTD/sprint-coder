@@ -243,6 +243,7 @@ const preamble = String.raw`
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include "computer_use_native_approval_ticket.h"
 using HRESULT=std::int32_t;
 using DWORD=std::uint32_t;
 using HWND=void*;
@@ -286,6 +287,8 @@ struct Control { std::mutex stop_mutex; std::atomic<std::uint64_t> stop_serial{0
 Control& WindowsTargetListControl(){static auto* control=new Control;return *control;}
 std::atomic<std::uint64_t> cancellation_epoch{0};
 std::atomic<bool> parent_process_dead{false};
+// #991 N8-2c: the semantic claim also checks an approved deadline; ordinary work carries none.
+std::uint64_t MonotonicNowNs(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
 struct Gate {
   std::mutex mutex;std::condition_variable ready;bool entered=false,released=false;
   void Hold(){std::unique_lock lock(mutex);entered=true;ready.notify_all();ready.wait(lock,[&]{return released;});}

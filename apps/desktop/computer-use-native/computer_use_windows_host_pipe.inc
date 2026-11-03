@@ -400,6 +400,12 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
         protocol_version != kProtocolVersion || api_version != kApiVersion)
       return Respond(pipe, request, MessageType::kError,
                      ErrorPayload("HANDSHAKE_MISMATCH"));
+    std::uint64_t helper_generation = 0;
+    (void)ReadJsonUint64(metadata, "helperGeneration", &helper_generation);
+    if (helper_generation > sprint_coder::computer_use::kNativeApprovalGenerationMax ||
+        (*handshaken && helper_generation != windows_helper_generation))
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("HANDSHAKE_MISMATCH"));
+    windows_helper_generation = helper_generation;
     *handshaken = true;
     if (!Respond(pipe, request, MessageType::kHandshakeResult,
                  ProbeJson(probe)))
@@ -492,6 +498,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     break;
   }
   case MessageType::kCancel: {
+    const auto approval = approval_states.find(FrameIdKey(request.header.session_id));
+    if (approval != approval_states.end()) approval->second.Invalidate();
     WindowsSession *session = FindWindowsSession(request);
     std::uint64_t requested_epoch = 0;
     if (session == nullptr ||
@@ -594,6 +602,13 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                       : ErrorPayload(reason, accepted))) {
       return false;
     }
+    break;
+  }
+  case MessageType::kApprovalApprove:
+  case MessageType::kApprovalDiscard:
+  case MessageType::kDispatchApproved: {
+    const WindowsV1UiaPath approval_uia_path;
+    if (!HandleWindowsApproval(pipe, request, metadata, type)) return false;
     break;
   }
   default:

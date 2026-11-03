@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, win32 } from 'node:path';
 import Database from 'better-sqlite3';
+import { secureLogger } from './secure-logger';
 import type { WindowsDispatchLedgerStorage } from './computer-use-native-host';
 import {
   isStoredWindowsQuarantine,
@@ -18,6 +19,11 @@ export function windowsLedgerInstanceId(userData: string): string {
     canonical = realpathSync.native(userData);
   } catch {
     // Profiles that do not exist yet retain the normalized-path fallback.
+    secureLogger.warn(
+      'Windows ledger profile realpath unavailable; using normalized path',
+      undefined,
+      { event: 'computer_use.windows_ledger.realpath_fallback' },
+    );
   }
   const normalized = win32
     .normalize(canonical)

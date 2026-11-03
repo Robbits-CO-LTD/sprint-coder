@@ -1158,11 +1158,9 @@ class WindowsComputerUseHelperClient {
 
   private async ensureConnected(operation = ''): Promise<void> {
     if (this.termination !== undefined) {
-      await this.termination.prepare(
-        isComputerUseStopOperation(operation) && this.socket !== null
-          ? 'stop_existing_helper'
-          : 'work',
-      );
+      const stopExistingHelper = isComputerUseStopOperation(operation) && this.socket !== null;
+      await this.termination.prepare(stopExistingHelper ? 'stop_existing_helper' : 'work');
+      if (stopExistingHelper && this.socket === null) throw new Error('native_stop_unconfirmed');
       if ([...this.generations.values()].some((record) => record.killRequested && !record.exited))
         throw new Error('native_stop_unconfirmed');
     }

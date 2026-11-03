@@ -225,6 +225,8 @@ export type ComputerUseNativeHostOptions = Readonly<{
    * PR5b's start/resume ledger gate immediately before socket.write is also required.
    * PR5b Host identity wiring and pre-send recording are complete; activate with PR10.
    * New-start quarantine matching (PR8) remains a separate prerequisite.
+   * Generation-checked quarantine release and approval of restored quarantines without old
+   * session memory (PR9) are also required before activation.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**

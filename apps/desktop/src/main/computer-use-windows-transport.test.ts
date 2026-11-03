@@ -1,3 +1,4 @@
+import type * as FsPromises from 'node:fs/promises';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type {
   WindowsStopDeliveryEvent,
@@ -86,7 +87,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const actual = await importOriginal<typeof FsPromises>();
   let sequence = 0;
   return {
     ...actual,
@@ -772,6 +773,29 @@ describe('Computer Use Windows helper transport', () => {
       target.addon.cancel!({ sessionId: 'old-session', cancelEpoch: 1 }),
     ).rejects.toThrow('native_stop_unconfirmed');
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('PR10 refuses Stop without reconnecting when the helper exits during prepare', async () => {
+    const target = createTarget(responders());
+    const prepare = vi.fn(async (operation?: 'work' | 'stop_existing_helper') => {
+      if (operation === 'stop_existing_helper') {
+        children[0]!.emit('exit', 0, null);
+        await Promise.resolve();
+      }
+    });
+    target.addon.configureWindowsTermination!({
+      prepare,
+      started: () => undefined,
+      event: () => undefined,
+      exited: () => undefined,
+    });
+    await target.addon.startSession!({ profile, sessionId: 'keeper' });
+    await expect(target.addon.cancel!({ sessionId: 'keeper', cancelEpoch: 1 })).rejects.toThrow(
+      'native_stop_unconfirmed',
+    );
+    expect(prepare).toHaveBeenLastCalledWith('stop_existing_helper');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(1);
   });
 
   it('PR10 keeps termination disabled by default even with a ledger', () => {
@@ -3669,14 +3693,19 @@ describe('Computer Use Windows helper transport', () => {
 #include <string_view>
 struct WindowsSession {};
 struct RECT {};
+// An ordinary dispatch: no approved effect is handed to the semantic owner (#991 N8-2c).
+enum class ApprovedEffect { kInvalid };
 std::atomic<std::uint64_t> cancellation_epoch{0};
 bool DispatchWindowsSemanticAction(const WindowsSession&, const RECT&, std::uint64_t,
-    const std::string&, const std::string&, bool* accepted, std::string* reason) {
+    const std::string&, const std::string&, bool* accepted, std::string* reason,
+    ApprovedEffect effect) {
+  if (effect != ApprovedEffect::kInvalid) return false;
   *accepted = true; *reason = "semantic_input_in_flight"; return false;
 }
 bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t) { return true; }
 bool PublicDispatch(std::string* result, std::string* reason, bool* accepted) {
   WindowsSession session; RECT bounds; std::uint64_t expected_epoch = 0;
+  const ApprovedEffect approved_effect = ApprovedEffect::kInvalid;
   std::string kind = "invoke", metadata = "{}"; bool dispatched = false;
   ${native.slice(start + '} else '.length, end)}
 ${native.slice(errorStart, errorEnd)}

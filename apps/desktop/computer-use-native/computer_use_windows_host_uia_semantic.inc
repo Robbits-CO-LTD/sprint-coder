@@ -1,5 +1,7 @@
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
+  std::uint64_t approved_started_ns = 0;
+  std::uint64_t approved_deadline_ns = 0;
   std::string session_id;
   std::shared_ptr<std::atomic<std::uint64_t>> attempts;
   // stop_mutex protects the claim and its terminal boundary.
@@ -76,6 +78,9 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
   {
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
     if (WindowsSemanticOperations().active.get() != pending || pending->session_id.empty() ||
+        (pending->approved_deadline_ns != 0 &&
+         (MonotonicNowNs() < pending->approved_started_ns ||
+          MonotonicNowNs() >= pending->approved_deadline_ns)) ||
         pending->input_in_flight || pending->ever_claimed ||
         pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone ||
         !WindowsV1UiaMayCall()) return E_ABORT;
@@ -99,6 +104,8 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
 }
 
 struct WindowsSemanticWork {
+  sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+      sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
   std::uint32_t pid = 0;
   HWND window = nullptr;
   std::string target_id;
@@ -114,6 +121,8 @@ struct WindowsUiaRisk {
   bool secure = false;
   bool high_impact = false;
   bool metadata_complete = false;
+  bool confirmation = false;
+  bool other = false;
 };
 
 std::string LowercaseAscii(std::string value) {
@@ -178,6 +187,9 @@ WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {
   // Version 1 excludes ordinary save/send/publish/delete labels from this
   // high-impact list.
   risk.high_impact = ContainsWindowsRiskText(normalized);
+  const auto split = sprint_coder::computer_use::ClassifyWindowsRiskText(normalized);
+  risk.confirmation = split.confirmation;
+  risk.other = split.other;
   risk.metadata_complete = true;
   return risk;
 }
@@ -215,6 +227,8 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
     merged.classified = merged.classified || risk.classified;
     merged.secure = merged.secure || risk.secure;
     merged.high_impact = merged.high_impact || risk.high_impact;
+    merged.confirmation = merged.confirmation || risk.confirmation;
+    merged.other = merged.other || risk.other;
     metadata_complete = metadata_complete && risk.metadata_complete;
     // An element that could not be read ends the climb: the facts are incomplete whatever the parents
     // say (ClassifyNativePreflightFacts puts incomplete metadata ahead of secure and high impact, so
@@ -605,12 +619,21 @@ bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
   return true;
 }
 
-bool RejectWindowsRisk(const WindowsUiaRisk &risk, std::string *reason) {
+bool RejectWindowsRisk(const WindowsUiaRisk &risk, std::string *reason,
+    sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+        sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   using namespace sprint_coder::computer_use;
   const auto decision = ClassifyNativePreflightFacts(
       {risk.metadata_complete, risk.classified, risk.secure, risk.high_impact});
-  if (NativePreflightAllowsDispatch(decision)) return false;
-  switch (decision.reason) {
+  // An approved dispatch is judged by the Windows approved-risk table for its claimed effect; every
+  // other dispatch keeps the V1 decision above unchanged.
+  const auto judged = approved_effect == NativeApprovalEffect::kInvalid
+      ? decision
+      : ClassifyWindowsNativeRisk(
+          {risk.classified, risk.secure, risk.high_impact, risk.confirmation, risk.other},
+          risk.metadata_complete, approved_effect);
+  if (NativePreflightAllowsDispatch(judged)) return false;
+  switch (judged.reason) {
     case NativePreflightReason::kSecure:
       *reason = "secure_field_blocked";
       break;
@@ -780,7 +803,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
     *reason = "stale_target";
     return false;
   }
-  if (RejectWindowsRisk(ClassifyWindowsUiaElement(target), reason)) {
+  if (RejectWindowsRisk(ClassifyWindowsUiaElement(target), reason, work.approved_effect)) {
     return false;
   }
   if (!AwaitWindowsSemanticValidation()) {
@@ -932,7 +955,9 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
 
 bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &expected,
                                    std::uint64_t expected_epoch, std::string_view kind,
-                                   const std::string &metadata, bool *accepted, std::string *reason) {
+                                   const std::string &metadata, bool *accepted, std::string *reason,
+                                   sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+                                       sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   *accepted = false;
   const WindowsV1UiaPath path;
   if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); return false; }
@@ -940,6 +965,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   snapshot.epoch = expected_epoch;
   if (!snapshot.stop_serial.has_value()) snapshot.stop_serial = WindowsValidationFrameStopSerial();
   auto work = std::make_unique<WindowsSemanticWork>();
+  work->approved_effect = approved_effect;
   if (!ReadJsonString(metadata, "targetId", &work->target_id) || work->target_id.empty() || work->target_id.size() > 128) {
     *reason = "target_required"; return false;
   }
@@ -950,6 +976,8 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   work->kind = std::string(kind);
   work->metadata = metadata;
   auto pending = std::make_shared<WindowsSemanticPending>();
+  pending->approved_started_ns = session.approved_started_ns;
+  pending->approved_deadline_ns = session.approved_deadline_ns;
   pending->session_id = session.session_id;
   pending->attempts = session.input_api_attempts;
   auto &control = WindowsTargetListControl();

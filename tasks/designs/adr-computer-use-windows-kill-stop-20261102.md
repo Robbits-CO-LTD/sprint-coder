@@ -94,6 +94,7 @@ Main が起こしていない helper の終了（crash、Stop 以外の `abortTr
 - SID ごとの既定 ACL を継承する固定の %LOCALAPPDATA%\Sprint Coder\computer-use\kill-stop.sqlite に保存する。userData に依存しない。better-sqlite3、WAL、busy_timeout 250 ms とし、Host の保存の期限 2 秒以内で競合を失敗として返す。
 - 台帳は (instanceId, helperGeneration, sessionId, requestId) で一意。instanceId は正規化した userData の絶対パスのハッシュで、Main の再起動をまたいで同じ。起動時に読む台帳は自分の instanceId のものだけ。対象の隔離（pid・作成時刻・理由）は同じ SID の全インスタンスで共有する。
 - transferReceipt は隔離の追加と台帳の削除を一つの transaction で行う。隔離を消さず、transferReceipt と restoreQuarantines はともに最初にコミットされた理由を保持し、再試行は冪等。接続ごとに書込みと完了を直列化する。並走時のコミット順と核の処理順は異なりうるが、理由は判定に使わない。
+- releaseQuarantine は版確認と identity による削除を一つの immediate transaction で行い、移管を妨げる未知の reason の行も R15 の終了照合または R17 の明示承認による解除の対象とする。世代付きの承認解除との結合試験は PR9（#1035）の main への merge 後の別の周で行い、それまでは既定で無効を維持する。
 - 起動復元と入口の共有隔離の再読取りが失敗した間は開始を拒否する。読めた正常行は使い、不正行・null・identity 欠損は R20 に従って破棄し、行の種類と破棄理由だけを診断へ渡す。復元用の状態を実行中の helper から分離し、再読取りで kill や保留中の移管を巻き戻さない。
 - PR4 は Host への注入と restoreWindowsLedger の入口まで。index.ts からは有効にせず、有効化は PR10。別インスタンスの隔離による拒否は pid と作成時刻が分かる対象で試験し、作成時刻が不明な新規開始の照合は PR8 に残す。
 

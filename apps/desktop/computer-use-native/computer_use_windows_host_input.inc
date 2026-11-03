@@ -75,7 +75,10 @@ std::string RequestPayloadDigest(const Frame &request) {
 bool RevalidateWindowsTarget(const WindowsSession &session,
                              const RECT &expected,
                              std::uint64_t expected_epoch) {
-  if (parent_process_dead.load(std::memory_order_acquire) ||
+  if ((session.approved_deadline_ns != 0 &&
+       (MonotonicNowNs() < session.approved_started_ns ||
+        MonotonicNowNs() >= session.approved_deadline_ns)) ||
+      parent_process_dead.load(std::memory_order_acquire) ||
       !session.has_observation || session.active_window == nullptr ||
       GetForegroundWindow() != session.active_window ||
       session.cancel_epoch != expected_epoch ||
@@ -98,8 +101,28 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
   if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
+  std::unique_lock approval_lock(WindowsTargetListControl().stop_mutex, std::defer_lock);
+  if (session.approved_deadline_ns != 0) {
+    approval_lock.lock();
+    const auto now = MonotonicNowNs();
+    if (now < session.approved_started_ns || now >= session.approved_deadline_ns ||
+        session.approved_helper_generation != windows_helper_generation ||
+        !WindowsValidationStillCurrent(expected_epoch, session.approved_stop_serial) ||
+        WindowsSemanticInputInFlightLocked()) return 0;
+  }
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
   return SendInput(count, events, sizeof(INPUT));
+}
+
+bool SetWindowsApprovedCursor(const WindowsSession &session, int x, int y) {
+  std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+  const auto now = MonotonicNowNs();
+  if (now < session.approved_started_ns || now >= session.approved_deadline_ns ||
+      session.approved_helper_generation != windows_helper_generation ||
+      !WindowsValidationStillCurrent(session.cancel_epoch, session.approved_stop_serial) ||
+      WindowsSemanticInputInFlightLocked()) return false;
+  session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+  return SetCursorPos(x, y) != FALSE;
 }
 
 WORD VirtualKeyForName(std::string_view key) {
@@ -492,7 +515,9 @@ bool WindowsActionPoint(const RECT &bounds, const std::string &metadata,
 
 bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
-                           std::string *reason, bool *accepted) {
+                           std::string *reason, bool *accepted,
+                           sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+                               sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   *accepted = false;
   if (WindowsSemanticInputInFlight()) { *reason = "semantic_input_in_flight"; return false; }
   const std::uint64_t expected_epoch = session.cancel_epoch;
@@ -505,7 +530,15 @@ bool DispatchWindowsAction(const WindowsSession &session,
   // again by the evaluation. A refusal is made before the first input API attempt, SetCursorPos or
   // SendInput. No verdict leaves the V1 guards below as they are.
   WindowsClickBasis click_basis;
-  {
+  if (approved_effect != sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
+    click_basis.tracked = session.approved_click_tracked;
+    click_basis.opens = session.approved_click_opens;
+    click_basis.input_read = session.approved_click_input_read;
+    click_basis.input_tick = session.approved_click_input_tick;
+  }
+  if (approved_effect != sprint_coder::computer_use::NativeApprovalEffect::kInvalid &&
+      session.approved_deadline_ns == 0) { *reason = "native_approval_unavailable"; return false; }
+  if (approved_effect == sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
     const sprint_coder::computer_use::InterlockEvaluation evaluation =
         WindowsInterlockRefusal(session, metadata, kind, &click_basis);
     if (evaluation.Refuses()) {
@@ -545,7 +578,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
     std::string visual_signature;
     if (RejectWindowsRisk(ClassifyWindowsPoint({screen_x, screen_y},
                                                session.pid, &visual_signature),
-                          reason))
+                          reason, approved_effect))
       return false;
     if (visual_signature.empty() ||
         !session.visual_control_signatures.contains(visual_signature)) {
@@ -562,8 +595,14 @@ bool DispatchWindowsAction(const WindowsSession &session,
         *reason = "stale_target";
       return false;
     }
-    session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-    if (!SetCursorPos(screen_x, screen_y)) {
+    bool cursor_set = false;
+    if (session.approved_deadline_ns != 0)
+      cursor_set = SetWindowsApprovedCursor(session, screen_x, screen_y);
+    else {
+      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+      cursor_set = SetCursorPos(screen_x, screen_y) != FALSE;
+    }
+    if (!cursor_set) {
       *reason = "input_unavailable";
       return false;
     }
@@ -571,7 +610,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
     if (RejectWindowsRisk(ClassifyWindowsPoint({screen_x, screen_y},
                                                session.pid,
                                                &current_visual_signature),
-                          reason))
+                          reason, approved_effect))
       return false;
     if (current_visual_signature.empty() ||
         !session.visual_control_signatures.contains(current_visual_signature)) {
@@ -622,7 +661,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
     std::string visual_signature;
     if (RejectWindowsRisk(
             ClassifyWindowsPoint(point, session.pid, &visual_signature),
-            reason))
+            reason, approved_effect))
       return false;
     if (visual_signature.empty() ||
         !session.visual_control_signatures.contains(visual_signature)) {
@@ -636,15 +675,21 @@ bool DispatchWindowsAction(const WindowsSession &session,
         *reason = "stale_target";
       return false;
     }
-    session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-    if (!SetCursorPos(point.x, point.y)) {
+    bool cursor_set = false;
+    if (session.approved_deadline_ns != 0)
+      cursor_set = SetWindowsApprovedCursor(session, point.x, point.y);
+    else {
+      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+      cursor_set = SetCursorPos(point.x, point.y) != FALSE;
+    }
+    if (!cursor_set) {
       *reason = "input_unavailable";
       return false;
     }
     std::string current_visual_signature;
     if (RejectWindowsRisk(
             ClassifyWindowsPoint(point, session.pid, &current_visual_signature),
-            reason))
+            reason, approved_effect))
       return false;
     if (current_visual_signature.empty() ||
         !session.visual_control_signatures.contains(current_visual_signature)) {
@@ -693,7 +738,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "invalid_key";
       return false;
     }
-    if (RejectWindowsRisk(ClassifyWindowsFocusedElement(session.pid), reason))
+    if (RejectWindowsRisk(ClassifyWindowsFocusedElement(session.pid), reason, approved_effect))
       return false;
     if (!RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       *reason = "stale_target";
@@ -718,7 +763,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "invalid_text";
       return false;
     }
-    if (RejectWindowsRisk(ClassifyWindowsFocusedElement(session.pid), reason))
+    if (RejectWindowsRisk(ClassifyWindowsFocusedElement(session.pid), reason, approved_effect))
       return false;
     dispatched = true;
     for (const auto scalar : scalars) {
@@ -732,7 +777,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
              kind == "toggle" || kind == "expand_collapse") {
     dispatched =
         DispatchWindowsSemanticAction(session, bounds, expected_epoch, kind,
-                                      metadata, accepted, reason) &&
+                                      metadata, accepted, reason, approved_effect) &&
         RevalidateWindowsTarget(session, bounds, expected_epoch);
     if (!dispatched && *accepted && reason->empty())
       *reason = "input_not_confirmed";

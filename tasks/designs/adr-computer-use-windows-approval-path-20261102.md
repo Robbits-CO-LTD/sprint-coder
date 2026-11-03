@@ -247,6 +247,13 @@ D-7、AC-4 / V2 Q1 の「E2 / E3 は単発承認、上限クラスは操作ご�
 
 現状の根拠は各 §2 の file:line に記載した。N1 による移動後のシンボルを追い、Windows の分割先と行を更新した。kill-stop の正式な wire / generation 通知名は別 PR の確定結果と合わせる。#777 / N12 の人の実測結果、Windows の 2-A と C6 の PASS は未確認であり、§2.6 の公開条件として残る。
 
+### 5.1 N8-2c の追跡メモ（#991 / PR #1036）
+
+- gate を開いた preflight は、Offer の一回の計測で振り分ける（`RouteWindowsApprovalPreflight`）。経路は三つ。eligible なら offer。takeover、計測不能、offer できない approval、offer の失敗は拒否する（ordinary ticket にしない）。計測した ordinary / blocked と、一文字を超える type（承認の対象外）は既存の interlock へ渡す。interlock は approval を approval_closed で拒否する。
+- 承認計測の worker には値で所有したものだけを渡す（`WindowsApprovalOwnedRequest`）。ShadowRequestInfo の view は worker の中で作る。
+- click_opens の読み取りは承認計測にも置く（lane 上、worker の前、値で渡す）。interlock の入口は通常の preflight と dispatch 専用で再利用できない。また Offer の basis はオーナーの承認入力より前の input time になる。
+- host 結線の試験は N8-3 で seam / harness と一緒に置く。対象は、ReadWindowsApprovalReference の generation 欠落・不一致と、preflight での ordinary slot の無効化である。N8-2c の固定は、可搬の route fixture と source pin までとする。
+
 ## 6. 改訂履歴
 
 - 2026-11-02: Windows の承認 gate、単発 ticket、上限規則、digest 束縛、Stop との接点、承認 UI の設計を記載した。照合基準は 1899ca3c である。

@@ -449,7 +449,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // ClassifyNativePreflightFacts (checked in the harness) puts first of all as unclassified, and
     // RejectWindowsRisk rejects as target_unclassified.
     expect(c).toContain(
-      'struct WindowsUiaRisk { bool classified = false; bool secure = false; bool high_impact = false; bool metadata_complete = false; };',
+      'struct WindowsUiaRisk { bool classified = false; bool secure = false; bool high_impact = false; bool metadata_complete = false; bool confirmation = false; bool other = false; };',
     );
     expect(c).toContain('if (element == nullptr || !WindowsV1UiaMayCall()) return risk;');
     // The semantic action reads its patterns through ONE timed helper that releases what a read that did
