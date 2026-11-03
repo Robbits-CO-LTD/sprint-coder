@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ComputerUseEligibility } from '@sprint-coder/contracts';
 import { eligibilityDeclaration } from '../../../../build-computer-use-eligibility.mjs';
-import { checkComputerUseEligibility } from './computer-use-eligibility';
+import {
+  checkComputerUseEligibility,
+  computerUseApprovalPathEnabled,
+  computerUseClassifierRoute,
+  effectiveComputerUseEligibilityMode,
+  COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV,
+} from './computer-use-eligibility';
+import { parseNativeHandshake } from './computer-use-native-handshake';
+import { windowsV2EligibilityProblems } from '../../scripts/verify-windows-v2-eligibility.mjs';
 
 // D7-3: Main's three-way check against what a build declares and attests. The synthetic cases run
 // everywhere; the report case runs in CI right after a real build, with the manifest and the
@@ -18,6 +26,61 @@ function verdict(main: ComputerUseEligibility | null, built: ComputerUseEligibil
 }
 
 describe('Computer Use eligibility: Main against a built native (D7-3)', () => {
+  it.each([null, declaration('v1-allowlist', 'win32')])(
+    'legacy_v1_remains_accepted (Main %s)',
+    (compiled) => {
+      const legacy = parseNativeHandshake(
+        { protocolVersion: 1, apiVersion: 3, platform: 'win32', napiVersion: 10 },
+        'win32',
+      );
+      expect(legacy).toBeNull();
+      for (const manifest of [undefined, declaration('v1-allowlist', 'win32')]) {
+        expect(
+          checkComputerUseEligibility({ compiled, manifest, attested: legacy ?? undefined }),
+        ).toBe('ok');
+      }
+    },
+  );
+
+  it.each([false, true])('force_v1_reduces_classifier_and_approval (agent=%s)', (agent) => {
+    const effectiveMode = effectiveComputerUseEligibilityMode({
+      compiled: 'v2-denylist',
+      agentDrivenV2: true,
+      environment: { [COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV]: '1' },
+    });
+    const route = computerUseClassifierRoute({ agent, effectiveMode });
+    expect(effectiveMode).toBe('v1-allowlist');
+    expect(route).toBe('v1');
+    expect(
+      computerUseApprovalPathEnabled({
+        platform: 'win32',
+        methodsExported: true,
+        attestedClassifierVersion: 2,
+        effectiveMode,
+        route,
+        windowsApprovalReady: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('the current Windows V2 declaration cannot pass full-build verification yet', () => {
+    const eligibility = declaration('v2-denylist', 'win32');
+    expect(
+      windowsV2EligibilityProblems({
+        expected: eligibility,
+        compiled: { eligibility },
+        manifest: { eligibility },
+        handshake: {
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          eligibility,
+        },
+      }),
+    ).not.toEqual([]);
+  });
+
   it('opens for a matching mode on macOS and closes for every mixed pair', () => {
     const v1 = declaration('v1-allowlist', 'darwin');
     const v2 = declaration('v2-denylist', 'darwin');

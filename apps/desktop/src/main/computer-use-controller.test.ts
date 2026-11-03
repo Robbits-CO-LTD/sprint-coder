@@ -4622,6 +4622,64 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it.each([1, 2, targetEligibility.denyRulesetVersion('win32')!])(
+      'allowed_saved_version_is_preserved_by_lookup_and_listing (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const target = windowsProfile();
+        const grant = fixture.controller.createAppGrant(
+          computerAppGrantIdentityFrom(target.identity)!,
+          input,
+        );
+        const saved = { ...grant, denyRulesetVersion: version };
+        fixture.grants.set(grant.id, saved);
+        expect(fixture.controller.appGrantFor(target)).toEqual(saved);
+        expect(fixture.controller.listAppGrants().grants).toContainEqual(saved);
+        expect(fixture.grants.get(grant.id)).toEqual(saved);
+        await fixture.controller.dispose();
+      },
+    );
+
+    it.each([-1, 1.5, Infinity, targetEligibility.denyRulesetVersion('win32')! + 1])(
+      'unreadable_allowed_grant_survives_listing_without_becoming_usable (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const target = windowsProfile();
+        const grant = fixture.controller.createAppGrant(
+          computerAppGrantIdentityFrom(target.identity)!,
+          input,
+        );
+        const saved = { ...grant, denyRulesetVersion: version };
+        fixture.grants.set(grant.id, saved);
+        expect(fixture.controller.listAppGrants().grants).toContainEqual(saved);
+        expect(fixture.controller.appGrantFor(target)).toBeNull();
+        expect(fixture.grants.get(grant.id)).toEqual(saved);
+        await fixture.controller.dispose();
+      },
+    );
+
+    it.each([
+      1,
+      targetEligibility.denyRulesetVersion('win32')!,
+      targetEligibility.denyRulesetVersion('win32')! + 1,
+    ])('denied_class_revokes_even_a_future_saved_version (%s)', async (version) => {
+      const fixture = createFixture();
+      const target = windowsProfile('keepass.exe');
+      const saved = createComputerAppGrantFixtureStore().api.createComputerAppGrant({
+        identity: computerAppGrantIdentityFrom(target.identity)!,
+        displayName: 'Fixture',
+        denyRulesetVersion: version,
+        ...input,
+      });
+      fixture.grants.set(saved.id, saved);
+      expect(fixture.controller.appGrantFor(target)).toBeNull();
+      expect(fixture.grants.has(saved.id)).toBe(false);
+      expect(() =>
+        fixture.controller.createAppGrant(computerAppGrantIdentityFrom(target.identity)!, input),
+      ).toThrow();
+      await fixture.controller.dispose();
+    });
+
     it('listing_revokes_newly_denied_grants_without_a_profile', async () => {
       const fixture = createFixture();
       const legacy = createComputerAppGrantFixtureStore().api.createComputerAppGrant({
