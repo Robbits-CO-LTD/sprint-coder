@@ -18,6 +18,7 @@
 // Delivery remains deferred: owner routing (PR7c-2), sessionless E4 (PR11), settle duration.
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS } from './computer-use-native-host';
+import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
 import {
   decideWindowsStop,
   windowsDiscoveryStopResult,
@@ -59,6 +60,131 @@ const foreground: WindowsForegroundLedgerRow = {
   state: 'effect_unconfirmed',
 };
 const quarantine = { identity: target, reason: 'response_lost' } as const;
+describe('PR9 K-1 persistence entry', () => {
+  it.each(['failed', 'throw', 'pending'] as const)(
+    'keeps isolation when persistence is %s',
+    async (mode) => {
+      let current = state({ rows: [background] });
+      let completion: Promise<void> | undefined;
+      let finish: ((value: boolean) => void) | undefined;
+      const pending = new Promise<boolean>((resolve) => {
+        finish = resolve;
+      });
+      queueWindowsInputQuarantine({
+        row: background,
+        cause: 'takeover_conflict',
+        holdId: 'k1',
+        apply: (event) => {
+          const decision = decideWindowsStop(current, event);
+          current = decision.state;
+          return decision;
+        },
+        persist: () => {
+          if (mode === 'throw') throw new Error('Synthetic storage failure');
+          return mode === 'pending' ? pending : false;
+        },
+        enqueue: (_generation, holdId, write) => {
+          completion = Promise.resolve()
+            .then(write)
+            .catch(() => false)
+            .then((written) => {
+              current = decideWindowsStop(current, {
+                kind: 'retry_storage',
+                holdId,
+                status: written ? 'written' : 'failed',
+              }).state;
+            });
+        },
+      });
+      await Promise.resolve();
+      expect(windowsTargetMayStart(current, target)).toBe(false);
+      expect(windowsTargetMayStart(current, otherTarget)).toBe(true);
+      expect(current.rows).toEqual([background]);
+      expect(current.quarantines).toEqual([]);
+      expect(current.holds).toHaveLength(1);
+      finish!(true);
+      await completion;
+      expect(windowsTargetMayStart(current, target)).toBe(false);
+      expect(current.holds).toHaveLength(mode === 'pending' ? 0 : 1);
+      expect(current.quarantines).toEqual(
+        mode === 'pending' ? [{ identity: target, reason: 'takeover_conflict' }] : [],
+      );
+    },
+  );
+  it.each([
+    'transport_timeout',
+    'failAll',
+    'abortTransport',
+    'semantic_owner_uncertain',
+    'takeover_conflict',
+  ] as const)('holds the target before persisting %s and retains the source row', async (cause) => {
+    let current = state({ rows: [background] });
+    let queued: (() => Promise<void>) | undefined;
+    let stored: unknown;
+    const pause = queueWindowsInputQuarantine({
+      row: background,
+      cause,
+      holdId: 'k1',
+      apply: (event) => {
+        const decision = decideWindowsStop(current, event);
+        current = decision.state;
+        return decision;
+      },
+      persist: async (rows) => {
+        stored = rows;
+        return true;
+      },
+      enqueue: (_generation, holdId, write) => {
+        expect(windowsTargetMayStart(current, target)).toBe(false);
+        expect(windowsTargetMayStart(current, otherTarget)).toBe(true);
+        queued = async () => {
+          const written = await write();
+          current = decideWindowsStop(current, {
+            kind: 'retry_storage',
+            holdId,
+            status: written ? 'written' : 'failed',
+          }).state;
+        };
+      },
+    });
+    expect(pause).toBe(true);
+    expect(current.quarantines).toEqual([]);
+    expect(stored).toBeUndefined();
+    expect(queued).toBeDefined();
+    await queued!();
+    expect(stored).toEqual([{ identity: target, reason: windowsK1QuarantineReason(cause) }]);
+    expect(current.quarantines).toEqual(stored);
+    expect(current.rows).toEqual([background]);
+    expect(current.holds).toEqual([]);
+    expect(windowsTargetMayStart(current, target)).toBe(false);
+  });
+
+  it.each([row, foreground])('does not persist a quarantine for $inputPath', (source) => {
+    let current = state({ rows: [source] });
+    let queued = false;
+    const pause = queueWindowsInputQuarantine({
+      row: source,
+      cause: 'transport_timeout',
+      holdId: 'k1',
+      apply: (event) => {
+        const decision = decideWindowsStop(current, event);
+        current = decision.state;
+        return decision;
+      },
+      persist: () => {
+        throw new Error('Unexpected write');
+      },
+      enqueue: () => {
+        queued = true;
+      },
+    });
+    expect(pause).toBe(source.kind === 'foreground');
+    expect(queued).toBe(false);
+    expect(current.holds).toEqual([]);
+    expect(current.quarantines).toEqual([]);
+    expect(current.rows).toEqual([source]);
+  });
+});
 const blockers = (
   ['uncertain', 'closeCandidate', 'activeStopQuarantines', 'in_flight'] as const
 ).map((kind): WindowsNativeBlocker => ({ helperGeneration: 1, ownerId: 'session-a', kind }));

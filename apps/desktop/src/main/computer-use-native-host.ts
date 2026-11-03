@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
 import { WindowsStopDelivery, type WindowsStopOwner } from './computer-use-windows-stop-delivery';
 import {
   createComputerUseDiscoveryManager,
@@ -974,14 +975,18 @@ export function createComputerUseNativeHost(
       assertSend,
       canceled: () => reflect('canceled'),
       unconfirmed: (cause) => {
-        if (row !== undefined)
-          ledgerEvent(row.helperGeneration, {
-            kind: 'input_unconfirmed',
-            helperGeneration: row.helperGeneration,
-            sessionId: row.sessionId,
-            requestId: row.requestId,
+        const current = row;
+        if (current !== undefined)
+          queueWindowsInputQuarantine({
+            row: current,
             cause,
-            storage: { status: 'written' },
+            holdId: `input-quarantine-${++holdSequence}`,
+            apply: (event) => ledgerEvent(current.helperGeneration, event),
+            persist: (quarantines) => ledger.restoreQuarantines(quarantines),
+            enqueue: (generation, holdId, write) => {
+              pendingWrites.set(holdId, { generation, write });
+              void writePending(holdId);
+            },
           });
       },
       response: (accepted) => reflect(accepted ? 'effect_unconfirmed' : 'rejected'),
