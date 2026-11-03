@@ -27,6 +27,10 @@ jobs:
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
       website_required: ${{ steps.scope.outputs.website_required }}
       scope_json: ${{ steps.scope.outputs.scope_json }}
+      # Opt in only after this exact runner has repository access and passed acceptance.
+      # Fork PRs and Dependabot retain disposable GitHub-hosted runners.
+      common_runner: ${{ vars.SPRINT_CODER_MSI_CI_ENABLED == 'true' && github.actor != 'dependabot[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","Windows","X64","robbits-ci","robbits-ci-ready","ci-host-msi"]' || '["ubuntu-latest"]' }}
+      rust_runner: ${{ vars.SPRINT_CODER_MSI_CI_ENABLED == 'true' && github.actor != 'dependabot[bot]' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","Windows","X64","robbits-ci","robbits-ci-ready","ci-host-msi"]' || '["windows-2022"]' }}
     steps:
       - name: Checkout complete comparison history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -50,7 +54,7 @@ jobs:
     name: quality (${{ matrix.label }})
     needs: classify
     if: needs.classify.outputs.mode == 'full' || needs.classify.outputs.mode == 'renderer'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.classify.outputs.common_runner) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -85,7 +89,7 @@ jobs:
     name: package tests
     needs: classify
     if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.classify.outputs.common_runner) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -238,8 +242,29 @@ jobs:
           src/main/computer-use-windows-ticket-seam.test.ts
           verify-computer-use-eligibility.test.mjs
           computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
+
+  sandbox-rust-windows:
+    name: Rust Windows sandbox boundary
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
+    runs-on: ${{ fromJSON(needs.classify.outputs.rust_runner) }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
       - name: Test Windows sandbox working directory and access boundary
-        if: runner.os == 'Windows'
         shell: pwsh
         run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
 
@@ -953,6 +978,7 @@ jobs:
         quality,
         renderer-tests,
         package-tests,
+        sandbox-rust-windows,
         computer-use-native-gate,
         computer-use-windows-v2-harness,
         computer-use-hung-helper,

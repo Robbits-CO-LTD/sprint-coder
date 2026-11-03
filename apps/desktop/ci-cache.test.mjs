@@ -243,6 +243,58 @@ describe('CI cache reuse and fallback', () => {
 });
 
 describe('CI scope wiring', () => {
+  it('routes only opted-in trusted events to MSI and preserves hosted OS coverage', () => {
+    const labels = [
+      'self-hosted',
+      'Windows',
+      'X64',
+      'robbits-ci',
+      'robbits-ci-ready',
+      'ci-host-msi',
+    ];
+    const repository = 'Robbits-CO-LTD/sprint-coder';
+    const route = (output, enabled, eventName, headRepo, actor = 'maintainer') => {
+      const expression = workflow.jobs.classify.outputs[output];
+      return JSON.parse(
+        runInNewContext(expression.slice(3, -2), {
+          vars: { SPRINT_CODER_MSI_CI_ENABLED: enabled },
+          github: {
+            repository,
+            actor,
+            event_name: eventName,
+            event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+          },
+        }),
+      );
+    };
+    for (const [output, fallback] of [
+      ['common_runner', 'ubuntu-latest'],
+      ['rust_runner', 'windows-2022'],
+    ]) {
+      for (const enabled of ['', 'false'])
+        expect(route(output, enabled, 'pull_request', repository)).toEqual([fallback]);
+      for (const eventName of ['push', 'workflow_dispatch', 'pull_request'])
+        expect(route(output, 'true', eventName, repository)).toEqual(labels);
+      expect(route(output, 'true', 'pull_request', 'outside/fork')).toEqual([fallback]);
+      expect(route(output, 'true', 'pull_request', undefined)).toEqual([fallback]);
+      expect(route(output, 'true', 'pull_request', repository, 'dependabot[bot]')).toEqual([
+        fallback,
+      ]);
+      expect(route(output, 'true', 'pull_request_target', repository)).toEqual([fallback]);
+    }
+    for (const job of ['quality', 'package-tests'])
+      expect(workflow.jobs[job]['runs-on']).toBe(
+        '${{ fromJSON(needs.classify.outputs.common_runner) }}',
+      );
+    expect(workflow.jobs['sandbox-rust-windows']['runs-on']).toBe(
+      '${{ fromJSON(needs.classify.outputs.rust_runner) }}',
+    );
+    expect(workflow.jobs['test-macos']['runs-on']).toBe('macos-latest');
+    expect(workflow.jobs['package-linux']['runs-on']).toBe('ubuntu-latest');
+    expect(workflow.jobs['renderer-tests']['runs-on']).toBe('ubuntu-latest');
+    expect(workflow.jobs['package-windows']['runs-on']).toBe('windows-2022');
+  });
+
   it.each([
     ['README.md', ['classify', 'required']],
     ['website/index.html', ['classify', 'website', 'required']],
@@ -433,8 +485,10 @@ describe('full CI partition contract', () => {
         .map((step) => ({ job, step })),
     );
     expect(cargoSteps).toHaveLength(1);
-    expect(cargoSteps[0].job).toBe('computer-use-native-gate');
-    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
+    expect(cargoSteps[0].job).toBe('sandbox-rust-windows');
+    expect(workflow.jobs['sandbox-rust-windows'].if).toBe(
+      "needs.classify.outputs.full_matrix == 'true'",
+    );
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;

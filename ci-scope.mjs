@@ -25,6 +25,7 @@ const DISPLAY_COMPONENTS = new Set([
 const FULL_JOBS = [
   'quality',
   'package-tests',
+  'sandbox-rust-windows',
   'computer-use-native-gate',
   'computer-use-windows-v2-harness',
   'computer-use-hung-helper',
