@@ -13,6 +13,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -33,6 +34,90 @@ constexpr std::uint32_t kMaxFrameBytes = kMaxMetadataBytes + kMaxBinaryBytes;
 constexpr std::uint32_t kMagic =
     0x31554353; // ASCII "SCU1" in little-endian order.
 constexpr std::uint16_t kCancelMessageType = 9;
+
+// N9 P1a: wire vocabulary only. No production start or dispatch consumes this extension yet.
+inline constexpr bool kWindowsBackgroundInputEnabled = false;
+inline constexpr std::uint32_t kWindowsBackgroundCapabilityVersion = 1;
+inline constexpr std::uint32_t kWindowsBackgroundCapabilityTableVersion = 1;
+inline constexpr std::uint32_t kInputAuthorityVersion = 1;
+enum class InputSessionKind { kForeground, kBackground };
+enum class InputPath { kBackgroundSemantic, kForegroundSemantic, kForegroundInput };
+
+[[nodiscard]] inline std::string_view InputPathName(InputPath path) {
+  switch (path) {
+  case InputPath::kBackgroundSemantic: return "background_semantic";
+  case InputPath::kForegroundSemantic: return "foreground_semantic";
+  case InputPath::kForegroundInput: return "foreground_input";
+  }
+  return {};
+}
+
+[[nodiscard]] inline std::optional<InputPath> ParseInputPath(std::string_view name) {
+  for (const auto path : {InputPath::kBackgroundSemantic, InputPath::kForegroundSemantic,
+                          InputPath::kForegroundInput})
+    if (InputPathName(path) == name) return path;
+  return std::nullopt;
+}
+
+[[nodiscard]] inline std::string_view InputPathLedgerKind(InputPath path) {
+  if (InputPathName(path).empty()) return {};
+  return path == InputPath::kBackgroundSemantic ? "background_semantic" : "normal";
+}
+
+struct InputSession {
+  InputSessionKind kind = InputSessionKind::kForeground;
+};
+
+// Explicit absence is reserved until P2/P3 measure it. These are not dispatch authority yet.
+struct InputAuthority {
+  InputSessionKind session_kind = InputSessionKind::kForeground;
+  InputPath input_path = InputPath::kForegroundInput;
+  std::optional<std::string> pattern;
+  std::nullptr_t target_ancestors_digest = nullptr;
+  std::nullptr_t content_fingerprint = nullptr;
+  std::nullptr_t interaction_epoch = nullptr;
+};
+
+[[nodiscard]] inline bool IsInputAuthorityShapeValid(const InputAuthority &value) {
+  if (value.session_kind != InputSessionKind::kForeground &&
+      value.session_kind != InputSessionKind::kBackground) return false;
+  if (InputPathName(value.input_path).empty()) return false;
+  if ((value.session_kind == InputSessionKind::kBackground) !=
+      (value.input_path == InputPath::kBackgroundSemantic)) return false;
+  if (value.input_path == InputPath::kForegroundInput) return !value.pattern;
+  if (!value.pattern) return false;
+  for (const auto name : {"invoke", "toggle", "select", "set_value", "expand_collapse",
+                          "scroll", "set_scroll_percent"})
+    if (*value.pattern == name) return true;
+  return false;
+}
+
+[[nodiscard]] inline std::string WindowsBackgroundCapabilityWire() {
+  return "{\"version\":" + std::to_string(kWindowsBackgroundCapabilityVersion) +
+      ",\"capabilityTableVersion\":" + std::to_string(kWindowsBackgroundCapabilityTableVersion) +
+      ",\"authorityVersion\":" + std::to_string(kInputAuthorityVersion) + "}";
+}
+
+[[nodiscard]] inline std::string InputSessionWire(const InputSession &value) {
+  switch (value.kind) {
+  case InputSessionKind::kForeground:
+    return "{\"kind\":\"foreground\",\"backgroundCapabilityVersion\":null}";
+  case InputSessionKind::kBackground:
+    return "{\"kind\":\"background\",\"backgroundCapabilityVersion\":" +
+        std::to_string(kWindowsBackgroundCapabilityVersion) + "}";
+  }
+  return {};
+}
+
+[[nodiscard]] inline std::string InputAuthorityWire(const InputAuthority &value) {
+  if (!IsInputAuthorityShapeValid(value)) return {};
+  return "{\"version\":" + std::to_string(kInputAuthorityVersion) +
+      ",\"sessionKind\":\"" +
+      (value.session_kind == InputSessionKind::kBackground ? "background" : "foreground") +
+      "\",\"inputPath\":\"" + std::string(InputPathName(value.input_path)) +
+      "\",\"pattern\":" + (value.pattern ? "\"" + *value.pattern + "\"" : "null") +
+      ",\"targetAncestorsDigest\":null,\"contentFingerprint\":null,\"interactionEpoch\":null}";
+}
 
 struct FrameId {
   std::array<std::uint8_t, 16> bytes{};

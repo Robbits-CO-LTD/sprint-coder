@@ -29,6 +29,8 @@ export function parseNativeHandshake(
       'capabilities',
       'reason',
       'windowsDocumentViewers',
+      // Independently parsed by the background protocol; incompatibility closes only that route.
+      'windowsBackgroundInput',
     );
   if (Reflect.ownKeys(handshake).some((key) => typeof key !== 'string' || !keys.includes(key)))
     throw new Error('HANDSHAKE_INVALID');
