@@ -1040,6 +1040,19 @@ type WindowCandidatePermit = Readonly<{
   expiresAt: number;
 }>;
 
+/** A Windows row this build cannot read: it grants nothing here, and only approval replaces it. */
+function computerAppGrantVersionUnreadable(
+  stored: Readonly<{ platform: string; denyRulesetVersion: number }>,
+  version: number,
+): boolean {
+  return (
+    stored.platform === 'win32' &&
+    (!Number.isSafeInteger(stored.denyRulesetVersion) ||
+      stored.denyRulesetVersion < 1 ||
+      stored.denyRulesetVersion > version)
+  );
+}
+
 export class ComputerUseController {
   private readonly broker: MainToolBroker;
   private readonly registry: ComputerUseToolRegistry;
@@ -1614,11 +1627,7 @@ export class ComputerUseController {
     );
     const version = computerAppGrantRulesetVersion(derived.platform);
     if (version === null) return null;
-    const unreadableVersion =
-      derived.platform === 'win32' &&
-      (!Number.isSafeInteger(stored.denyRulesetVersion) ||
-        stored.denyRulesetVersion < 1 ||
-        stored.denyRulesetVersion > version);
+    const unreadableVersion = computerAppGrantVersionUnreadable(stored, version);
     if (mismatch === null && !unreadableVersion) return stored;
     // A newly denied class is revoked outright — the user is not asked again (§6.3, T3). Every
     // other mismatch leaves the row alone: it simply stops matching, and the next request raises a
@@ -1760,12 +1769,7 @@ export class ComputerUseController {
       derived.platform,
       derived.grantIdentityDigest,
     );
-    if (
-      retained !== null &&
-      derived.platform === 'win32' &&
-      (!Number.isSafeInteger(retained.denyRulesetVersion) ||
-        retained.denyRulesetVersion > denyRulesetVersion)
-    )
+    if (retained !== null && computerAppGrantVersionUnreadable(retained, denyRulesetVersion))
       this.deps.persistence.removeComputerAppGrant(retained.id, retained.revision);
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
