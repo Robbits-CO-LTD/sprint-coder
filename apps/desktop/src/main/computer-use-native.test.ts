@@ -516,12 +516,14 @@ describe('Windows native helper compile boundary', () => {
       ([text]) => text.trim(),
     );
     // Its declaration and its definition.
-    expect(baseReferences).toEqual(Array(2).fill('std::atomic<bool> &WindowsTargetListWorkerRunning()'));
+    expect(baseReferences).toEqual(
+      Array(2).fill('std::atomic<bool> &WindowsTargetListWorkerRunning()'),
+    );
     const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
     expect(uses.length).toBeGreaterThan(0);
     for (const [, method, args] of uses)
       expect(
-        method === 'load' || (method === 'store' && args.startsWith('false')),
+        method === 'load' || (method === 'store' && (args ?? '').startsWith('false')),
         `${method}(${args})`,
       ).toBe(true);
     expect(source).toContain(
