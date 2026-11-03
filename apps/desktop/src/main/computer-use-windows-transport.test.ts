@@ -5285,6 +5285,14 @@ int main() {
       ).resolves.toBe(false);
       expect(target.control.releases).toBe(1);
       expect(target.quarantines).toHaveLength(1);
+      // While the target is still alive the save keeps failing: every retry stays refused and
+      // the quarantine is kept (no R15 handover without a proven exit).
+      for (const turn of ['turn-a', 'turn-b'])
+        await expect(startSession(target.host, `retry-${turn}`, turn)).rejects.toThrow(
+          'native_unavailable',
+        );
+      expect(target.control.releases).toBeGreaterThan(1);
+      expect(target.quarantines).toHaveLength(1);
       // The target exits, the store recovers and the PID is reused by a new process.
       target.control.exitedCreationTime = '133000000000000001';
       target.control.creationTime = '133000000000000002';
