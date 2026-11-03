@@ -54,7 +54,10 @@ export type WindowsTargetIdentityResult =
 
 export type WindowsComputerUseNativeAddon = ComputerUseNativeAddon &
   Readonly<{
-    checkTargetIdentity: (targets: unknown) => Promise<readonly WindowsTargetIdentityResult[]>;
+    checkTargetIdentity: (
+      targets: unknown,
+      checked?: (helperGeneration: number) => void,
+    ) => Promise<readonly WindowsTargetIdentityResult[]>;
   }>;
 
 const MAX_TARGET_IDENTITIES = 64;
@@ -158,7 +161,7 @@ export function createWindowsComputerUseNativeAddon(
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
-    checkTargetIdentity: (targets) => client.checkTargetIdentity(targets),
+    checkTargetIdentity: (targets, checked) => client.checkTargetIdentity(targets, checked),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
     discoverWindows: (input) => client.discoverWindows(input),
@@ -857,10 +860,15 @@ class WindowsComputerUseHelperClient {
       this.termination?.completed?.(owner.helper, 'discovery', owner.id, owner.stopLifetimeId);
   }
 
-  async checkTargetIdentity(input: unknown): Promise<readonly WindowsTargetIdentityResult[]> {
+  async checkTargetIdentity(
+    input: unknown,
+    checked?: (helperGeneration: number) => void,
+  ): Promise<readonly WindowsTargetIdentityResult[]> {
     const targets = parseTargetIdentities(input);
     let response: unknown;
     try {
+      await this.ensureConnected();
+      const generation = this.helperGeneration;
       response = await this.call(
         'check_target_identity',
         'check_target_identity',
@@ -868,6 +876,9 @@ class WindowsComputerUseHelperClient {
         undefined,
         undefined,
       );
+      if (generation !== this.helperGeneration || this.socket === null || this.socket.destroyed)
+        throw new Error('native_unavailable');
+      checked?.(generation);
     } catch {
       // Neither helper error payloads nor JSON parser diagnostics may expose an identity.
       throw new Error('Windows target identity check failed');

@@ -489,6 +489,8 @@ function createTarget(
   configure?: (helper: FakeWindowsHelper) => void,
   options: ComputerUseNativeHostOptions = {},
   adaptAddon: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon = (addon) => addon,
+  identityBoundStart?: boolean,
+  eligibility?: ComputerUseNativeBinding['manifest']['eligibility'],
 ): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
@@ -531,12 +533,27 @@ function createTarget(
       reason: '',
       capabilities: { observe: true, control: true, cancellableWindowDiscovery: true },
     },
-    expectedTrust,
+    { ...expectedTrust, ...(eligibility === undefined ? {} : { eligibility }) },
   );
-  const host = createComputerUseNativeHost(binding(adaptAddon(addon)), 'win32', {
-    windowsPhysicalBoundsToDip: (value) => value,
-    ...options,
-  });
+  const hostBinding = binding(adaptAddon(addon));
+  const host = createComputerUseNativeHost(
+    {
+      ...hostBinding,
+      manifest: { ...hostBinding.manifest, ...(eligibility === undefined ? {} : { eligibility }) },
+      probe: {
+        ...hostBinding.probe,
+        capabilities: {
+          ...hostBinding.probe.capabilities,
+          ...(identityBoundStart === undefined ? {} : { identityBoundStart }),
+        },
+      },
+    },
+    'win32',
+    {
+      windowsPhysicalBoundsToDip: (value) => value,
+      ...options,
+    },
+  );
   return {
     addon,
     host,
@@ -658,6 +675,445 @@ describe('Computer Use Windows helper transport', () => {
     vi.useRealTimers();
     onSocket = null;
   });
+
+  const startIdentity = { pid: 42, processStartTime: '133000000000000001' };
+  function identityStartTarget(
+    control: {
+      v2?: boolean;
+      identity?: Record<string, unknown>;
+      check?: Record<string, unknown>;
+      write?: (row: WindowsLedgerRow) => boolean | Promise<boolean>;
+      response?: Responder;
+      capability?: boolean;
+      enabled?: boolean;
+      holdStart?: boolean;
+      remove?: () => boolean;
+      termination?: boolean;
+      adapt?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon;
+    } = {},
+  ) {
+    const eligibility = control.v2
+      ? {
+          mode: 'v2-denylist' as const,
+          rulesetVersion: 2,
+          classifierVersion: 1,
+          lexiconVersion: 1,
+          ticketRequired: true,
+        }
+      : undefined;
+    const order: string[] = [];
+    const rows: WindowsLedgerRow[] = [];
+    const quarantines: WindowsTargetQuarantine[] = [];
+    const requests: Record<string, unknown>[] = [];
+    const base = responders();
+    const target = createTarget(
+      {
+        ...base,
+        stop_pending_start: (metadata) => [
+          'probe_result',
+          {
+            result: 'closed',
+            drained: true,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: 1,
+            inputAttemptCount: 0,
+          },
+        ],
+        handshake: () => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            ...(eligibility === undefined ? {} : { eligibility }),
+            capabilities: {
+              cancellableWindowDiscovery: true,
+              identityBoundStart: control.capability ?? true,
+            },
+          },
+        ],
+        list_windows: (metadata) => {
+          order.push('discovery');
+          requests.push(metadata);
+          const [, candidates] = base['list_windows']!({});
+          return [
+            'probe_result',
+            (candidates as Record<string, unknown>[]).map((row) => ({
+              ...row,
+              ...(control.identity ?? startIdentity),
+            })),
+          ];
+        },
+        check_target_identity: (metadata) => {
+          order.push('check');
+          requests.push(metadata);
+          return ['target_identity_result', { results: [control.check ?? { result: 'alive' }] }];
+        },
+        start_session: (metadata) => {
+          order.push('start');
+          requests.push(metadata);
+          if (control.response) return control.response(metadata);
+          const [, result] = base['start_session']!(metadata);
+          order.push('foreground');
+          return [
+            'probe_result',
+            {
+              ...(result as object),
+              ...startIdentity,
+              startResult: { ...startIdentity, attemptCount: 1, foregroundResult: 'confirmed' },
+            },
+          ];
+        },
+      },
+      (helper) => {
+        if (control.holdStart) helper.holdOnly('start_session');
+      },
+      {
+        windowsStartIdentity: { enabled: control.enabled !== false },
+        effectiveEligibilityMode: () => (control.v2 ? 'v2-denylist' : 'v1-allowlist'),
+        ...(control.termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
+        windowsLedger: {
+          write: async (row) => {
+            order.push('write');
+            const ok = await (control.write?.(row) ?? true);
+            if (ok) rows.push(row);
+            order.push('stored');
+            return ok;
+          },
+          update: (row) => {
+            const i = rows.findIndex((r) => r.requestId === row.requestId);
+            if (i >= 0) rows[i] = row;
+            return true;
+          },
+          delete: (row) => {
+            order.push('delete');
+            if (control.remove?.() === false) return false;
+            const i = rows.findIndex((r) => r.requestId === row.requestId);
+            if (i >= 0) rows.splice(i, 1);
+            return true;
+          },
+          restoreQuarantines: () => true,
+          transferReceipt: (removed, isolated) => {
+            for (const row of removed) {
+              const i = rows.findIndex((r) => r.requestId === row.requestId);
+              if (i >= 0) rows.splice(i, 1);
+            }
+            quarantines.push(...isolated);
+            return true;
+          },
+        },
+      },
+      control.adapt ?? ((addon) => addon),
+      control.capability ?? true,
+      eligibility,
+    );
+    return { ...target, rows, order, requests, quarantines };
+  }
+
+  it.each(['v1', 'v2'] as const)(
+    'PR5b Host %s binds new and existing starts before foreground',
+    async (classifierRoute) => {
+      const target = identityStartTarget({ v2: classifierRoute === 'v2' });
+      const input = {
+        profile,
+        windowId: '100',
+        sessionId: 'identity-start',
+        taskId: 'task-1',
+        turnId: 'turn-a',
+        cancelEpoch: 0,
+        classifierRoute,
+      };
+      const first = await target.host.startSession(input);
+      expect(target.order).toEqual([
+        'discovery',
+        'discovery',
+        'check',
+        'write',
+        'stored',
+        'start',
+        'foreground',
+        'delete',
+      ]);
+      expect(JSON.stringify(first)).not.toMatch(/processStartTime|133000000000000001|startResult/);
+      target.order.length = 0;
+      const second = await target.host.startSession({ ...input, resume: true });
+      expect(target.order).toEqual(['write', 'stored', 'start', 'foreground', 'delete']);
+      expect(JSON.stringify(second)).not.toMatch(/processStartTime|133000000000000001|startResult/);
+      expect(target.rows).toEqual([]);
+      expect(
+        target.requests
+          .filter((r) => r['operation'] === 'list_windows_cancellable')
+          .every((r) => r['includeStartIdentity'] === true),
+      ).toBe(true);
+      expect(
+        target.requests.find((r) => r['operation'] === 'check_target_identity')?.['targets'],
+      ).toEqual([startIdentity]);
+      expect(target.requests.filter((r) => r['operation'] === 'start_session')).toEqual([
+        expect.objectContaining({
+          pid: 42,
+          requireStartIdentity: true,
+          expectedProcessStartTime: startIdentity.processStartTime,
+        }),
+        expect.objectContaining({
+          pid: 42,
+          requireStartIdentity: true,
+          expectedProcessStartTime: startIdentity.processStartTime,
+        }),
+      ]);
+    },
+  );
+  it.each([
+    { identity: { pid: 42 } },
+    { identity: { pid: 42, processStartTime: '0' } },
+    { identity: { pid: 42, processStartTime: 123 } },
+    { identity: { pid: undefined, processStartTime: '133000000000000001' } },
+    { identity: { pid: -1, processStartTime: '133000000000000001' } },
+    { check: { result: 'terminated', reason: 'start_time_mismatch' } },
+    { check: { result: 'unverifiable', reason: 'access_denied' } },
+    { capability: false },
+    { write: () => false },
+  ])('PR5b Host refuses unsafe new starts %j', async (control) => {
+    const target = identityStartTarget(control);
+    await expect(startSession(target.host, 'identity-denied', 'turn-a')).rejects.toThrow(
+      'native_unavailable',
+    );
+    expect(target.order).not.toContain('start');
+    expect(target.order).not.toContain('foreground');
+  });
+
+  it.each(
+    ['failure', 'identity', 'window', 'missing', 'counter', 'evidence'].flatMap((mode) =>
+      [false, true].map((existing) => ({ mode, existing })),
+    ),
+  )('PR5b Host R23 retains and pauses on $mode existing=$existing', async ({ mode, existing }) => {
+    let fail = !existing;
+    const base = responders();
+    const target = identityStartTarget({
+      response: (metadata) => {
+        const [, raw] = base['start_session']!(metadata);
+        if (!fail)
+          return [
+            'probe_result',
+            {
+              ...(raw as object),
+              ...startIdentity,
+              startResult: { ...startIdentity, attemptCount: 1, foregroundResult: 'confirmed' },
+            },
+          ];
+        if (mode === 'failure')
+          return [
+            'error',
+            {
+              code: 'STALE_WINDOW',
+              accepted: false,
+              startResult: { ...startIdentity, attemptCount: 1, foregroundResult: 'unconfirmed' },
+            },
+          ];
+        return [
+          'probe_result',
+          {
+            ...(raw as object),
+            ...startIdentity,
+            ...(mode === 'identity' ? { processStartTime: '133000000000000002' } : {}),
+            ...(mode === 'window' ? { windowIdentityDigest: digest('d') } : {}),
+            ...(mode === 'counter' ? { inputAttemptCount: -1 } : {}),
+            ...(mode === 'missing'
+              ? {}
+              : {
+                  startResult: {
+                    ...startIdentity,
+                    ...(mode === 'evidence' ? { pid: 43 } : {}),
+                    attemptCount: 1,
+                    foregroundResult: 'confirmed',
+                  },
+                }),
+          },
+        ];
+      },
+    });
+    if (existing) await startSession(target.host, 'r23-start', 'turn-a');
+    fail = true;
+    const pending = startSession(target.host, 'r23-start', 'turn-a');
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    {
+      await rejected;
+      expect(target.rows).toEqual([
+        expect.objectContaining({
+          kind: 'foreground',
+          inputPath: 'foreground',
+          state: 'effect_unconfirmed',
+          identity: { pid: 42, creationTime: startIdentity.processStartTime },
+        }),
+      ]);
+      expect(target.host.availability().state).toBe('native_unavailable');
+      await expect(startSession(target.host, 'r23-next', 'turn-a')).rejects.toThrow();
+      expect(target.order.filter((item) => item === 'start')).toHaveLength(existing ? 2 : 1);
+      await target.host.stopPendingStart!('r23-start');
+      expect(target.rows).toEqual([]);
+      expect(target.quarantines).toEqual([]);
+    }
+  });
+
+  it('PR5b Host deletes a verified zero-attempt refusal without isolation', async () => {
+    const target = identityStartTarget({
+      response: () => [
+        'error',
+        {
+          code: 'STALE_WINDOW',
+          accepted: false,
+          startResult: { ...startIdentity, attemptCount: 0, foregroundResult: 'not_attempted' },
+        },
+      ],
+    });
+    await expect(startSession(target.host, 'refused-start', 'turn-a')).rejects.toThrow();
+    expect(target.order).toContain('delete');
+    expect(target.rows).toEqual([]);
+    expect(target.quarantines).toEqual([]);
+  });
+
+  it.each(['stop', 'generation', 'delete-failed'] as const)(
+    'PR5b Host cancels a saved unsent foreground row after %s',
+    async (mode) => {
+      let release!: (written: boolean) => void;
+      const target = identityStartTarget({
+        write: () =>
+          new Promise<boolean>((resolve) => {
+            release = resolve;
+          }),
+        remove: () => mode !== 'delete-failed',
+      });
+      const pending = startSession(target.host, 'stored-start', 'turn-a');
+      const rejected = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.order).toContain('write');
+      expect(target.order).not.toContain('start');
+      if (mode !== 'stop') sockets[0]!.destroy();
+      else await target.host.stopPendingStart!('stored-start');
+      release(true);
+      await rejected;
+      expect(target.order).not.toContain('start');
+      expect(target.rows).toHaveLength(mode === 'delete-failed' ? 1 : 0);
+      expect(target.quarantines).toEqual([]);
+    },
+  );
+
+  it('PR5b Host keeps the default path free of identity checks and foreground writes', async () => {
+    const target = identityStartTarget({ enabled: false, capability: false });
+    await startSession(target.host, 'legacy-start', 'turn-a');
+    expect(target.order).not.toContain('check');
+    expect(target.order).not.toContain('write');
+    expect(
+      target.requests.every(
+        (r) => !('requireStartIdentity' in r) && !('includeStartIdentity' in r),
+      ),
+    ).toBe(true);
+  });
+
+  it('PR5b Host rejects a new helper after identity verification', async () => {
+    const target = identityStartTarget({
+      adapt: (addon) => ({
+        ...addon,
+        checkTargetIdentity: async (...args) => {
+          const result = await addon.checkTargetIdentity!(...args);
+          sockets[0]!.destroy();
+          return result;
+        },
+      }),
+    });
+    await expect(startSession(target.host, 'checked-old-generation', 'turn-a')).rejects.toThrow();
+    expect(target.order).not.toContain('start');
+    expect(target.rows).toEqual([]);
+  });
+
+  it.each(['storage', 'capability', 'checker', 'callbacks'] as const)(
+    'PR5b Host refuses missing %s without fallback',
+    async (missing) => {
+      const write = vi.fn(() => true);
+      const target = createTarget(
+        responders(),
+        undefined,
+        {
+          windowsStartIdentity: { enabled: true },
+          ...(missing === 'storage'
+            ? {}
+            : {
+                windowsLedger: {
+                  write,
+                  update: () => true,
+                  delete: () => true,
+                  restoreQuarantines: () => true,
+                },
+              }),
+        },
+        (addon) => {
+          if (missing === 'checker') {
+            const { checkTargetIdentity, ...remaining } = addon;
+            void checkTargetIdentity;
+            return remaining;
+          }
+          if (missing === 'callbacks') {
+            const { dispatchLedgerSupported, ...remaining } = addon;
+            void dispatchLedgerSupported;
+            return remaining;
+          }
+          return addon;
+        },
+        missing === 'capability' ? undefined : true,
+      );
+      await expect(startSession(target.host, 'missing-contract', 'turn-a')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(write).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('PR5b Host refuses storage completion after the helper exits', async () => {
+    let release!: (written: boolean) => void;
+    const target = identityStartTarget({
+      termination: true,
+      write: () =>
+        new Promise<boolean>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const pending = startSession(target.host, 'exit-during-write', 'turn-a');
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.order).toContain('write');
+    children[0]!.emit('exit', 1, null);
+    release(true);
+    await rejected;
+    expect(target.order).not.toContain('start');
+    expect(target.rows).toEqual([]);
+    expect(target.quarantines).toEqual([]);
+  });
+
+  it.each([false, true])(
+    'PR5b Host retains a lost start until exit cleanup enabled=%s',
+    async (termination) => {
+      const target = identityStartTarget({ holdStart: true, termination });
+      const pending = startSession(target.host, 'lost-start', 'turn-a');
+      const rejected = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.rows).toHaveLength(1);
+      vi.spyOn(children[0]!, 'kill').mockReturnValue(true);
+      sockets[0]!.emit('error', new Error('synthetic transport failure'));
+      await rejected;
+      expect(target.rows).toHaveLength(1);
+      expect(target.rows[0]?.state).toBe('effect_unconfirmed');
+      expect(target.host.availability().state).toBe('native_unavailable');
+      if (termination) {
+        children[0]!.emit('exit', 1, null);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(target.rows).toEqual([]);
+      }
+      expect(target.quarantines).toEqual([]);
+    },
+  );
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
   const startCallbacks = (): WindowsStartCallbacks => ({
@@ -4984,14 +5440,14 @@ int main() {
       decide.mockRestore();
     },
   );
-  it('PR7a foreground-only exit leaves rows for restart R23 and cleans up once', async () => {
+  it('PR7a foreground-only exit discards rows for R23 and cleans up once', async () => {
     const cleanup = vi.fn();
     const original = stopKernel.decideWindowsStop;
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
       const result = original(state, event);
       if (event.kind !== 'start_generation') return result;
       if (result.kind !== 'generation_started') throw new Error('Expected generation start');
-      // PR5b will supply foreground rows; seed that future ledger input at the kernel boundary.
+      // Seed a foreground row at the kernel boundary to isolate exit cleanup.
       return {
         ...result,
         state: {
@@ -5026,8 +5482,8 @@ int main() {
       children[0]!.emit('exit', 0, null);
       await vi.advanceTimersByTimeAsync(0);
       expect(cleanup.mock.calls).toEqual([[1]]);
-      expect(decide.mock.results.at(-1)!.value.state.rows).toMatchObject([{ kind: 'foreground' }]);
-      expect(target.control.transfers).toBe(0);
+      expect(target.control.transfers).toBe(1);
+      expect(target.quarantines).toEqual([]);
       expect(target.deleted).toEqual([]);
       expect(decide.mock.calls.filter(([, event]) => event.kind === 'retry_storage')).toEqual([]);
       await expect(target.addon.listTargets!({})).resolves.toEqual([]);

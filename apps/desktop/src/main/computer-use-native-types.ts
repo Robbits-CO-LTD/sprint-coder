@@ -86,6 +86,8 @@ export type ComputerUseNativeAddon = Readonly<{
   cancelUnsubmittedDiscovery?(discoveryId: string): 'never_sent' | 'may_have_been_sent' | 'unknown';
   /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
   listTargets?(input: unknown): unknown;
+  /** Main-only identity check; results preserve request order without exposing identity. */
+  checkTargetIdentity?(targets: unknown, checked?: (helperGeneration: number) => void): unknown;
   /** Main-only synchronous gate, evaluated after preparation immediately before socket.write. */
   startSession?(
     input: unknown,

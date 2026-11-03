@@ -61,6 +61,7 @@ import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
 import type {
   WindowsDispatchCallbacks,
+  WindowsStartCallbacks,
   WindowsCloseConfirmation,
 } from './computer-use-native-types';
 import {
@@ -69,6 +70,7 @@ import {
   isStoredWindowsLedgerRow,
   type WindowsStopDiagnostic,
   type WindowsLedgerRow,
+  type WindowsLedgerPath,
   type WindowsStopState,
   type WindowsStopEvent,
   type WindowsStopDecision,
@@ -181,15 +183,17 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
-  /** Opt-in storage and startup restoration. Product wiring remains PR10; handoffs remain PR5b. */
+  /** Opt-in storage and startup restoration. Product activation remains PR10. */
   windowsLedger?: WindowsDispatchLedgerStorage;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
+  /** Main-only PR5b policy. Product activation is coordinated with PR10. */
+  windowsStartIdentity?: Readonly<{ enabled: boolean }>;
   /**
    * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
    * them, a helper whose exit never arrives keeps refusing connections with no user notification.
    * PR5b's start/resume ledger gate immediately before socket.write is also required.
-   * Keep disabled until Host requireStartIdentity/includeStartIdentity wiring and pre-send
-   * recording (PR5b-3), and new-start quarantine matching (PR8), are complete.
+   * PR5b Host identity wiring and pre-send recording are complete; activate with PR10.
+   * New-start quarantine matching (PR8) remains a separate prerequisite.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
@@ -259,6 +263,8 @@ export function createComputerUseNativeHost(
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
   const ledger = platform === 'win32' ? options.windowsLedger : undefined;
+  const startIdentityEnabled =
+    platform === 'win32' && options.windowsStartIdentity?.enabled === true;
   const terminationEnabled =
     ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
   const ledgerStates = new Map<number, WindowsStopState>();
@@ -269,7 +275,10 @@ export function createComputerUseNativeHost(
     {
       generation: number;
       write: () => boolean | Promise<boolean>;
-      reflect?: (written: boolean, uncertain: boolean) => WindowsStopDecision;
+      reflect?: (
+        written: boolean,
+        uncertain: boolean,
+      ) => Pick<WindowsStopDecision, 'awaitingHoldId'>;
     }
   >();
   const writing = new Set<string>();
@@ -614,10 +623,40 @@ export function createComputerUseNativeHost(
           cause,
           storage: rows.length === 0 ? { status: 'written' } : { status: 'failed', holdId },
         });
-        // Foreground-only rows stay for restart (R23), even with healthy storage.
-        if (decision.awaitingHoldId === null) return;
+        if (rows.length === 0) return;
+        // R23 creates no target hold and must not delay generation cleanup. Track the discard
+        // separately so a healthy store deletes now and failed I/O can retry without isolation.
+        const foregroundOnly = decision.awaitingHoldId === null;
+        if (foregroundOnly) {
+          for (const row of rows)
+            receiptRows.add(`${generation}:${row.sessionId}:${row.requestId}`);
+        }
         pendingWrites.set(holdId, {
           generation,
+          ...(foregroundOnly
+            ? {
+                reflect: (written: boolean) => {
+                  if (written) {
+                    const state = ledgerState(generation);
+                    ledgerStates.set(generation, {
+                      ...state,
+                      rows: state.rows.filter(
+                        (row) =>
+                          !rows.some(
+                            (removed) =>
+                              removed.helperGeneration === row.helperGeneration &&
+                              removed.sessionId === row.sessionId &&
+                              removed.requestId === row.requestId,
+                          ),
+                      ),
+                    });
+                    for (const row of rows)
+                      receiptRows.delete(`${generation}:${row.sessionId}:${row.requestId}`);
+                  }
+                  return { awaitingHoldId: written ? null : holdId };
+                },
+              }
+            : {}),
           write: async () => {
             // Response and dispatch_canceled both use response holds. Receipt holds are absorbed.
             if (ledgerState(generation).holds.some((hold) => hold.operation === 'response'))
@@ -666,16 +705,17 @@ export function createComputerUseNativeHost(
               hold.targets.some((t) => pid === undefined || t.pid === pid),
           ),
     );
-  const dispatchLedger = (
-    input: Parameters<ComputerUseNativeHost['dispatch']>[0],
-    internal: InternalNativeSession,
+  const inputLedger = (
+    input: Readonly<{
+      sessionId: string;
+      identity: WindowsLedgerRow['identity'] | null;
+      path: WindowsLedgerPath;
+      stopped(): boolean;
+    }>,
   ): (WindowsDispatchCallbacks & { completed(): Promise<void> }) | undefined => {
     if (ledger === undefined) return undefined;
     let row: WindowsLedgerRow | undefined;
-    const identity =
-      typeof internal.raw['pid'] === 'number' && typeof internal.raw.processStartTime === 'string'
-        ? { pid: internal.raw['pid'], creationTime: internal.raw.processStartTime }
-        : null;
+    const identity = input.identity;
     const deny = (stopped = false): never => {
       throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
         code: stopped ? 'NATIVE_STOP_UNCONFIRMED' : 'UNAVAILABLE',
@@ -683,11 +723,7 @@ export function createComputerUseNativeHost(
       });
     };
     const assertSend = () => {
-      if (
-        input.signal.aborted ||
-        inputQuarantined() ||
-        startOwners.get(input.session.sessionId)?.stopped
-      )
+      if (input.stopped() || inputQuarantined() || startOwners.get(input.sessionId)?.stopped)
         deny(true);
       if (row === undefined || ledgerBlocked(identity?.pid, identity?.creationTime)) deny();
       if (
@@ -758,11 +794,7 @@ export function createComputerUseNativeHost(
     };
     return {
       beforeWrite: async (helperGeneration, requestId) => {
-        if (
-          input.signal.aborted ||
-          inputQuarantined() ||
-          startOwners.get(input.session.sessionId)?.stopped
-        )
+        if (input.stopped() || inputQuarantined() || startOwners.get(input.sessionId)?.stopped)
           deny(true);
         if (ledgerBlocked(identity?.pid, identity?.creationTime)) deny();
         if (
@@ -774,22 +806,12 @@ export function createComputerUseNativeHost(
         if (identity === null) return;
         const candidate: WindowsLedgerRow = {
           helperGeneration,
-          sessionId: input.session.sessionId,
+          sessionId: input.sessionId,
           requestId,
           identity,
-          kind:
-            input.inputKind === 'paste'
-              ? 'paste'
-              : ['invoke', 'set_text', 'select', 'toggle', 'expand_collapse'].includes(
-                    input.action.type,
-                  )
-                ? 'semantic'
-                : 'SendInput',
-          inputPath: 'normal',
+          ...input.path,
           state: 'awaiting_response',
         };
-        // PR5b / N9 must persist non-normal path changes before acknowledging them.
-        if (candidate.inputPath !== 'normal') deny();
         // The row key must stay unique; never let a second row overwrite a stored one.
         if (
           ledgerState(helperGeneration).rows.some(
@@ -826,7 +848,7 @@ export function createComputerUseNativeHost(
                   sessionId: candidate.sessionId,
                   requestId,
                   identity,
-                  input: { kind: candidate.kind, inputPath: candidate.inputPath },
+                  input: input.path,
                   storage: { status: 'written' },
                 });
                 row = candidate;
@@ -845,7 +867,7 @@ export function createComputerUseNativeHost(
           sessionId: candidate.sessionId,
           requestId,
           identity,
-          input: { kind: candidate.kind, inputPath: candidate.inputPath },
+          input: input.path,
           storage: stored
             ? { status: 'written' }
             : { status: 'failed', holdId: `dispatch-write-${++holdSequence}` },
@@ -871,6 +893,29 @@ export function createComputerUseNativeHost(
       completed: () => reflect('success'),
     };
   };
+  const dispatchLedger = (
+    input: Parameters<ComputerUseNativeHost['dispatch']>[0],
+    internal: InternalNativeSession,
+  ) =>
+    inputLedger({
+      sessionId: input.session.sessionId,
+      identity:
+        typeof internal.raw['pid'] === 'number' && typeof internal.raw.processStartTime === 'string'
+          ? { pid: internal.raw['pid'], creationTime: internal.raw.processStartTime }
+          : null,
+      stopped: () => input.signal.aborted,
+      path: {
+        kind:
+          input.inputKind === 'paste'
+            ? 'paste'
+            : ['invoke', 'set_text', 'select', 'toggle', 'expand_collapse'].includes(
+                  input.action.type,
+                )
+              ? 'semantic'
+              : 'SendInput',
+        inputPath: 'normal',
+      },
+    });
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
   const inputAttemptsBySession = new Map<string, number>();
@@ -904,6 +949,7 @@ export function createComputerUseNativeHost(
     nativeTerminal: ComputerUsePendingStartStop | null;
     nativeTerminalEvidence: unknown;
     unconfirmed: boolean;
+    foregroundUnconfirmed?: boolean;
     stopPromise: Promise<ComputerUsePendingStartStop> | null;
   };
   const startOwners = new Map<string, StartOwner>();
@@ -1329,8 +1375,9 @@ export function createComputerUseNativeHost(
     record: Record<string, unknown>,
     sessionId: string,
     cancelEpoch: number,
+    beforeAdoption = false,
   ): ComputerUseNativeInputReceipt => {
-    if (!sessions.has(sessionId))
+    if (!beforeAdoption && !sessions.has(sessionId))
       throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
     const parsed = computerUseNativeInputReceiptSchema.safeParse({
       sessionId: record['sessionId'],
@@ -1345,7 +1392,7 @@ export function createComputerUseNativeHost(
       (previous !== undefined && parsed.data.inputAttemptCount < previous)
     )
       throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
-    inputAttemptsBySession.set(sessionId, parsed.data.inputAttemptCount);
+    if (!beforeAdoption) inputAttemptsBySession.set(sessionId, parsed.data.inputAttemptCount);
     return parsed.data;
   };
 
@@ -1603,7 +1650,10 @@ export function createComputerUseNativeHost(
   const beginRawDiscovery = (input: Readonly<Record<string, unknown>>) => {
     // The ledger-enabled query retries storage before checking native availability.
     if (ledger === undefined) requireMethod('discoverWindows');
-    return discoveryManager.begin(input);
+    return discoveryManager.begin({
+      ...input,
+      ...(startIdentityEnabled ? { includeStartIdentity: true } : {}),
+    });
   };
   const beginWindowDiscovery = (
     profile: Parameters<ComputerUseNativeHost['listWindows']>[0],
@@ -1676,20 +1726,124 @@ export function createComputerUseNativeHost(
     nativeRoute: 'v1' | 'v2' | undefined,
     owner: StartOwner,
   ): Promise<ComputerUseNativeSession> => {
-    // SetForegroundWindow inside native start is not ledgered here; PR5b owns that handoff.
     assertStartOwner(owner);
+    if (
+      startIdentityEnabled &&
+      (ledger === undefined ||
+        binding.probe.capabilities.identityBoundStart !== true ||
+        addon?.dispatchLedgerSupported !== true ||
+        typeof addon.checkTargetIdentity !== 'function')
+    )
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
+    let checkedGeneration: number | undefined;
     const sendStart = async (request: Record<string, unknown>, creationTime: unknown) => {
       if (ledger === undefined) return await invoke('startSession', request);
       requireMethod('startSession');
       const start = addon?.startSession;
       if (start === undefined) throw new ComputerUseNativeUnavailableError('native_unavailable');
-      return await start(request, () => {
-        assertStartOwner(owner);
+      let callbacks: WindowsStartCallbacks | undefined;
+      let unconfirmedRecord: Promise<void> | undefined;
+      if (startIdentityEnabled) {
         if (
-          ledgerBlocked(request['pid'], typeof creationTime === 'string' ? creationTime : undefined)
+          typeof request['pid'] !== 'number' ||
+          !Number.isSafeInteger(request['pid']) ||
+          request['pid'] < 1 ||
+          !validStartTime(creationTime)
         )
           throw new ComputerUseNativeUnavailableError('native_unavailable');
-      });
+        request['requireStartIdentity'] = true;
+        request['expectedProcessStartTime'] = creationTime;
+        const recording = inputLedger({
+          sessionId: input.sessionId,
+          identity: { pid: request['pid'], creationTime },
+          path: { kind: 'foreground', inputPath: 'foreground' },
+          stopped: () =>
+            owner.stopped || owner.terminated || startOwners.get(owner.sessionId) !== owner,
+        });
+        if (recording === undefined)
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+        const retain = () => (unconfirmedRecord ??= recording.response(true));
+        const pause = () => {
+          owner.stopped = true;
+          owner.unconfirmed = true;
+          owner.foregroundUnconfirmed = true;
+        };
+        callbacks = {
+          ...recording,
+          beforeWrite: async (generation, requestId) => {
+            if (checkedGeneration !== undefined && generation !== checkedGeneration)
+              throw new ComputerUseNativeUnavailableError('native_unavailable');
+            await recording.beforeWrite(generation, requestId);
+          },
+          unconfirmed: (cause) => {
+            pause();
+            recording.unconfirmed(cause);
+            void retain().catch(() => undefined);
+          },
+          startResponse: async (value, succeeded) => {
+            try {
+              const raw = asRecord(value, 'native_unavailable');
+              const result = asRecord(raw['startResult'], 'native_unavailable');
+              const count = result['attemptCount'];
+              const outcome = result['foregroundResult'];
+              if (
+                result['pid'] !== request['pid'] ||
+                result['processStartTime'] !== creationTime ||
+                typeof count !== 'number' ||
+                !Number.isSafeInteger(count) ||
+                count < 0 ||
+                !(
+                  (outcome === 'not_attempted' && count === 0) ||
+                  (outcome === 'confirmed' && count > 0 && succeeded) ||
+                  outcome === 'unconfirmed'
+                )
+              )
+                throw new ComputerUseNativeUnavailableError('native_unavailable');
+              if (succeeded) {
+                const parsed = parseNativeSession(
+                  raw,
+                  input.profile.platform,
+                  input,
+                  request,
+                  options.windowsPhysicalBoundsToDip,
+                );
+                if (
+                  raw['pid'] !== request['pid'] ||
+                  parsed.raw.processStartTime !== creationTime ||
+                  parsed.windowIdentityDigest !== request['windowIdentityDigest']
+                )
+                  throw new ComputerUseNativeUnavailableError('native_unavailable');
+                inputReceipt(raw, input.sessionId, parsed.cancelEpoch, true);
+              }
+              if (outcome === 'unconfirmed')
+                throw new ComputerUseNativeUnavailableError('native_unavailable');
+              await recording.completed();
+            } catch {
+              pause();
+              await retain();
+              throw new ComputerUseNativeUnavailableError('native_unavailable');
+            }
+          },
+        };
+      }
+      try {
+        return await start(
+          request,
+          () => {
+            assertStartOwner(owner);
+            if (
+              ledgerBlocked(
+                request['pid'],
+                typeof creationTime === 'string' ? creationTime : undefined,
+              )
+            )
+              throw new ComputerUseNativeUnavailableError('native_unavailable');
+          },
+          callbacks,
+        );
+      } finally {
+        await unconfirmedRecord;
+      }
     };
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
@@ -1749,7 +1903,9 @@ export function createComputerUseNativeHost(
       assertStartOwner(owner);
       pid = pidsByIdentity.get(input.profile.identityDigest);
       if (pid === undefined || windows.every((candidate) => candidate.windowId !== input.windowId))
-        throw new ComputerUseNativeUnavailableError('native_app_not_active');
+        throw new ComputerUseNativeUnavailableError(
+          startIdentityEnabled ? 'native_unavailable' : 'native_app_not_active',
+        );
     }
     const discoveryRequest = {
       ...input.profile,
@@ -1779,9 +1935,36 @@ export function createComputerUseNativeHost(
         BigInt(processStartTime) > 0xffff_ffff_ffff_ffffn)
     )
       throw new ComputerUseNativeUnavailableError('native_unavailable');
+    if (startIdentityEnabled && !validStartTime(processStartTime))
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
     const selectedPid = selectedRecord['pid'];
     if (typeof selectedPid !== 'number' || !Number.isSafeInteger(selectedPid) || selectedPid < 1)
-      throw new ComputerUseNativeUnavailableError('native_window_owner_invalid');
+      throw new ComputerUseNativeUnavailableError(
+        startIdentityEnabled ? 'native_unavailable' : 'native_window_owner_invalid',
+      );
+    if (startIdentityEnabled) {
+      if (selectedPid > 0xffff_ffff)
+        throw new ComputerUseNativeUnavailableError('native_unavailable');
+      let results: unknown;
+      try {
+        results = await addon?.checkTargetIdentity?.(
+          [{ pid: selectedPid, processStartTime }],
+          (generation) => {
+            checkedGeneration = generation;
+          },
+        );
+      } catch {
+        throw new ComputerUseNativeUnavailableError('native_unavailable');
+      }
+      assertStartOwner(owner);
+      if (
+        checkedGeneration === undefined ||
+        !Array.isArray(results) ||
+        results.length !== 1 ||
+        asRecord(results[0], 'native_unavailable')['result'] !== 'alive'
+      )
+        throw new ComputerUseNativeUnavailableError('native_unavailable');
+    }
     pid = selectedPid;
     pidsByIdentity.set(input.profile.identityDigest, selectedPid);
     const selectedBounds = asRecord(selectedRecord['bounds'], 'native_window_invalid');
@@ -2023,6 +2206,8 @@ export function createComputerUseNativeHost(
         // an unfinished/uncertain launch-capable discovery.
         if (
           stoppedBeforeSettlement &&
+          // R23 pause is not a user Stop; retain evidence until an explicit Stop or exit.
+          !owner.foregroundUnconfirmed &&
           owner.nativeInvoked &&
           owner.unconfirmed &&
           !owner.discoveryUnconfirmed &&
@@ -3366,4 +3551,12 @@ function requiredCaptureDimension(value: unknown, maximum: number): number {
   if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > maximum)
     throw new ComputerUseNativeUnavailableError('native_capture_dimensions_invalid');
   return Number(value);
+}
+
+function validStartTime(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[1-9][0-9]{0,19}$/u.test(value) &&
+    BigInt(value) <= 0xffff_ffff_ffff_ffffn
+  );
 }
