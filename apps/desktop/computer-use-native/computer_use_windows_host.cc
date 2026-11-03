@@ -206,6 +206,9 @@ int ProbeMain() {
   return 0;
 }
 
+// After Main dies, how long the consumer has to return before the helper ends itself.
+inline constexpr ULONGLONG kWindowsParentDeathGraceMs = 2'000;
+
 int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   if (pipe_name.size() < 10 || pipe_name.size() > 240 ||
       pipe_name.rfind(L"\\\\.\\pipe\\sprint-coder-computer-use-", 0) != 0)
@@ -299,6 +302,16 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
           }
           CancelIoEx(pipe, nullptr);
           DisconnectNamedPipe(pipe);
+          // A cancel can land just before the consumer issues its next I/O, and a stall outside I/O
+          // never returns. With Main gone nothing else ends this helper, so keep cancelling for a
+          // short grace period, then end the process (its job ends any unverified child).
+          const ULONGLONG grace_end = GetTickCount64() + kWindowsParentDeathGraceMs;
+          while (serving.load(std::memory_order_acquire)) {
+            if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8);
+            Sleep(20);
+            std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
+            CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());
+          }
           break;
         }
       }

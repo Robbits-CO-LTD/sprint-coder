@@ -87,6 +87,14 @@ it('measures validation identity on the consumer with cancellable I/O and fresh 
   expect(parentLock).toContain(
     'CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());',
   );
+  // A cancel can miss the next I/O and a stall outside I/O never returns: keep cancelling, then
+  // end the helper after the grace period rather than leave it holding the target's handles.
+  const grace = watcher.slice(watcher.indexOf('DisconnectNamedPipe(pipe);'));
+  expect(grace.replace(/\s+/gu, ' ')).toContain(
+    'while (serving.load(std::memory_order_acquire)) { if (GetTickCount64() >= grace_end) TerminateProcess(GetCurrentProcess(), 8);',
+  );
+  expect(grace).toContain('CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());');
+  expect(host).toContain("inline constexpr ULONGLONG kWindowsParentDeathGraceMs = 2'000;");
   expect(source).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
   expect(source).toContain(
     'WindowsTargetListWorkerRunning().store(false, std::memory_order_release)',
