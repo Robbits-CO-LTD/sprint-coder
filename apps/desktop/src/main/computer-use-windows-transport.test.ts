@@ -39,6 +39,7 @@ import {
 } from './computer-use-native-host';
 import type {
   WindowsLedgerRow,
+  WindowsStorageHold,
   WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 import * as stopKernel from './computer-use-windows-stop-outcome';
@@ -930,15 +931,27 @@ describe('Computer Use Windows helper transport', () => {
     }
   });
 
-  it.each(['start', 'resume'] as const)(
-    'PR5b gates %s after another instance commits during admission',
+  it.each(['start', 'resume', 'other-target'] as const)(
+    'PR5b gates same-target start holds / resume quarantine, allows other targets (%s)',
     async (entry) => {
       const directory = mkdtempSync(join(tmpdir(), 'ledger-start-gate-'));
       const path = join(directory, 'shared.sqlite');
       const a = openWindowsLedgerStore({ path, userData: 'C:/synthetic/a' });
       const b = openWindowsLedgerStore({ path, userData: 'C:/synthetic/b' });
       let commit = false;
-      let discoveryCount = 0;
+      const holds: WindowsStorageHold[] = [];
+      const decide = stopKernel.decideWindowsStop;
+      // Supply a storage hold at the kernel seam; new-start quarantine matching belongs to PR8.
+      const kernel = vi
+        .spyOn(stopKernel, 'decideWindowsStop')
+        .mockImplementation((state, event) => {
+          const decision = decide(state, event);
+          if (event.kind !== 'restore_read' || decision.kind !== 'restored') return decision;
+          return {
+            ...decision,
+            state: { ...decision.state, holds: [...decision.state.holds, ...holds] },
+          };
+        });
       try {
         const original = responders();
         const identity = { pid: 4242, processStartTime: '133000000000000001' };
@@ -947,12 +960,12 @@ describe('Computer Use Windows helper transport', () => {
             ...original,
             list_windows: (metadata) => {
               const [type, result] = original['list_windows']!(metadata);
-              discoveryCount += 1;
               return [
                 type,
                 (result as Record<string, unknown>[]).map((row) => ({
                   ...row,
-                  ...(discoveryCount === 1 ? {} : identity),
+                  pid: identity.pid,
+                  ...(metadata['includeStartIdentity'] === true ? identity : {}),
                 })),
               ];
             },
@@ -965,16 +978,36 @@ describe('Computer Use Windows helper transport', () => {
           { windowsLedger: b, windowsKillStopTermination: { enabled: true } },
           (addon) => ({
             ...addon,
-            startSession: (...args) => {
+            startSession: async (...args) => {
               if (commit) {
+                if (entry !== 'resume')
+                  holds.push({
+                    id: 'synthetic-start-hold',
+                    operation: 'response',
+                    targets: [
+                      {
+                        pid: entry === 'other-target' ? 4343 : identity.pid,
+                        creationTime: '133000000000000002',
+                      },
+                    ],
+                    changes: [],
+                    recovery: 'reflect_response',
+                  });
                 expect(
                   a.restoreQuarantines([
                     {
-                      identity: { pid: identity.pid, creationTime: identity.processStartTime },
+                      identity: {
+                        pid: entry === 'other-target' ? 4343 : identity.pid,
+                        creationTime:
+                          entry === 'other-target'
+                            ? '133000000000000002'
+                            : identity.processStartTime,
+                      },
                       reason: 'exit_suspect',
                     },
                   ]),
                 ).toBe(true);
+                await target.host.restoreWindowsLedger();
               }
               return addon.startSession!(...args);
             },
@@ -983,25 +1016,104 @@ describe('Computer Use Windows helper transport', () => {
         await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
         if (entry === 'resume') await startSession(target.host, 'shared-session', 'turn-a');
         commit = true;
-        await expect(
-          target.host.startSession({
-            profile,
-            windowId: '100',
-            sessionId: 'shared-session',
-            taskId: 'task-1',
-            turnId: 'turn-a',
-            cancelEpoch: 0,
-            resume: entry === 'resume',
-          }),
-        ).rejects.toMatchObject({ reasonCode: 'native_unavailable' });
+        const attempt = target.host.startSession({
+          profile,
+          windowId: '100',
+          sessionId: 'shared-session',
+          taskId: 'task-1',
+          turnId: 'turn-a',
+          cancelEpoch: 0,
+          resume: entry === 'resume',
+        });
+        if (entry === 'other-target')
+          await expect(attempt).resolves.toMatchObject({ sessionId: 'shared-session' });
+        else await expect(attempt).rejects.toMatchObject({ reasonCode: 'native_unavailable' });
         expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(
-          entry === 'resume' ? 1 : 0,
+          entry === 'start' ? 0 : 1,
         );
       } finally {
+        kernel.mockRestore();
         a.close();
         b.close();
         rmSync(directory, { recursive: true, force: true });
       }
+    },
+  );
+  it.each([
+    '0',
+    '01',
+    '-1',
+    '1.5',
+    '1e3',
+    '',
+    '18446744073709551616',
+    '123456789012345678901',
+    1,
+    null,
+  ])(
+    'PR5b rejects malformed discovery identity %j before sending start',
+    async (processStartTime) => {
+      const original = responders();
+      // Deliberately malformed helper output tests the Host boundary, not opt-in wiring.
+      const target = createTarget(
+        {
+          ...original,
+          list_windows: (metadata) => {
+            const [type, rows] = original['list_windows']!(metadata);
+            return [
+              type,
+              (rows as Record<string, unknown>[]).map((row) => ({ ...row, processStartTime })),
+            ];
+          },
+        },
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            read: () => ({ rows: [], quarantines: [] }),
+            restoreQuarantines: () => true,
+          },
+        },
+      );
+      await expect(startSession(target.host, 'invalid-identity', 'turn-a')).rejects.toMatchObject({
+        reasonCode: 'native_unavailable',
+      });
+      expect(target.helper().served).not.toContain('start_session');
+    },
+  );
+  it.each(['1', '18446744073709551615'])(
+    'PR5b accepts discovery identity boundary %s',
+    async (processStartTime) => {
+      const original = responders();
+      // Inject a valid identity at the discovery boundary ahead of PR5b-3 opt-in wiring.
+      const target = createTarget(
+        {
+          ...original,
+          list_windows: (metadata) => {
+            const [type, rows] = original['list_windows']!(metadata);
+            return [
+              type,
+              (rows as Record<string, unknown>[]).map((row) => ({ ...row, processStartTime })),
+            ];
+          },
+        },
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            read: () => ({ rows: [], quarantines: [] }),
+            restoreQuarantines: () => true,
+          },
+        },
+      );
+      await expect(startSession(target.host, 'valid-identity', 'turn-a')).resolves.toMatchObject({
+        sessionId: 'valid-identity',
+      });
+      expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(1);
     },
   );
   it.each(['throw', 'timeout'] as const)(
