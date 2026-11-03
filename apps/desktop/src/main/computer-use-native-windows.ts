@@ -143,6 +143,7 @@ type PendingRequest = Readonly<{
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+  deadline: number;
   sessionId: ComputerUseNativeFrameId;
   /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
   stopsSession: boolean;
@@ -1601,21 +1602,35 @@ class WindowsComputerUseHelperClient {
       new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           if (this.pending.get(requestId.hex) !== pending) return;
+          // Map insertion order follows sends; a serial consumer may still be serving the head.
+          let earlierRequestWithinDeadline = false;
+          for (const request of this.pending.values()) {
+            if (request === pending) break;
+            if (request.helperGeneration === helperGeneration && request.deadline > Date.now()) {
+              earlierRequestWithinDeadline = true;
+              break;
+            }
+          }
           this.pending.delete(requestId.hex);
           this.markSemanticUncertain(pending);
           pending.dispatchCallbacks?.unconfirmed('transport_timeout');
           const error = new Error('Computer Use Windows helper request timed out');
           reject(error);
-          // A request that never came back means the helper is unusable, so this normally ends it
-          // outright rather than waiting for the transport to fall idle. The exception is a stop that
-          // is still on the wire: the helper's answer to it is the only thing that can release Main's
-          // input quarantine, and requests that were already in flight when Stop began keep timers of
-          // their own that would otherwise expire inside Stop's window and kill the helper the stop
-          // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-          // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
-          // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
-          // the original input/launch unit ended. A submitted semantic request also needs its
-          // helper before its own deadline: a shorter queued read can time out first.
+          // D is independent of Stop's C. Keep the original generation and reuse its single T;
+          // uncertain input/discovery must not leave a hung helper alive indefinitely.
+          const generation = this.generations.get(helperGeneration);
+          if (
+            generation !== undefined &&
+            !isComputerUseStopOperation(String(metadata['operation']))
+          ) {
+            if (!earlierRequestWithinDeadline) this.requestTermination(generation, error);
+            return;
+          }
+          // Only Stop operations or configurations without kill-stop reach this legacy path.
+          // Retain the helper for a bounded Stop or an unconfirmed input/discovery; reconnecting
+          // cannot prove the original unit ended. Since PR11, exit -> cleanupGeneration also
+          // releases quarantine, in addition to a confirmed Stop response. A submitted semantic
+          // request needs its helper before its own deadline when a shorter queued read expires.
           if (
             activityGeneration === this.activityGeneration &&
             helperGeneration === this.helperGeneration &&
@@ -1633,6 +1648,7 @@ class WindowsComputerUseHelperClient {
           resolve,
           reject,
           timeout,
+          deadline: Date.now() + timeoutMilliseconds,
           sessionId,
           stopsSession,
           retainAfterKill:

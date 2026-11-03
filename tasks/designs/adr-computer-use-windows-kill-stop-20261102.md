@@ -156,6 +156,9 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 
 時刻の起点は、その入口の Stop の開始とする。C = 10 秒（実測で見直すまで維持）、T = 2 秒。E1 / E2 は cancel の ack に最大 1 秒を使い、E3 / E4 は使わない。C 内の `semantic_input_in_flight` の再試行で期限を延長しない。exit が期限内に来ない場合に返すのは、停止確定ではなく `termination_requested` である（§3.1 の 1）。
 
+N5-B1（方式 C の TS 側）: kill-stop 有効時は、Stop・外部取消しのない通常要求も送信時の期限 D（picker 5 分、observe／discovery 30 秒、start 15 秒、read-node 5 秒、その他 10 秒）で元の helper 世代の `requestTermination` へ入る。未確認 semantic／discovery や進行中の Stop を理由に D を延長せず、追加の C は積まない。終了要求と T は世代につき一度だけで、exit 未確認なら再接続を拒否し台帳・隔離を保つ。exit 後の clean／suspect 判定と遅い exit の一度だけの通知は既存経路を使い、通常失敗を `user_stop` にしない。旧世代の応答・timer は新世代を変更しない。kill-stop 無効構成の挙動は維持する。B1-AC3（通常応答後も残る worker／cleanup の監視と完了通知）は B2 に持ち越し、本変更だけで応答後の処理まで有界になったとは扱わない。
+同じ世代で先に送信された未完了の要求が自身の D 内にある間は、直列キューの後続要求が D を超えても、その要求を失敗として返すだけで helper の終了は先頭の D に委ねる。先頭の D が切れれば一度だけ終了を要求し、上限は先頭の D＋T とする。
+
 | 入口 | 通常の確定 | receipt が得られない場合の結果の期限 | 根拠 |
 | --- | --- | --- | --- |
 | E1 開始済みセッション | 検証済み close receipt | cancel 最大 1 秒 + C + T = 最大 13 秒 | §3.1 の 1、§4 の S2 |
