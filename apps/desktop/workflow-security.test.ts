@@ -57,6 +57,22 @@ function stepBlock(job: string, name: string): string {
   return job.slice(start, next === -1 ? job.length : next);
 }
 
+function expectBuildModeContract(workflow: string, route: 'release' | 'acceptance'): void {
+  if (route === 'release') {
+    expect(workflow, route).not.toContain('--eligibility');
+    expect(workflow, route).not.toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD');
+    return;
+  }
+  // Acceptance packages keep their explicit marker and artifact check regardless of eligibility.
+  const build = jobBlock(workflow, 'acceptance-build');
+  expect(stepBlock(build, 'Make unsigned Windows acceptance artifacts')).toContain(
+    'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: windows-unsigned-acceptance',
+  );
+  expect(stepBlock(build, 'Verify the acceptance mode is compiled into Main')).toContain(
+    'verify-computer-use-acceptance-build.mjs --expect present',
+  );
+}
+
 describe('workflow security boundaries', () => {
   it('isolates the Windows hung helper live seam in its full-matrix job', () => {
     const job = jobBlock(workflows['.github/workflows/ci.yml'], 'computer-use-hung-helper');
@@ -400,9 +416,40 @@ describe('workflow security boundaries', () => {
     );
   });
 
-  it('never asks a distributed or acceptance build for the deny-list', () => {
+  it('release_beta_remains_v1_without_acceptance_mode', () => {
+    // This workflow handles both stable and beta tags.
+    const release = workflows['.github/workflows/release-beta.yml'];
+    expect(release).toContain("prerelease='true'");
+    expect(release).toContain("prerelease='false'");
+    expectBuildModeContract(release, 'release');
+  });
+
+  it.each([
+    'run: npm run build:computer-use-native -- --eligibility=v2',
+    'run: node build-computer-use-native.mjs --eligibility v2',
+    'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: windows-unsigned-acceptance',
+    '$env:SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD = "windows-unsigned-acceptance"',
+    'echo "SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=windows-unsigned-acceptance" >> $GITHUB_ENV',
+  ])('rejects a release build mode override: %s', (override) => {
+    const release = workflows['.github/workflows/release-beta.yml'];
+    expect(() => expectBuildModeContract(`${release}\n${override}\n`, 'release')).toThrow();
+  });
+
+  it.each(['', '--eligibility=v2', '--eligibility v2'])(
+    'keeps the acceptance build contract independent of release mode: %s',
+    (eligibility) => {
+      const acceptance = workflows['.github/workflows/computer-use-acceptance-build.yml'];
+      // N7-7 can select v2 here without changing the release contract or today's workflow.
+      const candidate = eligibility
+        ? `${acceptance}\n      - run: npm run build:computer-use-native -- ${eligibility}\n`
+        : acceptance;
+      expectBuildModeContract(candidate, 'acceptance');
+    },
+  );
+
+  it('keeps shared package builders and evidence workflows at the default eligibility mode', () => {
     // Every route that builds the Computer Use native for a package, by either spelling of its
-    // name, must leave the mode at its v1 default. Only the CI gate chooses a mode.
+    // name, must leave the mode at its v1 default. Explicit modes belong in dedicated workflows.
     const rootPackage = JSON.parse(
       readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8'),
     ) as { scripts: Record<string, string> };
@@ -422,13 +469,11 @@ describe('workflow security boundaries', () => {
     expect(forge).toContain('build-computer-use-native.mjs');
     expect(forge).not.toContain('--eligibility');
     for (const file of [
-      '.github/workflows/release-beta.yml',
-      '.github/workflows/computer-use-acceptance-build.yml',
       '.github/workflows/computer-use-final-gate.yml',
       '.github/workflows/computer-use-evidence-harness.yml',
     ] as const)
       expect(workflows[file], file).not.toContain('--eligibility');
-    // The one workflow that does pass it is the CI gate.
+    // The CI gate already selects its matrix mode explicitly.
     expect(workflows['.github/workflows/ci.yml']).toContain('--eligibility=');
   });
 });
