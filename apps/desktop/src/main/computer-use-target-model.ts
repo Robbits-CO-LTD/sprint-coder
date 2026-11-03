@@ -6,6 +6,7 @@ import {
 } from '@sprint-coder/contracts';
 import { computerTargetToolKind } from '@sprint-coder/domain';
 import type { WindowsGenerationToken } from './computer-use-native-types';
+import type { ComputerAppProfileRecord } from './persistence';
 
 /** Main-only ownership evidence; helper lifetime and native list revision are independent. */
 export type ComputerTargetWindowsGeneration = Readonly<{
@@ -125,6 +126,7 @@ export type ComputerTargetTokenBinding = ComputerTargetAppBinding &
   Readonly<{ windowIdentityDigest: string; nativeWindowId: string }>;
 
 export type ComputerTargetAppTokenRecord = Readonly<{
+  candidateProfile?: ComputerAppProfileRecord;
   enumeration?: symbol;
   binding: ComputerTargetAppBinding;
   profileId: string;
@@ -132,6 +134,7 @@ export type ComputerTargetAppTokenRecord = Readonly<{
 }>;
 
 export type ComputerTargetTokenRecord = Readonly<{
+  candidateProfile?: ComputerAppProfileRecord;
   enumeration?: symbol;
   binding: ComputerTargetTokenBinding;
   profileId: string;

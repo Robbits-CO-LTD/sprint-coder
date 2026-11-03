@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
+import {
+  computerTargetWindowsGenerationMatches,
+  type ComputerTargetWindowsGeneration,
+} from './computer-use-target-model';
 import { WindowsStopDelivery, type WindowsStopOwner } from './computer-use-windows-stop-delivery';
 import {
   createComputerUseDiscoveryManager,
@@ -2251,6 +2255,11 @@ export function createComputerUseNativeHost(
     const selectedRecord =
       selected === undefined ? null : asRecord(selected, 'native_window_invalid');
     if (selectedRecord === null) throw new ComputerUseNativeUnavailableError('native_window_stale');
+    if (
+      input.expectedWindowIdentityDigest !== undefined &&
+      selectedRecord['windowIdentityDigest'] !== input.expectedWindowIdentityDigest
+    )
+      throw new ComputerUseNativeUnavailableError('native_window_stale');
     const processStartTime = selectedRecord['processStartTime'];
     if (
       ledger !== undefined &&
@@ -2360,6 +2369,14 @@ export function createComputerUseNativeHost(
     }
   };
 
+  let targetGeneration: ComputerTargetWindowsGeneration | undefined;
+  let targetEnumeration: symbol | undefined;
+  const targetGenerationCurrent = (generation: ComputerTargetWindowsGeneration): boolean =>
+    terminationEnabled &&
+    addon?.isWindowsGenerationCurrent?.(generation.helper) === true &&
+    options.effectiveEligibilityMode?.() === 'v2-denylist' &&
+    generation.rulesetVersion === denyRulesetVersion('win32') &&
+    computerTargetWindowsGenerationMatches(targetGeneration, generation);
   const host: ComputerUseNativeHost = {
     ...(terminationEnabled
       ? {
@@ -2563,9 +2580,13 @@ export function createComputerUseNativeHost(
           captureWindowsGeneration: () => addon?.captureWindowsGeneration?.() ?? null,
           isWindowsGenerationCurrent: (token: WindowsGenerationToken) =>
             addon?.isWindowsGenerationCurrent?.(token) === true,
+          isWindowsTargetGenerationCurrent: targetGenerationCurrent,
         }
       : {}),
     listTargets: async () => {
+      const enumeration = Symbol('target-enumeration');
+      targetEnumeration = enumeration;
+      targetGeneration = undefined;
       if (ledger !== undefined) await retryLedger();
       const requireDiscovery = (): void => {
         if (
@@ -2585,7 +2606,9 @@ export function createComputerUseNativeHost(
       const requireGeneration = (): void => {
         if (
           terminationEnabled &&
-          (helper == null || addon?.isWindowsGenerationCurrent?.(helper) !== true)
+          (enumeration !== targetEnumeration ||
+            helper == null ||
+            addon?.isWindowsGenerationCurrent?.(helper) !== true)
         )
           throw new ComputerUseNativeUnavailableError('native_target_generation_changed');
       };
@@ -2606,6 +2629,7 @@ export function createComputerUseNativeHost(
               }),
             }),
       };
+      targetGeneration = result.windowsGeneration;
       if (ledger !== undefined) {
         const targets = [...result.targets];
         const prepare = admissionBatch();
@@ -2692,7 +2716,33 @@ export function createComputerUseNativeHost(
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
       if (ledger === undefined) requireMethod('startSession');
-      const { classifierRoute, assertTargetCurrent, ...input } = startInput;
+      const {
+        classifierRoute,
+        assertTargetCurrent: assertCallerTarget,
+        windowsGeneration,
+        ...baseInput
+      } = startInput;
+      const assertTargetCurrent =
+        windowsGeneration === undefined
+          ? assertCallerTarget
+          : () => {
+              assertCallerTarget?.();
+              if (
+                !targetGenerationCurrent(windowsGeneration) ||
+                !/^[a-f0-9]{64}$/u.test(baseInput.expectedWindowIdentityDigest ?? '')
+              )
+                throw new ComputerUseNativeUnavailableError('native_target_generation_changed');
+            };
+      const input = {
+        ...baseInput,
+        ...(windowsGeneration === undefined
+          ? {}
+          : {
+              targetGeneration: windowsGeneration.listGeneration,
+              denyRulesetVersion: windowsGeneration.rulesetVersion,
+              eligibilityBasis: 'v2-denylist',
+            }),
+      };
       assertTargetCurrent?.();
       if (!Number.isSafeInteger(input.cancelEpoch) || input.cancelEpoch < 0)
         throw new ComputerUseNativeUnavailableError('native_session_invalid');

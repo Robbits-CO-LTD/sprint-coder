@@ -214,6 +214,13 @@ describe('Windows native targets independently classified in Main', () => {
     });
     expect(result.windowsGeneration?.helper).toBe(helper);
     expect(host.captureWindowsGeneration!()).toBe(helper);
+    expect(host.isWindowsTargetGenerationCurrent?.(result.windowsGeneration!)).toBe(true);
+    value.generation += 1;
+    const second = await host.listTargets!();
+    expect(host.isWindowsTargetGenerationCurrent?.(result.windowsGeneration!)).toBe(false);
+    fixture.listTargets.mockReturnValueOnce({});
+    await expect(host.listTargets!()).rejects.toThrow();
+    expect(host.isWindowsTargetGenerationCurrent?.(second.windowsGeneration!)).toBe(false);
     current = false;
     expect(host.isWindowsGenerationCurrent!(helper)).toBe(false);
     await expect(host.listTargets!()).rejects.toThrow('native_target_generation_changed');
