@@ -1454,23 +1454,6 @@ struct WindowsNewStartMeasurement {
   std::string reason = "session_target_rejected";
 };
 
-enum class WindowsNewStartDecision { kWaiting, kAdopt, kDrop };
-
-struct WindowsNewStartPending {
-  std::mutex mutex;
-  std::condition_variable changed;
-  std::atomic<bool> abandoned{false};
-  bool ready = false;
-  bool succeeded = false;
-  WindowsNewStartDecision decision = WindowsNewStartDecision::kWaiting;
-  WindowsNewStartMeasurement measured;
-  // Aliases only: the worker's RAII owners retain these until adoption. Destroying pending on the
-  // consumer must never bring a potentially blocking handle close back onto its lane.
-  HANDLE thread = nullptr;
-  HANDLE process = nullptr;
-  HANDLE executable = INVALID_HANDLE_VALUE;
-};
-
 // BEGIN windows v1 new-start eligibility
 bool MeasureWindowsV1NewStartEligibility(const WindowsStartInput &input,
                                         const LockedWindowsExecutable &executable,
@@ -1526,27 +1509,10 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
   return still_valid();
 }
 
-// Stops the worker on every consumer exit, including an allocation failure while preparing the
-// response/session. Adoption is the only path that transfers its handles and releases its slot here.
-struct WindowsNewStartWaitGuard {
-  std::shared_ptr<WindowsNewStartPending> pending;
-  ~WindowsNewStartWaitGuard() {
-    {
-      std::lock_guard lock(pending->mutex);
-      if (pending->decision == WindowsNewStartDecision::kAdopt) return;
-      pending->abandoned.store(true, std::memory_order_release);
-      pending->decision = WindowsNewStartDecision::kDrop;
-      if (pending->thread != nullptr) CancelSynchronousIo(pending->thread);
-    }
-    pending->changed.notify_one();
-  }
-};
-
 bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std::string *reason) {
   *reason = "session_target_rejected";
   auto &control = WindowsTargetListControl();
   const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
-  auto pending = std::make_shared<WindowsNewStartPending>();
   const auto start_valid = [&] {
     const std::uint64_t epoch = cancellation_epoch.load(std::memory_order_acquire);
     return !parent_process_dead.load(std::memory_order_acquire) &&
@@ -1571,102 +1537,45 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     input.initial_epoch = cancellation_epoch.load(std::memory_order_acquire);
     if (control.running.exchange(true, std::memory_order_acq_rel)) return false;
   }
-  WindowsNewStartWaitGuard lease{pending};
-  try {
-    std::thread([pending, input]() mutable {
-      bool adopted = false;
-      {
-        ScopedKernelHandle target_process;
-        LockedWindowsExecutable process_executable;
-        WindowsNewStartMeasurement measured;
-        bool succeeded = false;
-        const auto still_valid = [&] {
-          return !pending->abandoned.load(std::memory_order_acquire) &&
-              (!input.start_lease || !input.start_lease->owner->stopped.load(std::memory_order_acquire)) &&
-              !parent_process_dead.load(std::memory_order_acquire) &&
-              WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == input.stop_serial &&
-              cancellation_epoch.load(std::memory_order_acquire) == input.initial_epoch;
-        };
-        {
-          ScopedKernelHandle thread;
-          try {
-            struct Apartment {
-              HRESULT result;
-              bool initialized;
-              explicit Apartment(bool needed)
-                  : result(needed ? CoInitializeEx(nullptr, COINIT_MULTITHREADED) : S_OK),
-                    initialized(needed && SUCCEEDED(result)) {}
-              ~Apartment() { if (initialized) CoUninitialize(); }
-            } apartment(input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist);
-            if (SUCCEEDED(apartment.result) && still_valid() &&
-                DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread.value,
-                                0, FALSE, DUPLICATE_SAME_ACCESS)) {
-              {
-                std::lock_guard lock(pending->mutex);
-                pending->thread = thread.value;
-              }
-              succeeded = MeasureWindowsNewStart(input, still_valid, &target_process,
-                                                   &process_executable, &measured);
-            }
-          } catch (...) {
-            succeeded = false;
-          }
-          // The COM apartment and temporary judgement are already gone; withdraw the cancellable
-          // thread alias before closing its duplicate, and before publishing ready.
-          std::lock_guard lock(pending->mutex);
-          pending->thread = nullptr;
-        }
-        {
-          std::unique_lock lock(pending->mutex);
-          if (succeeded && still_valid()) {
-            pending->measured = std::move(measured);
-            pending->process = target_process.value;
-            pending->executable = process_executable.file;
-            pending->succeeded = true;
-            pending->ready = true;
-            pending->changed.notify_one();
-            pending->changed.wait(lock, [&] { return pending->decision != WindowsNewStartDecision::kWaiting; });
-            adopted = pending->decision == WindowsNewStartDecision::kAdopt;
-            if (adopted) {
-              target_process.release();
-              process_executable.file = INVALID_HANDLE_VALUE;
-            }
-            pending->process = nullptr;
-            pending->executable = INVALID_HANDLE_VALUE;
-          } else {
-            pending->measured.reason = std::move(measured.reason);
-          }
-        }
-      }
-      if (adopted) {
-        // Adopted handles belong to the session; this worker must not release the shared slot.
-        return;
-      }
-      // Rejected candidates are closed on this worker before another measurement can begin.
+  // Main's E3 kill-stop owns the bound for blocked measurement/cleanup. Keep the shared
+  // slot until this call has released its resources; there is no detached result to adopt.
+  struct Slot {
+    WindowsStartInput &input;
+    ~Slot() {
       input.start_lease.reset();
-      {
-        std::lock_guard lock(pending->mutex);
-        pending->ready = true;
-        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-      }
-      pending->changed.notify_one();
-    }).detach();
+      WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
+    }
+  } slot{input};
+  ScopedKernelHandle target_process;
+  LockedWindowsExecutable process_executable;
+  WindowsNewStartMeasurement measured;
+  const auto still_valid = [&] {
+    return start_valid() &&
+        cancellation_epoch.load(std::memory_order_acquire) == input.initial_epoch;
+  };
+  bool succeeded = false;
+  try {
+    struct Apartment {
+      HRESULT result;
+      bool initialized;
+      explicit Apartment(bool needed)
+          : result(needed ? CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED) : S_OK),
+            initialized(needed && SUCCEEDED(result)) {}
+      ~Apartment() { if (initialized) CoUninitialize(); }
+    } apartment(v2);
+    if (SUCCEEDED(apartment.result) && still_valid())
+      succeeded = MeasureWindowsNewStart(input, still_valid, &target_process,
+                                         &process_executable, &measured);
   } catch (...) {
-    control.running.store(false, std::memory_order_release);
+    succeeded = false;
+  }
+  if (!start_valid()) {
+    *reason = "session_start_canceled";
     return false;
   }
-  {
-    std::unique_lock lock(pending->mutex);
-    while (!pending->ready && start_valid())
-      pending->changed.wait_for(lock, std::chrono::milliseconds(20));
-    if (!start_valid()) {
-      *reason = "session_start_canceled";
-      return false;
-    }
-    if (!pending->succeeded) {
-      *reason = pending->measured.reason;
-      return false;
-    }
+  if (!succeeded) {
+    *reason = measured.reason;
+    return false;
   }
   // The measured candidate is ready; focus still belongs to the consumer.
   {
@@ -1676,7 +1585,6 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       return false;
     }
   }
-  const auto &measured = pending->measured;
   InvalidateWindowsTicket(input.session_key);
   if (!sessions.empty()) {
     *reason = "session_limit";
@@ -1729,7 +1637,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     session.input_api_attempts = input.start_lease->owner->input_api_attempts;
   }
   const auto identity_matches = [&](HWND focus_window) {
-    if (CheckWindowsStartFocusIdentity(pending->process, input.pid, input.expected_process_start,
+    if (CheckWindowsStartFocusIdentity(target_process.value, input.pid, input.expected_process_start,
         measured.process_start, input.window, focus_window, input.app_identity, input.expected_window_identity))
       return true;
     *reason = "session_identity_changed";
@@ -1738,7 +1646,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   if (!identity_matches(input.window)) return false;
   const auto begin_focus = [&](HWND focus_window) {
     // Potentially blocking identity queries must not hold the reader's Stop lock.
-    if (!CheckWindowsStartFocusIdentity(pending->process, input.pid, input.expected_process_start,
+    if (!CheckWindowsStartFocusIdentity(target_process.value, input.pid, input.expected_process_start,
         measured.process_start, input.window, focus_window, input.app_identity, input.expected_window_identity)) {
       *reason = "session_identity_changed"; return false;
     }
@@ -1817,7 +1725,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       (background_gate ? ",\"inputSession\":" + sprint_coder::computer_use::InputSessionWire(session.input_session) : "") + "}";
   };
   std::string built = v2 ? build_response(effective_epoch) : std::string{};
-  if ((v2 || background) && (WaitForSingleObject(pending->process, 0) != WAIT_TIMEOUT ||
+  if ((v2 || background) && (WaitForSingleObject(target_process.value, 0) != WAIT_TIMEOUT ||
       !IsApplicationWindow(input.window) || !target_facts(&bounds) ||
       !geometry_matches(bounds))) {
     *reason = "session_target_rejected";
@@ -1831,7 +1739,6 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   // Stop and final start adoption share this lock. Window/geometry OS queries stay outside it so
   // their latency cannot prevent the reader from recording Stop.
   {
-    std::lock_guard lock(pending->mutex);
     std::lock_guard stop_lock(control.stop_mutex);
     if (!start_valid() || !sessions.empty()) {
       *reason = "session_start_canceled";
@@ -1839,7 +1746,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     }
     if (!WindowsBackgroundMonitorCurrent(session)) { *reason = "user_takeover"; return false; }
     // All allocating session/response work precedes the ownership handoff. Cache adoption is also
-    // consumer-only, and a late worker cannot install a context after Stop.
+    // consumer-only, and a late measurement cannot install a context after Stop.
     if (v2 && measured.context.has_value() && !WindowsV2FactsContextCache().has_value())
       WindowsV2FactsContextCache() = measured.context;
     std::uint64_t previous_epoch = v2 ? input.initial_epoch : cancellation_epoch.load(std::memory_order_acquire);
@@ -1856,15 +1763,11 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       *reason = "session_start_canceled";
       return false;
     }
-    inserted->second.process_handle = pending->process;
-    inserted->second.executable_file = pending->executable;
-    pending->process = nullptr;
-    pending->executable = INVALID_HANDLE_VALUE;
-    pending->decision = WindowsNewStartDecision::kAdopt;
-    control.running.store(false, std::memory_order_release);
+    inserted->second.process_handle = target_process.release();
+    inserted->second.executable_file = process_executable.file;
+    process_executable.file = INVALID_HANDLE_VALUE;
     *response = std::move(built);
   }
-  pending->changed.notify_one();
   if (!v2) InvalidateWindowsTicket(input.session_key);
   return true;
 }

@@ -399,6 +399,49 @@ describe('Windows native helper compile boundary', () => {
     expect(source.match(/bool ReadExact\(/gu)).toHaveLength(1);
   });
 
+  it('keeps new-start synchronous with owned handles and guarded focus/adoption', () => {
+    const source = readWindowsHostSource();
+    const start = source.slice(
+      source.indexOf('bool StartWindowsNewSession('),
+      source.indexOf('// END windows shared new start'),
+    );
+    expect(start).not.toContain('std::thread');
+    expect(start).not.toContain('pending->');
+    expect(source).not.toContain('WindowsNewStartWaitGuard');
+    expect(start).toContain('ScopedKernelHandle target_process;');
+    expect(start).toContain('LockedWindowsExecutable process_executable;');
+    expect(start).toContain('MeasureWindowsNewStart(input, still_valid, &target_process,');
+    expect(start).toContain('inserted->second.process_handle = target_process.release();');
+    expect(start).toContain('process_executable.file = INVALID_HANDLE_VALUE;');
+    expect(start).toContain('if (!begin_focus(input.window)) return false;');
+    expect(start.indexOf('InvalidateWindowsTicket(input.session_key)')).toBeLessThan(
+      start.indexOf('const auto begin_focus'),
+    );
+    expect(start.indexOf('if (!start_valid() || !sessions.empty())')).toBeLessThan(
+      start.indexOf('sessions.emplace'),
+    );
+  });
+
+  it('retains the E3 ten-second stop and two-second exit bound without resending', () => {
+    const source = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    expect(source).toContain('COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000');
+    const stop = source.slice(
+      source.indexOf('  const stopWithTermination ='),
+      source.indexOf('  const stopStartOwner ='),
+    );
+    expect(stop).toContain('Promise.race([');
+    expect(stop).toContain('options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS');
+    expect(stop).toContain('const wait = setTimeout(finish, 2_000)');
+    expect(stop.match(/addon\?\.requestWindowsTermination\?\.\(\)/gu)).toHaveLength(1);
+    const owner = source.slice(
+      source.indexOf('  const stopStartOwner ='),
+      source.indexOf('  const inputReceipt ='),
+    );
+    expect(owner).toContain('if (owner.stopPromise !== null) return owner.stopPromise');
+    expect(owner).toContain('stopWithTermination(');
+    expect(owner).toContain('() => completePendingStop(owner)');
+  });
+
   it('publishes parent death into the shared input gate before disconnecting the pipe', () => {
     const source = readWindowsHostSource();
     const watcherSource = source.slice(
@@ -417,7 +460,7 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('bool StartWindowsNewSession('),
       source.indexOf('// END windows v2 targets'),
     );
-    const newStartConsumer = newStart.slice(0, newStart.indexOf('WindowsNewStartWaitGuard lease'));
+    const newStartConsumer = newStart.slice(0, newStart.indexOf('const auto still_valid'));
     const newStartWorker = newStart.slice(
       newStart.indexOf('const auto still_valid'),
       newStart.indexOf('struct Apartment'),
@@ -443,7 +486,7 @@ describe('Windows native helper compile boundary', () => {
     expect(startSource).toContain('StartWindowsNewSession(std::move(input)');
     expect(startSource).toContain('StartWindowsExistingSession(std::move(input)');
     expect(newStartConsumer).toContain('parent_process_dead.load(std::memory_order_acquire)');
-    expect(newStartWorker).toContain('parent_process_dead.load(std::memory_order_acquire)');
+    expect(newStartWorker).toContain('return start_valid() &&');
     expect(existingStartGate).toContain('!parent_process_dead.load(std::memory_order_acquire)');
     expect(existingStartGate).toContain('cancellation_epoch.load(std::memory_order_acquire)');
     expect(existingStartGate).toContain('input.stop_serial');
@@ -556,7 +599,7 @@ describe('Windows native helper compile boundary', () => {
       /limits\.BasicLimitInformation\.LimitFlags &= ~JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*if \(!SetInformationJobObject\([^;]+?\)\) return false;\s*if \(ResumeThread\(child\.thread\.value\) == static_cast<DWORD>\(-1\)\) \{\s*limits\.BasicLimitInformation\.LimitFlags \|= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;\s*SetInformationJobObject\(job\.value, JobObjectExtendedLimitInformation,\s*&limits, sizeof\(limits\)\);\s*return false;\s*\}/u,
     );
     expect(source).toContain('WindowsSessionExecutableMatches');
-    expect(source).toContain('inserted->second.executable_file = pending->executable');
+    expect(source).toContain('inserted->second.executable_file = process_executable.file');
   });
 
   it('creates the suspended rename probe in its job and confirms exit before deleting files', () => {

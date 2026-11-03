@@ -90,7 +90,6 @@ function componentSource(): string {
     CaptureWindowsBackgroundStartDialogs: 'ComponentBackgroundDialogs',
     OpenProcess: 'ComponentOpenProcess',
     OpenLockedProcessExecutable: 'ComponentOpenExecutable',
-    DuplicateHandle: 'ComponentDuplicateHandle',
     IsProcessElevated: 'ComponentElevated',
     IsWindow: 'ComponentWindow',
     IsApplicationWindow: 'ComponentApplicationWindow',
@@ -113,8 +112,8 @@ function componentSource(): string {
   }
   shared = replaceOne(
     shared,
-    '    std::thread([pending, input]() mutable {',
-    '    ComponentBeforeThread();\n    std::thread([pending, input]() mutable {\n      ComponentWorkerLifetime worker_lifetime;',
+    '  try {\n    struct Apartment {',
+    '  try {\n    ComponentBeforeMeasurement();\n    struct Apartment {',
   );
   const adoption = '  // Stop and final start adoption share this lock.';
   shared = replaceOne(shared, adoption, '  ComponentBeforeAdopt();\n' + adoption);
@@ -130,7 +129,7 @@ function componentSource(): string {
   return (prefix + shared + source.slice(end)).replaceAll('CloseHandle(', 'ComponentCloseHandle(');
 }
 
-it('limits component substitutions to the shared worker and retains real eligibility predicates', () => {
+it('limits component substitutions to the shared measurement and retains real eligibility predicates', () => {
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');
@@ -211,7 +210,7 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
       });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: 58 component cases, controlled focus only, no OS input',
+        'PASS: 62 component cases, controlled focus only, no OS input',
       );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

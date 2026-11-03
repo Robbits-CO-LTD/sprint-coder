@@ -12,12 +12,14 @@ export function configureWindowsKillStop(input: {
   enabled?: boolean;
   open?: typeof openWindowsLedgerStore;
 }): { options: ComputerUseNativeHostOptions; close(): void } {
-  if (input.platform !== 'win32' || !(input.enabled ?? WINDOWS_KILL_STOP_ENABLED))
-    return { options: {}, close() {} };
+  if (input.platform !== 'win32') return { options: {}, close() {} };
   const options: ComputerUseNativeHostOptions = {
     windowsKillStopTermination: { enabled: true },
     windowsStartIdentity: { enabled: true },
   };
+  // N5-G removed the Stop-only new-start worker, so the old path is gone: a disabled build leaves
+  // the Host unavailable, exactly like a missing ledger, instead of starting without kill-stop.
+  if (!(input.enabled ?? WINDOWS_KILL_STOP_ENABLED)) return { options, close() {} };
   try {
     const store = (input.open ?? openWindowsLedgerStore)({
       userData: input.userData,

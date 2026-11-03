@@ -23,8 +23,6 @@ const uiaContact =
   'WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });';
 const startReady = '  const auto begin_focus = [&](HWND focus_window) {';
 const startAdopt = '  // Stop and final start adoption share this lock.';
-const startEpilogue =
-  '        // Adopted handles belong to the session; this worker must not release the shared slot.';
 
 function replaceOnce(source: string, before: string, after: string): string {
   if (source.split(before).length !== 2) throw new Error('RCA seam source boundary changed');
@@ -79,7 +77,7 @@ function instrumentedHost(): string {
   );
   source = source.slice(0, rejudgeFrom) + rejudge + source.slice(rejudgeTo);
   const measureFrom = source.indexOf('bool MeasureWindowsNewStart(');
-  const measureTo = source.indexOf('struct WindowsNewStartWaitGuard', measureFrom);
+  const measureTo = source.indexOf('bool StartWindowsNewSession(', measureFrom);
   if (measureFrom < 0 || measureTo < 0) throw new Error('Start measurement boundary changed');
   source =
     source.slice(0, measureFrom) +
@@ -97,13 +95,8 @@ function instrumentedHost(): string {
   newStart = replaceOnce(newStart, startAdopt, `  Sc940StartAdoptGate();\n${startAdopt}`);
   newStart = replaceOnce(
     newStart,
-    startEpilogue,
-    `        Sc940StartEpilogueGate();\n${startEpilogue}`,
-  );
-  newStart = replaceOnce(
-    newStart,
-    '    std::thread([pending, input]() mutable {',
-    '    Sc940StartWorkerAttempt();\n    std::thread([pending, input]() mutable {',
+    '  try {\n    struct Apartment {',
+    '  try {\n    Sc940StartMeasurementAttempt();\n    struct Apartment {',
   );
   newStart = replaceOnce(
     newStart,
@@ -830,7 +823,7 @@ std::string Sc940ResumeComponent(const WindowsSession &session, const std::strin
 void Sc940StartReadyGate();
 void Sc940StartAdoptGate();
 void Sc940StartEpilogueGate();
-void Sc940StartWorkerAttempt();
+void Sc940StartMeasurementAttempt();
 BOOL Sc940StartShow(HWND window, int command);
 BOOL Sc940StartForeground(HWND window);
 void Sc820AutomationCreated();
@@ -902,7 +895,7 @@ std::atomic<unsigned> uia_released_roots{0};
 std::atomic<unsigned> uia_hold_contact{0};
 std::atomic<ULONGLONG> uia_held_since{0};
 std::atomic<unsigned> start_open_calls{0};
-std::atomic<unsigned> start_worker_attempts{0};
+std::atomic<unsigned> start_measurement_attempts{0};
 std::atomic<unsigned> start_open_successes{0};
 std::atomic<unsigned> start_focus_calls{0};
 std::atomic<bool> hold_start_epilogue{false};
@@ -1361,7 +1354,7 @@ std::string Sc940ResumeComponent(const WindowsSession &session, const std::strin
       ",\"afterOk\":" + (after_ok ? "true" : "false") + ",\"completed\":" + std::to_string(completed) + "}";
 }
 void Sc940StartReadyGate() { Sc940Gate(HoldPoint::kStartReady); }
-void Sc940StartWorkerAttempt() { start_worker_attempts.fetch_add(1); }
+void Sc940StartMeasurementAttempt() { start_measurement_attempts.fetch_add(1); }
 void Sc940StartAdoptGate() { Sc940Gate(HoldPoint::kStartAdopt); }
 void Sc940StartEpilogueGate() {
   HANDLE release = nullptr;
@@ -2733,22 +2726,17 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
                 (cancel || sessions.empty()), "start_real_client_empty_session");
     hold_point.store(healthy ? HoldPoint::kNone : queued ? HoldPoint::kConsumer : ready ? HoldPoint::kStartReady :
                      adopt ? HoldPoint::kStartAdopt : HoldPoint::kStartOpen);
-    hold_start_epilogue.store(healthy);
+    hold_start_epilogue.store(false);
     run.Send(MessageType::kProbe, 2, listed.Metadata(1), 8);
     if (healthy) {
       AssertStarted(run, 2, listed, 1);
-      Require(WaitForSingleObject(run.epilogue_entered.value, 5000) == WAIT_OBJECT_0, "start_old_worker_epilogue");
-      Require(run.StartWorkerThread() != nullptr, "start_old_worker_thread_captured");
-      // Keep the old successful worker alive while a new list owns the same single-flight slot.
+      Require(!WindowsTargetListWorkerRunning().load(), "start_resources_released_before_response");
       held_measure_pid = pid;
       hold_point.store(HoldPoint::kMeasure);
       run.Send(MessageType::kProbe, 31, "{\"operation\":\"list_targets\"}");
       Require(WaitForSingleObject(run.entered.value, 5000) == WAIT_OBJECT_0 && WindowsTargetListWorkerRunning().load(),
               "start_next_worker_claimed_slot");
-      hold_start_epilogue.store(false);
-      SetEvent(run.epilogue_release.value);
-      Require(WaitForSingleObject(run.StartWorkerThread(), 5000) == WAIT_OBJECT_0, "start_old_worker_exited");
-      Require(WindowsTargetListWorkerRunning().load(), "start_old_worker_does_not_release_next_slot");
+      Require(WindowsTargetListWorkerRunning().load(), "start_next_list_owns_slot");
       hold_point.store(HoldPoint::kNone);
       SetEvent(run.release.value);
       Require(run.Wait(31, 7000) && run.ProbeReply(31, MessageType::kProbeResult) && run.WaitWorkerIdle(1000),
@@ -2760,46 +2748,44 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
                   WindowsTargetListWorkerRunning().load() == !queued, "start_fault_gate_entered");
       if (cancel) {
         const unsigned opens = start_open_calls.load(), measures = measurement_calls.load();
-        const unsigned workers = start_worker_attempts.load();
+        const unsigned workers = start_measurement_attempts.load();
         const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
         const ULONGLONG sent = GetTickCount64();
         // Same first Stop as the be6 RCA: a valid Cancel of the seeded control session.
         run.Send(MessageType::kCancel, 4, "{\"cancelEpoch\":2}");
         Require(WaitStopSerial(serial, 1000), "start_cancel_reader_progress");
-        Require(run.Wait(2, 1000) && run.Error(2, "session_start_canceled", 8) &&
-                    run.Wait(4, 1000) && run.Receipt(4, MessageType::kDispatchResult, "canceled", 2),
-                "start_valid_cancel_receipt_before_release");
-        // API 3 keeps each SID/header pair immutable. First prove alias rejection, then use
-        // a genuinely fresh lifetime with the new epoch/serial to test the occupied input lane.
-        run.Send(MessageType::kProbe, 6, listed.Metadata(2), 9);
-        Require(run.Wait(6, 1000) && run.Error(6, "session_id_reuse", 9), "start_sid_alias_refused");
-        run.Send(MessageType::kProbe, 11, listed.Metadata(2, "sc940-busy"), 9);
-        run.Send(MessageType::kProbe, 7, "{\"operation\":\"list_targets\"}");
-        Require(run.Wait(11, 1000) && run.Error(11, "session_start_canceled", 9) &&
-                    run.Wait(7, 1000) && run.Error(7, "list_targets_unavailable"), "start_fresh_busy_requests_refused");
+        Require(start_open_calls.load() == opens && start_measurement_attempts.load() == workers &&
+                    measurement_calls.load() == measures && WindowsTargetListWorkerRunning().load() &&
+                    start_focus_calls.load() == 0, "start_stop_latched_without_next_api");
         {
           std::lock_guard lock(WindowsTargetListControl().stop_mutex);
           const auto owner = WindowsStarts().input_owner;
           Require(owner != nullptr && owner->session_key == FrameIdKey(Id(8)) &&
-                      owner->pending_requests.load() != 0, "start_old_worker_retains_input_lane");
+                      owner->pending_requests.load() != 0, "start_consumer_retains_input_lane");
         }
+        hold_point.store(HoldPoint::kNone);
+        SetEvent(run.release.value);
+        Require(run.Wait(2, 1000) && run.Error(2, "session_start_canceled", 8) &&
+                    run.Wait(4, 1000) && run.Receipt(4, MessageType::kDispatchResult, "canceled", 2),
+                "start_valid_cancel_receipt_after_release");
+        run.Send(MessageType::kProbe, 6, listed.Metadata(2), 9);
+        Require(run.Wait(6, 1000) && run.Error(6, "session_id_reuse", 9), "start_sid_alias_refused");
         run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}", 8);
         Require(run.Wait(3, 1000) && run.Error(3, "invalid_cancel", 8), "start_uncreated_cancel_bounded");
         run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
         Require(run.Wait(5, 1000) && run.Receipt(5, MessageType::kProbeResult, "closed", 3),
-                "start_control_receipts_before_release");
+                "start_control_receipts_after_release");
         stop_ms = GetTickCount64() - sent;
-        Require(start_open_calls.load() == opens && start_worker_attempts.load() == workers && measurement_calls.load() == measures &&
-                    WindowsTargetListWorkerRunning().load(), "start_busy_starts_no_worker");
+        Require(start_open_calls.load() == opens && start_measurement_attempts.load() == workers && measurement_calls.load() == measures &&
+                    !WindowsTargetListWorkerRunning().load(), "start_stopped_measurement_released_slot");
       } else {
         const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
         const ULONGLONG sent = GetTickCount64();
         run.Send(MessageType::kProbe, 3, "{\"operation\":\"close_session\",\"cancelEpoch\":2}", 8);
         Require(WaitStopSerial(serial, 1000), "start_close_reader_progress");
-        if (queued || ready || adopt) {
-          hold_point.store(HoldPoint::kNone);
-          SetEvent(run.release.value);
-        }
+        Require(start_focus_calls.load() == 0, "start_stop_latched_without_focus");
+        hold_point.store(HoldPoint::kNone);
+        SetEvent(run.release.value);
         Require(run.Wait(2, 1000) && run.Error(2, "session_start_canceled", 8) &&
                     run.Wait(3, 1000) && run.Error(3, "native_close_unconfirmed", 8), "start_uncreated_close_bounded");
         stop_ms = GetTickCount64() - sent;
@@ -2809,13 +2795,11 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
                   !ticket_states.contains(FrameIdKey(Id(8))) && start_focus_calls.load() == 0 &&
                   windows_v2_list_generation == listed.generation, "start_stop_prevents_adoption_and_focus");
       stop_proven = true;
-      if (!queued && !ready && !adopt)
-        Require(WindowsTargetListWorkerRunning().load() && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-                "start_response_precedes_open_release");
+      Require(!WindowsTargetListWorkerRunning().load(), "start_response_follows_resource_cleanup");
       hold_point.store(HoldPoint::kNone);
       SetEvent(run.release.value);
       Require(run.WaitWorkerIdle(15'000) && start_open_calls.load() == (queued ? 0u : 1u) &&
-                  start_worker_attempts.load() == (queued ? 0u : 1u) &&
+                  start_measurement_attempts.load() == (queued ? 0u : 1u) &&
                   start_open_successes.load() == (queued ? 0u : 1u) && !sessions.contains(FrameIdKey(Id(8))) &&
                   windows_v2_list_generation == listed.generation, "start_late_open_cleaned_without_adoption");
       late_cleanup = true;
@@ -2826,7 +2810,7 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
         Require(run.Wait(25, 1000) && run.Error(25, "session_id_reuse", 8), "start_retired_lifetime_refused");
         run.Send(MessageType::kProbe, 21, fresh.Metadata(4, "sc940-retry"), 10);
         AssertStarted(run, 21, fresh, 4, 10, "sc940-retry");
-        Require(start_open_calls.load() == 2 && start_worker_attempts.load() == 2, "start_explicit_retry_has_one_new_worker");
+        Require(start_open_calls.load() == 2 && start_measurement_attempts.load() == 2, "start_explicit_retry_has_one_new_measurement");
         CloseStarted(run, 22, 23, 5, 10, "sc940-retry");
       }
     }
@@ -3073,7 +3057,7 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":4}", 9);
     Require(run.Wait(5, 1000) && run.Error(5, "native_close_unconfirmed", 9), "rejudge_unknown_close_not_success");
     Require(snapshot.input_api_attempts->load() == 0 && snapshot.maximum_mode == listed.mode &&
-                !snapshot.v2_input_not_web.has_value() && start_worker_attempts.load() == 0 && start_focus_calls.load() == 0 &&
+                !snapshot.v2_input_not_web.has_value() && start_measurement_attempts.load() == 0 && start_focus_calls.load() == 0 &&
                 synchronous_session_probes.load() == 0 && ticket_states.empty() && sessions.empty() &&
                 rejudge_workers.load() == 1 && RejudgeState().active == 0 && RejudgeState().thread == 0 &&
                 !wrong_measurement.load() && !gate_timed_out.load(), "rejudge_component_never_admits_or_inputs");
@@ -4847,8 +4831,7 @@ describe('Windows target I/O RCA seam source', () => {
     ).toHaveLength(2);
     expect(generated.split('    Sc940StartReadyGate();')).toHaveLength(2);
     expect(generated.split('  Sc940StartAdoptGate();')).toHaveLength(2);
-    expect(generated.split('        Sc940StartEpilogueGate();')).toHaveLength(2);
-    expect(generated.split('    Sc940StartWorkerAttempt();')).toHaveLength(2);
+    expect(generated.split('    Sc940StartMeasurementAttempt();')).toHaveLength(2);
     expect(generated.split('!Sc940ValidationFileIdentity(work, &held_file_identity)')).toHaveLength(
       2,
     );

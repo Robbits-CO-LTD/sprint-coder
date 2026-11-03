@@ -46,7 +46,7 @@ function findBuild(): Build | null {
   };
 }
 
-// No target application is started. The real pipe's V1 worker is held at its executable-read boundary.
+// No target application is started. The real pipe's V1 consumer is held at its executable-read boundary.
 // The remaining reads name this process with a deliberately wrong identity and cannot reach focus.
 const nativeSource = readWindowsHostSource();
 
@@ -61,7 +61,7 @@ function instrumentPendingHost(source: string): string {
     .replaceAll('CloseHandle(', 'TrackHandleClose(');
 }
 
-it('instruments the new-start worker identity read without depending on source line wrapping', () => {
+it('instruments the new-start consumer identity read without depending on source line wrapping', () => {
   const source = instrumentPendingHost(nativeSource);
   expect(source).toContain('HoldStartOpen(target_process->value, process_executable)');
 });
@@ -153,7 +153,7 @@ describe.skipIf(process.platform !== 'win32')('Windows API3 pending-start termin
       expect(receipts[1]!.cancelEpoch).toBeGreaterThan(receipts[0]!.cancelEpoch);
       expect(receipts.every((receipt) => receipt.inputAttemptCount === 0)).toBe(true);
       expect(result.stdout).toContain(
-        'PASS: worker-held I/O, pending pipe, no input, no late adoption',
+        'PASS: consumer-held I/O, pending pipe, no input, no late adoption',
       );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
@@ -230,7 +230,7 @@ int wmain(){
  std::thread serve([&]{consumer_thread.store(GetCurrentThreadId());const auto apartment=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);Require(SUCCEEDED(apartment),"COM apartment");BackendProbe probe;served=ServePipe(server.value,probe);CoUninitialize();DisconnectNamedPipe(server.value);});
  Send(client.value,1,7,"{\"protocolVersion\":1,\"apiVersion\":3}",MessageType::kHandshake);Read(client.value,1,MessageType::kHandshakeResult);std::cerr<<"phase=handshake\n"<<std::flush;
  Send(client.value,2,7,Start("pending",9));
- for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()!=consumer_thread.load(),"identity I/O is off the consumer");std::cerr<<"phase=start-gate\n"<<std::flush;
+ for(int i=0;i<3000&&!entered_start.load();i++)Sleep(1);Require(entered_start.load(),"start gate entered");Require(io_thread.load()==consumer_thread.load(),"identity I/O stays on the consumer");std::cerr<<"phase=start-gate\n"<<std::flush;
  const auto before_conflict=WindowsTargetListControl().stop_serial.load();
  Send(client.value,2,7,Stop("pending"));
  for(int i=0;i<3000&&!conflict_seen.load();i++)Sleep(1);Require(conflict_seen.load(),"conflicting request observed");
@@ -239,13 +239,12 @@ int wmain(){
  bool latched=false;
  for(int i=0;i<3000&&!latched;i++){{std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto found=WindowsStarts().owners.find(FrameIdKey(Id(7)));latched=found!=WindowsStarts().owners.end()&&found->second->stopped.load();}if(!latched)Sleep(1);}
  std::cerr<<"phase=stop-latch-wait\n"<<std::flush;Require(latched,"reader stop latch");
- auto canceled=Read(client.value,2,MessageType::kError);Require(Payload(canceled).find("session_start_canceled")!=std::string::npos,"start abandoned before read release");
+ Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"Stop latches before held I/O release");
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->stopped.load()&&owner->pending_requests.load()!=0&&WindowsTargetListWorkerRunning().load(),"stopped consumer retains ownership without adoption");}
+ hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
+ auto canceled=Read(client.value,2,MessageType::kError);Require(Payload(canceled).find("session_start_canceled")!=std::string::npos,"late start refused after read release");
  auto conflict=Read(client.value,2,MessageType::kError);Require(Payload(conflict).find("request_id_conflict")!=std::string::npos,"conflicting operation refused");
  auto first=Read(client.value,3,MessageType::kProbeResult);std::cerr<<"phase=terminal\n"<<std::flush;std::cout<<"RECEIPT:"<<Payload(first)<<"\n";
- Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==0,"terminal before held I/O release");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->terminal&&owner->pending_requests.load()!=0&&WindowsTargetListWorkerRunning().load(),"terminal retains worker ownership without adoption");}
- hold_start.store(false);std::cerr<<"phase=released\n"<<std::flush;
- Require(held_worker.value!=nullptr&&WaitForSingleObject(held_worker.value,5000)==WAIT_OBJECT_0,"worker exits after real read");
  Require(actual_reads.load()==1&&successful_reads.load()==1&&process_releases.load()==1&&file_releases.load()==1&&!WindowsTargetListWorkerRunning().load(),"actual read and resource cleanup");
  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsStarts().owners.at(FrameIdKey(Id(7)));Require(sessions.empty()&&owner->pending_requests.load()==0,"late result discarded and lease released");}
  const auto serial=WindowsTargetListControl().stop_serial.load(), epoch=cancellation_epoch.load();
@@ -261,6 +260,6 @@ int wmain(){
  Send(client.value,9,10,Stop("failed"));auto failed=Read(client.value,9,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(failed)<<"\n";
  Send(client.value,10,10,"{\"sessionId\":\"failed\",\"operation\":\"stop_pending_start\",\"action\":\"click\"}");Read(client.value,10,MessageType::kError);
  std::cerr<<"phase=cleanup\n"<<std::flush;CloseHandle(client.value);client.value=INVALID_HANDLE_VALUE;serve.join();Require(served,"pipe shutdown");
- Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: worker-held I/O, pending pipe, no input, no late adoption\n";return 0;
+ Require(sessions.empty(),"sessions empty at exit");finished.store(true);std::cout<<"PASS: consumer-held I/O, pending pipe, no input, no late adoption\n";return 0;
 }
 `;

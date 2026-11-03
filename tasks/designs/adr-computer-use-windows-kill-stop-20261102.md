@@ -343,6 +343,8 @@ PR10b は上記の接続と検証の完了後に、既定値の 1 行とその�
 
 PR11 は既定で有効な Windows kill-stop に E3 / E4 を接続する。C = 10 秒、T = 2 秒を維持し、Host の全体期限、pending-stop / discovery の transport 期限、manager の一回の試行期限を C に合わせる。期限・証明検証失敗で同じ終了処理へ入り、保存待ちの隔離は終了結果の返却と独立して維持する。開始 catch、Controller、Host、Scope、manager は再送しない。例外は close の semantic_input_in_flight の C 内の再試行だけ。明示的に kill-stop を無効にした互換経路と macOS は従来の挙動を維持する。helper 起動前の E3 / E4 の未送信証明は、同じ世代、未確認 owner・行なし、終了要求なしの条件で受理する。
 
+N5-G 以降、kill-stop を無効にした Windows の構成は、ledger を開けない時と同じく Host を使えない状態にする（`configureWindowsKillStop` が ledger なしの有効な設定を返す）。new-start の Stop 専用の worker を除いたので旧経路は残らない。kill-stop を外すには新しい build と、必要なら N5 の rollback を要する。native の契約と WindowsStartInput は変更しない。
+
 ## 5. 残るリスク
 
 1. `termination_requested` のまま signaled にならない環境（壊れたドライバ）では、終了を確認できるまで隔離を保ち、新しい helper は起動しない。Main を終了すると、libuv の job が helper を強制終了しようとするが（§3.1 の 7）、カーネルの中で止まって終了できない helper はそれでも残る。このため再起動は古い helper の終了の証拠にはしないが、対象ごとの隔離へ移す根拠にはする（§2.2）。頻度は実機で測る。

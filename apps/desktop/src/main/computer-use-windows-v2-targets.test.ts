@@ -135,10 +135,7 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     const v2AndShared = v2Block.replace(v1Eligibility, '').replace(v1ExistingEligibility, '');
     expect(v2AndShared).not.toContain('MaximumModeForWindowsExecutable');
     expect(v2AndShared).not.toContain('IsPolicyLanguageSupported');
-    const sharedMeasure = cut(
-      'bool MeasureWindowsNewStart(',
-      '// Stops the worker on every consumer exit',
-    );
+    const sharedMeasure = cut('bool MeasureWindowsNewStart(', 'bool StartWindowsNewSession(');
     expect(sharedMeasure).toContain(
       'const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;',
     );
