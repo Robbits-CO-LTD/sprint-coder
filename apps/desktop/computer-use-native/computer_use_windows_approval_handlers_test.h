@@ -18,7 +18,11 @@ struct Fixture {
   bool random_ok = true;
   unsigned tokens = 0;
   unsigned approved_inputs = 0;
-  unsigned ordinary_inputs = 0;
+  // Counted by the preflight route below: an ordinary ticket is issued only where the gated
+  // preflight hands the request to the ordinary interlock and that interlock finds it ordinary.
+  unsigned ordinary_tickets = 0;
+  unsigned interlock_refusals = 0;
+  WindowsApprovalPreflightRoute route = WindowsApprovalPreflightRoute::kRefuse;
   Fixture() {
     reference.helper_generation = 7;
     reference.stop_serial = 11;
@@ -36,6 +40,7 @@ struct Fixture {
     sample.display = {NativeApprovalEffect::kSupervisedAction, "invoke", std::nullopt,
                       std::nullopt, false};
     sample.risk.classified = sample.metadata_complete = true;
+    sample.decision = DecisionKind::kApproval;
   }
   WindowsApprovalEnvironment Environment() {
     return {[this] { return now; }, [this](std::string *token) {
@@ -52,9 +57,22 @@ struct Fixture {
         return sample;
       }};
   }
+  // The gated preflight: one Offer, then RouteWindowsApprovalPreflight on its measurement. The
+  // ordinary interlock is represented by its outcome for the measured decision: an ordinary ticket
+  // for an ordinary decision, its own refusal for anything else.
   bool Offer() {
     std::string receipt;
-    const bool ok = owner.Offer(reference, {"request-1", "session-1", 0, 1, 0}, Environment(), &receipt);
+    WindowsApprovalSample measured;
+    const bool ok = owner.Offer(reference, {"request-1", "session-1", 0, 1, 0}, Environment(),
+                                &receipt, &measured);
+    route = RouteWindowsApprovalPreflight(ok, measured);
+    if (route == WindowsApprovalPreflightRoute::kInterlock) {
+      if (measured.decision == DecisionKind::kOrdinary || measured.outside_approval_scope)
+        ++ordinary_tickets;
+      else
+        ++interlock_refusals;
+    }
+    if (ok != (route == WindowsApprovalPreflightRoute::kOffered)) return false;
     if (ok && (receipt.empty() || receipt.find(std::string(64, 'e')) != std::string::npos))
       return false;
     reference.facts.approval_generation = 1;
@@ -83,7 +101,7 @@ inline bool Check() {
       f.sample.display.extension = "txt";
     }
     if (!f.Offer() || !f.Approve() || !f.Dispatch() || f.Dispatch() || f.Approve() ||
-        f.approved_inputs != 1 || f.ordinary_inputs != 0) return false;
+        f.approved_inputs != 1 || f.ordinary_tickets != 0) return false;
   }
   // Pending 60 seconds and ready 5 seconds: equality expires; the last nanosecond is live.
   for (const auto offset : {59'999'999'999ULL, 60'000'000'000ULL, 60'000'000'001ULL}) {
@@ -151,7 +169,7 @@ inline bool Check() {
     case 12: f.sample.risk.high_impact = f.sample.risk.other = true; break;
     case 13: f.stop_during_measurement = true; break;
     }
-    if (f.Dispatch() || f.approved_inputs || f.ordinary_inputs) return false;
+    if (f.Dispatch() || f.approved_inputs || f.ordinary_tickets) return false;
     if (f.owner.occupied() != (mismatch < 2)) return false;
   }
   {
@@ -172,6 +190,52 @@ inline bool Check() {
     if (!f.Offer()) return false;
     f.owner.Invalidate(); // cancel/close, independent of a late worker result
     if (f.Approve() || f.Dispatch()) return false;
+  }
+  // The gated preflight keeps ordinary work ordinary (a full_access_app click on a plain control):
+  // a measured ordinary decision gets the ordinary interlock and its ticket, and no approval.
+  {
+    Fixture f;
+    f.sample.measured = {};
+    f.sample.decision = DecisionKind::kOrdinary;
+    if (f.Offer() || f.route != WindowsApprovalPreflightRoute::kInterlock ||
+        f.ordinary_tickets != 1 || f.owner.occupied() || f.Approve() || f.Dispatch() ||
+        f.approved_inputs != 0) return false;
+  }
+  // A blocked decision reaches the same interlock, which refuses with its own reason code.
+  {
+    Fixture f;
+    f.sample.measured = {};
+    f.sample.decision = DecisionKind::kBlocked;
+    if (f.Offer() || f.route != WindowsApprovalPreflightRoute::kInterlock ||
+        f.interlock_refusals != 1 || f.ordinary_tickets != 0 || f.owner.occupied()) return false;
+  }
+  // Text longer than one scalar is outside any approval: the ordinary interlock decides.
+  {
+    Fixture f;
+    f.sample = {};
+    f.sample.outside_approval_scope = true;
+    if (f.Offer() || f.route != WindowsApprovalPreflightRoute::kInterlock ||
+        f.ordinary_tickets != 1 || f.owner.occupied()) return false;
+  }
+  // Fail closed, never an ordinary ticket: an approval that cannot be offered, a takeover, an
+  // unmeasured sample, a measurement past its budget, an eligible measurement whose offer failed
+  // (Stop at the claim, no token), and an eligible effect whose decision is not an approval.
+  for (unsigned refusal = 0; refusal < 8; ++refusal) {
+    Fixture f;
+    switch (refusal) {
+    case 0: f.sample.measured.eligible = false; break; // kApproval measured, not offerable
+    case 1: f.sample.measured.eligible = false; f.sample.measured.takeover = true; break;
+    case 2: f.sample = {}; break;
+    case 3: f.measurement_delay = 150'000'000ULL; f.sample.decision = DecisionKind::kOrdinary;
+            f.sample.measured = {}; break;
+    case 4: f.stopped = true; break;
+    case 5: f.random_ok = false; break;
+    case 6: f.sample.decision = DecisionKind::kOrdinary; break;
+    case 7: f.sample.outside_approval_scope = true; break;
+    }
+    if (f.Offer() || f.route != WindowsApprovalPreflightRoute::kRefuse ||
+        f.ordinary_tickets != 0 || f.interlock_refusals != 0 || f.owner.occupied() ||
+        f.Approve() || f.Dispatch() || f.approved_inputs != 0) return false;
   }
   return true;
 }

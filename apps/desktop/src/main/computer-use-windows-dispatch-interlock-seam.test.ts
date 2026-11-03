@@ -101,6 +101,12 @@ struct WindowsSession {
   std::uint32_t pid = 4242;
   bool has_focused_element_signature = true;
   std::string focused_element_signature = "observed-focus";
+  // #991 N8-2c: the claim an approved dispatch carries (the head reads only these).
+  std::uint64_t approved_deadline_ns = 0;
+  bool approved_click_tracked = false;
+  bool approved_click_opens = false;
+  bool approved_click_input_read = false;
+  unsigned long approved_click_input_tick = 0;
 };
 struct WindowsClickBasis { bool tracked = false; bool opens = false; bool input_read = false; unsigned long input_tick = 0; };
 
@@ -159,14 +165,17 @@ void Check(bool ok, const char *name) {
 }
 
 struct Outcome { bool ran_on; bool accepted; std::string reason; std::vector<std::string> calls; };
-Outcome Run() {
+Outcome Run(sprint_coder::computer_use::NativeApprovalEffect approved =
+                sprint_coder::computer_use::NativeApprovalEffect::kInvalid,
+            std::uint64_t approved_deadline_ns = 0) {
   g_calls.clear();
   g_focus_now = "observed-focus";
   WindowsSession session;
+  session.approved_deadline_ns = approved_deadline_ns;
   std::string result;
   std::string reason;
   bool accepted = true;
-  const bool ran_on = DispatchWindowsAction(session, "{}", &result, &reason, &accepted);
+  const bool ran_on = DispatchWindowsAction(session, "{}", &result, &reason, &accepted, approved);
   return {ran_on, accepted, reason, g_calls};
 }
 
@@ -247,6 +256,24 @@ int main() {
     const Outcome outcome = Run();
     Check(!outcome.ran_on && outcome.reason == "stale_target" && outcome.calls == std::vector<std::string>({"validate"}),
           "failed_binding_asks_nothing");
+  }
+  // #991 N8-2c: an approved dispatch was measured by its own owner and never asks the ordinary
+  // interlocks; without a claimed deadline it is refused before anything after the binding.
+  g_binding_ok = true;
+  g_kind = "click";
+  g_answer = InterlockEvaluation{};
+  g_answer.verdict.outcome = InterlockOutcome::kBlocked;
+  g_answer.verdict.reason = InterlockReason::kShellSurface;
+  {
+    const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 0);
+    Check(!out.ran_on && !out.accepted && out.reason == "native_approval_unavailable" &&
+              out.calls == std::vector<std::string>({"validate"}),
+          "approved_without_claim_refused_after_binding_only");
+  }
+  {
+    const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 7);
+    Check(out.ran_on && out.calls == std::vector<std::string>({"validate", "v1-guards"}),
+          "approved_claim_skips_the_ordinary_interlock");
   }
   std::cout << (g_failures == 0 ? "OK\n" : "FAILED\n");
   return g_failures == 0 ? 0 : 1;

@@ -7,6 +7,8 @@
 #include "computer_use_native_approved_risk.h"
 
 #include <functional>
+#include <string>
+#include <utility>
 
 namespace sprint_coder::computer_use {
 
@@ -29,14 +31,55 @@ struct WindowsApprovalSample {
   NativeRiskBits risk;
   bool metadata_complete = false;
   WindowsApprovalClickBasis click_basis;
+  // What the classifier decided for complete facts. An unmeasured sample stays a takeover.
+  DecisionKind decision = DecisionKind::kTakeover;
+  // Set only by the lane for a request no approval can bind (text longer than one scalar). It is
+  // never eligible; the preflight leaves it to the ordinary interlock.
+  bool outside_approval_scope = false;
 };
+
+// The request a measurement worker reads, owned by value. RunWindowsOpenMeasurement may abandon
+// its worker at the deadline or on Stop and return while the worker still runs, so the worker must
+// never read a view of the caller's stack or of a session (WindowsOpenMeasurementLimits contract).
+// View() is taken inside the worker and points only into this object, which the worker owns.
+struct WindowsApprovalOwnedRequest {
+  std::string kind;
+  std::string key;
+  std::string maximum_mode;
+  std::string policy_language;
+  bool click_tracked = false;
+  bool click_opens = false;
+  [[nodiscard]] ShadowRequestInfo View() const noexcept {
+    ShadowRequestInfo info;
+    info.kind = kind;
+    info.key = key;
+    info.maximum_mode = maximum_mode;
+    info.policy_language = policy_language;
+    info.click_tracked = click_tracked;
+    info.click_opens = click_opens;
+    return info;
+  }
+};
+
+// The worker body handed to RunWindowsOpenMeasurement: it owns the request and builds the views
+// itself, so an abandoned worker reads only what it owns.
+template <class Measure>
+[[nodiscard]] auto WindowsApprovalMeasurementRead(WindowsApprovalOwnedRequest request,
+                                                  Measure measure) {
+  return [request = std::move(request), measure = std::move(measure)](
+             const WindowsOpenMeasurementLimits &budget) mutable {
+    return measure(request.View(), budget);
+  };
+}
 
 // The same Windows-only entry at all three boundaries; never the ordinary interlock evaluator.
 [[nodiscard]] inline WindowsApprovalSample MeasureWindowsApprovalSample(
     const WindowsApprovalMeasurementInput &input, WindowsApprovalDisplay display,
     NativeRiskBits risk, bool metadata_complete) {
-  WindowsApprovalSample sample{MeasureWindowsApproval(input), std::move(display), risk,
+  DecisionKind decision = DecisionKind::kTakeover;
+  WindowsApprovalSample sample{MeasureWindowsApproval(input, &decision), std::move(display), risk,
                                metadata_complete};
+  sample.decision = decision;
   if (!sample.measured.eligible) return sample;
   const auto effect = sample.measured.effect;
   if (effect == NativeApprovalEffect::kDownloadOpen ||
@@ -69,6 +112,40 @@ struct WindowsApprovalSample {
   return sample;
 }
 
+[[nodiscard]] inline bool WindowsApprovalSampleEligible(const WindowsApprovalSample &sample) {
+  return sample.measured.eligible && !sample.measured.takeover &&
+      !sample.outside_approval_scope && sample.decision == DecisionKind::kApproval &&
+      sample.display.effect == sample.measured.effect &&
+      NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk(
+          sample.risk, sample.metadata_complete, sample.measured.effect));
+}
+
+// What a gated preflight does with the one measurement its Offer made (DecidePreflightV2 keeps the
+// v1 answer for a measured ordinary decision on macOS; Windows keeps the ordinary interlock path).
+//   kOffered:   the approval was offered; no ordinary ticket.
+//   kRefuse:    a takeover, an unmeasurable request, an approval that could not be offered, or an
+//               eligible measurement whose offer failed. Fail closed: never an ordinary ticket.
+//   kInterlock: a measured ordinary or blocked decision, or a request outside any approval's scope.
+//               The existing interlock decides: an ordinary ticket, or the refusal with its own
+//               reason code (it refuses an approval decision as approval_closed).
+enum class WindowsApprovalPreflightRoute : std::uint8_t { kOffered, kRefuse, kInterlock };
+
+[[nodiscard]] inline WindowsApprovalPreflightRoute RouteWindowsApprovalPreflight(
+    bool offered, const WindowsApprovalSample &sample) {
+  if (offered) return WindowsApprovalPreflightRoute::kOffered;
+  if (sample.measured.takeover || sample.measured.eligible) return WindowsApprovalPreflightRoute::kRefuse;
+  if (sample.outside_approval_scope) return WindowsApprovalPreflightRoute::kInterlock;
+  switch (sample.decision) {
+  case DecisionKind::kOrdinary:
+  case DecisionKind::kBlocked:
+    return WindowsApprovalPreflightRoute::kInterlock;
+  case DecisionKind::kApproval:
+  case DecisionKind::kTakeover:
+    return WindowsApprovalPreflightRoute::kRefuse;
+  }
+  return WindowsApprovalPreflightRoute::kRefuse;
+}
+
 struct WindowsApprovalEnvironment {
   std::function<std::uint64_t()> now;
   std::function<bool(std::string *)> random;
@@ -81,8 +158,12 @@ class WindowsApprovalHandlers {
 public:
   [[nodiscard]] bool Offer(const WindowsApprovalReference &reference,
                            const WindowsApprovalReceiptContext &receipt_context,
-                           const WindowsApprovalEnvironment &environment, std::string *receipt) {
+                           const WindowsApprovalEnvironment &environment, std::string *receipt,
+                           WindowsApprovalSample *measured = nullptr) {
     Invalidate();
+    // `measured` receives the sample only when it was taken within the budget; otherwise it stays
+    // an unmeasured takeover, which RouteWindowsApprovalPreflight refuses.
+    if (measured != nullptr) *measured = WindowsApprovalSample{};
     if (receipt == nullptr || !Valid(reference) || !EnvironmentValid(environment)) return false;
     receipt->clear();
     const auto start = environment.now();
@@ -91,8 +172,9 @@ public:
     const auto deadline = WindowsOpenMeasurementDeadline(start, start + kNativeApprovalWaitMaxNs);
     const auto sample = environment.measure(deadline);
     const auto after = environment.now();
-    if (!InBudget(start, after, deadline) || !SampleEligible(sample))
-      return false;
+    if (!InBudget(start, after, deadline)) return false;
+    if (measured != nullptr) *measured = sample;
+    if (!SampleEligible(sample)) return false;
     std::uint64_t generation = 0;
     if (!NextNativeApprovalGeneration(last_generation_, &generation)) return false;
     NativeApprovalOfferContext context{reference.facts.session_id, reference.facts.task_id,
@@ -165,10 +247,7 @@ private:
     return environment.now && environment.random && environment.claim && environment.measure;
   }
   static bool SampleEligible(const WindowsApprovalSample &sample) {
-    return sample.measured.eligible && !sample.measured.takeover &&
-        sample.display.effect == sample.measured.effect &&
-        NativePreflightAllowsDispatch(ClassifyWindowsNativeRisk(
-            sample.risk, sample.metadata_complete, sample.measured.effect));
+    return WindowsApprovalSampleEligible(sample);
   }
   static bool InBudget(std::uint64_t start, std::uint64_t now, std::uint64_t deadline) {
     return deadline > start && now >= start && now < deadline;

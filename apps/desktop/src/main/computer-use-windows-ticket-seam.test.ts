@@ -130,6 +130,7 @@ const preamble = String.raw`
 #include <unordered_map>
 #include <vector>
 #include "computer_use_native_interlock_capture.h"
+#include "computer_use_windows_approval_handlers.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
@@ -792,6 +793,18 @@ InterlockEvaluation WindowsInterlockRefusal(const WindowsSession &, const std::s
   }
   return g_interlock_answer;
 }
+// The approval block is cut (#991 N8-2c). Its gate is closed in every build
+// (kWindowsApprovalHandlersEnabled = false), so the ordinary preflight below never leaves it; the
+// stand-ins fail closed if it ever did.
+bool WindowsApprovalGate(const WindowsSession &) { return false; }
+bool ReadWindowsApprovalReference(const WindowsSession &, const std::string &, std::uint64_t,
+                                  sprint_coder::computer_use::WindowsApprovalReference *, bool) {
+  return false;
+}
+sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(
+    const WindowsSession &, const std::string &) {
+  return {};
+}
 `;
 
 // The shadow wiring has its own seam (a real run against UI Automation); it is cut out here and
@@ -807,7 +820,15 @@ function cutShadowWiring(text: string): string {
   const entryEnd = '// END sync interlock entry';
   const entryTo = withoutShadow.indexOf(entryEnd, entryFrom);
   if (entryFrom < 0 || entryTo < 0) throw new Error('Sync interlock entry markers changed');
-  return withoutShadow.slice(0, entryFrom) + withoutShadow.slice(entryTo + entryEnd.length);
+  const withoutEntry =
+    withoutShadow.slice(0, entryFrom) + withoutShadow.slice(entryTo + entryEnd.length);
+  // The approval measurement and handlers (#991 N8-2c) read UI Automation and stay behind a closed
+  // gate; the gate, the reference reader and the environment are closed stand-ins above.
+  const approvalFrom = withoutEntry.indexOf('// BEGIN windows approval measurement and handlers');
+  const approvalEnd = '// END windows approval measurement and handlers';
+  const approvalTo = withoutEntry.indexOf(approvalEnd, approvalFrom);
+  if (approvalFrom < 0 || approvalTo < 0) throw new Error('Approval handler markers changed');
+  return withoutEntry.slice(0, approvalFrom) + withoutEntry.slice(approvalTo + approvalEnd.length);
 }
 
 // The click rule (#500 S5-c-2 PR-2) reads the shell's settings and the clock; it has its own

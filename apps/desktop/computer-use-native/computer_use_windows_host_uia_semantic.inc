@@ -623,14 +623,17 @@ bool RejectWindowsRisk(const WindowsUiaRisk &risk, std::string *reason,
     sprint_coder::computer_use::NativeApprovalEffect approved_effect =
         sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   using namespace sprint_coder::computer_use;
-  const auto decision = approved_effect == NativeApprovalEffect::kInvalid
-      ? ClassifyNativePreflightFacts(
-          {risk.metadata_complete, risk.classified, risk.secure, risk.high_impact})
+  const auto decision = ClassifyNativePreflightFacts(
+      {risk.metadata_complete, risk.classified, risk.secure, risk.high_impact});
+  // An approved dispatch is judged by the Windows approved-risk table for its claimed effect; every
+  // other dispatch keeps the V1 decision above unchanged.
+  const auto judged = approved_effect == NativeApprovalEffect::kInvalid
+      ? decision
       : ClassifyWindowsNativeRisk(
           {risk.classified, risk.secure, risk.high_impact, risk.confirmation, risk.other},
           risk.metadata_complete, approved_effect);
-  if (NativePreflightAllowsDispatch(decision)) return false;
-  switch (decision.reason) {
+  if (NativePreflightAllowsDispatch(judged)) return false;
+  switch (judged.reason) {
     case NativePreflightReason::kSecure:
       *reason = "secure_field_blocked";
       break;

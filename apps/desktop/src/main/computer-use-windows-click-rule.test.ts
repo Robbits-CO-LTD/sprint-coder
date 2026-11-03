@@ -171,7 +171,12 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
 
   it('hands click_opens to the shadow and to the synchronous entry, for a click with a point, and nowhere else', () => {
     const squashed = squash(host);
-    expect(host.match(/WindowsClickOpens\(/gu)).toHaveLength(3); // the definition and two uses
+    // The definition and three uses: the shadow, the synchronous interlock entry, and the approval
+    // measurement (#991 N8-2c). The approval path cannot reuse the interlock's read (the interlock
+    // entry is asked only by the ordinary preflight and dispatch) nor the Offer's (its input time
+    // is older than the person's approval), so it reads on its own lane under the same contract,
+    // checked below.
+    expect(host.match(/WindowsClickOpens\(/gu)).toHaveLength(4);
     expect(squashed).toContain(
       'job.click_tracked = kind == "click" && point_known; job.click_opens = job.click_tracked && WindowsClickOpens();',
     );
@@ -200,6 +205,22 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
       entry.indexOf('}).detach();'),
     );
     expect(worker).not.toContain('WindowsClickOpens(');
+    // The approval measurement: read on the lane, before the measurement worker exists, handed to it
+    // by value (the owned request and the basis), never read inside the worker.
+    const approval = squashed.slice(
+      squashed.indexOf('WindowsApprovalSample MeasureWindowsApprovalOnLane('),
+      squashed.indexOf('WindowsApprovalEnvironment WindowsApprovalEnvironmentFor('),
+    );
+    const approvalRead = approval.indexOf(
+      'request.click_opens = request.click_tracked && WindowsClickOpens();',
+    );
+    const approvalWorker = approval.indexOf('return RunWindowsOpenMeasurement<WindowsApprovalSample>(');
+    expect(approvalRead).toBeGreaterThan(0);
+    expect(approvalWorker).toBeGreaterThan(approvalRead);
+    expect(approval).toContain('click_basis.opens = request.click_opens;');
+    expect(approval).toContain('WindowsApprovalMeasurementRead( std::move(request), [window, point, input, target, epoch, click_basis](');
+    expect(approval.slice(approvalWorker)).not.toContain('WindowsClickOpens(');
+    expect(approval.slice(approvalWorker)).not.toContain('WindowsReadLastInputTick(');
     // The synchronous entry leaves before it uses the point when a click has none.
     const guard = 'if ((kind == "click" || kind == "scroll") && !point_known) return unavailable;';
     expect(entry).toContain(guard);

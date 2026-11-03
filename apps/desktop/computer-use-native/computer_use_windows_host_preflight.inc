@@ -510,6 +510,10 @@ WindowsInterlockRefusal(const WindowsSession &session, const std::string &metada
 // END sync interlock entry
 
 
+// BEGIN windows approval measurement and handlers (#991 N8-2c)
+// The gate, the lane's measurement (a UI Automation read on a bounded worker) and the three private
+// message handlers. Behaviour seams that compile the ordinary preflight on any platform cut this
+// block and stand in a closed gate (kWindowsApprovalHandlersEnabled is false in every build).
 // N8-2c keeps this gate closed. The authenticated generation is nevertheless mandatory, including
 // fixture builds; a missing generation cannot become a wildcard when N8-3 connects Main.
 bool WindowsApprovalGate(const WindowsSession &session) {
@@ -558,32 +562,40 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   if (kind == "type") {
     std::string text;
     std::vector<std::uint32_t> scalars;
-    if (!ReadJsonString(metadata, "text", &text) || !DecodeUtf8Scalars(text, &scalars) ||
-        scalars.size() != 1) return {};
+    if (!ReadJsonString(metadata, "text", &text) || !DecodeUtf8Scalars(text, &scalars)) return {};
+    // An approval binds one scalar. Longer text is outside the approval's scope, not unmeasurable:
+    // the preflight leaves it to the ordinary interlock, which refuses an approval decision.
+    if (scalars.size() != 1) {
+      WindowsApprovalSample outside;
+      outside.outside_approval_scope = true;
+      return outside;
+    }
   }
   POINT point{};
   if ((kind == "click" || kind == "scroll") && !WindowsActionPoint(bounds, metadata, &point)) return {};
-  // ShadowRequestInfo.key is a view; keep the decoded key alive for the whole measurement.
-  std::string key;
-  (void)ReadJsonString(metadata, "key", &key);
-  ShadowRequestInfo info;
-  info.kind = kind;
-  info.maximum_mode = session.maximum_mode;
-  info.policy_language = session.policy_language;
-  info.key = key;
-  info.click_tracked = kind == "click";
+  // Everything the worker reads is owned by value: RunWindowsOpenMeasurement may abandon the worker
+  // at the deadline or on Stop and return while it still runs. The worker builds the request's
+  // views from its own copy (WindowsApprovalMeasurementRead); this frame and the session may be gone.
+  WindowsApprovalOwnedRequest request;
+  request.kind = kind;
+  request.maximum_mode = session.maximum_mode;
+  request.policy_language = session.policy_language;
+  (void)ReadJsonString(metadata, "key", &request.key);
+  request.click_tracked = kind == "click";
+  // Read on the lane, before the worker exists, and handed to it by value (as the interlock entry
+  // does); the worker reads no system state of its own for them.
   WindowsApprovalClickBasis click_basis;
-  click_basis.tracked = info.click_tracked;
+  click_basis.tracked = request.click_tracked;
   DWORD input_tick = 0;
-  click_basis.input_read = !info.click_tracked || WindowsReadLastInputTick(&input_tick);
+  click_basis.input_read = !request.click_tracked || WindowsReadLastInputTick(&input_tick);
   click_basis.input_tick = input_tick;
-  info.click_opens = info.click_tracked && WindowsClickOpens();
-  click_basis.opens = info.click_opens;
+  request.click_opens = request.click_tracked && WindowsClickOpens();
+  click_basis.opens = request.click_opens;
   std::string target;
   (void)ReadJsonString(metadata, "targetId", &target);
   const auto window = session.active_window;
+  // input.request stays empty here; the worker fills it from its own copy of the request.
   WindowsApprovalMeasurementInput input;
-  input.request = info;
   input.ruleset = kWindowsInterlockRuleset;
   input.route = ClassifierRoute::kV2;
   input.attested_classifier_version = kNativeEligibilityClassifierVersion;
@@ -597,8 +609,12 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   input.identity.y = bounds.top;
   input.identity.width = bounds.right - bounds.left;
   input.identity.height = bounds.bottom - bounds.top;
-  return RunWindowsOpenMeasurement<WindowsApprovalSample>(limits,
-      [window, point, input, kind, target, epoch, click_basis](const WindowsOpenMeasurementLimits &budget) mutable {
+  return RunWindowsOpenMeasurement<WindowsApprovalSample>(limits, WindowsApprovalMeasurementRead(
+      std::move(request), [window, point, input, target, epoch, click_basis](
+          const ShadowRequestInfo &info, const WindowsOpenMeasurementLimits &budget) mutable {
+    // `info` views the worker's own copy of the request; nothing here refers to the caller.
+    input.request = info;
+    const std::string operation(info.kind);
     const WindowsV1UiaPath uia_path(std::chrono::milliseconds(150), epoch);
     auto source = WindowsUiaShadowSource::Create(window, point, [budget] { return budget.MayRead(); },
         WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
@@ -613,7 +629,7 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
     });
     WindowsShadowReader reader(*source);
     reader.ReadChainIdentity(true);
-    const auto capture = reader.Capture(kind, target);
+    const auto capture = reader.Capture(operation, target);
     std::string target_signature;
     if (reader.ReadTargetSignature(&target_signature) != ShadowReadResult::kOk)
       return WindowsApprovalSample{};
@@ -627,7 +643,7 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
     const bool complete = native_risk.metadata_complete && capture.target_found &&
                           capture.chain_reached_root && !capture.read_failed;
     WindowsApprovalDisplay display;
-    display.operation = kind;
+    display.operation = operation;
     display.effect = MeasureWindowsApproval(input).effect;
     // Labels remain explicitly unverified. The closed E2/E3 gates cannot borrow an old path or
     // selection; their open facts are required by MeasureWindowsApprovalSample when connected.
@@ -636,7 +652,7 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
     if (sample.measured.eligible)
       sample.measured.authority_digest = Sha256Hex(sample.measured.authority_digest + target_signature);
     return sample;
-  });
+  }));
 }
 
 sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(
@@ -719,6 +735,8 @@ bool HandleWindowsApproval(HANDLE pipe, const Frame &request, const std::string 
         : ErrorPayload(reason, accepted));
 }
 
+// END windows approval measurement and handlers
+
 bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
                             const std::string &metadata) {
   const WindowsValidationFrameScope frame;
@@ -775,15 +793,28 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     auto &approval = approval_states[session_key];
     approval.Invalidate();
     WindowsApprovalReference reference;
-    std::string receipt;
+    WindowsApprovalSample measured;
+    std::string offer_receipt;
     const WindowsApprovalReceiptContext context{request_id, session.session_id, cancel_epoch,
         observation_revision, session.input_api_attempts->load(std::memory_order_acquire)};
-    if (ReadWindowsApprovalReference(session, metadata, state.generation, &reference, true) &&
-        approval.Offer(reference, context, WindowsApprovalEnvironmentFor(session, metadata), &receipt))
-      return Respond(pipe, request, MessageType::kPreflightResult, receipt);
-    return Respond(pipe, request, MessageType::kPreflightResult,
-        WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
-                                "denied", "native_approval_unavailable", ""));
+    const bool offered =
+        ReadWindowsApprovalReference(session, metadata, state.generation, &reference, true) &&
+        approval.Offer(reference, context, WindowsApprovalEnvironmentFor(session, metadata),
+                       &offer_receipt, &measured);
+    // One measurement decides. Offered: no ordinary ticket. A takeover, an unmeasurable request, an
+    // approval that cannot be offered, or a failed offer is refused (never an ordinary ticket). A
+    // measured ordinary or blocked decision continues to the interlock below, which issues the
+    // ordinary ticket or refuses with the blocked reason code.
+    switch (RouteWindowsApprovalPreflight(offered, measured)) {
+    case WindowsApprovalPreflightRoute::kOffered:
+      return Respond(pipe, request, MessageType::kPreflightResult, offer_receipt);
+    case WindowsApprovalPreflightRoute::kRefuse:
+      return Respond(pipe, request, MessageType::kPreflightResult,
+          WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
+                                  "denied", "native_approval_unavailable", ""));
+    case WindowsApprovalPreflightRoute::kInterlock:
+      break;
+    }
   }
   // The v2 interlocks (#500 S5-c-2 PR-5): AFTER the V1 binding is valid and BEFORE a ticket is
   // issued. A refusal issues no ticket (the slot was invalidated above). No verdict (budget,
