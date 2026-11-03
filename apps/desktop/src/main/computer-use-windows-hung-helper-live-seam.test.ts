@@ -1106,7 +1106,7 @@ const sessionCaseNames = [
   'stops observation hung in UiaCall through the worker cancellation path',
   'stops observation hung in Capture through the worker cancellation path',
   'retains claimed semantic input after Controller native_unavailable',
-  'keeps a closed session helper while a hung discovery is unconfirmed, then idle-tears it down',
+  'terminates a shared helper when discovery blocks session Stop',
   `measures healthy close behind ${busyLoadFrames} queued observations (below 64 frames)`,
 ];
 const proxyLoadFrames = 8;
@@ -1409,13 +1409,18 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
     );
   }
   it(
-    'retains a helper with unconfirmed discovery hung in CreateFileW',
+    'terminates discovery hung in CreateFileW at its normal request deadline',
     async (context) => {
       live(context);
       observeChildren();
       await watchAttestation(context);
       arm('CreateFileW');
-      const { addon } = addonFor(hung);
+      const { addon, binding } = addonFor(hung);
+      const killStop = killStopOptions();
+      createComputerUseNativeHost(binding, 'win32', {
+        windowsPhysicalBoundsToDip: (value) => value,
+        ...killStop.options,
+      });
       const discovery = settle(
         addon.discoverWindows!({
           discoveryId: 'hung-discovery',
@@ -1426,26 +1431,27 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         }),
       );
       await awaitHang(discovery, operationTimeoutMilliseconds('list_windows_cancellable') + margin);
+      // Connection/attestation precedes the transport's request timer.
       const origin = performance.now();
       expect(await discovery).toBeInstanceOf(Error);
-      await delay(Math.max(0, killBudget + margin - (performance.now() - origin)));
-      expect(children.filter((row) => row.temp)).toHaveLength(1);
-      expect(children.find((row) => row.temp)?.kills).toEqual([]);
-      // This read-only worker cannot claim a launch after Stop. Native can return a drained
-      // receipt even though the worker remains hung; discovery Stop itself never arms teardown.
-      const stopOrigin = performance.now();
-      const stop = await addon.stopWindowDiscovery!({ discoveryId: 'hung-discovery' });
-      const elapsed = performance.now() - stopOrigin;
-      expect(stop).toMatchObject({ result: 'stopped', drained: true });
-      expect(elapsed).toBeLessThan(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
-      expect(children.find((row) => row.temp)?.kills).toEqual([]);
-      report('discovery-CreateFileW', stopOrigin, stop, elapsed);
+      await until(
+        () => children.filter((row) => row.temp).every((row) => row.exited),
+        WINDOWS_STOP_EXIT_MS + margin,
+        'normal discovery deadline exit',
+      );
+      const helpers = children.filter((row) => row.temp);
+      expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+      expect(performance.now() - origin).toBeLessThan(
+        operationTimeoutMilliseconds('list_windows_cancellable') + WINDOWS_STOP_EXIT_MS + margin,
+      );
+      expect(killStop.rows).toEqual([]);
+      report(context.task.name, origin, { result: 'terminated_clean' }, performance.now() - origin);
     },
     caseTimeout,
   );
 
   it(
-    'stops sessionless Controller discovery while its CreateFileW worker remains hung',
+    'stops sessionless Controller discovery through E4 while synchronous measurement is hung',
     async (context) => {
       live(context);
       observeChildren();
@@ -1457,7 +1463,12 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         computerAppIdentitySchema.parse(JSON.parse(identity.stdout) as unknown),
       );
       const { binding } = addonFor(hung);
-      const { controller } = controllerFor(binding, profile);
+      const killStop = killStopOptions();
+      const { controller, host } = controllerFor(binding, profile, undefined, killStop);
+      const notifications: unknown[] = [];
+      host.subscribeWindowsStop!((event) => {
+        if (event.kind === 'notification') notifications.push(event.notification);
+      });
       arm('CreateFileW');
       const discovering = settle(controller.beginWindowCandidates(profile.id, 'seam-task').result);
       await awaitHang(
@@ -1468,10 +1479,20 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
       await controller.stopForTask('seam-task', 'task_changed');
       const elapsed = performance.now() - origin;
       expect(await discovering).toBeInstanceOf(Error);
-      // Confirms at once today; a missed ack deadline would add at least cancelBudget.
-      expect(elapsed).toBeLessThan(cancelBudget);
-      expect(children.filter((row) => row.temp)).toHaveLength(1);
-      expect(children.find((row) => row.temp)?.kills).toEqual([]);
+      expect(elapsed).toBeLessThan(killStopBudget + margin);
+      const helpers = children.filter((row) => row.temp);
+      expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+      expect(helpers.every((row) => row.exited)).toBe(true);
+      expect(helpers[0]!.kills[0]! - origin).toBeGreaterThanOrEqual(
+        COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS - margin,
+      );
+      expect(notifications).toContainEqual(
+        expect.objectContaining({
+          owner: expect.objectContaining({ kind: 'discovery' }),
+          phase: 'exit_confirmed',
+        }),
+      );
+      expect(killStop.rows).toEqual([]);
       report('controller-discovery-CreateFileW', origin, { result: 'stopped' }, elapsed);
     },
     caseTimeout,
@@ -1682,12 +1703,12 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
   );
 
   it(
-    'keeps a closed session helper while a hung discovery is unconfirmed, then idle-tears it down',
+    'terminates a shared helper when discovery blocks session Stop',
     async (context) => {
       live(context);
       observeChildren();
       arm('');
-      const target = await prepare(context);
+      const target = await prepare(context, hung, undefined, killStopOptions());
       const session = await target.start();
       arm('CreateFileW');
       const discovery = settle(
@@ -1698,22 +1719,18 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         }),
       );
       await awaitHang(discovery, operationTimeoutMilliseconds('list_windows_cancellable') + margin);
-      // The close receipt arms idle teardown (shutdownWhenIdle); shutdownIfIdle must still keep
-      // the helper while the sent discovery is unconfirmed.
       const origin = performance.now();
       await target.controller.stopForTask('seam-task', 'task_changed');
       expect(target.controller.getStatus(session.sessionId)).toMatchObject({
         state: 'stopped',
         stopReason: 'task_changed',
       });
-      await delay(Math.max(0, killBudget + margin - (performance.now() - origin)));
+      expect(await discovery).toBeInstanceOf(Error);
       const helper = children.find((row) => row.temp);
-      expect(helper?.kills).toEqual([]);
-      expect(helper?.exited).toBe(false);
-      const stop = await target.addon.stopWindowDiscovery!({ discoveryId: 'idle-discovery' });
-      expect(stop).toMatchObject({ result: 'stopped' });
-      await until(() => helper?.exited === true, margin, 'idle teardown after discovery Stop');
-      report('idle-teardown-discovery-CreateFileW', origin, stop, performance.now() - origin);
+      expect(helper?.kills).toHaveLength(1);
+      expect(helper?.exited).toBe(true);
+      expect(performance.now() - origin).toBeLessThan(killStopBudget + margin);
+      report(context.task.name, origin, { result: 'terminated_clean' }, performance.now() - origin);
     },
     caseTimeout,
   );

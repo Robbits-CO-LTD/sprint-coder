@@ -16,6 +16,31 @@ import {
 
 const digest = (digit: string): string => digit.repeat(64);
 
+const discoveryTerminationOptions = {
+  windowsKillStopTermination: { enabled: true as const },
+  windowsLedger: {
+    write: () => true,
+    update: () => true,
+    delete: () => true,
+    restoreQuarantines: () => true,
+  },
+};
+function discoveryTerminationBinding(value: ComputerUseNativeBinding): ComputerUseNativeBinding {
+  const helper = Object.freeze({ helperGeneration: 1 });
+  return {
+    ...value,
+    addon: {
+      ...value.addon!,
+      configureWindowsTermination: () => undefined,
+      requestWindowsTermination: () => undefined,
+      cleanupWindowsGeneration: () => undefined,
+      captureWindowsGeneration: () => helper,
+      isWindowsGenerationCurrent: (candidate) => candidate === helper,
+      dispatchLedgerSupported: true,
+    },
+  };
+}
+
 describe('PR7c-2 owner set', () => {
   it('retains B behind A, clears only the matching lifetime, and empties after both terminals', () => {
     const delivery = new WindowsStopDelivery();
@@ -417,6 +442,75 @@ describe('Computer Use native Main adapter', () => {
     ).resolves.toMatchObject({ maximumMode: 'observe_only' });
   });
 
+  it('N5-I refuses Windows discovery without kill-stop before native submission', async () => {
+    const discoverWindows = vi.fn(async (input: unknown) => {
+      if (typeof input !== 'object' || input === null || !('discoveryId' in input))
+        throw new Error('fixture discovery input');
+      return {
+        discoveryId: input.discoveryId,
+        result: 'completed',
+        drained: true,
+        launchAttemptCount: 0,
+        windows: [],
+      };
+    });
+    const host = createComputerUseNativeHost(
+      binding(
+        {
+          probe: () => ({}),
+          pickApplication: () => null,
+          listWindows: () => [],
+          discoverWindows,
+          startSession: () => ({}),
+          observe: () => ({}),
+          dispatch: () => ({}),
+          cancel: () => undefined,
+          close: () => undefined,
+          stopPendingStart: () => ({}),
+        },
+        {},
+        'win32',
+      ),
+      'win32',
+      { windowsPhysicalBoundsToDip: (bounds) => bounds },
+    );
+    const profile = {
+      id: 'profile-1',
+      platform: 'win32' as const,
+      kind: 'win32-executable' as const,
+      label: 'Target',
+      canonicalPath: 'C:\\Target\\Target.exe',
+      appUrl: null,
+      identity: {
+        platform: 'win32' as const,
+        identityDigest: digest('a'),
+        executablePath: 'C:\\Target\\Target.exe',
+        executableDigest: digest('b'),
+        signerDigest: digest('d'),
+        packageFamilyName: null,
+        appUserModelId: null,
+        displayName: 'Target',
+        maximumMode: 'full_access_app' as const,
+      },
+      identityDigest: digest('a'),
+      version: null,
+      executableDigest: digest('b'),
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: false,
+      revision: 1,
+      createdAt: '2026-08-30T00:00:00.000Z',
+      updatedAt: '2026-08-30T00:00:00.000Z',
+    };
+    await expect(host.listWindows(profile)).rejects.toMatchObject({
+      reasonCode: 'native_discovery_unavailable',
+    });
+    expect(() => host.beginWindowDiscovery!(profile)).toThrow('native_discovery_unavailable');
+    expect(discoverWindows).not.toHaveBeenCalled();
+  });
+
   it('PR10 refuses an enabled Windows path without a ledger or termination-capable helper', () => {
     const surface = {
       probe: () => ({}),
@@ -477,14 +571,19 @@ describe('Computer Use native Main adapter', () => {
       }),
       close: () => undefined,
     };
-    const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
-      windowsPhysicalBoundsToDip: ({ x, y, width, height }) => ({
-        x: x / 1.5,
-        y: y / 1.5,
-        width: width / 1.5,
-        height: height / 1.5,
-      }),
-    });
+    const host = createComputerUseNativeHost(
+      discoveryTerminationBinding(binding(surface, {}, 'win32')),
+      'win32',
+      {
+        ...discoveryTerminationOptions,
+        windowsPhysicalBoundsToDip: ({ x, y, width, height }) => ({
+          x: x / 1.5,
+          y: y / 1.5,
+          width: width / 1.5,
+          height: height / 1.5,
+        }),
+      },
+    );
 
     await expect(
       host.listWindows({
@@ -612,9 +711,14 @@ describe('Computer Use native Main adapter', () => {
       close: () => undefined,
       ...extraSurface,
     };
-    const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
-      windowsPhysicalBoundsToDip: (bounds) => bounds,
-    });
+    const host = createComputerUseNativeHost(
+      discoveryTerminationBinding(binding(surface, {}, 'win32')),
+      'win32',
+      {
+        ...discoveryTerminationOptions,
+        windowsPhysicalBoundsToDip: (bounds) => bounds,
+      },
+    );
     const profile = {
       id: 'profile-1',
       platform: 'win32' as const,
@@ -757,7 +861,7 @@ describe('Computer Use native Main adapter', () => {
     },
   );
 
-  it('keeps the original Windows identity after a refused resume without a ledger', async () => {
+  it('keeps a refused Windows resume closed under required kill-stop', async () => {
     const original = '9007199254740993';
     const response = { processStartTime: original };
     const { host, startInput, startSession } = await win32TicketScenario(
@@ -771,10 +875,10 @@ describe('Computer Use native Main adapter', () => {
       'native_session_identity_mismatch',
     );
     response.processStartTime = original;
-    await expect(host.startSession({ ...startInput, resume: true })).resolves.toMatchObject({
-      sessionId: startInput.sessionId,
-    });
-    expect(startSession.mock.calls[2]?.[0]).toMatchObject({ pid: 42, processStartTime: original });
+    await expect(host.startSession({ ...startInput, resume: true })).rejects.toThrow(
+      'native_session_closed',
+    );
+    expect(startSession).toHaveBeenCalledTimes(2);
   });
 
   it.each([undefined, '9007199254740993'])(
@@ -971,9 +1075,14 @@ describe('Computer Use native Main adapter', () => {
       }),
       close: () => undefined,
     };
-    const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
-      windowsPhysicalBoundsToDip: (bounds) => bounds,
-    });
+    const host = createComputerUseNativeHost(
+      discoveryTerminationBinding(binding(surface, {}, 'win32')),
+      'win32',
+      {
+        ...discoveryTerminationOptions,
+        windowsPhysicalBoundsToDip: (bounds) => bounds,
+      },
+    );
 
     await expect(
       host.listWindows({

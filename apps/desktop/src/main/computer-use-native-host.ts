@@ -2166,6 +2166,8 @@ export function createComputerUseNativeHost(
     };
   };
   const beginRawDiscovery = (input: Readonly<Record<string, unknown>>) => {
+    if (platform === 'win32' && !terminationEnabled)
+      throw new ComputerUseNativeUnavailableError('native_discovery_unavailable');
     // The ledger-enabled query retries storage before checking native availability.
     if (ledger === undefined) requireMethod('discoverWindows');
     return discoveryManager.begin({

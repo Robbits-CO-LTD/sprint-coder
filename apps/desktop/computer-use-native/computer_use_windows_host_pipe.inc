@@ -452,7 +452,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       response = ProbeJson(probe);
       succeeded = true;
     } else if (operation == "pick_application") {
-      succeeded = PickWindowsExecutable(&response, &reason);
+      succeeded = PickWindowsExecutable(&response, &reason,
+          queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire)));
     } else if (operation == "list_windows_cancellable") {
       if (discovery.not_admitted) {
         WindowsDiscoveryParameters parsed;
@@ -817,6 +818,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     CancelIoEx(pipe, nullptr);
   }
   WindowsDiscoveryStopPump discovery_stop_pump{[&](const std::string& waiting_owner) {
+    // RunWindowsDiscovery lends response/cache ownership to this pump and joins it before return.
     // Bound each pass even if the reader keeps receiving Stops. Do not run another query or input.
     for (std::size_t count = 0; count < kMaximumQueuedFrames; ++count) {
       QueuedFrame stopped;
