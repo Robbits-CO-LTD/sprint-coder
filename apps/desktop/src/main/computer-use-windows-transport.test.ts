@@ -33,6 +33,7 @@ import type {
   ComputerUseNativeAddon,
   ComputerUseNativeBinding,
   WindowsCloseCallbacks,
+  WindowsTerminationCallbacks,
 } from './computer-use-native-types';
 import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
@@ -3374,6 +3375,7 @@ int main() {
       {
         ...base,
         list_targets: () => ['probe_result', []],
+        pick_application: () => ['probe_result', null],
         list_windows: (metadata) => {
           const [type, value] = base['list_windows']!(metadata);
           return [
@@ -3796,6 +3798,8 @@ int main() {
   );
   it('PR7b R13 does not write a receipt verified after exit while transfer is pending', async () => {
     const target = ledgerTarget(true, undefined, true);
+    const events: WindowsStopDeliveryEvent[] = [];
+    target.host.subscribeWindowsStop!((event) => events.push(event));
     const session = await startSession(target.host, 'session-a', 'turn-a');
     target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
     await target.dispatch(session);
@@ -3805,15 +3809,28 @@ int main() {
     children[0]!.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(0);
     const transfers = target.control.transfers;
+    const beforeReceipt = [...events];
+    expect(
+      events.filter((event) => event.kind === 'registered' && event.owner.kind === 'session'),
+    ).toHaveLength(1);
+    expect(events.filter((event) => event.kind === 'notification')).toMatchObject([
+      { notification: { owner: { id: 'session-a' }, phase: 'exit_confirmed' } },
+    ]);
     await expect(target.addon.confirmSessionClosed!(receipt, evidence)).resolves.toEqual({
       status: 'pending',
     });
     expect(target.control.transfers).toBe(transfers);
     expect(target.rows.size).toBe(1);
     expect(target.quarantines).toEqual([]);
+    expect(events).toEqual(beforeReceipt);
+    expect(
+      events.filter((event) => event.kind === 'retired' && event.owner.kind === 'session'),
+    ).toEqual([]);
   });
   it('PR7b R13 ignores a valid late dispatch response and duplicate exit in a new generation', async () => {
     const target = ledgerTarget(true, undefined, true);
+    const events: WindowsStopDeliveryEvent[] = [];
+    target.host.subscribeWindowsStop!((event) => events.push(event));
     const old = await startSession(target.host, 'old-session', 'old-turn');
     const oldHelper = target.helper();
     oldHelper.holdOnly('dispatch');
@@ -3826,9 +3843,22 @@ int main() {
     const quarantines = [...target.quarantines];
     target.control.pid = 43;
     const fresh = await startSession(target.host, 'fresh-session', 'fresh-turn');
+    const beforeLate = [...events];
+    const sessionEvents = events.filter(
+      (event) =>
+        (event.kind === 'notification' ? event.notification.owner : event.owner).kind === 'session',
+    );
+    expect(sessionEvents.map(({ kind }) => kind)).toEqual([
+      'registered',
+      'notification',
+      'notification',
+      'retired',
+      'registered',
+    ]);
     oldHelper.releaseLast('dispatch');
     oldChild.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(beforeLate);
     expect(target.quarantines).toEqual(quarantines);
     expect(target.rows.size).toBe(0);
     const writes = sockets[1]!.writes.length;
@@ -4578,6 +4608,115 @@ int main() {
       }
     },
   );
+  it.each(['success', 'error'] as const)(
+    'PR7c-2 retires a settled picker after %s',
+    async (outcome) => {
+      const target = ledgerTarget(true, undefined, true);
+      const events: WindowsStopDeliveryEvent[] = [];
+      target.host.subscribeWindowsStop!((event) => events.push(event));
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      if (outcome === 'error') target.helper().refuse('pick_application');
+      const picking = Promise.resolve(
+        target.addon.pickApplication!({ activationToken: 'synthetic', pickerKind: 'application' }),
+      );
+      if (outcome === 'error') await expect(picking).rejects.toThrow('SESSION_MISSING');
+      else await expect(picking).resolves.toBeNull();
+      const pickerEvents = () =>
+        events.filter(
+          (event) =>
+            (event.kind === 'notification' ? event.notification.owner : event.owner).kind ===
+            'picker',
+        );
+      expect(pickerEvents().map(({ kind }) => kind)).toEqual(['registered', 'retired']);
+      const registered = pickerEvents()[0];
+      expect(registered?.kind).toBe('registered');
+      if (registered?.kind !== 'registered') throw new Error('Missing picker registration');
+      expect(pickerEvents()[1]).toEqual({ kind: 'retired', owner: registered.owner });
+      children[0]!.emit('exit', 1, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pickerEvents().map(({ kind }) => kind)).toEqual(['registered', 'retired']);
+    },
+  );
+
+  it('PR7c-2 classifies stop without a stopping owner as shared helper stop', async () => {
+    const target = ledgerTarget(true, undefined, true);
+    const events: WindowsStopDeliveryEvent[] = [];
+    target.host.subscribeWindowsStop!((event) => events.push(event));
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    target.addon.requestWindowsTermination!();
+    await vi.advanceTimersByTimeAsync(0);
+    const notifications = events.flatMap((event) =>
+      event.kind === 'notification' ? [event.notification] : [],
+    );
+    expect(notifications.map(({ phase }) => phase)).toEqual([
+      'exit_confirmed',
+      'cleanup_completed',
+    ]);
+    expect(
+      notifications.every(
+        ({ internalReason, reason }) =>
+          internalReason === 'shared_helper_stop' && reason === 'native_unavailable',
+      ),
+    ).toBe(true);
+  });
+
+  it('PR7c-2 rejects discovery completion after kill begins until exit cleanup', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    let callbacks: WindowsTerminationCallbacks | undefined;
+    const target = ledgerTarget(
+      true,
+      (addon) => ({
+        ...addon,
+        configureWindowsTermination: (configured) => {
+          callbacks = configured;
+          addon.configureWindowsTermination!(configured);
+        },
+      }),
+      true,
+    );
+    const events: WindowsStopDeliveryEvent[] = [];
+    target.host.subscribeWindowsStop!((event) => events.push(event));
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    target.helper().holdOnly('list_windows_cancellable');
+    const discovery = target.host.beginWindowDiscovery!(profile);
+    const result = discovery.result.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const registered = events.find(
+      (event) => event.kind === 'registered' && event.owner.id === discovery.id,
+    );
+    if (registered?.kind !== 'registered' || callbacks === undefined)
+      throw new Error('Missing discovery registration');
+    const owner = registered.owner;
+    target.addon.requestWindowsTermination!();
+    expect(child.killCalls).toBe(1);
+    const beforeComplete = [...events];
+    expect(owner.kind).toBe('discovery');
+    callbacks.completed!(owner.helperGeneration, 'discovery', owner.id, owner.lifetimeId);
+    expect(events).toEqual(beforeComplete);
+    await vi.advanceTimersByTimeAsync(2_000);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await result;
+    const owned = events.filter(
+      (event) =>
+        (event.kind === 'notification' ? event.notification.owner : event.owner).lifetimeId ===
+        owner.lifetimeId,
+    );
+    expect(owned.map(({ kind }) => kind)).toEqual([
+      'registered',
+      'notification',
+      'notification',
+      'notification',
+      'retired',
+    ]);
+    expect(
+      owned.flatMap((event) => (event.kind === 'notification' ? [event.notification.phase] : [])),
+    ).toEqual(['termination_pending', 'exit_confirmed', 'cleanup_completed']);
+  });
+
   it('PR7c-2 delivers R8/R12 once per phase and only to the exiting generation', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(

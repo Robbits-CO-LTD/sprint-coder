@@ -1012,8 +1012,6 @@ class WindowsComputerUseHelperClient {
       );
       if (this.termination !== undefined && this.generations.get(helper)?.exited !== false)
         throw new Error('native_stop_unconfirmed');
-      if (picker !== undefined)
-        this.termination?.completed?.(helper, 'picker', picker.id, picker.lifetimeId);
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
@@ -1050,6 +1048,12 @@ class WindowsComputerUseHelperClient {
       }
       return result;
     } finally {
+      if (
+        picker !== undefined &&
+        helper !== undefined &&
+        this.generations.get(helper)?.exited === false
+      )
+        this.termination?.completed?.(helper, 'picker', picker.id, picker.lifetimeId);
       if (semantic !== undefined) {
         semantic.owner.attempts.delete(semantic.id);
         if (

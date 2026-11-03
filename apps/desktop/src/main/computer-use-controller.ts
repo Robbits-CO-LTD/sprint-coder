@@ -320,7 +320,7 @@ export function subscribeComputerUseWindowsStops(
   const unsubscribe = native.subscribeWindowsStop?.((event) => {
     if (disposed) return;
     const owner = event.kind === 'notification' ? event.notification.owner : event.owner;
-    const key = JSON.stringify([owner.kind, owner.id]);
+    const key = JSON.stringify([owner.helperGeneration, owner.kind, owner.id, owner.lifetimeId]);
     if (event.kind === 'registered') {
       const existing = records.get(key);
       if (existing !== undefined && sameWindowsStopOwner(existing.owner, owner)) return;

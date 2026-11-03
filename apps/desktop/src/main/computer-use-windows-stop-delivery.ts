@@ -185,7 +185,7 @@ export class WindowsStopDelivery {
           reason: requested ? 'requested_reason' : 'native_unavailable',
           internalReason: requested
             ? 'requested_stop'
-            : hasStops
+            : hasStops || cause === 'stop'
               ? 'shared_helper_stop'
               : cause === 'crash'
                 ? 'crash'

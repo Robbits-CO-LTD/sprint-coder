@@ -5577,6 +5577,49 @@ async function viWait(): Promise<void> {
 }
 
 describe('PR7c-2 internal stop subscription', () => {
+  it.each(['generation', 'lifetime'] as const)(
+    'keeps a live record when another %s is unbound',
+    (difference) => {
+      let emit: WindowsStopListener = () => undefined;
+      const receive = vi.fn();
+      const old = {
+        helperGeneration: 1,
+        kind: 'session',
+        id: 'same-id',
+        lifetimeId: 'old',
+      } as const;
+      const other = {
+        ...old,
+        ...(difference === 'generation' ? { helperGeneration: 2 } : { lifetimeId: 'other' }),
+      };
+      const unsubscribe = subscribeComputerUseWindowsStops(
+        {
+          subscribeWindowsStop: (listener) => {
+            emit = listener;
+            return () => undefined;
+          },
+        },
+        (owner) => (owner === old ? { requestedReason: () => 'user_stop', receive } : undefined),
+      );
+      emit({ kind: 'registered', owner: old });
+      emit({ kind: 'registered', owner: other });
+      emit({ kind: 'retired', owner: other });
+      emit({
+        kind: 'notification',
+        notification: {
+          owner: old,
+          phase: 'exit_confirmed',
+          result: 'terminated_clean',
+          late: false,
+          reason: 'native_unavailable',
+          internalReason: 'crash',
+        },
+      });
+      expect(receive).toHaveBeenCalledOnce();
+      expect(receive.mock.calls[0]![0].owner).toEqual(old);
+      unsubscribe();
+    },
+  );
   it('ignores old lifetimes and generations, deduplicates phases, and preserves the requested reason', () => {
     let emit: WindowsStopListener = () => undefined;
     const detached = vi.fn();
@@ -5594,6 +5637,7 @@ describe('PR7c-2 internal stop subscription', () => {
     const old = { helperGeneration: 1, kind: 'session', id: 'same-id', lifetimeId: 'old' } as const;
     const current = { ...old, helperGeneration: 2, lifetimeId: 'current' };
     emit({ kind: 'registered', owner: old });
+    emit({ kind: 'retired', owner: old });
     emit({ kind: 'registered', owner: current });
     const notification = {
       owner: old,
