@@ -25,6 +25,22 @@
 
 namespace sprint_coder::computer_use {
 
+// Missing OS evidence never admits a background start. These are window facts, not a grant for
+// any control/pattern; the versioned provider capability must be checked separately.
+struct WindowsBackgroundStartFacts {
+  std::optional<bool> visible;
+  std::optional<bool> not_minimized;
+  std::optional<bool> enabled;
+  std::optional<bool> not_cloaked;
+  std::optional<bool> input_desktop;
+  std::optional<bool> current_virtual_desktop;
+};
+
+[[nodiscard]] inline bool WindowsBackgroundStartFactsAdmit(const WindowsBackgroundStartFacts &facts) {
+  return facts.visible == true && facts.not_minimized == true && facts.enabled == true &&
+      facts.not_cloaked == true && facts.input_desktop == true && facts.current_virtual_desktop == true;
+}
+
 // A root the host measured (a canonical directory, UTF-8, without a trailing separator) and the
 // imageRoot value of what lies under it. The host passes the roots in precedence order: the first
 // root a path lies under names it.

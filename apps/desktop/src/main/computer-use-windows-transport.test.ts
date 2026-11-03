@@ -691,6 +691,42 @@ describe('Computer Use Windows helper transport', () => {
     onSocket = null;
   });
 
+  it('P2a retains the native foreground session shape', async () => {
+    const base = responders();
+    const inputSession = { kind: 'foreground', backgroundCapabilityVersion: null };
+    const { host } = createTarget({
+      ...base,
+      start_session: (metadata) => {
+        const [type, value] = base['start_session']!(metadata);
+        return [type, { ...(value as object), inputSession }];
+      },
+    });
+    const session = await startSession(host, 'p2a-foreground', 'turn-1');
+    expect(session.inputSession).toEqual(inputSession);
+    await host.close(session);
+  });
+
+  it.each([
+    null,
+    { kind: 'unknown', backgroundCapabilityVersion: null },
+    { kind: 'foreground', backgroundCapabilityVersion: 1 },
+    { kind: 'background', backgroundCapabilityVersion: 2 },
+    { kind: 'background', backgroundCapabilityVersion: 1 },
+  ])('P2a refuses malformed or gated background session shape %j', async (inputSession) => {
+    const base = responders();
+    const { host } = createTarget({
+      ...base,
+      stop_pending_start: (metadata) => base['close_session']!({ ...metadata, cancelEpoch: 1 }),
+      start_session: (metadata) => {
+        const [type, value] = base['start_session']!(metadata);
+        return [type, { ...(value as object), inputSession }];
+      },
+    });
+    await expect(startSession(host, 'p2a-rejected', 'turn-1')).rejects.toThrow(
+      'native_session_invalid',
+    );
+  });
+
   it.each(['read-failure', 'retry-exception'] as const)(
     'PR10 sends existing-helper Stop despite %s and refuses new work',
     async (failure) => {

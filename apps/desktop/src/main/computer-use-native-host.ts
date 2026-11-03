@@ -15,6 +15,7 @@ import {
   bindComputerUseMaximumMode,
   computerAppIdentitySchema,
   computerUseActionResultSchema,
+  computerUseInputSessionSchema,
   computerUseAvailabilitySchema,
   computerUseObservationSchema,
   computerUseModeSchema,
@@ -64,6 +65,7 @@ import {
 import { computerUseActionDigest } from './computer-use-action';
 import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
+import { COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED } from './computer-use-native-protocol';
 import type {
   WindowsDispatchCallbacks,
   WindowsStartCallbacks,
@@ -4064,6 +4066,17 @@ function parseNativeSession(
   const cancelEpoch = numberField(raw, 'cancelEpoch', input.cancelEpoch);
   const processIdentity =
     platform === 'win32' ? { processStartTime: parseWindowsProcessStartTime(raw) } : {};
+  const inputSession =
+    raw['inputSession'] === undefined
+      ? undefined
+      : computerUseInputSessionSchema.safeParse(raw['inputSession']);
+  if (
+    inputSession !== undefined &&
+    (!inputSession.success ||
+      platform !== 'win32' ||
+      (inputSession.data.kind === 'background' && !COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED))
+  )
+    throw new ComputerUseNativeUnavailableError('native_session_invalid');
   const policyLanguage = nativePolicyLanguage(raw);
   if (
     platform === 'win32' &&
@@ -4093,6 +4106,7 @@ function parseNativeSession(
   return Object.freeze({
     sessionId,
     platform,
+    ...(inputSession?.success ? { inputSession: inputSession.data } : {}),
     appIdentityDigest,
     windowIdentityDigest,
     windowId,
@@ -4129,6 +4143,7 @@ function parseWindowsProcessStartTime(raw: Readonly<Record<string, unknown>>): s
 function publicNativeSession(session: InternalNativeSession): ComputerUseNativeSession {
   return Object.freeze({
     sessionId: session.sessionId,
+    ...(session.inputSession === undefined ? {} : { inputSession: session.inputSession }),
     platform: session.platform,
     appIdentityDigest: session.appIdentityDigest,
     windowIdentityDigest: session.windowIdentityDigest,

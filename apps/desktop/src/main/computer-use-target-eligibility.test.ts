@@ -422,6 +422,9 @@ describe('target facts source contract', () => {
     const factsReaders = new Set([
       'computer_use_windows_target_facts.h',
       'computer_use_windows_host.cc',
+      // N9 P2a: the component seams compile the production v2 start engine with controlled facts.
+      'computer_use_windows_new_start_test.cc',
+      'computer_use_windows_existing_start_test.cc',
     ]);
     for (const name of readdirSync(nativeDirectory)) {
       if (!/\.(cc|mm|h)$/u.test(name)) continue;
