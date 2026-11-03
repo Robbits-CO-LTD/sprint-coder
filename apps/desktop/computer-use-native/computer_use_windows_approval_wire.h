@@ -4,6 +4,7 @@
 // private intent. This function neither issues a ticket nor enables the production approval gate.
 #include "computer_use_effect_classifier.h"
 #include "computer_use_native_approval_offer.h"
+#include "computer_use_preflight_classifier.h"
 
 #include <optional>
 
@@ -92,7 +93,8 @@ inline bool OperationAllowed(const WindowsApprovalDisplay &display) {
         effect_detail::NormalizeExtension(*display.extension) != *display.extension))) return {};
   const std::string effect(NativeApprovalEffectName(offer.effect));
   std::string receipt =
-      "{\"decision\":\"single_use_approval\",\"reasonCode\":null,\"deniedResult\":null,"
+      "{\"decision\":" + Quote(NativePreflightDecisionName(NativePreflightKind::kSingleUseApproval)) +
+      ",\"reasonCode\":null,\"deniedResult\":null,"
       "\"ticket\":null,\"classifierVersion\":2,\"inputAttemptCount\":" +
       std::to_string(context.input_attempt_count) + ",\"requestId\":" + Quote(context.request_id) +
       ",\"sessionId\":" + Quote(context.session_id) +

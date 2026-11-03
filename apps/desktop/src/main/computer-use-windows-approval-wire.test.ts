@@ -56,10 +56,7 @@ const receipt = {
 describe('Windows approval wire contract', () => {
   it('parses the exact C++ producer golden receipt', () => {
     const source = readFileSync(
-      new URL(
-        '../../computer-use-native/computer_use_windows_approval_wire_test.h',
-        import.meta.url,
-      ),
+      new URL('../../computer-use-native/computer_use_protocol_fuzz.cc', import.meta.url),
       'utf8',
     );
     const golden = source.match(/R"receipt\((.*?)\)receipt"/u)?.[1];
@@ -112,6 +109,46 @@ describe('Windows approval wire contract', () => {
       { ...context, expectedClassifierVersion: 1 },
     ])
       expect(() => parseNativePreflightReceipt(receipt, input)).toThrow();
+  });
+  it.each([undefined, context.windowsApproval])(
+    'rejects a Windows v2 offer with approval capability %j',
+    (windowsApproval) => {
+      const value: Record<string, unknown> = { ...receipt, receiptVersion: 2 };
+      delete value['display'];
+      expect(() =>
+        parseNativePreflightReceipt(value, {
+          session,
+          requestId: context.requestId,
+          observationRevision: context.observationRevision,
+          cancelEpoch: context.cancelEpoch,
+          expectedClassifierVersion: context.expectedClassifierVersion,
+          ...(windowsApproval === undefined ? {} : { windowsApproval }),
+        }),
+      ).toThrow('native_preflight_invalid');
+    },
+  );
+  it('preserves a macOS v2 offer without display information', () => {
+    const value: Record<string, unknown> = { ...receipt, receiptVersion: 2 };
+    delete value['display'];
+    expect(
+      parseNativePreflightReceipt(value, {
+        session: { ...session, platform: 'darwin' },
+        requestId: context.requestId,
+        observationRevision: context.observationRevision,
+        cancelEpoch: context.cancelEpoch,
+        expectedClassifierVersion: context.expectedClassifierVersion,
+      }),
+    ).toMatchObject({
+      kind: 'refused',
+      result: 'paused',
+      approvalOffer: {
+        kind: 'approval_required',
+        approvalGeneration: 1,
+        remainingMs: 60_000,
+        effect: 'supervised_action',
+        display: null,
+      },
+    });
   });
   it('rejects every missing key, unknown keys and invalid bounds', () => {
     for (const key of Object.keys(receipt)) {

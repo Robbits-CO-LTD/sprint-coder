@@ -2,16 +2,13 @@
 
 #include "computer_use_windows_approval_wire.h"
 
-// Shared golden receipt: the TS wire test reads this exact value through its strict parser.
-inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":2,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
-
-inline bool CheckWindowsApprovalWire() {
+inline bool CheckWindowsApprovalWire(std::string_view golden_receipt) {
   using namespace sprint_coder::computer_use;
   WindowsApprovalReceiptContext context{"request-1", "session-1", 0, 1, 0};
   NativeApprovalOffer offer{1, 60'000, NativeApprovalEffect::kSupervisedAction};
   WindowsApprovalDisplay display{NativeApprovalEffect::kSupervisedAction, "click", "Example",
                                  std::nullopt, false};
-  if (WindowsApprovalOfferReceipt(context, offer, display) != kWindowsApprovalWireFixture)
+  if (WindowsApprovalOfferReceipt(context, offer, display) != golden_receipt)
     return false;
   for (const auto effect : {NativeApprovalEffect::kSupervisedAction,
                             NativeApprovalEffect::kHighImpactConfirmation,

@@ -12,8 +12,13 @@ describe('Windows ordinary path excludes approval effects', () => {
     const guard = source.indexOf(
       'const EffectDecision decision = ClassifyEffect(built.facts, ruleset);',
     );
-    expect(guard).toBeGreaterThan(source.indexOf('!WindowsCaptureChainOwnedBy('));
-    const tail = source.slice(guard, source.indexOf('return result;', guard));
+    const ownedChain = source.indexOf('!WindowsCaptureChainOwnedBy(');
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(ownedChain).toBeGreaterThanOrEqual(0);
+    expect(guard).toBeGreaterThan(ownedChain);
+    const resultReturn = source.indexOf('return result;', guard);
+    expect(resultReturn).toBeGreaterThanOrEqual(0);
+    const tail = source.slice(guard, resultReturn);
     expect(tail).toContain('result.strict_verdict.outcome == InterlockOutcome::kNone');
     expect(tail).toContain('decision.kind == DecisionKind::kApproval');
     expect(tail).toContain('result.strict_verdict = interlock_detail::Refusal(');
@@ -23,14 +28,22 @@ describe('Windows ordinary path excludes approval effects', () => {
 
   it('uses that verdict before ordinary ticket issue and before any dispatch input', () => {
     const host = readWindowsHostSource();
-    const preflight = host.slice(host.indexOf('bool HandleWindowsPreflight('));
-    expect(preflight.indexOf('if (evaluation.Refuses())')).toBeLessThan(
-      preflight.indexOf('state.slot.Issue('),
-    );
-    const dispatch = host.slice(host.indexOf('bool DispatchWindowsAction('));
-    expect(dispatch.indexOf('if (evaluation.Refuses())')).toBeLessThan(
-      dispatch.indexOf('input_api_attempts->fetch_add('),
-    );
+    const preflightStart = host.indexOf('bool HandleWindowsPreflight(');
+    expect(preflightStart).toBeGreaterThanOrEqual(0);
+    const preflight = host.slice(preflightStart);
+    const preflightGuard = preflight.indexOf('if (evaluation.Refuses())');
+    const ticketIssue = preflight.indexOf('state.slot.Issue(');
+    expect(preflightGuard).toBeGreaterThanOrEqual(0);
+    expect(ticketIssue).toBeGreaterThanOrEqual(0);
+    expect(preflightGuard).toBeLessThan(ticketIssue);
+    const dispatchStart = host.indexOf('bool DispatchWindowsAction(');
+    expect(dispatchStart).toBeGreaterThanOrEqual(0);
+    const dispatch = host.slice(dispatchStart);
+    const dispatchGuard = dispatch.indexOf('if (evaluation.Refuses())');
+    const inputAttempt = dispatch.indexOf('input_api_attempts->fetch_add(');
+    expect(dispatchGuard).toBeGreaterThanOrEqual(0);
+    expect(inputAttempt).toBeGreaterThanOrEqual(0);
+    expect(dispatchGuard).toBeLessThan(inputAttempt);
     expect(host).toContain('ApplyIncompletePolicy(');
     expect(host).toContain('EvaluateWindowsInterlockOnSource(');
   });

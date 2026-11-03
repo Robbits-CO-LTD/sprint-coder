@@ -43,6 +43,9 @@
 
 namespace {
 
+// Shared golden receipt: the TS wire test reads this exact value through its strict parser.
+inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":2,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
+
 using sprint_coder::computer_use::DecodeFrame;
 using sprint_coder::computer_use::EncodeFrame;
 using sprint_coder::computer_use::FrameHeader;
@@ -9471,7 +9474,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
-  if (!Check(CheckWindowsApprovalWire(), "windows-approval-wire")) return 1;
+  if (!Check(CheckWindowsApprovalWire(kWindowsApprovalWireFixture), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;

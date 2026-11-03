@@ -2533,20 +2533,21 @@ export function parseNativePreflightReceipt(
   // receipt without it is version 1 and keeps its original strict shape.
   const version2 = keys.includes('receiptVersion');
   const version3 = record['receiptVersion'] === 3;
+  const offersApproval = version2 && record['decision'] === 'single_use_approval';
+  if (offersApproval && input.session.platform === 'win32' && !version3) return invalid();
   if (version3) {
     if (
       input.session.platform !== 'win32' ||
       input.windowsApproval?.route !== 'v2' ||
       input.windowsApproval.receiptVersion !== 3 ||
       input.expectedClassifierVersion !== 2 ||
-      record['decision'] !== 'single_use_approval' ||
+      !offersApproval ||
       typeof record['inputAttemptCount'] !== 'number' ||
       !Number.isSafeInteger(record['inputAttemptCount']) ||
       record['inputAttemptCount'] < 0
     )
       return invalid();
   } else if (version2 && record['receiptVersion'] !== 2) return invalid();
-  const offersApproval = version2 && record['decision'] === 'single_use_approval';
   const expectedKeys = version3
     ? NATIVE_APPROVAL_OFFER_KEYS_V3
     : !version2
