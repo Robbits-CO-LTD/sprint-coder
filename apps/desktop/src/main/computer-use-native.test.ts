@@ -54,6 +54,39 @@ it('measures validation identity on the consumer with cancellable I/O and fresh 
   expect(
     source.indexOf('if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false;'),
   ).toBeLessThan(source.indexOf('*result = measured;'));
+  // The order the safety rests on: the slot outlives the duplicated handles, the measurement runs
+  // inside the cancellation registration, and the result is adopted under the Stop lock.
+  const lane = source.slice(source.indexOf('bool ReadWindowsSessionIdentityOnLane('));
+  const at = (needle: string) => {
+    const index = lane.indexOf(needle);
+    expect(index, needle).toBeGreaterThan(-1);
+    return index;
+  };
+  const slot = at('struct Slot {');
+  const work = at('WindowsValidationWork work;');
+  const registration = at('WindowsNewStartIoRegistration cancellation;');
+  const measure = at('measured = MeasureWindowsSessionIdentity(work);');
+  const catchAt = at('} catch (...) {');
+  expect(slot).toBeLessThan(work);
+  expect(registration).toBeLessThan(measure);
+  expect(measure).toBeLessThan(catchAt);
+  expect(lane.slice(catchAt).replace(/\s+/gu, ' ')).toContain(
+    'std::lock_guard stop_lock(control.stop_mutex); if (!WindowsValidationStillCurrent(epoch, stop_serial)) return false; *result = measured;',
+  );
+  // With Main gone nothing kills the helper, so parent death cancels the consumer's own I/O.
+  const host = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+    'utf8',
+  );
+  const watcher = host.slice(host.indexOf('parent_watcher = std::thread('));
+  const parentLock = watcher.slice(
+    watcher.indexOf('std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);'),
+    watcher.indexOf('CancelIoEx(pipe, nullptr);'),
+  );
+  expect(parentLock).toContain('parent_process_dead.store(true, std::memory_order_release);');
+  expect(parentLock).toContain(
+    'CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());',
+  );
   expect(source).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
   expect(source).toContain(
     'WindowsTargetListWorkerRunning().store(false, std::memory_order_release)',

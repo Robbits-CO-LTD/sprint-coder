@@ -293,6 +293,9 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
             std::lock_guard stop_lock(WindowsTargetListControl().stop_mutex);
             parent_process_dead.store(true, std::memory_order_release);
             cancellation_epoch.fetch_add(1, std::memory_order_acq_rel);
+            // A start or session identity measurement runs on the consumer itself (N5-C/G/H). With no
+            // Main left to kill this helper, cancel its I/O so ServePipe can return and the helper exits.
+            CancelWindowsNewStartMeasurementLocked(WindowsTargetListControl());
           }
           CancelIoEx(pipe, nullptr);
           DisconnectNamedPipe(pipe);

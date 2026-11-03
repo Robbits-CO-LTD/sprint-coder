@@ -893,7 +893,8 @@ function controllerFor(
 // and the post-receipt idle teardown that keeps an unconfirmed discovery by its fake transport
 // cases. A real helper answering at once while a UiaCall or Capture worker is parked, a pending-start
 // Controller Stop ended by E3 kill-stop (N5-G; its sessionless form is fixed live by the fixture
-// start cases), and the busy close distribution are not fixed anywhere yet.
+// start cases), a validation held outside cancellable I/O ended by E1 kill-stop (N5-C), and the
+// busy close distribution are not fixed anywhere yet.
 // Where classic Notepad is eligible, these cases still run unchanged.
 let notepadPid: number | undefined;
 let notepadWindowId = '';

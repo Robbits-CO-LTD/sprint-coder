@@ -15,8 +15,10 @@
 inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;
 // The consumer's wait budget for list_targets. Completed rows survive it; unfinished measurements
 // are unresolvable. Listing, new V2 starts, session identity reads and V2 rejudgements share one
-// measurement slot. A driver may ignore best-effort CancelSynchronousIo, so cleanup keeps it occupied even
-// after the consumer answers. This list-only deadline is not a new native start deadline.
+// measurement slot. Listing and rejudgement measure on workers, and a driver may ignore best-effort
+// CancelSynchronousIo, so their cleanup can keep it occupied after the consumer answers; new starts
+// and session identity reads measure on the consumer and release it before the response (N5-C/G).
+// This list-only deadline is not a new native start deadline.
 inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
 
 // Main's pid (the lineage root for W8), set by ServeMain before the first request.

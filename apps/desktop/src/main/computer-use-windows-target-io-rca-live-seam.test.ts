@@ -3543,7 +3543,8 @@ int DiagnoseValidation(std::wstring_view scenario) {
       Require(WaitStopSerial(serial, 1000), "validation_close_reader_progress");
       if (!cancel) {
         // The event wait is not cancellable I/O. Return it after the barrier to test late rejection;
-        // the permanently held consumer is covered by the E1/E2 hung-helper seam.
+        // a consumer held for good ends only through Main's E1/E2 kill-stop. Its live case in the
+        // hung-helper seam needs a session, so it is a counted NOT_RUN until N13b.
         Require(!run.Wait(2, 50), "validation_no_response_while_consumer_held");
         hold_point.store(HoldPoint::kNone);
         SetEvent(run.release.value);
