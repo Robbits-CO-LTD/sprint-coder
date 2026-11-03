@@ -87,7 +87,10 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   write(row: WindowsLedgerRow): boolean | Promise<boolean>;
   update(row: WindowsLedgerRow): boolean | Promise<boolean>;
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
-  /** Adds quarantines; an existing quarantine for the same target keeps its first committed reason. */
+  /**
+   * Adds quarantines using the same first committed reason rule as transferReceipt.
+   * Concurrent connections may commit in a different order from the core's events.
+   */
   restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
   /** Remove only the proven terminated process identity; retries are idempotent. */
   releaseQuarantine?(identity: WindowsTargetQuarantine['identity']): boolean | Promise<boolean>;
@@ -527,14 +530,18 @@ export function createComputerUseNativeHost(
   };
   if (terminationEnabled && ledger !== undefined) {
     addon?.configureWindowsTermination?.({
-      prepare: async () => {
-        await retryLedger();
-        if (
-          [...ledgerStates.values()].some((state) =>
-            state.holds.some((hold) => hold.recovery === 'restore_store'),
+      prepare: async (operation = 'work') => {
+        // Stop on a live connection must not depend on storage availability or retry latency.
+        // Reconnecting still uses the work gate, and generation termination stays fail-closed.
+        if (operation !== 'stop_existing_helper') {
+          await retryLedger();
+          if (
+            [...ledgerStates.values()].some((state) =>
+              state.holds.some((hold) => hold.recovery === 'restore_store'),
+            )
           )
-        )
-          throw new Error('native_unavailable');
+            throw new Error('native_unavailable');
+        }
         if ([...ledgerStates.values()].some((state) => state.killRequested && !state.exitConfirmed))
           throw new Error('native_stop_unconfirmed');
       },
