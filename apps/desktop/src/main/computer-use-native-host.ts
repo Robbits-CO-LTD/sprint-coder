@@ -277,7 +277,7 @@ export function createComputerUseNativeHost(
       state = {
         helperGeneration: generation,
         helperLaunched: true,
-        entry: 'E1',
+        entry: null,
         stopOwnerId: '',
         killRequested: false,
         exitConfirmed: false,
@@ -312,15 +312,15 @@ export function createComputerUseNativeHost(
     }
     if (
       terminationEnabled &&
-      decision.cleanup === 'generation_after_transfer' &&
-      decision.cleanupGeneration !== null &&
+      typeof decision.cleanup === 'object' &&
+      decision.cleanup.kind === 'ready' &&
       decision.awaitingHoldId === null
     ) {
-      const completions = exitCompletions.get(decision.cleanupGeneration);
-      exitCompletions.delete(decision.cleanupGeneration);
+      const completions = exitCompletions.get(decision.cleanup.helperGeneration);
+      exitCompletions.delete(decision.cleanup.helperGeneration);
       for (const complete of completions ?? []) complete();
-      cleanupGeneration(decision.cleanupGeneration);
-      addon?.cleanupWindowsGeneration?.(decision.cleanupGeneration);
+      cleanupGeneration(decision.cleanup.helperGeneration);
+      addon?.cleanupWindowsGeneration?.(decision.cleanup.helperGeneration);
     }
     return decision;
   };
@@ -523,6 +523,28 @@ export function createComputerUseNativeHost(
           const owner = startOwners.get(id);
           if (owner !== undefined) owner.helperGeneration ??= generation;
         }
+      },
+      stopping: (generation, entry, ownerId) => {
+        const state = ledgerState(generation);
+        if (state.exitConfirmed || state.entry !== null) return;
+        const startOwner =
+          entry === 'E4'
+            ? [...startOwners.values()].find((owner) =>
+                [...owner.discoveries].some((discovery) => discovery.id === ownerId),
+              )
+            : undefined;
+        ledgerStates.set(generation, {
+          ...state,
+          entry:
+            startOwner !== undefined
+              ? sessions.has(startOwner.sessionId)
+                ? 'E1'
+                : 'E3'
+              : entry === 'E1' && !sessions.has(ownerId)
+                ? 'E2'
+                : entry,
+          stopOwnerId: startOwner?.sessionId ?? ownerId,
+        });
       },
       event: (generation, kind) => {
         ledgerEvent(generation, { kind, helperGeneration: generation });
