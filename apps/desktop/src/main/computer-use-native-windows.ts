@@ -39,17 +39,22 @@ import {
   type WindowsCloseCallbacks,
   type WindowsCloseConfirmation,
   type WindowsTerminationCallbacks,
+  type WindowsStartCallbacks,
   type WindowsAdmissionCheck,
   type WindowsTargetIdentityResult,
   type WindowsGenerationToken,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
+type WindowsRequestCallbacks = WindowsDispatchCallbacks | WindowsStartCallbacks;
 export type { WindowsTargetIdentityResult } from './computer-use-native-types';
 
 export type WindowsComputerUseNativeAddon = ComputerUseNativeAddon &
   Readonly<{
-    checkTargetIdentity: (targets: unknown) => Promise<readonly WindowsTargetIdentityResult[]>;
+    checkTargetIdentity: (
+      targets: unknown,
+      checked?: (helperGeneration: number) => void,
+    ) => Promise<readonly WindowsTargetIdentityResult[]>;
   }>;
 
 const MAX_TARGET_IDENTITIES = 64;
@@ -136,7 +141,7 @@ type PendingRequest = Readonly<{
   allowBinary: boolean;
   semantic?: SemanticAttempt;
   ownerSession?: string;
-  dispatchCallbacks?: WindowsDispatchCallbacks;
+  dispatchCallbacks?: WindowsRequestCallbacks;
 }>;
 
 export function createWindowsComputerUseNativeAddon(
@@ -153,7 +158,7 @@ export function createWindowsComputerUseNativeAddon(
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
-    checkTargetIdentity: (targets) => client.checkTargetIdentity(targets),
+    checkTargetIdentity: (targets, checked) => client.checkTargetIdentity(targets, checked),
     configureWindowsAdmission: (check) => client.configureWindowsAdmission(check),
     captureWindowsGeneration: () => client.captureWindowsGeneration(),
     isWindowsGenerationCurrent: (token) => client.isWindowsGenerationCurrent(token),
@@ -168,7 +173,7 @@ export function createWindowsComputerUseNativeAddon(
       return client.stopWindowDiscovery(id);
     },
     cancelUnsubmittedDiscovery: (id) => client.cancelUnsubmittedDiscovery(id),
-    startSession: (input, assertSend) => {
+    startSession: (input, assertSend, callbacks) => {
       const value = record(input);
       const profile = record(value['profile']);
       const identity = record(profile['identity']);
@@ -183,7 +188,7 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         undefined,
-        undefined,
+        callbacks,
         assertSend,
       );
     },
@@ -902,10 +907,15 @@ class WindowsComputerUseHelperClient {
       this.termination?.completed?.(owner.helper, 'discovery', owner.id, owner.stopLifetimeId);
   }
 
-  async checkTargetIdentity(input: unknown): Promise<readonly WindowsTargetIdentityResult[]> {
+  async checkTargetIdentity(
+    input: unknown,
+    checked?: (helperGeneration: number) => void,
+  ): Promise<readonly WindowsTargetIdentityResult[]> {
     const targets = parseTargetIdentities(input);
     let response: unknown;
     try {
+      await this.ensureConnected();
+      const generation = this.helperGeneration;
       response = await this.call(
         'check_target_identity',
         'check_target_identity',
@@ -913,6 +923,9 @@ class WindowsComputerUseHelperClient {
         undefined,
         undefined,
       );
+      if (generation !== this.helperGeneration || this.socket === null || this.socket.destroyed)
+        throw new Error('native_unavailable');
+      checked?.(generation);
     } catch {
       // Neither helper error payloads nor JSON parser diagnostics may expose an identity.
       throw new Error('Windows target identity check failed');
@@ -926,7 +939,7 @@ class WindowsComputerUseHelperClient {
     input: NativeRecord,
     sessionKey: string | undefined,
     requestKey: string | undefined,
-    dispatchCallbacks?: WindowsDispatchCallbacks,
+    dispatchCallbacks?: WindowsRequestCallbacks,
     assertStartSend?: () => void,
   ): Promise<unknown> {
     if (sessionKey !== undefined && operation !== 'start_session')
@@ -1334,7 +1347,7 @@ class WindowsComputerUseHelperClient {
     stopsSession = false,
     beforeWrite?: () => void,
     semantic?: SemanticAttempt,
-    dispatchCallbacks?: WindowsDispatchCallbacks,
+    dispatchCallbacks?: WindowsRequestCallbacks,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
@@ -1538,7 +1551,9 @@ class WindowsComputerUseHelperClient {
           code,
           accepted: value['accepted'] === true,
         });
-        if (pending.dispatchCallbacks === undefined) pending.reject(rejection);
+        if (pending.dispatchCallbacks !== undefined && 'startResponse' in pending.dispatchCallbacks)
+          this.settleStartResponse(pending, value, rejection);
+        else if (pending.dispatchCallbacks === undefined) pending.reject(rejection);
         else
           void pending.dispatchCallbacks
             .response(value['accepted'] === true)
@@ -1565,7 +1580,9 @@ class WindowsComputerUseHelperClient {
       }
       if (frame.binary.byteLength > 0)
         parsed = decodeWindowsObservationPayload(parsed, frame.binary);
-      pending.resolve(parsed);
+      if (pending.dispatchCallbacks !== undefined && 'startResponse' in pending.dispatchCallbacks)
+        this.settleStartResponse(pending, parsed);
+      else pending.resolve(parsed);
       this.shutdownIfIdle();
     } catch (error) {
       const invalid =
@@ -1577,6 +1594,22 @@ class WindowsComputerUseHelperClient {
       pending.reject(invalid);
       this.abortTransport(invalid);
     }
+  }
+
+  private settleStartResponse(pending: PendingRequest, value: unknown, rejection?: Error): void {
+    const callbacks = pending.dispatchCallbacks;
+    if (callbacks === undefined || !('startResponse' in callbacks)) return;
+    // A start error can follow SetForegroundWindow. Never translate accepted:false into an
+    // unexecuted foreground row; Main must validate startResult, including the expected identity.
+    void Promise.resolve()
+      .then(() => callbacks.startResponse(value, rejection === undefined))
+      .then(
+        () => (rejection === undefined ? pending.resolve(value) : pending.reject(rejection)),
+        (error: unknown) => {
+          callbacks.unconfirmed('abortTransport');
+          pending.reject(error instanceof Error ? error : new Error('native_unavailable'));
+        },
+      );
   }
 
   private failAll(
