@@ -34,6 +34,7 @@ import type {
   ComputerUseNativeBinding,
   WindowsCloseCallbacks,
   WindowsTerminationCallbacks,
+  WindowsStartCallbacks,
 } from './computer-use-native-types';
 import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
@@ -659,6 +660,199 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  const startCallbacks = (): WindowsStartCallbacks => ({
+    beforeWrite: vi.fn(async () => undefined),
+    assertSend: vi.fn(),
+    canceled: vi.fn(async () => undefined),
+    unconfirmed: vi.fn(),
+    startResponse: vi.fn(async () => undefined),
+  });
+
+  it('PR5b waits for start storage before sending and delivers the bound result', async () => {
+    const target = createTarget();
+    const callbacks = startCallbacks();
+    let stored!: () => void;
+    vi.mocked(callbacks.beforeWrite).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          stored = resolve;
+        }),
+    );
+    const result = Promise.resolve(
+      target.addon.startSession!({ sessionId: 'start-storage', profile }, undefined, callbacks),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(callbacks.beforeWrite).toHaveBeenCalledWith(1, expect.stringMatching(/^[a-f0-9]{32}$/u));
+    expect(target.helper().served).not.toContain('start_session');
+    stored();
+    const response = await result;
+    expect(callbacks.assertSend).toHaveBeenCalledOnce();
+    expect(callbacks.startResponse).toHaveBeenCalledWith(response, true);
+    expect(callbacks.canceled).not.toHaveBeenCalled();
+  });
+
+  it.each(['storage', 'gate', 'stop', 'generation'] as const)(
+    'PR5b cancels an unsent start after %s failure',
+    async (failure) => {
+      const target = createTarget();
+      const callbacks = startCallbacks();
+      let stored!: () => void;
+      vi.mocked(callbacks.beforeWrite).mockImplementation(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            stored = () =>
+              failure === 'storage' ? reject(new Error('storage failed')) : resolve();
+          }),
+      );
+      if (failure === 'gate')
+        vi.mocked(callbacks.assertSend).mockImplementation(() => {
+          throw new Error('owner changed');
+        });
+      const result = Promise.resolve(
+        target.addon.startSession!({ sessionId: 'unsent-start', profile }, undefined, callbacks),
+      ).then(
+        () => 'sent',
+        () => 'refused',
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (failure === 'stop') target.addon.cancelUnsubmittedStart?.('unsent-start');
+      if (failure === 'generation') sockets[0]!.emit('close');
+      stored();
+      expect(await result).toBe('refused');
+      expect(target.helper().served).not.toContain('start_session');
+      expect(callbacks.canceled).toHaveBeenCalledOnce();
+      expect(callbacks.startResponse).not.toHaveBeenCalled();
+    },
+  );
+
+  it('PR5b delivers foreground evidence on start errors only to the Main callback', async () => {
+    const evidence = {
+      pid: 42,
+      processStartTime: '133000000000000001',
+      attemptCount: 1,
+      foregroundResult: 'unconfirmed',
+    };
+    const target = createTarget({
+      ...responders(),
+      start_session: () => [
+        'error',
+        {
+          code: 'START_FAILED',
+          accepted: false,
+          startResult: evidence,
+        },
+      ],
+    });
+    const callbacks = startCallbacks();
+    const error = await Promise.resolve(
+      target.addon.startSession!({ sessionId: 'failed-start', profile }, undefined, callbacks),
+    ).catch((value: unknown) => value);
+    expect(callbacks.startResponse).toHaveBeenCalledWith(
+      {
+        code: 'START_FAILED',
+        accepted: false,
+        startResult: evidence,
+      },
+      false,
+    );
+    expect(error).toMatchObject({ code: 'START_FAILED', accepted: false });
+    expect(error).not.toHaveProperty('startResult');
+    expect(JSON.stringify(error)).not.toContain(evidence.processStartTime);
+    expect(callbacks.canceled).not.toHaveBeenCalled();
+  });
+
+  it('PR5b refuses a start when its result cannot be recorded', async () => {
+    const target = createTarget();
+    const callbacks = startCallbacks();
+    vi.mocked(callbacks.startResponse).mockRejectedValue(new Error('result write failed'));
+    await expect(
+      target.addon.startSession!({ sessionId: 'result-write', profile }, undefined, callbacks),
+    ).rejects.toThrow('result write failed');
+    expect(callbacks.unconfirmed).toHaveBeenCalledWith('abortTransport');
+    expect(callbacks.canceled).not.toHaveBeenCalled();
+  });
+
+  it('PR5b reports a lost start response as unconfirmed, never canceled', async () => {
+    const target = createTarget(responders(), (helper) => helper.holdOnly('start_session'));
+    const callbacks = startCallbacks();
+    const result = Promise.resolve(
+      target.addon.startSession!({ sessionId: 'lost-start', profile }, undefined, callbacks),
+    ).catch(() => 'lost');
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.emit('close');
+    expect(await result).toBe('lost');
+    expect(callbacks.unconfirmed).toHaveBeenCalled();
+    expect(callbacks.canceled).not.toHaveBeenCalled();
+    expect(callbacks.startResponse).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('PR5b waits for result storage on start success=%s', async (succeeded) => {
+    const base = responders();
+    const target = createTarget({
+      ...base,
+      start_session: (metadata) =>
+        succeeded
+          ? base['start_session']!(metadata)
+          : ['error', { code: 'START_FAILED', accepted: false }],
+    });
+    const callbacks = startCallbacks();
+    let recorded!: () => void;
+    vi.mocked(callbacks.startResponse).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          recorded = resolve;
+        }),
+    );
+    let settled = false;
+    const result = Promise.resolve(
+      target.addon.startSession!({ sessionId: 'pending-result', profile }, undefined, callbacks),
+    ).then(
+      () => {
+        settled = true;
+        return true;
+      },
+      () => {
+        settled = true;
+        return false;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(callbacks.startResponse).toHaveBeenCalledWith(expect.any(Object), succeeded);
+    expect(settled).toBe(false);
+    recorded();
+    expect(await result).toBe(succeeded);
+  });
+
+  it('PR5b waits for unsent cancellation storage without synthesizing a response', async () => {
+    const target = createTarget();
+    const callbacks = startCallbacks();
+    vi.mocked(callbacks.assertSend).mockImplementation(() => {
+      throw new Error('stopped');
+    });
+    let canceled!: () => void;
+    vi.mocked(callbacks.canceled).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          canceled = resolve;
+        }),
+    );
+    let settled = false;
+    const result = Promise.resolve(
+      target.addon.startSession!({ sessionId: 'pending-cancel', profile }, undefined, callbacks),
+    ).catch(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    expect(callbacks.canceled).toHaveBeenCalledOnce();
+    expect(target.helper().served).not.toContain('start_session');
+    canceled();
+    await result;
+    expect(settled).toBe(true);
+    expect(callbacks.startResponse).not.toHaveBeenCalled();
+    expect(callbacks.unconfirmed).not.toHaveBeenCalled();
+  });
+
   it('PR5b refuses an identity-bound start when the connected helper has no capability', async () => {
     const target = createTarget();
     await expect(

@@ -14,6 +14,12 @@ export type WindowsDispatchCallbacks = Readonly<{
   response(accepted: boolean): Promise<void>;
 }>;
 
+/** Main validates the complete start result before settling its foreground row (R23). */
+export type WindowsStartCallbacks = Omit<WindowsDispatchCallbacks, 'response'> &
+  Readonly<{
+    startResponse(value: unknown, succeeded: boolean): Promise<void>;
+  }>;
+
 export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
 export type WindowsTerminationCallbacks = Readonly<{
   prepare(): Promise<void>;
@@ -81,7 +87,11 @@ export type ComputerUseNativeAddon = Readonly<{
   /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
   listTargets?(input: unknown): unknown;
   /** Main-only synchronous gate, evaluated after preparation immediately before socket.write. */
-  startSession?(input: unknown, assertSend?: () => void): unknown;
+  startSession?(
+    input: unknown,
+    assertSend?: () => void,
+    callbacks?: WindowsStartCallbacks,
+  ): unknown;
   /** API3: terminates an admitted lifetime without guessing its native epoch. */
   stopPendingStart?(input: unknown): unknown;
   /** Main-only Windows transport proof; never a value received from native. */
