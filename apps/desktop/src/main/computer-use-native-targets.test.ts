@@ -122,6 +122,39 @@ function nativeFixture() {
 }
 
 describe('Windows native targets independently classified in Main', () => {
+  it('PR8 excludes the isolated process from cross-application discovery and retains another process', async () => {
+    const fixture = nativeFixture();
+    fixture.listTargets.mockReturnValue(envelope([row(), { ...row(), pid: 43 }]));
+    const host = createComputerUseNativeHost(
+      {
+        ...fixture.binding,
+        addon: {
+          ...fixture.binding.addon!,
+          checkTargetIdentity: async () => [{ result: 'alive' }],
+        },
+      },
+      'win32',
+      {
+        ...fixture.options,
+        windowsLedger: {
+          write: () => true,
+          update: () => true,
+          delete: () => true,
+          restoreQuarantines: () => true,
+          read: () => ({
+            rows: [],
+            quarantines: [
+              { identity: { pid: 42, creationTime: '133000000000000001' }, reason: 'exit_suspect' },
+            ],
+          }),
+        },
+      },
+    );
+    expect((await host.listTargets!()).targets).toMatchObject([
+      { kind: 'denied' },
+      { kind: 'selectable', native: { pid: 43 } },
+    ]);
+  });
   it.each([
     ['eligible', false, 'full_access_app'],
     ['eligible', true, 'observe_only'],

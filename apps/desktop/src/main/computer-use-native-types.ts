@@ -15,6 +15,16 @@ export type WindowsDispatchCallbacks = Readonly<{
 }>;
 
 export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
+/** Main-only capability: validity depends on object identity, not this numeric label alone. */
+export type WindowsGenerationToken = Readonly<{ helperGeneration: number }>;
+export type WindowsTargetIdentityResult =
+  | Readonly<{ result: 'alive' }>
+  | Readonly<{ result: 'terminated'; reason: 'signaled' | 'start_time_mismatch' | 'no_process' }>
+  | Readonly<{ result: 'unverifiable'; reason: 'access_denied' | 'win32_error' }>;
+/** Preparation may await native identity evidence; the returned guard runs at socket.write. */
+export type WindowsAdmissionCheck = (
+  input: Readonly<Record<string, unknown>>,
+) => Promise<() => void>;
 export type WindowsTerminationCallbacks = Readonly<{
   prepare(): Promise<void>;
   started(generation: number): void;
@@ -97,6 +107,10 @@ export type ComputerUseNativeAddon = Readonly<{
   ): void | Promise<WindowsCloseConfirmation>;
   configureCloseLedger?(callbacks: WindowsCloseCallbacks): void;
   configureWindowsTermination?(callbacks: WindowsTerminationCallbacks): void;
+  configureWindowsAdmission?(check: WindowsAdmissionCheck): void;
+  captureWindowsGeneration?(): WindowsGenerationToken | null;
+  isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
+  checkTargetIdentity?(targets: unknown): Promise<readonly WindowsTargetIdentityResult[]>;
   cleanupWindowsGeneration?(generation: number): void;
   /** Internal Stop seam; inert unless Host configured the termination callbacks. */
   requestWindowsTermination?(): void;

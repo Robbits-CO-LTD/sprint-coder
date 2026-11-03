@@ -39,16 +39,13 @@ import {
   type WindowsCloseCallbacks,
   type WindowsCloseConfirmation,
   type WindowsTerminationCallbacks,
+  type WindowsAdmissionCheck,
+  type WindowsTargetIdentityResult,
+  type WindowsGenerationToken,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
-export type WindowsTargetIdentityResult =
-  | Readonly<{ result: 'alive' }>
-  | Readonly<{
-      result: 'terminated';
-      reason: 'signaled' | 'start_time_mismatch' | 'no_process';
-    }>
-  | Readonly<{ result: 'unverifiable'; reason: 'access_denied' | 'win32_error' }>;
+export type { WindowsTargetIdentityResult } from './computer-use-native-types';
 
 export type WindowsComputerUseNativeAddon = ComputerUseNativeAddon &
   Readonly<{
@@ -157,6 +154,9 @@ export function createWindowsComputerUseNativeAddon(
     handshake: () => probe,
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
     checkTargetIdentity: (targets) => client.checkTargetIdentity(targets),
+    configureWindowsAdmission: (check) => client.configureWindowsAdmission(check),
+    captureWindowsGeneration: () => client.captureWindowsGeneration(),
+    isWindowsGenerationCurrent: (token) => client.isWindowsGenerationCurrent(token),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
     discoverWindows: (input) => client.discoverWindows(input),
@@ -368,6 +368,8 @@ class WindowsComputerUseHelperClient {
   private readonly closeConfirmations = new WeakMap<object, Promise<WindowsCloseConfirmation>>();
   private readonly persistedLifetimes = new WeakSet<object>();
   private termination: WindowsTerminationCallbacks | undefined;
+  private admission: WindowsAdmissionCheck | undefined;
+  private generationToken: WindowsGenerationToken | null = null;
   private readonly generations = new Map<number, HelperGeneration>();
   private readonly sessionGenerations = new Map<string, number>();
 
@@ -413,6 +415,34 @@ class WindowsComputerUseHelperClient {
 
   configureWindowsTermination(callbacks: WindowsTerminationCallbacks): void {
     this.termination = callbacks;
+  }
+
+  configureWindowsAdmission(check: WindowsAdmissionCheck): void {
+    this.admission = check;
+  }
+
+  captureWindowsGeneration(): WindowsGenerationToken | null {
+    const token = this.generationToken;
+    return token !== null && this.isWindowsGenerationCurrent(token) ? token : null;
+  }
+
+  isWindowsGenerationCurrent(token: WindowsGenerationToken): boolean {
+    const generation = this.generations.get(token.helperGeneration);
+    return (
+      token === this.generationToken &&
+      generation !== undefined &&
+      !generation.killRequested &&
+      !generation.exited &&
+      token.helperGeneration === this.helperGeneration
+    );
+  }
+
+  private assertGenerationToken(token: WindowsGenerationToken | null): void {
+    if (
+      this.termination !== undefined &&
+      (token === null || !this.isWindowsGenerationCurrent(token))
+    )
+      throw new Error('native_stop_unconfirmed');
   }
 
   requestWindowsTermination(): void {
@@ -683,8 +713,10 @@ class WindowsComputerUseHelperClient {
       this.termination?.completed?.(owner.helper, 'session', sessionId, owner.stopLifetimeId);
     // Main consumes this proof after a failed call has settled. Until then, keep it distinct
     // from an unknown ID; once no attempt remains, no continuation can still write.
-    if (owner.attempts.size === 0 && this.starts.get(sessionId) === owner)
+    if (owner.attempts.size === 0 && this.starts.get(sessionId) === owner) {
       this.starts.delete(sessionId);
+      this.lifetimes.delete(sessionId);
+    }
     this.shutdownWhenIdle(this.activityGeneration, this.helperGeneration, sessionId);
     return 'never_sent';
   }
@@ -750,6 +782,14 @@ class WindowsComputerUseHelperClient {
           'Windows discovery handshake capability is unavailable',
         );
       owner.helper = this.helperGeneration;
+      const generationToken = this.captureWindowsGeneration();
+      let assertAdmission: (() => void) | undefined;
+      try {
+        if (this.admission !== undefined) assertAdmission = await this.admission(value);
+        this.assertGenerationToken(generationToken);
+      } catch (cause) {
+        throw new ComputerUseDiscoveryNotSubmittedError('native_unavailable', { cause });
+      }
       const result = await this.sendConnected(
         'probe',
         { ...value, operation: 'list_windows_cancellable' },
@@ -758,6 +798,12 @@ class WindowsComputerUseHelperClient {
         operationTimeoutMilliseconds('list_windows_cancellable'),
         false,
         () => {
+          try {
+            this.assertGenerationToken(generationToken);
+            assertAdmission?.();
+          } catch (cause) {
+            throw new ComputerUseDiscoveryNotSubmittedError('native_unavailable', { cause });
+          }
           if (
             owner.stopped ||
             this.discoveries.get(id) !== owner ||
@@ -770,6 +816,7 @@ class WindowsComputerUseHelperClient {
         },
       );
       const proof = computerUseNativeDiscoveryResultSchema.parse(result);
+      this.assertGenerationToken(generationToken);
       if (
         proof.discoveryId !== id ||
         proof.launchAttemptCount < owner.launches ||
@@ -880,8 +927,7 @@ class WindowsComputerUseHelperClient {
   ): Promise<unknown> {
     if (sessionKey !== undefined && operation !== 'start_session')
       this.assertSessionGeneration(sessionKey);
-    if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
-      this.assertSemanticAvailable();
+    if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
     let owner: StartTransmission | undefined;
     let attempt: symbol | undefined;
     if (operation === 'start_session') {
@@ -959,12 +1005,12 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
+      const generationToken = this.captureWindowsGeneration();
       this.bindOwners(helper);
       if (sessionKey !== undefined) this.assertSessionGeneration(sessionKey);
       if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
         return { ok: false };
-      if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
-        this.assertSemanticAvailable();
+      if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
       if (semantic !== undefined) {
         if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
           throw semanticNotSubmitted();
@@ -974,6 +1020,11 @@ class WindowsComputerUseHelperClient {
         if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
           throw new Error('Computer Use start canceled before send');
       }
+      const assertAdmission =
+        (operation === 'start_session' || operation === 'list_targets') &&
+        this.admission !== undefined
+          ? await this.admission(input)
+          : undefined;
       if (operation === 'pick_application' && this.termination !== undefined) {
         const id = randomBytes(16).toString('hex');
         const lifetimeId = this.termination.owned?.(helper, 'picker', id);
@@ -991,8 +1042,9 @@ class WindowsComputerUseHelperClient {
         operationTimeoutMilliseconds(operation),
         isComputerUseStopOperation(operation),
         () => {
-          if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
-            this.assertSemanticAvailable();
+          this.assertGenerationToken(generationToken);
+          assertAdmission?.();
+          if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
           if (owner !== undefined) {
             if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
               throw new Error('Computer Use start canceled before send');
@@ -1070,8 +1122,10 @@ class WindowsComputerUseHelperClient {
           owner.attempts.size === 0 &&
           (owner.closed || (owner.stopped && !owner.everSent)) &&
           this.starts.get(owner.sessionId) === owner
-        )
+        ) {
           this.starts.delete(owner.sessionId);
+          if (!owner.everSent) this.lifetimes.delete(owner.sessionId);
+        }
       }
       if (closes && helper !== undefined) this.shutdownWhenIdle(activity, helper, sessionKey);
       else this.shutdownIfIdle();
@@ -1139,6 +1193,7 @@ class WindowsComputerUseHelperClient {
             exited: false,
           };
     if (generation !== undefined) {
+      this.generationToken = Object.freeze({ helperGeneration: generation.id });
       this.generations.set(generation.id, generation);
       this.termination!.started(generation.id);
       this.bindOwners(generation.id);
@@ -1873,6 +1928,10 @@ export function windowsStopRequestKey(
  */
 export const COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS =
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT + 1);
+
+function requiresSemanticAvailability(operation: string): boolean {
+  return !isComputerUseStopOperation(operation) && operation !== 'check_target_identity';
+}
 
 /**
  * Stop's own lane. Main quarantines input for the whole of it and only a close receipt lifts that,

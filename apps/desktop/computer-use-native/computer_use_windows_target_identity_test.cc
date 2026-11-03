@@ -6,7 +6,25 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+bool fail_identity_wait = false;
+bool fail_identity_read = false;
+DWORD IdentityTestWait(HANDLE process, DWORD timeout) {
+  if (!fail_identity_wait) return WaitForSingleObject(process, timeout);
+  SetLastError(ERROR_INVALID_HANDLE);
+  return WAIT_FAILED;
+}
+BOOL IdentityTestTimes(HANDLE process, LPFILETIME created, LPFILETIME exited,
+                       LPFILETIME kernel, LPFILETIME user) {
+  if (!fail_identity_read) return GetProcessTimes(process, created, exited, kernel, user);
+  SetLastError(ERROR_ACCESS_DENIED);
+  return FALSE;
+}
+// Fault only the OS boundary; the parser and classification remain production code.
+#define WaitForSingleObject IdentityTestWait
+#define GetProcessTimes IdentityTestTimes
 #include "component-identity.inc"
+#undef GetProcessTimes
+#undef WaitForSingleObject
 #pragma comment(lib, "advapi32.lib")
 
 bool Check(bool condition, const char* name) {
@@ -52,6 +70,9 @@ bool CheckAccessDeniedChild(const wchar_t* path) {
         output == "{\"results\":[{\"result\":\"unverifiable\",\"reason\":\"access_denied\"}]}",
         "real process access_denied is unverifiable");
   } else {
+    wchar_t ci[16]{};
+    if (GetEnvironmentVariableW(L"CI", ci, 16) != 0)
+      passed &= Check(false, "CI requires access_denied; run without SeDebugPrivilege");
     std::cout << "SKIP: real process access_denied: OpenProcess did not return ERROR_ACCESS_DENIED"
               << " (error=" << error << "; enabled SeDebugPrivilege may bypass the DACL)\n";
   }
@@ -93,6 +114,18 @@ int wmain(int argc, wchar_t**) {
     return "{\"operation\":\"check_target_identity\",\"targets\":[" + targets + "]}";
   };
   std::string output;
+  constexpr auto kClientMetadata = R"({"targets":[{"pid":4242,"processStartTime":"133000000000000001"}],"operation":"check_target_identity"})";
+  std::vector<WindowsTargetIdentity> parsed;
+  passed &= Check(ReadWindowsTargetIdentities(kClientMetadata, &parsed) && parsed.size() == 1 &&
+      parsed[0].pid == 4242 && parsed[0].process_start == "133000000000000001", "exact client metadata");
+  fail_identity_wait = true;
+  passed &= Check(CheckWindowsTargetIdentities(request(target), &output) &&
+      output == "{\"results\":[{\"result\":\"unverifiable\",\"reason\":\"win32_error\"}]}", "WAIT_FAILED remains unverifiable");
+  fail_identity_wait = false;
+  fail_identity_read = true;
+  passed &= Check(CheckWindowsTargetIdentities(request(target), &output) &&
+      output == "{\"results\":[{\"result\":\"unverifiable\",\"reason\":\"access_denied\"}]}", "creation time read failure remains unverifiable");
+  fail_identity_read = false;
   passed &= Check(CheckWindowsTargetIdentities(request(target), &output) &&
       output == "{\"results\":[{\"result\":\"alive\"}]}", "alive");
   // Match JSON.stringify({ targets, operation }) from the TS client, including key order.
