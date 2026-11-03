@@ -789,7 +789,46 @@ export function createComputerUseNativeHost(
         status === 'effect_unconfirmed'
           ? ledger.update({ ...current, state: 'effect_unconfirmed' })
           : ledger.delete(current);
-      pendingWrites.set(holdId, { generation: current.helperGeneration, write });
+      // R23 foreground rows are never a target basis (K-4): the core keeps the row but creates no
+      // hold, so retry_storage has nothing to retry. Like exited(), reflect the write here and
+      // keep a self-reflecting retry while storage fails.
+      const present = () =>
+        ledgerState(current.helperGeneration).rows.some(
+          (item) =>
+            item.helperGeneration === current.helperGeneration &&
+            item.sessionId === current.sessionId &&
+            item.requestId === current.requestId,
+        );
+      // A stale retry must not upsert a row that a later reflect or exit already removed.
+      const writeForeground = async () => !present() || (await write());
+      const reflectForeground = (written: boolean) => {
+        if (written) {
+          const state = ledgerState(current.helperGeneration);
+          ledgerStates.set(current.helperGeneration, {
+            ...state,
+            rows: state.rows.flatMap((item) =>
+              item.helperGeneration !== current.helperGeneration ||
+              item.sessionId !== current.sessionId ||
+              item.requestId !== current.requestId
+                ? [item]
+                : status === 'effect_unconfirmed'
+                  ? [{ ...item, state: 'effect_unconfirmed' as const }]
+                  : [],
+            ),
+          });
+        }
+        return { awaitingHoldId: written ? null : holdId };
+      };
+      pendingWrites.set(
+        holdId,
+        current.kind === 'foreground'
+          ? {
+              generation: current.helperGeneration,
+              write: writeForeground,
+              reflect: reflectForeground,
+            }
+          : { generation: current.helperGeneration, write },
+      );
       await writePending(holdId);
     };
     return {
@@ -1743,6 +1782,7 @@ export function createComputerUseNativeHost(
       if (start === undefined) throw new ComputerUseNativeUnavailableError('native_unavailable');
       let callbacks: WindowsStartCallbacks | undefined;
       let unconfirmedRecord: Promise<void> | undefined;
+      let startRequest = request;
       if (startIdentityEnabled) {
         if (
           typeof request['pid'] !== 'number' ||
@@ -1751,8 +1791,13 @@ export function createComputerUseNativeHost(
           !validStartTime(creationTime)
         )
           throw new ComputerUseNativeUnavailableError('native_unavailable');
-        request['requireStartIdentity'] = true;
-        request['expectedProcessStartTime'] = creationTime;
+        // Keep these out of `request`: it becomes the session's stored bindings, which a later
+        // existing-session start spreads back into its own request.
+        startRequest = {
+          ...request,
+          requireStartIdentity: true,
+          expectedProcessStartTime: creationTime,
+        };
         const recording = inputLedger({
           sessionId: input.sessionId,
           identity: { pid: request['pid'], creationTime },
@@ -1828,7 +1873,7 @@ export function createComputerUseNativeHost(
       }
       try {
         return await start(
-          request,
+          startRequest,
           () => {
             assertStartOwner(owner);
             if (
@@ -1842,7 +1887,8 @@ export function createComputerUseNativeHost(
           callbacks,
         );
       } finally {
-        await unconfirmedRecord;
+        // Wait for the R23 record, but never let its storage error replace the start's own error.
+        await unconfirmedRecord?.catch(() => undefined);
       }
     };
     const existing = sessions.get(input.sessionId);
@@ -3153,6 +3199,9 @@ function parseNativeSession(
     throw new ComputerUseNativeUnavailableError('native_session_identity_mismatch');
   if (screenBounds === undefined)
     throw new ComputerUseNativeUnavailableError('native_window_coordinate_invalid');
+  // startResult is per-start evidence; a stored copy would be re-sent by a later existing start.
+  const { startResult, ...response } = raw;
+  void startResult;
   return Object.freeze({
     sessionId,
     platform,
@@ -3169,7 +3218,7 @@ function parseNativeSession(
     // while authority-bearing response facts (especially policyLanguage) always win.
     raw: Object.freeze({
       ...requestBindings,
-      ...raw,
+      ...response,
       ...processIdentity,
       policyLanguage,
       maximumMode,

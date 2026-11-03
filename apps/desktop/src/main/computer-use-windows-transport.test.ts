@@ -850,6 +850,10 @@ describe('Computer Use Windows helper transport', () => {
       expect(
         target.requests.find((r) => r['operation'] === 'check_target_identity')?.['targets'],
       ).toEqual([startIdentity]);
+      // The first start's evidence is never stored and re-sent by the existing-session start.
+      expect(
+        target.requests.filter((r) => r['operation'] === 'start_session' && 'startResult' in r),
+      ).toEqual([]);
       expect(target.requests.filter((r) => r['operation'] === 'start_session')).toEqual([
         expect.objectContaining({
           pid: 42,
@@ -1114,6 +1118,166 @@ describe('Computer Use Windows helper transport', () => {
       expect(target.quarantines).toEqual([]);
     },
   );
+
+  // R23 foreground rows create no core hold (K-4); the Host must settle them without a
+  // retry_storage for a hold the core never created, and release its own write bookkeeping.
+  function observeForegroundSettlement() {
+    const errors: unknown[] = [];
+    const retries: unknown[] = [];
+    let latest: stopKernel.WindowsStopState | undefined;
+    const inputs: [stopKernel.WindowsStopEvent['kind'], stopKernel.WindowsStopState][] = [];
+    const original = stopKernel.decideWindowsStop;
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      if (event.kind === 'retry_storage') retries.push(event);
+      inputs.push([event.kind, state]);
+      try {
+        const decision = original(state, event);
+        latest = decision.state;
+        return decision;
+      } catch (error) {
+        errors.push(error);
+        throw error;
+      }
+    });
+    let closeLedger: WindowsCloseCallbacks | undefined;
+    const idle = vi.fn();
+    const adapt = (addon: ComputerUseNativeAddon): ComputerUseNativeAddon => ({
+      ...addon,
+      configureCloseLedger: (callbacks) => {
+        closeLedger = callbacks;
+        addon.configureCloseLedger!(callbacks);
+      },
+      reevaluateIdle: () => {
+        idle();
+        addon.reevaluateIdle!();
+      },
+    });
+    return {
+      adapt,
+      errors,
+      retries,
+      idle,
+      // The Host reflects foreground writes outside the reducer; a later event shows its state.
+      inputTo: (kind: stopKernel.WindowsStopEvent['kind']) =>
+        inputs.filter(([seen]) => seen === kind).at(-1)?.[1],
+      holds: () => latest?.holds ?? [],
+      blocked: (generation: number) => closeLedger!.blocked(generation),
+      restore: () => decide.mockRestore(),
+    };
+  }
+
+  it.each(['success', 'zero-attempt', 'cancel', 'lost'] as const)(
+    'PR5b Host settles the foreground row and releases idle teardown after %s',
+    async (mode) => {
+      const seen = observeForegroundSettlement();
+      try {
+        let generation = 0;
+        let release: ((written: boolean) => void) | undefined;
+        const target = identityStartTarget({
+          adapt: seen.adapt,
+          holdStart: mode === 'lost',
+          termination: mode === 'lost',
+          write: (row) => {
+            generation = row.helperGeneration;
+            if (mode !== 'cancel') return true;
+            return new Promise<boolean>((resolve) => {
+              release = resolve;
+            });
+          },
+          ...(mode === 'zero-attempt'
+            ? {
+                response: () => [
+                  'error',
+                  {
+                    code: 'STALE_WINDOW',
+                    accepted: false,
+                    startResult: {
+                      ...startIdentity,
+                      attemptCount: 0,
+                      foregroundResult: 'not_attempted',
+                    },
+                  },
+                ],
+              }
+            : {}),
+        });
+        const pending = startSession(target.host, 'settled-start', 'turn-a');
+        if (mode === 'success') await pending;
+        else {
+          const rejected = expect(pending).rejects.toThrow();
+          await vi.advanceTimersByTimeAsync(0);
+          if (mode === 'cancel') {
+            await target.host.stopPendingStart!('settled-start');
+            release!(true);
+          }
+          if (mode === 'lost') {
+            vi.spyOn(children[0]!, 'kill').mockReturnValue(true);
+            sockets[0]!.emit('error', new Error('synthetic transport failure'));
+          }
+          await rejected;
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(generation).toBeGreaterThan(0);
+        expect(seen.errors).toEqual([]);
+        expect(seen.retries).toEqual([]);
+        expect(seen.holds()).toEqual([]);
+        if (mode === 'lost') {
+          // R23 keeps the unconfirmed row in memory and storage until receipt or exit.
+          expect(target.rows).toEqual([
+            expect.objectContaining({ kind: 'foreground', state: 'effect_unconfirmed' }),
+          ]);
+          expect(seen.blocked(generation)).toBe(true);
+          children[0]!.emit('exit', 1, null);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(seen.inputTo('exit_confirmed')?.rows).toEqual([
+            expect.objectContaining({ kind: 'foreground', state: 'effect_unconfirmed' }),
+          ]);
+          expect(seen.errors).toEqual([]);
+          expect(seen.retries).toEqual([]);
+        }
+        // blocked() reads the Host's in-memory rows, holds, blockers and pending writes.
+        expect(target.rows).toEqual([]);
+        expect(seen.blocked(generation)).toBe(false);
+        expect(seen.idle).toHaveBeenCalled();
+      } finally {
+        seen.restore();
+      }
+    },
+  );
+
+  it('PR5b Host keeps a failed foreground delete blocked until its retry succeeds', async () => {
+    const seen = observeForegroundSettlement();
+    try {
+      let generation = 0;
+      let removable = false;
+      const target = identityStartTarget({
+        adapt: seen.adapt,
+        write: (row) => {
+          generation = row.helperGeneration;
+          return true;
+        },
+        remove: () => removable,
+      });
+      await startSession(target.host, 'retry-start', 'turn-a');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.errors).toEqual([]);
+      expect(target.rows).toHaveLength(1);
+      expect(seen.blocked(generation)).toBe(true);
+      // A failed retry stays blocked; it never asks the core for a hold it did not create.
+      await target.host.listTargets!().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.blocked(generation)).toBe(true);
+      removable = true;
+      await target.host.listTargets!().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.errors).toEqual([]);
+      expect(seen.retries).toEqual([]);
+      expect(target.rows).toEqual([]);
+      expect(seen.blocked(generation)).toBe(false);
+    } finally {
+      seen.restore();
+    }
+  });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
   const startCallbacks = (): WindowsStartCallbacks => ({
