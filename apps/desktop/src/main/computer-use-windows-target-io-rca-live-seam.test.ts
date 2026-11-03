@@ -95,8 +95,8 @@ function instrumentedHost(): string {
   newStart = replaceOnce(newStart, startAdopt, `  Sc940StartAdoptGate();\n${startAdopt}`);
   newStart = replaceOnce(
     newStart,
-    '  try {\n    struct Apartment {',
-    '  try {\n    Sc940StartMeasurementAttempt();\n    struct Apartment {',
+    '  try {\n    WindowsNewStartIoRegistration cancellation;\n',
+    '  try {\n    Sc940StartMeasurementAttempt();\n    WindowsNewStartIoRegistration cancellation;\n',
   );
   newStart = replaceOnce(
     newStart,
@@ -2727,6 +2727,8 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
     hold_point.store(healthy ? HoldPoint::kNone : queued ? HoldPoint::kConsumer : ready ? HoldPoint::kStartReady :
                      adopt ? HoldPoint::kStartAdopt : HoldPoint::kStartOpen);
     hold_start_epilogue.store(false);
+    const unsigned opens_before = start_open_calls.load(), measures_before = measurement_calls.load();
+    const unsigned attempts_before = start_measurement_attempts.load();
     run.Send(MessageType::kProbe, 2, listed.Metadata(1), 8);
     if (healthy) {
       AssertStarted(run, 2, listed, 1);
@@ -2742,43 +2744,45 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
       Require(run.Wait(31, 7000) && run.ProbeReply(31, MessageType::kProbeResult) && run.WaitWorkerIdle(1000),
               "start_next_worker_completes");
       CloseStarted(run, 22, 23, 2);
+    } else if (cancel) {
+      // N5-G: the new-start measurement is synchronous on the consumer, so a start while a session
+      // is live is refused with session_limit before measurement and never reaches the open gate;
+      // the live control session's Cancel and Close still answer at once. A Stop during an open
+      // with no session (no next API after Stop, no late adoption, released slot) is
+      // start-open-close.
+      const ULONGLONG sent = GetTickCount64();
+      Require(run.Wait(2, 1000) && run.Error(2, "session_limit", 8), "start_occupied_refused_before_measurement");
+      Require(start_open_calls.load() == opens_before && start_measurement_attempts.load() == attempts_before &&
+                  measurement_calls.load() == measures_before, "start_occupied_skips_measurement");
+      Require(!WindowsTargetListWorkerRunning().load() && WaitForSingleObject(run.entered.value, 0) == WAIT_TIMEOUT &&
+                  start_focus_calls.load() == 0, "start_occupied_skips_open_gate");
+      run.Send(MessageType::kCancel, 4, "{\"cancelEpoch\":2}");
+      Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kDispatchResult, "canceled", 2),
+              "start_occupied_control_cancel_answers");
+      run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+      Require(run.Wait(5, 1000) && run.Receipt(5, MessageType::kProbeResult, "closed", 3),
+              "start_occupied_control_close_answers");
+      stop_ms = GetTickCount64() - sent;
+      Require(stop_ms < 1000 && !sessions.contains(FrameIdKey(Id(8))) && !ticket_states.contains(FrameIdKey(Id(8))) &&
+                  start_open_calls.load() == opens_before && start_measurement_attempts.load() == attempts_before &&
+                  windows_v2_list_generation == listed.generation, "start_occupied_prevents_adoption_and_focus");
+      stop_proven = true;
+      hold_point.store(HoldPoint::kNone);
+      // With the slot free again, an explicit new start measures once and is adopted.
+      require_foreground();
+      const ListedStart fresh = ReadListedStart(run, 20);
+      run.Send(MessageType::kProbe, 21, fresh.Metadata(4, "sc940-retry"), 10);
+      AssertStarted(run, 21, fresh, 4, 10, "sc940-retry");
+      Require(start_open_calls.load() == opens_before + 1 && start_measurement_attempts.load() == attempts_before + 1,
+              "start_free_slot_has_one_measurement");
+      CloseStarted(run, 22, 23, 5, 10, "sc940-retry");
+      Require(run.WaitWorkerIdle(15'000) && !WindowsTargetListWorkerRunning().load(), "start_occupied_cleanup");
+      late_cleanup = true;
     } else {
       Require(WaitForSingleObject(run.entered.value, 10'000) == WAIT_OBJECT_0 &&
                   WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
                   WindowsTargetListWorkerRunning().load() == !queued, "start_fault_gate_entered");
-      if (cancel) {
-        const unsigned opens = start_open_calls.load(), measures = measurement_calls.load();
-        const unsigned workers = start_measurement_attempts.load();
-        const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
-        const ULONGLONG sent = GetTickCount64();
-        // Same first Stop as the be6 RCA: a valid Cancel of the seeded control session.
-        run.Send(MessageType::kCancel, 4, "{\"cancelEpoch\":2}");
-        Require(WaitStopSerial(serial, 1000), "start_cancel_reader_progress");
-        Require(start_open_calls.load() == opens && start_measurement_attempts.load() == workers &&
-                    measurement_calls.load() == measures && WindowsTargetListWorkerRunning().load() &&
-                    start_focus_calls.load() == 0, "start_stop_latched_without_next_api");
-        {
-          std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-          const auto owner = WindowsStarts().input_owner;
-          Require(owner != nullptr && owner->session_key == FrameIdKey(Id(8)) &&
-                      owner->pending_requests.load() != 0, "start_consumer_retains_input_lane");
-        }
-        hold_point.store(HoldPoint::kNone);
-        SetEvent(run.release.value);
-        Require(run.Wait(2, 1000) && run.Error(2, "session_start_canceled", 8) &&
-                    run.Wait(4, 1000) && run.Receipt(4, MessageType::kDispatchResult, "canceled", 2),
-                "start_valid_cancel_receipt_after_release");
-        run.Send(MessageType::kProbe, 6, listed.Metadata(2), 9);
-        Require(run.Wait(6, 1000) && run.Error(6, "session_id_reuse", 9), "start_sid_alias_refused");
-        run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}", 8);
-        Require(run.Wait(3, 1000) && run.Error(3, "invalid_cancel", 8), "start_uncreated_cancel_bounded");
-        run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
-        Require(run.Wait(5, 1000) && run.Receipt(5, MessageType::kProbeResult, "closed", 3),
-                "start_control_receipts_after_release");
-        stop_ms = GetTickCount64() - sent;
-        Require(start_open_calls.load() == opens && start_measurement_attempts.load() == workers && measurement_calls.load() == measures &&
-                    !WindowsTargetListWorkerRunning().load(), "start_stopped_measurement_released_slot");
-      } else {
+      {
         const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
         const ULONGLONG sent = GetTickCount64();
         run.Send(MessageType::kProbe, 3, "{\"operation\":\"close_session\",\"cancelEpoch\":2}", 8);
@@ -2803,16 +2807,6 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
                   start_open_successes.load() == (queued ? 0u : 1u) && !sessions.contains(FrameIdKey(Id(8))) &&
                   windows_v2_list_generation == listed.generation, "start_late_open_cleaned_without_adoption");
       late_cleanup = true;
-      if (cancel) {
-        require_foreground();
-        const ListedStart fresh = ReadListedStart(run, 20);
-        run.Send(MessageType::kProbe, 25, fresh.Metadata(4), 8);
-        Require(run.Wait(25, 1000) && run.Error(25, "session_id_reuse", 8), "start_retired_lifetime_refused");
-        run.Send(MessageType::kProbe, 21, fresh.Metadata(4, "sc940-retry"), 10);
-        AssertStarted(run, 21, fresh, 4, 10, "sc940-retry");
-        Require(start_open_calls.load() == 2 && start_measurement_attempts.load() == 2, "start_explicit_retry_has_one_new_measurement");
-        CloseStarted(run, 22, 23, 5, 10, "sc940-retry");
-      }
     }
     Require(start_focus_calls.load() == 0 && !wrong_measurement.load() && !gate_timed_out.load(), "start_no_input_or_foreign_target");
     run.Cleanup();

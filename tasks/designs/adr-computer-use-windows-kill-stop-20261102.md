@@ -345,6 +345,8 @@ PR11 は既定で有効な Windows kill-stop に E3 / E4 を接続する。C = 1
 
 N5-G 以降、kill-stop を無効にした Windows の構成は、ledger を開けない時と同じく Host を使えない状態にする（`configureWindowsKillStop` が ledger なしの有効な設定を返す）。new-start の Stop 専用の worker を除いたので旧経路は残らない。kill-stop を外すには新しい build と、必要なら N5 の rollback を要する。native の契約と WindowsStartInput は変更しない。
 
+new-start の計測（OpenLockedProcessExecutable / WinVerifyTrust / CreateFileW）は consumer で同期に走るため、I/O 以外で止まった new-start には stop_pending_start の応答が返らない。その Stop は clean close ではなく E3 の kill-stop（C 内の close 試行の後、helper を終了させ T 内に終了を確認）で終わる。取り消せる同期 I/O は、計測中だけ stop_mutex の下で登録した consumer の thread handle に対し、Stop / Close / Cancel が CancelSynchronousIo で取り消す。hung-helper live seam はこの契約を Host の E3 で固定する。
+
 ## 5. 残るリスク
 
 1. `termination_requested` のまま signaled にならない環境（壊れたドライバ）では、終了を確認できるまで隔離を保ち、新しい helper は起動しない。Main を終了すると、libuv の job が helper を強制終了しようとするが（§3.1 の 7）、カーネルの中で止まって終了できない helper はそれでも残る。このため再起動は古い helper の終了の証拠にはしないが、対象ごとの隔離へ移す根拠にはする（§2.2）。頻度は実機で測る。

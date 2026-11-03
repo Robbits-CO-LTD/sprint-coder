@@ -5,7 +5,7 @@
 // language (the app's own MUI claim) is not a ground for the mode on this path. The V1 deny-side
 // checks (the leaf table, the proxy table, elevation) are applied on top, so either refuses (ADR v2
 // section 3.2.1-5). v2 builds only: a v1 build answers list_targets with unsupported_operation and
-// admits no v2 session (EligibilityBasisAdmitted). The shared new-start worker also serves V1,
+// admits no v2 session (EligibilityBasisAdmitted). The shared synchronous new-start path also serves V1,
 // with its own unchanged eligibility branch and without V2 facts or context.
 //
 // What crosses to Main: a selectable row carries the identity Main binds a grant and a token to
@@ -73,6 +73,7 @@ std::string WindowsV2SelfSignerThumbprint() {
 // is known (fail closed).
 struct WindowsTargetListState {
   std::mutex stop_mutex;
+  HANDLE new_start_thread = nullptr;
   std::atomic<std::uint64_t> stop_serial{0};
   std::atomic<bool> running{false};
   std::shared_ptr<const WindowsTargetFactsContext> context_candidate;
@@ -176,6 +177,11 @@ std::shared_ptr<WindowsStartLease> AdmitWindowsStart(
   return std::make_shared<WindowsStartLease>(owner);
 }
 
+// Caller holds stop_mutex, which also protects registration and handle lifetime.
+void CancelWindowsNewStartMeasurementLocked(WindowsTargetListState& control) {
+  if (control.new_start_thread != nullptr) CancelSynchronousIo(control.new_start_thread);
+}
+
 bool LatchWindowsPendingStop(const std::string& key, const std::string& id) {
   auto& control = WindowsTargetListControl();
   std::lock_guard lock(control.stop_mutex);
@@ -187,6 +193,7 @@ bool LatchWindowsPendingStop(const std::string& key, const std::string& id) {
       !owner->terminal && registry.input_owner == owner) {
     control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
     control.context_candidate.reset();
+    CancelWindowsNewStartMeasurementLocked(control);
   }
   return true;
 }
@@ -1326,7 +1333,7 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
                          std::string_view app_identity, std::string_view executable_digest,
                          std::string_view signer_digest, std::string *maximum_mode,
                          std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file) {
-  // The synchronous resume entry retains its I/O guard. A new-start worker uses only its context
+  // The synchronous resume entry retains its I/O guard. A new start uses only its context
   // snapshot through AdmitWindowsV2StartInContext, never the consumer's mutable cache.
   if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ||
       WindowsV2FactsContext().lineage_root_pid == 0)
@@ -1509,6 +1516,25 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
   return still_valid();
 }
 
+struct WindowsNewStartIoRegistration {
+  HANDLE thread = nullptr;
+  WindowsNewStartIoRegistration() {
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                         &thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    auto& control = WindowsTargetListControl();
+    std::lock_guard lock(control.stop_mutex);
+    control.new_start_thread = thread;
+  }
+  WindowsNewStartIoRegistration(const WindowsNewStartIoRegistration&) = delete;
+  WindowsNewStartIoRegistration& operator=(const WindowsNewStartIoRegistration&) = delete;
+  ~WindowsNewStartIoRegistration() {
+    auto& control = WindowsTargetListControl();
+    std::lock_guard lock(control.stop_mutex);
+    control.new_start_thread = nullptr;
+    if (thread != nullptr) CloseHandle(thread);
+  }
+};
+
 bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std::string *reason) {
   *reason = "session_target_rejected";
   auto &control = WindowsTargetListControl();
@@ -1526,6 +1552,10 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     if (v2) input.generation = windows_v2_list_generation;
     if (!start_valid()) {
       *reason = "session_start_canceled";
+      return false;
+    }
+    if (!sessions.empty()) {
+      *reason = "session_limit";
       return false;
     }
     if (control.running.load(std::memory_order_acquire)) return false;
@@ -1555,6 +1585,8 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   };
   bool succeeded = false;
   try {
+    WindowsNewStartIoRegistration cancellation;
+    if (cancellation.thread == nullptr) return false;
     struct Apartment {
       HRESULT result;
       bool initialized;

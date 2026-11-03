@@ -131,8 +131,12 @@ const preamble = String.raw`
 #include <unordered_map>
 #include <vector>
 constexpr std::size_t kMaximumCachedResponses=256;
+// This ownership-only seam has no measurement thread; the new-start component covers cancellation.
+using HANDLE = void*;
+bool CancelSynchronousIo(HANDLE){throw std::runtime_error("unexpected measurement cancellation");}
 struct WindowsTargetListState {
   std::mutex stop_mutex;
+  HANDLE new_start_thread = nullptr;
   std::atomic<std::uint64_t> stop_serial{0};
   std::shared_ptr<int> context_candidate;
 };

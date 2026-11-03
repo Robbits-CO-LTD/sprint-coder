@@ -17,6 +17,7 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
   createComputerUseNativeHost,
+  type WindowsDispatchLedgerStorage,
 } from './computer-use-native-host';
 import {
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS,
@@ -29,6 +30,11 @@ import {
   type ComputerUseNativeAddon,
   type ComputerUseNativeBinding,
 } from './computer-use-native-types';
+import {
+  WINDOWS_STOP_DEADLINE_MS,
+  WINDOWS_STOP_EXIT_MS,
+  type WindowsInputKind,
+} from './computer-use-windows-stop-outcome';
 import type { ComputerAppProfileRecord } from './persistence';
 
 // Pass through every OS operation. The observer owns only the child/exit/kill timestamps and cleanup;
@@ -74,6 +80,10 @@ const killBudget =
   cancelBudget +
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT - 1) +
   COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+// PR11 kill-stop (E3, ADR kill-stop 2026-11-02): the Host tries the pending-start close within
+// C, then terminates the helper and waits at most T for its exit. N5-G runs the new-start
+// measurement on the consumer, so a start hung outside cancellable I/O ends only this way.
+const killStopBudget = WINDOWS_STOP_DEADLINE_MS.E3;
 const uiaWatchdog = numberConstant(
   readFileSync(join(nativeDirectory, 'computer_use_windows_host_uia_lane.inc'), 'utf8'),
   'kWindowsV1UiaSlowContact',
@@ -800,10 +810,33 @@ function profileFor(
     updatedAt: '2026-11-02T00:00:00.000Z',
   };
 }
+// The product's kill-stop Host options (computer-use-windows-product.ts) with an in-memory ledger in
+// place of the SQLite store; every write commits. The seam reads which rows were written.
+function killStopOptions() {
+  const rows: Array<{ at: number; kind: WindowsInputKind }> = [];
+  const ledger: WindowsDispatchLedgerStorage = {
+    write: (row) => {
+      rows.push({ at: performance.now(), kind: row.kind });
+      return true;
+    },
+    update: () => true,
+    updateWithQuarantines: () => true,
+    delete: () => true,
+    restoreQuarantines: () => true,
+    quarantineRevision: () => null,
+    releaseQuarantine: () => true,
+    transferReceipt: () => true,
+  };
+  return {
+    rows,
+    options: { windowsKillStopTermination: { enabled: true as const }, windowsLedger: ledger },
+  };
+}
 function controllerFor(
   binding: ComputerUseNativeBinding,
   profile: ComputerAppProfileRecord,
   startPoint?: string,
+  killStop?: ReturnType<typeof killStopOptions>,
 ) {
   const real = binding.addon!;
   const addon: ComputerUseNativeAddon = startPoint
@@ -817,6 +850,7 @@ function controllerFor(
     : real;
   const host = createComputerUseNativeHost({ ...binding, addon }, 'win32', {
     windowsPhysicalBoundsToDip: (value) => value,
+    ...killStop?.options,
   });
   const unused = (): never => {
     throw new Error('Unexpected persistence operation');
@@ -857,8 +891,9 @@ function controllerFor(
 // transport's deadline paths (cancel and close expiring, kill or retention) are fixed elsewhere,
 // by the fake-timer "kill-stop (N3) replacement baseline" in computer-use-windows-transport.test.ts,
 // and the post-receipt idle teardown that keeps an unconfirmed discovery by its fake transport
-// cases. A real helper answering at once while a UiaCall or Capture worker is parked, an immediate
-// pending-start Controller Stop, and the busy close distribution are not fixed anywhere yet.
+// cases. A real helper answering at once while a UiaCall or Capture worker is parked, a pending-start
+// Controller Stop ended by E3 kill-stop (N5-G; its sessionless form is fixed live by the fixture
+// start cases), and the busy close distribution are not fixed anywhere yet.
 // Where classic Notepad is eligible, these cases still run unchanged.
 let notepadPid: number | undefined;
 let notepadWindowId = '';
@@ -962,11 +997,16 @@ async function classicProfile(context: TestContext) {
   if (!notepadWindowId) skipWith(context, 'owned_classic_notepad_window_unavailable');
   return profileFor(identity);
 }
-async function prepare(context: TestContext, binary = hung, startPoint?: string) {
+async function prepare(
+  context: TestContext,
+  binary = hung,
+  startPoint?: string,
+  killStop?: ReturnType<typeof killStopOptions>,
+) {
   const profile = await classicProfile(context);
   await watchAttestation(context);
   const { addon, binding } = addonFor(binary);
-  const { controller, host } = controllerFor(binding, profile, startPoint);
+  const { controller, host } = controllerFor(binding, profile, startPoint, killStop);
   // Controller candidates carry a one-time token, never the HWND (beginWindowCandidates().commit()
   // replaces the native windowId with randomUUID()). Find the owned window by HWND in the Host's
   // native list, then pick the Controller candidate with the same window identity digest (derived
@@ -1088,6 +1128,8 @@ describe('hung helper seam static contracts (#1002)', () => {
   it('derives deadlines from the production constants and keeps the opt-in separate', () => {
     expect(stopBudget).toBe(21_000);
     expect(killBudget).toBe(41_000);
+    expect(killStopBudget).toBe(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS + WINDOWS_STOP_EXIT_MS);
+    expect(killStopBudget).toBe(12_000);
     expect(uiaWatchdog).toBe(470);
     expect(readFileSync(source, 'utf8')).toContain('#include "computer_use_windows_test_hang.h"');
     // The workflow isolation (one job, one env entry) is checked in workflow-security.test.ts.
@@ -1220,31 +1262,106 @@ describe('hung helper seam static contracts (#1002)', () => {
 });
 
 describe('real hung helper / transport / Host / Controller (#1002)', () => {
+  // N5-G runs the new-start measurement synchronously on the helper's consumer. The fixture hang
+  // waits on an event that is never set (not I/O), so CancelSynchronousIo cannot end it and the
+  // helper never answers stop_pending_start; before N5-G a Stop-only worker answered it at once
+  // (the N2 #1002 baseline). What stays fixed is a bounded Stop that adopts nothing and leaves no
+  // helper behind, now through the Host's E3 kill-stop: the close is tried for C, then the helper
+  // is terminated and its exit confirmed within T. The discovery that feeds the Host is synthetic
+  // for the seam's fixture window (V1 lists no fixture); the start itself is the real helper's.
   for (const point of ['WinVerifyTrust', 'CreateFileW']) {
     it(
-      `cancels a fixture start hung in ${point} before the V1 allow-list`,
+      `terminates a fixture start hung in ${point} before the V1 allow-list through E3 kill-stop`,
       async (context) => {
         live(context);
         observeChildren();
         arm('');
         await watchAttestation(context);
         const window = await startFixture();
-        const { addon } = addonFor(hung);
-        arm(point);
-        const starting = settle(addon.startSession!(fixtureStart(window, 'fixture-start')));
-        await awaitHang(starting, operationTimeoutMilliseconds('start_session') * 2 + margin);
-        const origin = performance.now();
-        const stopped = await addon.stopPendingStart!({ sessionId: 'fixture-start' });
-        const elapsed = performance.now() - origin;
-        expect(stopped).toMatchObject({ result: 'closed', drained: true });
-        expect(elapsed).toBeLessThan(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
-        expect(errorCode(await starting)).toBe('session_start_canceled');
-        await until(
-          () => children.filter((row) => row.temp).every((row) => row.exited),
-          margin,
-          'idle helper exit',
+        const identity = await run(healthy, ['--identity', healthy], 30_000);
+        expect(identity.status).toBe(0);
+        const profile = profileFor(
+          computerAppIdentitySchema.parse(JSON.parse(identity.stdout) as unknown),
         );
-        report(context.task.name, origin, stopped, elapsed);
+        const { binding } = addonFor(hung);
+        const real = binding.addon;
+        const row = {
+          pid: window['pid'],
+          windowHandle: window['windowId'],
+          boundsUnit: 'physical_px',
+          windowId: window['windowId'],
+          appIdentityDigest: profile.identityDigest,
+          executableDigest: profile.executableDigest,
+          windowIdentityDigest: 'c'.repeat(64),
+          title: 'Seam fixture',
+          bounds: { x: 0, y: 0, width: 640, height: 480 },
+          screenBounds: { x: 0, y: 0, width: 640, height: 480 },
+          focused: true,
+          eligible: true,
+          ownerKind: 'application',
+          modal: false,
+          revision: 1,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+        };
+        let discoveries = 0;
+        const addon: ComputerUseNativeAddon = {
+          ...real,
+          discoverWindows: (input) => {
+            discoveries += 1;
+            return {
+              discoveryId: record(input)['discoveryId'],
+              drained: true,
+              launchAttemptCount: 0,
+              result: 'completed',
+              windows: [row],
+            };
+          },
+          cancelUnsubmittedDiscovery: () => 'never_sent',
+          startSession: (input, assertSend, callbacks) => {
+            arm(point);
+            return real.startSession!(input, assertSend, callbacks);
+          },
+        };
+        const killStop = killStopOptions();
+        const host = createComputerUseNativeHost({ ...binding, addon }, 'win32', {
+          windowsPhysicalBoundsToDip: (value) => value,
+          ...killStop.options,
+        });
+        const starting = settle(
+          host.startSession({
+            profile,
+            windowId: String(window['windowId']),
+            sessionId: 'fixture-start',
+            taskId: 'seam-task',
+            turnId: 'seam-turn',
+            cancelEpoch: 0,
+          }),
+        );
+        await awaitHang(starting, operationTimeoutMilliseconds('start_session') * 2 + margin);
+        expect(discoveries).toBeGreaterThan(0);
+        const helpers = () => children.filter((row) => row.temp);
+        expect(helpers()).toHaveLength(1);
+        expect(helpers()[0]?.kills).toEqual([]);
+        const origin = performance.now();
+        const stopped = await host.stopPendingStart!('fixture-start');
+        const elapsed = performance.now() - origin;
+        // Terminated with the exit confirmed, never a clean close receipt and never only requested.
+        expect(stopped).toMatchObject({ kind: 'terminated', result: 'terminated_clean' });
+        expect(elapsed).toBeLessThan(killStopBudget + margin);
+        const kills = helpers()[0]?.kills ?? [];
+        expect(kills).toHaveLength(1);
+        expect(kills.map((at) => at - origin)[0]).toBeGreaterThanOrEqual(
+          COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS - margin,
+        );
+        expect(helpers().every((row) => row.exited)).toBe(true);
+        // No adoption: the start ends with an error the helper did not answer as a session.
+        const outcome = await starting;
+        expect(outcome).toBeInstanceOf(Error);
+        expect(helperReply(outcome)).toBeNull();
+        // No input was recorded at all, so none could follow the Stop.
+        expect(killStop.rows).toEqual([]);
+        report(context.task.name, origin, { result: stopped.kind }, elapsed);
       },
       caseTimeout,
     );
@@ -1256,7 +1373,10 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         live(context);
         observeChildren();
         arm('');
-        const target = await prepare(context, hung, point);
+        // N5-G: the hung start is on the consumer and answers no stop_pending_start, so the
+        // Controller Stop is the Host's E3 kill-stop (C, then termination confirmed within T).
+        const killStop = killStopOptions();
+        const target = await prepare(context, hung, point, killStop);
         const statuses: Array<{ state: string; stopReason: string | null }> = [];
         target.controller.subscribe((status) => statuses.push(status));
         const starting = settle(target.start());
@@ -1264,15 +1384,13 @@ describe('real hung helper / transport / Host / Controller (#1002)', () => {
         const origin = performance.now();
         await target.controller.stopForTask('seam-task', 'task_changed');
         const elapsed = performance.now() - origin;
-        // Confirms at once today; a missed ack deadline would add at least cancelBudget.
-        expect(elapsed).toBeLessThan(cancelBudget);
+        expect(elapsed).toBeLessThan(killStopBudget + margin);
         expect(await starting).toBeInstanceOf(Error);
         expect(statuses.at(-1)).toMatchObject({ state: 'stopped', stopReason: 'task_changed' });
-        await until(
-          () => children.filter((row) => row.temp).every((row) => row.exited),
-          margin,
-          'pending-start helper exit',
-        );
+        const helpers = children.filter((row) => row.temp);
+        expect(helpers.map((row) => row.kills.length)).toEqual([1]);
+        expect(helpers.every((row) => row.exited)).toBe(true);
+        expect(killStop.rows.filter((row) => row.at >= origin)).toEqual([]);
         report(`controller-start-${point}`, origin, { result: 'stopped' }, elapsed);
       },
       caseTimeout,
