@@ -244,6 +244,7 @@ const preamble = String.raw`
 #include <utility>
 #include <vector>
 #include "computer_use_native_approval_ticket.h"
+#include "computer_use_windows_approval_round_trip.h"
 using HRESULT=std::int32_t;
 using DWORD=std::uint32_t;
 using HWND=void*;

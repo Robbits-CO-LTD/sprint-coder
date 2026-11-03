@@ -514,6 +514,98 @@ WindowsInterlockRefusal(const WindowsSession &session, const std::string &metada
 
 
 // BEGIN windows approval measurement and handlers (#991 N8-2c)
+bool HandleWindowsApprovalRoundTrip(HANDLE pipe, const Frame &request, const std::string &metadata,
+                                   MessageType type) {
+  using namespace sprint_coder::computer_use;
+  // P3c is dormant in production. No request, environment variable or Renderer value opens it.
+  if (!kWindowsBackgroundInputEnabled)
+    return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_unavailable"));
+  const auto received_ms = MonotonicNowNs() / 1000000;
+  auto *session = FindWindowsSession(request);
+  ApprovalRoundTripBinding binding;
+  std::uint64_t version = 0;
+  std::string kind;
+  if (session == nullptr || !ReadWindowsRoundTripBinding(*session, metadata, &binding) ||
+      !ReadJsonUint64(metadata, "version", &version) || version != kApprovalRoundTripVersion ||
+      !ReadJsonString(metadata, "kind", &kind))
+    return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+  const bool begin = type == MessageType::kApprovalRoundTripBegin;
+  bool accepted = false;
+  if (begin && kind == "begin") {
+    std::uint64_t duration = 0, pid = 0;
+    std::string process_start, image;
+    ULONG client_pid = 0;
+    if (!ReadJsonUint64(metadata, "durationMs", &duration) ||
+        !ReadJsonUint64(metadata, "mainPid", &pid) || pid == 0 || pid > MAXDWORD ||
+        !GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid != pid ||
+        !ReadJsonString(metadata, "mainProcessStartTime", &process_start) ||
+        !ReadJsonString(metadata, "mainImageIdentity", &image))
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+    ScopedKernelHandle main_process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
+                                                static_cast<DWORD>(pid)));
+    std::string actual_start, actual_image;
+    std::wstring path;
+    if (main_process.value == nullptr || !ReadProcessStartIdentity(main_process.value, &actual_start) ||
+        actual_start != process_start || !ReadProcessPath(main_process.value, &path))
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+    ScopedKernelHandle executable(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (executable.value == INVALID_HANDLE_VALUE || !ReadFileDigest(executable.value, &actual_image) ||
+        actual_image != image || !session->has_observation || WindowsSemanticInputInFlight())
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+    bool pending_input = false;
+    {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      pending_input = WindowsSemanticOperations().active != nullptr;
+    }
+    if (pending_input)
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+    if (!session->round_trip) session->round_trip = std::make_shared<WindowsApprovalRoundTrip>();
+    if (session->round_trip->MayLegacyStart()) {
+      RECT bounds{};
+      std::string reason;
+      if (!ValidateWindowsSession(*session, &bounds, &reason)) session->round_trip->Invalidate();
+      else {
+        session->round_trip_monitor = std::make_shared<WindowsRoundTripMonitor>();
+        const bool monitoring = session->round_trip_monitor->Start(*session, static_cast<DWORD>(pid));
+        const auto now = MonotonicNowNs();
+        const auto key = FrameIdKey(request.header.session_id);
+        const auto approval = approval_states.find(key);
+        const auto remaining = approval != approval_states.end() && approval->second.occupied()
+            ? (approval->second.deadline() > now ? (approval->second.deadline() - now) / 1000000 : 0)
+            : kApprovalRoundTripMaxDurationMs;
+        std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+        // Begin and the semantic input claim share the Stop lock. A pending worker cannot cross
+        // this boundary after Begin; already-issued input prevents admission.
+        if (WindowsSemanticOperations().active == nullptr &&
+            WindowsValidationStillCurrent(session->cancel_epoch, WindowsValidationFrameStopSerial())) {
+          accepted = session->round_trip->Begin(binding, received_ms, duration, remaining,
+              session->observation_revision, ticket_states[key].generation, monitoring);
+          if (accepted) InvalidateWindowsTicket(key);
+        }
+      }
+    }
+    if (accepted && !WindowsRoundTripCurrent(*session)) accepted = false;
+    if (!accepted) session->round_trip->Invalidate();
+  } else if (!begin && kind == "end" && session->round_trip) {
+    std::string reason;
+    if (ReadJsonString(metadata, "reason", &reason) && WindowsRoundTripCurrent(*session))
+      accepted = session->round_trip->End(binding, reason == "approved", MonotonicNowNs() / 1000000);
+    if (!accepted) session->round_trip->Invalidate();
+  }
+  const bool failed = session->round_trip && session->round_trip->Failed();
+  const std::string failure = failed ? session->round_trip->Failure() : "target_changed";
+  ApprovalRoundTripFields fields{{"version", std::uint64_t{kApprovalRoundTripVersion}},
+      {"roundTripId", binding.id}, {"sessionId", binding.session}, {"taskId", binding.task},
+      {"turnId", binding.turn}, {"helperGeneration", binding.generation}, {"cancelEpoch", binding.epoch},
+      {"kind", std::string(begin ? "begin_result" : "end_result")}, {"accepted", accepted},
+      {"failureReason", accepted ? std::string("none") : failure}, {"failureLatched", failed}};
+  const auto payload = ApprovalRoundTripWire(fields);
+  if (payload.empty()) return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
+  return Respond(pipe, request, begin ? MessageType::kApprovalRoundTripBeginResult :
+                                       MessageType::kApprovalRoundTripEndResult, payload);
+}
+
 // The gate, the lane's measurement (a UI Automation read on a bounded worker) and the three private
 // message handlers. Behaviour seams that compile the ordinary preflight on any platform cut this
 // block and stand in a closed gate (kWindowsApprovalHandlersEnabled is false in every build).
@@ -685,6 +777,20 @@ bool HandleWindowsApproval(HANDLE pipe, const Frame &request, const std::string 
   if (session == nullptr || found == approval_states.end() || !WindowsApprovalGate(*session))
     return Respond(pipe, request, MessageType::kError, ErrorPayload("native_approval_unavailable"));
   auto &state = found->second;
+  ApprovalRoundTripBinding trip_binding;
+  if (session->round_trip && !session->round_trip->MayLegacyStart()) {
+    const bool allowed = WindowsRoundTripCurrent(*session) &&
+        (type == MessageType::kApprovalApprove
+             ? ReadWindowsRoundTripBinding(*session, metadata, &trip_binding) && session->round_trip->MayObserve()
+             : type == MessageType::kDispatchApproved && WindowsRoundTripMayInput(*session));
+    if (!allowed) {
+      if (type == MessageType::kApprovalDiscard) session->round_trip->Invalidate("rejected");
+      state.Invalidate();
+      return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
+    }
+  } else if (metadata.find("\"roundTripId\"") != std::string::npos) {
+    return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
+  }
   WindowsApprovalReference reference;
   if (type == MessageType::kApprovalDiscard) {
     if (!ReadJsonUint64(metadata, "helperGeneration", &reference.helper_generation) ||
@@ -701,8 +807,15 @@ bool HandleWindowsApproval(HANDLE pipe, const Frame &request, const std::string 
   }
   const auto environment = WindowsApprovalEnvironmentFor(*session, metadata);
   NativeApprovalEffect effect = NativeApprovalEffect::kInvalid;
-  const auto outcome = type == MessageType::kApprovalApprove
+  auto outcome = type == MessageType::kApprovalApprove
       ? state.Approve(reference, environment) : state.Dispatch(reference, environment, &effect);
+  if (!trip_binding.id.empty() && (!outcome.ok || !WindowsRoundTripCurrent(*session) ||
+      !session->round_trip->Exchange(trip_binding, session->observation_revision,
+          ticket_states[key].generation, MonotonicNowNs() / 1000000))) {
+    session->round_trip->Invalidate();
+    state.Invalidate();
+    outcome = {false, NativeApprovalFailure::kRevalidationFailed};
+  }
   if (type == MessageType::kApprovalApprove) {
     const auto denial = NativeApprovalDenialFor(outcome.failure);
     const auto &facts = reference.facts;
@@ -732,6 +845,7 @@ bool HandleWindowsApproval(HANDLE pipe, const Frame &request, const std::string 
   std::string result, reason;
   bool accepted = false;
   const bool succeeded = DispatchWindowsAction(dispatch_session, metadata, &result, &reason, &accepted, effect);
+  if (session->round_trip) session->round_trip->InputFinished();
   return RespondAndCache(pipe, request, succeeded ? MessageType::kDispatchApprovedResult : MessageType::kError,
       succeeded ? "{\"result\":\"completed\",\"reasonCode\":null,\"sessionId\":\"" +
           JsonEscape(session->session_id) + "\",\"cancelEpoch\":" + std::to_string(session->cancel_epoch) +
@@ -752,6 +866,8 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     return Respond(pipe, request, MessageType::kError,
                    ErrorPayload("session_missing"));
   const WindowsSession &session = found->second;
+  if (!WindowsRoundTripCurrent(session) || (session.round_trip && !session.round_trip->MayObserve()))
+    return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
   WindowsTicketState &state = ticket_states[session_key];
   state.slot.Invalidate();
   ++state.generation;
@@ -856,6 +972,16 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
         WindowsValidationStillCurrent(cancel_epoch, frame.StopSerial()))
       issued = state.slot.Issue(token, std::move(binding), now,
           sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs);
+  }
+  if (session.round_trip && !session.round_trip->MayLegacyStart()) {
+    sprint_coder::computer_use::ApprovalRoundTripBinding binding;
+    if (!issued || !ReadWindowsRoundTripBinding(session, metadata, &binding) ||
+        !WindowsRoundTripCurrent(session) || !session.round_trip->Exchange(binding,
+            session.observation_revision, state.generation, MonotonicNowNs() / 1000000)) {
+      session.round_trip->Invalidate();
+      state.slot.Invalidate();
+      issued = false;
+    }
   }
   std::string receipt = WindowsPreflightReceipt(
       session, request_id, cancel_epoch, observation_revision,

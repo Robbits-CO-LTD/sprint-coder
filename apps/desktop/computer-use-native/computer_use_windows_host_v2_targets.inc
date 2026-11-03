@@ -2108,7 +2108,8 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   const auto expected = WindowsExistingStartBinding(session);
   auto &control = WindowsTargetListControl();
   const auto measurement_current = [&] {
-    return WindowsExistingStartStillCurrent(input, expected.cancel_epoch) &&
+    return WindowsRoundTripCurrent(session) &&
+        WindowsExistingStartStillCurrent(input, expected.cancel_epoch) &&
         WindowsExistingStartBindingMatches(expected, session);
   };
   WindowsExistingStartMeasurement before;

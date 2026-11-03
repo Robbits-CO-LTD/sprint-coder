@@ -2,6 +2,10 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
                           std::vector<std::uint8_t> *binary,
                           std::string *reason,
                           std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
+  if (!WindowsRoundTripCurrent(session) || (session.round_trip && !session.round_trip->MayObserve())) {
+    *reason = "approval_round_trip_rejected";
+    return false;
+  }
   RECT bounds{};
   WindowsDialogSetSnapshot dialogs;
   // The UI Automation reads of the whole observe share one budget and the cancellation epoch (see the
@@ -604,6 +608,10 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     }
     break;
   }
+  case MessageType::kApprovalRoundTripBegin:
+  case MessageType::kApprovalRoundTripEnd:
+    if (!HandleWindowsApprovalRoundTrip(pipe, request, metadata, type)) return false;
+    break;
   case MessageType::kApprovalApprove:
   case MessageType::kApprovalDiscard:
   case MessageType::kDispatchApproved: {

@@ -82,11 +82,13 @@ const head =
 const program = String.raw`
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "computer_use_native_interlock_capture.h"
+#include "computer_use_windows_approval_round_trip.h"
 
 namespace {
 
@@ -97,6 +99,7 @@ using sprint_coder::computer_use::InterlockReason;
 
 struct RECT { long left = 0; long top = 0; long right = 0; long bottom = 0; };
 struct WindowsSession {
+  std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::uint64_t cancel_epoch = 0;
   std::uint32_t pid = 4242;
   bool has_focused_element_signature = true;
@@ -109,6 +112,9 @@ struct WindowsSession {
   unsigned long approved_click_input_tick = 0;
 };
 struct WindowsClickBasis { bool tracked = false; bool opens = false; bool input_read = false; unsigned long input_tick = 0; };
+
+// This seam exercises ordinary dispatch; an unexpected round trip fails closed.
+bool WindowsRoundTripMayInput(const WindowsSession &session) { return !session.round_trip; }
 
 std::vector<std::string> g_calls;
 std::string g_kind = "click";

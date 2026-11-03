@@ -75,6 +75,7 @@ std::string RequestPayloadDigest(const Frame &request) {
 bool RevalidateWindowsTarget(const WindowsSession &session,
                              const RECT &expected,
                              std::uint64_t expected_epoch) {
+  if (!WindowsRoundTripMayInput(session)) return false;
   if ((session.approved_deadline_ns != 0 &&
        (MonotonicNowNs() < session.approved_started_ns ||
         MonotonicNowNs() >= session.approved_deadline_ns)) ||
@@ -115,6 +116,7 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
 }
 
 bool SetWindowsApprovedCursor(const WindowsSession &session, int x, int y) {
+  if (!WindowsRoundTripMayInput(session)) return false;
   std::lock_guard lock(WindowsTargetListControl().stop_mutex);
   const auto now = MonotonicNowNs();
   if (now < session.approved_started_ns || now >= session.approved_deadline_ns ||
@@ -519,6 +521,11 @@ bool DispatchWindowsAction(const WindowsSession &session,
                            sprint_coder::computer_use::NativeApprovalEffect approved_effect =
                                sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   *accepted = false;
+  if (!WindowsRoundTripMayInput(session)) { *reason = "approval_round_trip_rejected"; return false; }
+  struct RoundTripInputFinished {
+    const WindowsSession &session;
+    ~RoundTripInputFinished() { if (session.round_trip) session.round_trip->InputFinished(); }
+  } round_trip_finished{session};
   if (WindowsSemanticInputInFlight()) { *reason = "semantic_input_in_flight"; return false; }
   const std::uint64_t expected_epoch = session.cancel_epoch;
   std::string kind;

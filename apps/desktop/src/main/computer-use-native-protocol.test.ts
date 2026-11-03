@@ -15,6 +15,37 @@ import {
 } from './computer-use-native-protocol';
 import { parseNativeHandshake } from './computer-use-native-handshake';
 
+describe('Windows approval round trip state (P3c)', () => {
+  it('registers the native state machine and keeps the background gate closed', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    expect(native('computer_use_windows_approval_round_trip.h')).toContain(
+      'class WindowsApprovalRoundTrip',
+    );
+    expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckApprovalRoundTripState()');
+    expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
+  });
+  it('pins native admission, foreground monitoring and the final input barriers', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    const session = native('computer_use_windows_host_session.inc');
+    expect(session).toContain('SetWinEventHook(EVENT_SYSTEM_FOREGROUND');
+    expect(session).toContain('PostThreadMessageW(thread_id, kPing');
+    expect(session).toContain('existing.round_trip->Return(binding,');
+    expect(session).toContain('existing.round_trip->Returned(binding,');
+    expect(native('computer_use_windows_host_preflight.inc')).toContain(
+      'if (!kWindowsBackgroundInputEnabled)',
+    );
+    expect(native('computer_use_windows_host_input.inc')).toContain(
+      'if (!WindowsRoundTripMayInput(session))',
+    );
+    expect(native('computer_use_windows_host_uia_semantic.inc')).toContain(
+      'pending->round_trip->MayInput(',
+    );
+    expect(native('computer_use_windows_approval_round_trip.h')).not.toContain('interaction_epoch');
+  });
+});
+
 const capability = { version: 1, capabilityTableVersion: 1, authorityVersion: 1 };
 const handshake = {
   protocolVersion: 1,
