@@ -170,7 +170,7 @@ Windows addon は 1 つの `WindowsComputerUseHelperClient` を持ち、その c
 | R5 | 同上、台帳の全種類（SendInput・paste を含み、前面化は除く）で応答待ち／accepted=true 効果未確認あり | exit 時に `terminated_target_suspect` | identity の対象隔離へ永続移管。移管前に行を失わない | 世代後始末。E1〜E3 は要求理由維持、session が無い E4 の理由値は PR11 で決める。遅延反映の注意。同対象不可、他対象可 | §2.2、§3.1 の 4・5 |
 | R6 | R5 の未確認行が SendInput／paste、または Stop 中に transport timeout | R5 と同じ | `pending` 消失に関係なく台帳から隔離 | 再送しない。他対象可 | §2.2、§4 の S2 |
 | R7 | kill 要求後、T 内に exit なし | 停止は未確定。`termination_requested` を返す | 台帳・隔離を維持 | child 保持、全操作・新 helper を拒否。E1〜E3 の理由は `native_unavailable`。E4 は `native_stop_unconfirmed` を伝達し、session が無い通知先・理由値は PR11 で決める | §2.2、§3.1 の 1・6 |
-| R8 | R7 の後で exit 到着 | 到着時に R4 / R5 へ遷移 | その世代の台帳で判定 | 該当世代だけ解除・後始末。核は `generation_exit` に終了原因と `late: true` を別々に保持し、Stop 起点なら元の要求理由を示す。配送は PR7c-2 | §2.2、§6.1 の 8 |
+| R8 | R7 の後で exit 到着 | 到着時に R4 / R5 へ遷移 | その世代の台帳で判定 | 該当世代だけ解除・後始末。核は `generation_exit` に終了原因と `late: true` を別々に保持し、Stop 起点なら元の要求理由を示す。E4 は `discovery_result` に `late: true` を保持する。配送は PR7c-2 | §2.2、§6.1 の 8 |
 | R9 | 未確認 discovery／start owner のみ残る、exit 確認 | `terminated_clean` | identity のない owner を対象隔離に変えない | discovery／start のブロック解除。その対象に既存の隔離が無ければ開始可（他の対象の隔離は関係しない） | §2.2 の 2、§3.1 の 5 |
 | R10 | 未確認 discovery と未確認 control が同居、exit 確認 | `terminated_target_suspect` | control の identity だけ隔離 | discovery も終了。対象不明として host 全体を残さない | §2.2 の 2、§3.1 の 5 |
 | R11 | Stop 外の crash／abortTransport、exit 確認 | exit 時に R4 / R5 と同じ判定 | 同じ台帳規則 | 全 owner を後始末。核は `generation_exit` に crash / abortTransport、遅延の有無、clean / suspect、`native_unavailable` を保持する。配送は PR7c-2 | §2.2、§2.5、§6.1 の 8 |
@@ -211,10 +211,10 @@ PR7c-1 で核の通知型を次の union に確定する。製品の配送は有
 
 - `unchanged`: 通知なし。古い receipt・応答・二重 exit（R13）はこの値とし、終了分類を変えない。
 - `termination_pending`: T 超過時に一度だけ停止未確定を通知する。理由は既存の `native_unavailable`。exit が来なくても返す。
-- `generation_exit`: `cause`（stop / crash / abortTransport）、`late`、`result`（terminated_clean / terminated_target_suspect）、`initiatorReason` を保持する。Stop 起点は `requested_reason`、Stop 外は `native_unavailable` とする。遅延と原因を混同せず、公開 StopReason は増やさない。
-- `discovery_result`: E4 の Stop 結果。停止成功と `native_stop_unconfirmed` は既存の結果型を使う。session が無い場合の最終配送先は PR11。
+- `generation_exit`: `cause`（stop / crash / abortTransport）、`late`、`result`（terminated_clean / terminated_target_suspect）、`initiatorReason` を保持する。Stop 起点は `requested_reason`、Stop 外は `native_unavailable` とする。核の `entry` は Stop 外で null、E1〜E4 の開始で設定し、終了原因 `cause` と独立に Stop 起点を判断する。遅延と原因を混同せず、公開 StopReason は増やさない。
+- `discovery_result`: E4 の Stop 結果と `late` を保持する。R7 の後の遅い exit（R8）は `late: true`、それ以外は false。Stop 中は cause が crash / abortTransport でもこの通知を使う。停止成功と `native_stop_unconfirmed` は既存の結果型を使う。session が無い場合の最終配送先は PR11。
 
-`WindowsStopDecision` は入力イベントでなく結果の種類を判別子にする。`GenerationCleanup` は `ready`（世代必須）/ `deferred`（世代と保存待ち ID 必須）の union とする。R19c は `exit_confirmed` で終了と保存待ちを返し、保存回復時の `storage_recovered` で同じ世代の後始末を許可する。終了通知を再発行せず、解消済み hold の再試行は拒否する。終了確認と後始末の配送段階への対応は PR7c-2 で定義する。
+`WindowsStopDecision` は入力イベントでなく結果の種類を判別子にする。`GenerationCleanup` は `ready`（世代必須）/ `deferred`（世代と保存待ち ID 必須）の union とする。R19c は `exit_confirmed` で終了と保存待ちを返し、保存回復時の `storage_recovered` で同じ世代の後始末を許可する。終了通知を再発行せず、解消済み hold の再試行は呼出し側の不具合として例外 `Unknown storage hold` を投げる。終了確認と後始末の配送段階への対応は PR7c-2 で定義する。
 
 R8・R11 の配送・owner 照合は PR7c-2、Controller への接続と表示は PR10。セッションが無い E4 の最終配送先と settle の具体的な時間は、引き続き §6.1 の 8・9 に従って決める。
 

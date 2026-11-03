@@ -161,8 +161,8 @@ export type WindowsStopState = Readonly<{
    * new generation may start only then (§3.1 の 6). restart clears it: a new Main has no helper.
    */
   helperLaunched: boolean;
-  /** The Stop in progress: its entry and owner (session id, or the discovery owner for E4). */
-  entry: WindowsStopEntry;
+  /** The Stop in progress; null outside Stop. Owner is a session id or the E4 discovery id. */
+  entry: WindowsStopEntry | null;
   stopOwnerId: string;
   killRequested: boolean;
   exitConfirmed: boolean;
@@ -332,7 +332,7 @@ export type WindowsStopNotification =
       result: Exclude<WindowsTerminationResult, 'termination_requested'>;
       initiatorReason: 'requested_reason' | 'native_unavailable';
     }>
-  | Readonly<{ kind: 'discovery_result'; result: WindowsDiscoveryStopResult }>;
+  | Readonly<{ kind: 'discovery_result'; result: WindowsDiscoveryStopResult; late: boolean }>;
 
 export type GenerationCleanup =
   | Readonly<{ kind: 'ready'; helperGeneration: number }>
@@ -340,6 +340,7 @@ export type GenerationCleanup =
 
 type GenerationCleanupEffect =
   | Readonly<{ cleanup: Extract<GenerationCleanup, { kind: 'ready' }>; awaitingHoldId: null }>
+  /** awaitingHoldId equals cleanup.holdId: both identify the same pending transfer. */
   | Readonly<{ cleanup: Extract<GenerationCleanup, { kind: 'deferred' }>; awaitingHoldId: string }>;
 
 export type WindowsStopDiagnostic = Readonly<{
@@ -721,13 +722,14 @@ function storedRowProblem(row: WindowsLedgerRow): 'invalid_format' | 'missing_id
   return formatOk ? null : 'invalid_format';
 }
 
-function entryAllowsNonSubmission(entry: WindowsStopEntry): boolean {
+function entryAllowsNonSubmission(entry: WindowsStopEntry | null): boolean {
   switch (entry) {
     case 'E3':
     case 'E4':
       return true;
     case 'E1':
     case 'E2':
+    case null:
       return false;
     default:
       return assertNever(entry);
@@ -765,9 +767,10 @@ const FULL_FRESH_SESSION: readonly WindowsFreshSessionRequirement[] = [
   'current_interaction_epoch',
 ];
 
-function discoveryNotification(result: WindowsStopResult): DiscoveryNotification {
+function discoveryNotification(result: WindowsStopResult, late = false): DiscoveryNotification {
   return {
     kind: 'discovery_result',
+    late,
     result: windowsDiscoveryStopResult(result),
   };
 }
@@ -777,13 +780,13 @@ function exitNotification(
   cause: 'stop' | 'crash' | 'abortTransport',
   result: ExitNotification['result'],
 ): ExitNotification | DiscoveryNotification {
-  if (state.entry === 'E4' && cause === 'stop') return discoveryNotification(result);
+  if (state.entry === 'E4') return discoveryNotification(result, state.exitWaitExceeded);
   return {
     kind: 'generation_exit',
     cause,
     late: state.exitWaitExceeded,
     result,
-    initiatorReason: cause === 'stop' ? 'requested_reason' : 'native_unavailable',
+    initiatorReason: state.entry !== null ? 'requested_reason' : 'native_unavailable',
   };
 }
 
@@ -921,7 +924,7 @@ export function decideWindowsStop(
       return {
         ...decision,
         kind: 'not_submitted',
-        state: { ...state, result: 'not_submitted' },
+        state: { ...state, entry: null, result: 'not_submitted' },
         confirmation: 'not_submitted',
         cleanup: 'stop_owner',
         helper: 'may_start',
@@ -1004,6 +1007,7 @@ export function decideWindowsStop(
         ...decision,
         ...receiptEffects,
         kind: 'receipt_confirmed',
+        state: { ...receiptEffects.state, entry: null },
         confirmation: 'host_receipt',
         cleanup: 'stop_owner',
         ...(state.entry === 'E4' ? { notification: discoveryNotification('receipt') } : {}),
@@ -1145,6 +1149,8 @@ export function decideWindowsStop(
         state: {
           ...state,
           helperGeneration: event.nextHelperGeneration,
+          entry: null,
+          stopOwnerId: '',
           helperLaunched: true,
           killRequested: false,
           exitConfirmed: false,
@@ -1174,6 +1180,8 @@ export function decideWindowsStop(
         state: {
           ...persisted.state,
           helperLaunched: false,
+          entry: null,
+          stopOwnerId: '',
           killRequested: false,
           exitConfirmed: false,
           exitWaitExceeded: false,

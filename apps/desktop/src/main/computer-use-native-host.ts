@@ -265,7 +265,7 @@ export function createComputerUseNativeHost(
       state = {
         helperGeneration: generation,
         helperLaunched: true,
-        entry: 'E1',
+        entry: null,
         stopOwnerId: '',
         killRequested: false,
         exitConfirmed: false,
@@ -441,6 +441,28 @@ export function createComputerUseNativeHost(
           const owner = startOwners.get(id);
           if (owner !== undefined) owner.helperGeneration ??= generation;
         }
+      },
+      stopping: (generation, entry, ownerId) => {
+        const state = ledgerState(generation);
+        if (state.exitConfirmed || state.entry !== null) return;
+        const startOwner =
+          entry === 'E4'
+            ? [...startOwners.values()].find((owner) =>
+                [...owner.discoveries].some((discovery) => discovery.id === ownerId),
+              )
+            : undefined;
+        ledgerStates.set(generation, {
+          ...state,
+          entry:
+            startOwner !== undefined
+              ? sessions.has(startOwner.sessionId)
+                ? 'E1'
+                : 'E3'
+              : entry === 'E1' && !sessions.has(ownerId)
+                ? 'E2'
+                : entry,
+          stopOwnerId: startOwner?.sessionId ?? ownerId,
+        });
       },
       event: (generation, kind) => {
         ledgerEvent(generation, { kind, helperGeneration: generation });

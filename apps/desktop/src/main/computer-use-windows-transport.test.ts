@@ -4351,6 +4351,66 @@ int main() {
       decide.mockRestore();
     }
   });
+  it.each(['cancel', 'close_session', 'stop_pending_start'] as const)(
+    'PR7c records Stop before %s races with transport failure',
+    async (operation) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        await startSession(target.host, 'session-1', 'turn-1');
+        target.helper().holdOnly(operation);
+        const stopping =
+          operation === 'cancel'
+            ? target.addon.cancel!({ sessionId: 'session-1', cancelEpoch: 1 })
+            : operation === 'close_session'
+              ? target.addon.close!({ sessionId: 'session-1', cancelEpoch: 1 })
+              : target.addon.stopPendingStart!({ sessionId: 'session-1' });
+        const settled = Promise.resolve(stopping).catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        sockets[0]!.emit('error', new Error('synthetic transport failure'));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(decide.mock.results.map((result) => result.value.notification)).toContainEqual({
+          kind: 'generation_exit',
+          cause: 'abortTransport',
+          late: false,
+          result: 'terminated_clean',
+          initiatorReason: 'requested_reason',
+        });
+        await settled;
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+  it('PR7c records sessionless E4 before a transport failure and preserves late exit', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.helper().holdOnly('list_windows_cancellable');
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      await vi.advanceTimersByTimeAsync(0);
+      target.helper().holdOnly('stop_window_discovery');
+      const stopping = discovery.stop().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.emit('error', new Error('synthetic transport failure'));
+      await vi.advanceTimersByTimeAsync(2_000);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.results.map((result) => result.value.notification)).toContainEqual({
+        kind: 'discovery_result',
+        late: true,
+        result: { stopped: true, result: 'terminated_clean' },
+      });
+      await stopping;
+    } finally {
+      decide.mockRestore();
+    }
+  });
   it.each([true, false, 'throw'] as const)(
     'PR7a kill result %s is not exit evidence and T is exactly two seconds',
     async (killResult) => {

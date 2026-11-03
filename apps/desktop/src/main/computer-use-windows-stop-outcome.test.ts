@@ -180,6 +180,7 @@ const cases: Case[] = [
       confirmation: 'not_submitted',
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'not_submitted' },
       },
     },
@@ -193,6 +194,7 @@ const cases: Case[] = [
       confirmation: 'host_receipt',
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'receipt' },
       },
     },
@@ -273,6 +275,7 @@ const cases: Case[] = [
     expected: {
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'terminated_clean' },
       },
     },
@@ -338,6 +341,7 @@ const cases: Case[] = [
     expected: {
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: {
           stopped: false,
           result: 'termination_requested',
@@ -409,7 +413,7 @@ const cases: Case[] = [
   },
   {
     name: 'R11 crash outside Stop',
-    input: state({ rows: [row] }),
+    input: state({ entry: null, rows: [row] }),
     event: { ...exit, cause: 'crash' },
     expected: {
       notification: {
@@ -1728,36 +1732,71 @@ describe('ADR omitted combinations are rejected', () => {
 });
 
 describe('PR7c-1 notification contract', () => {
-  for (const cause of ['stop', 'abortTransport', 'crash'] as const) {
-    for (const late of [false, true]) {
-      for (const suspect of [false, true]) {
-        it(`R8/R11 ${cause}, late=${late}, suspect=${suspect} confirms exit once`, () => {
-          const initial = state({ killRequested: true, rows: suspect ? [row] : [] });
-          const waiting = late
-            ? decideWindowsStop(initial, { kind: 'exit_wait_exceeded', helperGeneration: 1 }).state
-            : initial;
-          const confirmed = decideWindowsStop(waiting, { ...exit, cause });
-          expect(confirmed).toMatchObject({
-            kind: 'exit_confirmed',
-            notification: {
-              kind: 'generation_exit',
-              cause,
-              late,
-              result: suspect ? 'terminated_target_suspect' : 'terminated_clean',
-              initiatorReason: cause === 'stop' ? 'requested_reason' : 'native_unavailable',
-            },
-            cleanup: { kind: 'ready', helperGeneration: 1 },
+  for (const [entry, initiatorReason] of [
+    ['E1', 'requested_reason'],
+    ['E2', 'requested_reason'],
+    ['E3', 'requested_reason'],
+    [null, 'native_unavailable'],
+  ] as const) {
+    for (const cause of ['stop', 'abortTransport', 'crash'] as const) {
+      for (const late of [false, true]) {
+        for (const suspect of [false, true]) {
+          it(`R8/R11 entry=${entry}, ${cause}, late=${late}, suspect=${suspect} confirms exit once`, () => {
+            const initial = state({ entry, killRequested: true, rows: suspect ? [row] : [] });
+            const waiting = late
+              ? decideWindowsStop(initial, { kind: 'exit_wait_exceeded', helperGeneration: 1 })
+                  .state
+              : initial;
+            const confirmed = decideWindowsStop(waiting, { ...exit, cause });
+            expect(confirmed).toMatchObject({
+              kind: 'exit_confirmed',
+              notification: {
+                kind: 'generation_exit',
+                cause,
+                late,
+                result: suspect ? 'terminated_target_suspect' : 'terminated_clean',
+                initiatorReason,
+              },
+              cleanup: { kind: 'ready', helperGeneration: 1 },
+            });
+            const repeated = decideWindowsStop(confirmed.state, { ...exit, cause });
+            expect(repeated).toMatchObject({
+              kind: 'unchanged',
+              notification: { kind: 'unchanged' },
+              cleanup: 'none',
+            });
+            expect(repeated.state).toBe(confirmed.state);
           });
-          const repeated = decideWindowsStop(confirmed.state, { ...exit, cause });
-          expect(repeated).toMatchObject({
-            kind: 'unchanged',
-            notification: { kind: 'unchanged' },
-            cleanup: 'none',
-          });
-          expect(repeated.state).toBe(confirmed.state);
-        });
+        }
       }
     }
+  }
+
+  for (const cause of ['stop', 'abortTransport', 'crash'] as const) {
+    it(`R8 E4 late ${cause} preserves discovery delay`, () => {
+      const pending = decideWindowsStop(state({ entry: 'E4', killRequested: true }), {
+        kind: 'exit_wait_exceeded',
+        helperGeneration: 1,
+      });
+      expect(pending.notification).toEqual({
+        kind: 'discovery_result',
+        late: false,
+        result: {
+          stopped: false,
+          result: 'termination_requested',
+          code: 'native_stop_unconfirmed',
+        },
+      });
+      const confirmed = decideWindowsStop(pending.state, { ...exit, cause });
+      expect(confirmed.notification).toEqual({
+        kind: 'discovery_result',
+        late: true,
+        result: { stopped: true, result: 'terminated_clean' },
+      });
+      expect(decideWindowsStop(confirmed.state, { ...exit, cause }).notification).toEqual({
+        kind: 'unchanged',
+      });
+    });
   }
 
   it('R7 reports termination_pending once even if no exit follows', () => {
@@ -1773,6 +1812,47 @@ describe('PR7c-1 notification contract', () => {
       kind: 'unchanged',
       notification: { kind: 'unchanged' },
     });
+  });
+
+  it('does not carry a Stop into a new helper generation or Main restart', () => {
+    const stopped = decideWindowsStop(state(), exit).state;
+    for (const next of [
+      decideWindowsStop(stopped, { kind: 'start_generation', nextHelperGeneration: 2 }).state,
+      decideWindowsStop(stopped, { kind: 'restart', storage: written }).state,
+    ])
+      expect(next).toMatchObject({ entry: null, stopOwnerId: '' });
+    const started = decideWindowsStop(stopped, {
+      kind: 'start_generation',
+      nextHelperGeneration: 2,
+    });
+    expect(
+      decideWindowsStop(started.state, { ...exit, helperGeneration: 2, cause: 'crash' })
+        .notification,
+    ).toEqual({
+      kind: 'generation_exit',
+      cause: 'crash',
+      late: false,
+      result: 'terminated_clean',
+      initiatorReason: 'native_unavailable',
+    });
+  });
+  it('returns to outside Stop after receipt or non-submission confirms completion', () => {
+    for (const completed of [
+      decideWindowsStop(state(), receipt).state,
+      decideWindowsStop(state({ entry: 'E3' }), {
+        kind: 'not_submitted',
+        helperGeneration: 1,
+        otherUnconfirmedOwners: false,
+      }).state,
+    ]) {
+      expect(decideWindowsStop(completed, { ...exit, cause: 'crash' }).notification).toEqual({
+        kind: 'generation_exit',
+        cause: 'crash',
+        late: false,
+        result: 'terminated_clean',
+        initiatorReason: 'native_unavailable',
+      });
+    }
   });
 
   it('R19c separates exit confirmation from recovered generation cleanup', () => {
