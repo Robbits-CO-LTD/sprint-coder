@@ -88,6 +88,9 @@ public:
     if (desired) (void)exchange(true, order == std::memory_order_release ? std::memory_order_acq_rel : order);
     else std::atomic<bool>::store(false, order);
   }
+  // No slot is taken by compare-exchange; deleting it keeps every take numbered.
+  bool compare_exchange_strong(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;
+  bool compare_exchange_weak(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;
   // Assigning true takes the slot like exchange(true), so it is numbered too.
   bool operator=(bool desired) noexcept {
     store(desired);

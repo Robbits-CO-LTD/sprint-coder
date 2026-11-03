@@ -498,6 +498,22 @@ describe('Windows native helper compile boundary', () => {
     );
   });
 
+  it('takes worker slots only through numbered WindowsWorkerSlot operations (N5-B2)', () => {
+    const source = readWindowsHostSource();
+    // The base-typed accessor may only read or release the target-list slot; a take through it
+    // would skip the launch numbering that residual ownership relies on.
+    const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
+    expect(uses.length).toBeGreaterThan(0);
+    for (const [, method, args] of uses)
+      expect(
+        method === 'load' || (method === 'store' && args.startsWith('false')),
+        `${method}(${args})`,
+      ).toBe(true);
+    expect(source).toContain(
+      'bool compare_exchange_strong(bool &, bool, std::memory_order = std::memory_order_seq_cst) = delete;',
+    );
+  });
+
   it('uses bounded payment labels in both native risk classifiers', () => {
     const windows = readWindowsHostSource();
     const macos = readFileSync(
