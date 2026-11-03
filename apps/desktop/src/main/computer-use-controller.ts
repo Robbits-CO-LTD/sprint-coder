@@ -7,7 +7,10 @@ import {
   type WindowsOwnerStopNotification,
 } from './computer-use-windows-stop-delivery';
 import { createHash, randomUUID } from 'node:crypto';
-import type { ComputerUseDiscoveryHandle } from './computer-use-native-discovery';
+import type {
+  ComputerUseDiscoveryHandle,
+  ComputerUseGenerationTerminated,
+} from './computer-use-native-discovery';
 import {
   bindComputerUsePolicyLanguage,
   bindComputerUseMaximumMode,
@@ -295,6 +298,7 @@ export type ComputerUseNativeApprovalApproveResult =
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
 export type ComputerUsePendingStartStop =
+  | ComputerUseGenerationTerminated
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'closed'; inputReceipt: ComputerUseNativeInputReceipt }>;
 
@@ -415,10 +419,24 @@ export interface ComputerUseNativeHost {
   /** Main-only K-5 receiver. PR10 must consume a card's trusted activation before calling. */
   approveWindowsQuarantineResume?(
     input: Readonly<{
-      previousSessionId: string;
       newSessionId: string;
       trustedActivation: boolean;
-    }>,
+    }> &
+      (
+        | Readonly<{ previousSessionId: string; restoredTarget?: never }>
+        | Readonly<{
+            previousSessionId?: never;
+            /** Main-owned card evidence, never renderer/model supplied. PR10 binds the card. */
+            restoredTarget: {
+              identity: { pid: number; creationTime: string };
+              approvedWindow: {
+                windowId: string;
+                windowIdentityDigest: string;
+                identity: { pid: number; creationTime: string };
+              };
+            };
+          }>
+      ),
   ): Promise<boolean>;
   captureWindowsGeneration?(): WindowsGenerationToken | null;
   isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
@@ -548,7 +566,7 @@ export interface ComputerUseNativeHost {
     session: ComputerUseNativeSession,
     cancelEpoch: number,
   ): Promise<ComputerUseNativeInputReceipt | void>;
-  close(session: ComputerUseNativeSession): Promise<void>;
+  close(session: ComputerUseNativeSession): Promise<void | ComputerUseGenerationTerminated>;
 }
 
 export type ComputerUseControllerPersistence = Pick<

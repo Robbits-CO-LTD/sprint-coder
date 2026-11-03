@@ -429,7 +429,26 @@ it('checks the store version inside the release transaction', () => {
   }
 });
 
-// Generation-bound approval integration follows PR9 (#1035) merging into main.
+it('PR10 conditional approval releases an unknown row only at the approved revision', async () => {
+  const f = fixture();
+  const store = f.open();
+  store.restoreQuarantines([quarantine]);
+  const db = new Database(f.path);
+  connections.push(db);
+  db.prepare('UPDATE quarantines SET payload = ?').run(
+    JSON.stringify({ ...quarantine, reason: 'future-reason' }),
+  );
+  const revision = await store.quarantineRevision!(row.identity);
+  if (revision === null) throw new Error('Expected stored revision');
+  expect(store.transferReceipt!([row], [quarantine])).toBe(false);
+  expect(store.releaseQuarantine!(row.identity, revision + 1)).toBe(false);
+  expect(store.readQuarantines!()).toHaveLength(1);
+  expect(store.releaseQuarantine!(row.identity, revision)).toBe(true);
+  expect(store.transferReceipt!([row], [quarantine])).toBe(true);
+  expect(store.readQuarantines!()).toEqual([quarantine]);
+  expect(store.releaseQuarantine!(row.identity, revision)).toBe(false);
+});
+
 it('releases an unknown reason by exact identity so a blocked transfer can recover', () => {
   const f = fixture();
   const store = f.open();

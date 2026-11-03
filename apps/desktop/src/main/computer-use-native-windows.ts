@@ -584,7 +584,8 @@ class WindowsComputerUseHelperClient {
         this.lifetimes.delete(receipt.sessionId);
         this.sessionGenerations.delete(receipt.sessionId);
         this.completedLifetimes.set(receipt.sessionId, proof.lifetime);
-        // Match the bounded start-owner history; evicted receipts cannot confirm a lifetime.
+        // Persisted sessions have already left sessionGenerations, so generation cleanup cannot
+        // remove this proof. Match the bounded start-owner history; eviction makes it unusable.
         if (this.completedLifetimes.size > 128)
           this.completedLifetimes.delete(this.completedLifetimes.keys().next().value!);
       }
