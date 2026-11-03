@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { WindowsStopDelivery } from './computer-use-windows-stop-delivery';
+import type { WindowsStopState } from './computer-use-windows-stop-outcome';
 import { COMPUTER_USE_ARTIFACT_LIMITS } from '@sprint-coder/contracts';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ComputerUseNativeSession } from './computer-use-controller';
@@ -13,6 +15,45 @@ import {
 } from './computer-use-native-host';
 
 const digest = (digit: string): string => digit.repeat(64);
+
+describe('PR7c-2 owner set', () => {
+  it('retains B behind A, clears only the matching lifetime, and empties after both terminals', () => {
+    const delivery = new WindowsStopDelivery();
+    const state: WindowsStopState = {
+      helperGeneration: 1,
+      helperLaunched: true,
+      entry: null,
+      stopOwnerId: '',
+      killRequested: false,
+      exitConfirmed: false,
+      exitWaitExceeded: false,
+      result: null,
+      rows: [],
+      quarantines: [],
+      holds: [],
+      owners: [],
+      nativeBlockers: [],
+      foregroundDiscardPending: false,
+    };
+    const a = delivery.register(1, 'session', 'A');
+    const b = delivery.register(1, 'session', 'B');
+    delivery.stop(1, 'session', 'A', 'E1');
+    delivery.stop(1, 'session', 'B', 'E2');
+    delivery.complete(1, 'session', 'A', b.lifetimeId);
+    expect(delivery.project(state)).toMatchObject({ entry: 'E1', stopOwnerId: 'A' });
+    delivery.complete(1, 'session', 'A', a.lifetimeId);
+    expect(delivery.project(state)).toMatchObject({ entry: 'E2', stopOwnerId: 'B' });
+    delivery.complete(1, 'session', 'B', b.lifetimeId);
+    expect(delivery.project(state)).toMatchObject({ entry: null, stopOwnerId: '', owners: [] });
+    const fresh = delivery.register(1, 'session', 'A');
+    delivery.stop(1, 'session', 'A', 'E1');
+    delivery.complete(1, 'session', 'A', a.lifetimeId);
+    delivery.complete(2, 'session', 'A', fresh.lifetimeId);
+    delivery.complete(1, 'discovery', 'A', fresh.lifetimeId);
+    expect(delivery.project(state).owners).toEqual([fresh]);
+    expect(delivery.project(state).entry).toBe('E1');
+  });
+});
 
 function binding(
   addon: NonNullable<ComputerUseNativeBinding['addon']>,
