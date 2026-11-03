@@ -8956,7 +8956,8 @@ int main() {
         },
         dispatch_approved: (input) => {
           seen['dispatch'] = input;
-          return ['dispatch_result', { result: 'completed' }];
+          // The native host answers an approved dispatch with its own result type (20).
+          return ['dispatch_approved_result', { result: 'completed' }];
         },
       },
       undefined,
@@ -8999,9 +9000,15 @@ int main() {
     let failApprove = false;
     let failPreflight = false;
     let failDispatch = false;
+    let attempts = 0;
     const base = responders();
     const table: Record<string, Responder> = {
       ...base,
+      // The close receipt reports every input attempt the approved dispatch made.
+      close_session: (metadata) => {
+        const [type, result] = base['close_session']!(metadata);
+        return [type, { ...(result as object), inputAttemptCount: attempts }];
+      },
       handshake: (input) => [
         'handshake_result',
         {
@@ -9059,19 +9066,20 @@ int main() {
               },
             ],
       approval_discard: () => ['approval_discard_result', { discarded: true }],
-      dispatch_approved: () =>
-        failDispatch
-          ? ['error', { code: 'INPUT_FAILED', accepted: true }]
-          : [
-              'dispatch_result',
-              {
-                result: 'completed',
-                reasonCode: null,
-                sessionId: 'approval-host',
-                cancelEpoch: 0,
-                inputAttemptCount: 1,
-              },
-            ],
+      dispatch_approved: () => {
+        if (failDispatch) return ['error', { code: 'INPUT_FAILED', accepted: true }];
+        attempts = 1;
+        return [
+          'dispatch_approved_result',
+          {
+            result: 'completed',
+            reasonCode: null,
+            sessionId: 'approval-host',
+            cancelEpoch: 0,
+            inputAttemptCount: 1,
+          },
+        ];
+      },
     };
     const target = createTarget(
       table,
@@ -9115,6 +9123,8 @@ int main() {
       kind: 'refused',
       result: 'rejected',
     });
+    // The native success frame (dispatch_approved_result) binds and completes the dispatch.
+    expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'completed' });
     failDispatch = true;
     await expect(target.host.dispatchApproved!(input)).rejects.toThrow();
     await target.host.approvalDiscard!({ session, approvalGeneration: 1 });

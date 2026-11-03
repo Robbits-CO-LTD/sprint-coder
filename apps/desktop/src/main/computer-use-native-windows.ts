@@ -2045,6 +2045,8 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
     case 'approval_discard':
       return 'approval_discard_result';
     case 'dispatch_approved':
+      // The native host answers with kDispatchApprovedResult (20), not the ordinary result.
+      return 'dispatch_approved_result';
     case 'dispatch':
     case 'cancel':
       return 'dispatch_result';
