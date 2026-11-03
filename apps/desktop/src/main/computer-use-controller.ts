@@ -135,7 +135,11 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   ComputerUseNativeUnavailableError,
 } from './computer-use-native-host';
-import type { ComputerUseNativeTargetList } from './computer-use-native-targets';
+import {
+  windowsComputerTargetCandidates,
+  type ComputerUseNativeTargetList,
+  type WindowsComputerTargetCandidate,
+} from './computer-use-native-targets';
 import type { WindowsGenerationToken } from './computer-use-native-types';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
@@ -666,6 +670,8 @@ export type ComputerUseControllerDeps = Readonly<{
    * mis-wiring cannot quietly expose desktop enumeration.
    */
   agentDrivenEnabled?: () => boolean;
+  /** Main-only N6 discovery seam. Absent means off; production activation belongs to N5. */
+  windowsTargetDiscoveryEnabled?: () => boolean;
   /**
    * The effective eligibility mode (compiled pin, V2 flag, FORCE_V1_ALLOWLIST). Absent means
    * v1-allowlist, so every session is bound to the v1 classifier route until this is wired.
@@ -1764,9 +1770,9 @@ export class ComputerUseController {
   /**
    * The agent-facing enumeration (ADR v2 §5.2).
    *
-   * S2 does not change native, so the only windows that can be enumerated are those of applications
-   * a person already registered — the V1 allow-list. The shape, the tokens, and the privacy rules
-   * are the v2 ones, so S4/S5 can widen the source without widening what crosses the boundary.
+   * By default only registered profiles are enumerated. The Main-only Windows discovery gate adds
+   * ephemeral native candidates without registration, grants, or egress consent. Both sources use
+   * the same public shape, tokens, and privacy rules.
    *
    * Every call rotates this Task's tokens. That is not tidiness: a token names one window at one
    * policy epoch and one profile revision, and letting an older set survive a re-enumeration would
@@ -1799,10 +1805,32 @@ export class ComputerUseController {
       .listComputerAppProfiles()
       .filter((profile) => !computerUseAppIdentityIsDenied(profile.identity))
       .sort((left, right) => left.id.localeCompare(right.id));
+    const crossWindows =
+      this.deps.windowsTargetDiscoveryEnabled?.() === true &&
+      this.deps.native.availability().platform === 'win32';
+    const claimed =
+      input.appToken === undefined ? undefined : this.targetAppTokens.get(input.appToken);
+    // Candidate-only profiles are never persisted. An app filter must still prove the original
+    // token's Task, Turn, epoch and lifetime before a fresh list can match its private profile.
+    const candidateFilter =
+      crossWindows && claimed !== undefined && !profiles.some((p) => p.id === claimed.profileId);
+    if (
+      candidateFilter &&
+      (!this.targetRecordCurrent(claimed) ||
+        resolveComputerTargetAppToken(
+          this.targetAppTokens,
+          input.appToken!,
+          { ...claimed.binding, taskId: context.taskId, turnId: context.turnId, policyEpoch },
+          this.now(),
+        ) === null)
+    )
+      throw new Error('Computer Use target token is not valid');
     const selectedProfileId =
       input.appToken === undefined
         ? null
-        : this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
+        : candidateFilter
+          ? claimed.profileId
+          : this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
     this.revokeTargetTokens(context.taskId);
     const enumeration = Symbol('target-enumeration');
     this.targetEnumerations.set(context.taskId, enumeration);
@@ -1820,8 +1848,47 @@ export class ComputerUseController {
       target: SelectableComputerTarget;
     }[] = [];
     const snapshots = new Map<string, TargetEnumerationSnapshot>();
+    const candidates = new Map<string, WindowsComputerTargetCandidate>();
+    let nativeTruncated = false;
     let truncated = false;
     let dropped = 0;
+    if (crossWindows) {
+      if (this.deps.native.listTargets === undefined)
+        throw new Error('Computer Use target discovery is unavailable');
+      const list = await this.deps.native.listTargets().catch(() => {
+        throw new Error('Computer Use target discovery is unavailable');
+      });
+      scope.check();
+      if (
+        this.disposed ||
+        this.currentPolicyEpoch(context.taskId) !== policyEpoch ||
+        this.deps.windowsTargetDiscoveryEnabled?.() !== true ||
+        this.targetEnumerations.get(context.taskId) !== enumeration ||
+        list.windowsGeneration === undefined ||
+        !this.windowsTargetGenerationCurrent(list.windowsGeneration)
+      )
+        throw new Error('Computer Use target generation changed');
+      nativeTruncated = list.truncated;
+      for (const candidate of windowsComputerTargetCandidates(list)) {
+        // Saved profiles keep their existing discovery and consent path.
+        if (
+          profiles.some(
+            (p) => p.platform === 'win32' && p.identityDigest === candidate.profile.identityDigest,
+          )
+        )
+          continue;
+        candidates.set(candidate.profile.id, candidate);
+      }
+      profiles.push(...[...candidates.values()].map(({ profile }) => profile));
+      if (candidateFilter) {
+        const profile = candidates.get(claimed.profileId)?.profile;
+        if (
+          profile?.identityDigest !== claimed.binding.appIdentityDigest ||
+          profile?.revision !== claimed.binding.profileRevision
+        )
+          throw new Error('Computer Use target token is not valid');
+      }
+    }
     for (const profile of profiles)
       if (selectedProfileId === null || profile.id === selectedProfileId)
         scope.profileIds.add(profile.id);
@@ -1829,15 +1896,18 @@ export class ComputerUseController {
       scope.check();
       if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
       // One unreachable application must not blank the whole list; the agent still needs the rest.
-      const windows = await this.listNativeWindows(profile, scope).catch((error: unknown) => {
-        if (
-          error instanceof ComputerUseNativeUnavailableError &&
-          error.reasonCode === 'native_stop_unconfirmed'
-        )
-          throw error;
-        scope.check();
-        return [];
-      });
+      const candidate = candidates.get(profile.id);
+      const windows =
+        candidate?.windows ??
+        (await this.listNativeWindows(profile, scope).catch((error: unknown) => {
+          if (
+            error instanceof ComputerUseNativeUnavailableError &&
+            error.reasonCode === 'native_stop_unconfirmed'
+          )
+            throw error;
+          scope.check();
+          return [];
+        }));
       scope.check();
       // Native took time to answer. A permission revoked meanwhile has already cleared this Task's
       // tokens, so minting new ones — or returning titles that were read under the old policy —
@@ -1845,6 +1915,10 @@ export class ComputerUseController {
       if (this.disposed || this.currentPolicyEpoch(context.taskId) !== policyEpoch) {
         this.revokeTargetTokens(context.taskId);
         throw new Error('Computer Use policy epoch changed');
+      }
+      if (crossWindows && this.deps.windowsTargetDiscoveryEnabled?.() !== true) {
+        this.revokeTargetTokens(context.taskId);
+        throw new Error('Computer Use target discovery is unavailable');
       }
       const appToken = randomUUID();
       const windowsGeneration = windows[0]?.windowsGeneration;
@@ -1868,8 +1942,11 @@ export class ComputerUseController {
         profileRevision: profile.revision,
         ...(windowsGeneration === undefined ? {} : { windowsGeneration }),
       } as const;
-      const grantState = this.appGrantState(profile, context.taskId);
-      snapshots.set(profile.id, { profile, grantState });
+      const grantState =
+        candidate === undefined
+          ? this.appGrantState(profile, context.taskId)
+          : COMPUTER_APP_UNGRANTED;
+      if (candidate === undefined) snapshots.set(profile.id, { profile, grantState });
       let issued = false;
       let windowIndex = 0;
       for (const window of windows.filter(({ eligible }) => eligible !== false)) {
@@ -1981,7 +2058,10 @@ export class ComputerUseController {
         taskId: context.taskId,
         dropped,
       });
-    return computerListTargetsOutputSchema.parse({ targets, truncated });
+    return computerListTargetsOutputSchema.parse({
+      targets,
+      truncated: truncated || nativeTruncated,
+    });
   }
 
   /**

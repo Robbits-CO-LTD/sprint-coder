@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import {
   COMPUTER_TARGET_UNTRUSTED_LABEL_NOTE,
   computerListTargetsOutputSchema,
   computerTargetUntrustedLabelSchema,
   computerUseAvailabilitySchema,
+  computerWindowsTargetFactsSchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
   type SelectableComputerTarget,
@@ -155,6 +159,7 @@ function createFixture(
       profile: ComputerAppProfileRecord,
     ) => readonly ComputerUseNativeWindow[] | Promise<readonly ComputerUseNativeWindow[]>;
     agentDrivenEnabled?: boolean;
+    windowsTargetDiscoveryEnabled?: boolean | (() => boolean);
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
     now?: () => number;
     policyEpoch?: number;
@@ -200,6 +205,14 @@ function createFixture(
     native,
     featureEnabled: () => true,
     agentDrivenEnabled: () => options.agentDrivenEnabled !== false,
+    ...(options.windowsTargetDiscoveryEnabled === undefined
+      ? {}
+      : {
+          windowsTargetDiscoveryEnabled: () =>
+            typeof options.windowsTargetDiscoveryEnabled === 'function'
+              ? options.windowsTargetDiscoveryEnabled()
+              : options.windowsTargetDiscoveryEnabled === true,
+        }),
     providerEgressBindingFor: (_taskId, turnId) =>
       // Keyed by Turn, matching the real wiring: the destination a Turn actually ships to is fixed
       // when the Turn starts, so a fixture that answers for an unknown Turn would hide that.
@@ -218,6 +231,7 @@ function createFixture(
     listWindowCalls,
     profiles,
     grants: grantStore.grants,
+    persistence,
     /** Stands in for a re-registration: `registerProfile` updates the row in place and bumps it. */
     /**
      * Stands in for a re-registration, keeping the row internally consistent.
@@ -1200,4 +1214,252 @@ describe('Windows generation-qualified public tokens', () => {
       expect(f.start).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('N6-2 gated Windows cross-application candidates', () => {
+  function fixture(enabled?: boolean | (() => boolean), platform: 'win32' | 'darwin' = 'win32') {
+    const f = createFixture({
+      profiles: [],
+      ...(enabled === undefined ? {} : { windowsTargetDiscoveryEnabled: enabled }),
+    });
+    const draft = {
+      platform: 'win32' as const,
+      identityDigest: '',
+      executableDigest: 'b'.repeat(64),
+      maximumMode: 'full_access_app' as const,
+      executablePath: 'C:\\Program Files\\Contoso\\Editor\\editor.exe',
+      signerDigest: 'd'.repeat(64),
+      packageFamilyName: null,
+      appUserModelId: null,
+      displayName: 'Synthetic private display',
+      policyLanguage: 'unknown' as const,
+    };
+    const identity = { ...draft, identityDigest: nativeIdentityDigestFor(draft) };
+    const golden: unknown = JSON.parse(
+      readFileSync(
+        join(__dirname, '../../computer-use-native/target-eligibility-golden.json'),
+        'utf8',
+      ),
+    );
+    if (typeof golden !== 'object' || golden === null || !('base' in golden))
+      throw new Error('invalid golden');
+    const facts = computerWindowsTargetFactsSchema.parse(golden.base);
+    const native = {
+      kind: 'eligible',
+      windowId: '42',
+      pid: 42,
+      appIdentityDigest: identity.identityDigest,
+      executableDigest: identity.executableDigest,
+      windowIdentityDigest: 'c'.repeat(64),
+      title: 'Synthetic private title',
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+      boundsUnit: 'physical_px',
+      maximumMode: 'full_access_app',
+      identity,
+      facts,
+    };
+    const parsed = parseWindowsComputerUseTargets({
+      generation: 17,
+      rulesetVersion: 2,
+      truncated: false,
+      targets: [
+        native,
+        { ...native, facts: { ...facts, tokenElevated: true } },
+        { ...native, facts: { ...facts, tokenElevated: null } },
+      ],
+    });
+    if (parsed === null) throw new Error('invalid fixture');
+    const helper = Object.freeze({ helperGeneration: 3 });
+    const generation = { helper, listGeneration: 17, rulesetVersion: 2 };
+    const list = { ...parsed, windowsGeneration: generation };
+    const listTargets = vi.fn(async () => list);
+    f.native.listTargets = listTargets;
+    f.native.availability = () => ({ ...availability, platform });
+    f.native.isWindowsGenerationCurrent = (token) => token === helper;
+    return { ...f, listTargets, list, generation, identity };
+  }
+
+  it.each([undefined, false])('keeps discovery closed with gate %s', async (enabled) => {
+    const f = fixture(enabled);
+    expect(await f.controller.listTargets({}, toolContext)).toEqual({
+      targets: [],
+      truncated: false,
+    });
+    expect(f.listTargets).not.toHaveBeenCalled();
+  });
+
+  it('publishes an unregistered candidate only behind the gate, without grants or private details', async () => {
+    const f = fixture(true);
+    const output = await f.controller.listTargets({}, toolContext);
+    expect(output.targets).toHaveLength(1);
+    const target = output.targets[0] as SelectableComputerTarget;
+    expect(target).toEqual({
+      kind: 'selectable',
+      appToken: expect.any(String),
+      targetToken: expect.any(String),
+      verified: {
+        platform: 'win32',
+        identityKind: 'verified-signed',
+        publisher: null,
+        appId: 'editor.exe',
+      },
+      windowIndex: 1,
+      granted: false,
+      mode: 'full_access_app',
+      untrustedLabel: null,
+    });
+    expect(f.controller.targetTokenBinding(target.targetToken)?.windowsGeneration).toBe(
+      f.generation,
+    );
+    expect(f.grants.size).toBe(0);
+    expect(f.profiles).toEqual([]);
+    expect(f.persistence.createComputerAppProfile).not.toHaveBeenCalled();
+    expect(f.persistence.updateComputerAppProfile).not.toHaveBeenCalled();
+    expect(f.listWindowCalls).toEqual([]);
+    expect(JSON.stringify(output)).not.toMatch(
+      /Synthetic|Program Files|pid|windowId|Digest|Generation|facts|denied|unresolvable/,
+    );
+  });
+
+  it('does not change macOS discovery when the internal gate is open', async () => {
+    const f = fixture(true, 'darwin');
+    expect((await f.controller.listTargets({}, toolContext)).targets).toEqual([]);
+    expect(f.listTargets).not.toHaveBeenCalled();
+  });
+
+  it('keeps registered Windows profiles on their original discovery path without duplicate candidates', async () => {
+    const f = fixture(true);
+    const profile = profileRecord('registered', f.identity);
+    f.profiles.push(profile);
+    const output = await f.controller.listTargets({}, toolContext);
+    expect(output.targets).toHaveLength(1);
+    expect(f.listWindowCalls).toEqual(['registered']);
+    expect(
+      f.controller.targetTokenBinding((output.targets[0] as SelectableComputerTarget).targetToken)
+        ?.nativeWindowId,
+    ).toBe('native-window-registered-1');
+  });
+
+  it('filters a candidate app and rotates tokens without accepting a different Task or Turn', async () => {
+    const f = fixture(true);
+    const first = (await f.controller.listTargets({}, toolContext))
+      .targets[0] as SelectableComputerTarget;
+    for (const context of [
+      { ...toolContext, taskId: 'task-2' },
+      { ...toolContext, turnId: 'turn-2' },
+    ])
+      await expect(f.controller.listTargets({ appToken: first.appToken }, context)).rejects.toThrow(
+        /token/,
+      );
+    const second = (await f.controller.listTargets({ appToken: first.appToken }, toolContext))
+      .targets[0] as SelectableComputerTarget;
+    expect(second.appToken).not.toBe(first.appToken);
+    expect(f.controller.targetTokenBinding(first.targetToken)).toBeNull();
+    expect(f.controller.targetTokenBinding(second.targetToken)?.windowsGeneration).toBe(
+      f.generation,
+    );
+    await expect(
+      f.controller.listTargets({ appToken: first.appToken }, toolContext),
+    ).rejects.toThrow(/token/);
+  });
+
+  it('rejects old helper evidence and invalidates already issued candidate tokens', async () => {
+    const f = fixture(true);
+    const target = (await f.controller.listTargets({}, toolContext))
+      .targets[0] as SelectableComputerTarget;
+    f.native.isWindowsGenerationCurrent = () => false;
+    expect(f.controller.targetTokenBinding(target.targetToken)).toBeNull();
+    await expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/generation/);
+  });
+
+  it('does not adopt a delayed list after a newer enumeration or cancellation', async () => {
+    const f = fixture(true);
+    let release!: (list: typeof f.list) => void;
+    f.listTargets.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const late = expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/generation/);
+    const fresh = (await f.controller.listTargets({}, toolContext))
+      .targets[0] as SelectableComputerTarget;
+    release(f.list);
+    await late;
+    expect(f.controller.targetTokenBinding(fresh.targetToken)).not.toBeNull();
+    f.listTargets.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const abort = new AbortController();
+    const canceled = expect(
+      f.controller.listTargets({}, toolContext, abort.signal),
+    ).rejects.toThrow();
+    abort.abort();
+    release(f.list);
+    await canceled;
+  });
+
+  it('withholds native error detail and requires generation evidence', async () => {
+    const f = fixture(true);
+    f.listTargets.mockRejectedValueOnce(
+      new Error('Synthetic private process C:\\Private\\process.exe'),
+    );
+    await expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(
+      'Computer Use target discovery is unavailable',
+    );
+    f.native.listTargets = async () => ({
+      generation: f.list.generation,
+      rulesetVersion: f.list.rulesetVersion,
+      truncated: f.list.truncated,
+      targets: f.list.targets,
+    });
+    await expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/generation/);
+  });
+
+  it('withholds candidates if the gate closes while a registered profile is being discovered', async () => {
+    let enabled = true;
+    const f = fixture(() => enabled);
+    f.profiles.push(
+      profileRecord(
+        'registered-other',
+        macIdentity({
+          platform: 'win32',
+          executablePath: 'C:\\Program Files\\Other\\other.exe',
+          signerDigest: 'e'.repeat(64),
+          packageFamilyName: null,
+        }),
+      ),
+    );
+    f.native.listWindows = async () => {
+      enabled = false;
+      return [];
+    };
+    await expect(f.controller.listTargets({}, toolContext)).rejects.toThrow(/unavailable/);
+  });
+
+  it('preserves native truncation without cutting off candidate groups and enforces the public limit', async () => {
+    const f = fixture(true);
+    const first = f.list.targets[0]!;
+    if (first.kind !== 'selectable') throw new Error('invalid fixture');
+    f.list.truncated = true;
+    f.list.targets = [
+      first,
+      { ...first, native: { ...first.native, executableDigest: 'e'.repeat(64), windowId: '43' } },
+    ];
+    const truncated = await f.controller.listTargets({}, toolContext);
+    expect(truncated.truncated).toBe(true);
+    expect(truncated.targets).toHaveLength(2);
+    f.list.truncated = false;
+    f.list.targets = Array.from({ length: 51 }, (_, i) => ({
+      ...first,
+      native: { ...first.native, windowId: String(i + 1) },
+    }));
+    const capped = await f.controller.listTargets({}, toolContext);
+    expect(capped.targets).toHaveLength(50);
+    expect(capped.truncated).toBe(true);
+  });
 });
