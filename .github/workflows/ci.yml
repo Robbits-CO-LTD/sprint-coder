@@ -61,13 +61,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - label: typecheck
-            command: typecheck
-          - label: lint
-            command: lint
-          - label: format
-            command: format:check
+        # MSI has one slot: install once for all three checks instead of serializing
+        # three copies of checkout/cache restoration. Hosted runners stay parallel.
+        include: ${{ fromJSON(contains(needs.classify.outputs.common_runner, '"ci-host-msi"') && '[{"label":"shared","command":"shared"}]' || '[{"label":"typecheck","command":"typecheck"},{"label":"lint","command":"lint"},{"label":"format","command":"format:check"}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -87,7 +83,17 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Run ${{ matrix.label }}
+        if: matrix.command != 'shared'
         run: npm run ${{ matrix.command }}
+
+      - name: Run typecheck, lint, and format with one MSI dependency tree
+        if: matrix.command == 'shared'
+        shell: pwsh
+        run: |
+          foreach ($command in 'typecheck', 'lint', 'format:check') {
+            npm run $command
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
   package-tests:
     name: package tests

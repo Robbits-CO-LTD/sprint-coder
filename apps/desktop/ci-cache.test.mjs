@@ -315,6 +315,24 @@ describe('CI scope wiring', () => {
       expect(preflight.if).toBe("runner.name == 'MSI-ci'");
       expect(workflow.jobs[job].steps.indexOf(preflight)).toBe(1);
     }
+    const matrix = workflow.jobs.quality.strategy.matrix.include;
+    const qualityRows = (runner) =>
+      runInNewContext(matrix.slice(3, -2), {
+        fromJSON: JSON.parse,
+        contains: (value, token) => value.includes(token),
+        needs: { classify: { outputs: { common_runner: JSON.stringify(runner) } } },
+      });
+    expect(qualityRows(labels)).toEqual([{ label: 'shared', command: 'shared' }]);
+    expect(qualityRows(['ubuntu-latest'])).toEqual([
+      { label: 'typecheck', command: 'typecheck' },
+      { label: 'lint', command: 'lint' },
+      { label: 'format', command: 'format:check' },
+    ]);
+    const shared = workflow.jobs.quality.steps.find(
+      (step) => step.if === "matrix.command == 'shared'",
+    );
+    expect(shared.run).toContain("'typecheck', 'lint', 'format:check'");
+    expect(shared.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
   });
 
   it.each([

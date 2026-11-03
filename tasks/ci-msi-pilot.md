@@ -3,7 +3,7 @@
 ## Scope
 
 Use the existing non-administrator Organization runner `MSI-ci` (ID3741) for the
-three quality jobs (typecheck, lint, format), contracts/domain tests, and Windows Rust
+one shared quality job (typecheck, lint, format), contracts/domain tests, and Windows Rust
 release/test compilation. Keep the existing Windows Rust `windows_command` integration
 suite in hosted native Gate0, with its exact command and required gate intact.
 
@@ -24,6 +24,13 @@ The pilot targets runner availability and reusable local tool/dependency caches;
 it does not promise lower wall time before measurement. Reference run41548546148
 finished in about11 minutes with18 parallel Windows jobs totaling about70 job-minutes.
 MSI has one execution slot; moving every shard to it would serialize that work.
+Run41553126501 proved the non-administrator MSI cannot restore archived npm workspace
+symlinks (`tar: Cannot create symlink: Operation not permitted`); the existing cache
+action correctly falls back to `npm ci`, adding download/extraction/install overhead.
+Batch all three MSI quality checks after one installation. Keep the original three
+parallel quality rows when routing back to hosted runners. No symlink privilege is
+granted and no test failure is ignored. Cached npm downloads still reduce fetch work;
+installed-tree restore is not claimed to work on this account.
 
 ## Routing and access
 
