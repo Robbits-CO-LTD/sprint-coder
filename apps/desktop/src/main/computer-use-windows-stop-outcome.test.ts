@@ -15,9 +15,8 @@
 // restore_read ...". Foreground-only restart failure: "R14/R23 foreground-only ...". Gate then
 // write: "R18/K-4 ...", "R18 a row written after the gate ...".
 // Omitted combinations: "ADR omitted combinations are rejected".
-// Undecided (typed, not chosen here): R8/R11 notification (PR7), sessionless E4 destination and
-// reason value (PR11), settle duration (PR7).
-import { describe, expect, it } from 'vitest';
+// Delivery remains deferred: owner routing (PR7c-2), sessionless E4 (PR11), settle duration.
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS } from './computer-use-native-host';
 import {
   decideWindowsStop,
@@ -33,6 +32,8 @@ import {
   type WindowsLedgerRow,
   type WindowsNativeBlocker,
   type WindowsStopDecision,
+  type WindowsStopNotification,
+  type GenerationCleanup,
   type WindowsStopEvent,
   type WindowsStopState,
 } from './computer-use-windows-stop-outcome';
@@ -147,11 +148,15 @@ const k5Requirements: readonly WindowsFreshSessionRequirement[] = [
   'current_interaction_epoch',
 ];
 
+type DecisionExpectation<T = WindowsStopDecision> = T extends WindowsStopDecision
+  ? Partial<Omit<T, 'state'>> & { state?: Partial<T['state']> }
+  : never;
+
 type Case = {
   name: string;
   input: WindowsStopState;
   event: WindowsStopEvent;
-  expected: Partial<Omit<WindowsStopDecision, 'state'>> & { state?: Partial<WindowsStopState> };
+  expected: DecisionExpectation;
   mayStart: boolean;
 };
 const cases: Case[] = [
@@ -175,8 +180,8 @@ const cases: Case[] = [
       confirmation: 'not_submitted',
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'not_submitted' },
-        sessionlessDestination: 'undecided_pr11',
       },
     },
     mayStart: true,
@@ -189,8 +194,8 @@ const cases: Case[] = [
       confirmation: 'host_receipt',
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'receipt' },
-        sessionlessDestination: 'undecided_pr11',
       },
     },
     mayStart: true,
@@ -252,7 +257,13 @@ const cases: Case[] = [
     event: exit,
     expected: {
       confirmation: 'exit',
-      notification: { kind: 'session_reason', reason: 'requested_reason' },
+      notification: {
+        kind: 'generation_exit',
+        cause: 'stop',
+        late: false,
+        result: 'terminated_clean',
+        initiatorReason: 'requested_reason',
+      },
       state: { result: 'terminated_clean', quarantines: [quarantine] },
     },
     mayStart: false,
@@ -264,8 +275,8 @@ const cases: Case[] = [
     expected: {
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: { stopped: true, result: 'terminated_clean' },
-        sessionlessDestination: 'undecided_pr11',
       },
     },
     mayStart: true,
@@ -318,7 +329,7 @@ const cases: Case[] = [
     expected: {
       helper: 'retain_child',
       confirmation: 'none',
-      notification: { kind: 'session_reason', reason: 'native_unavailable' },
+      notification: { kind: 'termination_pending', reason: 'native_unavailable' },
       state: { rows: [row], result: 'termination_requested' },
     },
     mayStart: false,
@@ -330,12 +341,12 @@ const cases: Case[] = [
     expected: {
       notification: {
         kind: 'discovery_result',
+        late: false,
         result: {
           stopped: false,
           result: 'termination_requested',
           code: 'native_stop_unconfirmed',
         },
-        sessionlessDestination: 'undecided_pr11',
       },
     },
     mayStart: false,
@@ -351,7 +362,13 @@ const cases: Case[] = [
     event: exit,
     expected: {
       confirmation: 'exit',
-      notification: { kind: 'undecided', row: 'R8', decidedBy: 'PR7' },
+      notification: {
+        kind: 'generation_exit',
+        cause: 'stop',
+        late: true,
+        result: 'terminated_target_suspect',
+        initiatorReason: 'requested_reason',
+      },
       state: { result: 'terminated_target_suspect' },
     },
     mayStart: false,
@@ -371,7 +388,7 @@ const cases: Case[] = [
     event: exit,
     expected: {
       state: { result: 'terminated_clean', quarantines: [], nativeBlockers: [] },
-      cleanup: 'generation_after_transfer',
+      cleanup: { kind: 'ready', helperGeneration: 1 },
       affectedOwnerIds: ['discovery', 'start'],
     },
     mayStart: true,
@@ -390,16 +407,22 @@ const cases: Case[] = [
         quarantines: [{ identity: target, reason: 'exit_suspect' }],
         nativeBlockers: [],
       },
-      cleanup: 'generation_after_transfer',
+      cleanup: { kind: 'ready', helperGeneration: 1 },
     },
     mayStart: false,
   },
   {
     name: 'R11 crash outside Stop',
-    input: state({ rows: [row] }),
+    input: state({ entry: null, rows: [row] }),
     event: { ...exit, cause: 'crash' },
     expected: {
-      notification: { kind: 'undecided', row: 'R11', decidedBy: 'PR7' },
+      notification: {
+        kind: 'generation_exit',
+        cause: 'crash',
+        late: false,
+        result: 'terminated_target_suspect',
+        initiatorReason: 'native_unavailable',
+      },
       state: { result: 'terminated_target_suspect' },
     },
     mayStart: false,
@@ -414,7 +437,7 @@ const cases: Case[] = [
     }),
     event: exit,
     expected: {
-      cleanup: 'generation_after_transfer',
+      cleanup: { kind: 'ready', helperGeneration: 1 },
       state: {
         rows: [],
         quarantines: [
@@ -558,7 +581,7 @@ const cases: Case[] = [
     event: { ...exit, storage: failed },
     expected: {
       confirmation: 'exit',
-      cleanup: 'deferred_until_transfer',
+      cleanup: { kind: 'deferred', helperGeneration: 1, holdId: 'write-1' },
       awaitingHoldId: failed.holdId,
       state: { result: 'terminated_target_suspect', rows: [row], quarantines: [] },
     },
@@ -1084,7 +1107,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       expect(recovered.state.holds).toEqual([]);
       expect(recovered.state.rows).toEqual([]);
       expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'exit_suspect' }]);
-      expect(recovered.cleanup).toBe('generation_after_transfer');
+      expect(recovered.cleanup).toEqual({ kind: 'ready', helperGeneration: 1 });
     },
   );
 
@@ -1110,8 +1133,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       storage: failed,
     });
     expect(held).toMatchObject({
-      cleanup: 'deferred_until_transfer',
-      cleanupGeneration: 1,
+      cleanup: { kind: 'deferred', helperGeneration: 1, holdId: 'write-1' },
       awaitingHoldId: failed.holdId,
     });
     expect(held.state.nativeBlockers).toEqual(blockers);
@@ -1127,8 +1149,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       status: 'written',
     });
     expect(recovered).toMatchObject({
-      cleanup: 'generation_after_transfer',
-      cleanupGeneration: 1,
+      cleanup: { kind: 'ready', helperGeneration: 1 },
       awaitingHoldId: null,
     });
     expect(recovered.state.nativeBlockers).toEqual([]);
@@ -1155,7 +1176,7 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       storage: failed,
     });
     expect(fgExit.state.holds).toEqual([]);
-    expect(fgExit.cleanup).toBe('generation_after_transfer');
+    expect(fgExit.cleanup).toEqual({ kind: 'ready', helperGeneration: 1 });
     expect(windowsTargetMayStart(fgExit.state, target)).toBe(true);
   });
 
@@ -1707,5 +1728,194 @@ describe('ADR omitted combinations are rejected', () => {
       expect(result).toMatchObject({ refusal: 'approval_requires_fresh_session' });
       expect(result.state.quarantines).toEqual([quarantine]);
     }
+  });
+});
+
+describe('PR7c-1 notification contract', () => {
+  for (const [entry, initiatorReason] of [
+    ['E1', 'requested_reason'],
+    ['E2', 'requested_reason'],
+    ['E3', 'requested_reason'],
+    [null, 'native_unavailable'],
+  ] as const) {
+    for (const cause of ['stop', 'abortTransport', 'crash'] as const) {
+      for (const late of [false, true]) {
+        for (const suspect of [false, true]) {
+          it(`R8/R11 entry=${entry}, ${cause}, late=${late}, suspect=${suspect} confirms exit once`, () => {
+            const initial = state({ entry, killRequested: true, rows: suspect ? [row] : [] });
+            const waiting = late
+              ? decideWindowsStop(initial, { kind: 'exit_wait_exceeded', helperGeneration: 1 })
+                  .state
+              : initial;
+            const confirmed = decideWindowsStop(waiting, { ...exit, cause });
+            expect(confirmed).toMatchObject({
+              kind: 'exit_confirmed',
+              notification: {
+                kind: 'generation_exit',
+                cause,
+                late,
+                result: suspect ? 'terminated_target_suspect' : 'terminated_clean',
+                initiatorReason,
+              },
+              cleanup: { kind: 'ready', helperGeneration: 1 },
+            });
+            const repeated = decideWindowsStop(confirmed.state, { ...exit, cause });
+            expect(repeated).toMatchObject({
+              kind: 'unchanged',
+              notification: { kind: 'unchanged' },
+              cleanup: 'none',
+            });
+            expect(repeated.state).toBe(confirmed.state);
+          });
+        }
+      }
+    }
+  }
+
+  for (const cause of ['stop', 'abortTransport', 'crash'] as const) {
+    it(`R8 E4 late ${cause} preserves discovery delay`, () => {
+      const pending = decideWindowsStop(state({ entry: 'E4', killRequested: true }), {
+        kind: 'exit_wait_exceeded',
+        helperGeneration: 1,
+      });
+      expect(pending.notification).toEqual({
+        kind: 'discovery_result',
+        late: false,
+        result: {
+          stopped: false,
+          result: 'termination_requested',
+          code: 'native_stop_unconfirmed',
+        },
+      });
+      const confirmed = decideWindowsStop(pending.state, { ...exit, cause });
+      expect(confirmed.notification).toEqual({
+        kind: 'discovery_result',
+        late: true,
+        result: { stopped: true, result: 'terminated_clean' },
+      });
+      expect(decideWindowsStop(confirmed.state, { ...exit, cause }).notification).toEqual({
+        kind: 'unchanged',
+      });
+    });
+  }
+
+  it('R7 reports termination_pending once even if no exit follows', () => {
+    const deadline = { kind: 'exit_wait_exceeded', helperGeneration: 1 } as const;
+    const pending = decideWindowsStop(state({ killRequested: true }), deadline);
+    expect(pending).toMatchObject({
+      kind: 'termination_pending',
+      helper: 'retain_child',
+      state: { result: 'termination_requested', exitConfirmed: false },
+      notification: { kind: 'termination_pending', reason: 'native_unavailable' },
+    });
+    expect(decideWindowsStop(pending.state, deadline)).toMatchObject({
+      kind: 'unchanged',
+      notification: { kind: 'unchanged' },
+    });
+  });
+
+  it('does not carry a Stop into a new helper generation or Main restart', () => {
+    const stopped = decideWindowsStop(state(), exit).state;
+    for (const next of [
+      decideWindowsStop(stopped, { kind: 'start_generation', nextHelperGeneration: 2 }).state,
+      decideWindowsStop(stopped, { kind: 'restart', storage: written }).state,
+    ])
+      expect(next).toMatchObject({ entry: null, stopOwnerId: '' });
+    const started = decideWindowsStop(stopped, {
+      kind: 'start_generation',
+      nextHelperGeneration: 2,
+    });
+    expect(
+      decideWindowsStop(started.state, { ...exit, helperGeneration: 2, cause: 'crash' })
+        .notification,
+    ).toEqual({
+      kind: 'generation_exit',
+      cause: 'crash',
+      late: false,
+      result: 'terminated_clean',
+      initiatorReason: 'native_unavailable',
+    });
+  });
+  it('returns to outside Stop after receipt or non-submission confirms completion', () => {
+    for (const completed of [
+      decideWindowsStop(state(), receipt).state,
+      decideWindowsStop(state({ entry: 'E3' }), {
+        kind: 'not_submitted',
+        helperGeneration: 1,
+        otherUnconfirmedOwners: false,
+      }).state,
+    ]) {
+      expect(decideWindowsStop(completed, { ...exit, cause: 'crash' }).notification).toEqual({
+        kind: 'generation_exit',
+        cause: 'crash',
+        late: false,
+        result: 'terminated_clean',
+        initiatorReason: 'native_unavailable',
+      });
+    }
+  });
+
+  it('R19c separates exit confirmation from recovered generation cleanup', () => {
+    const confirmed = decideWindowsStop(state({ rows: [row] }), { ...exit, storage: failed });
+    expect(confirmed).toMatchObject({
+      kind: 'exit_confirmed',
+      notification: { kind: 'generation_exit' },
+      cleanup: { kind: 'deferred', helperGeneration: 1, holdId: failed.holdId },
+    });
+    expect(decideWindowsStop(confirmed.state, exit).notification).toEqual({ kind: 'unchanged' });
+    const recovered = decideWindowsStop(confirmed.state, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'written',
+    });
+    expect(recovered).toMatchObject({
+      kind: 'storage_recovered',
+      cleanup: { kind: 'ready', helperGeneration: 1 },
+      notification: { kind: 'unchanged' },
+    });
+    expect(recovered.state.holds).toEqual([]);
+    expect(() =>
+      decideWindowsStop(recovered.state, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'written',
+      }),
+    ).toThrow('Unknown storage hold');
+  });
+});
+
+describe('PR7c-1 result types', () => {
+  it('rejects missing generation, missing hold and impossible decision effects', () => {
+    type ReadyWithoutGeneration = { kind: 'ready' };
+    type DeferredWithoutHold = { kind: 'deferred'; helperGeneration: number };
+    type Unchanged = Extract<WindowsStopDecision, { kind: 'unchanged' }>;
+    type Exit = Extract<WindowsStopDecision, { kind: 'exit_confirmed' }>;
+    type Pending = Extract<WindowsStopDecision, { kind: 'termination_pending' }>;
+    type BadUnchanged = Omit<Unchanged, 'cleanup'> & { cleanup: GenerationCleanup };
+    type BadExit = Omit<Exit, 'notification'> & { notification: { kind: 'unchanged' } };
+    type BadPending = Omit<Pending, 'helper'> & { helper: 'may_start' };
+    type BadCleanup = Omit<Exit, 'cleanup' | 'awaitingHoldId'> & {
+      cleanup: { kind: 'ready'; helperGeneration: number };
+      awaitingHoldId: string;
+    };
+    expectTypeOf<
+      ReadyWithoutGeneration extends GenerationCleanup ? true : false
+    >().toEqualTypeOf<false>();
+    expectTypeOf<
+      DeferredWithoutHold extends GenerationCleanup ? true : false
+    >().toEqualTypeOf<false>();
+    expectTypeOf<BadUnchanged extends WindowsStopDecision ? true : false>().toEqualTypeOf<false>();
+    expectTypeOf<BadExit extends WindowsStopDecision ? true : false>().toEqualTypeOf<false>();
+    expectTypeOf<BadPending extends WindowsStopDecision ? true : false>().toEqualTypeOf<false>();
+    expectTypeOf<BadCleanup extends WindowsStopDecision ? true : false>().toEqualTypeOf<false>();
+    expectTypeOf<Extract<WindowsStopNotification, { kind: 'undecided' }>>().toEqualTypeOf<never>();
+    type ExitNotification = Extract<WindowsStopNotification, { kind: 'generation_exit' }>;
+    type BadNotification = Omit<ExitNotification, 'result'> & { result: 'termination_requested' };
+    expectTypeOf<
+      BadNotification extends WindowsStopNotification ? true : false
+    >().toEqualTypeOf<false>();
+    expectTypeOf<Extract<WindowsStopDecision, { kind: 'refused' }>['refusal']>()
+      .exclude<null>()
+      .toEqualTypeOf<Extract<WindowsStopDecision, { kind: 'refused' }>['refusal']>();
   });
 });

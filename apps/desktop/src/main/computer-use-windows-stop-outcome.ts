@@ -161,8 +161,8 @@ export type WindowsStopState = Readonly<{
    * new generation may start only then (§3.1 の 6). restart clears it: a new Main has no helper.
    */
   helperLaunched: boolean;
-  /** The Stop in progress: its entry and owner (session id, or the discovery owner for E4). */
-  entry: WindowsStopEntry;
+  /** The Stop in progress; null outside Stop. Owner is a session id or the E4 discovery id. */
+  entry: WindowsStopEntry | null;
   stopOwnerId: string;
   killRequested: boolean;
   exitConfirmed: boolean;
@@ -321,20 +321,27 @@ export type WindowsStopRefusal =
   | 'helper_stopping'
   | 'stale_generation';
 
-/**
- * Decided parts are typed values; undecided ones say which PR decides them (§2.6 末尾, §6.1 の 8).
- * E4's discovery result is decided (native_stop_unconfirmed for R7); only the destination and
- * reason value of a sessionless E4 notification are PR11's.
- */
+/** Kernel facts only; owner delivery and sessionless E4 routing belong to later PRs. */
 export type WindowsStopNotification =
   | Readonly<{ kind: 'unchanged' }>
-  | Readonly<{ kind: 'session_reason'; reason: 'requested_reason' | 'native_unavailable' }>
+  | Readonly<{ kind: 'termination_pending'; reason: 'native_unavailable' }>
   | Readonly<{
-      kind: 'discovery_result';
-      result: WindowsDiscoveryStopResult;
-      sessionlessDestination: 'undecided_pr11';
+      kind: 'generation_exit';
+      cause: 'stop' | 'crash' | 'abortTransport';
+      late: boolean;
+      result: Exclude<WindowsTerminationResult, 'termination_requested'>;
+      initiatorReason: 'requested_reason' | 'native_unavailable';
     }>
-  | Readonly<{ kind: 'undecided'; row: 'R8' | 'R11'; decidedBy: 'PR7' }>;
+  | Readonly<{ kind: 'discovery_result'; result: WindowsDiscoveryStopResult; late: boolean }>;
+
+export type GenerationCleanup =
+  | Readonly<{ kind: 'ready'; helperGeneration: number }>
+  | Readonly<{ kind: 'deferred'; helperGeneration: number; holdId: string }>;
+
+type GenerationCleanupEffect =
+  | Readonly<{ cleanup: Extract<GenerationCleanup, { kind: 'ready' }>; awaitingHoldId: null }>
+  /** awaitingHoldId equals cleanup.holdId: both identify the same pending transfer. */
+  | Readonly<{ cleanup: Extract<GenerationCleanup, { kind: 'deferred' }>; awaitingHoldId: string }>;
 
 export type WindowsStopDiagnostic = Readonly<{
   kind: string;
@@ -348,40 +355,114 @@ export type WindowsFreshSessionRequirement =
   /** Bound only for a background session (K-5). */
   | 'current_interaction_epoch';
 
-/**
- * A flat record on purpose: making it a discriminated union per event is deferred to PR7, once the
- * Host/client callers that consume it are settled. Fields an event does not decide keep the
- * neutral value ('none', 'unchanged', null, false, []).
- */
-export type WindowsStopDecision = Readonly<{
-  state: WindowsStopState;
-  confirmation: 'none' | 'host_receipt' | 'exit' | 'not_submitted';
-  helper: 'unchanged' | 'request_kill' | 'retain_child' | 'may_start';
-  /**
-   * deferred_until_transfer: the exit is confirmed but generation cleanup (releasing isolation
-   * sources, idle teardown) must wait for `awaitingHoldId` (R19c). retry_storage then returns
-   * generation_after_transfer.
-   */
-  cleanup: 'none' | 'stop_owner' | 'generation_after_transfer' | 'deferred_until_transfer';
-  cleanupGeneration: number | null;
-  idleTeardown: 'unchanged' | 'defer' | 'allowed';
-  /**
-   * The storage hold this decision waits on. While a R19b/R19c transfer is pending, no generation
-   * cleanup or idle teardown; while a release write is pending, no fresh session (R15/R17/R24).
-   */
-  awaitingHoldId: string | null;
-  retryAfterMs: 50 | null;
-  pause: boolean;
-  dispatch: 'unchanged' | 'deny' | 'allow';
-  refusal: WindowsStopRefusal | null;
-  freshSession: boolean;
-  freshSessionRequirements: readonly WindowsFreshSessionRequirement[];
-  affectedOwnerIds: readonly string[];
-  invalidateGenerationTokens: boolean;
-  diagnostics: readonly WindowsStopDiagnostic[];
-  /** Settle duration also remains undecided (PR7, §6.1 の 9). */
-  notification: WindowsStopNotification;
+/** Neutral effects stay available to callers, but each result permits only its own effects. */
+type NeutralEffects = Readonly<{
+  confirmation: 'none';
+  helper: 'unchanged';
+  cleanup: 'none';
+  idleTeardown: 'unchanged';
+  awaitingHoldId: null;
+  retryAfterMs: null;
+  pause: false;
+  dispatch: 'unchanged';
+  refusal: null;
+  freshSession: false;
+  freshSessionRequirements: readonly [];
+  affectedOwnerIds: readonly [];
+  invalidateGenerationTokens: false;
+  diagnostics: readonly [];
+  notification: Readonly<{ kind: 'unchanged' }>;
 }>;
+type DecisionBranch<Kind extends string, Effects = object> = Readonly<
+  { kind: Kind; state: WindowsStopState } & Omit<NeutralEffects, keyof Effects> & Effects
+>;
+type DiscoveryNotification = Extract<WindowsStopNotification, { kind: 'discovery_result' }>;
+type ExitNotification = Extract<WindowsStopNotification, { kind: 'generation_exit' }>;
+type FreshSessionEffect =
+  | Readonly<{ freshSession: false; freshSessionRequirements: readonly [] }>
+  | Readonly<{
+      freshSession: true;
+      freshSessionRequirements: readonly WindowsFreshSessionRequirement[];
+    }>;
+
+/** The discriminant describes the result, not the input event (a receipt may request a kill). */
+export type WindowsStopDecision =
+  | DecisionBranch<'unchanged'>
+  | DecisionBranch<
+      'refused',
+      {
+        refusal: WindowsStopRefusal;
+        dispatch: 'unchanged' | 'deny';
+        awaitingHoldId: string | null;
+      }
+    >
+  | DecisionBranch<'dispatch_allowed', { dispatch: 'allow' }>
+  | DecisionBranch<'kill_requested', { helper: 'request_kill' }>
+  | DecisionBranch<'awaiting_exit', { helper: 'retain_child' }>
+  | DecisionBranch<'receipt_pending', { idleTeardown: 'defer'; retryAfterMs: 50 | null }>
+  | DecisionBranch<
+      'termination_pending',
+      {
+        state: WindowsStopState & { result: 'termination_requested' };
+        helper: 'retain_child';
+        notification:
+          Extract<WindowsStopNotification, { kind: 'termination_pending' }> | DiscoveryNotification;
+      }
+    >
+  | DecisionBranch<
+      'not_submitted',
+      {
+        confirmation: 'not_submitted';
+        cleanup: 'stop_owner';
+        helper: 'may_start';
+        notification: NeutralEffects['notification'] | DiscoveryNotification;
+      }
+    >
+  | DecisionBranch<
+      'receipt_confirmed',
+      {
+        confirmation: 'host_receipt';
+        cleanup: 'stop_owner';
+        idleTeardown: 'allowed' | 'defer';
+        awaitingHoldId: string | null;
+        notification: NeutralEffects['notification'] | DiscoveryNotification;
+      }
+    >
+  | DecisionBranch<
+      'receipt_after_kill',
+      {
+        helper: 'retain_child';
+        idleTeardown: 'allowed' | 'defer';
+        awaitingHoldId: string | null;
+      }
+    >
+  | DecisionBranch<
+      'exit_confirmed',
+      GenerationCleanupEffect & {
+        state: WindowsStopState & { exitConfirmed: true; result: ExitNotification['result'] };
+        confirmation: 'exit';
+        helper: 'may_start';
+        affectedOwnerIds: readonly string[];
+        invalidateGenerationTokens: true;
+        notification: ExitNotification | DiscoveryNotification;
+      }
+    >
+  | DecisionBranch<'ledger_updated', { pause: boolean; awaitingHoldId: string | null }>
+  | DecisionBranch<'generation_started', { helper: 'may_start' }>
+  | DecisionBranch<
+      'restored',
+      { helper: 'may_start'; diagnostics: readonly WindowsStopDiagnostic[] }
+    >
+  | DecisionBranch<'diagnostic', { diagnostics: readonly WindowsStopDiagnostic[] }>
+  | DecisionBranch<'target_released', FreshSessionEffect>
+  | DecisionBranch<
+      'storage_recovered',
+      FreshSessionEffect & {
+        cleanup: 'none' | Extract<GenerationCleanup, { kind: 'ready' }>;
+        idleTeardown: 'unchanged' | 'allowed';
+        diagnostics: readonly WindowsStopDiagnostic[];
+      }
+    >;
 
 function assertNever(value: never): never {
   throw new Error(`Unhandled Windows stop value: ${JSON.stringify(value)}`);
@@ -641,13 +722,14 @@ function storedRowProblem(row: WindowsLedgerRow): 'invalid_format' | 'missing_id
   return formatOk ? null : 'invalid_format';
 }
 
-function entryAllowsNonSubmission(entry: WindowsStopEntry): boolean {
+function entryAllowsNonSubmission(entry: WindowsStopEntry | null): boolean {
   switch (entry) {
     case 'E3':
     case 'E4':
       return true;
     case 'E1':
     case 'E2':
+    case null:
       return false;
     default:
       return assertNever(entry);
@@ -685,23 +767,27 @@ const FULL_FRESH_SESSION: readonly WindowsFreshSessionRequirement[] = [
   'current_interaction_epoch',
 ];
 
-function discoveryNotification(result: WindowsStopResult): WindowsStopNotification {
+function discoveryNotification(result: WindowsStopResult, late = false): DiscoveryNotification {
   return {
     kind: 'discovery_result',
+    late,
     result: windowsDiscoveryStopResult(result),
-    sessionlessDestination: 'undecided_pr11',
   };
 }
 
 function exitNotification(
   state: WindowsStopState,
   cause: 'stop' | 'crash' | 'abortTransport',
-  result: WindowsTerminationResult,
-): WindowsStopNotification {
-  if (state.exitWaitExceeded) return { kind: 'undecided', row: 'R8', decidedBy: 'PR7' };
-  if (cause !== 'stop') return { kind: 'undecided', row: 'R11', decidedBy: 'PR7' };
-  if (state.entry === 'E4') return discoveryNotification(result);
-  return { kind: 'session_reason', reason: 'requested_reason' };
+  result: ExitNotification['result'],
+): ExitNotification | DiscoveryNotification {
+  if (state.entry === 'E4') return discoveryNotification(result, state.exitWaitExceeded);
+  return {
+    kind: 'generation_exit',
+    cause,
+    late: state.exitWaitExceeded,
+    result,
+    initiatorReason: state.entry !== null ? 'requested_reason' : 'native_unavailable',
+  };
 }
 
 /** Pure state-table kernel. It neither calls native code nor writes storage. */
@@ -710,12 +796,12 @@ export function decideWindowsStop(
   event: WindowsStopEvent,
 ): WindowsStopDecision {
   assertStateInvariants(state);
-  const decision: WindowsStopDecision = {
+  const decision: DecisionBranch<'unchanged'> = {
+    kind: 'unchanged',
     state,
     confirmation: 'none',
     helper: 'unchanged',
     cleanup: 'none',
-    cleanupGeneration: null,
     idleTeardown: 'unchanged',
     awaitingHoldId: null,
     retryAfterMs: null,
@@ -731,8 +817,12 @@ export function decideWindowsStop(
   };
   const refuse = (
     refusal: WindowsStopRefusal,
-    extra: Partial<WindowsStopDecision> = {},
-  ): WindowsStopDecision => ({ ...decision, ...extra, refusal });
+    extra: Readonly<{
+      state?: WindowsStopState;
+      dispatch?: 'deny';
+      awaitingHoldId?: string | null;
+    }> = {},
+  ): WindowsStopDecision => ({ ...decision, ...extra, kind: 'refused', refusal });
   /**
    * A target release grants a fresh session only when its write lands. A failed write keeps the
    * quarantine, holds the target and carries the requirements to the retry that releases it.
@@ -753,10 +843,16 @@ export function decideWindowsStop(
       ? {
           ...decision,
           state: persisted.state,
+          kind: 'target_released',
           freshSession: true,
           freshSessionRequirements: requirements,
         }
-      : { ...decision, state: persisted.state, awaitingHoldId: persisted.holdId };
+      : {
+          ...decision,
+          kind: 'ledger_updated',
+          state: persisted.state,
+          awaitingHoldId: persisted.holdId,
+        };
   };
 
   if (isGenerationEvent(event)) {
@@ -786,6 +882,7 @@ export function decideWindowsStop(
       // Cancel only this unsent row. An exit classification or quarantine is never rolled back.
       return {
         ...decision,
+        kind: 'ledger_updated',
         state: persist(state, event.storage, {
           operation: 'response',
           recovery: 'reflect_response',
@@ -796,17 +893,24 @@ export function decideWindowsStop(
     case 'pipe_closed':
       return decision;
     case 'kill_requested':
-      return { ...decision, state: { ...state, killRequested: true }, helper: 'request_kill' };
-    case 'exit_wait_exceeded':
-      if (!state.killRequested) throw new Error('Exit deadline requires a kill request');
       return {
         ...decision,
+        kind: 'kill_requested',
+        state: { ...state, killRequested: true },
+        helper: 'request_kill',
+      };
+    case 'exit_wait_exceeded':
+      if (!state.killRequested) throw new Error('Exit deadline requires a kill request');
+      if (state.exitWaitExceeded) return decision;
+      return {
+        ...decision,
+        kind: 'termination_pending',
         state: { ...state, exitWaitExceeded: true, result: 'termination_requested' },
         helper: 'retain_child',
         notification:
           state.entry === 'E4'
             ? discoveryNotification('termination_requested')
-            : { kind: 'session_reason', reason: 'native_unavailable' },
+            : { kind: 'termination_pending', reason: 'native_unavailable' },
       };
     case 'not_submitted':
       if (
@@ -819,7 +923,8 @@ export function decideWindowsStop(
       }
       return {
         ...decision,
-        state: { ...state, result: 'not_submitted' },
+        kind: 'not_submitted',
+        state: { ...state, entry: null, result: 'not_submitted' },
         confirmation: 'not_submitted',
         cleanup: 'stop_owner',
         helper: 'may_start',
@@ -829,6 +934,7 @@ export function decideWindowsStop(
     case 'receipt': {
       const requestKill: WindowsStopDecision = {
         ...decision,
+        kind: 'kill_requested',
         state: { ...state, killRequested: true },
         helper: 'request_kill',
       };
@@ -839,13 +945,17 @@ export function decideWindowsStop(
         case 'invalid':
         case 'deadline':
           // R3 / §2.2 (c): any other failure terminates immediately.
-          return state.killRequested ? { ...decision, helper: 'retain_child' } : requestKill;
+          return state.killRequested
+            ? { ...decision, kind: 'awaiting_exit', helper: 'retain_child' }
+            : requestKill;
         case 'received':
         case 'semantic_input_in_flight':
-          if (state.killRequested) return { ...decision, helper: 'retain_child' };
+          if (state.killRequested)
+            return { ...decision, kind: 'awaiting_exit', helper: 'retain_child' };
           if (event.closeDeadlineExceeded) return requestKill;
           return {
             ...decision,
+            kind: 'receipt_pending',
             idleTeardown: 'defer',
             retryAfterMs: receiptStatus === 'semantic_input_in_flight' ? 50 : null,
           };
@@ -877,22 +987,34 @@ export function decideWindowsStop(
               },
             }),
       });
-      return {
-        ...decision,
+      const receiptEffects: Readonly<{
+        state: WindowsStopState;
+        idleTeardown: 'allowed' | 'defer';
+        awaitingHoldId: string | null;
+      }> = {
         state: { ...persisted.state, result: state.killRequested ? state.result : 'receipt' },
-        confirmation: state.killRequested ? 'none' : 'host_receipt',
-        helper: state.killRequested ? 'retain_child' : 'unchanged',
-        cleanup: state.killRequested ? 'none' : 'stop_owner',
         idleTeardown: persisted.holdId === null ? 'allowed' : 'defer',
         awaitingHoldId: persisted.holdId,
-        // E4 (R1): the receipt stops the discovery. After a kill (R1a) the exit reports instead.
-        ...(state.entry === 'E4' && !state.killRequested
-          ? { notification: discoveryNotification('receipt') }
-          : {}),
+      };
+      if (state.killRequested)
+        return {
+          ...decision,
+          ...receiptEffects,
+          kind: 'receipt_after_kill',
+          helper: 'retain_child',
+        };
+      return {
+        ...decision,
+        ...receiptEffects,
+        kind: 'receipt_confirmed',
+        state: { ...receiptEffects.state, entry: null },
+        confirmation: 'host_receipt',
+        cleanup: 'stop_owner',
+        ...(state.entry === 'E4' ? { notification: discoveryNotification('receipt') } : {}),
       };
     }
     case 'exit_confirmed': {
-      const result: WindowsTerminationResult = generationRows.some(
+      const result: ExitNotification['result'] = generationRows.some(
         (row) => row.kind !== 'foreground',
       )
         ? 'terminated_target_suspect'
@@ -909,15 +1031,27 @@ export function decideWindowsStop(
         changes,
         releaseBlockers: { helperGeneration: state.helperGeneration, ownerId: null },
       });
+      const cleanupEffect: GenerationCleanupEffect =
+        persisted.holdId === null
+          ? {
+              cleanup: { kind: 'ready', helperGeneration: state.helperGeneration },
+              awaitingHoldId: null,
+            }
+          : {
+              cleanup: {
+                kind: 'deferred',
+                helperGeneration: state.helperGeneration,
+                holdId: persisted.holdId,
+              },
+              awaitingHoldId: persisted.holdId,
+            };
       return {
         ...decision,
+        ...cleanupEffect,
+        kind: 'exit_confirmed',
         state: { ...persisted.state, exitConfirmed: true, result },
         confirmation: 'exit',
         helper: 'may_start',
-        cleanup:
-          persisted.holdId === null ? 'generation_after_transfer' : 'deferred_until_transfer',
-        cleanupGeneration: state.helperGeneration,
-        awaitingHoldId: persisted.holdId,
         affectedOwnerIds: state.owners
           .filter((owner) => owner.helperGeneration === state.helperGeneration)
           .map((owner) => owner.id),
@@ -942,6 +1076,7 @@ export function decideWindowsStop(
           ];
       return {
         ...decision,
+        kind: 'ledger_updated',
         state: persist(state, event.storage, {
           operation: 'response',
           recovery: 'reflect_response',
@@ -961,6 +1096,7 @@ export function decideWindowsStop(
         : [];
       return {
         ...decision,
+        kind: 'ledger_updated',
         state: persist(state, event.storage, {
           operation: 'background_quarantine',
           recovery: 'write_quarantine',
@@ -972,7 +1108,7 @@ export function decideWindowsStop(
     case 'dispatch_gate': {
       const refusal = dispatchGateRefusal(state, event.helperGeneration, event.identity);
       return refusal === null
-        ? { ...decision, dispatch: 'allow' }
+        ? { ...decision, kind: 'dispatch_allowed', dispatch: 'allow' }
         : refuse(refusal, { dispatch: 'deny' });
     }
     case 'before_dispatch': {
@@ -996,7 +1132,7 @@ export function decideWindowsStop(
       // The state changed between the gate and the write: keep the stored row, do not send.
       const lateRefusal = dispatchGateRefusal(state, event.helperGeneration, event.identity);
       return lateRefusal === null
-        ? { ...decision, state: recorded, dispatch: 'allow' }
+        ? { ...decision, kind: 'dispatch_allowed', state: recorded, dispatch: 'allow' }
         : refuse(lateRefusal, { state: recorded, dispatch: 'deny' });
     }
     case 'start_generation':
@@ -1009,9 +1145,12 @@ export function decideWindowsStop(
       // Stop supplies its own entry and stopOwnerId.
       return {
         ...decision,
+        kind: 'generation_started',
         state: {
           ...state,
           helperGeneration: event.nextHelperGeneration,
+          entry: null,
+          stopOwnerId: '',
           helperLaunched: true,
           killRequested: false,
           exitConfirmed: false,
@@ -1036,10 +1175,13 @@ export function decideWindowsStop(
       });
       return {
         ...decision,
+        kind: 'restored',
         // A new Main has none of the old Main's in-memory owners or native blockers.
         state: {
           ...persisted.state,
           helperLaunched: false,
+          entry: null,
+          stopOwnerId: '',
           killRequested: false,
           exitConfirmed: false,
           exitWaitExceeded: false,
@@ -1059,6 +1201,7 @@ export function decideWindowsStop(
         throw new Error('Duplicate storage hold');
       return {
         ...decision,
+        kind: 'ledger_updated',
         state: {
           ...state,
           holds: [
@@ -1079,6 +1222,7 @@ export function decideWindowsStop(
       if (event.status === 'failed')
         return {
           ...decision,
+          kind: 'ledger_updated',
           state: event.uncertain
             ? {
                 ...state,
@@ -1130,18 +1274,24 @@ export function decideWindowsStop(
           awaitingHoldId: restoration.length > 0 ? hold.id : null,
         });
       }
-      if (event.status === 'before_write') return { ...decision, awaitingHoldId: hold.id };
+      if (event.status === 'before_write')
+        return { ...decision, kind: 'ledger_updated', awaitingHoldId: hold.id };
       const next = applyWritten(state, hold);
-      const resolved: WindowsStopDecision = {
+      const resolved: DecisionBranch<
+        'storage_recovered',
+        { diagnostics: readonly WindowsStopDiagnostic[] }
+      > = {
         ...decision,
+        kind: 'storage_recovered',
         state: { ...next, holds: next.holds.filter((item) => item.id !== hold.id) },
       };
       switch (hold.operation) {
         case 'exit_transfer':
+          if (hold.releaseBlockers === undefined)
+            throw new Error('Exit transfer requires a generation');
           return {
             ...resolved,
-            cleanup: 'generation_after_transfer',
-            cleanupGeneration: hold.releaseBlockers?.helperGeneration ?? null,
+            cleanup: { kind: 'ready', helperGeneration: hold.releaseBlockers.helperGeneration },
           };
         case 'receipt_transfer':
           return { ...resolved, idleTeardown: 'allowed' };
@@ -1186,10 +1336,15 @@ export function decideWindowsStop(
         { ...state, rows, holds: state.holds.filter((item) => item.id !== hold.id) },
         { kind: 'restart', storage: event.storage },
       );
+      if (restored.kind !== 'restored') throw new Error('Restart requires a restored decision');
       return { ...restored, diagnostics: [...discarded, ...restored.diagnostics] };
     }
     case 'invalid_stored_row':
-      return { ...decision, diagnostics: [{ kind: event.rowKind, reason: event.reason }] };
+      return {
+        ...decision,
+        kind: 'diagnostic',
+        diagnostics: [{ kind: event.rowKind, reason: event.reason }],
+      };
     case 'reconcile':
       if (event.evidence === 'alive' || event.evidence === 'unavailable') return decision;
       // R15: a new observation and ticket.

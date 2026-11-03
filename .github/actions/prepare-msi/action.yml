@@ -1,0 +1,33 @@
+name: Prepare dedicated MSI CI service
+description: Verify the non-administrator service identity and expose the installed Git Bash to this job.
+runs:
+  using: composite
+  steps:
+    - name: Verify MSI service identity and Git Bash
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        $administrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $session = (Get-Process -Id $PID).SessionId
+        if ($env:RUNNER_NAME -ne 'MSI-ci' -or $env:COMPUTERNAME -ne 'MSI' -or
+            $identity.User.Value -ne 'S-1-5-21-484800612-1836208420-3339672162-1005' -or
+            $administrator -or $session -ne 0) {
+          throw 'MSI CI requires the dedicated non-administrator service account in Session 0.'
+        }
+        $git = (Get-Command git.exe -ErrorAction Stop).Source
+        $gitBin = Join-Path (Split-Path (Split-Path $git -Parent) -Parent) 'bin'
+        if (-not (Test-Path -LiteralPath (Join-Path $gitBin 'bash.exe') -PathType Leaf)) {
+          throw 'The existing Git for Windows installation does not provide Git Bash.'
+        }
+        $gitBin >> $env:GITHUB_PATH
+        $head = git rev-parse HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to read the exact checkout commit.' }
+        $record = [ordered]@{
+          runner = $env:RUNNER_NAME; identity = $identity.Name
+          administrator = $administrator; session = $session; checkout = $head
+          run = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT
+        } | ConvertTo-Json -Compress
+        Write-Output $record
+        "MSI service preflight: ``$record``" >> $env:GITHUB_STEP_SUMMARY

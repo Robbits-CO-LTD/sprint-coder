@@ -19,6 +19,7 @@ export type WindowsTerminationCallbacks = Readonly<{
   prepare(): Promise<void>;
   started(generation: number): void;
   owned?(generation: number, kind: 'session' | 'discovery', id: string): void;
+  stopping?(generation: number, entry: 'E1' | 'E2' | 'E3' | 'E4', ownerId: string): void;
   event(generation: number, kind: 'kill_requested' | 'pipe_closed' | 'exit_wait_exceeded'): void;
   exited(generation: number, cause: 'stop' | 'crash' | 'abortTransport'): void;
 }>;

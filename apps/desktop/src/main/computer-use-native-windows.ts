@@ -672,6 +672,7 @@ class WindowsComputerUseHelperClient {
   cancelUnsubmittedStart(sessionId: string): 'never_sent' | 'may_have_been_sent' | 'unknown' {
     const owner = this.starts.get(sessionId);
     if (owner === undefined) return 'unknown';
+    if (owner.helper !== null) this.termination?.stopping?.(owner.helper, 'E3', sessionId);
     owner.stopped = true;
     if (owner.everSent) return 'may_have_been_sent';
     // Main consumes this proof after a failed call has settled. Until then, keep it distinct
@@ -685,6 +686,7 @@ class WindowsComputerUseHelperClient {
   cancelUnsubmittedDiscovery(id: string): 'never_sent' | 'may_have_been_sent' | 'unknown' {
     const owner = this.discoveries.get(id);
     if (owner === undefined) return 'unknown';
+    if (owner.helper !== null) this.termination?.stopping?.(owner.helper, 'E4', id);
     owner.stopped = true;
     if (owner.everSent) return 'may_have_been_sent';
     if (owner.attempts.size === 0 && this.discoveries.get(id) === owner)
@@ -793,6 +795,7 @@ class WindowsComputerUseHelperClient {
   async stopWindowDiscovery(id: string): Promise<unknown> {
     const owner = this.discoveries.get(id);
     if (owner === undefined) throw new Error('Unknown discovery lifetime');
+    if (owner.helper !== null) this.termination?.stopping?.(owner.helper, 'E4', id);
     owner.stopped = true;
     const attempt = Symbol('native-discovery-stop');
     owner.attempts.add(attempt);
@@ -921,6 +924,15 @@ class WindowsComputerUseHelperClient {
       lifetime.attempts.add(semantic.id);
     }
     const closes = operation === 'close_session' || operation === 'stop_pending_start';
+    if ((closes || operation === 'cancel') && sessionKey !== undefined) {
+      const generation = this.sessionGenerations.get(sessionKey);
+      if (generation !== undefined)
+        this.termination?.stopping?.(
+          generation,
+          operation === 'stop_pending_start' ? 'E3' : 'E1',
+          sessionKey,
+        );
+    }
     if (closes && sessionKey !== undefined) {
       const closing = this.starts.get(sessionKey);
       if (closing !== undefined) closing.stopped = true;

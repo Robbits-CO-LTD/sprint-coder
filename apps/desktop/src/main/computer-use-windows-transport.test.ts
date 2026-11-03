@@ -4249,6 +4249,7 @@ int main() {
     const decide = vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
       const result = original(state, event);
       if (event.kind !== 'start_generation') return result;
+      if (result.kind !== 'generation_started') throw new Error('Expected generation start');
       // PR5b will supply foreground rows; seed that future ledger input at the kernel boundary.
       return {
         ...result,
@@ -4346,6 +4347,66 @@ int main() {
         decide.mock.calls.filter(([, event]) => event.kind === 'exit_wait_exceeded'),
       ).toHaveLength(1);
       expect(child.killCalls).toBe(1);
+    } finally {
+      decide.mockRestore();
+    }
+  });
+  it.each(['cancel', 'close_session', 'stop_pending_start'] as const)(
+    'PR7c records Stop before %s races with transport failure',
+    async (operation) => {
+      const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+      try {
+        const target = ledgerTarget(true, undefined, true);
+        await startSession(target.host, 'session-1', 'turn-1');
+        target.helper().holdOnly(operation);
+        const stopping =
+          operation === 'cancel'
+            ? target.addon.cancel!({ sessionId: 'session-1', cancelEpoch: 1 })
+            : operation === 'close_session'
+              ? target.addon.close!({ sessionId: 'session-1', cancelEpoch: 1 })
+              : target.addon.stopPendingStart!({ sessionId: 'session-1' });
+        const settled = Promise.resolve(stopping).catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        sockets[0]!.emit('error', new Error('synthetic transport failure'));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(decide.mock.results.map((result) => result.value.notification)).toContainEqual({
+          kind: 'generation_exit',
+          cause: 'abortTransport',
+          late: false,
+          result: 'terminated_clean',
+          initiatorReason: 'requested_reason',
+        });
+        await settled;
+      } finally {
+        decide.mockRestore();
+      }
+    },
+  );
+  it('PR7c records sessionless E4 before a transport failure and preserves late exit', async () => {
+    const decide = vi.spyOn(stopKernel, 'decideWindowsStop');
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'keeper', 'turn-keeper');
+      target.helper().holdOnly('list_windows_cancellable');
+      const discovery = target.host.beginWindowDiscovery!(profile);
+      await vi.advanceTimersByTimeAsync(0);
+      target.helper().holdOnly('stop_window_discovery');
+      const stopping = discovery.stop().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      sockets[0]!.emit('error', new Error('synthetic transport failure'));
+      await vi.advanceTimersByTimeAsync(2_000);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(decide.mock.results.map((result) => result.value.notification)).toContainEqual({
+        kind: 'discovery_result',
+        late: true,
+        result: { stopped: true, result: 'terminated_clean' },
+      });
+      await stopping;
     } finally {
       decide.mockRestore();
     }
@@ -4645,8 +4706,7 @@ int main() {
       )!.value;
       expect(exit).toMatchObject({
         helper: 'may_start',
-        cleanup: 'deferred_until_transfer',
-        cleanupGeneration: 1,
+        cleanup: { kind: 'deferred', helperGeneration: 1, holdId: expect.any(String) },
       });
       expect(exit.state.result).toBe('terminated_target_suspect');
       expect(exit.state.nativeBlockers).toHaveLength(1);
@@ -5678,6 +5738,8 @@ int main() {
           }
           const decision = realDecide(next, event);
           if (event.kind !== 'response') return decision;
+          if (decision.kind !== 'ledger_updated')
+            throw new Error('Expected response ledger update');
           return {
             ...decision,
             state: {

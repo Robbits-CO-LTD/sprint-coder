@@ -4,10 +4,14 @@ inputs:
   node-version:
     description: Exact setup-node version
     required: true
+  cache-installed-tree:
+    description: Disable when the runner cannot restore archived workspace symlinks; npm's download cache remains available.
+    default: 'true'
 runs:
   using: composite
   steps:
     - name: Restore installed dependencies
+      if: inputs.cache-installed-tree == 'true'
       id: dependencies
       uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
       with:
