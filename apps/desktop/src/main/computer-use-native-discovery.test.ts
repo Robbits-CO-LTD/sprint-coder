@@ -1,3 +1,5 @@
+import type { WindowsStopListener } from './computer-use-windows-stop-delivery';
+import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createComputerUseDiscoveryManager } from './computer-use-native-discovery';
 import { ComputerUseDiscoveryNotSubmittedError } from './computer-use-native-types';
@@ -329,5 +331,197 @@ describe('owned Main window discovery', () => {
     a.resolve(completed(first.id));
     await expect(first.result).rejects.toThrow('native_stop_unconfirmed');
     expect(manager.quarantined()).toBe(false);
+  });
+});
+
+describe('PR11 discovery scope results', () => {
+  it('returns the E4 termination result to its Task and Turn', async () => {
+    const proof = {
+      kind: 'terminated',
+      helperGeneration: 1,
+      result: 'terminated_target_suspect',
+    } as const;
+    const handle = {
+      id: 'discovery',
+      result: new Promise<readonly never[]>(() => {}),
+      terminal: new Promise<never>(() => {}),
+      stop: vi.fn(async () => proof),
+    };
+    const publish = vi.fn();
+    const scope = new ComputerUseDiscoveryScope(
+      'task-a',
+      'turn-a',
+      null,
+      null,
+      {
+        beginWindowDiscovery: () => handle,
+        listWindows: async () => [],
+        subscribeWindowsStop: () => () => {},
+      },
+      () => {},
+      undefined,
+      publish,
+    );
+    const reading = scope
+      .read({ id: 'profile-a' } as Parameters<typeof scope.read>[0])
+      .catch((error) => error);
+    expect(await scope.stop(true, 'task_changed')).toMatchObject({
+      kind: 'discovery_result',
+      taskId: 'task-a',
+      turnId: 'turn-a',
+      reason: 'task_changed',
+      results: [proof],
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ reason: 'task_changed', results: [proof] }),
+    );
+    expect(await reading).toHaveProperty('discoveryResult.results', [proof]);
+    await scope.stop();
+    expect(handle.stop).toHaveBeenCalledTimes(1);
+  });
+  it('publishes a late E4 exit once to the original Task and Turn without reviving Stop', async () => {
+    let listener: WindowsStopListener = () => {};
+    const publish = vi.fn();
+    const handle = {
+      id: 'discovery',
+      result: new Promise<readonly never[]>(() => {}),
+      terminal: new Promise<never>(() => {}),
+      stop: vi.fn(async () => {
+        throw new Error('native_stop_unconfirmed');
+      }),
+    };
+    const scope = new ComputerUseDiscoveryScope(
+      'task-a',
+      'turn-a',
+      null,
+      null,
+      {
+        beginWindowDiscovery: () => handle,
+        listWindows: async () => [],
+        subscribeWindowsStop: (next) => {
+          listener = next;
+          return () => {};
+        },
+      },
+      () => {},
+      undefined,
+      publish,
+    );
+    void scope.read({ id: 'profile-a' } as Parameters<typeof scope.read>[0]).catch(() => undefined);
+    const owner = {
+      kind: 'discovery',
+      id: 'discovery',
+      helperGeneration: 1,
+      lifetimeId: 'lifetime-a',
+    } as const;
+    listener({ kind: 'registered', owner });
+    const stopping = scope.stop(true, 'turn_started');
+    await expect(stopping).rejects.toThrow('native_stop_unconfirmed');
+    const notification = {
+      owner,
+      phase: 'exit_confirmed',
+      result: 'terminated_clean',
+      late: true,
+      reason: 'requested_reason',
+      internalReason: 'requested_stop',
+    } as const;
+    listener({
+      kind: 'notification',
+      notification: { ...notification, owner: { ...owner, lifetimeId: 'stale' } },
+    });
+    expect(publish).toHaveBeenCalledTimes(1);
+    listener({ kind: 'notification', notification });
+    listener({ kind: 'notification', notification });
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        kind: 'discovery_result',
+        late: true,
+        taskId: 'task-a',
+        turnId: 'turn-a',
+        reason: 'turn_started',
+        results: [{ kind: 'terminated', result: 'terminated_clean', helperGeneration: 1 }],
+      }),
+    );
+    await expect(stopping).rejects.toThrow('native_stop_unconfirmed');
+    expect(handle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains native_unavailable for a discovery stopped by another owner', async () => {
+    let listener: WindowsStopListener = () => {};
+    const proof = { kind: 'terminated', helperGeneration: 1, result: 'terminated_clean' } as const;
+    const handle = {
+      id: 'discovery',
+      result: new Promise<readonly never[]>(() => {}),
+      terminal: new Promise<never>(() => {}),
+      stop: async () => proof,
+    };
+    const scope = new ComputerUseDiscoveryScope(
+      'task-b',
+      'turn-b',
+      null,
+      null,
+      {
+        beginWindowDiscovery: () => handle,
+        listWindows: async () => [],
+        subscribeWindowsStop: (next) => {
+          listener = next;
+          return () => {};
+        },
+      },
+      () => {},
+    );
+    void scope.read({ id: 'profile-b' } as Parameters<typeof scope.read>[0]).catch(() => undefined);
+    const owner = {
+      kind: 'discovery',
+      id: 'discovery',
+      helperGeneration: 1,
+      lifetimeId: 'lifetime-b',
+    } as const;
+    listener({ kind: 'registered', owner });
+    listener({
+      kind: 'notification',
+      notification: {
+        owner,
+        phase: 'exit_confirmed',
+        result: 'terminated_clean',
+        late: false,
+        reason: 'native_unavailable',
+        internalReason: 'shared_helper_stop',
+      },
+    });
+    expect(await scope.stop()).toMatchObject({
+      taskId: 'task-b',
+      turnId: 'turn-b',
+      reason: 'native_unavailable',
+      results: [proof],
+    });
+  });
+
+  it('does not resend failed E4 Stop through its scope', async () => {
+    const handle = {
+      id: 'discovery',
+      result: new Promise<readonly never[]>(() => {}),
+      terminal: new Promise<never>(() => {}),
+      stop: vi.fn(async () => {
+        throw new Error('native_stop_unconfirmed');
+      }),
+    };
+    const scope = new ComputerUseDiscoveryScope(
+      'task-a',
+      'turn-a',
+      null,
+      null,
+      {
+        beginWindowDiscovery: () => handle,
+        listWindows: async () => [],
+        subscribeWindowsStop: () => () => {},
+      },
+      () => {},
+    );
+    void scope.read({ id: 'profile-a' } as Parameters<typeof scope.read>[0]).catch(() => undefined);
+    await expect(scope.stop()).rejects.toThrow('native_stop_unconfirmed');
+    await expect(scope.stop()).rejects.toThrow('native_stop_unconfirmed');
+    expect(handle.stop).toHaveBeenCalledTimes(1);
   });
 });

@@ -37,6 +37,7 @@ import {
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { createComputerUseDiscoveryManager } from './computer-use-native-discovery';
 import { COMPUTER_START_TOOL, COMPUTER_TARGET_TOOLS } from './computer-use-target-tools';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { compilePromptGuidance } from './prompt-context';
@@ -164,6 +165,7 @@ function createFixture(
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
     now?: () => number;
     policyEpoch?: number;
+    nativeOverrides?: Partial<ComputerUseNativeHost>;
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -183,6 +185,7 @@ function createFixture(
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
     close: async () => undefined,
+    ...options.nativeOverrides,
   };
   const persistence = {
     listComputerAppProfiles: () => [...profiles],
@@ -302,6 +305,69 @@ describe('computer_list_targets', () => {
     // Each row must be usable as a target reference on its own; two rows never share a token.
     expect(new Set(rows.map((row) => row.targetToken)).size).toBe(4);
     expect(new Set(rows.map((row) => row.appToken)).size).toBe(2);
+  });
+
+  it('keeps the other applications when one macOS listWindows rejects', async () => {
+    const failing = profileRecord(
+      'profile-preview',
+      macIdentity({ bundleId: 'com.example.preview' }),
+    );
+    const { controller } = createFixture({
+      profiles: [failing, profileRecord('profile-notes', macIdentity())],
+      windowsFor: async (profile) => {
+        if (profile.id === failing.id) throw new Error('listWindows failed');
+        return [nativeWindow(profile, 1)];
+      },
+    });
+    const rows = selectable((await controller.listTargets({}, toolContext)).targets);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.verified).toMatchObject({ appId: 'com.example.notes' });
+  });
+
+  it('keeps the other applications when one Windows discovery fails with a confirmed stop', async () => {
+    const failing = profileRecord(
+      'profile-preview',
+      macIdentity({ bundleId: 'com.example.preview' }),
+    );
+    const stop = vi.fn(async (id: string) => ({
+      discoveryId: id,
+      result: 'stopped',
+      drained: true,
+      launchAttemptCount: 1,
+    }));
+    const manager = createComputerUseDiscoveryManager({
+      query: async (id, input) => {
+        if (input['profileId'] === failing.id) throw new Error('app_identity_changed');
+        return {
+          discoveryId: id,
+          result: 'completed',
+          drained: true,
+          launchAttemptCount: 1,
+          windows: [],
+        };
+      },
+      stop,
+      cancelUnsubmitted: () => 'may_have_been_sent',
+      timeoutMs: 10,
+      attemptLimit: 1,
+      retainStop: true,
+      unconfirmedError: () => new Error('native_stop_unconfirmed'),
+    });
+    const { controller } = createFixture({
+      profiles: [failing, profileRecord('profile-notes', macIdentity())],
+      nativeOverrides: {
+        beginWindowDiscovery: (profile) => {
+          const handle = manager.begin({ profileId: profile.id });
+          return { ...handle, result: handle.result.then(() => [nativeWindow(profile, 1)]) };
+        },
+        subscribeWindowsStop: () => () => {},
+      },
+    });
+    const rows = selectable((await controller.listTargets({}, toolContext)).targets);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.verified).toMatchObject({ appId: 'com.example.notes' });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(manager.quarantined()).toBe(false);
   });
 
   it('answers granted from the grant table, not from being enumerable', async () => {

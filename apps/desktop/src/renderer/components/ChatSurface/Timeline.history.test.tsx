@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, TeamDetail, TurnDiff } from '../../types/sprint-coder';
-import { useAppStore } from '../../store/appStore';
+import { handleTurnEvent, useAppStore } from '../../store/appStore';
 import { Timeline } from './Timeline';
 
 const initial = useAppStore.getState();
@@ -38,6 +38,80 @@ async function render(): Promise<string> {
 }
 
 describe('Timeline history (issue #842)', () => {
+  it('PR11 shows a replayed late discovery once on its ended Turn, before the next Turn', async () => {
+    useAppStore.setState({
+      messagesByTask: {
+        'task-1': [
+          message({ id: 'u1' }),
+          message({ id: 'a1', author: 'assistant', content: '元の回答' }),
+          message({ id: 'u2', turnId: 'turn-2', content: '次の依頼' }),
+        ],
+      },
+      discoveryResultsByTask: {},
+    });
+    const event = {
+      type: 'computer_use.discovery_result' as const,
+      seq: 10,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      result: {
+        kind: 'discovery_result' as const,
+        late: true,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        reason: 'policy_changed' as const,
+        results: [
+          {
+            kind: 'terminated' as const,
+            helperGeneration: 1,
+            result: 'terminated_target_suspect' as const,
+          },
+        ],
+      },
+    };
+    for (let i = 0; i < 2; i++)
+      handleTurnEvent('task-1', event, (update) => useAppStore.setState(update));
+    expect(useAppStore.getState().discoveryResultsByTask['task-1']).toHaveLength(1);
+    const html = await render();
+    expect(html.match(/操作補助プロセスの終了を確認しました/g)).toHaveLength(1);
+    expect(html).toContain('操作対象への影響が不明');
+    expect(html.indexOf('操作補助プロセス')).toBeGreaterThan(html.indexOf('元の回答'));
+    expect(html.indexOf('操作補助プロセス')).toBeLessThan(html.indexOf('次の依頼'));
+  });
+  it('PR11 shows an in-time session-less discovery termination without calling it late', async () => {
+    useAppStore.setState({
+      messagesByTask: { 'task-1': [message({ id: 'u1' })] },
+      discoveryResultsByTask: {},
+    });
+    handleTurnEvent(
+      'task-1',
+      {
+        type: 'computer_use.discovery_result' as const,
+        seq: 11,
+        taskId: 'task-1',
+        turnId: null,
+        result: {
+          kind: 'discovery_result' as const,
+          late: false,
+          taskId: 'task-1',
+          turnId: null,
+          reason: 'task_changed' as const,
+          results: [
+            {
+              kind: 'terminated' as const,
+              helperGeneration: 1,
+              result: 'terminated_target_suspect' as const,
+            },
+          ],
+        },
+      },
+      (update) => useAppStore.setState(update),
+    );
+    const html = await render();
+    expect(html).toContain('Computer Use：操作補助プロセスの終了を確認しました。');
+    expect(html).toContain('操作対象への影響が不明');
+    expect(html).not.toContain('遅れて');
+  });
   it('marks a Turn a restart interrupted under its partial reply, and leaves finished Turns alone', async () => {
     useAppStore.setState({
       messagesByTask: {

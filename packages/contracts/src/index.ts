@@ -2266,7 +2266,46 @@ export const commandOutputPageSchema = z
 export type CommandOutputPage = z.infer<typeof commandOutputPageSchema>;
 
 const turnEventBase = { taskId: idSchema, turnId: idSchema, seq: z.number().int().positive() };
+export const computerUseDiscoveryResultSchema = z
+  .object({
+    kind: z.literal('discovery_result'),
+    late: z.boolean(),
+    taskId: idSchema.nullable(),
+    turnId: idSchema.nullable(),
+    reason: z.lazy(() =>
+      z.union([computerUseStopReasonSchema, z.literal('native_stop_unconfirmed')]),
+    ),
+    results: z.array(
+      z.discriminatedUnion('kind', [
+        z
+          .object({
+            kind: z.literal('terminated'),
+            helperGeneration: z.number().int().positive(),
+            result: z.enum(['terminated_clean', 'terminated_target_suspect']).optional(),
+          })
+          .strict(),
+        z.object({ kind: z.literal('not_submitted') }).strict(),
+        z
+          .object({
+            kind: z.enum(['completed', 'stopped']),
+            launchAttemptCount: z.union([z.literal(0), z.literal(1)]),
+          })
+          .strict(),
+      ]),
+    ),
+  })
+  .strict();
+export type ComputerUseDiscoveryResult = z.infer<typeof computerUseDiscoveryResultSchema>;
+const computerUseDiscoveryEventSchema = z
+  .object({
+    type: z.literal('computer_use.discovery_result'),
+    ...turnEventBase,
+    turnId: idSchema.nullable(),
+    result: computerUseDiscoveryResultSchema,
+  })
+  .strict();
 export const turnEventSchema = z.discriminatedUnion('type', [
+  computerUseDiscoveryEventSchema,
   z
     .object({ type: z.literal('turn.accepted'), ...turnEventBase, userMessage: chatMessageSchema })
     .strict(),
@@ -2453,6 +2492,7 @@ export const turnSnapshotSchema = z
     queued: z.array(queuedInputSchema),
     contextUsage: contextUsageSchema,
     pendingApprovals: z.array(approvalSummarySchema).default([]),
+    discoveryResults: z.array(computerUseDiscoveryEventSchema).optional(),
     activatedSkills: z
       .array(
         z

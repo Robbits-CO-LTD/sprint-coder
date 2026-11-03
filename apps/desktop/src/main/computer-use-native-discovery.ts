@@ -47,6 +47,9 @@ export function createComputerUseDiscoveryManager(
     timeoutMs: number;
     attemptLimit: number;
     unconfirmedError: () => Error;
+    retainStop?: boolean;
+    terminationResult?: (generation: number) => 'terminated_clean' | 'terminated_target_suspect';
+    terminate?: (generation: number) => Promise<ComputerUseGenerationTerminated>;
     generationAvailable?: (generation: number) => boolean;
     generationKillRequested?: (generation: number) => boolean;
   }>,
@@ -108,15 +111,24 @@ export function createComputerUseDiscoveryManager(
         if (timer !== undefined) clearTimeout(timer);
       }
     }
+    if (options.terminate !== undefined && owner.helperGeneration !== null) {
+      const proof = await options.terminate(owner.helperGeneration);
+      // Exit confirms Stop; only persisted generation cleanup releases isolation.
+      return proof;
+    }
     throw options.unconfirmedError();
   };
+  const withResult = (proof: ComputerUseDiscoveryStop): ComputerUseDiscoveryStop =>
+    proof.kind === 'terminated' && options.terminationResult !== undefined
+      ? { ...proof, result: options.terminationResult(proof.helperGeneration) }
+      : proof;
   const stop = (owner: Owner, external = true): Promise<ComputerUseDiscoveryStop> => {
     owner.stopped = true;
     if (external) owner.cancelRequested = true;
     if (owner.stopping !== null) return owner.stopping;
     if (owner.terminal !== null) {
       if (owner.cancelRequested) owner.rejectCanceled(canceledError());
-      owner.stopping = Promise.resolve(owner.terminal);
+      owner.stopping = Promise.resolve(withResult(owner.terminal));
       return owner.stopping;
     }
     owner.unconfirmed = true;
@@ -130,10 +142,10 @@ export function createComputerUseDiscoveryManager(
     void completeStop(owner).then(
       (proof) => {
         if (owner.cancelRequested) owner.rejectCanceled(canceledError());
-        resolve(proof);
+        resolve(withResult(proof));
       },
       () => {
-        if (owner.stopping === stopping) owner.stopping = null;
+        if (!options.retainStop && owner.stopping === stopping) owner.stopping = null;
         const error = options.unconfirmedError();
         if (owner.cancelRequested) owner.rejectCanceled(error);
         reject(error);

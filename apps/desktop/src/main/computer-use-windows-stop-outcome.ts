@@ -905,7 +905,9 @@ export function decideWindowsStop(
       event.kind !== 'dispatch_gate' &&
       event.kind !== 'before_dispatch' &&
       event.kind !== 'dispatch_canceled' &&
-      (event.helperGeneration < state.helperGeneration || !helperMayBeAlive(state))
+      (event.helperGeneration < state.helperGeneration ||
+        (!helperMayBeAlive(state) &&
+          !(event.kind === 'not_submitted' && !state.helperLaunched && !state.exitConfirmed)))
     ) {
       return decision;
     }

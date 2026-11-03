@@ -1,5 +1,29 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import * as contracts from './index';
+
+it('PR11 validates late discovery Turn events without accepting native identity metadata', () => {
+  const event = {
+    type: 'computer_use.discovery_result',
+    seq: 1,
+    taskId: 'task',
+    turnId: 'turn',
+    result: {
+      kind: 'discovery_result',
+      late: true,
+      taskId: 'task',
+      turnId: 'turn',
+      reason: 'policy_changed',
+      results: [{ kind: 'terminated', helperGeneration: 1, result: 'terminated_clean' }],
+    },
+  };
+  expect(contracts.turnEventSchema.parse(event)).toEqual(event);
+  expect(
+    contracts.turnEventSchema.safeParse({
+      ...event,
+      result: { ...event.result, results: [{ ...event.result.results[0], pid: 42 }] },
+    }).success,
+  ).toBe(false);
+});
 import {
   claudeEffortSchema,
   commandEnvelopeSchema,

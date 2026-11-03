@@ -1,3 +1,4 @@
+import type { ComputerUseDiscoveryResult } from './computer-use-discovery-scope';
 import type * as FsPromises from 'node:fs/promises';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type {
@@ -582,6 +583,7 @@ function createTarget(
 function controllerFor(
   host: ReturnType<typeof createComputerUseNativeHost>,
   profiles: ComputerAppProfileRecord[] = [profile],
+  publishDiscoveryResult?: (result: ComputerUseDiscoveryResult) => void,
 ) {
   const unused = (): never => {
     throw new Error('Unexpected persistence call');
@@ -603,6 +605,7 @@ function controllerFor(
   return new ComputerUseController({
     persistence,
     native: host,
+    ...(publishDiscoveryResult === undefined ? {} : { publishDiscoveryResult }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
     repositionEmergencyStop: () => true,
@@ -5813,7 +5816,7 @@ int main() {
 
   const dispatchWrites = (socket: FakeHelperSocket) =>
     socket.writes.filter((bytes) => decodeComputerUseNativeFrame(bytes).messageType === 'dispatch');
-  it('PR10 leaves E3 start-receipt cleanup on the legacy deadline', async () => {
+  it('PR11 terminates E3 start-receipt cleanup at C', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(
       () => child as unknown as NodeChildProcess.ChildProcess,
@@ -5835,10 +5838,182 @@ int main() {
     target.helper().holdOnly('close_session');
     const starting = startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(child.killCalls).toBe(0);
+    expect(child.killCalls).toBe(1);
     child.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(0);
     await starting;
+  });
+
+  it.each([false, true])(
+    'PR11 settles close after its owner is trimmed during kill wait (exit=%s)',
+    async (exit) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      let release!: () => void;
+      const confirmation = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          confirmSessionClosed: async (receipt, evidence) => {
+            const result = await addon.confirmSessionClosed!(receipt, evidence);
+            if (result === undefined) throw new Error('Expected ledger confirmation');
+            await confirmation;
+            return result;
+          },
+        }),
+        true,
+      );
+      const first = await startSession(target.host, 'trim-first', 'turn-first');
+      await startSession(target.host, 'trim-keeper', 'turn-keeper');
+      let retireOwner: (() => boolean) | undefined;
+      const originalGet = Map.prototype.get;
+      const lookup = vi.spyOn(Map.prototype, 'get').mockImplementation(function (
+        this: Map<unknown, unknown>,
+        key: unknown,
+      ) {
+        const value: unknown = originalGet.call(this, key);
+        if (
+          key === first.sessionId &&
+          typeof value === 'object' &&
+          value !== null &&
+          'attempts' in value &&
+          'helperGeneration' in value
+        )
+          retireOwner = () => this.delete(first.sessionId);
+        return value;
+      });
+      const closing = target.host.close(first);
+      lookup.mockRestore();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.killCalls).toBe(1);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(retireOwner?.()).toBe(true);
+      if (exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(closing).resolves.toMatchObject(
+        exit ? { kind: 'terminated', helperGeneration: 1 } : { kind: 'termination_requested' },
+      );
+      if (!exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it.each([
+    ['E3', false, false],
+    ['E3', true, false],
+    ['E4', false, false],
+    ['E4', true, false],
+    ['E3', true, true],
+    ['E4', true, true],
+  ] as const)(
+    'PR11 bounds %s by C + T without resending (exit=%s, suspect=%s)',
+    async (entry, exit, suspect) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const events: WindowsStopDeliveryEvent[] = [];
+      target.host.subscribeWindowsStop!((event) => events.push(event));
+      const keeper = await startSession(target.host, 'keeper', 'turn-keeper');
+      if (suspect) {
+        target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        await target.dispatch(keeper);
+      }
+      const operation = entry === 'E3' ? 'stop_pending_start' : 'stop_window_discovery';
+      target.helper().holdOnly(operation);
+      let stop: () => Promise<unknown>;
+      if (entry === 'E3') {
+        target.helper().holdOnly('start_session');
+        void startSession(target.host, 'pending', 'turn-pending').catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        stop = () => target.host.stopPendingStart!('pending');
+      } else {
+        target.helper().holdOnly('list_windows_cancellable');
+        const discovery = target.host.beginWindowDiscovery!(profile);
+        await vi.advanceTimersByTimeAsync(0);
+        stop = () => discovery.stop();
+      }
+      let settled = false;
+      const stopping = stop().then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.killCalls).toBe(1);
+      expect(settled).toBe(false);
+      if (exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBe(true);
+      const outcome = await stopping;
+      if (exit) {
+        expect(outcome).toMatchObject({
+          kind: 'terminated',
+          result: suspect ? 'terminated_target_suspect' : 'terminated_clean',
+        });
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            kind: 'notification',
+            notification: expect.objectContaining({
+              owner: expect.objectContaining({ id: 'keeper' }),
+              internalReason: 'shared_helper_stop',
+              phase: 'exit_confirmed',
+            }),
+          }),
+        );
+      } else if (entry === 'E3') expect(outcome).toEqual({ kind: 'termination_requested' });
+      else expect(outcome).toBeInstanceOf(Error);
+      const count = sockets[0]!.writes.length;
+      await stop().catch(() => undefined);
+      expect(sockets[0]!.writes).toHaveLength(count);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it('PR11 Controller delivers sessionless E4 to its Task without resending', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    await startSession(target.host, 'keeper', 'turn-keeper');
+    target.helper().holdOnly('list_windows_cancellable');
+    target.helper().refuse('stop_window_discovery');
+    const publish = vi.fn();
+    const controller = controllerFor(target.host, [profile], publish);
+    const intent = controller.beginWindowCandidates(profile.id, 'task-a', 'frame-a');
+    const reading = intent.result.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = controller.stopForTask('task-a', 'task_changed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    await stopping;
+    expect(publish).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        kind: 'discovery_result',
+        taskId: 'task-a',
+        reason: 'task_changed',
+        results: [expect.objectContaining({ kind: 'terminated', result: 'terminated_clean' })],
+      }),
+    );
+    expect(await reading).toHaveProperty('discoveryResult.reason', 'task_changed');
+    expect(() => intent.commit(() => 'stale')).toThrow();
+    await controller.dispose();
   });
 
   it.each([true, false])('PR10 bounds cancel + close by 1 + C + T (exit=%s)', async (exit) => {
@@ -6180,10 +6355,8 @@ int main() {
         expect(target.rows.size).toBe(0);
         expect(target.host.availability().control).toBe(false);
         expect(child.killCalls).toBe(1);
-        if (entry === 'close') {
-          await vi.advanceTimersByTimeAsync(2_000);
-          expect(await close).toBe('resolved');
-        } else expect(await close).toBe('rejected');
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(await close).toBe('resolved');
         child.emit('exit', 0, null);
         await vi.advanceTimersByTimeAsync(0);
         expect(decide.mock.results.at(-1)!.value.state.result).toBe('terminated_clean');
@@ -7103,6 +7276,116 @@ int main() {
       ),
     ).toBe(true);
   });
+
+  it.each(['timeout', 'reject', 'replacement', 'success'] as const)(
+    'PR11 fixes the Stop generation before work and throughout kill wait (%s)',
+    async (mode) => {
+      let callbacks!: WindowsTerminationCallbacks;
+      let owners: { map: Map<unknown, unknown> } | undefined;
+      let originalOwner: object | undefined;
+      const originalSet = Map.prototype.set;
+      // Capture the private owner map at its normal insertion boundary, without exposing a
+      // production test API. Only this session's StartOwner insertion matches.
+      const insertion = vi.spyOn(Map.prototype, 'set').mockImplementation(function (
+        this: Map<unknown, unknown>,
+        key: unknown,
+        value: unknown,
+      ) {
+        if (
+          key === 'generation-race' &&
+          typeof value === 'object' &&
+          value !== null &&
+          'nativeInvoked' in value
+        ) {
+          owners = { map: this };
+          originalOwner = value;
+        }
+        return originalSet.call(this, key, value);
+      });
+      const kill = vi.fn();
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          configureWindowsTermination: (value) => {
+            callbacks = value;
+            addon.configureWindowsTermination!(value);
+          },
+          requestWindowsTermination: kill,
+          close: (input) => {
+            closeWork();
+            // A verified close before the deadline returns normally even without an initial owner.
+            if (mode === 'success') return addon.close!(input);
+            return mode === 'reject'
+              ? Promise.reject(new Error('original close failure'))
+              : new Promise(() => {});
+          },
+        }),
+        true,
+      );
+      let session: Awaited<ReturnType<typeof startSession>>;
+      try {
+        session = await startSession(target.host, 'generation-race', 'turn-race');
+      } finally {
+        insertion.mockRestore();
+      }
+      if (owners === undefined || originalOwner === undefined)
+        throw new Error('Missing StartOwner');
+      const ownerMap = owners.map;
+      const replacement = { ...originalOwner, helperGeneration: 2 };
+      if (mode !== 'replacement') ownerMap.delete(session.sessionId);
+      const closeWork = () => {
+        if (mode !== 'replacement') ownerMap.set(session.sessionId, replacement);
+      };
+      let settled = false;
+      const stopping = target.host.close(session);
+      void stopping.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      if (mode === 'success') {
+        await expect(stopping).resolves.toBeUndefined();
+        expect(kill).not.toHaveBeenCalled();
+        return;
+      }
+      const rejected =
+        mode === 'replacement'
+          ? undefined
+          : expect(stopping).rejects.toMatchObject({
+              reasonCode: 'native_stop_unconfirmed',
+              // The replaced work() / deadline error is kept for diagnostics.
+              cause: expect.any(Error),
+            });
+      await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+      if (mode !== 'replacement') {
+        await rejected;
+        expect(kill).not.toHaveBeenCalled();
+        expect(ownerMap.get(session.sessionId)).toBe(replacement);
+        return;
+      }
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(settled).toBe(false);
+      ownerMap.set(session.sessionId, replacement);
+      callbacks.started(2);
+      callbacks.owned!(2, 'session', session.sessionId);
+      callbacks.exited(2, 'stop');
+      await vi.advanceTimersByTimeAsync(0);
+      // Another generation's exit settles nothing, and its owner never gets a kill of its own.
+      expect(settled).toBe(false);
+      expect(kill).toHaveBeenCalledTimes(1);
+      callbacks.exited(1, 'stop');
+      await expect(stopping).resolves.toEqual({
+        kind: 'terminated',
+        helperGeneration: 1,
+        result: 'terminated_clean',
+      });
+      expect(kill).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('PR7c-2 rejects discovery completion after kill begins until exit cleanup', async () => {
     const child = new ControlledHelperChild();

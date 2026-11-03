@@ -195,6 +195,41 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('PR11 records late discovery on a completed Turn and restores it without changing the active Turn', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Discovery history');
+      const original = persistence.startTurn(task.id, 'original');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, original.turnId, stage);
+      persistence.completeTurn(task.id, original.turnId, 'completed');
+      const current = persistence.startTurn(task.id, 'next');
+      const event = persistence.recordComputerUseDiscoveryResult({
+        kind: 'discovery_result',
+        late: true,
+        taskId: task.id,
+        turnId: original.turnId,
+        reason: 'policy_changed',
+        results: [{ kind: 'terminated', helperGeneration: 1, result: 'terminated_target_suspect' }],
+      });
+      expect(persistence.getActiveTurnId(task.id)).toBe(current.turnId);
+      expect(persistence.snapshot(task.id).discoveryResults).toEqual([event]);
+      expect(persistence.listEventsAfter(task.id, event.seq - 1)).toEqual([event]);
+      const other = persistence.createTask('Other task');
+      expect(() =>
+        persistence.recordComputerUseDiscoveryResult({
+          kind: 'discovery_result',
+          late: true,
+          taskId: other.id,
+          turnId: original.turnId,
+          reason: 'user_stop',
+          results: [],
+        }),
+      ).toThrow();
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.snapshot(task.id).discoveryResults).toEqual([event]);
+      reopened.close();
+    });
     it('preserves source snapshots and reads legacy graph rows that predate sources', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('Graph source storage');
