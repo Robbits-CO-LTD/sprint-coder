@@ -187,6 +187,62 @@ it('PR9 release persists only the approved identity across connections and resta
   expect(await b.releaseQuarantine!(quarantine.identity)).toBe(true);
 });
 
+it('PR9 approval release is conditional on the shared quarantine revision', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  await a.restoreQuarantines([quarantine]);
+  const approved = await a.quarantineRevision!(quarantine.identity);
+  expect(approved).toEqual(expect.any(Number));
+  // Another Host transfers newer evidence: the first reason stays, the revision changes.
+  expect(await b.transferReceipt!([], [{ ...quarantine, reason: 'response_lost' }])).toBe(true);
+  const newer = await b.quarantineRevision!(quarantine.identity);
+  expect(newer).toBeGreaterThan(approved!);
+  expect(await a.releaseQuarantine!(quarantine.identity, approved!)).toBe(false);
+  expect(b.read().quarantines).toEqual([quarantine]);
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(true);
+  expect(b.read().quarantines).toEqual([]);
+  // An absent row is an idempotent retry.
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(true);
+  expect(await a.quarantineRevision!(quarantine.identity)).toBeNull();
+  // A re-added row never reuses an earlier revision (no ABA on a delayed retry).
+  await b.restoreQuarantines([quarantine]);
+  expect(await b.quarantineRevision!(quarantine.identity)).toBeGreaterThan(newer!);
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(false);
+  expect(a.read().quarantines).toEqual([quarantine]);
+  // R15 (proven termination) stays identity-only.
+  expect(await a.releaseQuarantine!(quarantine.identity)).toBe(true);
+  expect(b.read().quarantines).toEqual([]);
+});
+
+it('PR9 migrates a version 1 store to the quarantine revision column', async () => {
+  const f = fixture();
+  f.open().close();
+  const db = new Database(f.path);
+  connections.push(db);
+  db.exec('DROP TABLE quarantines; DROP TABLE quarantine_revision');
+  db.exec(
+    'CREATE TABLE quarantines (pid INTEGER NOT NULL, creation_time TEXT NOT NULL, ' +
+      'payload TEXT NOT NULL, PRIMARY KEY (pid, creation_time))',
+  );
+  db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+    row.identity.pid,
+    row.identity.creationTime,
+    JSON.stringify(quarantine),
+  );
+  db.pragma('user_version = 1');
+  const store = f.open();
+  expect(db.pragma('user_version', { simple: true })).toBe(2);
+  expect(store.read().quarantines).toEqual([quarantine]);
+  expect(await store.quarantineRevision!(quarantine.identity)).toBe(0);
+  await store.restoreQuarantines([quarantine]);
+  const bumped = await store.quarantineRevision!(quarantine.identity);
+  expect(bumped).toBeGreaterThan(0);
+  expect(await store.releaseQuarantine!(quarantine.identity, 0)).toBe(false);
+  expect(await store.releaseQuarantine!(quarantine.identity, bumped!)).toBe(true);
+  expect(store.read().quarantines).toEqual([]);
+});
+
 it('PR9 K-1 (a) writes the row update and its shared quarantine atomically', async () => {
   const f = fixture();
   const a = f.open('a');
@@ -233,7 +289,7 @@ it.each([
     await store.write(row);
     const db = new Database(f.path);
     connections.push(db);
-    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+    db.prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)').run(
       row.identity.pid,
       row.identity.creationTime,
       payload,
@@ -256,7 +312,7 @@ it('PR10 preserves unknown quarantine payloads for diagnostics and newer readers
   const values = [null, { ...quarantine, reason: 'future-reason' }];
   values.forEach((value, index) =>
     db
-      .prepare('INSERT INTO quarantines VALUES (?, ?, ?)')
+      .prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)')
       .run(100 + index, 'synthetic', JSON.stringify(value)),
   );
   expect(store.read().quarantines).toEqual(values);
@@ -269,7 +325,7 @@ it('PR10 records the schema version and preserves unknown-version rows', () => {
   const store = f.open();
   const db = new Database(f.path);
   connections.push(db);
-  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  expect(db.pragma('user_version', { simple: true })).toBe(2);
   db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)').run(
     windowsLedgerInstanceId('C:/synthetic/default'),
     1,
@@ -277,7 +333,11 @@ it('PR10 records the schema version and preserves unknown-version rows', () => {
     'future',
     'null',
   );
-  db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(100, 'synthetic', 'null');
+  db.prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)').run(
+    100,
+    'synthetic',
+    'null',
+  );
   db.pragma('user_version = 99');
   expect(() => store.read()).toThrow('Unsupported Windows ledger version');
   expect(() => store.delete(row)).toThrow('Unsupported Windows ledger version');
@@ -308,7 +368,7 @@ it('PR10 upgrades an unversioned store without losing existing rows or quarantin
   connections.push(db);
   db.pragma('user_version = 0');
   const reopened = f.open();
-  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  expect(db.pragma('user_version', { simple: true })).toBe(2);
   expect(reopened.read()).toEqual({ rows: [row], quarantines: [quarantine] });
 });
 

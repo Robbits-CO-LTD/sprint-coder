@@ -42,6 +42,7 @@ import {
   ComputerUseNativeUnavailableError,
   createComputerUseNativeHost,
   type ComputerUseNativeHostOptions,
+  type WindowsDispatchLedgerStorage,
 } from './computer-use-native-host';
 import type {
   WindowsLedgerRow,
@@ -1810,7 +1811,11 @@ describe('Computer Use Windows helper transport', () => {
           .prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)')
           .run(store.instanceId, 1, 'corrupt-session', String(index), JSON.stringify(value)),
       );
-      db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(99, 'corrupt', 'null');
+      db.prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)').run(
+        99,
+        'corrupt',
+        'null',
+      );
       const target = createTarget(responders(), undefined, {
         windowsLedger: store,
         windowsLedgerDiagnostic: (value) => diagnostics.push(value),
@@ -4788,6 +4793,7 @@ int main() {
     withTransfer = false,
     adaptAddon?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon,
     termination = false,
+    store?: WindowsDispatchLedgerStorage,
   ) {
     const rows = new Map<string, WindowsLedgerRow>();
     const quarantines: WindowsTargetQuarantine[] = [];
@@ -4812,21 +4818,34 @@ int main() {
       transfers: 0,
       closeResponse: null as HelperResponse | null,
       failRelease: false,
+      throwRelease: false,
       releases: 0,
       releaseWait: null as Promise<void> | null,
       identityResult: { result: 'alive' } as
         | { result: 'alive' }
         | { result: 'terminated'; reason: 'start_time_mismatch' }
         | { result: 'unverifiable'; reason: 'access_denied' },
+      /** A process start time reported as terminated (no_process) regardless of identityResult. */
+      exitedCreationTime: undefined as string | undefined,
+      onIdentityCheck: undefined as (() => void) | undefined,
     };
     const base = responders();
     const target = createTarget(
       {
         ...base,
-        check_target_identity: (metadata) => [
-          'target_identity_result',
-          { results: (metadata['targets'] as unknown[]).map(() => control.identityResult) },
-        ],
+        check_target_identity: (metadata) => {
+          control.onIdentityCheck?.();
+          return [
+            'target_identity_result',
+            {
+              results: (metadata['targets'] as Record<string, unknown>[]).map((item) =>
+                item['processStartTime'] === control.exitedCreationTime
+                  ? { result: 'terminated', reason: 'no_process' }
+                  : control.identityResult,
+              ),
+            },
+          ];
+        },
         list_targets: () => ['probe_result', []],
         pick_application: () => ['probe_result', null],
         list_windows: (metadata) => {
@@ -4900,7 +4919,7 @@ int main() {
       undefined,
       {
         ...(termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
-        windowsLedger: {
+        windowsLedger: store ?? {
           write: async (row) => {
             written.push(row);
             if (control.wait !== null) await control.wait;
@@ -4931,9 +4950,11 @@ int main() {
             return true;
           },
           restoreQuarantines: () => control.restoreQuarantines(),
+          quarantineRevision: () => (quarantines.length === 0 ? null : 1),
           releaseQuarantine: async () => {
             control.releases += 1;
             if (control.releaseWait !== null) await control.releaseWait;
+            if (control.throwRelease) throw new Error('synthetic release failure');
             if (control.failRelease) return false;
             quarantines.length = 0;
             return true;
@@ -5150,6 +5171,128 @@ int main() {
       expect(spy.mock.results.filter((result) => result.type === 'throw')).toEqual([]);
       await target.host.listTargets!().catch(() => undefined);
       expect(spy.mock.results.filter((result) => result.type === 'throw')).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  const backgroundReceiptSpy = () => {
+    const decide = stopKernel.decideWindowsStop;
+    return vi.spyOn(stopKernel, 'decideWindowsStop').mockImplementation((state, event) => {
+      if (event.kind === 'receipt' && event.status === 'received')
+        state = {
+          ...state,
+          rows: state.rows.map((row) => ({
+            ...row,
+            kind: 'semantic',
+            inputPath: 'background_semantic',
+          })),
+        };
+      return decide(state, event);
+    });
+  };
+
+  it('PR9 approval release refuses when another Host added newer evidence before the delete', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ledger-approval-revision-'));
+    const path = join(directory, 'shared.sqlite');
+    const a = openWindowsLedgerStore({ path, userData: 'C:/synthetic/a' });
+    const b = openWindowsLedgerStore({ path, userData: 'C:/synthetic/b' });
+    const identity = { pid: 42, creationTime: '133000000000000001' };
+    const spy = backgroundReceiptSpy();
+    try {
+      const hostA = ledgerTarget(true, undefined, true, a);
+      const session = await startSession(hostA.host, 'session-1', 'turn-1');
+      await startSession(hostA.host, 'other-session', 'turn-2');
+      hostA.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await hostA.dispatch(session, ledgerActions[4]);
+      await hostA.host.close(session);
+      expect(a.readQuarantines()).toEqual([{ identity, reason: 'effect_unconfirmed' }]);
+      // Created after A's helper connected: a fake helper serves the latest target's table.
+      const original = responders();
+      const hostB = createTarget(
+        {
+          ...original,
+          list_windows: (metadata) => {
+            const [type, result] = original['list_windows']!(metadata);
+            return [
+              type,
+              (result as Record<string, unknown>[]).map((row) => ({ ...row, pid: identity.pid })),
+            ];
+          },
+          start_session: (metadata) => {
+            const [type, result] = original['start_session']!(metadata);
+            return [
+              type,
+              {
+                ...(result as Record<string, unknown>),
+                pid: identity.pid,
+                processStartTime: identity.creationTime,
+              },
+            ];
+          },
+        },
+        undefined,
+        { windowsLedger: b },
+      );
+      await expect(hostB.host.restoreWindowsLedger()).resolves.toBe(true);
+      // After A's approval starts, B's helper exits and transfers newer evidence for the target.
+      hostA.control.onIdentityCheck = () => {
+        hostA.control.onIdentityCheck = undefined;
+        expect(b.transferReceipt([], [{ identity, reason: 'exit_suspect' }])).toBe(true);
+      };
+      await expect(
+        hostA.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      expect(hostA.control.onIdentityCheck).toBeUndefined();
+      // The first committed reason stays; the approval did not cover B's newer evidence.
+      expect(b.readQuarantines()).toEqual([{ identity, reason: 'effect_unconfirmed' }]);
+      await expect(startSession(hostA.host, 'fresh-session', 'turn-3')).rejects.toThrow(
+        'native_unavailable',
+      );
+      await expect(startSession(hostB.host, 'b-session', 'turn-4')).rejects.toThrow(
+        'native_unavailable',
+      );
+      expect(b.readQuarantines()).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      a.close();
+      b.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('PR9 a failed approval release hands over to R15 once the target exits', async () => {
+    const spy = backgroundReceiptSpy();
+    try {
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await startSession(target.host, 'other-session', 'turn-2');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await target.dispatch(session, ledgerActions[4]);
+      await target.host.close(session);
+      expect(target.quarantines).toHaveLength(1);
+      target.control.throwRelease = true;
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      expect(target.control.releases).toBe(1);
+      expect(target.quarantines).toHaveLength(1);
+      // The target exits, the store recovers and the PID is reused by a new process.
+      target.control.exitedCreationTime = '133000000000000001';
+      target.control.creationTime = '133000000000000002';
+      target.control.throwRelease = false;
+      await expect(startSession(target.host, 'reused-session', 'turn-3')).resolves.toMatchObject({
+        sessionId: 'reused-session',
+      });
+      expect(target.quarantines).toEqual([]);
     } finally {
       spy.mockRestore();
     }

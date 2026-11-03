@@ -103,10 +103,23 @@ export type WindowsDispatchLedgerStorage = Readonly<{
    */
   restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
   /**
-   * Remove only this identity: a proven terminated process (R15) or an explicit approval after a
-   * fresh identity check (R17). Retries are idempotent.
+   * The shared quarantine's update revision, or null without a row. Every add or transfer that
+   * touches the identity (including one that keeps the first committed reason) changes it.
    */
-  releaseQuarantine?(identity: WindowsTargetQuarantine['identity']): boolean | Promise<boolean>;
+  quarantineRevision?(
+    identity: WindowsTargetQuarantine['identity'],
+  ): number | null | Promise<number | null>;
+  /**
+   * Remove only this identity. Without `revision` (R15: a proven terminated process covers every
+   * earlier operation) the delete is unconditional. With it (R17/R24: an explicit approval) the
+   * delete happens in one transaction only while the row still has that revision, and returns
+   * false, keeping the row, when newer evidence changed it. Retries are idempotent: an absent row
+   * returns true.
+   */
+  releaseQuarantine?(
+    identity: WindowsTargetQuarantine['identity'],
+    revision?: number,
+  ): boolean | Promise<boolean>;
   /** Startup snapshot: only this instance's rows, with all shared quarantines. */
   read?(): WindowsLedgerSnapshot | Promise<WindowsLedgerSnapshot>;
   /** Refresh shared isolation without replaying this Main's live ledger rows. */
@@ -2346,6 +2359,7 @@ export function createComputerUseNativeHost(
               confirmedClosed.has(input.newSessionId) ||
               (!owner.receiptConfirmed && !owner.terminated) ||
               ledger?.releaseQuarantine === undefined ||
+              ledger.quarantineRevision === undefined ||
               addon?.checkTargetIdentity === undefined
             )
               return false;
@@ -2370,6 +2384,16 @@ export function createComputerUseNativeHost(
                   ),
               ) ||
               [...uncertainWrites].some((row) => sameIdentity(row.identity, identity));
+            // The approval covers only the shared evidence committed when it was given. Another
+            // Host's later add or transfer changes this revision and the release then refuses.
+            let revision: number | null;
+            try {
+              revision = await ledger.quarantineRevision(identity);
+            } catch {
+              return false;
+            }
+            if (typeof revision !== 'number') return false;
+            const approvedRevision = revision;
             await retryLedger();
             if (
               blocked() ||
@@ -2377,17 +2401,17 @@ export function createComputerUseNativeHost(
             )
               return false;
             // This read is after approval; it can launch the new helper after a confirmed exit.
-            const reobserve = async () => {
+            const observe = async () => {
               try {
                 const result = await addon.checkTargetIdentity!([
                   { pid: identity.pid, processStartTime: identity.creationTime },
                 ]);
-                return result.length === 1 && result[0]?.result === 'alive';
+                return result.length === 1 ? result[0]?.result : undefined;
               } catch {
-                return false;
+                return undefined;
               }
             };
-            if (!(await reobserve()) || blocked()) return false;
+            if ((await observe()) !== 'alive' || blocked()) return false;
             const generation = Math.max(
               ...[...ledgerStates.values()]
                 .filter((state) => state.helperLaunched && !state.exitConfirmed)
@@ -2426,26 +2450,37 @@ export function createComputerUseNativeHost(
             });
             if (decision.refusal !== null) return false;
             let released = false;
+            // Set by the latest write: the shared row changed after approval, or the target ended.
+            let superseded = false;
+            let terminated = false;
             // A superseded release without a restoration obligation has no hold left (F5).
             const held = () => ledgerState(generation).holds.some((hold) => hold.id === holdId);
             pendingWrites.set(holdId, {
               generation,
               write: async () => {
-                if (
-                  !held() ||
-                  blocked(holdId) ||
-                  !(await reobserve()) ||
-                  !held() ||
-                  blocked(holdId)
-                )
-                  return false;
+                superseded = false;
+                terminated = false;
+                if (!held() || blocked(holdId)) return false;
+                const observed = await observe();
+                if (!held() || blocked(holdId)) return false;
+                if (observed === 'terminated') {
+                  // R15 handover: a proven exit covers every earlier operation on this identity,
+                  // including newer evidence and an earlier uncertain conditional delete. Without
+                  // it a failed release could never settle and PID reuse would stay refused.
+                  if (!(await ledger.releaseQuarantine!(identity))) return false;
+                  terminated = true;
+                  return true;
+                }
+                if (observed !== 'alive') return false;
                 const gate = ledgerEvent(generation, {
                   kind: 'retry_storage',
                   holdId,
                   status: 'before_write',
                 });
                 if (gate.refusal !== null || startOwners.has(input.newSessionId)) return false;
-                return ledger.releaseQuarantine!(identity);
+                if (await ledger.releaseQuarantine!(identity, approvedRevision)) return true;
+                superseded = true;
+                return false;
               },
               reflect: (written, uncertain) => {
                 if (!held()) {
@@ -2458,14 +2493,32 @@ export function createComputerUseNativeHost(
                     identity,
                   });
                 }
+                if (superseded && !written) {
+                  // The stored row kept newer evidence: end this approval and keep the quarantine.
+                  // A new approval reads the new revision (fail-closed).
+                  const state = ledgerState(generation);
+                  ledgerStates.set(generation, {
+                    ...state,
+                    holds: state.holds.map((hold) =>
+                      hold.id === holdId ? { ...hold, releaseSuperseded: true } : hold,
+                    ),
+                  });
+                  released = false;
+                  return ledgerEvent(generation, {
+                    kind: 'retry_storage',
+                    holdId,
+                    status: 'before_write',
+                  });
+                }
                 const result = ledgerEvent(generation, {
                   kind: 'retry_storage',
                   holdId,
                   status: written ? 'written' : 'failed',
                   ...(uncertain ? { uncertain: true } : {}),
                 });
-                released = result.freshSession;
-                if (released)
+                // The R15 handover clears the quarantine but never grants the approved session.
+                released = result.freshSession && !terminated;
+                if (result.freshSession)
                   for (const [id, state] of ledgerStates)
                     ledgerStates.set(id, {
                       ...state,

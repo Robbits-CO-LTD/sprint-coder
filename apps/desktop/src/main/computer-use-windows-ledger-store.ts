@@ -41,7 +41,8 @@ function decode(value: unknown): unknown {
 }
 
 type StoredRecord = { rowid: number; payload: string };
-const STORE_VERSION = 1;
+/** 2 adds the shared quarantine revision (approval releases are conditional on it). */
+const STORE_VERSION = 2;
 
 /** The caller owns lifetime. This is deliberately not opened from the product index.ts yet. */
 export function openWindowsLedgerStore(options: { userData: string; path?: string }) {
@@ -58,7 +59,7 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
   try {
     db.transaction(() => {
       const version = db.pragma('user_version', { simple: true });
-      if (version !== 0 && version !== STORE_VERSION)
+      if (version !== 0 && version !== 1 && version !== STORE_VERSION)
         throw new Error('Unsupported Windows ledger version');
       db.exec(`
         CREATE TABLE IF NOT EXISTS ledger (
@@ -68,10 +69,18 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
         );
         CREATE TABLE IF NOT EXISTS quarantines (
           pid INTEGER NOT NULL, creation_time TEXT NOT NULL, payload TEXT NOT NULL,
+          revision INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (pid, creation_time)
         );
+        CREATE TABLE IF NOT EXISTS quarantine_revision (
+          id INTEGER PRIMARY KEY CHECK (id = 0), value INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO quarantine_revision VALUES (0, 0);
       `);
-      if (version === 0) db.pragma(`user_version = ${STORE_VERSION}`);
+      // Version 1 rows keep revision 0; every later add takes a store-wide revision above it.
+      if (version === 1)
+        db.exec('ALTER TABLE quarantines ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+      if (version !== STORE_VERSION) db.pragma(`user_version = ${STORE_VERSION}`);
     }).immediate();
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = FULL');
@@ -91,14 +100,29 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
   const remove = db.prepare(
     'DELETE FROM ledger WHERE instance_id = ? AND helper_generation = ? AND session_id = ? AND request_id = ?',
   );
+  // A conflict keeps the first committed payload but still records that newer evidence landed.
   const addQuarantine = db.prepare(
-    'INSERT INTO quarantines VALUES (?, ?, ?) ON CONFLICT DO NOTHING',
+    'INSERT INTO quarantines (pid, creation_time, payload, revision) VALUES (?, ?, ?, ?) ' +
+      'ON CONFLICT DO UPDATE SET revision = excluded.revision',
   );
-  const findQuarantine = db.prepare<[number, string], { payload: string }>(
-    'SELECT payload FROM quarantines WHERE pid = ? AND creation_time = ?',
+  const nextRevision = db
+    .prepare<[], number>(
+      'UPDATE quarantine_revision SET value = value + 1 WHERE id = 0 RETURNING value',
+    )
+    .pluck();
+  const findQuarantine = db.prepare<[number, string], { payload: string; revision: number }>(
+    'SELECT payload, revision FROM quarantines WHERE pid = ? AND creation_time = ?',
+  );
+  const deleteQuarantine = db.prepare(
+    'DELETE FROM quarantines WHERE pid = ? AND creation_time = ?',
+  );
+  const deleteQuarantineAt = db.prepare(
+    'DELETE FROM quarantines WHERE pid = ? AND creation_time = ? AND revision = ?',
   );
   /** Both transferReceipt and restoreQuarantines preserve the first committed reason.
    * Concurrent receipt/exit commits can differ from core event order; reasons are diagnostic.
+   * Every add that touches an identity, including a kept-reason conflict, takes a new store-wide
+   * revision, so a revision is never reused even after its row was released and added again.
    */
   const add = (quarantines: readonly WindowsTargetQuarantine[]) => {
     // Check every conflict under the write lock before changing either table.
@@ -113,8 +137,11 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
       )
         return false;
     }
-    for (const q of quarantines)
-      addQuarantine.run(q.identity.pid, q.identity.creationTime, JSON.stringify(q));
+    for (const q of quarantines) {
+      const revision = nextRevision.get();
+      if (typeof revision !== 'number') throw new Error('Windows ledger revision unavailable');
+      addQuarantine.run(q.identity.pid, q.identity.creationTime, JSON.stringify(q), revision);
+    }
     return true;
   };
   const readQuarantines = db.transaction(() => {
@@ -174,14 +201,25 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
       assertVersion();
       return add(quarantines);
     }).immediate,
-    releaseQuarantine(identity: WindowsTargetQuarantine['identity']) {
-      assertVersion();
-      db.prepare('DELETE FROM quarantines WHERE pid = ? AND creation_time = ?').run(
-        identity.pid,
-        identity.creationTime,
-      );
-      return true;
-    },
+    quarantineRevision: db.transaction(
+      (identity: WindowsTargetQuarantine['identity']): number | null => {
+        assertVersion();
+        return findQuarantine.get(identity.pid, identity.creationTime)?.revision ?? null;
+      },
+    ),
+    releaseQuarantine: db.transaction(
+      (identity: WindowsTargetQuarantine['identity'], revision?: number): boolean => {
+        assertVersion();
+        if (revision === undefined) {
+          deleteQuarantine.run(identity.pid, identity.creationTime);
+          return true;
+        }
+        if (deleteQuarantineAt.run(identity.pid, identity.creationTime, revision).changes > 0)
+          return true;
+        // An absent row is an idempotent retry (or another release); a present one is newer.
+        return findQuarantine.get(identity.pid, identity.creationTime) === undefined;
+      },
+    ).immediate,
     transferReceipt: db.transaction(
       (rows: readonly WindowsLedgerRow[], quarantines: readonly WindowsTargetQuarantine[]) => {
         assertVersion();
