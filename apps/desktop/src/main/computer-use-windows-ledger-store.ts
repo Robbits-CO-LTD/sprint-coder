@@ -4,12 +4,14 @@ import { dirname, win32 } from 'node:path';
 import Database from 'better-sqlite3';
 import type { WindowsDispatchLedgerStorage } from './computer-use-native-host';
 import {
+  isStoredWindowsQuarantine,
   storedRowProblem,
   type WindowsLedgerRow,
   type WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 
 export function windowsLedgerInstanceId(userData: string): string {
+  // No legacy rows exist before product wiring; future instanceId changes require migration before activation.
   if (!win32.isAbsolute(userData)) throw new Error('Absolute userData path required');
   let canonical = userData;
   try {
@@ -92,12 +94,28 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
   const addQuarantine = db.prepare(
     'INSERT INTO quarantines VALUES (?, ?, ?) ON CONFLICT DO NOTHING',
   );
+  const findQuarantine = db.prepare<[number, string], { payload: string }>(
+    'SELECT payload FROM quarantines WHERE pid = ? AND creation_time = ?',
+  );
   /** Both transferReceipt and restoreQuarantines preserve the first committed reason.
    * Concurrent receipt/exit commits can differ from core event order; reasons are diagnostic.
    */
   const add = (quarantines: readonly WindowsTargetQuarantine[]) => {
+    // Check every conflict under the write lock before changing either table.
+    for (const q of quarantines) {
+      const record = findQuarantine.get(q.identity.pid, q.identity.creationTime);
+      if (record === undefined) continue;
+      const existing = decode(record.payload);
+      if (
+        !isStoredWindowsQuarantine(existing) ||
+        existing.identity.pid !== q.identity.pid ||
+        existing.identity.creationTime !== q.identity.creationTime
+      )
+        return false;
+    }
     for (const q of quarantines)
       addQuarantine.run(q.identity.pid, q.identity.creationTime, JSON.stringify(q));
+    return true;
   };
   const readQuarantines = db.transaction(() => {
     assertVersion();
@@ -144,8 +162,7 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
     }).immediate,
     restoreQuarantines: db.transaction((quarantines: readonly WindowsTargetQuarantine[]) => {
       assertVersion();
-      add(quarantines);
-      return true;
+      return add(quarantines);
     }).immediate,
     releaseQuarantine(identity: WindowsTargetQuarantine['identity']) {
       assertVersion();
@@ -158,7 +175,7 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
     transferReceipt: db.transaction(
       (rows: readonly WindowsLedgerRow[], quarantines: readonly WindowsTargetQuarantine[]) => {
         assertVersion();
-        add(quarantines);
+        if (!add(quarantines)) return false;
         for (const row of rows) remove.run(...key(row));
         return true;
       },

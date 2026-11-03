@@ -169,6 +169,37 @@ afterEach(() => {
 });
 ledgerStorageContract('SQLite Windows ledger contract', fixture);
 
+it.each([
+  ['unknown reason', JSON.stringify({ ...quarantine, reason: 'future-reason' })],
+  ['unknown shape', 'null'],
+  ['malformed JSON', '{'],
+  [
+    'mismatched identity',
+    JSON.stringify({ ...quarantine, identity: { ...row.identity, pid: 99 } }),
+  ],
+])(
+  'rejects conflicting %s without losing ledger rows or partially restoring quarantines',
+  async (_, payload) => {
+    const f = fixture();
+    const store = f.open();
+    await store.write(row);
+    const db = new Database(f.path);
+    connections.push(db);
+    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+      row.identity.pid,
+      row.identity.creationTime,
+      payload,
+    );
+    const other = { ...quarantine, identity: { ...row.identity, pid: 42 } };
+    expect(await store.transferReceipt!([row], [other, quarantine])).toBe(false);
+    expect(await store.restoreQuarantines([other, quarantine])).toBe(false);
+    expect(store.read().rows).toEqual([row]);
+    expect(db.prepare('SELECT payload FROM quarantines').all()).toEqual([{ payload }]);
+    store.close();
+    expect(f.open().read().rows).toEqual([row]);
+  },
+);
+
 it('PR10 preserves unknown quarantine payloads for diagnostics and newer readers', () => {
   const f = fixture();
   const store = f.open();
@@ -318,13 +349,22 @@ it.each([false, true])(
     parentPort.postMessage('ready');
     Atomics.wait(new Int32Array(workerData.gate), 0, 0);
     try {
+      // Host retries failed storage operations; only lock contention is retryable here.
+      const retryBusy = (operation) => {
+        for (let attempt = 0; ; attempt++) {
+          try { return operation(); }
+          catch (error) {
+            if (error.code !== 'SQLITE_BUSY' || attempt >= 9) throw error;
+          }
+        }
+      };
       const rows = Array.from({ length: 20 }, (_, i) => ({ ...workerData.row, requestId: String(i) }));
-      for (const row of rows) store.write(row);
+      for (const row of rows) retryBusy(() => store.write(row));
       if (workerData.transfer) {
         const quarantine = { ...workerData.quarantine, reason: workerData.instance === 'a' ? 'exit_suspect' : 'response_lost' };
-        store.transferReceipt(rows, [quarantine]);
+        retryBusy(() => store.transferReceipt(rows, [quarantine]));
         parentPort.postMessage(store.read().quarantines);
-      } else store.restoreQuarantines([workerData.quarantine]);
+      } else retryBusy(() => store.restoreQuarantines([workerData.quarantine]));
     } finally { store.close(); }
   `,
           {
