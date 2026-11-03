@@ -1912,6 +1912,8 @@ export function createComputerUseNativeHost(
     let ended = false;
     // A claimed UIA call may return shortly after Stop. Retry only that explicit nonterminal
     // answer, within this one original deadline; never leave a retry running after the caller ends.
+    // N5-J: semantic input still has a worker and a claim; this is the PR11 close-only exception,
+    // not a retry for the removed start, validation, rejudge or discovery workers.
     const attempt = async (): Promise<unknown> => {
       for (;;) {
         if (ended) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');

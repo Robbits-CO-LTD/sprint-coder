@@ -545,7 +545,7 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('// END windows v2 targets'),
     );
     const newStartConsumer = newStart.slice(0, newStart.indexOf('const auto still_valid'));
-    const newStartWorker = newStart.slice(
+    const newStartMeasurement = newStart.slice(
       newStart.indexOf('const auto still_valid'),
       newStart.indexOf('struct Apartment'),
     );
@@ -570,7 +570,7 @@ describe('Windows native helper compile boundary', () => {
     expect(startSource).toContain('StartWindowsNewSession(std::move(input)');
     expect(startSource).toContain('StartWindowsExistingSession(std::move(input)');
     expect(newStartConsumer).toContain('parent_process_dead.load(std::memory_order_acquire)');
-    expect(newStartWorker).toContain('return start_valid() &&');
+    expect(newStartMeasurement).toContain('return start_valid() &&');
     expect(existingStartGate).toContain('!parent_process_dead.load(std::memory_order_acquire)');
     expect(existingStartGate).toContain('cancellation_epoch.load(std::memory_order_acquire)');
     expect(existingStartGate).toContain('input.stop_serial');
@@ -580,6 +580,15 @@ describe('Windows native helper compile boundary', () => {
     expect(source).toContain(
       'SendInputForBoundTarget(session, expected, expected_epoch, count, events)',
     );
+  });
+
+  it('keeps removed measurement workers and their cancellation aliases absent (N5-J)', () => {
+    const source = readWindowsHostSource();
+    expect(source).not.toMatch(
+      /\b(?:WindowsValidationPending|WindowsValidationState|WindowsDiscoveryPending|WindowsV2RejudgePending|WindowsV2RejudgeState|active_job_id|cancellation_thread)\b/u,
+    );
+    expect(source).toContain('WindowsNewStartIoRegistration cancellation;');
+    expect(source).toContain('WindowsWorkerSlot running;');
   });
 
   it('takes worker slots only through numbered WindowsWorkerSlot operations (N5-B2)', () => {

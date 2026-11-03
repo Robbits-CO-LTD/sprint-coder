@@ -48,6 +48,35 @@ describe('Windows v1 display name contract (#947)', () => {
 });
 
 describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
+  it('retains list partial results, cancellation and cleanup ownership without Stop (N5-J)', () => {
+    const list = cut('bool ListWindowsTargets(', '// BEGIN windows v2 rejudge');
+    expect(v2Block).toContain("kWindowsListTargetsBudgetMs = 6'000;");
+    expect(list).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
+    expect(list).toContain('std::thread([pending,');
+    expect(list).toContain('pending->ready.wait_for(lock, std::chrono::milliseconds(20))');
+    expect(list).toContain('std::lock_guard stop_lock(control.stop_mutex);');
+    expect(list).toContain('pending->abandoned.store(true, std::memory_order_release);');
+    expect(list).toContain('(!context_valid() || pending->context_ready)');
+    expect(list).toContain('CancelSynchronousIo(pending->thread.value);');
+    expect(list).toContain('if (!context_valid() || !pending->enumerated)');
+    expect(list).toContain('WindowsV2ListRows partial = pending->progress;');
+    expect(list).toContain('index < pending->remaining && !partial.Full()');
+    expect(list).toContain('/*truncated=*/true, partial');
+    expect(list.indexOf('~Apartment()')).toBeLessThan(
+      list.indexOf('WindowsTargetListWorkerRunning().store(false'),
+    );
+    const candidate = cut(
+      'void AdoptWindowsV2ContextCandidate(',
+      'bool MeasureWindowsV2TargetList(',
+    );
+    expect(candidate).toContain('control.running.load(std::memory_order_acquire)');
+    expect(candidate).toContain('control.context_stop_serial == expected_stop');
+    expect(candidate).toContain(
+      'control.context_candidate->lineage_root_pid == windows_v2_main_pid',
+    );
+    expect(candidate).not.toContain('windows_v2_list_generation =');
+  });
+
   it('answers list_targets with unsupported_operation in a v1 build, before anything is read', () => {
     expect(host).toContain(
       [
