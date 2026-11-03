@@ -3101,6 +3101,7 @@ int main() {
       failReflect: false,
       creationTime: '133000000000000001' as string | undefined,
       pid: 42,
+      discoveryPid: 42,
       response: null as HelperResponse | null,
       wait: null as Promise<void> | null,
       reflectWait: null as Promise<void> | null,
@@ -3111,6 +3112,16 @@ int main() {
     const target = createTarget(
       {
         ...base,
+        list_windows: (metadata) => {
+          const [type, rows] = base['list_windows']!(metadata);
+          return [
+            type,
+            (rows as Array<Record<string, unknown>>).map((row) => ({
+              ...row,
+              pid: control.discoveryPid,
+            })),
+          ];
+        },
         stop_pending_start: (metadata) => [
           'probe_result',
           {
@@ -3770,6 +3781,52 @@ int main() {
       value: { result: 'rejected', reasonCode: 'native_unavailable' },
     });
   });
+
+  it.each(['same', 'other'] as const)(
+    'R19a a hold left while a start waits in discovery refuses only the held target (%s)',
+    async (kind) => {
+      const target = ledgerTarget();
+      const sessionA = await startSession(target.host, 'session-a', 'turn-1');
+      // B's window discovery is withheld so A's failed reflection lands during it.
+      target.helper().holdOnly('list_windows_cancellable');
+      const starting = startSession(target.host, 'session-b', 'turn-2').then(
+        (value) => ({ outcome: 'resolved' as const, value }),
+        (error: unknown) => ({ outcome: 'rejected' as const, error }),
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      expect(target.helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
+      target.control.failReflect = true;
+      await target.dispatch(sessionA);
+      expect(target.rows.size).toBe(1);
+      target.control.failReflect = false;
+      if (kind === 'other') target.control.discoveryPid = 43;
+      target.helper().release('list_windows_cancellable');
+      const startFrames = () =>
+        sockets
+          .at(-1)!
+          .writes.map((bytes) =>
+            JSON.parse(decodeComputerUseNativeFrame(bytes).metadata.toString('utf8')),
+          )
+          .filter((metadata: Record<string, unknown>) => metadata['operation'] === 'start_session');
+      if (kind === 'same') {
+        const result = await starting;
+        expect(result).toMatchObject({ outcome: 'rejected' });
+        expect((result as { error: unknown }).error).toMatchObject({
+          reasonCode: 'native_unavailable',
+        });
+        expect(target.helper().served.filter((op) => op === 'start_session')).toHaveLength(1);
+        expect(startFrames()).toHaveLength(1);
+      } else {
+        expect(await starting).toMatchObject({
+          outcome: 'resolved',
+          value: { sessionId: 'session-b' },
+        });
+        expect(startFrames().map((metadata: Record<string, unknown>) => metadata['pid'])).toEqual([
+          42, 43,
+        ]);
+      }
+    },
+  );
 
   it.each([false, true])(
     'R18 cancels an unsent stored row after Stop during storage (%s)',

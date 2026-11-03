@@ -1247,6 +1247,12 @@ export function createComputerUseNativeHost(
       ...nativeRouteField(input.profile.platform, nativeRoute),
     };
     assertStartOwner(owner);
+    // Discovery awaited after the admission check; a hold left on this target meanwhile refuses.
+    if (
+      ledger !== undefined &&
+      ledgerBlocked(pid, sessions.get(input.sessionId)?.raw.processStartTime)
+    )
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
     owner.nativeInvoked = true;
     const value = await invoke('startSession', request);
     assertStartOwner(owner);
