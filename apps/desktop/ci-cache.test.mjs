@@ -301,6 +301,15 @@ describe('CI scope wiring', () => {
       expect(workflow.jobs[job]['runs-on']).toBe(
         '${{ fromJSON(needs.classify.outputs.common_runner) }}',
       );
+    expect(depsAction.inputs['cache-installed-tree'].default).toBe('true');
+    expect(depsAction.runs.steps.find((step) => step.id === 'dependencies').if).toBe(
+      "inputs.cache-installed-tree == 'true'",
+    );
+    for (const job of ['quality', 'package-tests'])
+      expect(
+        workflow.jobs[job].steps.find((step) => step.uses === './.github/actions/install-deps')
+          .with['cache-installed-tree'],
+      ).toBe("${{ runner.name != 'MSI-ci' }}");
     expect(workflow.jobs['sandbox-rust-windows']['runs-on']).toBe(
       '${{ fromJSON(needs.classify.outputs.rust_runner) }}',
     );

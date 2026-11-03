@@ -81,6 +81,7 @@ jobs:
         uses: ./.github/actions/install-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache-installed-tree: ${{ runner.name != 'MSI-ci' }}
 
       - name: Run ${{ matrix.label }}
         if: matrix.command != 'shared'
@@ -120,6 +121,7 @@ jobs:
         uses: ./.github/actions/install-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache-installed-tree: ${{ runner.name != 'MSI-ci' }}
 
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain

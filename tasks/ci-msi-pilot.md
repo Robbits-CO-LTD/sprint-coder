@@ -29,8 +29,11 @@ symlinks (`tar: Cannot create symlink: Operation not permitted`); the existing c
 action correctly falls back to `npm ci`, adding download/extraction/install overhead.
 Batch all three MSI quality checks after one installation. Keep the original three
 parallel quality rows when routing back to hosted runners. No symlink privilege is
-granted and no test failure is ignored. Cached npm downloads still reduce fetch work;
-installed-tree restore is not claimed to work on this account.
+granted and no test failure is ignored. MSI's two dependency consumers explicitly
+disable the unsupported installed-tree archive through the action input, avoiding
+failed restore/download/recompression on every job. Hosted callers keep the default
+installed-tree cache. MSI still uses its persistent npm download cache with clean
+`npm ci`; installed-tree restore is not claimed to work on this account.
 
 ## Routing and access
 
