@@ -57,6 +57,11 @@ export type ComputerUseNativeProbe = Readonly<{
     screenCaptureKit?: boolean;
     /** Private Windows protocol extension; absence never enables its query/Stop methods. */
     cancellableWindowDiscovery?: boolean;
+    /**
+     * Private Windows attest for identity-bound starts. The handshake accepts it, but nothing
+     * reads it yet, so absence and presence both keep the existing start path.
+     */
+    identityBoundStart?: boolean;
     /** Private Windows attest for reading one node; absence keeps artifact transfer closed. */
     artifactRead?: boolean;
   }>;

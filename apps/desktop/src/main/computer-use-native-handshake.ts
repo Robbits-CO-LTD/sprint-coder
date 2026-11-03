@@ -73,6 +73,7 @@ export function parseNativeHandshake(
               'graphicsCapture',
               'sendInput',
               'cancellableWindowDiscovery',
+              'identityBoundStart',
               'artifactRead',
               'approval',
             ].includes(key) ||

@@ -321,6 +321,87 @@ bool CheckWindowsTargetIdentities(std::string_view metadata, std::string* respon
 }
 // END windows target identity
 
+// Keep the identity check's strict decimal contract without opening a process.
+bool ReadWindowsStartIdentity(const std::string& metadata, std::string* process_start) {
+  bool required = false;
+  process_start->clear();
+  if (!ReadOptionalJsonBoolean(metadata, "requireStartIdentity", &required)) return false;
+  const bool has_expected = metadata.find("\"expectedProcessStartTime\"") != std::string::npos;
+  if (!required) return !has_expected;
+  const std::string key = "\"expectedProcessStartTime\"";
+  const auto first = metadata.find(key);
+  if (first == std::string::npos || metadata.find(key, first + key.size()) != std::string::npos) return false;
+  std::size_t cursor = first + key.size();
+  const auto space = [&] {
+    while (cursor < metadata.size() && (metadata[cursor] == ' ' || metadata[cursor] == '\t' ||
+           metadata[cursor] == '\r' || metadata[cursor] == '\n')) ++cursor;
+  };
+  space();
+  if (cursor >= metadata.size() || metadata[cursor++] != ':') return false;
+  space();
+  std::string value;
+  if (!ReadJsonStringValueAt(metadata, &cursor, &value) ||
+      value.empty() || value.front() < '1' || value.front() > '9' ||
+      !std::all_of(value.begin(), value.end(), [](char c) { return c >= '0' && c <= '9'; }))
+    return false;
+  space();
+  if (cursor >= metadata.size() || (metadata[cursor] != ',' && metadata[cursor] != '}')) return false;
+  std::uint64_t ticks = 0;
+  const auto parsed = std::from_chars(value.data(), value.data() + value.size(), ticks);
+  if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) return false;
+  *process_start = std::move(value);
+  return true;
+}
+
+struct WindowsStartResult {
+  std::uint32_t pid = 0;
+  std::string process_start;
+  std::uint64_t attempt_count = 0;
+  bool execution_unknown = false;
+};
+
+WindowsStartResult ReadWindowsStartResult(const std::string& metadata) {
+  WindowsStartResult result;
+  std::uint64_t pid = 0;
+  if (ReadWindowsStartIdentity(metadata, &result.process_start) &&
+      ReadJsonUint64(metadata, "pid", &pid) && pid > 0 &&
+      pid <= std::numeric_limits<DWORD>::max())
+    result.pid = static_cast<DWORD>(pid);
+  else result.process_start.clear();
+  return result;
+}
+
+std::string AppendWindowsStartResult(std::string payload, const WindowsStartResult& start_result,
+                                    bool succeeded) {
+  if (start_result.process_start.empty() || payload.empty() || payload.back() != '}') return payload;
+  const char* outcome = start_result.execution_unknown ? "unconfirmed" :
+      start_result.attempt_count == 0 ? "not_attempted" :
+      succeeded ? "confirmed" : "unconfirmed";
+  payload.pop_back();
+  return payload + ",\"startResult\":{\"pid\":" + std::to_string(start_result.pid) +
+      ",\"processStartTime\":\"" + start_result.process_start +
+      "\",\"attemptCount\":" + std::to_string(start_result.attempt_count) +
+      ",\"foregroundResult\":\"" + outcome + "\"}}";
+}
+
+bool CheckWindowsStartFocusIdentity(HANDLE process, std::uint32_t pid,
+                                    const std::string& expected_start,
+                                    const std::string& held_start, HWND window,
+                                    HWND focus_window, const std::string& app_identity,
+                                    const std::string& expected_window_identity) {
+  if (expected_start.empty()) return true; // Legacy starts have not opted into this contract.
+  std::string actual_start;
+  DWORD window_pid = 0, focus_pid = 0;
+  return expected_start == held_start && process != nullptr &&
+      GetProcessId(process) == pid && WaitForSingleObject(process, 0) == WAIT_TIMEOUT &&
+      ReadProcessStartIdentity(process, &actual_start) && actual_start == expected_start &&
+      IsWindow(window) && GetWindowThreadProcessId(window, &window_pid) != 0 && window_pid == pid &&
+      IsWindow(focus_window) && GetWindowThreadProcessId(focus_window, &focus_pid) != 0 && focus_pid == pid &&
+      Sha256String("computer-window-identity-v1\n" + app_identity + "\n" + actual_start + "\n" +
+          std::to_string(static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window)))) ==
+          expected_window_identity;
+}
+
 bool WindowsSessionProcessMatches(const WindowsSession &session) {
   std::string process_start;
   return session.process_handle != nullptr &&
@@ -338,6 +419,7 @@ struct WindowEnumerationContext {
   std::string policy_language = "unknown";
   std::string maximum_mode = "observe_only";
   bool identity_matches = false;
+  bool include_start_identity = false;
   bool elevated = true;
   bool proxy = false;
   std::vector<std::string> candidates;
@@ -859,7 +941,9 @@ BOOL CALLBACK CollectTopLevelWindow(HWND window, LPARAM parameter) {
       "\",\"modal\":" + (modal ? "true" : "false") +
       ",\"policyLanguage\":\"" + context->policy_language +
       "\",\"maximumMode\":\"" + context->maximum_mode +
-      "\",\"revision\":1}");
+      "\",\"revision\":1" +
+      (context->include_start_identity && eligible
+          ? ",\"processStartTime\":\"" + context->process_start + "\"" : "") + "}");
   return context->candidates.size() < 64 ? TRUE : FALSE;
 }
 
@@ -924,7 +1008,8 @@ bool EnumerateWindowsForExecutable(const std::wstring &canonical_path,
                                    std::string_view expected_executable_digest,
                                    std::string_view expected_signer_digest,
                                    std::vector<std::string> *candidates,
-                                   const std::function<bool()>& still_valid = {}) {
+                                   const std::function<bool()>& still_valid = {},
+                                   bool include_start_identity = false) {
   const auto current = [&] { return !still_valid || still_valid(); };
   if (!current()) return false;
   ScopedKernelHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -953,6 +1038,7 @@ bool EnumerateWindowsForExecutable(const std::wstring &canonical_path,
       }
       WindowEnumerationContext context;
       context.still_valid = still_valid;
+      context.include_start_identity = include_start_identity;
       context.pid = entry.th32ProcessID;
       context.app_identity = std::string(expected_identity);
       context.executable_digest =

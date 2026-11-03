@@ -124,6 +124,7 @@ describe('the Windows helper trust the loader hands to the pipe client (D7)', ()
         graphicsCapture: true,
         sendInput: true,
         cancellableWindowDiscovery: true,
+        identityBoundStart: true,
         artifactRead: true,
         approval: false,
       },
@@ -184,6 +185,65 @@ describe('the Windows helper trust the loader hands to the pipe client (D7)', ()
       ).toThrow('HANDSHAKE_INVALID');
     },
   );
+
+  it.each([true, false, 'true', 1, null, undefined])(
+    'accepts the identityBoundStart attest only as a win32 boolean in probe and pipe handshakes: %s',
+    (identityBoundStart) => {
+      const valid = typeof identityBoundStart === 'boolean';
+      const binding = load(V1, { cancellableWindowDiscovery: true, identityBoundStart });
+      expect(binding.probe.available).toBe(valid);
+      if (!valid) expect(binding.probe.reason).toBe('HANDSHAKE_INVALID');
+      const handshake = {
+        protocolVersion: 1,
+        apiVersion: 3,
+        napiVersion: 10,
+        platform: 'win32',
+        sourceCommit: 'f'.repeat(40),
+        capabilities: { cancellableWindowDiscovery: true, identityBoundStart },
+      };
+      const trust = {
+        sourceCommit: 'f'.repeat(40),
+        binaryDigest: 'a'.repeat(64),
+        signerDigest: 'b'.repeat(64),
+      };
+      if (valid)
+        expect(() => assertWindowsComputerUseHelperHandshake(handshake, trust)).not.toThrow();
+      else
+        expect(() => assertWindowsComputerUseHelperHandshake(handshake, trust)).toThrow(
+          'HANDSHAKE_INVALID',
+        );
+      expect(() =>
+        parseNativeHandshake(
+          {
+            protocolVersion: 1,
+            apiVersion: 3,
+            napiVersion: 10,
+            platform: 'darwin',
+            capabilities: { identityBoundStart },
+          },
+          'darwin',
+        ),
+      ).toThrow('HANDSHAKE_INVALID');
+    },
+  );
+
+  it('still refuses a capability key the contract does not know', () => {
+    const binding = load(V1, { identityBoundStart: true, futureCapability: true });
+    expect(binding.probe.available).toBe(false);
+    expect(binding.probe.reason).toBe('HANDSHAKE_INVALID');
+    expect(() =>
+      parseNativeHandshake(
+        {
+          protocolVersion: 1,
+          apiVersion: 3,
+          napiVersion: 10,
+          platform: 'win32',
+          capabilities: { identityBoundStart: true, futureCapability: true },
+        },
+        'win32',
+      ),
+    ).toThrow('HANDSHAKE_INVALID');
+  });
 
   it('carries the manifest eligibility, so the pipe handshake is checked against it', () => {
     const binding = load(V1);

@@ -90,6 +90,18 @@ enum class MessageType : std::uint16_t {
   kDispatchApprovedResult = 20,
 };
 
+// Windows identityBoundStart capability (no new MessageType):
+// list_windows_cancellable / list_targets: includeStartIdentity=true adds the
+// decimal-string processStartTime to selectable rows; discovery must not launch.
+// start_session: requireStartIdentity=true requires expectedProcessStartTime;
+// pid and windowIdentityDigest bind the same candidate. Without the opt-in the
+// legacy request/response is unchanged. Opt-in success AND error responses carry
+// startResult {pid, processStartTime, attemptCount, foregroundResult}.
+// foregroundResult: not_attempted (zero calls), confirmed (successful start),
+// unconfirmed (a call was attempted but start failed, or admission cannot prove
+// the earlier attempt's outcome). A zero count alone is not proof of no effect.
+// Counts are per request,
+// unlike cumulative inputAttemptCount. These fields are Main-internal only.
 struct Frame {
   FrameHeader header{};
   std::vector<std::uint8_t> metadata;

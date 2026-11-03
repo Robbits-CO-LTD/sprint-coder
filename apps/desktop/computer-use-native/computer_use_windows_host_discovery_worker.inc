@@ -12,6 +12,10 @@ bool MeasureWindowsDiscovery(const std::string &metadata, const WindowsDiscovery
     *reason = "profile_identity_invalid";
     return false;
   }
+  bool include_start_identity = false;
+  if (!ReadOptionalJsonBoolean(metadata, "includeStartIdentity", &include_start_identity)) {
+    *reason = "discovery_input_invalid"; return false;
+  }
   std::string canonical_path_utf8;
   std::string expected_identity;
   std::string expected_executable_digest;
@@ -80,12 +84,12 @@ bool MeasureWindowsDiscovery(const std::string &metadata, const WindowsDiscovery
       !EnumerateWindowsForExecutable(
           current_executable.identity.path, expected_identity,
           current_executable.identity.executable_digest,
-          expected_signer_digest, &candidates, work.current)) {
+          expected_signer_digest, &candidates, work.current, include_start_identity)) {
     CloseLockedWindowsExecutable(&current_executable);
     *reason = "process_enumeration_unavailable";
     return false;
   }
-  if (work.current() && candidates.empty() && identity_matches &&
+  if (!include_start_identity && work.current() && candidates.empty() && identity_matches &&
       !IsDisallowedTargetExecutable(current_executable.identity.path)) {
     ScopedKernelHandle launched_process;
     if (LaunchVerifiedExecutable(current_executable, &launched_process.value, work.claim_launch, work.retire_launch)) {
@@ -97,7 +101,7 @@ bool MeasureWindowsDiscovery(const std::string &metadata, const WindowsDiscovery
                 current_executable.identity.path, expected_identity,
                 current_executable.identity.executable_digest,
                 expected_signer_digest,
-                &candidates, work.current)) {
+                &candidates, work.current, include_start_identity)) {
           CloseLockedWindowsExecutable(&current_executable);
           *reason = "process_enumeration_unavailable";
           return false;
