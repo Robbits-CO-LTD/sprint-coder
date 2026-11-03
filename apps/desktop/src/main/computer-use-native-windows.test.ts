@@ -74,6 +74,14 @@ describe('P3d interaction authority', () => {
     expect(delivery.bind(binding)).toEqual([]);
     expect(delivery.blocked(binding.sessionId)).toBe(true);
   });
+  it('BG03_lost_event_cannot_bypass_epoch: a held event marks the session as waiting for a binding', () => {
+    const delivery = new WindowsInteractionEvents();
+    expect(delivery.waitsForBinding(binding.sessionId)).toBe(false);
+    delivery.hold(event, 2, true);
+    expect(delivery.waitsForBinding(binding.sessionId)).toBe(true);
+    delivery.bind(binding);
+    expect(delivery.waitsForBinding(binding.sessionId)).toBe(false);
+  });
   it('BG03_lost_event_cannot_bypass_epoch: a start that ends unbound leaves no held event behind', () => {
     const delivery = new WindowsInteractionEvents();
     delivery.hold(event, 2, true);

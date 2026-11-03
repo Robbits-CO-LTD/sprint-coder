@@ -164,6 +164,12 @@ export class WindowsInteractionEvents {
     this.held.delete(sessionId);
     this.overflowed.delete(sessionId);
   }
+  /** Whether an event is waiting for a binding that does not exist yet. */
+  waitsForBinding(sessionId: string): boolean {
+    return (
+      !this.sessions.has(sessionId) && (this.held.has(sessionId) || this.overflowed.has(sessionId))
+    );
+  }
   /** A start that ended without a binding leaves nothing behind for a later start to replay. */
   discardUnbound(sessionId: string): void {
     if (this.sessions.has(sessionId)) return;

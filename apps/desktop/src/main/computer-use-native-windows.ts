@@ -1298,6 +1298,10 @@ class WindowsComputerUseHelperClient {
               interactionEpoch,
             ),
           );
+        // An event already arrived for this session but nothing can bind it: native will not
+        // resend it, so the start must not succeed with the revocation lost.
+        else if (this.interactionEvents.waitsForBinding(sessionKey))
+          throw new Error('Unbound interaction event');
       }
       if (closes && sessionKey !== undefined) {
         this.interactionEvents.remove(sessionKey);
