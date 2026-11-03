@@ -293,6 +293,8 @@ function createFixture(
     /** A fake host that can paste an artifact (#785 T15-7); a production host never reports it. */
     artifactPaste?: { supported?: boolean };
     /** Opens the native approval path on the fake host (a production host never reports it). */
+    helperGeneration?: () => number | null;
+    subscribeWindowsStop?: ComputerUseNativeHost['subscribeWindowsStop'];
     nativeApproval?: {
       enabled?: boolean;
       /** Per-session answer (C5-1); default: `enabled` for every session. */
@@ -362,6 +364,19 @@ function createFixture(
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
+    ...(options.subscribeWindowsStop === undefined
+      ? {}
+      : { subscribeWindowsStop: options.subscribeWindowsStop }),
+    ...(options.helperGeneration === undefined
+      ? {}
+      : {
+          captureWindowsGeneration: () => {
+            const helperGeneration = options.helperGeneration!();
+            return helperGeneration === null ? null : { helperGeneration };
+          },
+          isWindowsGenerationCurrent: (token) =>
+            token.helperGeneration === options.helperGeneration!(),
+        }),
     availability: () => ({ ...availability, platform: currentProfile.platform }),
     pickApplication: async () => appIdentity,
     listWindows: async () => {
@@ -1225,6 +1240,401 @@ describe('ComputerUseController', () => {
       return { fixture, started, acting, sessionId: started.sessionId };
     }
     const auditList = (fixture: ReturnType<typeof createFixture>) => [...fixture.audits.values()];
+
+    const windowsProfile: ComputerAppProfileRecord = {
+      ...profile,
+      platform: 'win32',
+      kind: 'win32-executable',
+      canonicalPath: 'C:\\Windows\\System32\\notepad.exe',
+      identity: {
+        platform: 'win32',
+        identityDigest: profile.identityDigest,
+        executablePath: 'C:\\Windows\\System32\\notepad.exe',
+        executableDigest: profile.executableDigest,
+        signerDigest: '3'.repeat(64),
+        packageFamilyName: null,
+        appUserModelId: null,
+        displayName: 'Notepad',
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+      },
+    };
+
+    it.each([
+      'supervised_action',
+      'high_impact_confirmation',
+      'download_open',
+      'file_manager_open',
+    ] as const)('N8-4 forwards Windows %s display to the single-use card only', async (effect) => {
+      const display =
+        effect === 'download_open' || effect === 'file_manager_open'
+          ? {
+              effect,
+              operation: 'invoke' as const,
+              targetLabel: 'fixture.txt',
+              extension: 'txt',
+              externalApplication: 'may_open' as const,
+              unsignedWarning: 'none' as const,
+            }
+          : {
+              effect,
+              operation: 'invoke' as const,
+              targetLabel: null,
+              extension: null,
+              externalApplication: 'not_applicable' as const,
+              unsignedWarning: 'none' as const,
+            };
+      const result = offer(effect);
+      const common = {
+        kind: 'approval_required' as const,
+        approvalGeneration: 7,
+        remainingMs: 30_000,
+      };
+      let approvalOffer: ComputerUseNativeApprovalOffer;
+      switch (display.effect) {
+        case 'supervised_action':
+          approvalOffer = {
+            ...common,
+            effect: display.effect,
+            display: { ...display, effect: display.effect },
+          };
+          break;
+        case 'high_impact_confirmation':
+          approvalOffer = {
+            ...common,
+            effect: display.effect,
+            display: { ...display, effect: display.effect },
+          };
+          break;
+        case 'download_open':
+          approvalOffer = {
+            ...common,
+            effect: display.effect,
+            display: { ...display, effect: display.effect },
+          };
+          break;
+        case 'file_manager_open':
+          approvalOffer = {
+            ...common,
+            effect: display.effect,
+            display: { ...display, effect: display.effect },
+          };
+          break;
+      }
+      const { fixture, acting, sessionId } = await offered({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => 1,
+        observationOverrides: {
+          targetSignatures: nativeFacts.targetSignatures,
+          targetMetadata: {
+            button: {
+              secure: false,
+              highImpact: effect === 'high_impact_confirmation',
+              highImpactNative: effect === 'high_impact_confirmation',
+            },
+          },
+        },
+        nativeDispatch: async () => ({ ...result, approvalOffer }),
+      });
+      await viWait();
+      const card = pendingCard(fixture);
+      expect(card.display).toEqual(display);
+      expect(card.allowedDecisions).toEqual(['allow_once', 'deny']);
+      expect(card.eligibleForPlan).toBe(false);
+      await clickCard(fixture);
+      await expect(acting).resolves.toMatchObject({ result: 'completed' });
+      expect(fixture.approvedDispatches).toHaveLength(1);
+      expect(JSON.stringify(auditList(fixture))).not.toContain('fixture.txt');
+      await fixture.controller.stop(sessionId);
+    });
+
+    it.each(['before click', 'during re-observation', 'after approve'] as const)(
+      'N8-4 rejects the old helper generation %s without dispatching to its replacement',
+      async (point) => {
+        let generation = 1;
+        const { fixture, acting, sessionId } = await offered({
+          profileRecord: windowsProfile,
+          windowExecutableDigest: profile.executableDigest!,
+          helperGeneration: () => generation,
+          observationOverridesForRevision: (revision) => {
+            if (point === 'during re-observation' && revision > 1) generation += 1;
+            return {};
+          },
+          nativeApproval: {
+            approve: () => {
+              if (point === 'after approve') generation += 1;
+              return { kind: 'approved' };
+            },
+          },
+        });
+        await viWait();
+        if (point === 'before click') generation += 1;
+        await clickCard(fixture);
+        await expect(acting).resolves.toMatchObject({
+          result: 'rejected',
+          reasonCode: 'native_approval_revoked',
+        });
+        expect(fixture.approveInputs).toHaveLength(point === 'after approve' ? 1 : 0);
+        expect(fixture.approvedDispatches).toHaveLength(0);
+        expect(fixture.nativeLog).not.toContain('approvalDiscard:7');
+        expect(fixture.controller.getStatus(sessionId)?.pendingApproval).toBeNull();
+        await fixture.controller.stop(sessionId);
+      },
+    );
+
+    it('N8-4 rejects a late offer from the old helper without publishing a card', async () => {
+      let generation = 1;
+      const { fixture, acting, sessionId } = await offered({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => generation,
+        nativeDispatch: async () => {
+          generation += 1;
+          return offer();
+        },
+      });
+      await viWait();
+      expect(fixture.approvals).toHaveLength(0);
+      await expect(acting).resolves.toMatchObject({ reasonCode: 'native_approval_revoked' });
+      expect(fixture.nativeLog).not.toContain('approvalDiscard:7');
+      await fixture.controller.stop(sessionId);
+    });
+
+    it('N8-4 withdraws the Windows card on helper termination before any click', async () => {
+      const listeners = new Set<WindowsStopListener>();
+      const { fixture, acting, sessionId } = await offered({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => 1,
+        subscribeWindowsStop: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      });
+      await viWait();
+      const card = pendingCard(fixture);
+      for (const listener of listeners)
+        listener({
+          kind: 'notification',
+          notification: {
+            owner: {
+              helperGeneration: 1,
+              kind: 'session',
+              id: sessionId,
+              lifetimeId: 'fixture-lifetime',
+            },
+            phase: 'termination_pending',
+            result: 'termination_requested',
+            late: false,
+            reason: 'native_unavailable',
+            internalReason: 'crash',
+          },
+        });
+      await expect(acting).resolves.toMatchObject({ reasonCode: 'native_approval_revoked' });
+      expect(fixture.approvals.at(-1)).toMatchObject({ id: card.id, state: 'canceled' });
+      expect(auditList(fixture)[0]).toMatchObject({
+        approvalId: card.id,
+        approvalOutcome: 'revoked',
+      });
+      expect(fixture.approveInputs).toHaveLength(0);
+      expect(fixture.approvedDispatches).toHaveLength(0);
+      await fixture.controller.dispose();
+      expect(listeners.size).toBe(0);
+    });
+
+    it.each(['deny', 'expire', 'stop'] as const)(
+      'N8-4 correlates Windows %s without input',
+      async (decision) => {
+        const { fixture, acting, sessionId } = await offered({
+          profileRecord: windowsProfile,
+          windowExecutableDigest: profile.executableDigest!,
+          helperGeneration: () => 1,
+          nativeDispatch: async () =>
+            offer('high_impact_confirmation', 7, decision === 'expire' ? 100 : 30_000),
+        });
+        await viWait();
+        const card = pendingCard(fixture);
+        if (decision === 'deny') await clickCard(fixture, 'deny');
+        if (decision === 'stop') await fixture.controller.stop(sessionId);
+        await expect(acting).resolves.toMatchObject({ result: 'rejected' });
+        expect(auditList(fixture)).toHaveLength(1);
+        expect(auditList(fixture)[0]).toMatchObject({
+          approvalId: card.id,
+          nativeRequestId: sha('req-a'),
+          approvalOutcome:
+            decision === 'deny' ? 'denied' : decision === 'expire' ? 'expired' : 'revoked',
+        });
+        expect(fixture.approveInputs).toHaveLength(0);
+        expect(fixture.approvedDispatches).toHaveLength(0);
+        await fixture.controller.stop(sessionId);
+      },
+    );
+
+    it.each(['full_access_app', 'supervised'] as const)(
+      'N8-4 binds the whole set_text once and keeps its payload out of cards and audit in %s',
+      async (mode) => {
+        const action: ComputerUseAction = {
+          type: 'set_text',
+          targetId: 'button',
+          text: 'synthetic full text\nsecond line',
+        };
+        const { fixture, acting, sessionId } = await offered(
+          {
+            profileRecord: windowsProfile,
+            windowExecutableDigest: profile.executableDigest!,
+            helperGeneration: () => 1,
+            authorizationRequired: true,
+            observationOverrides: {
+              targetSignatures: nativeFacts.targetSignatures,
+              targetMetadata: { button: { secure: false, highImpact: false } },
+            },
+            nativeDispatch: async () => ({
+              result: 'paused',
+              reasonCode: 'native_single_use_approval_unavailable',
+              approvalOffer: {
+                kind: 'approval_required',
+                approvalGeneration: 7,
+                remainingMs: 30_000,
+                effect: 'supervised_action',
+                display: {
+                  effect: 'supervised_action',
+                  operation: 'set_text',
+                  targetLabel: null,
+                  extension: null,
+                  externalApplication: 'not_applicable',
+                  unsignedWarning: 'none',
+                },
+              },
+            }),
+          },
+          mode,
+          action,
+        );
+        await viWait();
+        if (mode === 'supervised') {
+          await clickCard(fixture);
+          await viWait();
+        }
+        expect(fixture.dispatchCount()).toBe(1);
+        const card = pendingCard(fixture);
+        expect(card.actionDigest).toBe(computerUseActionDigest(action));
+        await expect(
+          fixture.controller.resolveApproval({
+            approvalId: card.id,
+            expectedRevision: card.revision,
+            challenge: card.challenge,
+            decision: 'allow_plan',
+          }),
+        ).rejects.toThrow(/not allowed/iu);
+        await clickCard(fixture);
+        await expect(acting).resolves.toMatchObject({ result: 'completed' });
+        expect(fixture.approveInputs).toHaveLength(1);
+        expect(fixture.approveInputs[0]?.action).toEqual(action);
+        expect(fixture.approvedDispatches).toHaveLength(1);
+        expect(fixture.approvedDispatches[0]?.action).toEqual(action);
+        const publicData = JSON.stringify([
+          fixture.approvals,
+          fixture.statuses,
+          auditList(fixture),
+        ]);
+        expect(publicData).not.toContain('synthetic full text');
+        expect(publicData).not.toMatch(
+          /intentToken|executionToken|helperGeneration|approvalGeneration/u,
+        );
+        await fixture.controller.stop(sessionId);
+      },
+    );
+
+    it('N8-4 requires two cards again for each Windows action outside a plan', async () => {
+      const { fixture, acting, sessionId } = await offered(
+        {
+          profileRecord: windowsProfile,
+          windowExecutableDigest: profile.executableDigest!,
+          helperGeneration: () => 1,
+          authorizationRequired: true,
+        },
+        'supervised',
+      );
+      for (let round = 0; round < 2; round += 1) {
+        const result =
+          round === 0 ? acting : fixture.controller.act(sessionId, buttonAction, 'req-b');
+        await viWait();
+        const first = pendingCard(fixture);
+        expect(first.eligibleForPlan).toBe(false);
+        await clickCard(fixture);
+        await viWait();
+        const second = pendingCard(fixture);
+        expect(second.id).not.toBe(first.id);
+        expect(second.eligibleForPlan).toBe(false);
+        await clickCard(fixture);
+        await expect(result).resolves.toMatchObject({ result: 'completed' });
+      }
+      expect(fixture.approvals.filter((card) => card.state === 'pending')).toHaveLength(4);
+      expect(fixture.approvedDispatches).toHaveLength(2);
+      await fixture.controller.stop(sessionId);
+    });
+
+    it.each(['ab', '😀x'])('N8-4 rejects multiple Windows type scalars: %s', async (text) => {
+      const { fixture, acting, sessionId } = await offered(
+        {
+          profileRecord: windowsProfile,
+          windowExecutableDigest: profile.executableDigest!,
+          helperGeneration: () => 1,
+          observationOverrides: { focusedElementHighImpact: true },
+        },
+        'full_access_app',
+        { type: 'type', text },
+      );
+      await expect(acting).resolves.toMatchObject({
+        reasonCode: 'native_approval_multi_scalar_type',
+      });
+      expect(fixture.approvals).toHaveLength(0);
+      expect(fixture.approveInputs).toHaveLength(0);
+      expect(fixture.approvedDispatches).toHaveLength(0);
+      await fixture.controller.stop(sessionId);
+    });
+
+    it('N8-4 invalidates an existing Windows plan when the helper generation changes', async () => {
+      let generation = 1;
+      const fixture = createFixture({
+        profileRecord: windowsProfile,
+        windowExecutableDigest: profile.executableDigest!,
+        helperGeneration: () => generation,
+        mode: 'supervised',
+        authorizationRequired: true,
+        nativeApproval: {},
+        observationOverrides: {
+          targetSignatures: nativeFacts.targetSignatures,
+          targetMetadata: { button: { secure: false, highImpact: false } },
+        },
+      });
+      const started = await start(fixture, 'supervised', false, undefined, 3);
+      await fixture.controller.observe(started.sessionId);
+      const acting = fixture.controller.act(started.sessionId, buttonAction, 'plan-first');
+      await viWait();
+      const card = pendingCard(fixture);
+      await fixture.controller.resolveApproval({
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        challenge: card.challenge,
+        decision: 'allow_plan',
+      });
+      await expect(acting).resolves.toMatchObject({ result: 'completed' });
+      const sessions = (
+        fixture.controller as unknown as { sessions: Map<string, { planGrant: unknown }> }
+      ).sessions;
+      expect(sessions.get(started.sessionId)?.planGrant).not.toBeNull();
+      generation += 1;
+      await expect(fixture.controller.observe(started.sessionId)).rejects.toThrow(
+        /generation changed/iu,
+      );
+      expect(sessions.get(started.sessionId)?.planGrant).toBeNull();
+      expect(fixture.dispatchCount()).toBe(1);
+      await fixture.controller.stop(started.sessionId);
+    });
 
     it('approves a high_impact_confirmation once: card, click, re-observation, approve, dispatchApproved', async () => {
       const { fixture, acting, sessionId } = await offered();
