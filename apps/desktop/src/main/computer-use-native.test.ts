@@ -514,7 +514,7 @@ describe('Windows native helper compile boundary', () => {
     expect(outsideSlot).not.toMatch(/_cast<\s*(?:const\s+|volatile\s+)*std::atomic<bool>/u);
     // No other name or spelling for the base type either, so the reference count below sees every one.
     expect(outsideSlot).not.toMatch(
-      /(?<!std::)\batomic<bool>|using\s+(?:namespace\s+std\b|std::atomic\b)/u,
+      /(?<!std::)\batomic<bool>|using\s+(?:namespace\s+std\b|std::atomic\b)|atomic<\s*[A-Z]\w?\s*>/u,
     );
     expect(outsideSlot).not.toMatch(
       /\batomic_bool\b|(?:using\s+\w+\s*=|typedef)\s*std::atomic<bool>/u,

@@ -152,7 +152,9 @@ public:
       return false;
     }
   }
-  // Called once serving has ended; nothing is written to the pipe after it. A write that holds the
+  // Called by the consumer once its loop has ended; nothing is written to the pipe after it. Only the
+  // consumer (Respond, its own retirement delivery) and this notifier write frames; the reader never
+  // does, so once stopping_ is set no writer is left. A write that holds the
   // lock may never finish while Main is alive but not reading (ServePipe also ends on a protocol
   // violation, with the pipe open), so cancel until the lock is free: a cancel can land just before
   // the write is issued, and a single one would then miss it. Once stopping_ is set under the lock,
