@@ -25,7 +25,11 @@ export class ComputerUseDiscoveryScope {
   private readonly lateResults = new Set<string>();
   private readonly unsubscribeStop: (() => void) | undefined;
   private requestedReason: ComputerUseStopReason | null = null;
-  private draining: Promise<ComputerUseDiscoveryStop[]> | null = null;
+  // One stop per handle, kept so a handle that completes after an earlier drain is still included.
+  private readonly drained = new Map<
+    ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>,
+    Promise<ComputerUseDiscoveryStop>
+  >();
   private interrupted = false;
   private finished = false;
   private stopFailed = false;
@@ -161,7 +165,7 @@ export class ComputerUseDiscoveryScope {
       (!retry || !this.stopFailed || this.native.subscribeWindowsStop !== undefined)
     )
       return this.stopping;
-    if (this.stopFailed && this.native.subscribeWindowsStop === undefined) this.draining = null;
+    if (this.stopFailed && this.native.subscribeWindowsStop === undefined) this.drained.clear();
     this.stopFailed = false;
     this.requestedReason = reason;
     let resolve!: (result: ComputerUseDiscoveryResult) => void;
@@ -234,17 +238,20 @@ export class ComputerUseDiscoveryScope {
 
   private drain(): Promise<ComputerUseDiscoveryStop[]> {
     // Internal failure needs native cleanup, but must not invent a requested Stop reason.
-    this.draining ??= Promise.all(
-      [...new Set([...this.completedHandles, ...this.handles])].map(async (handle) => {
-        const result = await handle.stop();
-        this.handles.delete(handle);
-        return result;
-      }),
-    ).catch((error: unknown) => {
+    const all = [...new Set([...this.completedHandles, ...this.handles])];
+    for (const handle of all)
+      if (!this.drained.has(handle))
+        this.drained.set(
+          handle,
+          handle.stop().then((result) => {
+            this.handles.delete(handle);
+            return result;
+          }),
+        );
+    return Promise.all(all.map((handle) => this.drained.get(handle)!)).catch((error: unknown) => {
       this.stopFailed = true;
       throw error;
     });
-    return this.draining;
   }
 
   private cancelWork(error: unknown): void {
@@ -268,6 +275,7 @@ export class ComputerUseDiscoveryScope {
       this.unsubscribeStop?.();
       this.stopOwners.clear();
       this.lateResults.clear();
+      // Completed proofs stay: a Stop after retirement still reports them. The scope is per Turn.
       this.retired();
     }
   }

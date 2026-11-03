@@ -1647,8 +1647,8 @@ export function createComputerUseNativeHost(
         }),
       ]);
     } catch {
-      // The owner may already be gone when work() cleaned up; the generation it ran on still decides.
-      const generation = generationOf() ?? started;
+      // Fixed for the whole kill wait: the owner may be gone or replaced by another generation.
+      const generation = started ?? generationOf();
       if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       if (ledgerState(generation).exitConfirmed) return outcome(generation);
