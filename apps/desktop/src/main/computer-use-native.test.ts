@@ -1,6 +1,6 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -39,6 +39,47 @@ import {
 } from './computer-use-native-windows';
 
 const roots: string[] = [];
+
+it('keeps Store Notepad not-web binding acceptance-test-only and bound at start and rejudge', () => {
+  const facts = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_target_facts.h'),
+    'utf8',
+  );
+  expect(facts).toContain('inline constexpr bool kWindowsStoreNotepadNotWeb = false;');
+  expect(facts).toContain('#if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)');
+  expect(facts).toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1');
+  expect(facts).toContain('defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)');
+  expect(facts).toContain('defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)');
+  expect(facts).toContain('#error Store Notepad not-web is restricted to acceptance test builds');
+  expect(facts).toContain('WindowsStoreNotepadIsNotWeb');
+  const targets = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host_v2_targets.inc'),
+    'utf8',
+  );
+  expect(targets).toContain('out->not_web_package = WindowsPackageIdentityParts{');
+  expect(targets).toContain('/*session_recorded=*/true, judged.not_web_package);');
+  expect(targets).toContain('/*session_recorded=*/false, judged.not_web_package)');
+  const root = join(__dirname, '../../../..');
+  const definition = 'SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB';
+  const scan = (directory: string, recursive: boolean) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (recursive) scan(path, true);
+      } else if (
+        /\.(?:[cm]?js|ts|json|gyp|ya?ml|ps1|cmd|bat)$/u.test(entry.name) &&
+        !/\.(?:test|spec)\./u.test(entry.name)
+      ) {
+        expect(readFileSync(path, 'utf8'), path).not.toContain(definition);
+      }
+    }
+  };
+  scan(root, false);
+  scan(join(root, '.github'), true);
+  scan(join(root, 'apps/desktop'), false);
+  scan(join(root, 'apps/desktop/scripts'), true);
+  scan(join(root, 'apps/desktop/computer-use-native'), false);
+});
 
 it('measures validation identity on the consumer with cancellable I/O and fresh Stop guards', () => {
   const source = readFileSync(

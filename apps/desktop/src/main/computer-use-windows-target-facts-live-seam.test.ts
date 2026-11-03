@@ -349,6 +349,141 @@ int PtyHost(const std::wstring &ping) {
   return 0;
 }
 
+void CheckStoreNotepadBinding(const TargetFacts &facts,
+                             const WindowsPackageIdentityFacts &package,
+                             const WindowsFileKey &key) {
+  const auto parts = WindowsPackageIdentityFor(package);
+  Check(parts.has_value(), "store_notepad_verified_package");
+  const auto judge = [&](const TargetFacts &f, const std::optional<WindowsPackageIdentityParts> &p,
+                         const std::optional<WindowsFileKey> &held,
+                         const std::optional<WindowsFileKey> &recorded, bool session) {
+    return WindowsTargetIsNotWebByTable(f, held, std::nullopt, recorded, session, p);
+  };
+  Check(judge(facts, parts, key, std::nullopt, false) == kWindowsStoreNotepadNotWeb,
+        "store_notepad_requires_verified_package_and_file_key");
+  Check(judge(facts, parts, key, key, true) == kWindowsStoreNotepadNotWeb,
+        "store_notepad_retains_session_file_binding");
+  Check(!judge(facts, std::nullopt, key, key, true), "store_notepad_family_alone_rejected");
+  Check(!judge(facts, parts, std::nullopt, key, true), "store_notepad_missing_held_key_rejected");
+  Check(!judge(facts, parts, key, std::nullopt, true), "store_notepad_missing_session_key_rejected");
+  WindowsFileKey changed = key;
+  changed.file_id[0] ^= 1;
+  Check(!judge(facts, parts, changed, key, true), "package_update_invalidates_session_file_binding");
+  changed = key;
+  changed.volume_serial ^= 1;
+  Check(!judge(facts, parts, changed, key, true), "store_notepad_changed_volume_rejected");
+  if (parts.has_value()) {
+    auto wrong = *parts;
+    wrong.publisher_id = "0000000000000";
+    Check(!judge(facts, wrong, key, key, true), "store_notepad_wrong_publisher_rejected");
+    wrong = *parts;
+    wrong.relative_path = "other\\notepad.exe";
+    Check(!judge(facts, wrong, key, key, true), "store_notepad_wrong_relative_path_rejected");
+    wrong = *parts;
+    wrong.family = "Example.Editor_8wekyb3d8bbwe";
+    Check(!judge(facts, wrong, key, key, true), "store_notepad_wrong_family_rejected");
+  }
+  auto bad = facts;
+  bad.package_development_mode = true;
+  Check(!judge(bad, parts, key, key, true), "store_notepad_development_rejected");
+  bad = facts;
+  bad.package_signature_kind = "developer";
+  Check(!judge(bad, parts, key, key, true), "store_notepad_developer_signature_rejected");
+  bad = facts;
+  bad.running_image_matches = false;
+  Check(!judge(bad, parts, key, key, true), "store_notepad_running_image_mismatch_rejected");
+  bad = facts;
+  bad.image_volume = "network";
+  Check(!judge(bad, parts, key, key, true), "store_notepad_remote_rejected");
+  bad = facts;
+  bad.image_root = "program_files";
+  Check(!judge(bad, parts, key, key, true), "store_notepad_outside_windows_apps_rejected");
+  bad = facts;
+  bad.pe_subsystem = "console";
+  Check(!judge(bad, parts, key, key, true), "store_notepad_non_gui_rejected");
+  bad = facts;
+  bad.package_family = "Example.Editor_8wekyb3d8bbwe";
+  Check(!judge(bad, parts, key, key, true), "store_notepad_mismatched_facts_rejected");
+  auto dev = package;
+  dev.development_mode = true;
+  Check(!judge(facts, WindowsPackageIdentityFor(dev), key, key, true),
+        "store_notepad_unverified_package_rejected");
+}
+
+void CheckInstalledStoreNotepad(const WindowsTargetFactsContext &context) {
+  UINT32 count = 0;
+  UINT32 length = 0;
+  const LONG queried = GetPackagesByPackageFamily(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe",
+                                                 &count, nullptr, &length, nullptr);
+  if (queried == ERROR_SUCCESS && count == 0) {
+    std::cout << "SKIP store_notepad_not_installed\n";
+    return;
+  }
+  Check(queried == ERROR_INSUFFICIENT_BUFFER && count > 0, "store_notepad_package_query");
+  if (queried != ERROR_INSUFFICIENT_BUFFER || count == 0) return;
+  std::vector<PWSTR> names(count);
+  std::vector<wchar_t> buffer(length);
+  if (GetPackagesByPackageFamily(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe", &count,
+                                names.data(), &length, buffer.data()) != ERROR_SUCCESS) {
+    Check(false, "store_notepad_package_names");
+    return;
+  }
+  UINT32 root_length = 0;
+  Check(GetPackagePathByFullName(names[0], &root_length, nullptr) == ERROR_INSUFFICIENT_BUFFER,
+        "store_notepad_install_root_size");
+  if (root_length == 0) return;
+  std::vector<wchar_t> root(root_length);
+  if (GetPackagePathByFullName(names[0], &root_length, root.data()) != ERROR_SUCCESS) {
+    Check(false, "store_notepad_install_root");
+    return;
+  }
+  const std::wstring image = std::wstring(root.data()) + L"\\Notepad\\Notepad.exe";
+  std::wstring command = L"\"" + image + L"\"";
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  // Measure our suspended image: no UI, document restore, or hand-off to an existing Notepad.
+  if (!CreateProcessW(image.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+                      nullptr, nullptr, &startup, &process)) {
+    Check(false, "store_notepad_create_suspended");
+    return;
+  }
+  // A packaged app can refuse this job (Windows puts it in the package's own job), so a process
+  // outside the job is ended here once measured; it never runs, being suspended throughout.
+  struct Outside {
+    HANDLE process = nullptr;
+    ~Outside() {
+      if (process == nullptr) return;
+      TerminateProcess(process, 1);
+      WaitForSingleObject(process, 5000);
+      CloseHandle(process);
+    }
+  } outside;
+  if (AssignProcessToJobObject(g_job, process.hProcess)) g_started.push_back(process.hProcess);
+  else outside.process = process.hProcess;
+  CloseHandle(process.hThread);
+  const auto measured = Measure(process.dwProcessId, nullptr, context);
+  Check(measured.file_identity.has_value(), "store_notepad_measured_file_key");
+  if (!measured.file_identity.has_value()) return;
+  WindowsFileKey key;
+  key.volume_serial = measured.file_identity->volume_serial;
+  std::memcpy(key.file_id.data(), measured.file_identity->file_id.Identifier, key.file_id.size());
+  // Suspended, the module list is not readable yet, so the hold refuses and Notepad is not taken as
+  // not-web; running it would open a window on the desktop. The package facts are real, so check
+  // the binding as for a running image whose hold matched.
+  const WindowsPackageIdentityFacts identity{measured.facts.packaged,
+      measured.facts.package_signature_kind, measured.facts.package_development_mode,
+      measured.facts.package_family, measured.package_publisher_id, measured.facts.image_root,
+      WindowsTargetUtf8(measured.image_path), measured.package_install_root};
+  Check(measured.facts.running_image_matches != std::optional<bool>(true) &&
+            !WindowsTargetIsNotWebByTable(measured.facts, key, std::nullopt, std::nullopt, false,
+                WindowsPackageIdentityFor(identity)),
+        "store_notepad_suspended_hold_refused");
+  auto facts = measured.facts;
+  facts.running_image_matches = true;
+  CheckStoreNotepadBinding(facts, identity, key);
+}
+
 int wmain(int argc, wchar_t **argv) {
   std::vector<wchar_t> self_buffer(32768, L'\0');
   const DWORD self_length = GetModuleFileNameW(nullptr, self_buffer.data(), static_cast<DWORD>(self_buffer.size()));
@@ -1131,6 +1266,7 @@ int wmain(int argc, wchar_t **argv) {
   }
 
   // A process that does not exist: nothing is measured.
+  CheckInstalledStoreNotepad(outsider);
   const WindowsTargetFactsMeasurement missing = MeasureWindowsTargetFacts(0xfffffff0u, nullptr, outsider);
   Check(!missing.creation.has_value() && !TargetFactsAreComplete(missing.facts) &&
             ClassOf(missing.facts) == "unresolvable",
@@ -1165,6 +1301,52 @@ const source = [
   cut('// BEGIN windows target facts', '// END windows target facts'),
   '} // namespace',
   program,
+].join('\n');
+
+const storeNotepadUnitSource = [
+  includes,
+  program.slice(0, program.indexOf('std::string Show(')),
+  program.slice(
+    program.indexOf('void CheckStoreNotepadBinding('),
+    program.indexOf('void CheckInstalledStoreNotepad('),
+  ),
+  String.raw`
+int main() {
+  TargetFacts facts;
+  facts.platform = TargetPlatform::kWin32;
+  facts.running_image_matches = true;
+  facts.packaged = true;
+  facts.package_family = "Microsoft.WindowsNotepad_8wekyb3d8bbwe";
+  facts.package_signature_kind = "store";
+  facts.package_development_mode = false;
+  facts.image_root = "windows_apps";
+  facts.image_volume = "fixed";
+  facts.pe_subsystem = "gui";
+  const std::string root = "C:\\Program Files\\WindowsApps\\Synthetic.Notepad";
+  WindowsPackageIdentityFacts package{true, "store", false, facts.package_family,
+      "8wekyb3d8bbwe", "windows_apps", root + "\\Notepad\\Notepad.exe", root};
+  WindowsFileKey key;
+  key.volume_serial = 17;
+  key.file_id[0] = 9;
+  CheckStoreNotepadBinding(facts, package, key);
+  facts.package_signature_kind = "system";
+  package.signature_kind = "system";
+  CheckStoreNotepadBinding(facts, package, key);
+  // Both builds retain the original System32 entry and its file-key refusal.
+  facts.packaged = false;
+  facts.image_root = "windows_directory";
+  facts.image_relative_path = "system32\\notepad.exe";
+  facts.signature = "valid";
+  facts.signer_microsoft_root = true;
+  Check(WindowsTargetIsNotWebByTable(facts, key, key, key, true), "system_notepad_unchanged");
+  WindowsFileKey changed = key;
+  changed.file_id[1] = 1;
+  Check(!WindowsTargetIsNotWebByTable(facts, changed, changed, key, true),
+        "system_notepad_changed_key_rejected");
+  std::cout << (g_failures == 0 ? "OK\n" : "FAILED\n");
+  return g_failures == 0 ? 0 : 1;
+}
+`,
 ].join('\n');
 
 const build = findBuild();
@@ -1275,6 +1457,61 @@ describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows target facts, live (#500 S5-c-3 PR-2)',
   () => {
+    it('checks Store Notepad binding with the gate off and on and rejects production defines', async () => {
+      expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-store-notepad-'));
+      try {
+        const seam = join(scratch, 'store-notepad.cc');
+        const binary = join(scratch, 'store-notepad.exe');
+        writeFileSync(seam, storeNotepadUnitSource);
+        const acceptance = '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1';
+        const enabled = '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1';
+        const compile = async (definitions: string[]) => {
+          const command = build!.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/permissive-',
+            '/utf-8',
+            `/I${nativeDirectory}`,
+            ...definitions,
+            seam,
+            `/Fe:${binary}`,
+            `/Fo:${binary}.obj`,
+          ]);
+          return promisify(execFile)(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 120_000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+        };
+        for (const definitions of [[], [acceptance], [acceptance, enabled]]) {
+          await compile(definitions);
+          const result = await promisify(execFile)(binary, [], {
+            encoding: 'utf8',
+            timeout: 10_000,
+          });
+          expect(result.stdout).toContain('OK');
+        }
+        for (const definitions of [
+          [enabled],
+          [enabled, '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=0'],
+          [enabled, acceptance, '/DSPRINT_CODER_ELIGIBILITY_FROM_BUILD=1'],
+          [enabled, acceptance, '/DSPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE=1'],
+        ]) {
+          await expect(compile(definitions)).rejects.toMatchObject({
+            stdout: expect.stringContaining(
+              'Store Notepad not-web is restricted to acceptance test builds',
+            ),
+          });
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+      }
+    }, 600_000);
+
     it('measures cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage and a rename swap', async () => {
       expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-target-facts-'));
@@ -1355,6 +1592,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           '/D_WIN32_WINNT=0x0A00',
           `/I${nativeDirectory}`,
           '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+          '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
           seamSource,
           `/Fe:${binary}`,
           `/Fo:${binary}.obj`,

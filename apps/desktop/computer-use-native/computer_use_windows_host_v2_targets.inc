@@ -400,6 +400,7 @@ struct WindowsV2Judgement {
   std::string process_start;
   std::optional<sprint_coder::computer_use::WindowsFileKey> held_key;
   std::optional<sprint_coder::computer_use::WindowsFileKey> table_key;
+  std::optional<sprint_coder::computer_use::WindowsPackageIdentityParts> not_web_package;
   // The identity above is read once, the first time a window of the process is selectable.
   bool identity_read = false;
   bool identity_ok = false;
@@ -456,6 +457,13 @@ bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
       out->package.has_value() ? out->package->identity_digest : out->executable.identity.identity_digest;
   out->held_key = WindowsFileKeyOf(*out->measured.file_identity);
   out->table_key = WindowsV2SystemNotepadKey();
+  if constexpr (sprint_coder::computer_use::kWindowsStoreNotepadNotWeb) {
+    if (out->package.has_value()) {
+      using sprint_coder::computer_use::WindowsPackageIdentityParts;
+      out->not_web_package = WindowsPackageIdentityParts{
+          out->package->family, out->package->publisher_id, out->package->relative_path, {}};
+    }
+  }
   out->identity_ok = true;
   return true;
 }
@@ -1081,7 +1089,7 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
   if (result.matches)
     result.not_web = sprint_coder::computer_use::WindowsTargetIsNotWebByTable(
         judged.measured.facts, judged.held_key, judged.table_key, work.not_web_file,
-        /*session_recorded=*/true);
+        /*session_recorded=*/true, judged.not_web_package);
   // As before, a completed cold context can survive a target refusal. An exception or Stop never
   // supplies a candidate, and only the consumer may turn this pure value into the active cache.
   if (!work.context.has_value()) result.context = std::move(context);
@@ -1093,7 +1101,7 @@ WindowsV2RejudgeResult RunWindowsV2RejudgeMeasurement(const WindowsV2RejudgeWork
 // What a v2 session's start (or resume) and every input re-judge: the target is still selectable,
 // with the mode, the application identity (the package digest for a package), the process start and
 // the held running image the session was bound to. `not_web` is the explicit table's answer for this
-// judgement: the session's recorded System32 notepad file, still the very file it was.
+// judgement: the session's recorded notepad file, still the very file it was.
 bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> *not_web,
                              std::string *reason) {
   *reason = "session_identity_changed";
@@ -1170,7 +1178,7 @@ bool JudgeWindowsV2Input(const WindowsSession &session, std::string *reason) {
 // The v2 admission of a start or resume (in place of the V1 allow-list): the ruleset version the
 // token was minted under is this build's, a new session names the latest list, and the target is
 // judged again now and is the one the token named (identity, executable and, outside a package, the
-// signer, and the very file `locked` holds). The mode is the core's. `not_web_file` is the System32
+// signer, and the very file `locked` holds). The mode is the core's. `not_web_file` is the
 // notepad file the explicit table matched, recorded for the session's life.
 bool AdmitWindowsV2StartInContext(
     std::uint32_t pid, HWND window, const LockedWindowsExecutable &locked,
@@ -1200,7 +1208,7 @@ bool AdmitWindowsV2StartInContext(
   *maximum_mode = std::string(judged.verdict.maximum_mode);
   *not_web_file = WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key,
                                                judged.table_key, std::nullopt,
-                                               /*session_recorded=*/false)
+                                               /*session_recorded=*/false, judged.not_web_package)
                       ? judged.held_key
                       : std::nullopt;
   return true;
