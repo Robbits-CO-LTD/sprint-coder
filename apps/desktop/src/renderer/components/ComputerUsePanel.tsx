@@ -6,6 +6,8 @@ import {
   type ComputerAppGrantView,
   type ComputerUseAcceptanceMode,
   type ComputerUseApprovalDecision,
+  type ComputerUseApproval,
+  type ComputerUseWindowsApprovalDisplay,
   type ComputerUseMode,
   type ComputerUseOsPermission,
   type ComputerUsePolicyLanguage,
@@ -126,12 +128,37 @@ const ARTIFACT_SIZE_LABELS: Readonly<Record<ComputerUseArtifactSizeClassView, st
   le_4k: '4KB以下',
 };
 
+const WINDOWS_EFFECT_LABELS: Readonly<Record<ComputerUseWindowsApprovalDisplay['effect'], string>> =
+  {
+    supervised_action: '一般操作（操作ごとの確認）',
+    high_impact_confirmation: '高リスク操作の確定',
+    download_open: 'ダウンロードしたファイルを開く（E2）',
+    file_manager_open: 'ファイルマネージャーから開く（E3）',
+  };
+const WINDOWS_OPERATION_LABELS: Readonly<
+  Record<ComputerUseWindowsApprovalDisplay['operation'], string>
+> = {
+  click: 'クリック',
+  double_click: 'ダブルクリック',
+  invoke: '操作を実行',
+  set_text: '文字を設定',
+  type: '文字を入力',
+  key: 'キーを入力',
+  scroll: 'スクロール',
+  select: '項目を選択',
+  toggle: '設定を切り替え',
+  expand_collapse: '表示を切り替え',
+};
+
 export type ComputerUseApprovalView = Readonly<{
   id: string;
   actionLabel: string;
   targetLabel: string;
   impactLabel: string;
   escapedPreview: string | null;
+  display?: ComputerUseWindowsApprovalDisplay;
+  expiresAt?: string;
+  state?: ComputerUseApproval['state'];
   /** Only for a paste of a value copied elsewhere. */
   transfer?: ComputerUseApprovalTransferView;
   allowedDecisions: readonly ComputerUseApprovalDecision[];
@@ -1269,6 +1296,12 @@ export function ComputerUseSessionRail({
       ? 'Providerへ送信中'
       : 'Provider送信は待機中';
 
+  const approvalExpired =
+    approval?.expiresAt !== undefined && Date.parse(approval.expiresAt) <= now;
+  const approvalDisabled =
+    approval?.display !== undefined &&
+    (stopping || approvalExpired || approval.state !== 'pending');
+
   return (
     <aside className="computer-use-rail" aria-label="Computer Useの実行状態">
       <div className="computer-use-rail__status">
@@ -1351,6 +1384,68 @@ export function ComputerUseSessionRail({
                 <dd>{approval.impactLabel}</dd>
               </div>
             </dl>
+            {approval.display === undefined ? null : (
+              <div role="group" aria-label="native測定情報">
+                <p>native測定情報</p>
+                <dl>
+                  <div>
+                    <dt>測定された操作</dt>
+                    <dd>{WINDOWS_OPERATION_LABELS[approval.display.operation]}</dd>
+                  </div>
+                  <div>
+                    <dt>効果</dt>
+                    <dd>{WINDOWS_EFFECT_LABELS[approval.display.effect]}</dd>
+                  </div>
+                  <div>
+                    <dt>対象のラベル</dt>
+                    <dd>
+                      {approval.display.targetLabel ??
+                        (approval.display.effect === 'supervised_action'
+                          ? 'ラベル未検証の一般操作'
+                          : '対象のラベルを検証できません')}
+                    </dd>
+                  </div>
+                  {approval.display.extension === null ? null : (
+                    <div>
+                      <dt>拡張子（native測定）</dt>
+                      <dd>{approval.display.extension}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>外部アプリ</dt>
+                    <dd>
+                      {approval.display.externalApplication === 'may_open'
+                        ? '外部アプリが開く可能性があります'
+                        : '該当しません'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>承認期限</dt>
+                    <dd>
+                      {approvalExpired ? (
+                        '承認期限切れ'
+                      ) : (
+                        <time dateTime={approval.expiresAt}>
+                          {approval.expiresAt === undefined
+                            ? ''
+                            : new Date(approval.expiresAt).toLocaleTimeString()}
+                        </time>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+                {approval.display.unsignedWarning === 'main_image_only' ? (
+                  <p role="note">
+                    このアプリは署名で本人確認できません。更新・変更後は再確認が必要です。確認するのは主実行ファイルの一致であり、DLL・プラグイン・スクリプト等の安全性は保証しません。
+                  </p>
+                ) : null}
+                <p>
+                  Tab / Shift+Tab またはクリックでボタンを選び、Enter / Space /
+                  クリックで決定してください。
+                </p>
+                {stopping ? <p>停止中のため承認できません</p> : null}
+              </div>
+            )}
             {approval.transfer === undefined ? null : (
               <div
                 className="computer-use-approval__transfer"
@@ -1397,6 +1492,7 @@ export function ComputerUseSessionRail({
                 type="button"
                 data-computer-use-activation="approval"
                 data-computer-use-intent={approval.activationIntents?.allow_once}
+                disabled={approvalDisabled}
                 onClick={() => onApproval('allow_once')}
               >
                 今回のみ許可
@@ -1418,6 +1514,7 @@ export function ComputerUseSessionRail({
                 className="danger"
                 data-computer-use-activation="approval"
                 data-computer-use-intent={approval.activationIntents?.deny}
+                disabled={approvalDisabled}
                 onClick={() => onApproval('deny')}
               >
                 拒否

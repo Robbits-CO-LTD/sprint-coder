@@ -788,6 +788,9 @@ export function approvalView(
     targetLabel: approval.targetLabel,
     impactLabel: approval.risk === 'high' ? '対象アプリ内を変更します' : '対象を観測します',
     escapedPreview: approval.preview === '' ? null : approval.preview,
+    ...(approval.display == null
+      ? {}
+      : { display: approval.display, expiresAt: approval.expiresAt, state: approval.state }),
     ...(approval.transfer === undefined
       ? {}
       : {
