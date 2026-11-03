@@ -52,8 +52,8 @@ std::uint64_t MonotonicNowNs();
 // taken. The request whose WindowsResidualRequestScope is installed on the taking thread records that
 // launch, so a response is charged only for workers its own request started: not for a slot an earlier
 // request or the effect shadow holds, and not for one that was released and taken again. The slot is
-// taken only through exchange(true) on this type; a std::atomic<bool> reference to it only loads and
-// releases it.
+// taken only through exchange(true), store(true) or assigning true on this type; a std::atomic<bool>
+// reference to it only loads and releases it.
 class WindowsWorkerSlot;
 struct WindowsWorkerLaunch {
   const WindowsWorkerSlot *slot = nullptr;
@@ -83,10 +83,14 @@ public:
     }
     return previous;
   }
+  // Hides std::atomic<bool>::store: a store of true takes the slot like exchange(true) and is numbered.
+  void store(bool desired, std::memory_order order = std::memory_order_seq_cst) noexcept {
+    if (desired) (void)exchange(true, order == std::memory_order_release ? std::memory_order_acq_rel : order);
+    else std::atomic<bool>::store(false, order);
+  }
   // Assigning true takes the slot like exchange(true), so it is numbered too.
   bool operator=(bool desired) noexcept {
-    if (desired) (void)exchange(true);
-    else store(false);
+    store(desired);
     return desired;
   }
   // Whether the worker started as launch `serial` still holds the slot.

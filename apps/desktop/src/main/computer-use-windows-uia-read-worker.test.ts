@@ -583,6 +583,15 @@ int main(){try {
   FocusReceiptContract();
   ExpiredCommitContract();
   {using namespace sprint_coder::computer_use;
+    // A store of true takes the slot like exchange(true): numbered and recorded (discovery, existing start).
+    WindowsWorkerSlot slot;
+    {Frame request;request.header.request_id.bytes[0]=9;const WindowsResidualRequestScope scope(request);
+      slot.store(true,std::memory_order_release);
+      written_frames.clear();Check(Respond(nullptr,request,MessageType::kProbeResult,"{}")&&written_frames.back().header.flags==kResidualWorkFlag,"store_true_launch_is_residual");}
+    slot.store(false);slot.store(true);
+    Check(DeliverWindowsRetiredOperations(nullptr)&&written_frames.back().header.message_type==27,"store_true_relaunch_does_not_hide_retirement");
+    slot.store(false);written_frames.clear();}
+  {using namespace sprint_coder::computer_use;
     for(WindowsWorkerSlot* running:{&WindowsUiaReadWorkerRunning(),&WindowsCaptureWorkerRunning(),&InterlockWorkerRunning()}){
       Frame request;request.header.request_id.bytes[0]=1;request.header.session_id.bytes[0]=2;
       const WindowsResidualRequestScope request_scope(request);
