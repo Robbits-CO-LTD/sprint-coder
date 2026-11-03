@@ -17,6 +17,32 @@ afterEach(() => {
 });
 
 describe('ComputerUseUserActivationGate', () => {
+  it.each(['Enter', ' '])(
+    'requires a fresh %j key after explicit Tab navigation, not a held key',
+    (key) => {
+      const { contents, gate, event } = fixture(() => 100);
+      try {
+        contents.emit('before-input-event', {}, { type: 'keyDown', key, isAutoRepeat: true });
+        expect(gate.bindIntent(event, 'approval', 'fixture-intent')).toBe(false);
+        expect(gate.consume(event, 'approval')).toBeNull();
+        contents.emit(
+          'before-input-event',
+          {},
+          { type: 'keyDown', key: 'Tab', isAutoRepeat: false },
+        );
+        expect(gate.consume(event, 'approval')).toBeNull();
+        contents.emit('before-input-event', {}, { type: 'keyDown', key, isAutoRepeat: false });
+        expect(gate.bindIntent(event, 'approval', 'fixture-intent')).toBe(true);
+        expect(gate.consume(event, 'approval')).toMatchObject({
+          inputKind: 'keyboard',
+          intent: 'fixture-intent',
+        });
+        expect(gate.consume(event, 'approval')).toBeNull();
+      } finally {
+        gate.dispose();
+      }
+    },
+  );
   it('issues one sender/frame/window-bound permit and rejects replay', () => {
     vi.stubEnv('NODE_ENV', 'test');
     const { gate, event } = fixture(() => 100);
