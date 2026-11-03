@@ -31,6 +31,28 @@ const authority = {
   interactionEpoch: null,
 };
 
+describe('Windows background observation (P2b)', () => {
+  const native = (name: string) =>
+    readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+
+  it('connects target-only observation and capture without reading foreground focus', () => {
+    const pipe = native('computer_use_windows_host_pipe.inc');
+    expect(pipe).toContain('ValidateWindowsObservationSession(session,');
+    expect(pipe).toContain(
+      'background ? WindowsUiaRisk{} : ClassifyWindowsFocusedElement(session.pid)',
+    );
+    expect(pipe).toContain('!background && WindowsFocusedElementSignature(');
+    expect(pipe).toContain('&capture_stop, background ? session.pid : 0');
+    const observe = native('computer_use_windows_host_observe.inc');
+    expect(observe).toContain('WindowsBackgroundObservationNodeAdmitted(');
+    expect(observe).toContain('CaptureWindowsBackgroundStartDialogs(session,');
+    expect(observe).toContain('ReadWindowsSessionIdentityOnLane(session,');
+    const capture = native('computer_use_windows_host_capture.inc');
+    expect(capture).toContain('background_pid == 0 ? GetForegroundWindow() == window');
+    expect(capture).toContain('MeasureWindowsBackgroundStartFacts(background_pid, window,');
+  });
+});
+
 describe('Windows background input wire (P1a)', () => {
   it('keeps the legacy helper and foreground handshake unchanged', () => {
     expect(parseNativeHandshake(handshake, 'win32')).toBeNull();

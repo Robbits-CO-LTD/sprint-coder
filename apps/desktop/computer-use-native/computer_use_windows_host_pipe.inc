@@ -3,6 +3,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
                           std::string *reason,
                           std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
   RECT bounds{};
+  const bool background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
   WindowsDialogSetSnapshot dialogs;
   // The UI Automation reads of the whole observe share one budget and the cancellation epoch (see the
   // bounds above). The reason of a read that did not complete says why (WindowsV1ObserveReason).
@@ -21,13 +22,15 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
     *reason = unreadable("observation_stale");
     return false;
   }
-  if (!ValidateWindowsSession(session, &bounds, reason, &dialogs) ||
+  std::optional<WindowsValidationFrameScope> observation_frame;
+  if (background) observation_frame.emplace(observe_stop_serial);
+  if (!ValidateWindowsObservationSession(session, &bounds, reason, &dialogs) ||
       session.cancel_epoch !=
           cancellation_epoch.load(std::memory_order_acquire))
     return false;
   std::string tree;
   std::size_t nodes = 0;
-  if (!ReadUiaObservation(session.pid, dialogs.active_window, &tree, &nodes)) {
+  if (!ReadUiaObservation(session.pid, dialogs.active_window, &tree, &nodes, background)) {
     *reason = unreadable("accessibility_unavailable");
     return false;
   }
@@ -40,7 +43,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   std::string stable_tree;
   std::size_t stable_nodes = 0;
   if (!ReadUiaObservation(session.pid, dialogs.active_window, &stable_tree,
-                          &stable_nodes) ||
+                          &stable_nodes, background) ||
       stable_tree != tree || stable_nodes != nodes) {
     *reason = unreadable("observation_stale");
     return false;
@@ -54,7 +57,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
     return false;
   }
   const WindowsUiaRisk focused_risk =
-      ClassifyWindowsFocusedElement(session.pid);
+      background ? WindowsUiaRisk{} : ClassifyWindowsFocusedElement(session.pid);
   if (!WindowsValidationStillCurrent(session.cancel_epoch, observe_stop_serial)) {
     *reason = "observation_stale";
     return false;
@@ -65,7 +68,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   // this observe the read is refused by the path without a call (no second wait on the element).
   std::string focused_element_signature;
   const bool has_focused_element_signature =
-      WindowsFocusedElementSignature(session.pid, bounds, &focused_element_signature);
+      !background && WindowsFocusedElementSignature(session.pid, bounds, &focused_element_signature);
   if (!WindowsValidationStillCurrent(session.cancel_epoch, observe_stop_serial)) {
     *reason = "observation_stale";
     return false;
@@ -80,13 +83,13 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   WindowsV1UiaStop capture_stop = WindowsV1UiaStop::kNone;
   if (!CaptureWindowWithGraphicsCapture(dialogs.active_window, session.cancel_epoch,
                                         observe_stop_serial, binary, &width, &height,
-                                        &capture_stop)) {
+                                        &capture_stop, background ? session.pid : 0)) {
     *reason = WindowsV1ObserveReason(capture_stop, "graphics_capture_unavailable");
     return false;
   }
   RECT stable_bounds{};
   WindowsDialogSetSnapshot stable_dialogs;
-  if (!ValidateWindowsSession(session, &stable_bounds, reason,
+  if (!ValidateWindowsObservationSession(session, &stable_bounds, reason,
                               &stable_dialogs) ||
       session.cancel_epoch !=
           cancellation_epoch.load(std::memory_order_acquire) ||
