@@ -267,6 +267,24 @@ R8・R11 の配送・owner 照合は PR7c-2、Controller への接続と表示�
 - 健全な helper では今どおり receipt で確定する。ただし close は `ServePipe` の単一キューで処理される。reader は `stop_serial` と cancel epoch の更新に加え、開始・discovery の受付や停止 latch も行うが、close の応答は consumer が処理する。close は処理中の frame と、それより先に受け付けた待ち frame の後ろに並ぶ（待ちキュー全体の上限は 64 件）。discovery 待機中には別 owner の `stop_window_discovery` を先に処理する例外がある。
 - helper の dispatch 結果の cache（`requestId` ごと、二重入力防止）は終了で失われる。これが安全なのは、その helper の上のセッションをすべて捨てるときだけである（§2.5）。
 
+### 3.2.1 N5 の整理後の構成（2026-11-04）
+
+§1 の worker 数・旧停止経路は base 時点の問題記録であり、現在の構成ではない。N5-C/D/G/H/I 後の validation、rejudge、new-start、existing-start、discovery の測定は consumer 上で同期に行う。専用 worker、pending 結果配送、再利用 job ID と cancellation alias は除去済みである。測定中は `WindowsNewStartIoRegistration` で consumer の同期 I/O 取消し先を登録する。取消しは best effort であり、完了の証拠にはしない。共有 slot は測定の所有物より先に宣言し、cleanup 後に解放する。結果は stop mutex 内で Stop・epoch・親の生存などを再確認して採用する。
+
+§3.2 の discovery 待機中の別 owner Stop pump は旧構成であり、N5-I 後はない。reader の停止 latch は残り、同期測定が戻らない場合も Main の E1/E2 は最大 1＋C＋T、E3/E4 は C＋T の既存終了経路へ入る。exit 未確認を停止成功にしない。PR11 の一般再送は戻さず、claim 済み semantic 入力の `semantic_input_in_flight` に対する C 内の close 再試行だけを維持する。
+
+| list の機構 | N5-J の扱いと理由 |
+|---|---|
+| worker・pending・20 ms 待機 | 維持。Stop がなくても6秒で完成済み行を返すため。未完了行は匿名の拒否、64行／64 KiB、truncated を維持する。 |
+| numbered な共有 measurement slot | 維持。応答後も list の測定・cleanup が残りうるので、同期化済みの測定との重複を防ぐ。consumer の早期応答では解放しない。 |
+| worker thread handle・CancelSynchronousIo | 維持。Stop だけでなく通常期限後の測定取消しにも使う。cold context の初期化は通常期限だけでは取り消さず、Stop では取り消す。 |
+| abandoned・stop serial・generation・context candidate | 維持。Stop と結果採用は同じ lock で順序付ける。遅い一覧を採用しない。cold context は cleanup 後、同じ serial・Main の次の明示要求でのみ採用可能で、古い行や generation は再利用しない。 |
+| Stop 専用の配送・alias | list には独立して除けるものがなく、N5-J では native コードを変更しない。 |
+
+worker が固着した場合も6秒の部分一覧と資源解放は別である。N5-B2 の残留 flags と `operation_retired`、N5-B1 の元世代の期限 D による終了監視を維持する。TS の残留監視・遅い応答の拒否は list、UIA、image に引き続き必要であり、同期化した worker の残骸として削除しない。E/F は通常期限、COM／画像の所有権、semantic との共有 slot を担うため変更なしで閉じた。
+
+親死亡時は libuv job に加え、`computer_use_windows_host.cc` の parent watcher が親の死亡を即時に latch し、stop mutex を try_lock して同期 I/O の取消しを試みる。pipe を切断し、exit cleanup 中も監視を維持し、2秒の猶予を超えれば自プロセスを終了要求する。§3.1 の7の「通常終了経路は通らない」は job が先に終了させた場合の説明であり、watcher 経路が不要という意味ではない。どちらも対象へ既に渡った効果の取消しや cleanup 成功の証拠にはしない。
+
 ### 3.3 子プロセスと一時資源
 
 - **検証済みの子は、helper の終了で殺さない**（親 ADR §10 #940 の「検証済みアプリの起動は巻き戻さない」と同じ）。 AI が起動したアプリをユーザーが使っていれば、未保存の作業が失われる。今の `LaunchVerifiedExecutable` も検証済みの子は残し、未検証の子だけを終了させている（`computer_use_windows_host.cc` の `OwnedChild`）。

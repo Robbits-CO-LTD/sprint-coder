@@ -1893,6 +1893,8 @@ class WindowsComputerUseHelperClient {
   }
 
   private resolveFrame(frame: ComputerUseNativeFrame): void {
+    // N5-J: list, UIA and image workers still outlive responses. Retirement and stale-frame
+    // guards remain necessary even though start, validation, rejudge and discovery are synchronous.
     if (frame.messageType === 'operation_retired') {
       const residual = this.residual.get(frame.requestId.hex);
       const deferred = residual === undefined ? this.deferredRequestFor(frame) : undefined;
