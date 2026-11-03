@@ -90,8 +90,23 @@ public:
     std::lock_guard lock(mutex_);
     return state_;
   }
-  std::uint64_t Claim(std::uint64_t expected_epoch, std::uint64_t now = BackgroundMonitorNow()) {
+  // The final input boundary reads the clock under the lock, so a stale sample cannot pass it.
+  std::uint64_t Claim(std::uint64_t expected_epoch) {
     std::lock_guard lock(mutex_);
+    return ClaimLocked(expected_epoch, BackgroundMonitorNow());
+  }
+  std::uint64_t Claim(std::uint64_t expected_epoch, std::uint64_t now) {
+    std::lock_guard lock(mutex_);
+    return ClaimLocked(expected_epoch, now);
+  }
+  bool Finish(std::uint64_t claim) {
+    std::lock_guard lock(mutex_);
+    if (claim == 0 || claim != active_claim_) return false;
+    active_claim_ = 0;
+    return !state_.paused && !state_.unknown_effect;
+  }
+private:
+  std::uint64_t ClaimLocked(std::uint64_t expected_epoch, std::uint64_t now) {
     CheckHealthLocked(ObserveLocked(now));
     if (!registered_ || state_.paused || expected_epoch != state_.epoch || active_claim_ != 0)
       return 0;
@@ -102,13 +117,6 @@ public:
     active_claim_ = ++next_claim_;
     return active_claim_;
   }
-  bool Finish(std::uint64_t claim) {
-    std::lock_guard lock(mutex_);
-    if (claim == 0 || claim != active_claim_) return false;
-    active_claim_ = 0;
-    return !state_.paused && !state_.unknown_effect;
-  }
-private:
   // A default argument samples the clock before the lock, so a thread may arrive with a time
   // older than one another thread already recorded. Never let that order read as a stall.
   std::uint64_t ObserveLocked(std::uint64_t now) {
