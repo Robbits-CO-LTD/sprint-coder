@@ -6519,6 +6519,11 @@ export interface PersistenceClient {
   getActiveTurnId(taskId: string): string | null;
   changeStage(taskId: string, turnId: string, stage: TurnStage): TurnEvent;
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent;
+  recordComputerUseDiscoveryResult(
+    result: Extract<TurnEvent, { type: 'computer_use.discovery_result' }>['result'] & {
+      taskId: string;
+    },
+  ): TurnEvent;
   assistantMessageIdFor(taskId: string, turnId: string): string | null;
   completeTurn(
     taskId: string,
@@ -20615,6 +20620,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }>;
     return turnSnapshotSchema.parse({
       lastSeq,
+      discoveryResults: (
+        this.db
+          .prepare(
+            "SELECT payload_json FROM turn_events WHERE task_id = ? AND type = 'computer_use.discovery_result' ORDER BY seq",
+          )
+          .all(taskId) as { payload_json: string }[]
+      ).map(({ payload_json }) => turnEventSchema.parse(JSON.parse(payload_json))),
       activeTurn,
       queued: this.listQueued(taskId),
       contextUsage,
@@ -22587,6 +22599,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
         };
       })(),
     }));
+  }
+
+  recordComputerUseDiscoveryResult(
+    result: Extract<TurnEvent, { type: 'computer_use.discovery_result' }>['result'] & {
+      taskId: string;
+    },
+  ): TurnEvent {
+    this.assertTask(result.taskId);
+    // A late native exit still belongs to its original, possibly terminal Turn.
+    if (result.turnId !== null) this.getTurn(result.taskId, result.turnId);
+    return this.appendEvent({
+      type: 'computer_use.discovery_result',
+      taskId: result.taskId,
+      turnId: result.turnId,
+      result,
+    });
   }
 
   private appendEvent(event: EventWithoutSeq): TurnEvent {

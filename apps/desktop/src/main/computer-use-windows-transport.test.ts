@@ -5808,6 +5808,66 @@ int main() {
     await starting;
   });
 
+  it.each([false, true])(
+    'PR11 settles close after its owner is trimmed during kill wait (exit=%s)',
+    async (exit) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      let release!: () => void;
+      const confirmation = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const target = ledgerTarget(
+        true,
+        (addon) => ({
+          ...addon,
+          confirmSessionClosed: async (receipt, evidence) => {
+            const result = await addon.confirmSessionClosed!(receipt, evidence);
+            if (result === undefined) throw new Error('Expected ledger confirmation');
+            await confirmation;
+            return result;
+          },
+        }),
+        true,
+      );
+      const first = await startSession(target.host, 'trim-first', 'turn-first');
+      await startSession(target.host, 'trim-keeper', 'turn-keeper');
+      let retireOwner: (() => boolean) | undefined;
+      const originalGet = Map.prototype.get;
+      const lookup = vi.spyOn(Map.prototype, 'get').mockImplementation(function (
+        this: Map<unknown, unknown>,
+        key: unknown,
+      ) {
+        const value: unknown = originalGet.call(this, key);
+        if (
+          key === first.sessionId &&
+          typeof value === 'object' &&
+          value !== null &&
+          'attempts' in value &&
+          'helperGeneration' in value
+        )
+          retireOwner = () => this.delete(first.sessionId);
+        return value;
+      });
+      const closing = target.host.close(first);
+      lookup.mockRestore();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.killCalls).toBe(1);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(retireOwner?.()).toBe(true);
+      if (exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(closing).resolves.toMatchObject(
+        exit ? { kind: 'terminated', helperGeneration: 1 } : { kind: 'termination_requested' },
+      );
+      if (!exit) child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
   it.each([
     ['E3', false, false],
     ['E3', true, false],

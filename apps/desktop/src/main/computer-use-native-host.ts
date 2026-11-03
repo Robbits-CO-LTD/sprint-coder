@@ -1616,8 +1616,7 @@ export function createComputerUseNativeHost(
     generationOf: () => number | null | undefined,
   ): Promise<T | ComputerUseGenerationTerminated | Readonly<{ kind: 'termination_requested' }>> => {
     if (!terminationEnabled) return work();
-    const outcome = () => {
-      const generation = generationOf();
+    const outcome = (generation: number | null | undefined) => {
       if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       const state = ledgerState(generation);
@@ -1633,7 +1632,7 @@ export function createComputerUseNativeHost(
         : { kind: 'termination_requested' as const };
     };
     const generation = generationOf();
-    if (generation != null && ledgerState(generation).exitConfirmed) return outcome();
+    if (generation != null && ledgerState(generation).exitConfirmed) return outcome(generation);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -1646,34 +1645,36 @@ export function createComputerUseNativeHost(
         }),
       ]);
     } catch {
-      if (generationOf() == null)
+      const generation = generationOf();
+      if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-      if (ledgerState(generationOf()!).exitConfirmed) return outcome();
+      if (ledgerState(generation).exitConfirmed) return outcome(generation);
       // Subscribe before kill: exit may be synchronous, and storage cleanup is independent.
-      return await new Promise<ReturnType<typeof outcome>>((resolve) => {
+      return await new Promise<ReturnType<typeof outcome>>((resolve, reject) => {
         let settled = false;
         const finish = () => {
           if (settled) return;
           settled = true;
           unsubscribe();
           clearTimeout(wait);
-          resolve(outcome());
+          try {
+            resolve(outcome(generation));
+          } catch (error) {
+            reject(error);
+          }
         };
         const unsubscribe = stopDelivery.subscribe((event) => {
           if (
             event.kind === 'notification' &&
-            event.notification.owner.helperGeneration === generationOf() &&
+            event.notification.owner.helperGeneration === generation &&
             (event.notification.phase === 'exit_confirmed' ||
-              ledgerState(generationOf()!).exitWaitExceeded)
+              ledgerState(generation).exitWaitExceeded)
           )
             finish();
         });
         const wait = setTimeout(finish, 2_000);
         addon?.requestWindowsTermination?.();
-        if (
-          ledgerState(generationOf()!).exitConfirmed ||
-          ledgerState(generationOf()!).exitWaitExceeded
-        )
+        if (ledgerState(generation).exitConfirmed || ledgerState(generation).exitWaitExceeded)
           finish();
       });
     } finally {

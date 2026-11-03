@@ -400,3 +400,21 @@ PR11 は既定で有効な Windows kill-stop に E3 / E4 を接続する。C = 1
 15. 保存先の決定に伴う読み替えと残件: N9a の ADR の K-1・K-3 が「SQLite のストア」と書く箇所は、本 ADR §2.2 の 5 の SID 共通 SQLite（B、2026-11-03 オーナー決定）と読み替える。保存の形は §2.2 の 5 に具体化した。PR1〜PR3 は保存に依存しない。N15 の ADR の該当の引用は N15 の Q23 の決定の後に追随して直す。
 
 16. **採用: 前面化の記録の範囲と開始の 2 段化（案 C）**（2026-11-03 オーナー決定）。K-4 は開始内を含む helper の SetForegroundWindow を対象とし、N9 の新しい引渡しだけには限らない。方式は §2.2.1 の C（discovery / check_target_identity → 送信前記録 → identity に束縛した開始）を採用し、実装範囲・受入は §4.1 の PR5b とする。MessageType は増やさず、要求・応答の項目（開始の成功・失敗の応答に加える前面化の試行・結果を含む）と対応能力の契約を拡張する。有効化は PR10 と同時とし、それまでは Host options の内部 policy で既定無効を維持する。採用決定は実装完了を意味しない。保存先は採用済みの B を維持する。
+
+### PR11 段 A・修正 1 回目の補足（2026-11-03）
+
+§4 の PR11 段落末尾にある「helper 起動前の E3 / E4 の未送信証明は、同じ世代、未確認 owner・行なし、終了要求なしの条件で受理する」は、純粋な状態判定器の条件と本番の受理経路を混同していたため、以下の記述に訂正する。
+
+本番 E3 は `completeNativePendingStop` で、当該 session が未成立で、native 未呼出しまたは transport の当該 start の取消しが `never_sent` の場合に `not_submitted` を得る。所有する discovery の停止も完了してから `finishStartOwner` で確定し、kill-stop 有効時に当該 owner の世代が既に終了要求済みまたは終了確認済みなら未送信として確定しない。本番 E4 は discovery manager が当該 query の未呼出し、当該 discovery の `never_sent`、または `ComputerUseDiscoveryNotSubmittedError` を根拠に未送信を確定する。manager の `finish` は owner の同一性を確認し、世代が束縛済みならその世代の終了確認・終了要求を拒否する。世代未束縛の起動準備中も受理対象であり、他 owner や台帳行が一切ないことを本番の共通受理条件としては要求していない。他 owner・行の隔離をこの未送信証明で解除しない。
+
+純粋な `decideWindowsStop` の `not_submitted` はこれとは別に、E3 / E4、同世代、他の未確認 owner なし、その世代の行なし、終了要求なしを条件とする。helper 未起動・終了未確認の場合の特例はこの判定器の世代チェックに属する。
+
+#### 親の追加承認後の実装・検証（2026-11-03）
+
+- F1: 本番 IpcRouter は `createComputerUseControllerForIpc` を介して Controller を生成し、`publishDiscoveryResult` を既存の Turn イベント保存・購読 port 配送へ接続する。期限内の結果は従来どおり呼出元 Promise の reject に含め、イベントへは `late: true` の結果だけを流す。Scope の owner lifetime ごとの重複抑止を維持する。
+- 共有契約に `computer_use.discovery_result` を追加した。保存時に元の Task / Turn の所属を検証し、Turn が終了済みでも同じ Turn に追記する。Turn のない UI discovery は Task に記録する。既存 `turn_events` 表の形で保存できるため migration は不要。snapshot・再購読から復元し、Renderer は sequence で重複を除き、元の Turn の最後のメッセージの後（Turn なしなら Task）へ表示する。`terminated_target_suspect` は対象への影響が不明で安全確認が必要な結果として表示する。
+- F2: 内部失敗は理由を確定しない cleanup とし、Stop を要求していないのに `user_stop` をラッチ／publish しない。外部 AbortSignal の既知の Stop 理由を引き継ぎ、後からの本来の Stop 理由を保持する。開始時に作業ツリーにあった F2・F3 の修正を土台とした。
+- BOT 4454559207: terminal が result の reject より先に解決することを manager の回帰試験で再現した。完了済み handle を保持して drain の対象にも含め、共有 helper の終了／manager の自動停止の `terminated_clean`・`terminated_target_suspect` を呼出元 error の `discoveryResult` に残す。内部失敗を理由付き Stop 通知に変えることはしない。
+- BOT 4454559234: kill 待ちへ入る catch で generation を固定し、finish 内の outcome の例外は reject へ変換する。回帰試験では close の後始末後に対象 owner を退役させる境界を注入した。修正前の実装では timer の finish → outcome から `native_stop_unconfirmed` が投げられることを確認し、修正後は exit あり／なしの双方で Promise が決着した。
+- 検証環境: Windows、指定の sandbox-vite-shim、`--pool=threads`。通常の `node` はこの環境の v24.13.0 を使用（Node 22 での再実行は未実施）。指定 8 ファイルの一括実行は 2,402 PASS / 1 FAIL / 1 SKIP。唯一の FAIL は既知の `ipc.test.ts:819` の保護フォルダ警告で、今回変更していないフォルダ判定の試験である。後から追加した条件も含む focused 回帰は 8 PASS（自動停止／共有終了 × clean／suspect、Task／終了済み Turn の late 配送、owner 退役時の exit あり／なし）。contracts は 88 PASS、Timeline の単体試験は 6 PASS。bundled Electron の ABI で実行した SQLite の focused 試験は 1 PASS（終了済み Turn、次の Turn の維持、別 Task の Turn の拒否、再読込）。対象 tsc、変更した TypeScript/TSX の ESLint・Prettier check、`git diff --check` は PASS。
+- 実アプリの Computer Use による表示・操作確認は未実施。上記の Timeline 単体試験を実機 E2E の PASS とは扱わない。Git の index・branch・履歴を変更せず、変更は未コミットで残す。gh・ネットワーク・再委任は行っていない。

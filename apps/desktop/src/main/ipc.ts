@@ -1069,6 +1069,21 @@ export function computerUseProviderModelIsEligible(input: {
   );
 }
 
+export function createComputerUseControllerForIpc(
+  deps: Omit<ConstructorParameters<typeof ComputerUseController>[0], 'publishDiscoveryResult'>,
+  persistence: Pick<PersistenceClient, 'recordComputerUseDiscoveryResult'>,
+  publish: (event: TurnEvent) => void,
+): ComputerUseController {
+  return new ComputerUseController({
+    ...deps,
+    publishDiscoveryResult: (result) => {
+      // In-deadline results belong to the rejected caller Promise, not a second notification.
+      if (!result.late || result.taskId === null) return;
+      publish(persistence.recordComputerUseDiscoveryResult({ ...result, taskId: result.taskId }));
+    },
+  });
+}
+
 export class IpcRouter {
   private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
@@ -1938,153 +1953,157 @@ export class IpcRouter {
         return this.computerUseController.stop(sessionId, 'emergency_stop');
       },
     });
-    this.computerUseController = new ComputerUseController({
-      runtimeCapture: this.computerUseRuntimeCapture,
-      persistence: this.persistence,
-      native: computerUseNative,
-      featureEnabled: () => this.computerUseFeature.enabled(),
-      agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
-      // The effective eligibility mode (C5-1): v2-denylist only for a build compiled as v2 with the V2
-      // flag on and no force-v1 variable. It decides which route a session asks the native for; the
-      // host binds v2 only when the build also attests classifier 2.
-      effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
-      // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
-      // from the Turn that is calling rather than from the Task's mutable model setting: the Task
-      // row can be pointed at a different connection mid-Turn while the running Turn keeps sending
-      // to the one it started with, which would consent against B and transmit to A.
-      providerEgressBindingFor: (taskId, turnId) =>
-        this.computerUseProviderEgressBindingFor(taskId, turnId),
-      currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
-      // A panel start needs an idle Task. `computer_start` runs inside a Turn, so what it needs is
-      // that its own Turn is still the active one — the same requirement, expressed against the
-      // Turn that owns the session rather than against "none".
-      canStartSession: (taskId, ownerTurnId) =>
-        computerUseSessionMayStart(
-          {
-            persistence: this.persistence,
-            hasBusyWorkers: (id) => this.teamCoordinator.hasBusyWorkers(id),
-          },
+    this.computerUseController = createComputerUseControllerForIpc(
+      {
+        runtimeCapture: this.computerUseRuntimeCapture,
+        persistence: this.persistence,
+        native: computerUseNative,
+        featureEnabled: () => this.computerUseFeature.enabled(),
+        agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
+        // The effective eligibility mode (C5-1): v2-denylist only for a build compiled as v2 with the V2
+        // flag on and no force-v1 variable. It decides which route a session asks the native for; the
+        // host binds v2 only when the build also attests classifier 2.
+        effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
+        // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
+        // from the Turn that is calling rather than from the Task's mutable model setting: the Task
+        // row can be pointed at a different connection mid-Turn while the running Turn keeps sending
+        // to the one it started with, which would consent against B and transmit to A.
+        providerEgressBindingFor: (taskId, turnId) =>
+          this.computerUseProviderEgressBindingFor(taskId, turnId),
+        currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
+        // A panel start needs an idle Task. `computer_start` runs inside a Turn, so what it needs is
+        // that its own Turn is still the active one — the same requirement, expressed against the
+        // Turn that owns the session rather than against "none".
+        canStartSession: (taskId, ownerTurnId) =>
+          computerUseSessionMayStart(
+            {
+              persistence: this.persistence,
+              hasBusyWorkers: (id) => this.teamCoordinator.hasBusyWorkers(id),
+            },
+            taskId,
+            ownerTurnId,
+          ),
+        plannerFactory: async ({
           taskId,
-          ownerTurnId,
-        ),
-      plannerFactory: async ({
-        taskId,
-        turnId,
-        sessionId,
-        connectionId,
-        modelId,
-        mode,
-        policyEpoch,
-        sessionGoal,
-        signal,
-      }) => {
-        const selected = this.persistence.getProviderConnection(connectionId);
-        const connection = await this.ensureProviderEndpointConsent(selected, false);
-        const verified = await this.providerVerification.requireVerifiedForExecution(
-          connection.id,
-          signal,
-        );
-        if (
-          !verified.enabled ||
-          verified.id !== connectionId ||
-          verified.providerId !== selected.providerId
-        )
-          throw new Error('Computer Use provider selection changed');
-        const selectedModel = this.modelCatalog.find(connectionId, modelId);
-        if (
-          !computerUseProviderModelIsEligible({
-            connectionId,
-            providerId: verified.providerId,
-            modelId,
-            model: selectedModel,
-          })
-        )
-          throw new InvalidModelError('provider');
-        const endpointTrust = this.providerEgressTrustForConnection(verified);
-        const catalogRevision = this.modelCatalog.revision;
-        const plannerBaseDeps = {
-          runtimeCapture: this.computerUseRuntimeCapture,
-          runtime: this.providerRegistry.resolve(verified),
-          connection: verified,
+          turnId,
+          sessionId,
+          connectionId,
           modelId,
           mode,
-          task: this.persistence.getTask(taskId),
-          turnId,
-          permissionBroker: this.permissionBroker,
-          endpointTrust,
-          structuredOutputSupported: selectedModel?.structuredOutput.value === true,
-          // What `computer_start` said this session is for, or nothing when a person started it
-          // from the panel and the Task's own objective is the whole story.
-          ...(sessionGoal === null ? {} : { sessionGoal }),
-        } as const;
-        const permit = await preflightComputerUseProvider(
-          { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },
+          policyEpoch,
+          sessionGoal,
           signal,
-        );
-        if (
-          permit.sessionId !== sessionId ||
-          permit.connectionId !== connectionId ||
-          permit.modelId !== modelId ||
-          Date.parse(permit.expiresAt) <= Date.now()
-        )
-          throw new Error('Computer Use provider preflight binding changed');
-        return new ProviderComputerUsePlanner({
-          ...plannerBaseDeps,
-          artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,
-          artifactPasteSupported: this.computerUseNative.artifactPasteSupported?.() === true,
-          compatibilityPermit: permit,
-          currentCompatibilityBinding: async (currentSignal) => {
-            const persisted = this.persistence.getProviderConnection(connectionId);
-            const current = await this.providerVerification.requireVerifiedForExecution(
-              persisted.id,
-              currentSignal,
-            );
-            const currentEndpointTrust = this.providerEgressTrustForConnection(current);
-            return {
-              endpointRevision: computerUseProviderEndpointRevision(
-                current,
-                modelId,
-                currentEndpointTrust,
-              ),
-              catalogRevision: this.modelCatalog.revision,
-              policyEpoch: this.permissionBroker.getPolicy(taskId).policyEpoch,
-              adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
-            };
-          },
-        });
+        }) => {
+          const selected = this.persistence.getProviderConnection(connectionId);
+          const connection = await this.ensureProviderEndpointConsent(selected, false);
+          const verified = await this.providerVerification.requireVerifiedForExecution(
+            connection.id,
+            signal,
+          );
+          if (
+            !verified.enabled ||
+            verified.id !== connectionId ||
+            verified.providerId !== selected.providerId
+          )
+            throw new Error('Computer Use provider selection changed');
+          const selectedModel = this.modelCatalog.find(connectionId, modelId);
+          if (
+            !computerUseProviderModelIsEligible({
+              connectionId,
+              providerId: verified.providerId,
+              modelId,
+              model: selectedModel,
+            })
+          )
+            throw new InvalidModelError('provider');
+          const endpointTrust = this.providerEgressTrustForConnection(verified);
+          const catalogRevision = this.modelCatalog.revision;
+          const plannerBaseDeps = {
+            runtimeCapture: this.computerUseRuntimeCapture,
+            runtime: this.providerRegistry.resolve(verified),
+            connection: verified,
+            modelId,
+            mode,
+            task: this.persistence.getTask(taskId),
+            turnId,
+            permissionBroker: this.permissionBroker,
+            endpointTrust,
+            structuredOutputSupported: selectedModel?.structuredOutput.value === true,
+            // What `computer_start` said this session is for, or nothing when a person started it
+            // from the panel and the Task's own objective is the whole story.
+            ...(sessionGoal === null ? {} : { sessionGoal }),
+          } as const;
+          const permit = await preflightComputerUseProvider(
+            { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },
+            signal,
+          );
+          if (
+            permit.sessionId !== sessionId ||
+            permit.connectionId !== connectionId ||
+            permit.modelId !== modelId ||
+            Date.parse(permit.expiresAt) <= Date.now()
+          )
+            throw new Error('Computer Use provider preflight binding changed');
+          return new ProviderComputerUsePlanner({
+            ...plannerBaseDeps,
+            artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,
+            artifactPasteSupported: this.computerUseNative.artifactPasteSupported?.() === true,
+            compatibilityPermit: permit,
+            currentCompatibilityBinding: async (currentSignal) => {
+              const persisted = this.persistence.getProviderConnection(connectionId);
+              const current = await this.providerVerification.requireVerifiedForExecution(
+                persisted.id,
+                currentSignal,
+              );
+              const currentEndpointTrust = this.providerEgressTrustForConnection(current);
+              return {
+                endpointRevision: computerUseProviderEndpointRevision(
+                  current,
+                  modelId,
+                  currentEndpointTrust,
+                ),
+                catalogRevision: this.modelCatalog.revision,
+                policyEpoch: this.permissionBroker.getPolicy(taskId).policyEpoch,
+                adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+              };
+            },
+          });
+        },
+        authorize: (request) =>
+          this.evaluateToolPermission(
+            {
+              context: request.context,
+              callId: request.callId,
+              entry: request.entry,
+              input: request.input,
+            },
+            request.capability,
+          ),
+        publishApproval: (approval) => this.publishComputerUseApproval(approval),
+        publishGrantRequest: (request) => this.publishComputerUseGrantRequest(request),
+        publishStatus: (status) => this.publishComputerUseStatus(status),
+        armEmergencyStop: (sessionId, targetBounds) => {
+          this.computerUseEmergencySessionId = sessionId;
+          return this.computerUseEmergencyStop.arm(targetBounds);
+        },
+        disarmEmergencyStop: (sessionId) => {
+          if (this.computerUseEmergencySessionId !== sessionId) return;
+          this.computerUseEmergencySessionId = null;
+          this.computerUseEmergencyStop.disarm();
+        },
+        repositionEmergencyStop: (sessionId, screenBounds) =>
+          this.computerUseEmergencySessionId === sessionId &&
+          this.computerUseEmergencyStop.reposition(screenBounds),
+        visualActionBlocked: (sessionId, action) =>
+          this.computerUseEmergencySessionId === sessionId &&
+          this.computerUseEmergencyStop.blocksTargetAction(action),
+        // Computer Use owns a synthetic, non-persisted Turn. Its ToolBroker lifecycle is transient;
+        // durable evidence is stored in computer_action_audits instead of managed_tool_calls.
+        lifecycle: () => undefined,
       },
-      authorize: (request) =>
-        this.evaluateToolPermission(
-          {
-            context: request.context,
-            callId: request.callId,
-            entry: request.entry,
-            input: request.input,
-          },
-          request.capability,
-        ),
-      publishApproval: (approval) => this.publishComputerUseApproval(approval),
-      publishGrantRequest: (request) => this.publishComputerUseGrantRequest(request),
-      publishStatus: (status) => this.publishComputerUseStatus(status),
-      armEmergencyStop: (sessionId, targetBounds) => {
-        this.computerUseEmergencySessionId = sessionId;
-        return this.computerUseEmergencyStop.arm(targetBounds);
-      },
-      disarmEmergencyStop: (sessionId) => {
-        if (this.computerUseEmergencySessionId !== sessionId) return;
-        this.computerUseEmergencySessionId = null;
-        this.computerUseEmergencyStop.disarm();
-      },
-      repositionEmergencyStop: (sessionId, screenBounds) =>
-        this.computerUseEmergencySessionId === sessionId &&
-        this.computerUseEmergencyStop.reposition(screenBounds),
-      visualActionBlocked: (sessionId, action) =>
-        this.computerUseEmergencySessionId === sessionId &&
-        this.computerUseEmergencyStop.blocksTargetAction(action),
-      // Computer Use owns a synthetic, non-persisted Turn. Its ToolBroker lifecycle is transient;
-      // durable evidence is stored in computer_action_audits instead of managed_tool_calls.
-      lifecycle: () => undefined,
-    });
+      this.persistence,
+      (event) => this.publish(event),
+    );
     this.window.webContents.on?.('did-start-navigation', this.handleComputerUseRendererNavigation);
     this.window.webContents.on?.('render-process-gone', this.handleComputerUseRendererGone);
     this.taskTitleRuntimes = new TaskTitleRuntimePool(

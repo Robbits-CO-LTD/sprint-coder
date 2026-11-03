@@ -25,7 +25,18 @@ import {
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import type { ComputerUsePlannerInput } from './computer-use-planner-port';
-import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
+import {
+  computerUseProviderModelIsEligible,
+  createComputerUseControllerForIpc,
+  IpcRouter,
+  toPublicError,
+} from './ipc';
+import type {
+  WindowsStopListener,
+  WindowsStopDeliveryEvent,
+} from './computer-use-windows-stop-delivery';
+import type { ComputerUseDiscoveryStop } from './computer-use-native-discovery';
+import type { TurnEvent } from '@sprint-coder/contracts';
 import {
   COMPUTER_LIST_TARGETS_TOOL,
   COMPUTER_REQUEST_ACCESS_TOOL,
@@ -1364,6 +1375,10 @@ describe('Computer Use target tools end to end', () => {
    */
   function endToEnd(
     options: {
+      discoveryNative?: Partial<ConstructorParameters<typeof ComputerUseController>[0]['native']>;
+      recordDiscovery?: Parameters<
+        typeof createComputerUseControllerForIpc
+      >[1]['recordComputerUseDiscoveryResult'];
       preset?: 'ask' | 'auto' | 'full';
       revoked?: boolean;
       revokedCapabilities?: ('computer.observe' | 'computer.control')[];
@@ -1421,78 +1436,93 @@ describe('Computer Use target tools end to end', () => {
       createdAt: '2026-09-19T00:00:00.000Z',
       updatedAt: '2026-09-19T00:00:00.000Z',
     };
-    const controller = new ComputerUseController({
-      persistence: {
-        listComputerAppProfiles: () => [profile],
-        getComputerAppProfile: () => profile,
-        // A real `computer_start` runs inside the calling Turn, so the Task has to look busy with
-        // exactly that Turn — the same thing production sees while a tool call is in flight.
-        getActiveTurnId: () => 'turn-1',
-        getPermissionPolicy: () => ({ policyEpoch }),
-        listComputerActionAudits: () => [],
-        recordComputerActionAudit: (input: Record<string, unknown>) => {
-          const record = { ...input, id: `audit-${audits.size + 1}`, state: 'pending' };
-          audits.set(record.id, record);
-          return record;
-        },
-        completeComputerActionAudit: ({ auditId }: { auditId: string }) => audits.get(auditId),
-        ...grantStore.api,
-      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
-      native: {
-        availability: () => available,
-        pickApplication: async () => null,
-        listWindows: async () => [
-          {
+    const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
+    const delivered = vi.fn();
+    Object.assign(router, {
+      ports: new Set([{ taskId: 'task-1', port: { postMessage: delivered } }]),
+    });
+    const controller = createComputerUseControllerForIpc(
+      {
+        persistence: {
+          listComputerAppProfiles: () => [profile],
+          getComputerAppProfile: () => profile,
+          // A real `computer_start` runs inside the calling Turn, so the Task has to look busy with
+          // exactly that Turn — the same thing production sees while a tool call is in flight.
+          getActiveTurnId: () => 'turn-1',
+          getPermissionPolicy: () => ({ policyEpoch }),
+          listComputerActionAudits: () => [],
+          recordComputerActionAudit: (input: Record<string, unknown>) => {
+            const record = { ...input, id: `audit-${audits.size + 1}`, state: 'pending' };
+            audits.set(record.id, record);
+            return record;
+          },
+          completeComputerActionAudit: ({ auditId }: { auditId: string }) => audits.get(auditId),
+          ...grantStore.api,
+        } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
+        native: {
+          availability: () => available,
+          pickApplication: async () => null,
+          listWindows: async () => [
+            {
+              platform: 'darwin',
+              windowId: 'native-window-1',
+              appIdentityDigest: profile.identityDigest,
+              windowIdentityDigest: 'd'.repeat(64),
+              title: 'Meeting notes',
+              bounds: { x: 0, y: 0, width: 800, height: 600 },
+              screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+              focused: true,
+              eligible: true,
+              ownerKind: 'application',
+              modal: false,
+              revision: 1,
+              policyLanguage: 'en',
+              maximumMode: 'full_access_app',
+            },
+          ],
+          startSession: async (input: { sessionId: string; windowId: string }) => ({
+            sessionId: input.sessionId,
             platform: 'darwin',
-            windowId: 'native-window-1',
             appIdentityDigest: profile.identityDigest,
             windowIdentityDigest: 'd'.repeat(64),
-            title: 'Meeting notes',
-            bounds: { x: 0, y: 0, width: 800, height: 600 },
-            screenBounds: { x: 0, y: 0, width: 800, height: 600 },
-            focused: true,
-            eligible: true,
-            ownerKind: 'application',
-            modal: false,
-            revision: 1,
+            windowId: input.windowId,
+            profileRevision: profile.revision,
+            cancelEpoch: 0,
             policyLanguage: 'en',
             maximumMode: 'full_access_app',
+            screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+          }),
+          observe: async (session: { sessionId: string }) => {
+            observationRevision += 1;
+            return endToEndObservation(
+              session.sessionId,
+              observationRevision,
+              profile.identityDigest,
+            );
           },
-        ],
-        startSession: async (input: { sessionId: string; windowId: string }) => ({
-          sessionId: input.sessionId,
-          platform: 'darwin',
-          appIdentityDigest: profile.identityDigest,
-          windowIdentityDigest: 'd'.repeat(64),
-          windowId: input.windowId,
-          profileRevision: profile.revision,
-          cancelEpoch: 0,
-          policyLanguage: 'en',
-          maximumMode: 'full_access_app',
-          screenBounds: { x: 0, y: 0, width: 800, height: 600 },
-        }),
-        observe: async (session: { sessionId: string }) => {
-          observationRevision += 1;
-          return endToEndObservation(
-            session.sessionId,
-            observationRevision,
-            profile.identityDigest,
-          );
-        },
-        dispatch: async () => ({ result: 'completed', reasonCode: null }),
-        cancel: async () => undefined,
-        close: async () => undefined,
-      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
-      featureEnabled: () => true,
-      agentDrivenEnabled: () => true,
-      providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
-      currentPolicyEpoch: () => policyEpoch,
-      repositionEmergencyStop: () => true,
-      publishGrantRequest: (request) => cards.push(request),
-      // One round and done, so a real `computer_start` reaches a terminal state without a Provider.
-      planner: { plan: options.plan ?? (async () => ({ type: 'finish' })) },
-    });
-    const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
+          dispatch: async () => ({ result: 'completed', reasonCode: null }),
+          cancel: async () => undefined,
+          close: async () => undefined,
+          ...options.discoveryNative,
+        } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
+        featureEnabled: () => true,
+        agentDrivenEnabled: () => true,
+        providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
+        currentPolicyEpoch: () => policyEpoch,
+        repositionEmergencyStop: () => true,
+        publishGrantRequest: (request) => cards.push(request),
+        // One round and done, so a real `computer_start` reaches a terminal state without a Provider.
+        planner: { plan: options.plan ?? (async () => ({ type: 'finish' })) },
+      },
+      {
+        recordComputerUseDiscoveryResult:
+          options.recordDiscovery ??
+          (() => {
+            throw new Error('unexpected discovery publication');
+          }),
+      },
+      (event) => (router as unknown as { publish(event: TurnEvent): void }).publish(event),
+    );
     Object.assign(router, { permissionBroker, computerUseController: controller });
     const harness = new ManagedCodingHarness({
       workspaceFor: () => null,
@@ -1513,6 +1543,7 @@ describe('Computer Use target tools end to end', () => {
     });
     return {
       harness,
+      delivered,
       controller,
       permissionBroker,
       router,
@@ -1527,6 +1558,101 @@ describe('Computer Use target tools end to end', () => {
   }
 
   const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+
+  it.each(['turn-1', null])(
+    'PR11 routes one late E4 result through production IPC wiring to its original owner (turn=%s)',
+    async (turnId) => {
+      const listeners = new Set<WindowsStopListener>();
+      const emit = (event: WindowsStopDeliveryEvent) => {
+        for (const listener of listeners) listener(event);
+      };
+      const owner = {
+        kind: 'discovery' as const,
+        id: 'discovery-1',
+        helperGeneration: 1,
+        lifetimeId: 'lifetime-1',
+      };
+      let finish!: (proof: ComputerUseDiscoveryStop) => void;
+      const terminal = new Promise<ComputerUseDiscoveryStop>((resolve) => {
+        finish = resolve;
+      });
+      const begin = vi.fn(() => {
+        queueMicrotask(() => emit({ kind: 'registered', owner }));
+        return {
+          id: owner.id,
+          result: new Promise<never>(() => {}),
+          terminal,
+          stop: async () => {
+            throw new Error('native_stop_unconfirmed');
+          },
+        };
+      });
+      const recorded: TurnEvent[] = [];
+      const fixture = endToEnd({
+        discoveryNative: {
+          beginWindowDiscovery: begin,
+          subscribeWindowsStop: (listener) => {
+            listeners.add(listener);
+            return () => {
+              listeners.delete(listener);
+            };
+          },
+        },
+        recordDiscovery: (result) => {
+          const event = {
+            type: 'computer_use.discovery_result' as const,
+            taskId: 'task-1',
+            turnId: result.turnId,
+            seq: recorded.length + 1,
+            result,
+          };
+          recorded.push(event);
+          return event;
+        },
+      });
+      const reading = (
+        turnId === null
+          ? fixture.controller.beginWindowCandidates(fixture.profile.id, 'task-1', 'frame-1').result
+          : fixture.controller.listTargets({}, turnContext)
+      ).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
+      await expect(fixture.controller.stopForTask('task-1', 'task_changed')).rejects.toThrow(
+        'native_stop_unconfirmed',
+      );
+      expect(await reading).toHaveProperty('discoveryResult.reason', 'native_stop_unconfirmed');
+      expect(recorded).toEqual([]);
+      expect(fixture.delivered).not.toHaveBeenCalled();
+      if (turnId !== null) fixture.controller.turnEnded('task-1', turnId);
+      const notification = {
+        owner,
+        phase: 'exit_confirmed' as const,
+        result: 'terminated_target_suspect' as const,
+        late: true,
+        reason: 'requested_reason' as const,
+        internalReason: 'requested_stop' as const,
+      };
+      emit({ kind: 'notification', notification });
+      emit({ kind: 'notification', notification });
+      expect(recorded).toHaveLength(1);
+      expect(fixture.delivered).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'computer_use.discovery_result',
+          taskId: 'task-1',
+          turnId,
+          result: expect.objectContaining({
+            late: true,
+            reason: 'task_changed',
+            results: [
+              { kind: 'terminated', helperGeneration: 1, result: 'terminated_target_suspect' },
+            ],
+          }),
+        }),
+      );
+      finish({ kind: 'terminated', helperGeneration: 1, result: 'terminated_target_suspect' });
+      await Promise.resolve();
+      await fixture.controller.dispose();
+    },
+  );
 
   it('publishes, guards, authorizes, and executes computer_list_targets with no Workspace', async () => {
     const { harness, controller, profile } = endToEnd();

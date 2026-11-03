@@ -1,5 +1,5 @@
 import { sameWindowsStopOwner, type WindowsStopOwner } from './computer-use-windows-stop-delivery';
-import type { ComputerUseStopReason } from '@sprint-coder/contracts';
+import { computerUseStopReasonSchema, type ComputerUseStopReason } from '@sprint-coder/contracts';
 import type { ComputerAppProfileRecord } from './persistence';
 import type { ComputerUseNativeHost, ComputerUseNativeWindow } from './computer-use-controller';
 import type {
@@ -7,14 +7,8 @@ import type {
   ComputerUseDiscoveryStop,
 } from './computer-use-native-discovery';
 
-export type ComputerUseDiscoveryResult = Readonly<{
-  kind: 'discovery_result';
-  late: boolean;
-  taskId: string | null;
-  turnId: string | null;
-  reason: ComputerUseStopReason | 'native_stop_unconfirmed';
-  results: readonly ComputerUseDiscoveryStop[];
-}>;
+import type { ComputerUseDiscoveryResult } from '@sprint-coder/contracts';
+export type { ComputerUseDiscoveryResult } from '@sprint-coder/contracts';
 
 /** Main-only lifetime: cancellation remains live until the caller commits its result. */
 export class ComputerUseDiscoveryScope {
@@ -23,11 +17,15 @@ export class ComputerUseDiscoveryScope {
   private readonly handles = new Set<
     ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>
   >();
+  private readonly completedHandles = new Set<
+    ComputerUseDiscoveryHandle<readonly ComputerUseNativeWindow[]>
+  >();
   private stopping: Promise<ComputerUseDiscoveryResult> | null = null;
   private readonly stopOwners = new Map<string, WindowsStopOwner>();
   private readonly lateResults = new Set<string>();
   private readonly unsubscribeStop: (() => void) | undefined;
-  private requestedReason: ComputerUseStopReason = 'user_stop';
+  private requestedReason: ComputerUseStopReason | null = null;
+  private draining: Promise<ComputerUseDiscoveryStop[]> | null = null;
   private interrupted = false;
   private finished = false;
   private stopFailed = false;
@@ -37,7 +35,8 @@ export class ComputerUseDiscoveryScope {
     this.rejectCanceled = reject;
   });
   private readonly forward = () => {
-    void this.stop().catch(() => undefined);
+    const reason = computerUseStopReasonSchema.safeParse(this.externalSignal?.reason);
+    void this.stop(true, reason.success ? reason.data : 'user_stop').catch(() => undefined);
   };
 
   constructor(
@@ -69,6 +68,7 @@ export class ComputerUseDiscoveryScope {
       if (owner === undefined || !sameWindowsStopOwner(owner, notification.owner)) return;
       if (notification.reason === 'native_unavailable') this.interrupted = true;
       if (
+        (this.requestedReason === null && !this.interrupted) ||
         notification.phase !== 'exit_confirmed' ||
         !notification.late ||
         notification.result === 'termination_requested' ||
@@ -82,7 +82,9 @@ export class ComputerUseDiscoveryScope {
         taskId: this.taskId,
         turnId: this.turnId,
         reason:
-          notification.reason === 'requested_reason' ? this.requestedReason : 'native_unavailable',
+          notification.reason === 'requested_reason'
+            ? (this.requestedReason ?? 'native_unavailable')
+            : 'native_unavailable',
         results: [
           {
             kind: 'terminated',
@@ -112,6 +114,7 @@ export class ComputerUseDiscoveryScope {
     if (handle !== undefined) {
       this.handles.add(handle);
       void handle.terminal.then(() => {
+        this.completedHandles.add(handle);
         this.handles.delete(handle);
         this.retireIfFinished();
       });
@@ -124,13 +127,22 @@ export class ComputerUseDiscoveryScope {
       return windows;
     } catch (error) {
       if (this.signal.aborted) {
-        await this.stop(false);
+        await (this.stopping ?? this.drain());
         throw this.signal.reason;
       }
-      if (this.native.subscribeWindowsStop !== undefined && error instanceof Error) {
-        const result = await this.stop(false);
-        Object.assign(error, { discoveryResult: result });
-      }
+      this.cancelWork(error);
+      const results = await this.drain();
+      if (error instanceof Error && results.some((result) => result.kind === 'terminated'))
+        Object.assign(error, {
+          discoveryResult: {
+            kind: 'discovery_result',
+            late: false,
+            taskId: this.taskId,
+            turnId: this.turnId,
+            reason: 'native_unavailable',
+            results,
+          } satisfies ComputerUseDiscoveryResult,
+        });
       throw error;
     }
   }
@@ -149,6 +161,7 @@ export class ComputerUseDiscoveryScope {
       (!retry || !this.stopFailed || this.native.subscribeWindowsStop !== undefined)
     )
       return this.stopping;
+    if (this.stopFailed && this.native.subscribeWindowsStop === undefined) this.draining = null;
     this.stopFailed = false;
     this.requestedReason = reason;
     let resolve!: (result: ComputerUseDiscoveryResult) => void;
@@ -158,17 +171,9 @@ export class ComputerUseDiscoveryScope {
       reject = no;
     });
     this.stopping = stopping;
-    this.controller.abort(new Error('Computer Use discovery canceled'));
-    for (const undo of this.rollback) undo();
-    this.rollback.clear();
+    this.cancelWork(new Error('Computer Use discovery canceled'));
     // Publish/latch before callbacks; a pending native result is never awaited by Stop.
-    void Promise.all(
-      [...this.handles].map(async (handle) => {
-        const result = await handle.stop();
-        this.handles.delete(handle);
-        return result;
-      }),
-    ).then(
+    void this.drain().then(
       (results) => {
         const result: ComputerUseDiscoveryResult = {
           kind: 'discovery_result',
@@ -211,7 +216,9 @@ export class ComputerUseDiscoveryScope {
       if (!this.finished) this.check();
       return result;
     } catch (error) {
-      await this.stop(false);
+      this.cancelWork(error);
+      if (this.stopping !== null) await this.stopping;
+      else await this.drain();
       throw error;
     } finally {
       this.finish();
@@ -223,6 +230,29 @@ export class ComputerUseDiscoveryScope {
     this.rollback.clear();
     this.externalSignal?.removeEventListener('abort', this.forward);
     this.retireIfFinished();
+  }
+
+  private drain(): Promise<ComputerUseDiscoveryStop[]> {
+    // Internal failure needs native cleanup, but must not invent a requested Stop reason.
+    this.draining ??= Promise.all(
+      [...new Set([...this.completedHandles, ...this.handles])].map(async (handle) => {
+        const result = await handle.stop();
+        this.handles.delete(handle);
+        return result;
+      }),
+    ).catch((error: unknown) => {
+      this.stopFailed = true;
+      throw error;
+    });
+    return this.draining;
+  }
+
+  private cancelWork(error: unknown): void {
+    this.controller.abort(
+      error instanceof Error ? error : new Error('Computer Use discovery failed'),
+    );
+    for (const undo of this.rollback) undo();
+    this.rollback.clear();
   }
 
   private publish(result: ComputerUseDiscoveryResult): void {
