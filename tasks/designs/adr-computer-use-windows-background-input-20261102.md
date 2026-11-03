@@ -365,6 +365,7 @@ P0〜P7 は背景 gate を既定無効に保つ。環境変数・Renderer・モ�
 
 ### 5.2 未決事項と実測待ち
 
+- P3b の暫定定数は mouse 照合許容 100 ms、各 pump の心拍間隔 20 ms、心拍欠落上限 250 ms（`computer_use_windows_background_monitor.h`）。別スレッドの watchdog と claim 時にも期限を検査し、遅れて到着した心拍・hook や再登録では pause を解除しない。件数の一対一対応は仮定せず、到着時刻の窓で照合する。これらは安全側に停止するための仮値であり、下記の実測前は公開しない。
 - message-only window への WM_INPUT 配送、SendInput 由来 mouse の Raw Input / hook の対応、照合許容時間と pump 心拍の間隔・上限は実測待ち。hwndTarget 必須と失敗時の fail-closed は決定済みであり、値を仮定して公開しない。
 - シェルの窓を識別できるか、その結果で往復の例外を開くかは未決。現在はシェルが前面になれば pause とする。
 - 正常往復は生きた id で復帰・再観測・交換してから end とする。交換済み ticket の end 時の扱いと dispatch までの詳細な状態遷移は P3c で明文化し、Main / native の対試験で固定する。往復中の claim 禁止と失敗保持を弱めない。

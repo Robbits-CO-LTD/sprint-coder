@@ -1,14 +1,18 @@
-// P3a owns event attribution and claim ordering. Raw Input/heartbeat and event delivery are P3b/d.
+// Native monitoring closes claims independently of Main event delivery (P3d).
 struct WindowsBackgroundMonitor {
   using Owner = sprint_coder::computer_use::BackgroundInputOwner;
+  using Pump = sprint_coder::computer_use::BackgroundMonitorPump;
   sprint_coder::computer_use::WindowsBackgroundMonitorState state;
   const DWORD pid;
   const HWND window;
   std::mutex mutex;
   std::condition_variable ready;
-  bool initialized = false;
-  bool registered = false;
+  unsigned initialized = 0;
+  bool registered = true;
   std::jthread pump;
+  std::jthread raw_pump;
+  std::jthread watchdog;
+  static constexpr UINT kHeartbeat = WM_APP + 73;
   static thread_local WindowsBackgroundMonitor *current;
 
   WindowsBackgroundMonitor(DWORD target_pid, HWND target_window, std::uint64_t epoch)
@@ -56,6 +60,7 @@ struct WindowsBackgroundMonitor {
   }
   static LRESULT CALLBACK Mouse(int code, WPARAM message, LPARAM data) {
     if (code == HC_ACTION && current != nullptr) {
+      current->state.MouseHook();
       // Injection flags/extra-info are deliberately ignored. Only ephemeral hit/capture metadata.
       if (data == 0) current->state.Pause();
       else current->SamplePointer(reinterpret_cast<const MSLLHOOKSTRUCT *>(data)->pt);
@@ -71,8 +76,106 @@ struct WindowsBackgroundMonitor {
     if (current != nullptr) current->state.TargetEvent(Owner::kTarget);
   }
 
+  static LRESULT CALLBACK RawWindow(HWND hwnd, UINT message, WPARAM word, LPARAM data) {
+    if (message == WM_INPUT && current != nullptr) {
+      // Read only the header. Never retain movement, buttons, keys or device identity.
+      RAWINPUTHEADER header{};
+      UINT size = sizeof(header);
+      const UINT read = GetRawInputData(reinterpret_cast<HRAWINPUT>(data), RID_HEADER,
+          &header, &size, sizeof(header));
+      if (read != sizeof(header) || size != sizeof(header)) current->state.Pause();
+      else if (header.dwType == RIM_TYPEMOUSE) current->state.RawMouse();
+    }
+    // DefWindowProc performs the required foreground WM_INPUT cleanup too.
+    return DefWindowProcW(hwnd, message, word, data);
+  }
+
+  void Initialized(bool success) {
+    if (!success) state.Registered(false);
+    {
+      std::lock_guard lock(mutex);
+      registered = registered && success;
+      ++initialized;
+      if (initialized == 2) state.Registered(registered);
+    }
+    ready.notify_all();
+  }
+
+  void RunPump(std::stop_token stop, Pump kind) {
+    using namespace sprint_coder::computer_use;
+    MSG message{};
+    std::uint64_t last_post = 0;
+    bool pending = false;
+    while (!stop.stop_requested() && !state.Snapshot().paused) {
+      const auto now = BackgroundMonitorNow();
+      if (!pending && now - last_post >= kBackgroundHeartbeatIntervalMs) {
+        if (!PostThreadMessageW(GetCurrentThreadId(), kHeartbeat, 0, 0)) break;
+        last_post = now;
+        pending = true;
+      }
+      if (MsgWaitForMultipleObjects(0, nullptr, FALSE,
+          static_cast<DWORD>(kBackgroundHeartbeatIntervalMs), QS_ALLINPUT) == WAIT_FAILED) break;
+      // Bound each drain so a busy queue cannot starve stop or heartbeat checks.
+      for (unsigned count = 0; count < 64 && !stop.stop_requested(); ++count) {
+        if (!PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) break;
+        if (message.message == WM_QUIT) { state.Pause(); return; }
+        if (message.hwnd == nullptr && message.message == kHeartbeat) {
+          if (pending) state.Heartbeat(kind);
+          pending = false;
+        } else {
+          TranslateMessage(&message);
+          DispatchMessageW(&message);
+        }
+      }
+      state.CheckHealth();
+    }
+    state.Pause();
+  }
+
+  void RunRawPump(std::stop_token stop) {
+    current = this;
+    // Windows allows only one raw-input sink per device class in this process.
+    // A second session must fail closed instead of silently stealing the first sink.
+    static std::mutex sink_mutex;
+    std::unique_lock sink_lock(sink_mutex, std::try_to_lock);
+    if (!sink_lock.owns_lock()) { Initialized(false); current = nullptr; return; }
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    static const ATOM window_class = [instance] {
+      WNDCLASSEXW cls{};
+      cls.cbSize = sizeof(cls);
+      cls.lpfnWndProc = RawWindow;
+      cls.hInstance = instance;
+      cls.lpszClassName = L"SprintCoderBackgroundRawInput";
+      return RegisterClassExW(&cls);
+    }();
+    const HWND sink = window_class == 0 ? nullptr : CreateWindowExW(0,
+        MAKEINTATOM(window_class), L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, instance, nullptr);
+    RAWINPUTDEVICE device{0x01, 0x02, RIDEV_INPUTSINK, sink};
+    const bool success = sink != nullptr && RegisterRawInputDevices(&device, 1, sizeof(device));
+    Initialized(success);
+    if (success) RunPump(stop, Pump::kRaw);
+    state.Pause();
+    if (success) {
+      device.dwFlags = RIDEV_REMOVE;
+      device.hwndTarget = nullptr;
+      if (!RegisterRawInputDevices(&device, 1, sizeof(device))) state.Pause();
+    }
+    if (sink != nullptr) DestroyWindow(sink);
+    current = nullptr;
+  }
+
   bool Start() {
+    state.BeginMonitoring();
     try {
+      watchdog = std::jthread([this](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+          state.CheckHealth();
+          if (state.Snapshot().paused) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(
+              sprint_coder::computer_use::kBackgroundHeartbeatIntervalMs));
+        }
+      });
+      raw_pump = std::jthread([this](std::stop_token stop) { RunRawPump(stop); });
       pump = std::jthread([this](std::stop_token stop) {
         current = this;
         MSG message{};
@@ -88,26 +191,9 @@ struct WindowsBackgroundMonitor {
         const auto capture = SetWinEventHook(EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTUREEND,
             nullptr, Target, pid, 0, WINEVENT_OUTOFCONTEXT);
         const bool success = foreground && mouse && objects && movement && capture;
-        state.Registered(success);
         state.Foreground(Belongs(GetForegroundWindow()));
-        {
-          std::lock_guard lock(mutex);
-          registered = success;
-          initialized = true;
-        }
-        ready.notify_all();
-        while (success && !stop.stop_requested()) {
-          if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT) == WAIT_FAILED) {
-            state.Pause();
-            break;
-          }
-          while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            if (message.message == WM_QUIT) { state.Pause(); break; }
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-          }
-          if (message.message == WM_QUIT) break;
-        }
+        Initialized(success);
+        if (success) RunPump(stop, Pump::kHook);
         state.Pause();
         for (auto hook : {foreground, objects, movement, capture})
           if (hook != nullptr) UnhookWinEvent(hook);
@@ -119,14 +205,19 @@ struct WindowsBackgroundMonitor {
       return false;
     }
     std::unique_lock lock(mutex);
-    if (!ready.wait_for(lock, std::chrono::milliseconds(150), [&] { return initialized; }) ||
+    if (!ready.wait_for(lock, std::chrono::milliseconds(150), [&] { return initialized == 2; }) ||
         !registered) state.Pause();
     return !state.Snapshot().paused;
   }
-  ~WindowsBackgroundMonitor() {
+  void Stop() {
     state.Pause();
+    if (watchdog.joinable()) watchdog.request_stop();
+    if (raw_pump.joinable()) raw_pump.request_stop();
     if (pump.joinable()) { pump.request_stop(); pump.join(); }
+    if (raw_pump.joinable()) raw_pump.join();
+    if (watchdog.joinable()) watchdog.join();
   }
+  ~WindowsBackgroundMonitor() { Stop(); }
 };
 thread_local WindowsBackgroundMonitor *WindowsBackgroundMonitor::current = nullptr;
 
@@ -134,6 +225,7 @@ bool StartWindowsBackgroundMonitor(WindowsSession &session, DWORD pid, HWND wind
                                    bool human_resume, std::string *reason) {
   std::uint64_t epoch = 1;
   if (session.background_monitor) {
+    session.background_monitor->state.CheckHealth();
     // Freeze the old claim boundary before inspecting it; resume cannot race an active claim.
     if (human_resume) session.background_monitor->state.Pause();
     const auto previous = session.background_monitor->state.Snapshot();
@@ -147,6 +239,7 @@ bool StartWindowsBackgroundMonitor(WindowsSession &session, DWORD pid, HWND wind
       return false;
     }
     epoch = previous.epoch + 1;
+    session.background_monitor->Stop();
   }
   auto monitor = std::make_shared<WindowsBackgroundMonitor>(pid, window, epoch);
   if (!monitor->Start()) { *reason = "user_takeover"; return false; }
@@ -155,6 +248,7 @@ bool StartWindowsBackgroundMonitor(WindowsSession &session, DWORD pid, HWND wind
 }
 
 bool WindowsBackgroundMonitorReady(const WindowsSession &session) {
+  if (session.background_monitor) session.background_monitor->state.CheckHealth();
   return session.background_monitor && !session.background_monitor->state.Snapshot().paused;
 }
 
