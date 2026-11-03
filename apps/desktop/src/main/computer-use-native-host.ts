@@ -742,6 +742,7 @@ export function createComputerUseNativeHost(
     return assertAdmission;
   };
   if (ledger !== undefined)
+    // Discovery enumerates windows; exclude quarantined candidates individually, not by cached PID.
     addon?.configureWindowsAdmission?.((input) =>
       input['discoveryId'] === undefined
         ? prepareTargetAdmission(input)
@@ -767,15 +768,17 @@ export function createComputerUseNativeHost(
       const raw = asRecord(candidate, 'native_window_invalid');
       try {
         admitted.push({ candidate, check: await prepare(raw) });
-      } catch {
-        /* Exclude this target only. */
+      } catch (error) {
+        // Exclude this target only; an unexpected failure is not a refusal and must surface.
+        if (!(error instanceof ComputerUseNativeUnavailableError)) throw error;
       }
     }
     return admitted.flatMap(({ candidate, check }) => {
       try {
         check();
         return [candidate];
-      } catch {
+      } catch (error) {
+        if (!(error instanceof ComputerUseNativeUnavailableError)) throw error;
         return [];
       }
     });
