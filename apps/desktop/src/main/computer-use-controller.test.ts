@@ -53,6 +53,8 @@ import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture
 import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { computerUseActionDigest } from './computer-use-action';
 import { computerUseDisplayLabel } from './computer-use-artifact';
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
+import * as targetEligibility from './computer-use-target-eligibility';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -4538,6 +4540,186 @@ describe('ComputerUseController', () => {
     expect(second.sessionId).not.toBe(first.sessionId);
     await fixture.controller.stop(second.sessionId);
     await fixture.controller.dispose();
+  });
+
+  describe('grant ruleset pin', () => {
+    const input = { maxMode: 'full_access_app' as const, providerEgress: null };
+    function windowsProfile(leaf = 'fixture.exe'): ComputerAppProfileRecord {
+      const facts = {
+        platform: 'win32' as const,
+        executablePath: `C:\\Program Files\\Fixture\\${leaf}`,
+        executableDigest: 'b'.repeat(64),
+        signerDigest: 'a'.repeat(64),
+        packageFamilyName: null,
+      };
+      const identityDigest = computerAppNativeIdentityDigest(
+        facts,
+        computerAppGrantIdentityFrom(facts)!,
+      )!;
+      return {
+        ...profile,
+        platform: 'win32',
+        kind: 'win32-executable',
+        canonicalPath: facts.executablePath,
+        identityDigest,
+        identity: { ...facts, identityDigest },
+      };
+    }
+
+    it('windows_grant_uses_compiled_pin', async () => {
+      const fixture = createFixture();
+      const identity = computerAppGrantIdentityFrom(windowsProfile().identity)!;
+      expect(fixture.controller.createAppGrant(identity, input).denyRulesetVersion).toBe(
+        targetEligibility.denyRulesetVersion('win32'),
+      );
+      await fixture.controller.dispose();
+    });
+
+    it('ruleset_upgrade_revokes_newly_denied_grant', async () => {
+      const target = windowsProfile('keepass.exe');
+      const fixture = createFixture({
+        profileRecord: target,
+        windowExecutableDigest: target.executableDigest!,
+      });
+      const identity = computerAppGrantIdentityFrom(target.identity)!;
+      // Model the old table, then restore the compiled table while the session is running.
+      const oldRules = vi.spyOn(DENY_RULESET.rules, 'some').mockReturnValue(false);
+      let started;
+      try {
+        const grant = fixture.controller.createAppGrant(identity, input);
+        fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: 1 });
+        started = await start(fixture);
+      } finally {
+        oldRules.mockRestore();
+      }
+      expect(fixture.controller.appGrantFor(fixture.currentProfile())).toBeNull();
+      expect(fixture.grants.size).toBe(0);
+      await vi.waitFor(() =>
+        expect(fixture.statuses.at(-1)).toMatchObject({
+          sessionId: started.sessionId,
+          state: 'stopped',
+          stopReason: 'policy_changed',
+        }),
+      );
+      expect(() => fixture.controller.createAppGrant(identity, input)).toThrow();
+      expect(fixture.grants.size).toBe(0);
+      await fixture.controller.dispose();
+    });
+
+    it('unchanged_allowed_grant_is_not_revoked', async () => {
+      const target = windowsProfile();
+      const fixture = createFixture({
+        profileRecord: target,
+        windowExecutableDigest: target.executableDigest!,
+      });
+      const grant = fixture.controller.createAppGrant(
+        computerAppGrantIdentityFrom(target.identity)!,
+        input,
+      );
+      fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: 1 });
+      expect(fixture.controller.appGrantFor(target)?.id).toBe(grant.id);
+      expect(fixture.grants.size).toBe(1);
+      await fixture.controller.dispose();
+    });
+
+    it('listing_revokes_newly_denied_grants_without_a_profile', async () => {
+      const fixture = createFixture();
+      const legacy = createComputerAppGrantFixtureStore().api.createComputerAppGrant({
+        identity: computerAppGrantIdentityFrom(windowsProfile('keepass.exe').identity)!,
+        displayName: 'Fixture',
+        denyRulesetVersion: 1,
+        ...input,
+      });
+      fixture.grants.set(legacy.id, legacy);
+      expect(fixture.controller.listAppGrants().grants).toEqual([]);
+      await fixture.controller.dispose();
+    });
+
+    it.each([0, NaN, 4])(
+      'unreadable_saved_version_is_retained_without_grant (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const grant = fixture.controller.createAppGrant(
+          computerAppGrantIdentityFrom(windowsProfile().identity)!,
+          input,
+        );
+        fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
+        expect(fixture.controller.appGrantFor(windowsProfile())).toBeNull();
+        expect(fixture.grants.get(grant.id)).toEqual({ ...grant, denyRulesetVersion: version });
+        await fixture.controller.dispose();
+      },
+    );
+
+    it.each([4, NaN, 0, -1, 2.5])(
+      'reapproval_replaces_a_retained_unreadable_grant (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const identity = computerAppGrantIdentityFrom(windowsProfile().identity)!;
+        const grant = fixture.controller.createAppGrant(identity, input);
+        fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
+        // The newer build's row grants nothing here; approving again in this build replaces it.
+        const replaced = fixture.controller.createAppGrant(identity, input);
+        expect(replaced.denyRulesetVersion).toBe(3);
+        expect(fixture.grants.has(grant.id)).toBe(false);
+        expect(fixture.controller.appGrantFor(windowsProfile())?.id).toBe(replaced.id);
+        await fixture.controller.dispose();
+      },
+    );
+
+    it.each([null, 0, 4, NaN])(
+      'unreadable_or_mismatched_pin_fails_closed (%s)',
+      async (version) => {
+        const fixture = createFixture();
+        const pin = vi.spyOn(targetEligibility, 'denyRulesetVersion').mockReturnValue(version);
+        try {
+          expect(() =>
+            fixture.controller.createAppGrant(
+              computerAppGrantIdentityFrom(windowsProfile().identity)!,
+              input,
+            ),
+          ).toThrow();
+          expect(fixture.grants.size).toBe(0);
+        } finally {
+          pin.mockRestore();
+          await fixture.controller.dispose();
+        }
+      },
+    );
+
+    it('macos_denied_bundle_grant_is_revoked_by_app_grant_state', async () => {
+      const facts = { ...appIdentityFacts, bundleId: 'com.apple.terminal' };
+      const identity = computerAppGrantIdentityFrom(facts)!;
+      const identityDigest = computerAppNativeIdentityDigest(facts, identity)!;
+      const target = {
+        ...profile,
+        identityDigest,
+        identity: { ...facts, identityDigest },
+      };
+      const fixture = createFixture({ profileRecord: target });
+      const legacy = createComputerAppGrantFixtureStore().api.createComputerAppGrant({
+        identity,
+        displayName: 'Fixture',
+        denyRulesetVersion: 1,
+        ...input,
+      });
+      fixture.grants.set(legacy.id, legacy);
+      expect(fixture.controller['appGrantState'](target, null).granted).toBe(false);
+      expect(fixture.grants.size).toBe(0);
+      await fixture.controller.dispose();
+    });
+
+    it('macos_grant_version_is_unchanged', async () => {
+      const fixture = createFixture();
+      const pin = vi.spyOn(targetEligibility, 'denyRulesetVersion').mockReturnValue(null);
+      try {
+        const grant = fixture.controller.createAppGrant(appGrantIdentity, input);
+        expect(grant.denyRulesetVersion).toBe(1);
+        expect(fixture.controller.appGrantFor(profile)?.id).toBe(grant.id);
+      } finally {
+        pin.mockRestore();
+        await fixture.controller.dispose();
+      }
+    });
   });
 
   it('stops a running session when its application grant is revoked', async () => {

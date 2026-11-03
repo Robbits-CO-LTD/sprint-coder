@@ -55,7 +55,7 @@ const asciiLower = (value: string): string =>
   value.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 
 /** `*` matches any run of characters (including none); every other character matches itself. */
-function globMatches(pattern: string, text: string): boolean {
+export function globMatches(pattern: string, text: string): boolean {
   let p = 0;
   let t = 0;
   let star = -1;

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computerAppGrantCodeChanged,
   computerAppGrantIdentityFrom,
+  computerAppGrantIdentityIsDenied,
   computerAppGrantIdentityMatches,
   computerAppGrantMismatch,
   computerAppNativeIdentityDigest,
@@ -59,6 +60,42 @@ function derive(identity: Record<string, unknown>): ComputerAppGrantIdentity {
   expect(derived).not.toBeNull();
   return derived!;
 }
+
+describe('persisted identity deny rules', () => {
+  it.each([
+    'KEEPASS.EXE',
+    'python3.exe',
+    'fixture-update.exe',
+    'setup\u2028x.exe',
+    'python\u2028.exe',
+  ])('applies shared exact and glob rules to %s', (leaf) => {
+    expect(
+      computerAppGrantIdentityIsDenied(
+        derive(
+          winIdentity({
+            executablePath: `C:\\Program Files\\Fixture\\${leaf}`,
+          }),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('applies shared package prefixes without relying on the image name', () => {
+    expect(
+      computerAppGrantIdentityIsDenied({
+        platform: 'win32',
+        executablePath: 'C:\\Program Files\\Fixture\\fixture.exe',
+        packageFamilyName: 'Microsoft.SecHealthUI_8wekyb3d8bbwe',
+      }),
+    ).toBe(true);
+  });
+
+  it('does not infer missing process facts or revoke an allowed identity', () => {
+    expect(computerAppGrantIdentityIsDenied(derive(winIdentity()))).toBe(false);
+    expect(computerAppGrantIdentityIsDenied(derive(packageIdentity()))).toBe(false);
+    expect(computerAppGrantIdentityIsDenied(derive(macIdentity()))).toBe(false);
+  });
+});
 
 describe('grant identity derivation', () => {
   it('binds a signed macOS application to its bundle id, Team ID, and signing identifier', () => {
