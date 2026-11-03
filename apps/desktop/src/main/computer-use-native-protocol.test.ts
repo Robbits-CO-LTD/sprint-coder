@@ -591,3 +591,14 @@ describe('P1b malformed wire rejection', () => {
     }
   });
 });
+
+describe('isolated origin classification (N11-A)', () => {
+  it('registers the portable origin cases without connecting capture', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckOriginClassification()');
+    expect(native('computer_use_origin_classify.h')).toContain('ClassifyPageOrigin');
+    expect(native('computer_use_origin_classify_test.h')).toContain('sensitive-case');
+    expect(native('computer_use_effect_shadow.h')).not.toContain('ClassifyPageOrigin');
+  });
+});
