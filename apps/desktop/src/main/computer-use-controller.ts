@@ -262,15 +262,15 @@ export type ComputerUseNativeActionResult = Readonly<{
   result: ComputerUseActionResult['result'];
   reasonCode: string | null;
   inputReceipt?: ComputerUseNativeInputReceipt;
-  /** A version 2 approval offer the native made instead of dispatching; not acted on yet. */
+  /** A validated native offer (macOS v2 or Windows v3), made instead of dispatching. */
   approvalOffer?: ComputerUseNativeApprovalOffer;
 }>;
 
 /**
  * What a native approval offer tells Main (ADR v2 S4-4 addendum, flow step 1): the discriminated
  * `{ kind: 'approval_required', approvalGeneration, remainingMs, effect }` that `adapter.dispatch`
- * reports instead of dispatching. Today the controller still treats it as the closed no-input
- * pause, and PR 4 builds `awaitNativeApproval` on it. No token ever crosses here.
+ * reports instead of dispatching. Windows adds measured display facts; macOS keeps null.
+ * No token ever crosses here.
  */
 export type ComputerUseNativeApprovalOffer = Readonly<{
   kind: 'approval_required';
@@ -833,6 +833,8 @@ type SessionRecord = {
   /** Fixed when the session was created; every later native start repeats it. */
   readonly classifierRoute: ComputerUseClassifierRoute;
   native: ComputerUseNativeSession;
+  /** Undefined outside the Windows approval path; null means its helper is no longer usable. */
+  approvalHelperGeneration: WindowsGenerationToken | null | undefined;
   screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   controller: AbortController;
   turnId: string;
@@ -956,6 +958,7 @@ const NATIVE_APPROVAL_REFUSAL_REASON: Readonly<
 type NativeApprovalSnapshot = Readonly<{
   approvalGeneration: number;
   effect: ComputerUseNativeApprovalOffer['effect'];
+  display: ComputerUseNativeApprovalOffer['display'];
   policyEpoch: number;
   turnId: string;
   deadline: number;
@@ -1059,6 +1062,8 @@ export class ComputerUseController {
    */
   private startingProfileId: string | null = null;
 
+  private readonly unsubscribeApprovalStop: (() => void) | undefined;
+
   constructor(private readonly deps: ComputerUseControllerDeps) {
     this.now = deps.now ?? Date.now;
     // A monotonic clock, not the wall clock above: the store measures a lifetime.
@@ -1083,6 +1088,14 @@ export class ComputerUseController {
       implementationKind: 'built-in',
       authorizationDenied: (input, context) => this.recordDeniedAction(input, context),
       execute: (input, context, control) => this.executeAction(input, context, control.signal),
+    });
+    this.unsubscribeApprovalStop = deps.native.subscribeWindowsStop?.((event) => {
+      if (event.kind !== 'notification' || event.notification.owner.kind !== 'session') return;
+      const owner = event.notification.owner;
+      const record = this.sessions.get(owner.id);
+      if (record?.approvalHelperGeneration?.helperGeneration !== owner.helperGeneration) return;
+      record.approvalHelperGeneration = null;
+      this.approvalHelperCurrent(record);
     });
   }
 
@@ -3541,6 +3554,10 @@ export class ComputerUseController {
         cancelEpoch: 0,
         classifierRoute,
       });
+      const approvalHelperGeneration =
+        native.platform === 'win32' && this.nativeApprovalPathOpen(sessionId)
+          ? (this.deps.native.captureWindowsGeneration?.() ?? null)
+          : undefined;
       controller.signal.throwIfAborted();
       starting.native = native;
       this.assertStartBinding(input.taskId, policyEpoch, ownerTurnId);
@@ -3614,6 +3631,7 @@ export class ComputerUseController {
         agent: input.agent ?? null,
         classifierRoute,
         native,
+        approvalHelperGeneration,
         screenBounds: native.screenBounds,
         controller,
         turnId,
@@ -4012,6 +4030,7 @@ export class ComputerUseController {
       throw new Error('Computer Use approval is stale');
     const record = this.sessions.get(pending.approval.sessionId);
     if (record === undefined) throw new Error('Computer Use session is no longer active');
+    if (!this.approvalHelperCurrent(record)) return record.status;
     const decision = input.decision;
     if (!pending.approval.allowedDecisions.includes(decision))
       throw new Error('Computer Use approval decision is not allowed');
@@ -4428,6 +4447,7 @@ export class ComputerUseController {
   async dispose(): Promise<void> {
     const discoveryStop = this.stopDiscoveriesWhere(() => true);
     this.disposed = true;
+    this.unsubscribeApprovalStop?.();
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
     this.startingController?.abort(new Error('Computer Use disposed while starting'));
@@ -4736,7 +4756,8 @@ export class ComputerUseController {
       !this.isHardBoundary(action, record.observation);
     const challenge = `${randomUUID()}${randomUUID()}`;
     // A paste shows the planner's own words (the artifact id), not the value: the excerpt is T15-9.
-    const preview = safeActionPreview(paste === undefined ? action : paste.display);
+    const omitText = record.approvalHelperGeneration !== undefined;
+    const preview = safeActionPreview(paste === undefined ? action : paste.display, omitText);
     const approval = computerUseApprovalSchema.parse({
       id: approvalId,
       sessionId: record.status.sessionId,
@@ -4747,7 +4768,7 @@ export class ComputerUseController {
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
       preview,
-      ...(paste === undefined ? {} : { transfer: paste.transfer }),
+      ...(paste === undefined || omitText ? {} : { transfer: paste.transfer }),
       risk:
         action.type === 'wait' || action.type === 'finish' || action.type === 'copy'
           ? 'low'
@@ -5215,6 +5236,7 @@ export class ComputerUseController {
     record: SessionRecord,
     approvalGeneration: number,
   ): Promise<void> {
+    if (!this.approvalHelperCurrent(record)) return;
     // approvalDiscard has no input capability and may be called from any refusal path.
     try {
       await this.deps.native.approvalDiscard?.({ session: record.native, approvalGeneration });
@@ -5250,8 +5272,14 @@ export class ComputerUseController {
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
-      preview: safeActionPreview(paste?.display ?? action),
-      ...(paste === undefined ? {} : { transfer: paste.transfer }),
+      preview: safeActionPreview(
+        paste?.display ?? action,
+        record.approvalHelperGeneration !== undefined,
+      ),
+      ...(snapshot.display === null ? {} : { display: snapshot.display }),
+      ...(paste === undefined || record.approvalHelperGeneration !== undefined
+        ? {}
+        : { transfer: paste.transfer }),
       risk: 'high',
       policyEpoch: snapshot.policyEpoch,
       observationRevision: record.observation?.revision ?? record.status.observationRevision,
@@ -5347,6 +5375,8 @@ export class ComputerUseController {
     const availability = this.deps.native.availability();
     if (!availability.available || !availability.control)
       throw new Error('Computer Use native control is unavailable');
+    if (!this.nativeApprovalPathOpen(record.status.sessionId))
+      throw new Error('Computer Use native approval is unavailable');
     if (this.deps.visualActionBlocked?.(record.status.sessionId, action) === true)
       throw new Error('Computer Use action is inside the Stop boundary');
     await record.planner?.revalidate?.(signal);
@@ -5391,6 +5421,7 @@ export class ComputerUseController {
     const snapshot: NativeApprovalSnapshot = {
       approvalGeneration: offer.approvalGeneration,
       effect: offer.effect,
+      display: offer.display,
       policyEpoch: record.status.policyEpoch,
       turnId: record.turnId,
       deadline: this.now() + Math.min(offer.remainingMs, NATIVE_APPROVAL_CARD_MAX_MS),
@@ -5431,6 +5462,7 @@ export class ComputerUseController {
       };
     };
 
+    if (!this.approvalHelperCurrent(record)) return refuse('revoked');
     const decision = await this.awaitNativeApproval(
       record,
       requestId,
@@ -5823,6 +5855,7 @@ export class ComputerUseController {
   }
 
   private planGrantMatches(record: SessionRecord, action: ComputerUseAction): boolean {
+    if (!this.approvalHelperCurrent(record)) return false;
     const grant = record.planGrant;
     if (grant === null || this.now() >= grant.expiresAt || grant.remaining <= 0) return false;
     if (grant.maxRounds !== record.status.maxRounds) return false;
@@ -6092,7 +6125,37 @@ export class ComputerUseController {
     return action.x >= 0 && action.x <= 1 && action.y >= 0 && action.y <= 1;
   }
 
+  private approvalHelperCurrent(record: SessionRecord): boolean {
+    const generation = record.approvalHelperGeneration;
+    if (generation === undefined) return true;
+    if (generation !== null && this.deps.native.isWindowsGenerationCurrent?.(generation) === true)
+      return true;
+    record.approvalHelperGeneration = null;
+    record.planGrant = null;
+    const prefix = `${record.status.sessionId}\0`;
+    for (const call of this.planGrantAuthorizedCalls)
+      if (call.startsWith(prefix)) this.planGrantAuthorizedCalls.delete(call);
+    this.cancelPendingApprovals(record.status.sessionId, 'native_approval_revoked');
+    if (
+      !record.controller.signal.aborted &&
+      (record.status.state !== 'paused' || record.status.pendingApproval !== null)
+    ) {
+      record.status = this.status(
+        record,
+        'paused',
+        null,
+        record.observation?.revision ?? record.status.observationRevision,
+        record.status.round,
+        null,
+      );
+      this.emit(record.status);
+    }
+    return false;
+  }
+
   private assertSessionLive(record: SessionRecord): void {
+    if (!this.approvalHelperCurrent(record))
+      throw new Error('Computer Use approval helper generation changed');
     if (record.controller.signal.aborted) throw new Error('Computer Use session is canceled');
     // For an agent-started session the grant is part of being live: it authorised the session, so
     // losing it must stop the session at the same cadence a policy change does.
@@ -6748,11 +6811,12 @@ function actionTargetLabel(action: ComputerUseAction): string {
   return action.type;
 }
 
-function safeActionPreview(action: ComputerUsePlannedAction): string {
+function safeActionPreview(action: ComputerUsePlannedAction, omitText = false): string {
   const value = action as unknown as Record<string, unknown>;
   const redacted = Object.fromEntries(
     Object.entries(value).map(([key, nested]) => {
       if ((key === 'text' || key === 'value') && typeof nested === 'string') {
+        if (omitText) return [`${key}Length`, [...nested].length];
         const escaped = safeUntrustedDisplayText(nested, 128);
         return [key, escaped.slice(0, 128)];
       }

@@ -6331,7 +6331,7 @@ export const computerUseApprovalSchema = z
     actionDigest: computerUseDigestSchema,
     targetLabel: computerUseLabelSchema,
     preview: computerUsePreviewSchema,
-    /** Absent on legacy cards; Windows display is connected by the approval controller later. */
+    /** Measured Windows native offer facts; absent on legacy and macOS cards. */
     display: computerUseWindowsApprovalDisplaySchema.nullable().optional(),
     /** Present only for a paste of an artifact (#785 T15-7b). Optional: older cards have none. */
     transfer: computerUseApprovalTransferSchema.optional(),
