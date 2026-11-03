@@ -595,7 +595,232 @@ struct WindowsTargetKernelImage {
   std::uint64_t stack_commit = 0;
 };
 
-std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process) {
+// P5 enables this together with the eligibility/ruleset change. Early opt-in requires an explicit
+// acceptance value of 1; the test switch is forbidden in production build inputs.
+#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && (defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE))
+#error IL-only image anchor test switch must not be used in production builds
+#endif
+#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1
+inline constexpr bool kWindowsIlOnlyImageAnchor = true;
+#else
+inline constexpr bool kWindowsIlOnlyImageAnchor = false;
+#endif
+
+struct WindowsIlOnlyImageHeader {
+  std::uint32_t magic = 0;
+  std::uint32_t machine = 0;
+  std::uint32_t entry_rva = 0;
+  std::uint32_t image_size = 0;
+  std::uint32_t timestamp = 0;
+  std::uint32_t check_sum = 0;
+  std::uint64_t image_base = 0;
+};
+
+std::optional<WindowsIlOnlyImageHeader>
+WindowsReadIlOnlyImageHeader(std::span<const std::uint8_t> bytes) {
+  using namespace sprint_coder::computer_use::windows_target_facts_detail;
+  if (!sprint_coder::computer_use::ParsePeImageSummary(bytes).has_value()) return std::nullopt;
+  const auto pe = ReadLe(bytes, 0x3c, 4);
+  if (!pe.has_value()) return std::nullopt;
+  const auto optional = OffsetWithin(*pe, 24, bytes.size());
+  if (!optional.has_value()) return std::nullopt;
+  const auto magic = ReadLe(bytes, *optional, 2);
+  const auto machine = ReadLe(bytes, *pe + 4, 2);
+  const auto entry = ReadLe(bytes, *optional + 16, 4);
+  const auto size = ReadLe(bytes, *optional + 56, 4);
+  const auto timestamp = ReadLe(bytes, *pe + 8, 4);
+  const auto checksum = ReadLe(bytes, *optional + 64, 4);
+  const bool wide = magic == std::optional<std::uint32_t>(0x20b);
+  const auto base_low = ReadLe(bytes, *optional + (wide ? 24 : 28), 4);
+  const auto base_high = wide ? ReadLe(bytes, *optional + 28, 4)
+                              : std::optional<std::uint32_t>(0);
+  if (!magic || !machine || !entry || !size || !timestamp || !checksum || !base_low || !base_high ||
+      *size == 0 || *entry >= *size)
+    return std::nullopt;
+  return WindowsIlOnlyImageHeader{*magic, *machine, *entry, *size, *timestamp, *checksum,
+                                  *base_low | (static_cast<std::uint64_t>(*base_high) << 32)};
+}
+
+bool WindowsIlOnlyHeadersMatch(const WindowsIlOnlyImageHeader &file,
+                              const WindowsIlOnlyImageHeader &mapped,
+                              std::optional<std::uint32_t> clr_flags,
+                              std::optional<bool> native64) {
+  // ImageBase is a preferred address, not an identity field of a relocated mapping.
+  // The loader may widen an IL-only PE32 header in a native 64-bit process. Only magic may differ;
+  // the mapped header is parsed using its own layout, and the post-hold identity anchor is unchanged.
+  const bool converted = native64 == std::optional<bool>(true) && clr_flags &&
+      (*clr_flags & 1) != 0 && (*clr_flags & 2) == 0 &&
+      file.magic == 0x10b && file.machine == 0x14c && mapped.magic == 0x20b;
+  return (file.magic == mapped.magic || converted) && file.machine == mapped.machine &&
+         file.entry_rva == mapped.entry_rva && file.image_size == mapped.image_size &&
+         file.timestamp == mapped.timestamp && file.check_sum == mapped.check_sum;
+}
+
+std::optional<WindowsIlOnlyImageHeader> WindowsReadMappedIlOnlyHeader(HANDLE process, LPVOID base) {
+  constexpr std::size_t kHeaderLimit = 64 * 1024;
+  IMAGE_DOS_HEADER dos{};
+  SIZE_T read = 0;
+  if (!ReadProcessMemory(process, base, &dos, sizeof(dos), &read) || read != sizeof(dos) ||
+      dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < static_cast<LONG>(sizeof(dos)) ||
+      static_cast<std::size_t>(dos.e_lfanew) > kHeaderLimit - 24)
+    return std::nullopt;
+  const auto address = reinterpret_cast<std::uintptr_t>(base);
+  if (address > UINTPTR_MAX - kHeaderLimit) return std::nullopt;
+  std::array<std::uint8_t, 24> nt{};
+  if (!ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address + dos.e_lfanew),
+                         nt.data(), nt.size(), &read) || read != nt.size())
+    return std::nullopt;
+  const auto optional_size = sprint_coder::computer_use::windows_target_facts_detail::ReadLe(nt, 20, 2);
+  if (!optional_size || *optional_size > kHeaderLimit - dos.e_lfanew - nt.size())
+    return std::nullopt;
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(dos.e_lfanew) + nt.size() + *optional_size);
+  if (!ReadProcessMemory(process, base, bytes.data(), bytes.size(), &read) || read != bytes.size())
+    return std::nullopt;
+  return WindowsReadIlOnlyImageHeader(bytes);
+}
+
+struct WindowsIlOnlyImageMapping {
+  std::wstring name;
+  std::uint32_t entry_rva = 0;
+};
+
+std::optional<std::uint32_t> WindowsHeldImageClrFlags(std::span<const std::uint8_t> bytes) {
+  using namespace sprint_coder::computer_use::windows_target_facts_detail;
+  // The shared summary validates the PE, but its CLR bitness-conversion flag excludes x64 and
+  // 32BITPREFERRED. Read ILONLY independently from the held file's bounded CLR directory.
+  if (!sprint_coder::computer_use::ParsePeImageSummary(bytes)) return std::nullopt;
+  const auto pe = ReadLe(bytes, 0x3c, 4);
+  if (!pe) return std::nullopt;
+  const auto optional = OffsetWithin(*pe, 24, bytes.size());
+  const auto optional_size = ReadLe(bytes, *pe + 20, 2);
+  const auto sections = ReadLe(bytes, *pe + 6, 2);
+  if (!optional || !optional_size || !sections) return std::nullopt;
+  const bool wide = ReadLe(bytes, *optional, 2) == std::optional<std::uint32_t>(0x20b);
+  const std::size_t directory = (wide ? 112 : 96) + 14 * 8;
+  const auto count = ReadLe(bytes, *optional + (wide ? 108 : 92), 4);
+  if (*optional_size < directory + 8 || !count || *count < 15) return std::nullopt;
+  const auto rva = ReadLe(bytes, *optional + directory, 4);
+  const auto size = ReadLe(bytes, *optional + directory + 4, 4);
+  const auto table = OffsetWithin(*optional, *optional_size, bytes.size());
+  if (!rva || *rva == 0 || !size || *size < 72 || !table) return std::nullopt;
+  std::optional<std::size_t> clr;
+  for (std::size_t index = 0; index < *sections; ++index) {
+    const auto end = OffsetWithin(*table, index * 40 + 40, bytes.size());
+    if (!end) return std::nullopt;
+    const auto at = *end - 40;
+    const auto address = ReadLe(bytes, at + 12, 4);
+    const auto raw_size = ReadLe(bytes, at + 16, 4);
+    const auto raw = ReadLe(bytes, at + 20, 4);
+    if (!address || !raw_size || !raw) return std::nullopt;
+    if (*rva < *address || *rva - *address >= *raw_size) continue;
+    const auto delta = *rva - *address;
+    if (clr || *raw_size - delta < 72) return std::nullopt;
+    clr = OffsetWithin(*raw, delta, bytes.size());
+    if (!clr || !OffsetWithin(*clr, 72, bytes.size())) return std::nullopt;
+  }
+  if (!clr) return std::nullopt;
+  const auto cb = ReadLe(bytes, *clr, 4);
+  const auto flags = ReadLe(bytes, *clr + 16, 4);
+  if (!cb || *cb < 72 || *cb > *size || !flags) return std::nullopt;
+  return flags;
+}
+
+bool WindowsHeldImageIsIlOnly(std::span<const std::uint8_t> bytes) {
+  const auto flags = WindowsHeldImageClrFlags(bytes);
+  return flags && (*flags & 1) != 0;
+}
+
+std::optional<bool> WindowsTargetIsNative64Bit(HANDLE process) {
+  using QueryFn = BOOL (WINAPI *)(HANDLE, USHORT *, USHORT *);
+  static const auto query = reinterpret_cast<QueryFn>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
+  USHORT process_machine = 0, native_machine = 0;
+  if (query == nullptr || !query(process, &process_machine, &native_machine)) return std::nullopt;
+  return process_machine == IMAGE_FILE_MACHINE_UNKNOWN &&
+      (native_machine == IMAGE_FILE_MACHINE_AMD64 || native_machine == IMAGE_FILE_MACHINE_ARM64);
+}
+
+std::optional<WindowsIlOnlyImageMapping>
+WindowsTargetIlOnlyImageMapping(HANDLE process, LPVOID transfer, HANDLE held_file) {
+  // All I/O stays on the measuring thread, including while WindowsNewStartIoRegistration is
+  // active: CancelSynchronousIo failures propagate as no answer. The caller's existing deadline
+  // and adoption guards still apply; bound the additional address-space walk independently too.
+  constexpr unsigned kRegionLimit = 65'536;
+  constexpr ULONGLONG kScanBudgetMs = 250;
+  const ULONGLONG started = GetTickCount64();
+  const auto within_budget = [&] { return GetTickCount64() - started < kScanBudgetMs; };
+  std::vector<wchar_t> name(32'768, L'\0');
+  DWORD length = static_cast<DWORD>(name.size());
+  if (!QueryFullProcessImageNameW(process, PROCESS_NAME_NATIVE, name.data(), &length) ||
+      length == 0 || length >= name.size())
+    return std::nullopt;
+  const std::wstring kernel_name(name.data(), length);
+  const auto utf8 = WindowsTargetUtf8(kernel_name);
+  if (!utf8 || sprint_coder::computer_use::WindowsNativeImageIsRemote(*utf8) || !within_budget())
+    return std::nullopt;
+  // The first measurement precedes the main hold; retain a no-write/no-delete handle while
+  // matching. The post-hold remeasurement below uses the caller's actual held file instead.
+  ScopedKernelHandle opened;
+  if (held_file == nullptr) {
+    const std::wstring global = L"\\\\?\\GLOBALROOT" + kernel_name;
+    opened.value = CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (opened.value == INVALID_HANDLE_VALUE) { opened.value = nullptr; return std::nullopt; }
+    held_file = opened.value;
+  }
+  std::vector<std::uint8_t> bytes(64 * 1024);
+  OVERLAPPED at{};
+  DWORD read = 0;
+  if (!within_budget() || !ReadFile(held_file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, &at))
+    return std::nullopt;
+  bytes.resize(read);
+  if (!WindowsHeldImageIsIlOnly(bytes)) return std::nullopt;
+  const auto header = WindowsReadIlOnlyImageHeader(bytes);
+  const auto entry = reinterpret_cast<std::uintptr_t>(transfer);
+  if (!header || entry < header->image_base || entry - header->image_base != header->entry_rva)
+    return std::nullopt;
+
+  SYSTEM_INFO system{};
+  GetNativeSystemInfo(&system);
+  const auto maximum = reinterpret_cast<std::uintptr_t>(system.lpMaximumApplicationAddress);
+  std::uintptr_t cursor = 0;
+  LPVOID previous_allocation = nullptr;
+  LPVOID matched = nullptr;
+  bool complete = false;
+  for (unsigned count = 0; count < kRegionLimit && within_budget(); ++count) {
+    MEMORY_BASIC_INFORMATION region{};
+    if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(cursor), &region, sizeof(region)) !=
+        sizeof(region))
+      return std::nullopt;
+    if (region.Type == MEM_IMAGE && region.AllocationBase != previous_allocation) {
+      if (region.AllocationBase == nullptr) return std::nullopt;
+      previous_allocation = region.AllocationBase;
+      const auto mapped = WindowsTargetMappedFileName(process, region.AllocationBase);
+      // An unreadable allocation could be a second match, so it cannot be ignored.
+      if (!mapped) return std::nullopt;
+      if (SameWindowsTargetName(*mapped, kernel_name)) {
+        if (matched != nullptr) return std::nullopt;
+        matched = region.AllocationBase;
+      }
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+    if (region.RegionSize == 0 || base > UINTPTR_MAX - region.RegionSize) return std::nullopt;
+    const auto next = base + region.RegionSize;
+    if (next <= cursor) return std::nullopt;
+    if (next > maximum) { complete = true; break; }
+    cursor = next;
+  }
+  if (!complete || matched == nullptr || !within_budget()) return std::nullopt;
+  const auto mapped_header = WindowsReadMappedIlOnlyHeader(process, matched);
+  const auto native64 = WindowsTargetIsNative64Bit(process);
+  const auto clr_flags = WindowsHeldImageClrFlags(bytes);
+  if (!mapped_header || !WindowsIlOnlyHeadersMatch(*header, *mapped_header, clr_flags, native64) || !within_budget())
+    return std::nullopt;
+  return WindowsIlOnlyImageMapping{kernel_name, header->entry_rva};
+}
+
+std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process,
+                                                                   HANDLE held_file = nullptr) {
   using NtQueryInformationProcessFn =
       LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   static const NtQueryInformationProcessFn query = []() {
@@ -633,22 +858,32 @@ std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE proc
   if (query(process, kProcessImageInformation, &image, sizeof(image), &returned) < 0 ||
       image.transfer_address == nullptr)
     return std::nullopt;
-  // The entry point must sit in a MEM_IMAGE region; its allocation base names the mapping.
+  // Native entry points name their mapping directly. The alternative remains disabled until P5.
   MEMORY_BASIC_INFORMATION region{};
   if (VirtualQueryEx(process, image.transfer_address, &region, sizeof(region)) !=
-          sizeof(region) ||
-      region.Type != MEM_IMAGE || region.AllocationBase == nullptr ||
-      image.transfer_address < region.AllocationBase)
-    return std::nullopt;
-  const std::optional<std::wstring> mapped =
-      WindowsTargetMappedFileName(process, region.AllocationBase);
-  if (!mapped.has_value())
+          sizeof(region))
     return std::nullopt;
   WindowsTargetKernelImage info;
-  info.mapped_name = *mapped;
-  info.entry_rva = static_cast<std::uint32_t>(
-      reinterpret_cast<std::uintptr_t>(image.transfer_address) -
-      reinterpret_cast<std::uintptr_t>(region.AllocationBase));
+  if (region.Type != MEM_IMAGE) {
+    if constexpr (!kWindowsIlOnlyImageAnchor) {
+      return std::nullopt;
+    } else {
+      const auto mapping = WindowsTargetIlOnlyImageMapping(process, image.transfer_address, held_file);
+      if (!mapping) return std::nullopt;
+      info.mapped_name = mapping->name;
+      info.entry_rva = mapping->entry_rva;
+    }
+  } else {
+    if (region.AllocationBase == nullptr || image.transfer_address < region.AllocationBase)
+      return std::nullopt;
+    const std::optional<std::wstring> mapped =
+        WindowsTargetMappedFileName(process, region.AllocationBase);
+    if (!mapped.has_value()) return std::nullopt;
+    info.mapped_name = *mapped;
+    info.entry_rva = static_cast<std::uint32_t>(
+        reinterpret_cast<std::uintptr_t>(image.transfer_address) -
+        reinterpret_cast<std::uintptr_t>(region.AllocationBase));
+  }
   info.subsystem = static_cast<std::uint16_t>(image.sub_system_type);
   info.machine = image.machine;
   info.check_sum = image.check_sum;
@@ -689,8 +924,8 @@ bool WindowsHeldImageDisagreesWithKernel(HANDLE file, const WindowsTargetKernelI
   // (Framework64 InstallUtil, csc /platform:x64), suspended and running, every header value the kernel
   // records equals the file's (machine 0x14c stays 0x14c), and its TransferAddress is the image's
   // preferred ImageBase + AddressOfEntryPoint, which lies in no MEM_IMAGE region of the process, so
-  // WindowsTargetKernelImageInfo already answers nothing and the image is unresolvable (W-UR) before
-  // this check is reached. Keeping the skip would only relax the check for an image whose kernel
+  // WindowsTargetKernelImageInfo answers nothing by default (until P5 enables its alternative
+  // mapping measurement). Keeping the skip would only relax the check for an image whose kernel
   // record differs from its header, which no measured image does.
   if (summary->entry_rva != kernel.entry_rva || summary->machine != kernel.machine ||
       summary->check_sum != kernel.check_sum)
@@ -832,7 +1067,8 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   held->remote = WindowsTargetFileIsRemote(held->file.value);
   // Auxiliary deny-side checks.
   const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
-  const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
+  const std::optional<WindowsTargetKernelImage> again =
+      WindowsTargetKernelImageInfo(process, held->file.value);
   bool recorded_agrees = recorded.has_value();
   if (recorded_agrees) {
     const std::optional<WindowsPathIdentity> recorded_file =
