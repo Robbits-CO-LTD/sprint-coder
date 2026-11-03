@@ -1,9 +1,11 @@
 #pragma once
 
 #include "computer_use_windows_approval_wire.h"
+#include "computer_use_windows_approval_round_trip_wire_test.h"
 
 inline bool CheckWindowsApprovalWire(std::string_view golden_receipt) {
   using namespace sprint_coder::computer_use;
+  if (!CheckApprovalRoundTripWire()) return false;
   WindowsApprovalReceiptContext context{"request-1", "session-1", 0, 1, 0};
   NativeApprovalOffer offer{1, 60'000, NativeApprovalEffect::kSupervisedAction};
   WindowsApprovalDisplay display{NativeApprovalEffect::kSupervisedAction, "click", "Example",

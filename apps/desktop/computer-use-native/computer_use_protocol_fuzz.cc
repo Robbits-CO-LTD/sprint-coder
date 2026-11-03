@@ -9580,10 +9580,10 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kDispatchApprovedResult) + 1;
+      static_cast<std::uint16_t>(MessageType::kApprovalRoundTripEvent) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-approved-dispatch-unknown"))
+             "message-type-after-approval-round-trip-event-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');
