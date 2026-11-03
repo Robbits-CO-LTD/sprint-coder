@@ -524,12 +524,13 @@ it.each([false, true])(
     parentPort.postMessage('ready');
     Atomics.wait(new Int32Array(workerData.gate), 0, 0);
     try {
-      // Host retries failed storage operations; only lock contention is retryable here.
+      // Host retries failed storage operations; only lock contention is retryable here. Each try
+      // waits up to the 250ms busy timeout; 40 tries (~10s) absorb a loaded CI runner.
       const retryBusy = (operation) => {
         for (let attempt = 0; ; attempt++) {
           try { return operation(); }
           catch (error) {
-            if (error.code !== 'SQLITE_BUSY' || attempt >= 9) throw error;
+            if (error.code !== 'SQLITE_BUSY' || attempt >= 39) throw error;
           }
         }
       };

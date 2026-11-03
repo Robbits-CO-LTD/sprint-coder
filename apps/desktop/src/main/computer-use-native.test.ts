@@ -50,6 +50,7 @@ function packageFixture(
     trust?: 'developer-id' | 'authenticode' | 'ad-hoc' | 'unsigned';
     bytes?: string;
     eligibility?: Record<string, unknown>;
+    windowsDocumentViewers?: { version: number; digest: string };
   }> = {},
 ) {
   const platform = options.platform ?? 'darwin';
@@ -82,6 +83,9 @@ function packageFixture(
       signerDigest: trust === 'developer-id' || trust === 'authenticode' ? 'a'.repeat(64) : null,
       capabilities: ['observe', 'capture', 'accessibility', 'input'],
       ...(options.eligibility === undefined ? {} : { eligibility: options.eligibility }),
+      ...(options.windowsDocumentViewers === undefined
+        ? {}
+        : { windowsDocumentViewers: options.windowsDocumentViewers }),
     }),
   );
   return { root, resources, packagedDirname, artifactPath };
@@ -2800,4 +2804,66 @@ describe('Computer Use native OS permission reporting', () => {
     });
     expect(binding.addon).toBe(addon);
   });
+});
+
+describe('Windows approval loader evidence', () => {
+  it.each(['matching', 'missing', 'digest', 'version', 'old-helper'] as const)(
+    'keeps ordinary capabilities while checking approval evidence: %s',
+    (scenario) => {
+      const eligibility = {
+        mode: 'v1-allowlist',
+        rulesetVersion: 1,
+        classifierVersion: 1,
+        lexiconVersion: 1,
+        ticketRequired: true,
+      };
+      const viewers = { version: 1, digest: 'a'.repeat(16) };
+      const fixture = packageFixture({
+        platform: 'win32',
+        eligibility,
+        windowsDocumentViewers: viewers,
+      });
+      const manifest = parseComputerUseNativeManifest(
+        JSON.parse(
+          readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+        ),
+      );
+      const binding = loadComputerUseNative({
+        environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+        dirname: fixture.packagedDirname,
+        resourcesPath: fixture.resources,
+        platform: 'win32',
+        architecture: 'x64',
+        compiledPin: computerUseNativeCompiledPin(manifest),
+        verifySignature: () => 'a'.repeat(64),
+        probeHelper: () => ({
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          sourceCommit: 'f'.repeat(40),
+          available: true,
+          backend: 'fixture',
+          reason: 'READY',
+          eligibility,
+          capabilities: {
+            observe: true,
+            control: true,
+            ...(scenario === 'old-helper' ? {} : { approval: true, approvalWire: 3 }),
+          },
+          ...(scenario === 'missing'
+            ? {}
+            : {
+                windowsDocumentViewers: {
+                  version: scenario === 'version' ? 2 : 1,
+                  digest: (scenario === 'digest' ? 'b' : 'a').repeat(16),
+                },
+              }),
+        }),
+      });
+      expect(binding.probe.available).toBe(true);
+      expect(binding.probe.capabilities).toMatchObject({ observe: true, control: true });
+      expect(binding.windowsApprovalVerified).toBe(false);
+    },
+  );
 });

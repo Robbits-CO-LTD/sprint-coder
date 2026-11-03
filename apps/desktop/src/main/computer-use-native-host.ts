@@ -237,6 +237,8 @@ export type ComputerUseNativeHostOptions = Readonly<{
    * addendum, section 0).
    */
   classifierV2Attested?: boolean;
+  /** Test-only interlock evidence; production stays false until N7 wires the real attestation. */
+  windowsApprovalInterlockForTesting?: boolean;
   /**
    * The effective eligibility mode, read at every use so that the V2 flag or the force-v1 variable
    * closes the approval path of a running process. Absent: the mode is read from the route the
@@ -1820,6 +1822,15 @@ export function createComputerUseNativeHost(
       effectiveMode:
         options.effectiveEligibilityMode?.() ?? (route === 'v2' ? 'v2-denylist' : 'v1-allowlist'),
       route,
+      windowsApprovalReady:
+        options.windowsApprovalInterlockForTesting === true &&
+        binding.windowsApprovalVerified === true &&
+        packageReady &&
+        handshakeReady &&
+        probeReady &&
+        !inputQuarantined() &&
+        sessions.has(sessionId) &&
+        addon?.windowsApprovalReady?.(sessionId) === true,
     });
   };
 
@@ -2991,13 +3002,18 @@ export function createComputerUseNativeHost(
 
     dispatchApproved: async (input): Promise<ComputerUseNativeActionResult> => {
       const internal = sessions.get(input.session.sessionId);
+      if (internal === undefined && platform === 'win32')
+        return { result: 'rejected', reasonCode: 'native_session_missing' };
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
       if (
         !approvalPathEnabled(input.session.sessionId) ||
         !approvalRouteAllowed(input.session.sessionId)
-      )
+      ) {
+        if (platform === 'win32')
+          return { result: 'rejected', reasonCode: 'native_approval_closed' };
         throw new ComputerUseNativeUnavailableError('native_approval_closed');
+      }
       const actionDigest = computerUseActionDigest(input.action);
       const request = {
         ...internal.raw,
@@ -3010,7 +3026,24 @@ export function createComputerUseNativeHost(
       };
       let value: unknown;
       try {
-        value = await invoke('dispatchApproved', request);
+        const callbacks = dispatchLedger(input, internal);
+        if (callbacks === undefined) value = await invoke('dispatchApproved', request);
+        else {
+          requireMethod('dispatchApproved');
+          if (addon?.dispatchLedgerSupported !== true || addon.dispatchApproved === undefined)
+            throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
+              accepted: false,
+              code: 'UNAVAILABLE',
+            });
+          value = await addon.dispatchApproved(request, callbacks);
+          if (Object.keys(asRecord(value, 'native_action_result_invalid')).length !== 5)
+            throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+          const result = parseDispatchRecord(value, input, internal, actionDigest);
+          if (result.result !== 'completed' || result.reasonCode !== null)
+            throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+          await callbacks.completed();
+          return result;
+        }
       } catch (error) {
         const preDispatch = classifyComputerUseNativeDispatchFailure(error);
         if (preDispatch !== null) return preDispatch;
@@ -3060,6 +3093,14 @@ export function createComputerUseNativeHost(
           outcome = parseNativePreflightReceipt(receipt, {
             ...input,
             ...(expected === undefined ? {} : { expectedClassifierVersion: expected }),
+            ...(platform === 'win32' && approvalPathEnabled(input.session.sessionId)
+              ? {
+                  windowsApproval: {
+                    route: approvalRouteOf(input.session.sessionId),
+                    receiptVersion: 3,
+                  },
+                }
+              : {}),
           });
         } catch (error) {
           // A receipt that cannot be trusted was produced before any input. It is a typed
@@ -3378,7 +3419,7 @@ export function parseNativePreflightReceipt(
      */
     expectedClassifierVersion?: number;
     /** Supplied only after the Windows connection's capability and session route are checked.
-     * N8-3 connects this; the production caller deliberately leaves it absent for now. */
+     * Production remains closed until N7 attests the Windows interlock. */
     windowsApproval?: Readonly<{ route: ComputerUseApprovalRoute; receiptVersion: number }>;
   }>,
 ): NativePreflightOutcome {

@@ -130,10 +130,10 @@ export type ComputerUseNativeAddon = Readonly<{
   requestWindowsTermination?(): void;
   reevaluateIdle?(): void;
   observe?(input: unknown): unknown;
-  /** macOS native only (N2a). Absent on older native builds and on Windows. */
+  /** Side-effect-free ticket preflight. Absent on older native builds. */
   preflight?(input: unknown): unknown;
   /**
-   * macOS native only (N2b-4). Revalidates and exchanges the waiting approval for an execution
+   * Revalidates and exchanges the waiting approval for an execution
    * ticket. The request is a dispatch request plus `approvalGeneration`; the receipt is a fixed set
    * of nine keys (`ok`, `reasonCode`, `deniedResult`, `sessionId`, `requestId`, `cancelEpoch`,
    * `observationRevision`, `approvalGeneration`, `inputAttemptCount`). No input capability.
@@ -142,7 +142,8 @@ export type ComputerUseNativeAddon = Readonly<{
   /** Ends the approval of exactly `{ sessionId, approvalGeneration }`. No input capability. */
   approvalDiscard?(input: unknown): unknown;
   /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
-  dispatchApproved?(input: unknown): unknown;
+  dispatchApproved?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
+  windowsApprovalReady?(sessionId: string): boolean;
   dispatch?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
   dispatchLedgerSupported?: true;
   /**
@@ -156,6 +157,7 @@ export type ComputerUseNativeAddon = Readonly<{
 }>;
 
 export type ComputerUseNativeBinding = Readonly<{
+  windowsApprovalVerified?: boolean;
   manifest: ComputerUseNativeManifest;
   probe: ComputerUseNativeProbe;
   artifactPath: string | null;

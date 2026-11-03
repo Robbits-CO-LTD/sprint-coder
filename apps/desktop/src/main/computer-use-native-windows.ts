@@ -1,10 +1,14 @@
-import { parseNativeHandshake } from './computer-use-native-handshake';
+import {
+  parseNativeHandshake,
+  windowsApprovalEvidenceMatches,
+} from './computer-use-native-handshake';
 import {
   computerUseNativeCloseReceiptSchema,
   computerUseNativeInputReceiptSchema,
   computerUseNativeDiscoveryResultSchema,
   computerUseNativeDiscoveryStopReceiptSchema,
   type ComputerUseEligibility,
+  type ComputerUseWindowsDocumentViewers,
   type ComputerUseNativeInputReceipt,
 } from '@sprint-coder/contracts';
 import { createHash, randomBytes } from 'node:crypto';
@@ -119,6 +123,7 @@ export type WindowsComputerUseHelperTrust = Readonly<{
    * pipe has to say the same thing: both declared and equal, or neither declared.
    */
   eligibility?: ComputerUseEligibility;
+  windowsDocumentViewers?: ComputerUseWindowsDocumentViewers;
 }>;
 export type WindowsComputerUseHelperAttestation = Readonly<{
   imagePath: string;
@@ -157,6 +162,7 @@ export function createWindowsComputerUseNativeAddon(
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
+    windowsApprovalReady: (sessionId) => client.windowsApprovalReady(sessionId),
     listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
     checkTargetIdentity: (targets, checked) => client.checkTargetIdentity(targets, checked),
     configureWindowsAdmission: (check) => client.configureWindowsAdmission(check),
@@ -215,6 +221,37 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         `preflight:${stringField(value, 'requestId')}`,
+      );
+    },
+    approvalApprove: (input) => {
+      const value = record(input);
+      return client.call(
+        'approval_approve',
+        'approval_approve',
+        value,
+        stringField(value, 'sessionId'),
+        `approve:${stringField(value, 'requestId')}`,
+      );
+    },
+    approvalDiscard: (input) => {
+      const value = record(input);
+      return client.call(
+        'approval_discard',
+        'approval_discard',
+        value,
+        stringField(value, 'sessionId'),
+        undefined,
+      );
+    },
+    dispatchApproved: (input, callbacks) => {
+      const value = record(input);
+      return client.call(
+        'dispatch_approved',
+        'dispatch_approved',
+        value,
+        stringField(value, 'sessionId'),
+        `approved:${stringField(value, 'requestId')}`,
+        callbacks,
       );
     },
     // #785 T15-4w: the read of one node's value for `copy`. A probe operation of its own, under its own
@@ -362,6 +399,18 @@ class WindowsComputerUseHelperClient {
   private idleShutdownPending = false;
   private activityGeneration = 0;
   private helperGeneration = 0;
+  private readonly approvalSessionGenerations = new Map<string, number>();
+  private approvalHandshakeSupported = false;
+
+  windowsApprovalReady(sessionId: string): boolean {
+    return (
+      this.socket !== null &&
+      !this.socket.destroyed &&
+      this.approvalHandshakeSupported &&
+      this.approvalSessionGenerations.get(sessionId) === this.helperGeneration &&
+      this.starts.get(sessionId)?.stopped === false
+    );
+  }
   private readonly starts = new Map<string, StartTransmission>();
   private readonly discoveries = new Map<string, DiscoveryTransmission>();
   private discoveryHandshakeSupported = false;
@@ -982,7 +1031,10 @@ class WindowsComputerUseHelperClient {
       this.idleShutdownPending = false;
     }
     let semantic: SemanticAttempt | undefined;
-    if (operation === 'dispatch' && semanticActionTypes.has(input['type'])) {
+    if (
+      (operation === 'dispatch' || operation === 'dispatch_approved') &&
+      semanticActionTypes.has(input['type'])
+    ) {
       const epoch = input['cancelEpoch'];
       if (
         sessionKey === undefined ||
@@ -1030,6 +1082,16 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected(operation);
       helper = this.helperGeneration;
+      if (
+        ['approval_approve', 'approval_discard', 'dispatch_approved'].includes(operation) &&
+        (!this.approvalHandshakeSupported ||
+          sessionKey === undefined ||
+          this.approvalSessionGenerations.get(sessionKey) !== helper)
+      )
+        throw Object.assign(new Error('Windows approval unavailable'), {
+          code: 'APPROVAL_NOT_ENABLED',
+          accepted: false,
+        });
       const generationToken = this.captureWindowsGeneration();
       this.bindOwners(helper);
       if (sessionKey !== undefined) this.assertSessionGeneration(sessionKey);
@@ -1063,7 +1125,15 @@ class WindowsComputerUseHelperClient {
       }
       const result = await this.sendConnected(
         messageType,
-        { ...input, operation },
+        {
+          ...input,
+          operation,
+          ...(['preflight', 'approval_approve', 'approval_discard', 'dispatch_approved'].includes(
+            operation,
+          )
+            ? { helperGeneration: helper }
+            : {}),
+        },
         sessionKey === undefined
           ? this.transportSessionId
           : frameIdFromText(`session:${sessionKey}`),
@@ -1101,7 +1171,10 @@ class WindowsComputerUseHelperClient {
         if (generationToken !== null && typeof result === 'object' && result !== null)
           this.targetListGenerations.set(result, generationToken);
       }
+      if (operation === 'start_session' && sessionKey !== undefined)
+        this.approvalSessionGenerations.set(sessionKey, helper);
       if (closes && sessionKey !== undefined) {
+        this.approvalSessionGenerations.delete(sessionKey);
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
         const inputOwner = this.semantic.get(sessionKey);
@@ -1194,6 +1267,8 @@ class WindowsComputerUseHelperClient {
     if (this.termination !== undefined && this.generations.size >= 128)
       throw new Error('native_stop_unconfirmed');
     this.helperGeneration += 1;
+    this.approvalSessionGenerations.clear();
+    this.approvalHandshakeSupported = false;
     this.discoveryHandshakeSupported = false;
     this.artifactReadHandshakeSupported = false;
     this.identityBoundStartHandshakeSupported = false;
@@ -1327,11 +1402,21 @@ class WindowsComputerUseHelperClient {
         });
         const handshake = await this.sendConnected(
           'handshake',
-          { operation: 'handshake', protocolVersion: 1, apiVersion: 3 },
+          {
+            operation: 'handshake',
+            protocolVersion: 1,
+            apiVersion: 3,
+            helperGeneration: this.helperGeneration,
+          },
           this.transportSessionId,
           newComputerUseNativeFrameId(),
         );
         assertWindowsComputerUseHelperHandshake(handshake, this.expectedTrust);
+        this.approvalHandshakeSupported = windowsApprovalEvidenceMatches(
+          this.expectedTrust,
+          this.expectedTrust,
+          handshake,
+        );
         this.discoveryHandshakeSupported = windowsDiscoveryCapability(handshake);
         this.artifactReadHandshakeSupported =
           record(record(handshake)['capabilities'] ?? {})['artifactRead'] === true;
@@ -1955,6 +2040,13 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
       return 'probe_result';
     case 'observe':
       return 'observe_result';
+    case 'approval_approve':
+      return 'approval_approve_result';
+    case 'approval_discard':
+      return 'approval_discard_result';
+    case 'dispatch_approved':
+      // The native host answers with kDispatchApprovedResult (20), not the ordinary result.
+      return 'dispatch_approved_result';
     case 'dispatch':
     case 'cancel':
       return 'dispatch_result';

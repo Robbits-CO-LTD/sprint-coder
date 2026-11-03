@@ -135,7 +135,7 @@ export type ComputerUseApprovalRoute = ComputerUseClassifierRoute | 'unbound';
 
 /**
  * "The native approval path is open" (ADR v2 S4-4 addendum, section 0; C5). All of these, nothing
- * less: macOS, the addon exports the whole approval surface, the handshake attests classifier 2, and
+ * less: macOS (or verified Windows approval evidence), the whole approval surface, classifier 2, and
  * the session is bound to route v2 under the v2 deny-list. A session on v1 never has an approval,
  * whatever the rest says, and neither does a session with no binding (fail closed). Used by the
  * host and, through it, by the controller; there is no session-less answer.
@@ -146,9 +146,11 @@ export function computerUseApprovalPathEnabled(input: {
   attestedClassifierVersion: number;
   effectiveMode: ComputerUseEligibilityMode;
   route: ComputerUseApprovalRoute;
+  windowsApprovalReady?: boolean;
 }): boolean {
   if (
-    input.platform !== 'darwin' ||
+    (input.platform !== 'darwin' &&
+      !(input.platform === 'win32' && input.windowsApprovalReady === true)) ||
     !input.methodsExported ||
     input.attestedClassifierVersion !== COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION
   )
