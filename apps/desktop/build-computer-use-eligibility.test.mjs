@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   eligibilityBuildHeader,
   eligibilityDeclaration,
@@ -51,6 +52,74 @@ describe('Computer Use native --eligibility argument', () => {
 });
 
 describe('Computer Use native eligibility declaration', () => {
+  it('preserves_existing_declarations_by_platform_and_mode', () => {
+    for (const platform of ['darwin', 'win32']) {
+      for (const mode of ['v1-allowlist', 'v2-denylist']) {
+        expect(eligibilityDeclaration(mode, platform)).toEqual({
+          mode,
+          rulesetVersion: 1,
+          classifierVersion: 1,
+          lexiconVersion: 1,
+          ticketRequired: true,
+        });
+      }
+    }
+  });
+
+  it('rejects_unknown_platform_or_mode', () => {
+    for (const platform of ['linux', '', 'toString', '__proto__']) {
+      expect(() => eligibilityDeclaration('v1-allowlist', platform)).toThrow();
+      expect(() => parseEligibilityMode([], platform)).toThrow();
+      expect(() => parseEligibilityMode(['--eligibility=v1'], platform)).toThrow();
+    }
+    for (const mode of ['v3', '', 'toString', '__proto__']) {
+      expect(() => eligibilityDeclaration(mode, 'darwin')).toThrow();
+      expect(() => parseEligibilityMode([`--eligibility=${mode}`], 'darwin')).toThrow();
+    }
+  });
+
+  it('selects each platform and mode cell and preserves legacy values without defaults', async () => {
+    const versions = (value) => ({
+      rulesetVersion: value,
+      classifierVersion: value + 1,
+      lexiconVersion: value + 2,
+    });
+    for (const source of [
+      {
+        darwin: { v1: versions(4), v2: versions(7) },
+        win32: { v1: versions(10), v2: versions(13) },
+      },
+      versions(16),
+    ]) {
+      vi.resetModules();
+      vi.doMock('node:fs', () => ({
+        readFileSync: () =>
+          JSON.stringify({
+            versions: source,
+            ticketRequired: { darwin: true, win32: true },
+          }),
+      }));
+      try {
+        const helper = await import('../../build-computer-use-eligibility.mjs');
+        for (const platform of ['darwin', 'win32']) {
+          for (const [key, mode] of [
+            ['v1', 'v1-allowlist'],
+            ['v2', 'v2-denylist'],
+          ]) {
+            expect(helper.eligibilityDeclaration(mode, platform)).toEqual({
+              mode,
+              ...(source[platform]?.[key] ?? source),
+              ticketRequired: true,
+            });
+          }
+        }
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
+    }
+  });
+
   it('comes from the single eligibility.json; both natives claim a ticket', () => {
     const table = JSON.parse(
       readFileSync(resolve(desktopDirectory, 'computer-use-native', 'eligibility.json'), 'utf8'),
@@ -59,9 +128,9 @@ describe('Computer Use native eligibility declaration', () => {
       const v1 = eligibilityDeclaration('v1-allowlist', platform);
       expect(v1).toEqual({
         mode: 'v1-allowlist',
-        rulesetVersion: table.versions.rulesetVersion,
-        classifierVersion: table.versions.classifierVersion,
-        lexiconVersion: table.versions.lexiconVersion,
+        rulesetVersion: table.versions[platform].v1.rulesetVersion,
+        classifierVersion: table.versions[platform].v1.classifierVersion,
+        lexiconVersion: table.versions[platform].v1.lexiconVersion,
         ticketRequired: table.ticketRequired[platform],
       });
       // Each native refuses every input without a ticket (macOS: N2b-4 PR 5, Windows: S5-a).

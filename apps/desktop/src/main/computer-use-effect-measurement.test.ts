@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -52,8 +56,8 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     expect(read('computer_use_preflight_classifier.h')).toContain(
       'kNativePreflightClassifierVersion = 1;',
     );
-    const table = JSON.parse(read('eligibility.json')) as { versions: Record<string, number> };
-    expect(table.versions).toEqual({ rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 });
+    const table = JSON.parse(read('eligibility.json')) as { versions: EligibilityVersionTable };
+    expect(table.versions).toEqual(versionOneTable);
   });
 
   it('frames the authority under its domain, and the frame does not know the revisions', () => {

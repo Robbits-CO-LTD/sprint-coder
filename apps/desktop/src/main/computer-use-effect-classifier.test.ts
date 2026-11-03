@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -77,8 +81,8 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
     expect(read('computer_use_preflight_classifier.h')).toContain(
       'kNativePreflightClassifierVersion = 1;',
     );
-    const table = JSON.parse(read('eligibility.json')) as { versions: Record<string, number> };
-    expect(table.versions).toEqual({ rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 });
+    const table = JSON.parse(read('eligibility.json')) as { versions: EligibilityVersionTable };
+    expect(table.versions).toEqual(versionOneTable);
   });
 
   it('is included by no native source directly (macOS reaches it only through the shadow)', () => {

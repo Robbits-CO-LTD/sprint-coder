@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from './computer-use-eligibility-test-helper';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -681,7 +685,7 @@ describe('Computer Use external final gate', () => {
     const eligibilityTable = JSON.parse(
       readFileSync(resolve(__dirname, 'computer-use-native', 'eligibility.json'), 'utf8'),
     ) as {
-      versions: { rulesetVersion: number; classifierVersion: number; lexiconVersion: number };
+      versions: EligibilityVersionTable;
       ticketRequired: { darwin: boolean; win32: boolean };
     };
     const quoted = (text: string): string[] =>
@@ -714,11 +718,7 @@ describe('Computer Use external final gate', () => {
     it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
       // A distributed package is the v1 allow-list at the table's v1 numbers. Both natives claim a
       // ticket requirement (macOS: N2b-4 PR 5, Windows: S5-a).
-      expect(eligibilityTable.versions).toEqual({
-        rulesetVersion: 1,
-        classifierVersion: 1,
-        lexiconVersion: 1,
-      });
+      expect(eligibilityTable.versions).toEqual(versionOneTable);
       expect(eligibilityTable.ticketRequired).toEqual({ darwin: true, win32: true });
       for (const key of [
         'classifierVersion',

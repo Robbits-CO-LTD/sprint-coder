@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -115,12 +119,8 @@ describe('synchronous interlock evaluation (classifier v2, S4-1b-1)', () => {
     expect(harness).toContain('CheckNativeInterlockCapture()');
     expect(harness).toContain('Computer Use native interlock capture: PASS');
     const eligibility = JSON.parse(read('eligibility.json')) as {
-      versions: Record<string, number>;
+      versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual({
-      rulesetVersion: 1,
-      classifierVersion: 1,
-      lexiconVersion: 1,
-    });
+    expect(eligibility.versions).toEqual(versionOneTable);
   });
 });

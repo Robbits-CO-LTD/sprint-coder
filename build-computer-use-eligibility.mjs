@@ -40,6 +40,8 @@ export function windowsDocumentViewerDeclaration(platform) {
 }
 
 export function parseEligibilityMode(argv, target) {
+  if (target !== 'darwin' && target !== 'win32')
+    throw new Error('Computer Use native eligibility platform is unknown');
   const claims = argv.filter(
     (argument) => argument === '--eligibility' || argument.startsWith('--eligibility='),
   );
@@ -62,13 +64,24 @@ export function parseEligibilityMode(argv, target) {
 export function eligibilityDeclaration(mode, platform) {
   if (!Object.values(MODES).includes(mode))
     throw new Error('Computer Use native eligibility mode is unknown');
-  if (!Object.hasOwn(table.ticketRequired, platform))
+  if (platform !== 'darwin' && platform !== 'win32')
     throw new Error('Computer Use native eligibility platform is unknown');
+  // Older tables used one declaration for every platform and mode. Preserve its values.
+  const versions = Object.hasOwn(table.versions, 'rulesetVersion')
+    ? table.versions
+    : table.versions[platform]?.[mode === MODES.v1 ? 'v1' : 'v2'];
+  if (
+    !versions ||
+    !['rulesetVersion', 'classifierVersion', 'lexiconVersion'].every(
+      (key) => Number.isInteger(versions[key]) && versions[key] > 0 && versions[key] <= 0xffff,
+    )
+  )
+    throw new Error('Computer Use native eligibility versions are invalid');
   return {
     mode,
-    rulesetVersion: table.versions.rulesetVersion,
-    classifierVersion: table.versions.classifierVersion,
-    lexiconVersion: table.versions.lexiconVersion,
+    rulesetVersion: versions.rulesetVersion,
+    classifierVersion: versions.classifierVersion,
+    lexiconVersion: versions.lexiconVersion,
     ticketRequired: table.ticketRequired[platform],
   };
 }
