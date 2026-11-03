@@ -9597,12 +9597,13 @@ int main() {
   if (!Check(!EncodeFrame(cancel_header, metadata).empty(), "cancel-id-valid"))
     return 1;
 
-  // The approval request/result pairs are known; the next number is not.
+  // Approval pairs and interaction events are known; the next number is not.
   for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult,
                           MessageType::kCheckTargetIdentity, MessageType::kTargetIdentityResult,
                           MessageType::kApprovalApprove, MessageType::kApprovalApproveResult,
                           MessageType::kApprovalDiscard, MessageType::kApprovalDiscardResult,
-                          MessageType::kDispatchApproved, MessageType::kDispatchApprovedResult}) {
+                          MessageType::kDispatchApproved, MessageType::kDispatchApprovedResult,
+                          MessageType::kApprovalRoundTripEvent, MessageType::kBackgroundInteractionEvent}) {
     auto known_type_header = ValidHeader();
     known_type_header.message_type = static_cast<std::uint16_t>(type);
     if (!Check(!EncodeFrame(known_type_header, metadata).empty() &&
@@ -9612,10 +9613,10 @@ int main() {
   }
   auto unknown_type_header = ValidHeader();
   unknown_type_header.message_type =
-      static_cast<std::uint16_t>(MessageType::kApprovalRoundTripEvent) + 1;
+      static_cast<std::uint16_t>(MessageType::kBackgroundInteractionEvent) + 1;
   if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
                  !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
-             "message-type-after-approval-round-trip-event-unknown"))
+             "message-type-after-background-interaction-event-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');

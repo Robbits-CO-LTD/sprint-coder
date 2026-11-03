@@ -3,6 +3,12 @@ import {
   windowsApprovalEvidenceMatches,
 } from './computer-use-native-handshake';
 import {
+  WindowsInteractionEvents,
+  parseWindowsInteractionEvent,
+  type WindowsInteractionListener,
+} from './computer-use-windows-transport-events';
+import { computerUseApprovalRoundTripWireSchema } from '@sprint-coder/contracts';
+import {
   computerUseNativeCloseReceiptSchema,
   computerUseNativeInputReceiptSchema,
   computerUseNativeDiscoveryResultSchema,
@@ -157,6 +163,8 @@ export function createWindowsComputerUseNativeAddon(
   const discoverySupported = windowsDiscoveryCapability(probe);
   const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
+    subscribeWindowsInteraction: (listener) => client.subscribeWindowsInteraction(listener),
+    approvalRoundTrip: (input) => client.approvalRoundTrip(input),
     probe: () => probe,
     dispatchLedgerSupported: true,
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
@@ -394,6 +402,41 @@ type HelperGeneration = {
 };
 
 class WindowsComputerUseHelperClient {
+  private readonly interactionEvents = new WindowsInteractionEvents();
+  private readonly interactionListeners = new Set<WindowsInteractionListener>();
+  subscribeWindowsInteraction(listener: WindowsInteractionListener): () => void {
+    this.interactionListeners.add(listener);
+    return () => {
+      this.interactionListeners.delete(listener);
+    };
+  }
+  async approvalRoundTrip(input: unknown): Promise<unknown> {
+    const wire = computerUseApprovalRoundTripWireSchema.parse(input);
+    if (wire.kind !== 'begin' && wire.kind !== 'end') throw new Error('Invalid round trip request');
+    if (wire.helperGeneration !== this.helperGeneration) throw new Error('Stale round trip');
+    if (wire.kind === 'begin' && !this.interactionEvents.begin(wire, wire.roundTripId))
+      throw new Error('Unbound round trip');
+    const result = computerUseApprovalRoundTripWireSchema.parse(
+      await this.call(
+        wire.kind === 'begin' ? 'approval_round_trip_begin' : 'approval_round_trip_end',
+        `approval_round_trip_${wire.kind}`,
+        wire,
+        wire.sessionId,
+        undefined,
+      ),
+    );
+    if (
+      result.kind !== `${wire.kind}_result` ||
+      result.sessionId !== wire.sessionId ||
+      result.taskId !== wire.taskId ||
+      result.turnId !== wire.turnId ||
+      result.helperGeneration !== wire.helperGeneration ||
+      result.cancelEpoch !== wire.cancelEpoch ||
+      result.roundTripId !== wire.roundTripId
+    )
+      throw new Error('Unbound round trip acknowledgement');
+    return result;
+  }
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
@@ -1114,6 +1157,12 @@ class WindowsComputerUseHelperClient {
       )
         throw new Error('native_unavailable');
       if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
+      if (
+        sessionKey !== undefined &&
+        this.interactionEvents.blocked(sessionKey) &&
+        !['cancel', 'close_session', 'stop_pending_start'].includes(operation)
+      )
+        throw new Error('native_interaction_revoked');
       if (semantic !== undefined) {
         if (semantic.owner.helper !== null && semantic.owner.helper !== helper)
           throw semanticNotSubmitted();
@@ -1163,6 +1212,12 @@ class WindowsComputerUseHelperClient {
           this.assertGenerationToken(generationToken);
           assertAdmission?.();
           if (requiresSemanticAvailability(operation)) this.assertSemanticAvailable();
+          if (
+            sessionKey !== undefined &&
+            this.interactionEvents.blocked(sessionKey) &&
+            !['cancel', 'close_session', 'stop_pending_start'].includes(operation)
+          )
+            throw new Error('native_interaction_revoked');
           if (owner !== undefined) {
             if (owner.stopped || this.starts.get(owner.sessionId) !== owner)
               throw new Error('Computer Use start canceled before send');
@@ -1188,9 +1243,37 @@ class WindowsComputerUseHelperClient {
         if (generationToken !== null && typeof result === 'object' && result !== null)
           this.targetListGenerations.set(result, generationToken);
       }
-      if (operation === 'start_session' && sessionKey !== undefined)
+      if (operation === 'start_session' && sessionKey !== undefined) {
         this.approvalSessionGenerations.set(sessionKey, helper);
+        const started = record(result);
+        const interactionEpoch = started['interactionEpoch'] ?? 0;
+        const cancelEpoch = started['cancelEpoch'];
+        if (
+          typeof interactionEpoch !== 'number' ||
+          !Number.isSafeInteger(interactionEpoch) ||
+          interactionEpoch < 0
+        )
+          throw new Error('Invalid interaction epoch');
+        if (
+          typeof input['taskId'] === 'string' &&
+          typeof input['turnId'] === 'string' &&
+          typeof cancelEpoch === 'number' &&
+          Number.isSafeInteger(cancelEpoch) &&
+          cancelEpoch >= 0
+        )
+          this.interactionEvents.bind(
+            {
+              sessionId: sessionKey,
+              taskId: input['taskId'],
+              turnId: input['turnId'],
+              cancelEpoch,
+              helperGeneration: helper,
+            },
+            interactionEpoch,
+          );
+      }
       if (closes && sessionKey !== undefined) {
+        this.interactionEvents.remove(sessionKey);
         this.approvalSessionGenerations.delete(sessionKey);
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
@@ -1633,6 +1716,22 @@ class WindowsComputerUseHelperClient {
   }
 
   private resolveFrame(frame: ComputerUseNativeFrame): void {
+    if (
+      frame.messageType === 'approval_round_trip_event' ||
+      frame.messageType === 'background_interaction_event'
+    ) {
+      if (frame.binary.length !== 0 || frame.flags !== 0) return;
+      const event = parseWindowsInteractionEvent(JSON.parse(frame.metadata.toString('utf8')));
+      if (
+        !event ||
+        (event.kind === 'event') !== (frame.messageType === 'approval_round_trip_event') ||
+        frame.sessionId.hex !== frameIdFromText(`session:${event.sessionId}`).hex ||
+        !this.interactionEvents.receive(event, this.helperGeneration)
+      )
+        return;
+      for (const listener of this.interactionListeners) listener(event);
+      return;
+    }
     const pending = this.pending.get(frame.requestId.hex);
     if (pending === undefined) return;
     if (!isWindowsHelperResponseBound(frame, pending)) {
@@ -2059,6 +2158,10 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
       return 'observe_result';
     case 'approval_approve':
       return 'approval_approve_result';
+    case 'approval_round_trip_begin':
+      return 'approval_round_trip_begin_result';
+    case 'approval_round_trip_end':
+      return 'approval_round_trip_end_result';
     case 'approval_discard':
       return 'approval_discard_result';
     case 'dispatch_approved':

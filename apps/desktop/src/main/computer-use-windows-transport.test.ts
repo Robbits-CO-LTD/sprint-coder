@@ -709,6 +709,156 @@ describe('Computer Use Windows helper transport', () => {
     await host.close(session);
   });
 
+  it('BG03_lost_event_cannot_bypass_epoch: delivers unsolicited events and revokes tickets before cancel', async () => {
+    const { host, addon, helper } = createTarget();
+    const received = vi.fn();
+    host.subscribeWindowsInteraction?.(received);
+    const session = await startSession(host, 'background-event', 'turn-1');
+    const socket = sockets[0]!;
+    const startFrame = socket.writes
+      .map(decodeComputerUseNativeFrame)
+      .find((frame) => JSON.parse(frame.metadata.toString())['operation'] === 'start_session')!;
+    const base = {
+      version: 1,
+      kind: 'background_event',
+      sessionId: session.sessionId,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      helperGeneration: 1,
+      cancelEpoch: 0,
+      interactionEpoch: 2,
+      sequence: 2,
+      state: 'takeover',
+    };
+    const send = (value: unknown, header = startFrame.sessionId) =>
+      socket.emit(
+        'data',
+        encodeComputerUseNativeFrame({
+          ...startFrame,
+          messageType: 'background_interaction_event',
+          sessionId: header,
+          metadata: Buffer.from(JSON.stringify(value)),
+          binary: Buffer.alloc(0),
+        }),
+      );
+    for (const patch of [
+      { taskId: 'other' },
+      { turnId: 'other' },
+      { helperGeneration: 2 },
+      { cancelEpoch: 1 },
+      { interactionEpoch: 0 },
+      { extra: true },
+    ])
+      send({ ...base, ...patch });
+    send(base, { hex: 'a'.repeat(32) });
+    expect(received).not.toHaveBeenCalled();
+    send(base);
+    send(base);
+    send({ ...base, sequence: 1, interactionEpoch: 1 });
+    expect(received).toHaveBeenCalledTimes(1);
+    await expect(
+      Promise.resolve(
+        addon.dispatch!({
+          sessionId: session.sessionId,
+          requestId: 'stale-ticket',
+          cancelEpoch: 0,
+          type: 'click',
+          ticket: digest('d'),
+        }),
+      ),
+    ).rejects.toThrow('native_interaction_revoked');
+    await expect(startSession(host, session.sessionId, 'turn-1')).rejects.toThrow(
+      'native_interaction_revoked',
+    );
+    expect(helper().served).not.toContain('dispatch');
+    expect(helper().served).not.toContain('close_session');
+    await host.cancel(session, 1);
+    expect(helper().served.at(-1)).toBe('cancel');
+    await host.close(session);
+  });
+
+  it('RT_begin_ack_precedes_focus_exception: event uses the bound trip and never resumes on end', async () => {
+    const { host, addon } = createTarget({
+      ...responders(),
+      approval_round_trip_begin: (metadata) => {
+        const {
+          operation: _operation,
+          durationMs: _duration,
+          mainPid: _pid,
+          mainProcessStartTime: _start,
+          mainImageIdentity: _image,
+          ...binding
+        } = metadata;
+        return [
+          'approval_round_trip_begin_result',
+          {
+            ...binding,
+            kind: 'begin_result',
+            accepted: true,
+            failureReason: 'none',
+            failureLatched: false,
+          },
+        ];
+      },
+    });
+    const received = vi.fn();
+    host.subscribeWindowsInteraction?.(received);
+    const session = await startSession(host, 'trip-event', 'turn-1');
+    const bound = {
+      version: 1,
+      roundTripId: 'trip-1',
+      sessionId: session.sessionId,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      helperGeneration: 1,
+      cancelEpoch: 0,
+    };
+    await addon.approvalRoundTrip!({
+      ...bound,
+      kind: 'begin',
+      durationMs: 60_000,
+      mainPid: 100,
+      mainProcessStartTime: '100',
+      mainImageIdentity: digest('a'),
+    });
+    const socket = sockets[0]!;
+    const request = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+    const send = (patch: object) =>
+      socket.emit(
+        'data',
+        encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'approval_round_trip_event',
+          metadata: Buffer.from(
+            JSON.stringify({
+              ...bound,
+              kind: 'event',
+              sequence: 2,
+              state: 'active',
+              foreground: 'target',
+              failureReason: 'none',
+              failureLatched: false,
+              ...patch,
+            }),
+          ),
+        }),
+      );
+    send({ roundTripId: 'stale' });
+    send({});
+    send({ sequence: 1 });
+    send({});
+    expect(received).toHaveBeenCalledTimes(1);
+    send({ sequence: 3, state: 'failed', failureReason: 'expired', failureLatched: true });
+    send({ sequence: 4, state: 'ended' });
+    expect(received).toHaveBeenCalledTimes(2);
+    expect(received.mock.calls[1]![0].failureReason).toBe('expired');
+    await expect(startSession(host, session.sessionId, 'turn-1')).rejects.toThrow(
+      'native_interaction_revoked',
+    );
+    await host.cancel(session, 1);
+    await host.close(session);
+  });
+
   it.each([
     null,
     { kind: 'unknown', backgroundCapabilityVersion: null },

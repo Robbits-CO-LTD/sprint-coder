@@ -2,6 +2,7 @@ import type {
   ComputerUseNativeInputReceipt,
   ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
+import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
@@ -87,6 +88,8 @@ export type ComputerUseNativeProbe = Readonly<{
 }>;
 
 export type ComputerUseNativeAddon = Readonly<{
+  subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
+  approvalRoundTrip?(input: unknown): Promise<unknown>;
   probe(): unknown;
   handshake?(input: unknown): unknown;
   pickApplication?(input: unknown): unknown;

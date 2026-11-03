@@ -42,6 +42,8 @@ public:
   void Observe(ApprovalRoundTripFocus focus, bool healthy, bool guards, std::uint64_t now) {
     std::lock_guard lock(mutex_);
     if (phase_ == Phase::kIdle || phase_ == Phase::kFailed) return;
+    foreground_ = focus == ApprovalRoundTripFocus::kTarget ? "target" :
+        focus == ApprovalRoundTripFocus::kSprintCoder ? "sprint_coder" : "other";
     if (!Tick(now)) return;
     if (!healthy) Fail("monitor_failed");
     else if (!guards) Fail("target_changed");
@@ -114,6 +116,16 @@ public:
     std::lock_guard lock(mutex_);
     return failure_;
   }
+  struct Notification {
+    ApprovalRoundTripBinding binding;
+    std::string state, failure, foreground;
+  };
+  Notification ReadNotification() const {
+    std::lock_guard lock(mutex_);
+    return {binding_, phase_ == Phase::kFailed ? "failed" :
+        (phase_ == Phase::kEnded || phase_ == Phase::kOffered || phase_ == Phase::kIdle) ? "ended" : "active",
+        failure_, foreground_};
+  }
   void TargetEvent() {
     std::lock_guard lock(mutex_);
     if (phase_ != Phase::kIdle) Fail("target_changed");
@@ -149,6 +161,7 @@ private:
   std::set<std::string> used_;
   std::uint64_t last_ = 0, expires_ = 0, observation_ = 0, ticket_ = 0;
   std::string failure_ = "none";
+  std::string foreground_ = "target";
 };
 // Every preflight exit must either commit an exchange/offer or latch failure.
 // Holds a pointer, not a reference: an aggregate reference member can bind to a temporary.

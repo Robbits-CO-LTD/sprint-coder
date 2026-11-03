@@ -9,7 +9,7 @@ struct WindowsSession;
 struct WindowsDialogSetSnapshot;
 struct WindowsExecutableIdentity;
 // Monitor behavior is covered by the dedicated P3a native seam.
-bool ComponentBackgroundMonitor(WindowsSession&, DWORD, HWND, bool, std::string*) { return true; }
+bool ComponentBackgroundMonitor(WindowsSession&, DWORD, HWND, bool, std::string*);
 bool ComponentBackgroundMonitorReady(const WindowsSession&) { return true; }
 bool ComponentBackgroundGate();
 bool ComponentBackgroundSupported(const WindowsExecutableIdentity&);
@@ -54,6 +54,14 @@ struct ComponentWorkerLifetime { ComponentWorkerLifetime(); ~ComponentWorkerLife
 #include <stdexcept>
 
 namespace {
+// Supply the receipt state without starting OS monitor threads.
+bool ComponentBackgroundMonitor(WindowsSession& session, DWORD pid, HWND window,
+                                bool human_resume, std::string*) {
+  const auto epoch = session.background_monitor
+      ? session.background_monitor->state.Snapshot().epoch + (human_resume ? 1 : 0) : 1;
+  session.background_monitor = std::make_shared<WindowsBackgroundMonitor>(pid, window, epoch);
+  return true;
+}
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
   bool background_gate = false, background_supported = false;
@@ -319,6 +327,12 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(sessions.size() == 1, "single adopted session");
     const auto& session = sessions.at(input.session_key);
     const bool background = config.background_gate && config.bound_start && config.background_supported;
+    std::uint64_t interaction_epoch = 0;
+    Check(ReadJsonUint64(response, "interactionEpoch", &interaction_epoch) == background,
+          "interaction epoch only for background");
+    if (background) Check(session.background_monitor && interaction_epoch ==
+        session.background_monitor->state.Snapshot().epoch && interaction_epoch > 0,
+        "receipt carries monitor epoch");
     Check((session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) == background,
           "native session kind");
     Check((response.find("\"inputSession\":") != std::string::npos) == config.background_gate,

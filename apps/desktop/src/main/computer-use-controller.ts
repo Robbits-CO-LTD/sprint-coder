@@ -2,6 +2,7 @@ import {
   ComputerUseDiscoveryScope,
   type ComputerUseDiscoveryResult,
 } from './computer-use-discovery-scope';
+import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 import {
   sameWindowsStopOwner,
   windowsStopPhaseOrder,
@@ -427,6 +428,7 @@ export async function startComputerUseWindowsQuarantineSession(
 }
 
 export interface ComputerUseNativeHost {
+  subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
   /** Main-only K-5 receiver. The caller must consume the card's exact trusted activation. */
   approveWindowsQuarantineResume?(
     input: Readonly<{
@@ -872,6 +874,7 @@ type StartingSession = {
 };
 
 type SessionRecord = {
+  interactionRevoked?: true;
   requestedStopReason?: ComputerUseStopReason;
   status: ComputerUseSessionStatus;
   profile: ComputerAppProfileRecord;
@@ -1117,8 +1120,40 @@ export class ComputerUseController {
   >();
   private readonly unsubscribeWindowsStops: () => void;
   private readonly unsubscribeApprovalStop: (() => void) | undefined;
+  private readonly unsubscribeWindowsInteraction: (() => void) | undefined;
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
+    this.unsubscribeWindowsInteraction = deps.native.subscribeWindowsInteraction?.((event) => {
+      const record = this.sessions.get(event.sessionId);
+      if (
+        !record ||
+        record.controller.signal.aborted ||
+        record.stopPromise !== null ||
+        record.status.taskId !== event.taskId ||
+        record.turnId !== event.turnId ||
+        record.native.cancelEpoch !== event.cancelEpoch ||
+        (event.kind === 'event' && event.state !== 'failed')
+      )
+        return;
+      record.interactionRevoked = true;
+      record.native = { ...record.native, cancelEpoch: event.cancelEpoch + 1 };
+      record.observation = null;
+      record.planGrant = null;
+      const prefix = `${event.sessionId}\0`;
+      for (const call of this.planGrantAuthorizedCalls)
+        if (call.startsWith(prefix)) this.planGrantAuthorizedCalls.delete(call);
+      this.cancelPendingApprovals(event.sessionId, 'native_interaction_revoked');
+      record.status = this.status(
+        record,
+        'paused',
+        null,
+        record.status.observationRevision,
+        record.status.round,
+        null,
+      );
+      this.emit(record.status);
+      void deps.native.cancel(record.native, record.native.cancelEpoch).catch(() => undefined);
+    });
     this.now = deps.now ?? Date.now;
     // A monotonic clock, not the wall clock above: the store measures a lifetime.
     this.artifacts =
@@ -3615,7 +3650,8 @@ export class ComputerUseController {
       );
       this.emit(record.status);
       void this.run(record, record.status.round + 1).catch((error) => {
-        if (!record.controller.signal.aborted) void this.stop(sessionId, 'error');
+        if (!record.controller.signal.aborted && !record.interactionRevoked)
+          void this.stop(sessionId, 'error');
         return error;
       });
       return record.status;
@@ -3984,7 +4020,8 @@ export class ComputerUseController {
       if (candidate.quarantineResume) await this.observe(sessionId);
       controller.signal.throwIfAborted();
       void this.run(record).catch((error) => {
-        if (!controller.signal.aborted) void this.stop(sessionId, 'error');
+        if (!controller.signal.aborted && !record.interactionRevoked)
+          void this.stop(sessionId, 'error');
         return error;
       });
       controller.signal.throwIfAborted();
@@ -4829,6 +4866,7 @@ export class ComputerUseController {
     const discoveryStop = this.stopDiscoveriesWhere(() => true, 'app_closed');
     this.disposed = true;
     this.unsubscribeApprovalStop?.();
+    this.unsubscribeWindowsInteraction?.();
     this.unsubscribeWindowsStops();
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
@@ -4850,6 +4888,7 @@ export class ComputerUseController {
   }
 
   private async run(record: SessionRecord, firstRound = 1): Promise<void> {
+    if (record.interactionRevoked) return;
     const sessionId = record.status.sessionId;
     record.status = this.status(record, 'observing', null);
     this.emit(record.status);
@@ -6556,6 +6595,8 @@ export class ComputerUseController {
   }
 
   private assertSessionLive(record: SessionRecord): void {
+    if (record.interactionRevoked)
+      throw new Error('Computer Use interaction authority was revoked');
     if (!this.approvalHelperCurrent(record))
       throw new Error('Computer Use approval helper generation changed');
     if (record.controller.signal.aborted) throw new Error('Computer Use session is canceled');

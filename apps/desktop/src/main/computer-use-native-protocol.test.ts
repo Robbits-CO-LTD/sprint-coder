@@ -16,6 +16,28 @@ import {
 import { parseNativeHandshake } from './computer-use-native-handshake';
 
 describe('Windows background monitor (P3a)', () => {
+  it('BG03_lost_event_cannot_bypass_epoch: P3d delivers already-closed native state', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    const owner = native('computer_use_windows_background_monitor.h');
+    expect(owner).toContain('!registered_ || state_.paused || expected_epoch != state_.epoch');
+    const pipe = native('computer_use_windows_host_pipe.inc');
+    const delivery = pipe.slice(
+      pipe.indexOf('bool DeliverWindowsInteractionEvents('),
+      pipe.indexOf('bool ServePipe('),
+    );
+    expect(delivery.indexOf('state.CheckHealth()')).toBeLessThan(
+      delivery.indexOf('state.Snapshot()'),
+    );
+    expect(delivery.indexOf('snapshot.paused')).toBeLessThan(
+      delivery.indexOf('MessageType::kBackgroundInteractionEvent'),
+    );
+    expect(delivery).toContain('session.round_trip->ReadNotification()');
+    expect(delivery).toContain('ApprovalRoundTripWire(fields)');
+    expect(delivery).not.toContain('StartWindowsBackgroundMonitor');
+    expect(native('computer_use_windows_host_v2_targets.inc')).toContain('interactionEpoch');
+    expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
+  });
   it('pins P3b independent raw input and fail-closed health monitoring', () => {
     const native = (name: string) =>
       readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
@@ -560,7 +582,10 @@ describe('P1b native producer parity', () => {
       ).toBe(type);
     }
     expect(protocol.computerUseNativeMessageTypeValue('dispatch_approved_result')).toBe(20);
-    expect(protocol.isKnownComputerUseNativeMessageType(26)).toBe(false);
+    expect(protocol.computerUseNativeMessageTypeValue('background_interaction_event')).toBe(26);
+    expect(source).toContain('kBackgroundInteractionEvent = 26,');
+    expect(protocol.isKnownComputerUseNativeMessageType(26)).toBe(true);
+    expect(protocol.isKnownComputerUseNativeMessageType(27)).toBe(false);
   });
 });
 

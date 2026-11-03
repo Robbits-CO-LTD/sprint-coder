@@ -184,6 +184,7 @@ enum class MessageType : std::uint16_t {
   kApprovalRoundTripEnd = 23,
   kApprovalRoundTripEndResult = 24,
   kApprovalRoundTripEvent = 25,
+  kBackgroundInteractionEvent = 26,
 };
 
 // Windows identityBoundStart capability (no new MessageType):
@@ -206,7 +207,7 @@ struct Frame {
 
 [[nodiscard]] inline bool IsKnownMessageType(std::uint16_t value) noexcept {
   return value >= static_cast<std::uint16_t>(MessageType::kHandshake) &&
-         value <= static_cast<std::uint16_t>(MessageType::kApprovalRoundTripEvent);
+         value <= static_cast<std::uint16_t>(MessageType::kBackgroundInteractionEvent);
 }
 
 [[nodiscard]] inline bool ValidateHeader(const FrameHeader &header) noexcept {
