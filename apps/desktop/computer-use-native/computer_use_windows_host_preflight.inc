@@ -64,6 +64,62 @@ std::string ProbeJson(const BackendProbe &probe) {
          "},\"reason\":\"" + reason + "\"}\n";
 }
 
+// BEGIN windows residual response ownership
+std::atomic<bool> &InterlockWorkerRunning();
+
+std::uint32_t WindowsResidualWorkers() {
+  using namespace sprint_coder::computer_use;
+  return (WindowsUiaReadWorkerRunning().load(std::memory_order_acquire) ? 1u : 0u) |
+      (WindowsCaptureWorkerRunning().load(std::memory_order_acquire) ? 2u : 0u) |
+      (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ? 4u : 0u) |
+      (InterlockWorkerRunning().load(std::memory_order_acquire) ? 8u : 0u) |
+      (windows_uia_source_detail::ShellLookupRunning().load(std::memory_order_acquire) ? 16u : 0u) |
+      (windows_uia_source_detail::InterlockShellLookupRunning().load(std::memory_order_acquire) ? 32u : 0u);
+}
+
+struct WindowsResidualResponse {
+  FrameHeader header;
+  std::uint32_t workers;
+};
+
+class WindowsResidualRequestScope;
+thread_local const WindowsResidualRequestScope *windows_residual_request = nullptr;
+
+// A nested Stop or a later request does not own workers that were already running on entry.
+class WindowsResidualRequestScope {
+public:
+  explicit WindowsResidualRequestScope(const Frame &request)
+      : request_(&request), previous_(windows_residual_request), existing_(WindowsResidualWorkers()) {
+    windows_residual_request = this;
+  }
+  ~WindowsResidualRequestScope() { windows_residual_request = previous_; }
+  std::uint32_t Workers(const Frame &request) const {
+    return request_ == &request ? WindowsResidualWorkers() & ~existing_ : 0;
+  }
+private:
+  const Frame *request_;
+  const WindowsResidualRequestScope *previous_;
+  std::uint32_t existing_;
+};
+
+// Only the pipe consumer owns this queue and writes frames; cleanup keeps its slot busy.
+std::vector<WindowsResidualResponse> windows_residual_responses;
+
+bool DeliverWindowsRetiredOperations(HANDLE pipe) {
+  const auto running = WindowsResidualWorkers();
+  for (auto it = windows_residual_responses.begin(); it != windows_residual_responses.end();) {
+    it->workers &= running;
+    if (it->workers != 0) { ++it; continue; }
+    auto header = it->header;
+    header.message_type = static_cast<std::uint16_t>(MessageType::kOperationRetired);
+    header.flags = 0;
+    const auto payload = "{\"helperGeneration\":" + std::to_string(windows_helper_generation) + "}";
+    if (!WriteFrame(pipe, header, payload, {})) return false;
+    it = windows_residual_responses.erase(it);
+  }
+  return true;
+}
+
 std::string ErrorPayload(std::string_view code, bool accepted = false) {
   return std::string("{\"result\":\"rejected\",\"code\":\"") +
          std::string(code) +
@@ -76,8 +132,20 @@ bool Respond(HANDLE pipe, const Frame &request, MessageType type,
   FrameHeader response = request.header;
   response.message_type = static_cast<std::uint16_t>(type);
   response.cancel_id = {};
+  response.flags = 0;
+  if (type != MessageType::kHandshakeResult &&
+      type != MessageType::kApprovalRoundTripEvent &&
+      type != MessageType::kBackgroundInteractionEvent) {
+    const auto workers = windows_residual_request != nullptr ? windows_residual_request->Workers(request) : 0;
+    if (workers != 0) {
+      if (windows_residual_responses.size() >= 128) return false;
+      response.flags = sprint_coder::computer_use::kResidualWorkFlag;
+      windows_residual_responses.push_back({response, workers});
+    }
+  }
   return WriteFrame(pipe, response, payload, binary);
 }
+// END windows residual response ownership
 
 bool RespondAndCache(HANDLE pipe, const Frame &request, MessageType type,
                      std::string payload,

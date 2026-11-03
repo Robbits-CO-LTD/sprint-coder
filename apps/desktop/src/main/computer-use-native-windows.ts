@@ -29,6 +29,7 @@ import {
   COMPUTER_USE_NATIVE_MAGIC,
   COMPUTER_USE_NATIVE_PROTOCOL_VERSION,
   isKnownComputerUseNativeMessageType,
+  COMPUTER_USE_NATIVE_RESIDUAL_WORK,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
   COMPUTER_USE_NATIVE_MAX_METADATA_BYTES,
   decodeComputerUseNativeFrame,
@@ -534,6 +535,7 @@ class WindowsComputerUseHelperClient {
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly residual = new Map<string, PendingRequest>();
   private readonly preparingDispatches = new Set<string>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
@@ -887,6 +889,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private shutdownIfIdle(): void {
+    if (this.residual.size !== 0) return;
     if (this.closeLedger?.blocked(this.helperGeneration)) return;
     if (this.hasUnconfirmedSemanticInputs()) return;
     for (const owner of this.discoveries.values())
@@ -1655,7 +1658,11 @@ class WindowsComputerUseHelperClient {
     const socket = this.socket;
     if (socket === null)
       return Promise.reject(new Error('Computer Use Windows helper is disconnected'));
-    if (this.pending.has(requestId.hex) || this.preparingDispatches.has(requestId.hex))
+    if (
+      this.pending.has(requestId.hex) ||
+      this.residual.has(requestId.hex) ||
+      this.preparingDispatches.has(requestId.hex)
+    )
       return Promise.reject(new Error('Computer Use Windows helper request is already pending'));
     const encoded = encodeComputerUseNativeFrame({
       messageType,
@@ -1673,6 +1680,16 @@ class WindowsComputerUseHelperClient {
     const send = (): Promise<unknown> => {
       const result = new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
+          if (this.residual.get(requestId.hex) === pending) {
+            this.residual.delete(requestId.hex);
+            const generation = this.generations.get(helperGeneration);
+            if (generation !== undefined)
+              this.requestTermination(
+                generation,
+                new Error('Computer Use Windows helper worker timed out'),
+              );
+            return;
+          }
           if (this.pending.get(requestId.hex) !== pending) return;
           // Map insertion order follows sends; a serial consumer may still be serving the head.
           let earlierRequestWithinDeadline = false;
@@ -1853,6 +1870,29 @@ class WindowsComputerUseHelperClient {
   }
 
   private resolveFrame(frame: ComputerUseNativeFrame): void {
+    if (frame.messageType === 'operation_retired') {
+      const residual = this.residual.get(frame.requestId.hex);
+      if (residual === undefined) return;
+      const value = asRecord(
+        JSON.parse(frame.metadata.toString('utf8')),
+        'Invalid worker retirement',
+      );
+      if (
+        frame.flags !== 0 ||
+        frame.binary.length !== 0 ||
+        frame.cancelId !== null ||
+        frame.sessionId.hex !== residual.sessionId.hex ||
+        value['helperGeneration'] !== residual.helperGeneration ||
+        residual.helperGeneration !== this.helperGeneration ||
+        Date.now() >= residual.deadline ||
+        Object.keys(value).length !== 1
+      )
+        return;
+      clearTimeout(residual.timeout);
+      this.residual.delete(frame.requestId.hex);
+      this.shutdownIfIdle();
+      return;
+    }
     if (
       frame.messageType === 'approval_round_trip_event' ||
       frame.messageType === 'background_interaction_event'
@@ -1897,7 +1937,13 @@ class WindowsComputerUseHelperClient {
       return;
     }
     this.pending.delete(frame.requestId.hex);
-    clearTimeout(pending.timeout);
+    // Keep the original send-time D; a response is not proof that cleanup retired.
+    if (
+      frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK &&
+      this.generations.has(pending.helperGeneration)
+    )
+      this.residual.set(frame.requestId.hex, pending);
+    else clearTimeout(pending.timeout);
     try {
       let parsed = JSON.parse(frame.metadata.toString('utf8')) as unknown;
       if (frame.messageType === 'error') {
@@ -1988,6 +2034,8 @@ class WindowsComputerUseHelperClient {
     // Whatever armed the idle teardown is being failed right here, and the next request connects a
     // fresh helper that the old session's teardown has no claim on.
     this.idleShutdownPending = false;
+    for (const request of this.residual.values()) clearTimeout(request.timeout);
+    this.residual.clear();
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
       if (retainStops && pending.retainAfterKill) continue;
@@ -2165,6 +2213,7 @@ export function isWindowsHelperResponseBound(
   }>,
 ): boolean {
   return (
+    (frame.flags === 0 || frame.flags === COMPUTER_USE_NATIVE_RESIDUAL_WORK) &&
     frame.sessionId.hex === expected.sessionId.hex &&
     (frame.messageType === 'error' || frame.messageType === expected.responseType) &&
     (frame.binary.byteLength === 0 ||

@@ -279,7 +279,21 @@ void Send(HANDLE pipe,unsigned request,unsigned session,const std::string& paylo
  FrameHeader header;header.message_type=static_cast<std::uint16_t>(type);header.request_id=Id(static_cast<unsigned char>(request));header.session_id=Id(static_cast<unsigned char>(session));
  Require(WriteFrame(pipe,header,payload),"write frame");
 }
-Frame Read(HANDLE pipe,unsigned request,MessageType type){Frame frame;Require(ReadFrame(pipe,&frame),"read frame");Require(frame.header.request_id.bytes[0]==request&&frame.header.message_type==static_cast<std::uint16_t>(type),"response identity");return frame;}
+std::vector<FrameHeader> residual_responses;
+Frame Read(HANDLE pipe,unsigned request,MessageType type){
+ for(;;){Frame frame;Require(ReadFrame(pipe,&frame),"read frame");
+  if(frame.header.message_type==static_cast<std::uint16_t>(MessageType::kOperationRetired)){
+   auto found=std::find_if(residual_responses.begin(),residual_responses.end(),[&](const auto& header){return header.request_id.bytes==frame.header.request_id.bytes&&header.session_id.bytes==frame.header.session_id.bytes;});
+   std::uint64_t generation=0;
+   Require(found!=residual_responses.end()&&frame.header.flags==0&&frame.binary.empty()&&ReadJsonUint64(Payload(frame),"helperGeneration",&generation)&&generation==windows_helper_generation,"retirement identity");
+   residual_responses.erase(found);continue;
+  }
+  Require(frame.header.request_id.bytes[0]==request&&frame.header.message_type==static_cast<std::uint16_t>(type),"response identity");
+  if(frame.header.flags==sprint_coder::computer_use::kResidualWorkFlag)residual_responses.push_back(frame.header);
+  else Require(frame.header.flags==0,"response flags");
+  return frame;
+ }
+}
 std::string List(){return "{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"discovery:1\",\"canonicalPath\":\""+JsonEscape(Utf8FromWide(owned_path))+"\",\"identityDigest\":\""+std::string(64,'a')+"\",\"executableDigest\":\""+std::string(64,'c')+"\",\"signerDigest\":\"\"}";}
 std::string DiscoveryStop(const std::string& id){return "{\"operation\":\"stop_window_discovery\",\"discoveryId\":\""+id+"\"}";}
 std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"operation\":\"stop_pending_start\"}";}

@@ -589,7 +589,10 @@ describe('P1b native producer parity', () => {
     expect(protocol.computerUseNativeMessageTypeValue('background_interaction_event')).toBe(26);
     expect(source).toContain('kBackgroundInteractionEvent = 26,');
     expect(protocol.isKnownComputerUseNativeMessageType(26)).toBe(true);
-    expect(protocol.isKnownComputerUseNativeMessageType(27)).toBe(false);
+    expect(protocol.computerUseNativeMessageTypeValue('operation_retired')).toBe(27);
+    expect(source).toContain('kOperationRetired = 27,');
+    expect(protocol.isKnownComputerUseNativeMessageType(27)).toBe(true);
+    expect(protocol.isKnownComputerUseNativeMessageType(28)).toBe(false);
   });
 });
 

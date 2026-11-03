@@ -208,7 +208,21 @@ void Send(HANDLE pipe,unsigned request,unsigned session,const std::string& paylo
  FrameHeader header;header.message_type=static_cast<std::uint16_t>(type);header.request_id=Id(static_cast<unsigned char>(request));header.session_id=Id(static_cast<unsigned char>(session));
  Require(WriteFrame(pipe,header,payload),"write frame");
 }
-Frame Read(HANDLE pipe,unsigned request,MessageType type){Frame frame;Require(ReadFrame(pipe,&frame),"read frame");Require(frame.header.request_id.bytes[0]==request&&frame.header.message_type==static_cast<std::uint16_t>(type),"response identity");return frame;}
+std::vector<FrameHeader> residual_responses;
+Frame Read(HANDLE pipe,unsigned request,MessageType type){
+ for(;;){Frame frame;Require(ReadFrame(pipe,&frame),"read frame");
+  if(frame.header.message_type==static_cast<std::uint16_t>(MessageType::kOperationRetired)){
+   auto found=std::find_if(residual_responses.begin(),residual_responses.end(),[&](const auto& header){return header.request_id.bytes==frame.header.request_id.bytes&&header.session_id.bytes==frame.header.session_id.bytes;});
+   std::uint64_t generation=0;
+   Require(found!=residual_responses.end()&&frame.header.flags==0&&frame.binary.empty()&&ReadJsonUint64(Payload(frame),"helperGeneration",&generation)&&generation==windows_helper_generation,"retirement identity");
+   residual_responses.erase(found);continue;
+  }
+  Require(frame.header.request_id.bytes[0]==request&&frame.header.message_type==static_cast<std::uint16_t>(type),"response identity");
+  if(frame.header.flags==sprint_coder::computer_use::kResidualWorkFlag)residual_responses.push_back(frame.header);
+  else Require(frame.header.flags==0,"response flags");
+  return frame;
+ }
+}
 std::string Start(const std::string& id,unsigned epoch=0){return "{\"operation\":\"start_session\",\"sessionId\":\""+id+"\",\"pid\":"+std::to_string(GetCurrentProcessId())+",\"windowId\":\"1\",\"cancelEpoch\":"+std::to_string(epoch)+",\"appIdentityDigest\":\""+std::string(64,'a')+"\",\"windowIdentityDigest\":\""+std::string(64,'b')+"\",\"canonicalPath\":\"C:\\\\__sprint_nonexistent__.exe\",\"executableDigest\":\""+std::string(64,'c')+"\",\"signerDigest\":null,\"expectedBoundsX\":0,\"expectedBoundsY\":0,\"expectedBoundsWidth\":100,\"expectedBoundsHeight\":100}";}
 std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"operation\":\"stop_pending_start\"}";}
 int wmain(){

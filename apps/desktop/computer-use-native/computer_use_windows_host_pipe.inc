@@ -368,6 +368,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const std::string& admission_error = {},
                        WindowsDiscoveryAdmission discovery = {},
                        WindowsDiscoveryStopPump* discovery_stop_pump = nullptr) {
+  const WindowsResidualRequestScope residual_request(request);
   const auto type = static_cast<MessageType>(request.header.message_type);
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
@@ -831,7 +832,8 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
     return true;
   }};
   for (;;) {
-    if (!DeliverWindowsInteractionEvents(pipe, interaction_deliveries)) {
+    if (!DeliverWindowsRetiredOperations(pipe) ||
+        !DeliverWindowsInteractionEvents(pipe, interaction_deliveries)) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;

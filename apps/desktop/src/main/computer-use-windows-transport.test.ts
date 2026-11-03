@@ -215,6 +215,7 @@ class FakeWindowsHelper {
   private readonly held = new Map<string, 'blocking' | 'skipped'>();
   private readonly refused = new Set<string>();
   readonly served: string[] = [];
+  readonly residual = new Set<string>();
 
   constructor(
     private readonly socket: FakeHelperSocket,
@@ -240,6 +241,26 @@ class FakeWindowsHelper {
 
   allow(operation: string): void {
     this.refused.delete(operation);
+  }
+
+  retire(operation: string, change: Partial<ComputerUseNativeFrame> = {}): void {
+    const request = this.socket.writes
+      .map(decodeComputerUseNativeFrame)
+      .reverse()
+      .find((frame) => JSON.parse(frame.metadata.toString('utf8')).operation === operation);
+    if (request === undefined) throw new Error('No request to retire');
+    this.socket.emit(
+      'data',
+      encodeComputerUseNativeFrame({
+        ...request,
+        messageType: 'operation_retired',
+        flags: 0,
+        cancelId: null,
+        metadata: Buffer.from(JSON.stringify({ helperGeneration: 1 })),
+        binary: Buffer.alloc(0),
+        ...change,
+      }),
+    );
   }
 
   release(operation: string): void {
@@ -273,7 +294,7 @@ class FakeWindowsHelper {
       'data',
       encodeComputerUseNativeFrame({
         messageType,
-        flags: 0,
+        flags: this.residual.has(operation) ? 1 : 0,
         requestId: frame.requestId,
         sessionId: frame.sessionId,
         cancelId: null,
@@ -8037,6 +8058,88 @@ int main() {
       expect(target.quarantines).toHaveLength(operation === 'semantic' ? 1 : 0);
     },
   );
+
+  it.each(['probe_result', 'error'] as const)(
+    'partial_response_does_not_disarm_worker_deadline (%s)',
+    async (responseType) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'residual-deadline', 'turn-1');
+      target.helper().residual.add('list_targets');
+      if (responseType === 'error') target.helper().refuse('list_targets');
+      const result = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+      await vi.advanceTimersByTimeAsync(0);
+      await result;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it.each(['valid', 'generation', 'session', 'request', 'binary', 'flags', 'early'] as const)(
+    'residual_retirement_requires_original_generation_and_request (%s)',
+    async (kind) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      await startSession(target.host, 'residual-binding', 'turn-1');
+      target.helper().residual.add('list_targets');
+      target.helper().holdOnly('list_targets');
+      const result = Promise.resolve(target.addon.listTargets!({}));
+      await vi.advanceTimersByTimeAsync(2_000);
+      if (kind === 'early') target.helper().retire('list_targets');
+      target.helper().release('list_targets');
+      await result;
+      if (kind !== 'early')
+        target
+          .helper()
+          .retire(
+            'list_targets',
+            kind === 'generation'
+              ? { metadata: Buffer.from('{"helperGeneration":2}') }
+              : kind === 'session'
+                ? { sessionId: { hex: 'd'.repeat(32) } }
+                : kind === 'request'
+                  ? { requestId: { hex: 'e'.repeat(32) } }
+                  : kind === 'binary'
+                    ? { binary: Buffer.from([1]) }
+                    : kind === 'flags'
+                      ? { flags: 1 }
+                      : {},
+          );
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(kind === 'valid' ? 0 : 1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it('late_retirement_cannot_disarm_elapsed_worker_deadline', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    await startSession(target.host, 'late-retirement', 'turn-1');
+    target.helper().residual.add('list_targets');
+    await target.addon.listTargets!({});
+    vi.setSystemTime(Date.now() + 10_001);
+    target.helper().retire('list_targets');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(child.killCalls).toBe(1);
+    child.emit('exit', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+  });
 
   it('queued_request_deadline_defers_to_head', async () => {
     const child = new ControlledHelperChild();
