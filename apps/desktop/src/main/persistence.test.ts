@@ -10726,6 +10726,7 @@ if (runsWithElectronAbi)
         { version: 101 },
         { version: 102 },
         { version: 103 },
+        { version: 104 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12434,6 +12435,68 @@ if (runsWithElectronAbi)
       return { fixture, task, base };
     }
 
+    it('persists candidate audits without a profile row and preserves registered profile checks', () => {
+      const { fixture, task, base } = seed();
+      const input = {
+        ...base,
+        profileId: `native-target:${'f'.repeat(64)}`,
+        candidateProfileDisplayName: 'Synthetic editor',
+        nativeRequestId: '3'.repeat(64),
+      };
+      const audit = fixture.persistence.recordComputerActionAudit(input);
+      expect(audit).toMatchObject(input);
+      fixture.persistence.completeComputerActionAudit({
+        auditId: audit.id,
+        state: 'applied',
+        updatedAt: new Date().toISOString(),
+      });
+      expect(() =>
+        fixture.persistence.recordComputerActionAudit({
+          ...base,
+          profileId: 'missing-profile',
+          nativeRequestId: '4'.repeat(64),
+        }),
+      ).toThrow();
+      expect(() =>
+        fixture.persistence.recordComputerActionAudit({
+          ...input,
+          candidateProfileDisplayName: 'Different candidate',
+        }),
+      ).toThrow('Computer Use request id was reused');
+      fixture.persistence.close();
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      try {
+        expect(reopened.listComputerActionAudits(task.id)).toContainEqual(
+          expect.objectContaining({
+            ...input,
+            state: 'applied',
+          }),
+        );
+        expect(reopened.listComputerAppProfiles().map((profile) => profile.id)).not.toContain(
+          input.profileId,
+        );
+        const raw = new Database(fixture.path);
+        try {
+          expect(
+            raw
+              .prepare(
+                'SELECT profile_id, candidate_profile_id, candidate_profile_display_name FROM computer_action_audits WHERE id = ?',
+              )
+              .get(audit.id),
+          ).toEqual({
+            profile_id: null,
+            candidate_profile_id: input.profileId,
+            candidate_profile_display_name: input.candidateProfileDisplayName,
+          });
+          expect(raw.pragma('foreign_key_check')).toEqual([]);
+        } finally {
+          raw.close();
+        }
+      } finally {
+        reopened.close();
+      }
+    });
+
     it('leaves no byte of an old digest anywhere in the scrubbed migration backup (#786)', () => {
       const { fixture, base } = seed();
       // Enough rows that an UPDATE alone leaves some old values in freed pages (measured: 39 of
@@ -13130,7 +13193,7 @@ if (runsWithElectronAbi)
             .map((index) => ({
               ...index,
               // An automatic index is named after the table it was built for.
-              name: index.name.replace(/_v102/u, ''),
+              name: index.name.replace(/_v(?:102|104)/u, ''),
               columns: raw.prepare(`PRAGMA index_xinfo('${index.name}')`).all(),
             }))
             .sort((a, b) => a.name.localeCompare(b.name));
@@ -13152,7 +13215,7 @@ if (runsWithElectronAbi)
               .all(),
             rows: raw
               .prepare('SELECT rowid AS r, * FROM computer_action_audits ORDER BY rowid')
-              .all(),
+              .all() as Record<string, unknown>[],
             tableSql: (
               raw
                 .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -13255,8 +13318,60 @@ if (runsWithElectronAbi)
         expect(after.tableSql).toContain("'finish', 'copy'");
       });
 
+      it('v104 preserves registered rows, rowids, foreign keys and approval guards', () => {
+        const { path } = databaseBeforeV102();
+        new SqlitePersistenceClient(path).close();
+        const before = snapshot(path);
+        const legacy = new Database(path);
+        legacy.exec('DELETE FROM schema_migrations WHERE version = 104;');
+        legacy.close();
+        new SqlitePersistenceClient(path).close();
+        const after = snapshot(path);
+        expect(after.foreignKeys).toEqual(before.foreignKeys);
+        expect(after.indexes).toEqual(before.indexes);
+        expect(after.objects).toEqual(before.objects);
+        expect(after.triggers).toEqual(before.triggers);
+        expect(after.rows).toEqual(
+          before.rows.map((row) => ({
+            ...row,
+            candidate_profile_id: null,
+            candidate_profile_display_name: null,
+          })),
+        );
+        const raw = new Database(path);
+        try {
+          raw.pragma('foreign_keys = ON');
+          expect(raw.pragma('foreign_key_check')).toEqual([]);
+          expect(() =>
+            raw
+              .prepare("UPDATE computer_action_audits SET profile_id = NULL WHERE id = 'row-0'")
+              .run(),
+          ).toThrow(/CHECK constraint/u);
+          expect(() =>
+            raw
+              .prepare(
+                "UPDATE computer_action_audits SET profile_id = 'missing' WHERE id = 'row-0'",
+              )
+              .run(),
+          ).toThrow(/FOREIGN KEY/u);
+          expect(() =>
+            raw
+              .prepare(
+                "UPDATE computer_action_audits SET approval_id = 'changed' WHERE id = 'row-0'",
+              )
+              .run(),
+          ).toThrow('write-once');
+        } finally {
+          raw.close();
+        }
+      });
+
       it('then accepts copy, still rejects any other kind, and keeps the write-once guard', () => {
         const { path, base } = databaseBeforeV102();
+        // The API writes the current schema; replay v104 after the isolated v102 fixture.
+        const legacy = new Database(path);
+        legacy.exec('DELETE FROM schema_migrations WHERE version = 104;');
+        legacy.close();
         const migrated = new SqlitePersistenceClient(path);
         try {
           const copied = migrated.recordComputerActionAudit({

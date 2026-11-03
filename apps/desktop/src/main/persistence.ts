@@ -1267,6 +1267,8 @@ export type ComputerActionAuditRecord = Readonly<{
   /** SHA-256 binding digest; the live session id is never persisted. */
   sessionId: string;
   profileId: string;
+  /** Only native-discovered candidates; never creates a saved profile. */
+  candidateProfileDisplayName?: string;
   profileRevision: number;
   appIdentityDigest: string;
   windowIdentityDigest: string;
@@ -1300,6 +1302,8 @@ export type ComputerActionAuditInput = Readonly<{
   /** SHA-256 binding digest. */
   sessionId: string;
   profileId: string;
+  /** Only native-discovered candidates; never creates a saved profile. */
+  candidateProfileDisplayName?: string;
   profileRevision: number;
   appIdentityDigest: string;
   windowIdentityDigest: string;
@@ -1346,7 +1350,9 @@ type ComputerActionAuditRow = {
   task_id: string;
   turn_id: string;
   session_id: string;
-  profile_id: string;
+  profile_id: string | null;
+  candidate_profile_id: string | null;
+  candidate_profile_display_name: string | null;
   profile_revision: number;
   app_identity_digest: string;
   window_identity_digest: string;
@@ -1670,6 +1676,95 @@ const COMPUTER_USE_AUDIT_ACTION_KIND_COPY_SQL = `
     SELECT rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audits ORDER BY rowid;
   DROP TABLE computer_action_audits;
   ALTER TABLE computer_action_audits_v102 RENAME TO computer_action_audits;
+  CREATE INDEX computer_action_audits_task_created_idx
+    ON computer_action_audits(task_id, created_at, id);
+  CREATE INDEX computer_action_audits_session_idx
+    ON computer_action_audits(session_id, created_at, id);
+  CREATE TRIGGER computer_action_audits_approval_correlation_guard
+  BEFORE UPDATE OF approval_id, approval_parent_request_id, approval_outcome, approval_effect
+  ON computer_action_audits
+  WHEN (OLD.approval_id IS NOT NULL AND OLD.approval_id IS NOT NEW.approval_id)
+    OR OLD.approval_parent_request_id IS NOT NEW.approval_parent_request_id
+    OR (OLD.approval_effect IS NOT NULL AND OLD.approval_effect IS NOT NEW.approval_effect)
+    OR (OLD.approval_outcome IS NOT NULL AND OLD.approval_outcome IS NOT NEW.approval_outcome)
+    OR (NEW.approval_outcome IS NOT NULL AND NEW.approval_id IS NULL)
+  BEGIN
+    SELECT RAISE(ABORT, 'computer action audit approval correlation is write-once');
+  END;
+`;
+
+// Keep registered-profile foreign keys; candidates carry an independent audit snapshot.
+const COMPUTER_USE_AUDIT_CANDIDATE_SQL = `
+  CREATE TABLE computer_action_audits_v104 (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL CHECK (
+      length(turn_id) = 64 AND turn_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    session_id TEXT NOT NULL CHECK (
+      length(session_id) = 64 AND session_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    profile_id TEXT REFERENCES computer_app_profiles(id) ON DELETE RESTRICT,
+    profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),
+    app_identity_digest TEXT NOT NULL CHECK (
+      length(app_identity_digest) = 64 AND app_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    window_identity_digest TEXT NOT NULL CHECK (
+      length(window_identity_digest) = 64 AND window_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    observation_revision INTEGER NOT NULL CHECK (observation_revision >= 1),
+    observation_digest TEXT NOT NULL CHECK (
+      length(observation_digest) = 64 AND observation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    client_width INTEGER NOT NULL CHECK (client_width > 0 AND client_width <= 2560),
+    client_height INTEGER NOT NULL CHECK (client_height > 0 AND client_height <= 1600),
+    action_digest TEXT NOT NULL CHECK (
+      length(action_digest) = 64 AND action_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    action_kind TEXT NOT NULL CHECK (action_kind IN (
+      'invoke', 'set_text', 'select', 'toggle', 'expand_collapse',
+      'scroll', 'click', 'type', 'key', 'wait', 'finish', 'copy'
+    )),
+    route TEXT NOT NULL CHECK (route IN ('semantic', 'visual', 'none')),
+    state TEXT NOT NULL CHECK (
+      state IN ('pending', 'applied', 'rejected', 'unknown_effect', 'canceled')
+    ),
+    reason_code TEXT CHECK (reason_code IS NULL OR length(reason_code) <= 128),
+    native_request_id TEXT NOT NULL CHECK (
+      length(native_request_id) = 64 AND native_request_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    approval_id TEXT
+      CHECK (approval_id IS NULL OR (length(approval_id) BETWEEN 1 AND 128)),
+    approval_parent_request_id TEXT
+      CHECK (
+        approval_parent_request_id IS NULL OR
+        (length(approval_parent_request_id) = 64 AND approval_parent_request_id NOT GLOB '*[^0-9a-f]*')
+      ),
+    approval_outcome TEXT
+      CHECK (approval_outcome IS NULL OR approval_outcome IN ('approved', 'denied', 'expired', 'revoked')),
+    approval_effect TEXT
+      CHECK (approval_effect IS NULL OR approval_effect IN (
+        'download_open', 'file_manager_open', 'high_impact_confirmation', 'supervised_action'
+      )),
+    candidate_profile_id TEXT CHECK (candidate_profile_id IS NULL OR (
+      length(candidate_profile_id) = 78 AND substr(candidate_profile_id, 1, 14) = 'native-target:'
+      AND substr(candidate_profile_id, 15) NOT GLOB '*[^0-9a-f]*'
+    )),
+    candidate_profile_display_name TEXT CHECK (candidate_profile_display_name IS NULL OR
+      length(candidate_profile_display_name) BETWEEN 1 AND 160),
+    CHECK (
+      (profile_id IS NOT NULL AND candidate_profile_id IS NULL AND candidate_profile_display_name IS NULL)
+      OR (profile_id IS NULL AND candidate_profile_id IS NOT NULL AND candidate_profile_display_name IS NOT NULL)
+    ),
+    UNIQUE(session_id, native_request_id)
+  );
+  INSERT INTO computer_action_audits_v104(rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS})
+    SELECT rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audits ORDER BY rowid;
+  DROP TABLE computer_action_audits;
+  ALTER TABLE computer_action_audits_v104 RENAME TO computer_action_audits;
   CREATE INDEX computer_action_audits_task_created_idx
     ON computer_action_audits(task_id, created_at, id);
   CREATE INDEX computer_action_audits_session_idx
@@ -4860,6 +4955,11 @@ const migrations = [
           AND json_extract(payload_json, '$.autoDecision.decision') IN ('allow', 'allow_once', 'deny')
         GROUP BY 1, 2, 3;
     `,
+  },
+  {
+    version: 104,
+    checksum: 'computer-use-v104-candidate-audit-profile',
+    sql: COMPUTER_USE_AUDIT_CANDIDATE_SQL,
   },
 ];
 
@@ -16274,6 +16374,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         prior.taskId !== validated.taskId ||
         prior.turnId !== validated.turnId ||
         prior.profileId !== validated.profileId ||
+        prior.candidateProfileDisplayName !== validated.candidateProfileDisplayName ||
         prior.profileRevision !== validated.profileRevision ||
         prior.appIdentityDigest !== validated.appIdentityDigest ||
         prior.windowIdentityDigest !== validated.windowIdentityDigest ||
@@ -16307,7 +16408,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.assertTask(validated.taskId);
     // A Computer Use session may be started from an idle Task. In that case its synthetic
     // controller turn has no row in `turns`; the audit still remains Task-bound and privacy-safe.
-    this.getComputerAppProfile(validated.profileId);
+    if (validated.candidateProfileDisplayName === undefined)
+      this.getComputerAppProfile(validated.profileId);
     this.db
       .prepare(
         `INSERT INTO computer_action_audits(
@@ -16315,15 +16417,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
            app_identity_digest, window_identity_digest, observation_revision,
            observation_digest, client_width, client_height, action_digest, action_kind,
            route, state, reason_code, native_request_id, policy_epoch, created_at, updated_at,
-           approval_id, approval_parent_request_id, approval_effect
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           approval_id, approval_parent_request_id, approval_effect,
+           candidate_profile_id, candidate_profile_display_name
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         validated.taskId,
         validated.turnId,
         validated.sessionId,
-        validated.profileId,
+        validated.candidateProfileDisplayName === undefined ? validated.profileId : null,
         validated.profileRevision,
         validated.appIdentityDigest,
         validated.windowIdentityDigest,
@@ -16343,6 +16446,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
         validated.approvalId ?? null,
         validated.approvalParentRequestId ?? null,
         validated.approvalEffect ?? null,
+        validated.candidateProfileDisplayName === undefined ? null : validated.profileId,
+        validated.candidateProfileDisplayName ?? null,
       );
     return toComputerActionAudit(
       this.db
@@ -24796,6 +24901,12 @@ function validateComputerActionAuditInput(
     typeof input.profileId !== 'string' ||
     input.profileId.length === 0 ||
     input.profileId.length > 128 ||
+    (input.candidateProfileDisplayName !== undefined &&
+      (!/^native-target:[a-f0-9]{64}$/.test(input.profileId) ||
+        typeof input.candidateProfileDisplayName !== 'string' ||
+        input.candidateProfileDisplayName.length < 1 ||
+        input.candidateProfileDisplayName.length > 160 ||
+        /[\p{Cc}\p{Cf}]/u.test(input.candidateProfileDisplayName))) ||
     !Number.isSafeInteger(input.profileRevision) ||
     input.profileRevision < 1 ||
     !/^[a-f0-9]{64}$/.test(input.appIdentityDigest) ||
@@ -24862,7 +24973,10 @@ function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAudit
     taskId: row.task_id,
     turnId: row.turn_id,
     sessionId: row.session_id,
-    profileId: row.profile_id,
+    profileId: row.profile_id ?? row.candidate_profile_id ?? '',
+    ...(row.candidate_profile_display_name === null
+      ? {}
+      : { candidateProfileDisplayName: row.candidate_profile_display_name }),
     profileRevision: row.profile_revision,
     appIdentityDigest: row.app_identity_digest,
     windowIdentityDigest: row.window_identity_digest,
@@ -24894,6 +25008,9 @@ function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAudit
     turnId: parsed.turnId,
     sessionId: parsed.sessionId,
     profileId: parsed.profileId,
+    ...(parsed.candidateProfileDisplayName === undefined
+      ? {}
+      : { candidateProfileDisplayName: parsed.candidateProfileDisplayName }),
     profileRevision: parsed.profileRevision,
     appIdentityDigest: parsed.appIdentityDigest,
     windowIdentityDigest: parsed.windowIdentityDigest,

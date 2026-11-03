@@ -51,7 +51,8 @@ export function useComputerUseAppGrant(taskId: string | null): ComputerUseAppGra
   const resolve = useCallback(
     (decision: ComputerAppGrantDecision) => {
       const api = window.sprintCoder?.computerUse;
-      if (api?.resolveGrantRequest === undefined || visible === null) return;
+      if (api?.resolveGrantRequest === undefined || visible === null || visible.state !== 'pending')
+        return;
       setBusy(true);
       void api
         .resolveGrantRequest({

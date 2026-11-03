@@ -832,6 +832,7 @@ type PendingAppGrantRequest = {
   /** The ceiling of the agreement already in force, for a card that only asks about a destination. */
   grantedMaxMode: ComputerUseMode | null;
   timer: ReturnType<typeof setTimeout>;
+  generationTimer: ReturnType<typeof setInterval> | undefined;
   settle: (outcome: ComputerRequestAccessOutput) => void;
 };
 
@@ -2639,6 +2640,17 @@ export class ComputerUseController {
         COMPUTER_ACCESS_REQUEST_TIMEOUT_MS,
       );
       timer.unref?.();
+      // The host exposes a synchronous generation predicate, not a Renderer event. Poll only
+      // while a Windows generation-bound card exists; the click still rechecks before granting.
+      const targetRecord = input.targetRecord;
+      const generationTimer =
+        targetRecord?.binding.windowsGeneration === undefined
+          ? undefined
+          : setInterval(() => {
+              if (!this.targetRecordCurrent(targetRecord))
+                this.closeAppGrantCard(requestId, 'access_request_withdrawn', 'generation_changed');
+            }, 250);
+      generationTimer?.unref?.();
       this.pendingAppGrantRequest = {
         ...(input.targetRecord === undefined ? {} : { targetRecord: input.targetRecord }),
         request,
@@ -2657,6 +2669,7 @@ export class ComputerUseController {
         grantId: input.grantId,
         grantedMaxMode: input.grantedMaxMode,
         timer,
+        generationTimer,
         settle,
       };
       this.deps.publishGrantRequest?.(request);
@@ -2676,7 +2689,7 @@ export class ComputerUseController {
   private closeAppGrantCard(
     requestId: string,
     reasonCode: ComputerAccessRequestReasonCode,
-    noticeCode: 'timed_out' | 'withdrawn' | 'identity_changed',
+    noticeCode: NonNullable<ComputerAppGrantRequest['noticeCode']>,
   ): void {
     const pending = this.pendingAppGrantRequest;
     if (pending === null || pending.request.id !== requestId) return;
@@ -2685,6 +2698,7 @@ export class ComputerUseController {
     );
     this.pendingAppGrantRequest = null;
     clearTimeout(pending.timer);
+    clearInterval(pending.generationTimer);
     const canceled = computerAppGrantRequestSchema.parse({
       ...pending.request,
       state: 'canceled',
@@ -2780,6 +2794,10 @@ export class ComputerUseController {
       this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
       return;
     }
+    if (pending.targetRecord !== undefined && !this.targetRecordCurrent(pending.targetRecord)) {
+      this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'generation_changed');
+      return;
+    }
     // Two comparisons, because they cover different things. The facts are what the card *showed*;
     // the identity is what the card was *about*, including the path — which a signed macOS
     // application's digests all leave out, so a row re-pointed at another copy of the same signed
@@ -2823,6 +2841,7 @@ export class ComputerUseController {
     );
     this.pendingAppGrantRequest = null;
     clearTimeout(pending.timer);
+    clearInterval(pending.generationTimer);
     this.deps.publishGrantRequest?.(
       computerAppGrantRequestSchema.parse({
         ...pending.request,
@@ -5112,6 +5131,11 @@ export class ComputerUseController {
       turnId: computerUseAuditBindingDigest(record.turnId),
       sessionId: computerUseAuditBindingDigest(sessionId),
       profileId: record.profile.id,
+      ...(record.agent?.candidateProfile === undefined
+        ? {}
+        : {
+            candidateProfileDisplayName: sanitizeUntrustedTargetLabel(record.profile.label),
+          }),
       profileRevision: record.profile.revision,
       appIdentityDigest: record.status.appIdentityDigest,
       windowIdentityDigest: record.status.windowIdentityDigest,
@@ -5640,6 +5664,11 @@ export class ComputerUseController {
       turnId: computerUseAuditBindingDigest(record.turnId),
       sessionId: computerUseAuditBindingDigest(sessionId),
       profileId: record.profile.id,
+      ...(record.agent?.candidateProfile === undefined
+        ? {}
+        : {
+            candidateProfileDisplayName: sanitizeUntrustedTargetLabel(record.profile.label),
+          }),
       profileRevision: record.profile.revision,
       appIdentityDigest: record.status.appIdentityDigest,
       windowIdentityDigest: record.status.windowIdentityDigest,
@@ -5910,6 +5939,11 @@ export class ComputerUseController {
       turnId: computerUseAuditBindingDigest(record.turnId),
       sessionId: computerUseAuditBindingDigest(record.status.sessionId),
       profileId: record.profile.id,
+      ...(record.agent?.candidateProfile === undefined
+        ? {}
+        : {
+            candidateProfileDisplayName: sanitizeUntrustedTargetLabel(record.profile.label),
+          }),
       profileRevision: record.profile.revision,
       appIdentityDigest: record.status.appIdentityDigest,
       windowIdentityDigest: record.status.windowIdentityDigest,
