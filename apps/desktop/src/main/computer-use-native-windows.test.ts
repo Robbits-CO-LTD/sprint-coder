@@ -67,6 +67,20 @@ describe('P3d interaction authority', () => {
     expect(delivery.blocked('human-new-session')).toBe(false);
     expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
   });
+  it('BG03_lost_event_cannot_bypass_epoch: a held queue that overflows before bind fails closed', () => {
+    const delivery = new WindowsInteractionEvents();
+    for (let sequence = 1; sequence <= 9; sequence += 1)
+      delivery.hold({ ...event, sequence }, 2, true);
+    expect(delivery.bind(binding)).toEqual([]);
+    expect(delivery.blocked(binding.sessionId)).toBe(true);
+  });
+  it('BG03_lost_event_cannot_bypass_epoch: a start that ends unbound leaves no held event behind', () => {
+    const delivery = new WindowsInteractionEvents();
+    delivery.hold(event, 2, true);
+    delivery.discardUnbound(binding.sessionId);
+    expect(delivery.bind(binding)).toEqual([]);
+    expect(delivery.blocked(binding.sessionId)).toBe(false);
+  });
   it('RT_end_first_cannot_unlock_legacy_start: rejects unknown id, duplicates and reversed events', () => {
     const delivery = new WindowsInteractionEvents();
     delivery.bind(binding);

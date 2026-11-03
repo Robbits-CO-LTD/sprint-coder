@@ -1361,6 +1361,7 @@ class WindowsComputerUseHelperClient {
           this.starts.get(owner.sessionId) === owner
         ) {
           this.starts.delete(owner.sessionId);
+          this.interactionEvents.discardUnbound(owner.sessionId);
           if (!owner.everSent) this.lifetimes.delete(owner.sessionId);
         }
       }

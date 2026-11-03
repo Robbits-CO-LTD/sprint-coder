@@ -64,6 +64,8 @@ export class WindowsInteractionEvents {
    * begin_result coalesced in the same pipe read). Replayed through `receive` once it is.
    */
   private readonly held = new Map<string, HeldInteractionEvent[]>();
+  /** Sessions whose held queue overflowed: one lost event must still fail them closed. */
+  private readonly overflowed = new Set<string>();
   /** Returns the held events that the new binding accepted, in order, for the caller to deliver. */
   bind(binding: WindowsInteractionBinding, interactionEpoch = 0): WindowsInteractionEvent[] {
     const previous = this.sessions.get(binding.sessionId);
@@ -81,6 +83,12 @@ export class WindowsInteractionEvents {
         tripEnded: false,
         revoked: false,
       });
+    if (this.overflowed.delete(binding.sessionId)) {
+      // An event was dropped before this binding existed; native will not resend it.
+      this.held.delete(binding.sessionId);
+      this.sessions.get(binding.sessionId)!.revoked = true;
+      return [];
+    }
     return this.replay(binding.sessionId, () => true);
   }
   begin(binding: WindowsInteractionBinding, roundTripId: string): boolean {
@@ -135,7 +143,11 @@ export class WindowsInteractionEvents {
           event.roundTripId === current.pendingTrip;
     if (!waiting) return;
     const queue = this.held.get(event.sessionId) ?? [];
-    if (queue.length >= MAX_HELD_EVENTS) return;
+    if (queue.length >= MAX_HELD_EVENTS) {
+      if (current === undefined) this.overflowed.add(event.sessionId);
+      else current.revoked = true;
+      return;
+    }
     queue.push({ event, generation });
     this.held.set(event.sessionId, queue);
   }
@@ -150,6 +162,13 @@ export class WindowsInteractionEvents {
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.held.delete(sessionId);
+    this.overflowed.delete(sessionId);
+  }
+  /** A start that ended without a binding leaves nothing behind for a later start to replay. */
+  discardUnbound(sessionId: string): void {
+    if (this.sessions.has(sessionId)) return;
+    this.held.delete(sessionId);
+    this.overflowed.delete(sessionId);
   }
   receive(event: WindowsInteractionEvent, generation: number): boolean {
     const current = this.sessions.get(event.sessionId);
