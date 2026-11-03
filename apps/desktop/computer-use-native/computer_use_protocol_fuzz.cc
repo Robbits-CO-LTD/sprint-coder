@@ -6,6 +6,7 @@
 #include "computer_use_native_identity.h"
 #include "computer_use_effect_classifier.h"
 #include "computer_use_effect_shadow.h"
+#include "computer_use_origin_classify_test.h"
 #include "computer_use_windows_shadow.h"
 #include "computer_use_windows_risk_terms.h"
 #include "computer_use_windows_approval_measurement.h"
@@ -9502,6 +9503,7 @@ bool CheckStrictInterlock() {
 }
 
 int main() {
+  if (!CheckOriginClassification()) return 1;
   if (!CheckApprovalRoundTripState()) return 1;
   if (!CheckBackgroundMonitor()) return 1;
   if (!Check(CheckBackgroundInputWire(), "background-input-wire")) return 1;
