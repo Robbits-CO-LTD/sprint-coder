@@ -1,6 +1,7 @@
 /**
  * #988 N3 PR1: kill-stop result types, generation events and the pure §2.6 state-table kernel.
- * Not connected to product paths. Source of truth:
+ * PR5a connects dispatch recording/response only when Host storage is injected (default off).
+ * Helper lifetime/exit integration remains deferred. Source of truth:
  * tasks/designs/adr-computer-use-windows-kill-stop-20261102.md §2.2–§2.6, §3.1, §4.1, §6.1.
  *
  * This module is a leaf: it imports nothing at runtime, so later host/client PRs can import it
@@ -126,12 +127,20 @@ export type WindowsStorageHold = Readonly<{
   targets: readonly WindowsTargetIdentity[] | 'unknown';
   changes: readonly RowChange[];
   releaseTarget?: WindowsTargetIdentity;
+  /** Re-write these quarantines if an obsolete release was already persisted. */
+  quarantinesToRestore?: readonly WindowsTargetQuarantine[];
+  /** A deadline or exception cannot prove that an earlier write left storage unchanged. */
+  writeUncertain?: true;
   /**
    * Set on a pending release once newer isolation evidence for `releaseTarget` lands (a K-1
    * quarantine, a K-3 / exit / restore transfer). The release was decided before that evidence, so
-   * its retry must not clear it: retry_storage drops the hold and keeps the quarantine
-   * (release_superseded, fail-closed). Kept on the hold rather than as a version column on the
+   * its retry must not clear it: retry_storage/before_write refuses the release before I/O.
+   * If quarantine evidence exists, retain a restoration hold even after a failed/ambiguous write.
+   * Kept on the hold rather than as a version column on the
    * quarantine, whose stored row holds only pid, creation time and reason (§2.2 の 5).
+   * Before that evidence lands, an isolation hold for the same target (or unknown targets)
+   * also supersedes the release on retry. This closes the window where an older release retries
+   * before a pending K-1 write, independently of hold order.
    */
   releaseSuperseded?: true;
   /** Native blockers released only after this write lands (§3.1 の 5: transfer first). */
@@ -183,6 +192,14 @@ type ResponseOutcome =
  * Main facts, not untrusted wire objects or a persistence implementation.
  */
 export type WindowsGenerationEvent =
+  /** Host proves this written request never reached socket.write; not a helper response. */
+  | Readonly<{
+      kind: 'dispatch_canceled';
+      helperGeneration: number;
+      sessionId: string;
+      requestId: string;
+      storage: StorageWrite;
+    }>
   | Readonly<{
       kind: 'kill_requested' | 'exit_wait_exceeded' | 'pipe_closed';
       helperGeneration: number;
@@ -204,6 +221,7 @@ export type WindowsGenerationEvent =
   | (Readonly<{
       kind: 'response';
       helperGeneration: number;
+      sessionId: string;
       requestId: string;
       storage: StorageWrite;
     }> &
@@ -212,6 +230,7 @@ export type WindowsGenerationEvent =
   | Readonly<{
       kind: 'input_unconfirmed';
       helperGeneration: number;
+      sessionId: string;
       requestId: string;
       cause: WindowsUnconfirmedInputCause;
       storage: StorageWrite;
@@ -250,7 +269,12 @@ export type WindowsStopEvent =
       holdId: string;
       targets: readonly WindowsTargetIdentity[] | 'unknown';
     }>
-  | Readonly<{ kind: 'retry_storage'; holdId: string; status: 'failed' | 'written' }>
+  | Readonly<{
+      kind: 'retry_storage';
+      holdId: string;
+      status: 'before_write' | 'failed' | 'written';
+      uncertain?: true;
+    }>
   | Readonly<{
       kind: 'restore_read';
       holdId: string;
@@ -372,6 +396,24 @@ function sameRow(a: WindowsLedgerRow, b: WindowsLedgerRow): boolean {
     a.requestId === b.requestId
   );
 }
+/**
+ * §2.2: a row is keyed by (helper generation, session, request). The wire request id alone is not
+ * unique across sessions, so every row lookup uses the whole key. before_dispatch refuses a second
+ * row with the same key; finding one here is an invariant violation (fail-closed).
+ */
+function ledgerRow(
+  rows: readonly WindowsLedgerRow[],
+  key: Readonly<{ helperGeneration: number; sessionId: string; requestId: string }>,
+): WindowsLedgerRow | undefined {
+  const matches = rows.filter(
+    (row) =>
+      row.helperGeneration === key.helperGeneration &&
+      row.sessionId === key.sessionId &&
+      row.requestId === key.requestId,
+  );
+  if (matches.length > 1) throw new Error('Duplicate ledger request');
+  return matches[0];
+}
 function validIdentity(identity: WindowsTargetIdentity): boolean {
   return Number.isSafeInteger(identity.pid) && identity.pid > 0 && identity.creationTime.length > 0;
 }
@@ -435,6 +477,7 @@ function applyChanges(state: WindowsStopState, changes: readonly RowChange[]): W
 function applyWritten(
   state: WindowsStopState,
   write: Readonly<{
+    operation?: WindowsStorageOperation;
     changes: readonly RowChange[];
     releaseTarget?: WindowsTargetIdentity;
     releaseBlockers?: BlockerRelease;
@@ -444,6 +487,17 @@ function applyWritten(
   const { releaseTarget, releaseBlockers } = write;
   return {
     ...next,
+    // A successful generation transfer subsumes its older receipt transfers.
+    holds:
+      write.operation === 'exit_transfer'
+        ? next.holds.filter(
+            (hold) =>
+              hold.operation !== 'receipt_transfer' ||
+              !hold.changes.every(
+                (change) => change.row.helperGeneration === releaseBlockers?.helperGeneration,
+              ),
+          )
+        : next.holds,
     quarantines:
       releaseTarget === undefined
         ? next.quarantines
@@ -522,7 +576,17 @@ function persist(
       ? {}
       : { freshSessionRequirements: input.freshSessionRequirements }),
   };
-  return { state: { ...state, holds: [...state.holds, hold] }, applied: false, holdId: hold.id };
+  // R19b: verified receipt releases native ownership; the hold fences only its targets.
+  const held =
+    input.operation === 'receipt_transfer'
+      ? applyWritten(state, {
+          changes: [],
+          ...(input.releaseBlockers === undefined
+            ? {}
+            : { releaseBlockers: input.releaseBlockers }),
+        })
+      : state;
+  return { state: { ...held, holds: [...held.holds, hold] }, applied: false, holdId: hold.id };
 }
 
 function foregroundDiscards(changes: readonly RowChange[]): WindowsStopDiagnostic[] {
@@ -706,6 +770,7 @@ export function decideWindowsStop(
     if (
       event.kind !== 'dispatch_gate' &&
       event.kind !== 'before_dispatch' &&
+      event.kind !== 'dispatch_canceled' &&
       (event.helperGeneration < state.helperGeneration || !helperMayBeAlive(state))
     ) {
       return decision;
@@ -715,6 +780,19 @@ export function decideWindowsStop(
     (row) => row.helperGeneration === state.helperGeneration,
   );
   switch (event.kind) {
+    case 'dispatch_canceled': {
+      const row = ledgerRow(state.rows, event);
+      if (row === undefined) return decision;
+      // Cancel only this unsent row. An exit classification or quarantine is never rolled back.
+      return {
+        ...decision,
+        state: persist(state, event.storage, {
+          operation: 'response',
+          recovery: 'reflect_response',
+          changes: [{ row, action: 'delete' }],
+        }).state,
+      };
+    }
     case 'pipe_closed':
       return decision;
     case 'kill_requested':
@@ -850,7 +928,7 @@ export function decideWindowsStop(
     case 'response': {
       if (event.accepted !== (event.status !== 'rejected'))
         throw new Error('Response acceptance contradicts its status');
-      const row = generationRows.find((item) => item.requestId === event.requestId);
+      const row = ledgerRow(state.rows, event);
       if (row === undefined) return refuse('no_control_ledger_row');
       const background = row.inputPath === 'background_semantic';
       const confirmed = event.status !== 'effect_unconfirmed';
@@ -873,7 +951,7 @@ export function decideWindowsStop(
       };
     }
     case 'input_unconfirmed': {
-      const row = generationRows.find((item) => item.requestId === event.requestId);
+      const row = ledgerRow(state.rows, event);
       // Discovery cannot supply a control identity (omitted combination).
       if (row === undefined) return refuse('no_control_ledger_row');
       const background = row.inputPath === 'background_semantic';
@@ -998,16 +1076,61 @@ export function decideWindowsStop(
     case 'retry_storage': {
       const hold = state.holds.find((item) => item.id === event.holdId);
       if (hold === undefined) throw new Error('Unknown storage hold');
-      if (event.status === 'failed') return { ...decision, awaitingHoldId: hold.id };
+      if (event.status === 'failed')
+        return {
+          ...decision,
+          state: event.uncertain
+            ? {
+                ...state,
+                holds: state.holds.map((item) =>
+                  item.id === hold.id ? { ...item, writeUncertain: true } : item,
+                ),
+              }
+            : state,
+          awaitingHoldId: hold.id,
+        };
       // A read succeeding alone is not proof that restoration has completed.
       if (hold.recovery === 'restore_store') return refuse('restore_requires_rows');
-      // Newer isolation evidence for the target landed after this release was decided: drop the
-      // release and keep the quarantine (fail-closed). No fresh session is granted.
-      if (hold.releaseSuperseded === true) {
+      // Newer isolation evidence invalidates an older release. No fresh session is granted.
+      const releaseTarget = hold.releaseTarget;
+      const pendingEvidence =
+        releaseTarget !== undefined &&
+        state.holds.some(
+          (item) =>
+            item.operation !== 'release' &&
+            (item.changes.some(
+              (change) => change.action === 'transfer' || change.action === 'quarantine',
+            ) ||
+              ['transfer_rows', 'write_quarantine', 'restore_store'].includes(item.recovery)) &&
+            (item.targets === 'unknown' ||
+              item.targets.some((target) => sameTarget(target, releaseTarget))),
+        );
+      if (hold.releaseSuperseded === true || pendingEvidence) {
+        const remaining = state.holds.filter((item) => item.id !== hold.id);
+        const quarantines = state.quarantines.filter(
+          (q) => releaseTarget !== undefined && sameTarget(q.identity, releaseTarget),
+        );
+        // A writer that missed the pre-write gate may already have deleted the stored quarantine.
+        // Keep a concrete restoration obligation even after receipt removed the source rows.
+        const restoration: WindowsStorageHold[] =
+          quarantines.length > 0
+            ? [
+                {
+                  id: hold.id,
+                  operation: 'background_quarantine',
+                  recovery: 'write_quarantine',
+                  targets: quarantines.map((q) => q.identity),
+                  changes: [],
+                  quarantinesToRestore: quarantines,
+                },
+              ]
+            : [];
         return refuse('release_superseded', {
-          state: { ...state, holds: state.holds.filter((item) => item.id !== hold.id) },
+          state: { ...state, holds: [...remaining, ...restoration] },
+          awaitingHoldId: restoration.length > 0 ? hold.id : null,
         });
       }
+      if (event.status === 'before_write') return { ...decision, awaitingHoldId: hold.id };
       const next = applyWritten(state, hold);
       const resolved: WindowsStopDecision = {
         ...decision,

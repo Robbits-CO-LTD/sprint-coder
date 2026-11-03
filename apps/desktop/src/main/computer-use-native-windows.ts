@@ -35,6 +35,10 @@ import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
   ComputerUseDiscoveryNotSubmittedError,
   type ComputerUseNativeAddon,
+  type WindowsDispatchCallbacks,
+  type WindowsCloseCallbacks,
+  type WindowsCloseConfirmation,
+  type WindowsTerminationCallbacks,
 } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
@@ -128,12 +132,14 @@ type PendingRequest = Readonly<{
   sessionId: ComputerUseNativeFrameId;
   /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
   stopsSession: boolean;
+  retainAfterKill: boolean;
   activityGeneration: number;
   helperGeneration: number;
   responseType: ComputerUseNativeMessageType;
   allowBinary: boolean;
   semantic?: SemanticAttempt;
   ownerSession?: string;
+  dispatchCallbacks?: WindowsDispatchCallbacks;
 }>;
 
 export function createWindowsComputerUseNativeAddon(
@@ -145,6 +151,7 @@ export function createWindowsComputerUseNativeAddon(
   const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
     probe: () => probe,
+    dispatchLedgerSupported: true,
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
@@ -214,7 +221,7 @@ export function createWindowsComputerUseNativeAddon(
         `readNodeValue:${stringField(value, 'requestId')}`,
       );
     },
-    dispatch: (input) => {
+    dispatch: (input, callbacks) => {
       const value = record(input);
       return client.call(
         'dispatch',
@@ -222,6 +229,7 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         stringField(value, 'requestId'),
+        callbacks,
       );
     },
     cancel: (input) => {
@@ -261,10 +269,16 @@ export function createWindowsComputerUseNativeAddon(
     cancelUnsubmittedStart: (sessionId) => client.cancelUnsubmittedStart(sessionId),
     hasUnconfirmedSemanticInputs: () => client.hasUnconfirmedSemanticInputs(),
     confirmSessionClosed: (receipt, evidence) => client.confirmSessionClosed(receipt, evidence),
+    configureCloseLedger: (callbacks) => client.configureCloseLedger(callbacks),
+    configureWindowsTermination: (callbacks) => client.configureWindowsTermination(callbacks),
+    cleanupWindowsGeneration: (generation) => client.cleanupWindowsGeneration(generation),
+    requestWindowsTermination: () => client.requestWindowsTermination(),
+    reevaluateIdle: () => client.reevaluateIdle(),
   });
 }
 
 type StartTransmission = {
+  helper: number | null;
   sessionId: string;
   stopped: boolean;
   everSent: boolean;
@@ -297,7 +311,8 @@ type SemanticAttempt = {
   submitted: boolean;
 };
 type SemanticCloseProof = {
-  owner: SemanticTransmission;
+  owner: SemanticTransmission | undefined;
+  lifetime: object | undefined;
   receipt: ComputerUseNativeInputReceipt;
   helper: number;
   activity: number;
@@ -316,11 +331,23 @@ function semanticNotSubmitted(): Error {
   });
 }
 
+type HelperGeneration = {
+  id: number;
+  child: ChildProcess;
+  socket: Socket | null;
+  decoder: { readBuffer: Buffer };
+  killRequested: boolean;
+  cause: 'stop' | 'crash' | 'abortTransport';
+  exited: boolean;
+  timer?: NodeJS.Timeout;
+};
+
 class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly preparingDispatches = new Set<string>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
   private activityGeneration = 0;
@@ -333,6 +360,131 @@ class WindowsComputerUseHelperClient {
   // Object identity binds Host's confirmation to a received response. A later close reply must not
   // overwrite the earlier evidence that Host cached while independent discovery was still stopping.
   private readonly semanticCloseProofs = new WeakMap<object, SemanticCloseProof>();
+  private closeLedger: WindowsCloseCallbacks | undefined;
+  private readonly lifetimes = new Map<string, object>();
+  private readonly completedLifetimes = new Map<string, object>();
+  private readonly closeConfirmations = new WeakMap<object, Promise<WindowsCloseConfirmation>>();
+  private readonly persistedLifetimes = new WeakSet<object>();
+  private termination: WindowsTerminationCallbacks | undefined;
+  private readonly generations = new Map<number, HelperGeneration>();
+  private readonly sessionGenerations = new Map<string, number>();
+
+  private bindOwners(generation: number): void {
+    if (this.termination === undefined) return;
+    const record = this.generations.get(generation);
+    if (record === undefined || record.exited || record.killRequested) return;
+    for (const owner of this.starts.values()) {
+      if (owner.helper !== null) continue;
+      owner.helper = generation;
+      this.sessionGenerations.set(owner.sessionId, generation);
+      // Evict only finished sessions: a live start owner must keep its generation so Stop reaches it.
+      // Live owners are capped at 16 starts, so an evictable entry always exists past 128.
+      if (this.sessionGenerations.size > 128)
+        for (const sessionId of this.sessionGenerations.keys())
+          if (!this.starts.has(sessionId)) {
+            this.sessionGenerations.delete(sessionId);
+            break;
+          }
+      this.termination.owned?.(generation, 'session', owner.sessionId);
+    }
+    for (const owner of this.discoveries.values()) {
+      if (owner.helper !== null) continue;
+      owner.helper = generation;
+      this.termination.owned?.(generation, 'discovery', owner.id);
+    }
+  }
+
+  private assertSessionGeneration(sessionId: string): void {
+    if (this.termination === undefined) return;
+    const generation = this.sessionGenerations.get(sessionId);
+    const record = generation === undefined ? undefined : this.generations.get(generation);
+    if (
+      record === undefined ||
+      record.exited ||
+      record.killRequested ||
+      generation !== this.helperGeneration
+    )
+      throw new Error('native_stop_unconfirmed');
+  }
+
+  configureWindowsTermination(callbacks: WindowsTerminationCallbacks): void {
+    this.termination = callbacks;
+  }
+
+  requestWindowsTermination(): void {
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation !== undefined)
+      this.requestTermination(generation, new Error('native_stop_unconfirmed'), 'stop');
+  }
+
+  cleanupWindowsGeneration(generation: number): void {
+    const record = this.generations.get(generation);
+    if (record === undefined || !record.exited) return;
+    for (const [id, owner] of this.starts) {
+      if (owner.helper !== generation) continue;
+      owner.stopped = true;
+      owner.closed = true;
+      this.starts.delete(id);
+    }
+    for (const [id, owner] of this.discoveries) {
+      if (owner.helper !== generation) continue;
+      owner.stopped = true;
+      owner.closed = true;
+      this.discoveries.delete(id);
+    }
+    for (const [id, owner] of this.semantic) {
+      if (owner.helper !== generation) continue;
+      owner.confirmed = true;
+      owner.uncertain = false;
+      this.semantic.delete(id);
+    }
+    for (const [id, helper] of this.sessionGenerations) {
+      if (helper !== generation) continue;
+      this.sessionGenerations.delete(id);
+      this.lifetimes.delete(id);
+      this.completedLifetimes.delete(id);
+    }
+    clearTimeout(record.timer);
+    record.socket?.destroy();
+    record.decoder.readBuffer = Buffer.alloc(0);
+    this.generations.delete(generation);
+    if (this.child === record.child) this.child = null;
+    if (this.socket === record.socket) this.socket = null;
+  }
+
+  private requestTermination(
+    record: HelperGeneration,
+    error: Error,
+    cause: 'stop' | 'abortTransport' = 'abortTransport',
+  ): void {
+    if (record.exited || record.killRequested) return;
+    record.killRequested = true;
+    record.cause = cause;
+    this.termination!.event(record.id, 'kill_requested');
+    record.timer = setTimeout(() => {
+      if (!record.exited) this.termination!.event(record.id, 'exit_wait_exceeded');
+    }, 2_000);
+    // A valid close already in flight may still refine the exit ledger (R1a).
+    this.failAll(error, 'abortTransport', cause === 'stop');
+    if (cause !== 'stop') {
+      record.socket?.destroy();
+      if (this.socket === record.socket) this.socket = null;
+    }
+    // Neither a successful kill nor a failed kill proves that the process has exited.
+    try {
+      record.child.kill();
+    } catch {
+      // The process remains owned until its exit listener runs.
+    }
+  }
+
+  configureCloseLedger(callbacks: WindowsCloseCallbacks): void {
+    this.closeLedger = callbacks;
+  }
+
+  reevaluateIdle(): void {
+    this.shutdownIfIdle();
+  }
 
   hasUnconfirmedSemanticInputs(): boolean {
     return [...this.semantic.values()].some(
@@ -340,27 +492,89 @@ class WindowsComputerUseHelperClient {
     );
   }
 
-  confirmSessionClosed(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void {
+  confirmSessionClosed(
+    receipt: ComputerUseNativeInputReceipt,
+    evidence: unknown,
+  ): void | Promise<WindowsCloseConfirmation> {
     const owner = this.semantic.get(receipt.sessionId);
-    if (owner === undefined) return;
+    if (owner === undefined && this.closeLedger === undefined) return;
     const proof =
       typeof evidence === 'object' && evidence !== null
         ? this.semanticCloseProofs.get(evidence)
         : undefined;
     if (
       proof === undefined ||
-      proof.owner !== owner ||
-      proof.helper !== owner.helper ||
+      (proof.owner !== owner && !(owner === undefined && proof.owner?.confirmed)) ||
+      (owner !== undefined && proof.helper !== owner.helper) ||
+      (this.closeLedger !== undefined &&
+        (proof.lifetime === undefined ||
+          proof.lifetime !==
+            (this.lifetimes.get(receipt.sessionId) ??
+              this.completedLifetimes.get(receipt.sessionId)))) ||
       proof.helper !== this.helperGeneration ||
       proof.receipt.sessionId !== receipt.sessionId ||
       proof.receipt.cancelEpoch !== receipt.cancelEpoch ||
       proof.receipt.inputAttemptCount !== receipt.inputAttemptCount
     )
       throw new Error('native_stop_unconfirmed');
-    owner.confirmed = true;
-    owner.uncertain = false;
-    if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
-    this.shutdownWhenIdle(proof.activity, proof.helper, owner.sessionId);
+    const persisted = () => {
+      if (
+        this.termination !== undefined &&
+        (this.generations.get(proof.helper)?.killRequested !== false ||
+          this.generations.get(proof.helper)?.exited !== false)
+      )
+        return;
+      if (
+        this.closeLedger !== undefined &&
+        proof.lifetime !== this.lifetimes.get(receipt.sessionId)
+      )
+        return;
+      if (proof.lifetime !== undefined) this.persistedLifetimes.add(proof.lifetime);
+      if (proof.lifetime !== undefined) {
+        this.lifetimes.delete(receipt.sessionId);
+        this.sessionGenerations.delete(receipt.sessionId);
+        this.completedLifetimes.set(receipt.sessionId, proof.lifetime);
+        // Match the bounded start-owner history; evicted receipts cannot confirm a lifetime.
+        if (this.completedLifetimes.size > 128)
+          this.completedLifetimes.delete(this.completedLifetimes.keys().next().value!);
+      }
+      if (owner !== undefined) {
+        owner.confirmed = true;
+        owner.uncertain = false;
+        if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
+      }
+      this.shutdownWhenIdle(proof.activity, proof.helper, receipt.sessionId);
+    };
+    if (this.closeLedger !== undefined && proof.lifetime !== undefined) {
+      if (this.persistedLifetimes.has(proof.lifetime))
+        return Promise.resolve({ status: 'confirmed' });
+      let confirmation = this.closeConfirmations.get(proof.lifetime);
+      if (confirmation === undefined) {
+        confirmation = this.closeLedger.verified(proof.helper, receipt.sessionId, persisted).then(
+          (result) => {
+            if (
+              owner !== undefined &&
+              (this.termination === undefined ||
+                (this.generations.get(proof.helper)?.killRequested === false &&
+                  this.generations.get(proof.helper)?.exited === false))
+            ) {
+              owner.confirmed = true;
+              owner.uncertain = false;
+              owner.closeCandidate = false;
+              if (owner.attempts.size === 0) this.semantic.delete(owner.sessionId);
+            }
+            return result;
+          },
+          (error: unknown) => {
+            if (proof.lifetime !== undefined) this.closeConfirmations.delete(proof.lifetime);
+            throw error;
+          },
+        );
+        this.closeConfirmations.set(proof.lifetime, confirmation);
+      }
+      return confirmation;
+    }
+    persisted();
   }
 
   private markSemanticUncertain(pending: PendingRequest): void {
@@ -430,6 +644,7 @@ class WindowsComputerUseHelperClient {
   }
 
   private shutdownIfIdle(): void {
+    if (this.closeLedger?.blocked(this.helperGeneration)) return;
     if (this.hasUnconfirmedSemanticInputs()) return;
     for (const owner of this.discoveries.values())
       if (
@@ -508,10 +723,17 @@ class WindowsComputerUseHelperClient {
       attempts: new Set([attempt]),
     };
     this.discoveries.set(id, owner);
+    if (this.socket !== null) this.bindOwners(this.helperGeneration);
     this.activityGeneration += 1;
     this.idleShutdownPending = false;
     try {
       await this.ensureConnected();
+      this.bindOwners(this.helperGeneration);
+      if (
+        this.termination !== undefined &&
+        (owner.closed || owner.helper !== this.helperGeneration)
+      )
+        throw new ComputerUseDiscoveryNotSubmittedError('Discovery generation ended');
       if (this.hasUnconfirmedSemanticInputs())
         throw new ComputerUseDiscoveryNotSubmittedError('Unconfirmed semantic input remains');
       if (!this.discoveryHandshakeSupported)
@@ -578,6 +800,8 @@ class WindowsComputerUseHelperClient {
       if (!owner.everSent)
         throw new ComputerUseDiscoveryNotSubmittedError('Discovery was never sent');
       // Reconnecting would query a different helper, which cannot prove this operation ended.
+      if (owner.helper !== null && this.generations.get(owner.helper)?.killRequested)
+        throw new Error('native_stop_unconfirmed');
       if (this.socket === null || owner.helper !== this.helperGeneration)
         throw new Error('Discovery helper generation is unavailable');
       const result = await this.sendConnected(
@@ -633,7 +857,10 @@ class WindowsComputerUseHelperClient {
     input: NativeRecord,
     sessionKey: string | undefined,
     requestKey: string | undefined,
+    dispatchCallbacks?: WindowsDispatchCallbacks,
   ): Promise<unknown> {
+    if (sessionKey !== undefined && operation !== 'start_session')
+      this.assertSessionGeneration(sessionKey);
     if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
       this.assertSemanticAvailable();
     let owner: StartTransmission | undefined;
@@ -645,6 +872,7 @@ class WindowsComputerUseHelperClient {
       if (owner === undefined) {
         if (this.starts.size >= 16) throw new Error('Unconfirmed native starts remain');
         owner = {
+          helper: null,
           sessionId: sessionKey,
           stopped: false,
           everSent: false,
@@ -652,6 +880,11 @@ class WindowsComputerUseHelperClient {
           attempts: new Set(),
         };
         this.starts.set(sessionKey, owner);
+        if (this.socket !== null) this.bindOwners(this.helperGeneration);
+        if (this.closeLedger !== undefined) {
+          this.completedLifetimes.delete(sessionKey);
+          this.lifetimes.set(sessionKey, {});
+        }
       }
       attempt = Symbol('native-start-send');
       owner.attempts.add(attempt);
@@ -697,6 +930,8 @@ class WindowsComputerUseHelperClient {
     try {
       await this.ensureConnected();
       helper = this.helperGeneration;
+      this.bindOwners(helper);
+      if (sessionKey !== undefined) this.assertSessionGeneration(sessionKey);
       if (operation === 'read_node_value' && !this.artifactReadHandshakeSupported)
         return { ok: false };
       if (!isComputerUseStopOperation(operation) && operation !== 'check_target_identity')
@@ -739,28 +974,38 @@ class WindowsComputerUseHelperClient {
           }
         },
         semantic,
+        dispatchCallbacks,
       );
+      if (this.termination !== undefined && this.generations.get(helper)?.exited !== false)
+        throw new Error('native_stop_unconfirmed');
       if (closes && sessionKey !== undefined) {
         const receipt = computerUseNativeCloseReceiptSchema.safeParse(result);
         const closing = this.starts.get(sessionKey);
         const inputOwner = this.semantic.get(sessionKey);
         if (
-          inputOwner !== undefined &&
-          !inputOwner.confirmed &&
+          ((inputOwner !== undefined && !inputOwner.confirmed) || this.closeLedger !== undefined) &&
           receipt.success &&
           receipt.data.sessionId === sessionKey &&
           (operation !== 'close_session' || receipt.data.cancelEpoch === input['cancelEpoch']) &&
-          inputOwner.helper === helper &&
+          (inputOwner === undefined || inputOwner.helper === helper) &&
           typeof result === 'object' &&
           result !== null
         ) {
-          inputOwner.closeCandidate = true;
+          if (inputOwner !== undefined) inputOwner.closeCandidate = true;
           this.semanticCloseProofs.set(result, {
             owner: inputOwner,
+            lifetime: this.lifetimes.get(sessionKey) ?? this.completedLifetimes.get(sessionKey),
             receipt: receipt.data,
             helper,
             activity,
           });
+          const lifetime = this.lifetimes.get(sessionKey);
+          if (
+            lifetime !== undefined &&
+            !this.persistedLifetimes.has(lifetime) &&
+            !this.closeConfirmations.has(lifetime)
+          )
+            this.closeLedger?.received(helper, sessionKey);
         }
         if (closing !== undefined && receipt.success && receipt.data.sessionId === sessionKey) {
           closing.closed = true;
@@ -794,6 +1039,11 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.termination !== undefined) {
+      await this.termination.prepare();
+      if ([...this.generations.values()].some((record) => record.killRequested && !record.exited))
+        throw new Error('native_stop_unconfirmed');
+    }
     if (this.socket === null && this.hasUnconfirmedSemanticInputs())
       throw new Error('native_stop_unconfirmed');
     if (this.connecting !== null) {
@@ -808,6 +1058,8 @@ class WindowsComputerUseHelperClient {
   }
 
   private async connect(): Promise<void> {
+    if (this.termination !== undefined && this.generations.size >= 128)
+      throw new Error('native_stop_unconfirmed');
     this.helperGeneration += 1;
     this.discoveryHandshakeSupported = false;
     this.artifactReadHandshakeSupported = false;
@@ -834,13 +1086,44 @@ class WindowsComputerUseHelperClient {
       throw error;
     }
     this.child = child;
+    const generation: HelperGeneration | undefined =
+      this.termination === undefined || child.pid === undefined
+        ? undefined
+        : {
+            id: this.helperGeneration,
+            child,
+            socket: null,
+            decoder: { readBuffer: Buffer.alloc(0) },
+            killRequested: false,
+            cause: 'crash',
+            exited: false,
+          };
+    if (generation !== undefined) {
+      this.generations.set(generation.id, generation);
+      this.termination!.started(generation.id);
+      this.bindOwners(generation.id);
+    }
     child.once('error', () => {
       // A failed spawn has no process and does not emit exit.
       if (child.pid === undefined) removeHelperTemp();
     });
     child.once('exit', (code, signal) => {
       removeHelperTemp();
+      if (generation !== undefined) {
+        if (generation.exited) return;
+        generation.exited = true;
+        clearTimeout(generation.timer);
+        if (this.child === child) {
+          this.failAll(new Error('Computer Use Windows helper exited'));
+          generation.socket?.destroy();
+          this.socket = null;
+        }
+        this.termination!.exited(generation.id, generation.cause);
+        return;
+      }
       if (this.child !== child) return;
+      this.lifetimes.clear();
+      this.completedLifetimes.clear();
       this.failAll(
         new Error(`Computer Use Windows helper exited: ${String(code ?? signal ?? 'unknown')}`),
       );
@@ -857,26 +1140,52 @@ class WindowsComputerUseHelperClient {
         attestSpawnedWindowsComputerUseHelper(child.pid),
       );
     } catch (error) {
-      child.kill();
-      if (this.child === child) this.child = null;
+      if (generation !== undefined)
+        this.requestTermination(
+          generation,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      else {
+        if (child.pid !== undefined) child.kill();
+        if (this.child === child) this.child = null;
+      }
       throw error;
     }
     child.unref();
 
     let lastFailure: unknown = null;
     for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (generation?.exited || generation?.killRequested) break;
       try {
         const socket = await connectPipe(pipePath);
+        if (generation?.exited || generation?.killRequested) {
+          socket.destroy();
+          throw new Error('Computer Use Windows helper ended before pipe connection');
+        }
         this.socket = socket;
         // Partial frames belong to this pipe, including handshake retries on the same helper.
         const decoder: { readBuffer: Buffer } = { readBuffer: Buffer.alloc(0) };
+        if (generation !== undefined) {
+          generation.socket = socket;
+          generation.decoder = decoder;
+        }
         socket.on('data', (chunk) => {
           if (this.socket === socket) this.consume(chunk, decoder);
         });
         socket.on('error', (error) => {
-          if (this.socket === socket) this.failAll(error);
+          if (this.socket !== socket) return;
+          if (generation !== undefined) this.requestTermination(generation, error);
+          else this.failAll(error);
         });
         socket.on('close', () => {
+          if (generation !== undefined) {
+            this.termination!.event(generation.id, 'pipe_closed');
+            this.requestTermination(
+              generation,
+              new Error('Computer Use Windows helper pipe closed'),
+            );
+            return;
+          }
           if (this.socket !== socket) return;
           this.failAll(new Error('Computer Use Windows helper pipe closed'));
           this.socket = null;
@@ -899,8 +1208,12 @@ class WindowsComputerUseHelperClient {
         await delay(100);
       }
     }
-    child.kill();
-    throw new Error(`Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`);
+    const failure = new Error(
+      `Computer Use Windows helper pipe connection failed: ${String(lastFailure)}`,
+    );
+    if (generation !== undefined) this.requestTermination(generation, failure);
+    else child.kill();
+    throw failure;
   }
 
   private sendConnected(
@@ -912,11 +1225,12 @@ class WindowsComputerUseHelperClient {
     stopsSession = false,
     beforeWrite?: () => void,
     semantic?: SemanticAttempt,
+    dispatchCallbacks?: WindowsDispatchCallbacks,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
       return Promise.reject(new Error('Computer Use Windows helper is disconnected'));
-    if (this.pending.has(requestId.hex))
+    if (this.pending.has(requestId.hex) || this.preparingDispatches.has(requestId.hex))
       return Promise.reject(new Error('Computer Use Windows helper request is already pending'));
     const encoded = encodeComputerUseNativeFrame({
       messageType,
@@ -929,82 +1243,113 @@ class WindowsComputerUseHelperClient {
     });
     const activityGeneration = this.activityGeneration;
     const helperGeneration = this.helperGeneration;
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.pending.get(requestId.hex) !== pending) return;
-        this.pending.delete(requestId.hex);
-        this.markSemanticUncertain(pending);
-        const error = new Error('Computer Use Windows helper request timed out');
-        reject(error);
-        // A request that never came back means the helper is unusable, so this normally ends it
-        // outright rather than waiting for the transport to fall idle. The exception is a stop that
-        // is still on the wire: the helper's answer to it is the only thing that can release Main's
-        // input quarantine, and requests that were already in flight when Stop began keep timers of
-        // their own that would otherwise expire inside Stop's window and kill the helper the stop
-        // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
-        // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
-        // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
-        // the original input/launch unit ended. A submitted semantic request also needs its
-        // helper before its own deadline: a shorter queued read can time out first.
-        if (
-          activityGeneration === this.activityGeneration &&
-          helperGeneration === this.helperGeneration &&
-          !this.hasPendingStop() &&
-          !this.hasUnconfirmedDiscovery() &&
-          !this.hasUnconfirmedSemanticInputs() &&
-          ![...this.pending.values()].some(
-            (request) => request.semantic?.submitted && !request.semantic.owner.confirmed,
-          )
-        )
-          this.abortTransport(error);
-        else this.shutdownIfIdle();
-      }, timeoutMilliseconds);
-      const pending: PendingRequest = {
-        resolve,
-        reject,
-        timeout,
-        sessionId,
-        stopsSession,
-        activityGeneration,
-        helperGeneration,
-        responseType: responseTypeFor(messageType),
-        allowBinary: messageType === 'observe',
-        ...(semantic === undefined ? {} : { semantic }),
-        ...(typeof metadata['sessionId'] === 'string'
-          ? { ownerSession: metadata['sessionId'] }
-          : {}),
-      };
-      this.pending.set(requestId.hex, pending);
-      try {
-        if (this.socket !== socket)
-          throw new Error('Computer Use Windows helper changed before send');
-        beforeWrite?.();
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(requestId.hex);
-        reject(error);
-        this.shutdownIfIdle();
-        return;
-      }
-      try {
-        socket.write(encoded, (error) => {
-          if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
-          if (error === null || error === undefined) return;
-          clearTimeout(timeout);
-          this.markSemanticUncertain(pending);
+    const send = (): Promise<unknown> =>
+      new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          if (this.pending.get(requestId.hex) !== pending) return;
           this.pending.delete(requestId.hex);
+          this.markSemanticUncertain(pending);
+          pending.dispatchCallbacks?.unconfirmed('transport_timeout');
+          const error = new Error('Computer Use Windows helper request timed out');
           reject(error);
-          this.abortTransport(error);
-        });
-      } catch (error) {
-        clearTimeout(timeout);
-        this.pending.delete(requestId.hex);
-        const failure = error instanceof Error ? error : new Error(String(error));
-        this.markSemanticUncertain(pending);
-        reject(failure);
-        this.abortTransport(failure);
+          // A request that never came back means the helper is unusable, so this normally ends it
+          // outright rather than waiting for the transport to fall idle. The exception is a stop that
+          // is still on the wire: the helper's answer to it is the only thing that can release Main's
+          // input quarantine, and requests that were already in flight when Stop began keep timers of
+          // their own that would otherwise expire inside Stop's window and kill the helper the stop
+          // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
+          // the transport — the last stop normally aborts here. An unconfirmed semantic input or discovery instead
+          // retains its helper so Main can send a fresh bounded Stop; reconnecting cannot prove
+          // the original input/launch unit ended. A submitted semantic request also needs its
+          // helper before its own deadline: a shorter queued read can time out first.
+          if (
+            activityGeneration === this.activityGeneration &&
+            helperGeneration === this.helperGeneration &&
+            !this.hasPendingStop() &&
+            !this.hasUnconfirmedDiscovery() &&
+            !this.hasUnconfirmedSemanticInputs() &&
+            ![...this.pending.values()].some(
+              (request) => request.semantic?.submitted && !request.semantic.owner.confirmed,
+            )
+          )
+            this.abortTransport(error);
+          else this.shutdownIfIdle();
+        }, timeoutMilliseconds);
+        const pending: PendingRequest = {
+          resolve,
+          reject,
+          timeout,
+          sessionId,
+          stopsSession,
+          retainAfterKill:
+            metadata['operation'] === 'close_session' ||
+            metadata['operation'] === 'stop_pending_start',
+          activityGeneration,
+          helperGeneration,
+          responseType: responseTypeFor(messageType),
+          allowBinary: messageType === 'observe',
+          ...(semantic === undefined ? {} : { semantic }),
+          ...(dispatchCallbacks === undefined ? {} : { dispatchCallbacks }),
+          ...(typeof metadata['sessionId'] === 'string'
+            ? { ownerSession: metadata['sessionId'] }
+            : {}),
+        };
+        this.pending.set(requestId.hex, pending);
+        try {
+          if (this.socket !== socket)
+            throw new Error('Computer Use Windows helper changed before send');
+          beforeWrite?.();
+          dispatchCallbacks?.assertSend();
+        } catch (error) {
+          clearTimeout(timeout);
+          this.pending.delete(requestId.hex);
+          if (dispatchCallbacks === undefined) reject(error);
+          else void dispatchCallbacks.canceled().then(() => reject(error), reject);
+          this.shutdownIfIdle();
+          return;
+        }
+        try {
+          socket.write(encoded, (error) => {
+            if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
+            if (error === null || error === undefined) return;
+            clearTimeout(timeout);
+            this.markSemanticUncertain(pending);
+            pending.dispatchCallbacks?.unconfirmed('abortTransport');
+            this.pending.delete(requestId.hex);
+            reject(error);
+            this.abortTransport(error);
+          });
+        } catch (error) {
+          clearTimeout(timeout);
+          this.pending.delete(requestId.hex);
+          const failure = error instanceof Error ? error : new Error(String(error));
+          this.markSemanticUncertain(pending);
+          pending.dispatchCallbacks?.unconfirmed('abortTransport');
+          reject(failure);
+          this.abortTransport(failure);
+        }
+      });
+    const prepareAndSend = async (): Promise<unknown> => {
+      if (dispatchCallbacks !== undefined) {
+        this.preparingDispatches.add(requestId.hex);
+        try {
+          await dispatchCallbacks.beforeWrite(helperGeneration, requestId.hex);
+          if (
+            this.socket !== socket ||
+            socket.destroyed ||
+            helperGeneration !== this.helperGeneration
+          )
+            throw semanticNotSubmitted();
+        } catch (error) {
+          await dispatchCallbacks.canceled();
+          throw error;
+        } finally {
+          this.preparingDispatches.delete(requestId.hex);
+        }
       }
-    });
+      return send();
+    };
+    return dispatchCallbacks === undefined ? send() : prepareAndSend();
   }
 
   private consume(chunk: Buffer, decoder: { readBuffer: Buffer }): void {
@@ -1015,7 +1360,9 @@ class WindowsComputerUseHelperClient {
         decoder.readBuffer.readUInt16LE(4) !== COMPUTER_USE_NATIVE_PROTOCOL_VERSION ||
         !isKnownComputerUseNativeMessageType(decoder.readBuffer.readUInt16LE(6))
       ) {
-        this.failAll(new Error('Computer Use Windows helper returned an invalid frame header'));
+        this.protocolFailure(
+          new Error('Computer Use Windows helper returned an invalid frame header'),
+        );
         this.socket?.destroy();
         return;
       }
@@ -1026,7 +1373,9 @@ class WindowsComputerUseHelperClient {
         metadataBytes > COMPUTER_USE_NATIVE_MAX_METADATA_BYTES ||
         binaryBytes > COMPUTER_USE_NATIVE_MAX_BINARY_BYTES
       ) {
-        this.failAll(new Error('Computer Use Windows helper returned an invalid frame length'));
+        this.protocolFailure(
+          new Error('Computer Use Windows helper returned an invalid frame length'),
+        );
         this.socket?.destroy();
         return;
       }
@@ -1037,7 +1386,7 @@ class WindowsComputerUseHelperClient {
       try {
         this.resolveFrame(decodeComputerUseNativeFrame(encoded));
       } catch (error) {
-        this.failAll(error instanceof Error ? error : new Error(String(error)));
+        this.protocolFailure(error instanceof Error ? error : new Error(String(error)));
         this.socket?.destroy();
         return;
       }
@@ -1050,6 +1399,7 @@ class WindowsComputerUseHelperClient {
     if (!isWindowsHelperResponseBound(frame, pending)) {
       const error = new Error('Computer Use Windows helper response binding mismatch');
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed('abortTransport');
       this.pending.delete(frame.requestId.hex);
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -1063,7 +1413,7 @@ class WindowsComputerUseHelperClient {
       if (frame.messageType === 'error') {
         const value = asRecord(parsed, 'Computer Use Windows helper rejected the request');
         if (
-          pending.semantic?.submitted &&
+          (pending.semantic?.submitted || pending.dispatchCallbacks !== undefined) &&
           (typeof value['accepted'] !== 'boolean' ||
             typeof value['code'] !== 'string' ||
             !/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(value['code']))
@@ -1075,9 +1425,15 @@ class WindowsComputerUseHelperClient {
           (pending.stopsSession || value['accepted'] === true)
         )
           this.markSemanticUncertain(pending);
-        pending.reject(
-          Object.assign(new Error(code), { code, accepted: value['accepted'] === true }),
-        );
+        const rejection = Object.assign(new Error(code), {
+          code,
+          accepted: value['accepted'] === true,
+        });
+        if (pending.dispatchCallbacks === undefined) pending.reject(rejection);
+        else
+          void pending.dispatchCallbacks
+            .response(value['accepted'] === true)
+            .then(() => pending.reject(rejection), pending.reject);
         this.shutdownIfIdle();
         return;
       }
@@ -1108,18 +1464,25 @@ class WindowsComputerUseHelperClient {
           ? error
           : new Error('Computer Use Windows helper returned an invalid response');
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed('abortTransport');
       pending.reject(invalid);
       this.abortTransport(invalid);
     }
   }
 
-  private failAll(error: unknown): void {
+  private failAll(
+    error: unknown,
+    cause: 'failAll' | 'abortTransport' = 'failAll',
+    retainStops = false,
+  ): void {
     // Whatever armed the idle teardown is being failed right here, and the next request connects a
     // fresh helper that the old session's teardown has no claim on.
     this.idleShutdownPending = false;
     const normalized = error instanceof Error ? error : new Error(String(error));
     for (const [requestId, pending] of this.pending) {
+      if (retainStops && pending.retainAfterKill) continue;
       this.markSemanticUncertain(pending);
+      pending.dispatchCallbacks?.unconfirmed(cause);
       clearTimeout(pending.timeout);
       pending.reject(normalized);
       this.pending.delete(requestId);
@@ -1127,11 +1490,23 @@ class WindowsComputerUseHelperClient {
   }
 
   private abortTransport(error: Error): void {
-    this.failAll(error);
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation !== undefined) {
+      this.requestTermination(generation, error);
+      return;
+    }
+    this.lifetimes.clear();
+    this.completedLifetimes.clear();
+    this.failAll(error, 'abortTransport');
     this.socket?.destroy();
     this.socket = null;
     this.child?.kill();
     this.child = null;
+  }
+
+  private protocolFailure(error: Error): void {
+    if (this.termination !== undefined) this.abortTransport(error);
+    else this.failAll(error);
   }
 }
 

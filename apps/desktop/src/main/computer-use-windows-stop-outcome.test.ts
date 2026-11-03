@@ -96,6 +96,7 @@ const receipt: WindowsStopEvent = {
 const response = {
   kind: 'response',
   helperGeneration: 1,
+  sessionId: row.sessionId,
   requestId: row.requestId,
   status: 'success',
   accepted: true,
@@ -109,6 +110,7 @@ const unconfirmedResponse = {
 const transportTimeout = {
   kind: 'input_unconfirmed',
   helperGeneration: 1,
+  sessionId: row.sessionId,
   requestId: row.requestId,
   cause: 'transport_timeout',
   storage: written,
@@ -1036,7 +1038,10 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       ...receipt,
       storage: failed,
     });
-    expect(held.state.nativeBlockers).toEqual(blockers);
+    expect(held.state.nativeBlockers).toEqual([]);
+    expect(windowsTargetMayStart(held.state, target)).toBe(false);
+    expect(windowsTargetMayStart(held.state, otherTarget)).toBe(true);
+    expect(held.state.rows).toEqual([background]);
     expect(held).toMatchObject({ idleTeardown: 'defer', awaitingHoldId: failed.holdId });
     const recovered = decideWindowsStop(held.state, {
       kind: 'retry_storage',
@@ -1046,6 +1051,57 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     expect(recovered).toMatchObject({ idleTeardown: 'allowed', awaitingHoldId: null });
     expect(recovered.state.nativeBlockers).toEqual([]);
     expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'response_lost' }]);
+  });
+
+  it.each([true, false])(
+    'R19b/R19c exit absorbs receipt holds after storage succeeds (%s)',
+    (retry) => {
+      const held = decideWindowsStop(state({ rows: [row], nativeBlockers: blockers }), {
+        ...receipt,
+        storage: failed,
+      });
+      const exited = decideWindowsStop(held.state, {
+        ...exit,
+        storage: retry ? { status: 'failed', holdId: 'exit-write' } : written,
+      });
+      if (retry) {
+        expect(exited.state.holds).toContainEqual(held.state.holds[0]);
+        const stillFailed = decideWindowsStop(exited.state, {
+          kind: 'retry_storage',
+          holdId: 'exit-write',
+          status: 'failed',
+        });
+        expect(stillFailed.state.holds).toEqual(exited.state.holds);
+        expect(stillFailed.state.rows).toEqual([row]);
+      }
+      const recovered = retry
+        ? decideWindowsStop(exited.state, {
+            kind: 'retry_storage',
+            holdId: 'exit-write',
+            status: 'written',
+          })
+        : exited;
+      expect(recovered.state.holds).toEqual([]);
+      expect(recovered.state.rows).toEqual([]);
+      expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'exit_suspect' }]);
+      expect(recovered.cleanup).toBe('generation_after_transfer');
+    },
+  );
+
+  it('R19b/R19c exit does not absorb another generation receipt hold', () => {
+    const otherRow = { ...row, helperGeneration: 2 };
+    const otherHeld = decideWindowsStop(state({ helperGeneration: 2, rows: [otherRow] }), {
+      ...receipt,
+      helperGeneration: 2,
+      storage: failed,
+    }).state;
+    const recovered = decideWindowsStop(
+      state({ rows: [row, otherRow], holds: otherHeld.holds }),
+      exit,
+    );
+    expect(recovered.state.holds).toEqual(otherHeld.holds);
+    expect(recovered.state.rows).toEqual([otherRow]);
+    expect(recovered.state.quarantines).toEqual([{ identity: target, reason: 'exit_suspect' }]);
   });
 
   it('R19c keeps generation blockers until the transfer lands, then signals generation cleanup', () => {
@@ -1274,7 +1330,16 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
         freshSession: false,
         freshSessionRequirements: [],
       });
-      expect(retried.state.holds).toEqual([]);
+      expect(retried.state.holds).toMatchObject([
+        { id: failed.holdId, recovery: 'write_quarantine' },
+      ]);
+      const restored = decideWindowsStop(retried.state, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'written',
+      });
+      expect(restored.state.holds).toEqual([]);
+      expect(restored.state.quarantines).toEqual([quarantine]);
       expect(retried.state.quarantines).toEqual([quarantine]);
       expect(windowsTargetMayStart(retried.state, target)).toBe(false);
       expect(windowsTargetMayStart(retried.state, otherTarget)).toBe(true);
@@ -1307,6 +1372,185 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
     expect(windowsTargetMayStart(retried.state, target)).toBe(false);
   });
 
+  it.each([false, true])(
+    'R21 pending K-1 supersedes release regardless of retry order (%s)',
+    (k1First) => {
+      const held = decideWindowsStop(state({ rows: [background] }), {
+        ...approval,
+        storage: failed,
+      }).state;
+      let pending = decideWindowsStop(held, {
+        ...transportTimeout,
+        storage: { status: 'failed', holdId: 'k1-pending' },
+      }).state;
+      if (k1First)
+        pending = decideWindowsStop(pending, {
+          kind: 'retry_storage',
+          holdId: 'k1-pending',
+          status: 'written',
+        }).state;
+      const gate = decideWindowsStop(pending, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'before_write',
+      });
+      expect(gate.refusal).toBe('release_superseded');
+      expect(gate.state.holds.some((hold) => hold.id === failed.holdId)).toBe(k1First);
+      const retried = decideWindowsStop(pending, {
+        kind: 'retry_storage',
+        holdId: failed.holdId,
+        status: 'written',
+      });
+      expect(retried).toMatchObject({
+        freshSession: false,
+        refusal: 'release_superseded',
+        freshSessionRequirements: [],
+      });
+      expect(windowsTargetMayStart(retried.state, target)).toBe(false);
+    },
+  );
+
+  it.each([written, failed])('R18 cancels a stored but unsent row (%s)', (storage) => {
+    const recorded = decideWindowsStop(state({ killRequested: true }), dispatch);
+    const canceled = decideWindowsStop(recorded.state, {
+      kind: 'dispatch_canceled',
+      helperGeneration: 1,
+      sessionId: row.sessionId,
+      requestId: row.requestId,
+      storage,
+    });
+    expect(canceled.state.rows).toHaveLength(storage.status === 'written' ? 0 : 1);
+    if (storage.status === 'failed') {
+      expect(windowsTargetMayStart(canceled.state, target)).toBe(false);
+      expect(
+        decideWindowsStop(canceled.state, {
+          kind: 'retry_storage',
+          holdId: storage.holdId,
+          status: 'written',
+        }).state.rows,
+      ).toEqual([]);
+    }
+  });
+
+  it('§2.2 R5/R6/R19a row events match generation, session and request together', () => {
+    const rowA: WindowsControlLedgerRow = { ...row, state: 'effect_unconfirmed' };
+    const rowB: WindowsControlLedgerRow = { ...row, sessionId: 'session-b', identity: otherTarget };
+    const both = state({ rows: [rowA, rowB] });
+    const onB = { helperGeneration: 1, sessionId: 'session-b', requestId: row.requestId } as const;
+    expect(decideWindowsStop(both, { ...response, ...onB }).state.rows).toEqual([rowA]);
+    const held = decideWindowsStop(both, { ...response, ...onB, storage: failed }).state;
+    expect(held.holds.map((hold) => hold.targets)).toEqual([[otherTarget]]);
+    expect(windowsTargetMayStart(held, otherTarget)).toBe(false);
+    expect(windowsTargetMayStart(held, target)).toBe(true);
+    expect(
+      decideWindowsStop(held, { kind: 'retry_storage', holdId: failed.holdId, status: 'written' })
+        .state.rows,
+    ).toEqual([rowA]);
+    expect(
+      decideWindowsStop(both, { kind: 'dispatch_canceled', ...onB, storage: written }).state.rows,
+    ).toEqual([rowA]);
+    const backgroundB = { ...rowB, inputPath: 'background_semantic' } as const;
+    const lost = decideWindowsStop(
+      state({ rows: [{ ...rowA, inputPath: 'normal' }, backgroundB] }),
+      {
+        ...transportTimeout,
+        ...onB,
+      },
+    );
+    expect(lost.state.quarantines).toEqual([{ identity: otherTarget, reason: 'response_lost' }]);
+    expect(lost.state.rows).toHaveLength(2);
+    // Another session's row with the same request id is never a match.
+    expect(decideWindowsStop(state({ rows: [rowA] }), { ...response, ...onB }).refusal).toBe(
+      'no_control_ledger_row',
+    );
+    expect(
+      decideWindowsStop(state({ rows: [rowA] }), {
+        kind: 'dispatch_canceled',
+        ...onB,
+        storage: written,
+      }).state.rows,
+    ).toEqual([rowA]);
+    // The (generation, session, request) key is unique; a duplicate fails closed.
+    expect(() =>
+      decideWindowsStop(state({ rows: [rowB, { ...rowB, identity: target }] }), {
+        ...response,
+        ...onB,
+      }),
+    ).toThrow('Duplicate ledger request');
+  });
+
+  it('R21 refuses a superseded release before writing after a receipt transfer', () => {
+    const held = decideWindowsStop(state({ rows: [background], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const transferred = decideWindowsStop(held, receipt).state;
+    expect(transferred.rows).toEqual([]);
+    const gate = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.refusal).toBe('release_superseded');
+    expect(gate.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
+    expect(gate.state.quarantines).toEqual([quarantine]);
+    const alreadyWritten = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'written',
+    });
+    expect(alreadyWritten.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
+  });
+
+  it('R21 a timed out release retains restoration after newer evidence before writing', () => {
+    const held = decideWindowsStop(state({ rows: [background], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const ambiguous = decideWindowsStop(held, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'failed',
+      uncertain: true,
+    }).state;
+    const transferred = decideWindowsStop(ambiguous, receipt).state;
+    expect(ambiguous.holds).toMatchObject([{ writeUncertain: true }]);
+    const gate = decideWindowsStop(transferred, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.refusal).toBe('release_superseded');
+    expect(gate.awaitingHoldId).toBe(failed.holdId);
+    expect(gate.state.holds).toMatchObject([
+      { recovery: 'write_quarantine', quarantinesToRestore: [quarantine] },
+    ]);
+    expect(windowsTargetMayStart(gate.state, target)).toBe(false);
+  });
+
+  it('R21 a response hold does not supersede a release', () => {
+    const held = decideWindowsStop(state({ rows: [row], quarantines: [quarantine] }), {
+      ...approval,
+      storage: failed,
+    }).state;
+    const pending = decideWindowsStop(held, {
+      ...response,
+      storage: { status: 'failed', holdId: 'response-pending' },
+    }).state;
+    const released = decideWindowsStop(pending, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'written',
+    });
+    expect(released.refusal).toBeNull();
+    expect(released.freshSession).toBe(true);
+    expect(released.state.holds).toHaveLength(1);
+  });
+
   it('R24 held approval without newer isolation still releases on retry', () => {
     const held = decideWindowsStop(state({ quarantines: [quarantine] }), {
       ...approval,
@@ -1318,6 +1562,13 @@ describe('Windows Stop ADR state table (not connected to product paths)', () => 
       transportTimeout,
     ).state;
     expect(other.holds[0]?.releaseSuperseded).toBeUndefined();
+    const gate = decideWindowsStop(other, {
+      kind: 'retry_storage',
+      holdId: failed.holdId,
+      status: 'before_write',
+    });
+    expect(gate.state).toBe(other);
+    expect(gate.freshSession).toBe(false);
     const released = decideWindowsStop(other, {
       kind: 'retry_storage',
       holdId: failed.holdId,

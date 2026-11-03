@@ -3138,6 +3138,30 @@ describe('ComputerUseController', () => {
       });
     };
 
+    it.each(['type', 'set_text'] as const)(
+      'passes paste origin for every %s dispatch',
+      async (type) => {
+        const seen: Array<Parameters<ComputerUseNativeHost['dispatch']>[0]> = [];
+        const { fixture } = await pasteSession({
+          text: 'xy',
+          planned: (artifactRef) =>
+            type === 'type' ? { type, artifactRef } : { type, artifactRef, targetId: 'node-1' },
+          extra: {
+            nativeDispatch: async (input) => {
+              seen.push(input);
+              return { result: 'completed', reasonCode: null };
+            },
+          },
+        });
+        await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+        await answer(fixture, 'allow_once');
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        expect(seen).toHaveLength(type === 'type' ? 2 : 1);
+        expect(seen.every((input) => input.inputKind === 'paste')).toBe(true);
+        await fixture.controller.dispose();
+      },
+    );
+
     // What the Task's permission policy may say: nothing, "ask", or "yes" (an Auto / Full preset).
     const authorizers = {
       none: {},

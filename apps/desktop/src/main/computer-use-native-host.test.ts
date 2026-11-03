@@ -645,6 +645,36 @@ describe('Computer Use native Main adapter', () => {
       >().toEqualTypeOf<never>();
     },
   );
+  it('keeps Windows process identity out of observe output', async () => {
+    const processStartTime = '133000000000000001';
+    const { host, session } = await win32TicketScenario(
+      true,
+      undefined,
+      {
+        observe: () => ({
+          pid: 42,
+          processStartTime,
+          captureWidth: 1,
+          captureHeight: 1,
+          screenshot: Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            'base64',
+          ),
+          screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+          maximumMode: 'full_access_app',
+        }),
+      },
+      { processStartTime },
+    );
+    const observation = await host.observe(session, {
+      requestId: 'observe-identity',
+      cancelEpoch: 0,
+    });
+    expect(observation.images).toHaveLength(1);
+    expect(observation).not.toHaveProperty('pid');
+    expect(observation).not.toHaveProperty('processStartTime');
+    expect(JSON.stringify(observation)).not.toContain(processStartTime);
+  });
 
   it.each([undefined, '9007199254740994'])(
     'rejects a missing or changed creation time on existing start (%s)',
@@ -666,6 +696,26 @@ describe('Computer Use native Main adapter', () => {
       }
     },
   );
+
+  it('keeps the original Windows identity after a refused resume without a ledger', async () => {
+    const original = '9007199254740993';
+    const response = { processStartTime: original };
+    const { host, startInput, startSession } = await win32TicketScenario(
+      true,
+      undefined,
+      {},
+      response,
+    );
+    response.processStartTime = '9007199254740994';
+    await expect(host.startSession({ ...startInput, resume: true })).rejects.toThrow(
+      'native_session_identity_mismatch',
+    );
+    response.processStartTime = original;
+    await expect(host.startSession({ ...startInput, resume: true })).resolves.toMatchObject({
+      sessionId: startInput.sessionId,
+    });
+    expect(startSession.mock.calls[2]?.[0]).toMatchObject({ pid: 42, processStartTime: original });
+  });
 
   it.each([undefined, '9007199254740993'])(
     'accepts creation time %s when the recorded identity is missing',

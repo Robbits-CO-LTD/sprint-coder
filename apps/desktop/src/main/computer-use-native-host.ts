@@ -56,6 +56,43 @@ import {
 import { computerUseActionDigest } from './computer-use-action';
 import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
+import type {
+  WindowsDispatchCallbacks,
+  WindowsCloseConfirmation,
+} from './computer-use-native-types';
+import {
+  decideWindowsStop,
+  windowsTargetMayStart,
+  type WindowsLedgerRow,
+  type WindowsStopState,
+  type WindowsStopEvent,
+  type WindowsStopDecision,
+  type WindowsTargetQuarantine,
+} from './computer-use-windows-stop-outcome';
+
+/**
+ * Each row is keyed by (helperGeneration, sessionId, requestId); the wire request id alone can repeat
+ * across sessions, so an implementation must not key rows by requestId only.
+ */
+export type WindowsDispatchLedgerStorage = Readonly<{
+  write(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  update(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
+  /** Adds quarantines; an existing quarantine for the same target keeps its first reason. */
+  restoreQuarantines?(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
+  /**
+   * Atomically persist quarantines and delete receipt/exit rows; retries must be idempotent.
+   * Quarantines are never removed here, and an existing quarantine keeps its first committed reason.
+   * Receipt and exit transfers of one generation can run concurrently, so commit order may differ
+   * from the core's order (a late receipt's response_lost can land before an exit's exit_suspect).
+   * TODO(PR4): decide the reason precedence under concurrent commits (for example exit_suspect wins)
+   * and pin it, with the no-removal rule, in a contract test shared by every store implementation.
+   */
+  transferReceipt?(
+    rows: readonly WindowsLedgerRow[],
+    quarantines: readonly WindowsTargetQuarantine[],
+  ): boolean | Promise<boolean>;
+}>;
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
 export const COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE = 'native_picker_unavailable' as const;
@@ -89,6 +126,8 @@ export const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
  * repeating a literal that only happens to line up.
  */
 export const COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT = 2;
+// PR4 will revisit this bound with measured storage cost; currently the same 2s as T.
+const WINDOWS_LEDGER_STORAGE_TIMEOUT_MS = 2_000;
 
 export class ComputerUseNativeUnavailableError extends Error {
   constructor(readonly reasonCode: string) {
@@ -128,6 +167,13 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
+  /** PR5a opt-in only. Persistence implementation and foreground handoffs belong to PR4/PR5b. */
+  windowsLedger?: WindowsDispatchLedgerStorage;
+  /**
+   * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
+   * them, a helper whose exit never arrives keeps refusing connections with no user notification.
+   */
+  windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
    * Whether the build attests classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). Production sets
    * it from the eligibility compiled into Main (`computerUseClassifierV2Attested`, C5-1), which is
@@ -194,6 +240,492 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  const ledger = platform === 'win32' ? options.windowsLedger : undefined;
+  const terminationEnabled =
+    ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
+  const ledgerStates = new Map<number, WindowsStopState>();
+  let holdSequence = 0;
+  const pendingWrites = new Map<
+    string,
+    {
+      generation: number;
+      write: () => boolean | Promise<boolean>;
+      reflect?: (written: boolean, uncertain: boolean) => WindowsStopDecision;
+    }
+  >();
+  const writing = new Set<string>();
+  const receiptCompletions = new Map<string, () => void>();
+  const exitCompletions = new Map<number, Set<() => void>>();
+  const receiptRows = new Set<string>();
+  const uncertainWrites = new Set<WindowsLedgerRow>();
+  const ledgerState = (generation: number): WindowsStopState => {
+    let state = ledgerStates.get(generation);
+    if (state === undefined) {
+      // Without the termination seam these records only track dispatches.
+      state = {
+        helperGeneration: generation,
+        helperLaunched: true,
+        entry: 'E1',
+        stopOwnerId: '',
+        killRequested: false,
+        exitConfirmed: false,
+        exitWaitExceeded: false,
+        result: null,
+        rows: [],
+        quarantines: [],
+        holds: [],
+        owners: [],
+        nativeBlockers: [],
+        foregroundDiscardPending: false,
+      };
+      ledgerStates.set(generation, state);
+    }
+    return state;
+  };
+  const ledgerEvent = (generation: number, event: WindowsStopEvent) => {
+    const previous = ledgerState(generation);
+    const decision = decideWindowsStop(previous, event);
+    ledgerStates.set(generation, decision.state);
+    for (const hold of previous.holds) {
+      if (
+        hold.operation === 'receipt_transfer' &&
+        !decision.state.holds.some((remaining) => remaining.id === hold.id)
+      ) {
+        pendingWrites.delete(hold.id);
+        const complete = receiptCompletions.get(hold.id);
+        receiptCompletions.delete(hold.id);
+        complete?.();
+      }
+    }
+    if (
+      terminationEnabled &&
+      decision.cleanup === 'generation_after_transfer' &&
+      decision.cleanupGeneration !== null &&
+      decision.awaitingHoldId === null
+    ) {
+      const completions = exitCompletions.get(decision.cleanupGeneration);
+      exitCompletions.delete(decision.cleanupGeneration);
+      for (const complete of completions ?? []) complete();
+      cleanupGeneration(decision.cleanupGeneration);
+      addon?.cleanupWindowsGeneration?.(decision.cleanupGeneration);
+    }
+    return decision;
+  };
+  const tryWrite = async (write: () => boolean | Promise<boolean>): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        Promise.resolve(write()).then((written) => written === true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), WINDOWS_LEDGER_STORAGE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const retainRestoration = (generation: number, holdId: string): boolean => {
+    const hold = ledgerState(generation).holds.find((item) => item.id === holdId);
+    if (hold?.quarantinesToRestore === undefined) return false;
+    const quarantines = hold.quarantinesToRestore;
+    pendingWrites.set(holdId, {
+      generation,
+      write: () => ledger?.restoreQuarantines?.(quarantines) ?? false,
+    });
+    return true;
+  };
+  const writePending = async (holdId: string): Promise<void> => {
+    const pending = pendingWrites.get(holdId);
+    if (pending === undefined || writing.has(holdId)) return;
+    writing.add(holdId);
+    let settled = false;
+    // Keep the writer claimed until the original I/O settles, even after the caller's deadline.
+    const completion = Promise.resolve()
+      .then(pending.write)
+      .then(
+        (written) => ({ written: written === true, uncertain: false }),
+        () => ({ written: false, uncertain: true }),
+      )
+      .then(async ({ written, uncertain }) => {
+        settled = true;
+        const decision =
+          pending.reflect?.(written, uncertain) ??
+          ledgerEvent(pending.generation, {
+            kind: 'retry_storage',
+            holdId,
+            status: written ? 'written' : 'failed',
+            ...(uncertain ? { uncertain: true } : {}),
+          });
+        const restoration = retainRestoration(pending.generation, holdId);
+        if (written && decision.awaitingHoldId === null && !restoration) {
+          pendingWrites.delete(holdId);
+          const complete = receiptCompletions.get(holdId);
+          receiptCompletions.delete(holdId);
+          complete?.();
+        }
+        writing.delete(holdId);
+        // Response/cancellation writes can remove the final hold without an idle signal.
+        addon?.reevaluateIdle?.();
+        // A late obsolete release must land before its compensating quarantine write.
+        if (restoration && pendingWrites.get(holdId)?.write !== pending.write && written)
+          await writePending(holdId);
+        return written;
+      });
+    await tryWrite(() => completion);
+    if (!settled) {
+      if (pending.reflect !== undefined) pending.reflect(false, true);
+      else
+        ledgerEvent(pending.generation, {
+          kind: 'retry_storage',
+          holdId,
+          status: 'failed',
+          uncertain: true,
+        });
+    }
+  };
+  const retryLedger = async (): Promise<void> => {
+    let attempts = 0;
+    for (const holdId of [...pendingWrites.keys()]) {
+      const pending = pendingWrites.get(holdId);
+      if (pending === undefined || writing.has(holdId)) continue;
+      if (attempts === 2) break;
+      attempts += 1;
+      // Rotate attempted holds so a failing store cannot starve the later targets.
+      pendingWrites.delete(holdId);
+      pendingWrites.set(holdId, pending);
+      if (
+        pending.reflect !== undefined &&
+        !ledgerState(pending.generation).holds.some((hold) => hold.id === holdId)
+      ) {
+        await writePending(holdId);
+        continue;
+      }
+      const gate = ledgerEvent(pending.generation, {
+        kind: 'retry_storage',
+        holdId,
+        status: 'before_write',
+      });
+      if (gate.refusal !== null) {
+        if (gate.refusal === 'release_superseded' && !retainRestoration(pending.generation, holdId))
+          pendingWrites.delete(holdId);
+        continue;
+      }
+      await writePending(holdId);
+    }
+  };
+  if (terminationEnabled && ledger !== undefined) {
+    addon?.configureWindowsTermination?.({
+      prepare: async () => {
+        await retryLedger();
+        if ([...ledgerStates.values()].some((state) => state.killRequested && !state.exitConfirmed))
+          throw new Error('native_stop_unconfirmed');
+      },
+      started: (generation) => {
+        const state = ledgerState(generation);
+        ledgerStates.set(generation, {
+          ...state,
+          helperGeneration: generation - 1,
+          helperLaunched: false,
+        });
+        ledgerEvent(generation, { kind: 'start_generation', nextHelperGeneration: generation });
+      },
+      owned: (generation, kind, id) => {
+        if (kind === 'discovery') {
+          discoveryManager.bindGeneration(id, generation);
+          for (const owner of startOwners.values())
+            if ([...owner.discoveries].some((discovery) => discovery.id === id))
+              owner.helperGeneration ??= generation;
+        } else {
+          const owner = startOwners.get(id);
+          if (owner !== undefined) owner.helperGeneration ??= generation;
+        }
+      },
+      event: (generation, kind) => {
+        ledgerEvent(generation, { kind, helperGeneration: generation });
+      },
+      exited: (generation, cause) => {
+        const state = ledgerState(generation);
+        if (state.exitConfirmed) return;
+        const rows = state.rows;
+        const quarantines: WindowsTargetQuarantine[] = rows
+          .filter((row) => row.kind !== 'foreground')
+          .map((row) => ({ identity: row.identity, reason: 'exit_suspect' }));
+        const holdId = `exit-${++holdSequence}`;
+        ledgerStates.set(generation, {
+          ...state,
+          nativeBlockers: [
+            ...state.nativeBlockers,
+            {
+              helperGeneration: generation,
+              ownerId: holdId,
+              kind: 'in_flight',
+            },
+          ],
+        });
+        // Classify at exit, before any await. Failed storage retains both rows and blockers.
+        const decision = ledgerEvent(generation, {
+          kind: 'exit_confirmed',
+          helperGeneration: generation,
+          cause,
+          storage: rows.length === 0 ? { status: 'written' } : { status: 'failed', holdId },
+        });
+        // Foreground-only rows stay for restart (R23), even with healthy storage.
+        if (decision.awaitingHoldId === null) return;
+        pendingWrites.set(holdId, {
+          generation,
+          write: async () => {
+            // Response and dispatch_canceled both use response holds. Receipt holds are absorbed.
+            if (ledgerState(generation).holds.some((hold) => hold.operation === 'response'))
+              return false;
+            if ([...uncertainWrites].some((row) => row.helperGeneration === generation))
+              return false;
+            if (ledger.transferReceipt !== undefined)
+              return ledger.transferReceipt(rows, quarantines);
+            if (quarantines.length !== 0) return false;
+            for (const row of rows) if (!(await ledger.delete(row))) return false;
+            return true;
+          },
+        });
+        void writePending(holdId);
+      },
+    });
+  }
+  const targetGateState = (state: WindowsStopState): WindowsStopState => {
+    if (!terminationEnabled || !state.exitConfirmed) return state;
+    // R19c keeps the native blockers until transfer, but scopes admission to that hold's targets.
+    return {
+      ...state,
+      nativeBlockers: state.nativeBlockers.filter(
+        (blocker) =>
+          !state.holds.some(
+            (hold) =>
+              hold.operation === 'exit_transfer' &&
+              hold.releaseBlockers?.helperGeneration === blocker.helperGeneration,
+          ),
+      ),
+    };
+  };
+  const ledgerBlocked = (pid: unknown, creationTime?: string | null): boolean =>
+    [...uncertainWrites].some(
+      (row) =>
+        pid === undefined ||
+        (row.identity.pid === pid &&
+          (creationTime == null || row.identity.creationTime === creationTime)),
+    ) ||
+    [...ledgerStates.values()].some((state) =>
+      creationTime != null && typeof pid === 'number'
+        ? !windowsTargetMayStart(targetGateState(state), { pid, creationTime })
+        : state.holds.some(
+            (hold) =>
+              hold.targets === 'unknown' ||
+              hold.targets.some((t) => pid === undefined || t.pid === pid),
+          ),
+    );
+  const dispatchLedger = (
+    input: Parameters<ComputerUseNativeHost['dispatch']>[0],
+    internal: InternalNativeSession,
+  ): (WindowsDispatchCallbacks & { completed(): Promise<void> }) | undefined => {
+    if (ledger === undefined) return undefined;
+    let row: WindowsLedgerRow | undefined;
+    const identity =
+      typeof internal.raw['pid'] === 'number' && typeof internal.raw.processStartTime === 'string'
+        ? { pid: internal.raw['pid'], creationTime: internal.raw.processStartTime }
+        : null;
+    const deny = (stopped = false): never => {
+      throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
+        code: stopped ? 'NATIVE_STOP_UNCONFIRMED' : 'UNAVAILABLE',
+        accepted: false,
+      });
+    };
+    const assertSend = () => {
+      if (
+        input.signal.aborted ||
+        inputQuarantined() ||
+        startOwners.get(input.session.sessionId)?.stopped
+      )
+        deny(true);
+      if (row === undefined || ledgerBlocked(identity?.pid, identity?.creationTime)) deny();
+      if (
+        row !== undefined &&
+        ledgerEvent(row.helperGeneration, {
+          kind: 'dispatch_gate',
+          helperGeneration: row.helperGeneration,
+          identity,
+        }).dispatch !== 'allow'
+      )
+        deny();
+    };
+    const reflect = async (status: 'success' | 'rejected' | 'effect_unconfirmed' | 'canceled') => {
+      const current = row;
+      if (current === undefined) return;
+      // A validated receipt owns these rows until its write (or retry) completes. A late
+      // dispatch response must not race that transaction and recreate a deleted source row.
+      if (receiptRows.has(`${current.helperGeneration}:${current.sessionId}:${current.requestId}`))
+        return;
+      if (
+        !ledgerState(current.helperGeneration).rows.some(
+          (item) =>
+            item.helperGeneration === current.helperGeneration &&
+            item.sessionId === current.sessionId &&
+            item.requestId === current.requestId,
+        )
+      )
+        return;
+      const holdId = `dispatch-write-${++holdSequence}`;
+      const storage = { status: 'failed', holdId } as const;
+      // Install the hold before awaiting I/O so a concurrent start cannot slip through.
+      ledgerEvent(
+        current.helperGeneration,
+        status === 'canceled'
+          ? {
+              kind: 'dispatch_canceled',
+              helperGeneration: current.helperGeneration,
+              sessionId: current.sessionId,
+              requestId: current.requestId,
+              storage,
+            }
+          : status === 'rejected'
+            ? {
+                kind: 'response',
+                helperGeneration: current.helperGeneration,
+                sessionId: current.sessionId,
+                requestId: current.requestId,
+                storage,
+                status,
+                accepted: false,
+              }
+            : {
+                kind: 'response',
+                helperGeneration: current.helperGeneration,
+                sessionId: current.sessionId,
+                requestId: current.requestId,
+                storage,
+                status,
+                accepted: true,
+              },
+      );
+      const write = () =>
+        status === 'effect_unconfirmed'
+          ? ledger.update({ ...current, state: 'effect_unconfirmed' })
+          : ledger.delete(current);
+      pendingWrites.set(holdId, { generation: current.helperGeneration, write });
+      await writePending(holdId);
+    };
+    return {
+      beforeWrite: async (helperGeneration, requestId) => {
+        if (
+          input.signal.aborted ||
+          inputQuarantined() ||
+          startOwners.get(input.session.sessionId)?.stopped
+        )
+          deny(true);
+        if (ledgerBlocked(identity?.pid, identity?.creationTime)) deny();
+        if (
+          ledgerEvent(helperGeneration, { kind: 'dispatch_gate', helperGeneration, identity })
+            .dispatch !== 'allow' ||
+          identity === null
+        )
+          deny();
+        if (identity === null) return;
+        const candidate: WindowsLedgerRow = {
+          helperGeneration,
+          sessionId: input.session.sessionId,
+          requestId,
+          identity,
+          kind:
+            input.inputKind === 'paste'
+              ? 'paste'
+              : ['invoke', 'set_text', 'select', 'toggle', 'expand_collapse'].includes(
+                    input.action.type,
+                  )
+                ? 'semantic'
+                : 'SendInput',
+          inputPath: 'normal',
+          state: 'awaiting_response',
+        };
+        // PR5b / N9 must persist non-normal path changes before acknowledging them.
+        if (candidate.inputPath !== 'normal') deny();
+        // The row key must stay unique; never let a second row overwrite a stored one.
+        if (
+          ledgerState(helperGeneration).rows.some(
+            (item) => item.sessionId === candidate.sessionId && item.requestId === requestId,
+          )
+        )
+          deny();
+        let settled = false;
+        const pending = Promise.resolve()
+          .then(() => ledger.write(candidate))
+          .then(
+            (written) => {
+              settled = true;
+              return written === true;
+            },
+            () => {
+              settled = true;
+              return false;
+            },
+          );
+        const stored = await tryWrite(() => pending);
+        if (!settled) {
+          // A deadline cannot cancel storage I/O. Keep this target held until the late write
+          // settles and, if it landed, the definitely unsent row has entered cancellation.
+          uncertainWrites.add(candidate);
+          void pending
+            .then(async (written) => {
+              if (written) {
+                ledgerEvent(helperGeneration, {
+                  kind: 'before_dispatch',
+                  helperGeneration,
+                  sessionId: candidate.sessionId,
+                  requestId,
+                  identity,
+                  input: { kind: candidate.kind, inputPath: candidate.inputPath },
+                  storage: { status: 'written' },
+                });
+                row = candidate;
+                await reflect('canceled');
+              }
+              uncertainWrites.delete(candidate);
+            })
+            .catch(() => {
+              /* Retain the target hold if late cancellation cannot be recorded. */
+            });
+          deny();
+        }
+        const decision = ledgerEvent(helperGeneration, {
+          kind: 'before_dispatch',
+          helperGeneration,
+          sessionId: candidate.sessionId,
+          requestId,
+          identity,
+          input: { kind: candidate.kind, inputPath: candidate.inputPath },
+          storage: stored
+            ? { status: 'written' }
+            : { status: 'failed', holdId: `dispatch-write-${++holdSequence}` },
+        });
+        if (stored) row = candidate;
+        if (decision.dispatch !== 'allow') deny();
+        assertSend();
+      },
+      assertSend,
+      canceled: () => reflect('canceled'),
+      unconfirmed: (cause) => {
+        if (row !== undefined)
+          ledgerEvent(row.helperGeneration, {
+            kind: 'input_unconfirmed',
+            helperGeneration: row.helperGeneration,
+            sessionId: row.sessionId,
+            requestId: row.requestId,
+            cause,
+            storage: { status: 'written' },
+          });
+      },
+      response: (accepted) => reflect(accepted ? 'effect_unconfirmed' : 'rejected'),
+      completed: () => reflect('success'),
+    };
+  };
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
   const inputAttemptsBySession = new Map<string, number>();
@@ -208,6 +740,9 @@ export function createComputerUseNativeHost(
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
   type StartOwner = {
+    helperGeneration: number | null;
+    terminated: boolean;
+    receiptConfirmed: boolean;
     sessionId: string;
     binding: string;
     route: 'v1' | 'v2' | undefined;
@@ -227,8 +762,22 @@ export function createComputerUseNativeHost(
   };
   const startOwners = new Map<string, StartOwner>();
   const activeStopQuarantines = new Set<string>();
+  const preparingDiscoveries = new Map<string, { stopped: boolean }>();
   const discoveryManager = createComputerUseDiscoveryManager({
     query: async (id, input) => {
+      if (ledger !== undefined) {
+        const preparation = { stopped: false };
+        preparingDiscoveries.set(id, preparation);
+        try {
+          await retryLedger();
+          if (preparation.stopped)
+            throw new ComputerUseDiscoveryNotSubmittedError(
+              'Discovery canceled before storage retry',
+            );
+        } finally {
+          preparingDiscoveries.delete(id);
+        }
+      }
       let method: (input: unknown) => unknown;
       try {
         method = requireMethod('discoverWindows');
@@ -240,18 +789,53 @@ export function createComputerUseNativeHost(
       return await Promise.resolve(method({ ...input, discoveryId: id }));
     },
     stop: async (id) => await invoke('stopWindowDiscovery', { discoveryId: id }),
-    cancelUnsubmitted: (id) => addon?.cancelUnsubmittedDiscovery?.(id) ?? 'unknown',
+    cancelUnsubmitted: (id) => {
+      const preparation = preparingDiscoveries.get(id);
+      if (preparation !== undefined) {
+        preparation.stopped = true;
+        return 'never_sent';
+      }
+      return addon?.cancelUnsubmittedDiscovery?.(id) ?? 'unknown';
+    },
     timeoutMs: options.stopTimeoutMs ?? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
     attemptLimit: COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
     unconfirmedError: () => new ComputerUseNativeUnavailableError('native_stop_unconfirmed'),
+    ...(terminationEnabled
+      ? {
+          generationAvailable: (generation: number) => !ledgerState(generation).exitConfirmed,
+          generationKillRequested: (generation: number) => ledgerState(generation).killRequested,
+        }
+      : {}),
   });
   const semanticUnconfirmed = (): boolean => addon?.hasUnconfirmedSemanticInputs?.() === true;
+  const cleanupGeneration = (generation: number): void => {
+    for (const [id, owner] of startOwners) {
+      if (owner.helperGeneration !== generation || owner.terminated) continue;
+      owner.terminated = true;
+      owner.stopped = true;
+      owner.unconfirmed = false;
+      owner.discoveryUnconfirmed = false;
+      owner.nativeTerminalEvidence = null;
+      owner.discoveries.clear();
+      sessions.delete(id);
+      classifierBindings.delete(id);
+      inputAttemptsBySession.delete(id);
+      stopEpochs.delete(id);
+      revisionsBySession.delete(id);
+      activeStopQuarantines.delete(id);
+      confirmedClosed.add(id);
+      if (confirmedClosed.size > 128)
+        confirmedClosed.delete(confirmedClosed.values().next().value!);
+    }
+    discoveryManager.terminateGeneration(generation);
+  };
   const inputQuarantined = (): boolean =>
     semanticUnconfirmed() ||
     activeStopQuarantines.size !== 0 ||
     discoveryManager.quarantined() ||
     [...startOwners.values()].some(
       (owner) =>
+        !owner.terminated &&
         owner.stopped &&
         (owner.unconfirmed ||
           owner.discoveryUnconfirmed ||
@@ -271,6 +855,13 @@ export function createComputerUseNativeHost(
     ]);
 
   const assertStartOwner = (owner: StartOwner): void => {
+    if (
+      terminationEnabled &&
+      owner.helperGeneration !== null &&
+      ledgerState(owner.helperGeneration).exitConfirmed &&
+      !owner.terminated
+    )
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
     if (startOwners.get(owner.sessionId) !== owner || owner.stopped)
       throw new ComputerUseNativeUnavailableError('native_start_canceled');
   };
@@ -286,7 +877,7 @@ export function createComputerUseNativeHost(
     for (const [id, owner] of startOwners) {
       if (startOwners.size < 128) break;
       if (
-        owner.terminal !== null &&
+        (owner.terminal !== null || owner.terminated) &&
         !owner.unconfirmed &&
         !owner.discoveryUnconfirmed &&
         owner.attempts.size === 0
@@ -298,32 +889,175 @@ export function createComputerUseNativeHost(
   const confirmSessionClosed = (
     receipt: ComputerUseNativeInputReceipt,
     evidence: unknown,
-  ): void => {
+  ): void | Promise<WindowsCloseConfirmation> => {
     try {
-      addon?.confirmSessionClosed?.(receipt, evidence);
+      return addon?.confirmSessionClosed?.(receipt, evidence)?.catch(() => {
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      });
     } catch {
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     }
   };
 
-  const finishStartOwner = (owner: StartOwner, result: ComputerUsePendingStartStop): void => {
-    if (result.kind === 'closed')
-      confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence);
-    owner.nativeTerminalEvidence = null;
-    sessions.delete(owner.sessionId);
-    classifierBindings.delete(owner.sessionId);
-    inputAttemptsBySession.delete(owner.sessionId);
-    stopEpochs.delete(owner.sessionId);
-    revisionsBySession.delete(owner.sessionId);
-    activeStopQuarantines.delete(owner.sessionId);
-    owner.terminal = result;
-    owner.unconfirmed = false;
-    confirmedClosed.add(owner.sessionId);
-    if (confirmedClosed.size > 128) {
-      const oldest = confirmedClosed.values().next().value;
-      if (oldest !== undefined) confirmedClosed.delete(oldest);
-    }
-    trimStartOwners();
+  if (ledger !== undefined) {
+    addon?.configureCloseLedger?.({
+      received: (generation, sessionId) => {
+        const state = ledgerState(generation);
+        if (terminationEnabled && state.exitConfirmed) return;
+        ledgerStates.set(generation, {
+          ...state,
+          stopOwnerId: sessionId,
+          nativeBlockers: state.nativeBlockers.some((blocker) => blocker.ownerId === sessionId)
+            ? state.nativeBlockers
+            : [
+                ...state.nativeBlockers,
+                { helperGeneration: generation, ownerId: sessionId, kind: 'activeStopQuarantines' },
+              ],
+        });
+        ledgerEvent(generation, {
+          kind: 'receipt',
+          helperGeneration: generation,
+          status: 'received',
+          closeDeadlineExceeded: false,
+          storage: { status: 'written' },
+        });
+      },
+      blocked: (generation) => {
+        const state = ledgerState(generation);
+        return (
+          state.rows.length !== 0 ||
+          state.holds.length !== 0 ||
+          state.nativeBlockers.length !== 0 ||
+          [...pendingWrites.values()].some((pending) => pending.generation === generation)
+        );
+      },
+      verified: async (generation, sessionId, persisted) => {
+        if (!terminationEnabled || !ledgerState(generation).exitConfirmed) await retryLedger();
+        const state = ledgerState(generation);
+        if (terminationEnabled && state.exitConfirmed) {
+          // R13: only subscribe to the exit's existing transfer; never submit another receipt.
+          if (!state.holds.some((hold) => hold.operation === 'exit_transfer'))
+            return { status: 'confirmed' };
+          let completions = exitCompletions.get(generation);
+          if (completions === undefined) {
+            completions = new Set();
+            exitCompletions.set(generation, completions);
+          }
+          completions.add(persisted);
+          return { status: 'pending' };
+        }
+        const rows = state.rows.filter((row) => row.sessionId === sessionId);
+        const quarantines: WindowsTargetQuarantine[] = rows
+          .filter((row) => row.inputPath === 'background_semantic')
+          .map((row) => ({
+            identity: row.identity,
+            reason: row.state === 'effect_unconfirmed' ? 'effect_unconfirmed' : 'response_lost',
+          }));
+        const holdId = `receipt-${++holdSequence}`;
+        for (const row of rows) receiptRows.add(`${generation}:${row.sessionId}:${row.requestId}`);
+        receiptCompletions.set(holdId, () => {
+          for (const row of rows)
+            receiptRows.delete(`${generation}:${row.sessionId}:${row.requestId}`);
+          if (!terminationEnabled || !ledgerState(generation).killRequested)
+            activeStopQuarantines.delete(sessionId);
+          persisted();
+        });
+        pendingWrites.set(holdId, {
+          generation,
+          reflect: (written, uncertain) => {
+            const current = ledgerState(generation);
+            if (current.holds.some((hold) => hold.id === holdId))
+              return ledgerEvent(generation, {
+                kind: 'retry_storage',
+                holdId,
+                status: written ? 'written' : 'failed',
+                ...(uncertain ? { uncertain: true } : {}),
+              });
+            ledgerStates.set(generation, { ...current, stopOwnerId: sessionId });
+            const decision = ledgerEvent(generation, {
+              kind: 'receipt',
+              helperGeneration: generation,
+              status: 'verified',
+              closeDeadlineExceeded: false,
+              storage: written ? { status: 'written' } : { status: 'failed', holdId },
+            });
+            const owner = startOwners.get(sessionId);
+            if (decision.confirmation === 'host_receipt' && owner?.helperGeneration === generation)
+              owner.receiptConfirmed = true;
+            return decision;
+          },
+          write: async () => {
+            const current = ledgerState(generation);
+            // Exit owns the transfer once it includes this session's rows.
+            if (
+              current.holds.some(
+                (hold) =>
+                  hold.operation === 'exit_transfer' &&
+                  hold.changes.some((change) => change.row.sessionId === sessionId),
+              )
+            )
+              return false;
+            if (current.exitConfirmed && !current.rows.some((row) => row.sessionId === sessionId))
+              return true;
+            // Older response writes must finish before receipt deletes their rows.
+            if (
+              ledgerState(generation).holds.some(
+                (hold) =>
+                  hold.id !== holdId &&
+                  hold.changes.some((change) => change.row.sessionId === sessionId),
+              )
+            )
+              return false;
+            if (rows.length === 0) return true;
+            if (ledger.transferReceipt !== undefined)
+              return ledger.transferReceipt(rows, quarantines);
+            if (quarantines.length !== 0) return false;
+            for (const row of rows) if (!(await ledger.delete(row))) return false;
+            return true;
+          },
+        });
+        await writePending(holdId);
+        return { status: pendingWrites.has(holdId) ? 'pending' : 'confirmed' };
+      },
+    });
+  }
+
+  const finishStartOwner = (
+    owner: StartOwner,
+    result: ComputerUsePendingStartStop,
+  ): void | Promise<void> => {
+    if (owner.terminated) return;
+    const confirmation =
+      result.kind === 'closed'
+        ? confirmSessionClosed(result.inputReceipt, owner.nativeTerminalEvidence)
+        : undefined;
+    const finish = (): void => {
+      if (owner.terminated) return;
+      if (
+        terminationEnabled &&
+        !owner.receiptConfirmed &&
+        owner.helperGeneration !== null &&
+        (ledgerState(owner.helperGeneration).killRequested ||
+          ledgerState(owner.helperGeneration).exitConfirmed)
+      )
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      owner.nativeTerminalEvidence = null;
+      sessions.delete(owner.sessionId);
+      classifierBindings.delete(owner.sessionId);
+      inputAttemptsBySession.delete(owner.sessionId);
+      stopEpochs.delete(owner.sessionId);
+      revisionsBySession.delete(owner.sessionId);
+      activeStopQuarantines.delete(owner.sessionId);
+      owner.terminal = result;
+      owner.unconfirmed = false;
+      confirmedClosed.add(owner.sessionId);
+      if (confirmedClosed.size > 128) {
+        const oldest = confirmedClosed.values().next().value;
+        if (oldest !== undefined) confirmedClosed.delete(oldest);
+      }
+      trimStartOwners();
+    };
+    return confirmation === undefined ? finish() : confirmation.then(finish);
   };
 
   const completeNativePendingStop = async (
@@ -396,14 +1130,19 @@ export function createComputerUseNativeHost(
       stopOwnerDiscoveries(owner),
       completeNativePendingStop(owner),
     ]);
+    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     if (owner.terminal !== null) return owner.terminal;
     if (discovery.status === 'rejected' || native.status === 'rejected')
       throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
-    finishStartOwner(owner, native.value);
+    const finishing = finishStartOwner(owner, native.value);
+    if (finishing !== undefined) await finishing;
+    if (owner.terminated) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
     return native.value;
   };
 
   const stopStartOwner = (owner: StartOwner): Promise<ComputerUsePendingStartStop> => {
+    if (owner.terminated)
+      return Promise.reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'));
     if (owner.stopPromise !== null) return owner.stopPromise;
     let resolveStop!: (value: ComputerUsePendingStartStop) => void;
     let rejectStop!: (error: unknown) => void;
@@ -696,7 +1435,8 @@ export function createComputerUseNativeHost(
     };
   };
   const beginRawDiscovery = (input: Readonly<Record<string, unknown>>) => {
-    requireMethod('discoverWindows');
+    // The ledger-enabled query retries storage before checking native availability.
+    if (ledger === undefined) requireMethod('discoverWindows');
     return discoveryManager.begin(input);
   };
   const beginWindowDiscovery = (
@@ -705,7 +1445,8 @@ export function createComputerUseNativeHost(
     const raw = beginRawDiscovery(discoveryInput(profile));
     let stopped = false;
     const result = raw.result.then((value) => {
-      if (stopped) throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
+      if (stopped || (terminationEnabled && !discoveryManager.resultAvailable(raw.id)))
+        throw new ComputerUseNativeUnavailableError('native_discovery_canceled');
       return parseWindows(profile, value, () => !stopped);
     });
     void result.catch(() => undefined);
@@ -727,12 +1468,18 @@ export function createComputerUseNativeHost(
     assertStartOwner(owner);
     const discovery = beginRawDiscovery(input);
     owner.discoveries.add(discovery);
-    void discovery.terminal.then(() => {
-      owner.discoveries.delete(discovery);
-      owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
-      if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
-        finishStartOwner(owner, owner.nativeTerminal);
-    });
+    void discovery.terminal
+      .then(() => {
+        if (owner.terminated) return;
+        owner.discoveries.delete(discovery);
+        owner.discoveryUnconfirmed = owner.discoveries.size !== 0 && owner.stopped;
+        if (owner.stopped && owner.nativeTerminal !== null && !owner.discoveryUnconfirmed)
+          return finishStartOwner(owner, owner.nativeTerminal);
+      })
+      .catch(() => {
+        if (owner.terminated) return;
+        owner.unconfirmed = true;
+      });
     const value = await discovery.result;
     assertStartOwner(owner);
     return value;
@@ -763,6 +1510,7 @@ export function createComputerUseNativeHost(
     nativeRoute: 'v1' | 'v2' | undefined,
     owner: StartOwner,
   ): Promise<ComputerUseNativeSession> => {
+    // SetForegroundWindow inside native start is not ledgered here; PR5b owns that handoff.
     assertStartOwner(owner);
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
@@ -797,10 +1545,13 @@ export function createComputerUseNativeHost(
       );
       if (
         existing.platform === 'win32' &&
-        typeof existing.raw.processStartTime === 'string' &&
-        session.raw.processStartTime !== existing.raw.processStartTime
-      )
+        ((typeof existing.raw.processStartTime === 'string' &&
+          session.raw.processStartTime !== existing.raw.processStartTime) ||
+          (ledger !== undefined && session.raw['pid'] !== existing.raw['pid']))
+      ) {
+        if (ledger !== undefined) await stopStartOwner(owner).catch(() => undefined);
         throw new ComputerUseNativeUnavailableError('native_session_identity_mismatch');
+      }
       assertStartOwner(owner);
       owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
       sessions.set(session.sessionId, session);
@@ -866,6 +1617,12 @@ export function createComputerUseNativeHost(
       ...nativeRouteField(input.profile.platform, nativeRoute),
     };
     assertStartOwner(owner);
+    // Discovery awaited after the admission check; a hold left on this target meanwhile refuses.
+    if (
+      ledger !== undefined &&
+      ledgerBlocked(pid, sessions.get(input.sessionId)?.raw.processStartTime)
+    )
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
     owner.nativeInvoked = true;
     const value = await invoke('startSession', request);
     assertStartOwner(owner);
@@ -895,6 +1652,7 @@ export function createComputerUseNativeHost(
 
   const host: ComputerUseNativeHost = {
     listTargets: async () => {
+      if (ledger !== undefined) await retryLedger();
       const requireDiscovery = (): void => {
         if (
           platform !== 'win32' ||
@@ -974,7 +1732,7 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
-      requireMethod('startSession');
+      if (ledger === undefined) requireMethod('startSession');
       const { classifierRoute, ...input } = startInput;
       if (!Number.isSafeInteger(input.cancelEpoch) || input.cancelEpoch < 0)
         throw new ComputerUseNativeUnavailableError('native_session_invalid');
@@ -988,6 +1746,9 @@ export function createComputerUseNativeHost(
         if (startOwners.size >= 128)
           throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
         owner = {
+          helperGeneration: null,
+          terminated: false,
+          receiptConfirmed: false,
           sessionId: input.sessionId,
           binding: startBinding(startInput),
           route: classifierRoute,
@@ -1035,7 +1796,22 @@ export function createComputerUseNativeHost(
       const bindingOwner = Symbol('classifier-route-start');
       binding?.starts.add(bindingOwner);
       owner.attempts.add(attempt);
+      let startEntered = false;
       try {
+        if (ledger !== undefined) {
+          await retryLedger();
+          assertStartOwner(owner);
+          requireMethod('startSession');
+          const existing = sessions.get(startInput.sessionId);
+          if (
+            ledgerBlocked(
+              existing?.raw['pid'] ?? pidsByIdentity.get(startInput.profile.identityDigest),
+              existing?.raw.processStartTime,
+            )
+          )
+            throw new ComputerUseNativeUnavailableError('native_unavailable');
+        }
+        startEntered = true;
         return await startNative(
           input,
           binding === undefined ? undefined : binding.expectedVersion === 2 ? 'v2' : 'v1',
@@ -1046,7 +1822,12 @@ export function createComputerUseNativeHost(
         // terminal operation that removes the session before Cancel validates its receipt.
         const stoppedBeforeSettlement = owner.stopped;
         if (owner.stopPromise !== null) await owner.stopPromise.catch(() => undefined);
-        else if (!owner.stopped && owner.attempts.size === 1 && !sessions.has(input.sessionId))
+        else if (
+          startEntered &&
+          !owner.stopped &&
+          owner.attempts.size === 1 &&
+          !sessions.has(input.sessionId)
+        )
           await stopStartOwner(owner).catch(() => undefined);
         // A settled start request is a new opportunity to query terminal evidence, not itself
         // a stop receipt. One bounded recheck cannot resurrect the stopped lifetime or bypass
@@ -1062,6 +1843,16 @@ export function createComputerUseNativeHost(
         throw error;
       } finally {
         owner.attempts.delete(attempt);
+        if (
+          !startEntered &&
+          !owner.nativeInvoked &&
+          owner.attempts.size === 0 &&
+          !owner.stopped &&
+          owner.discoveryPending === 0 &&
+          !owner.discoveryUnconfirmed &&
+          startOwners.get(input.sessionId) === owner
+        )
+          startOwners.delete(input.sessionId);
         if (binding !== undefined) {
           binding.starts.delete(bindingOwner);
           if (
@@ -1272,6 +2063,7 @@ export function createComputerUseNativeHost(
     },
 
     dispatch: async (input): Promise<ComputerUseNativeActionResult> => {
+      if (ledger !== undefined) await retryLedger();
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
@@ -1355,17 +2147,33 @@ export function createComputerUseNativeHost(
         }
       }
       let value: unknown;
+      const callbacks = dispatchLedger(input, internal);
       try {
-        value = await invoke(
-          'dispatch',
-          ticket === null ? dispatchRequest : { ...dispatchRequest, ticket },
-        );
+        const request = ticket === null ? dispatchRequest : { ...dispatchRequest, ticket };
+        if (callbacks === undefined) value = await invoke('dispatch', request);
+        else {
+          requireMethod('dispatch');
+          if (addon?.dispatchLedgerSupported !== true || addon.dispatch === undefined)
+            throw new ComputerUseNativeUnavailableError('native_unavailable');
+          value = await addon.dispatch(request, callbacks);
+        }
       } catch (error) {
         const preDispatch = classifyComputerUseNativeDispatchFailure(error);
         if (preDispatch !== null) return preDispatch;
         throw error;
       }
-      return parseDispatchRecord(value, input, internal, actionDigest);
+      if (
+        callbacks !== undefined &&
+        Object.keys(asRecord(value, 'native_action_result_invalid')).length !== 5
+      )
+        throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+      const result = parseDispatchRecord(value, input, internal, actionDigest);
+      if (callbacks !== undefined) {
+        if (result.result !== 'completed' || result.reasonCode !== null)
+          throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+        await callbacks.completed();
+      }
+      return result;
     },
 
     cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
@@ -1428,7 +2236,17 @@ export function createComputerUseNativeHost(
         if (owner !== undefined) owner.unconfirmed = true;
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
-      confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
+      const confirming = confirmSessionClosed(terminal.inputReceipt, nativeClose.value);
+      if (confirming !== undefined) await confirming;
+      if (owner?.terminated) return;
+      if (
+        terminationEnabled &&
+        !owner?.receiptConfirmed &&
+        owner?.helperGeneration != null &&
+        (ledgerState(owner.helperGeneration).killRequested ||
+          ledgerState(owner.helperGeneration).exitConfirmed)
+      )
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       sessions.delete(session.sessionId);
       classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);

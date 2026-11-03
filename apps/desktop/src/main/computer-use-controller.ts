@@ -338,6 +338,8 @@ export interface ComputerUseNativeHost {
        * `ordinary` preflight for it is then refused as `hard_boundary` before any input.
        */
       mainHighImpact?: boolean;
+      /** Main-only origin; paste travels on the wire as type/set_text. */
+      inputKind?: 'paste';
     }>,
   ): Promise<ComputerUseNativeActionResult>;
   /**
@@ -4856,6 +4858,9 @@ export class ComputerUseController {
           cancelEpoch: record.native.cancelEpoch,
           signal,
           ...(mainHighImpact ? { mainHighImpact: true } : {}),
+          ...(this.artifactPasteCalls.has(`${record.status.sessionId}\0${requestId}`)
+            ? { inputKind: 'paste' as const }
+            : {}),
         });
       } catch (error) {
         captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>

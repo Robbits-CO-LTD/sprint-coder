@@ -5,6 +5,33 @@ import type {
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
+/** Main-only callbacks. The Windows client never owns or receives a storage implementation. */
+export type WindowsDispatchCallbacks = Readonly<{
+  beforeWrite(helperGeneration: number, wireRequestId: string): Promise<void>;
+  assertSend(): void;
+  canceled(): Promise<void>;
+  unconfirmed(cause: 'transport_timeout' | 'failAll' | 'abortTransport'): void;
+  response(accepted: boolean): Promise<void>;
+}>;
+
+export type WindowsCloseConfirmation = Readonly<{ status: 'confirmed' | 'pending' }>;
+export type WindowsTerminationCallbacks = Readonly<{
+  prepare(): Promise<void>;
+  started(generation: number): void;
+  owned?(generation: number, kind: 'session' | 'discovery', id: string): void;
+  event(generation: number, kind: 'kill_requested' | 'pipe_closed' | 'exit_wait_exceeded'): void;
+  exited(generation: number, cause: 'stop' | 'crash' | 'abortTransport'): void;
+}>;
+export type WindowsCloseCallbacks = Readonly<{
+  received(generation: number, sessionId: string): void;
+  blocked(generation: number): boolean;
+  verified(
+    generation: number,
+    sessionId: string,
+    persisted: () => void,
+  ): Promise<WindowsCloseConfirmation>;
+}>;
+
 /** Local transport proof only. A native error response can never create this instance. */
 export class ComputerUseDiscoveryNotSubmittedError extends Error {}
 
@@ -52,7 +79,16 @@ export type ComputerUseNativeAddon = Readonly<{
   /** Main-only Windows lifetime state, never native wire data or a public tool. */
   hasUnconfirmedSemanticInputs?(): boolean;
   /** Host has validated this exact native response, including epoch/counter and discovery Stop. */
-  confirmSessionClosed?(receipt: ComputerUseNativeInputReceipt, evidence: unknown): void;
+  confirmSessionClosed?(
+    receipt: ComputerUseNativeInputReceipt,
+    evidence: unknown,
+  ): void | Promise<WindowsCloseConfirmation>;
+  configureCloseLedger?(callbacks: WindowsCloseCallbacks): void;
+  configureWindowsTermination?(callbacks: WindowsTerminationCallbacks): void;
+  cleanupWindowsGeneration?(generation: number): void;
+  /** Internal Stop seam; inert unless Host configured the termination callbacks. */
+  requestWindowsTermination?(): void;
+  reevaluateIdle?(): void;
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
   preflight?(input: unknown): unknown;
@@ -67,7 +103,8 @@ export type ComputerUseNativeAddon = Readonly<{
   approvalDiscard?(input: unknown): unknown;
   /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
   dispatchApproved?(input: unknown): unknown;
-  dispatch?(input: unknown): unknown;
+  dispatch?(input: unknown, callbacks?: WindowsDispatchCallbacks): unknown;
+  dispatchLedgerSupported?: true;
   /**
    * Windows helper only (#785 T15-4w; macOS is T15-4m). Reads the value of the one node a `copy`
    * names and answers `{ ok: true, text }` or `{ ok: false }`. No input capability. The host adapter
