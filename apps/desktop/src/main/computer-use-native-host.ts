@@ -1648,7 +1648,9 @@ export function createComputerUseNativeHost(
       ]);
     } catch {
       // Fixed for the whole kill wait: the owner may be gone or replaced by another generation.
-      const generation = started ?? generationOf();
+      // Without an owner before the race, a later owner may belong to a newer helper than the
+      // one work() addressed, so the Stop stays unconfirmed (fail-closed).
+      const generation = started;
       if (generation == null)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       if (ledgerState(generation).exitConfirmed) return outcome(generation);
