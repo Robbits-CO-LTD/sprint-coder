@@ -25,6 +25,56 @@ describe('Windows approval round trip state (P3c)', () => {
     expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckApprovalRoundTripState()');
     expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
   });
+  it('pins offer closure, failed preflight exits and target event monitoring', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    const preflight = native('computer_use_windows_host_preflight.inc').split(
+      'bool HandleWindowsPreflight(',
+    )[1]!;
+    expect(preflight.indexOf('!session.round_trip->MayObserve()')).toBeLessThan(
+      preflight.indexOf('previous_approval->second.Invalidate()'),
+    );
+    expect(preflight.indexOf('WindowsRoundTripPreflightGuard')).toBeLessThan(
+      preflight.indexOf('response_cache.contains'),
+    );
+    expect(preflight).toContain('session.round_trip->Offer(binding,');
+    expect(preflight).toContain('round_trip_completed = issued && sent');
+    const monitor = native('computer_use_windows_host_session.inc');
+    for (const event of [
+      'EVENT_OBJECT_CREATE',
+      'EVENT_OBJECT_DESTROY',
+      'EVENT_OBJECT_SHOW',
+      'EVENT_OBJECT_HIDE',
+      'EVENT_OBJECT_LOCATIONCHANGE',
+      'EVENT_OBJECT_REORDER',
+      'EVENT_SYSTEM_MOVESIZESTART',
+      'EVENT_SYSTEM_MOVESIZEEND',
+      'EVENT_SYSTEM_CAPTURESTART',
+      'EVENT_SYSTEM_CAPTUREEND',
+    ]) {
+      expect(monitor).toContain(event);
+    }
+    expect(monitor).toContain('snapshot.pid, 0, WINEVENT_OUTOFCONTEXT');
+    expect(monitor).toContain('current->snapshot.round_trip->TargetEvent()');
+    expect(monitor).toContain(
+      'if (!all_registered) snapshot.round_trip->Invalidate("monitor_failed")',
+    );
+    expect(monitor).toContain('if (!started) snapshot.round_trip->Invalidate("monitor_failed")');
+    expect(monitor).toContain('acknowledged >= serial');
+    const fixture = native('computer_use_windows_approval_round_trip_test.h');
+    for (const test of [
+      'RT_two_cards_to_ordinary',
+      'RT_target_event_failure_latches_in_all_trip_phases',
+      'replay',
+      'binding_denied',
+      'refuse',
+      'interlock_refusal',
+      'registration',
+      'heartbeat',
+    ]) {
+      expect(fixture).toContain(test);
+    }
+  });
   it('pins native admission, foreground monitoring and the final input barriers', () => {
     const native = (name: string) =>
       readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');

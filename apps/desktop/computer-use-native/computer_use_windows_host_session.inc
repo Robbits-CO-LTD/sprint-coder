@@ -299,6 +299,16 @@ struct WindowsRoundTripMonitor {
   static void CALLBACK Foreground(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWORD, DWORD) {
     if (current != nullptr) current->Sample(window);
   }
+  static void CALLBACK Target(HWINEVENTHOOK, DWORD event, HWND window, LONG object,
+                              LONG child, DWORD, DWORD) {
+    if (current == nullptr) return;
+    // Process filtering is enforced by registration, including ownerless new windows.
+    // Capture/move events are system events; object events concern top-level windows only.
+    const bool system_event = event < EVENT_OBJECT_CREATE;
+    if (system_event || (object == OBJID_WINDOW && child == CHILDID_SELF &&
+        (window == nullptr || !IsWindow(window) || GetAncestor(window, GA_ROOT) == window)))
+      current->snapshot.round_trip->TargetEvent();
+  }
   bool Start(const WindowsSession &session, DWORD pid) {
     snapshot = session;
     snapshot.round_trip_monitor.reset();
@@ -318,14 +328,27 @@ struct WindowsRoundTripMonitor {
         PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
         const auto hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             nullptr, Foreground, 0, 0, WINEVENT_OUTOFCONTEXT);
+        const DWORD events[] = {EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_REORDER, EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+            EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTUREEND};
+        std::vector<HWINEVENTHOOK> target_hooks;
+        bool all_registered = hook != nullptr;
+        for (const DWORD event : events) {
+          const auto target_hook = SetWinEventHook(event, event, nullptr, Target,
+              snapshot.pid, 0, WINEVENT_OUTOFCONTEXT);
+          target_hooks.push_back(target_hook);
+          all_registered = all_registered && target_hook != nullptr;
+        }
+        if (!all_registered) snapshot.round_trip->Invalidate("monitor_failed");
         {
           std::lock_guard lock(mutex);
           thread_id = GetCurrentThreadId();
-          registered = hook != nullptr;
+          registered = all_registered;
           initialized = true;
         }
         ready.notify_all();
-        while (hook != nullptr && !stop.stop_requested()) {
+        while (all_registered && !stop.stop_requested()) {
           MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
           while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&message);
@@ -339,6 +362,8 @@ struct WindowsRoundTripMonitor {
           }
           Sample(GetForegroundWindow());
         }
+        for (const auto target_hook : target_hooks)
+          if (target_hook != nullptr) UnhookWinEvent(target_hook);
         if (hook != nullptr) UnhookWinEvent(hook);
         current = nullptr;
       });
@@ -348,7 +373,10 @@ struct WindowsRoundTripMonitor {
       return false;
     }
     std::unique_lock lock(mutex);
-    return ready.wait_for(lock, std::chrono::milliseconds(150), [&] { return initialized; }) && registered;
+    const bool started = ready.wait_for(lock, std::chrono::milliseconds(150),
+        [&] { return initialized; }) && registered;
+    if (!started) snapshot.round_trip->Invalidate("monitor_failed");
+    return started;
   }
   bool Sync() {
     std::unique_lock lock(mutex);

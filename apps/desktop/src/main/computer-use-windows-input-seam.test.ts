@@ -61,6 +61,8 @@ std::uint64_t windows_helper_generation = 0;
 std::uint64_t MonotonicNowNs() { return 1; }
 bool WindowsValidationStillCurrent(std::uint64_t, std::uint64_t) { return true; }
 bool WindowsSemanticInputInFlightLocked() { return false; }
+// N9 P3c: the approval round trip may close input; the seam keeps it open.
+bool WindowsRoundTripMayInput(const WindowsSession&) { return true; }
 BOOL SetCursorPos(int, int) { return 1; }
 bool valid = true;
 bool semanticInputInFlight = false;

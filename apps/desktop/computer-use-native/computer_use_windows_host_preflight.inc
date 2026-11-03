@@ -561,13 +561,20 @@ bool HandleWindowsApprovalRoundTrip(HANDLE pipe, const Frame &request, const std
     if (pending_input)
       return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_invalid"));
     if (!session->round_trip) session->round_trip = std::make_shared<WindowsApprovalRoundTrip>();
-    if (session->round_trip->MayLegacyStart()) {
+    if (session->round_trip->MayBegin()) {
+      const bool next_card = !session->round_trip->MayLegacyStart();
       RECT bounds{};
       std::string reason;
-      if (!ValidateWindowsSession(*session, &bounds, &reason)) session->round_trip->Invalidate();
+      WindowsSessionIdentityResult next_identity;
+      const bool next_valid = !next_card ||
+          (ReadWindowsSessionIdentityOnLane(*session, WindowsValidationFrameStopSerial(), &next_identity) &&
+           next_identity.identity_matches && !next_identity.elevated && WindowsRoundTripCurrent(*session));
+      if (next_card ? !next_valid :
+          !ValidateWindowsSession(*session, &bounds, &reason)) session->round_trip->Invalidate();
       else {
-        session->round_trip_monitor = std::make_shared<WindowsRoundTripMonitor>();
-        const bool monitoring = session->round_trip_monitor->Start(*session, static_cast<DWORD>(pid));
+        if (!next_card) session->round_trip_monitor = std::make_shared<WindowsRoundTripMonitor>();
+        const bool monitoring = next_card ? WindowsRoundTripCurrent(*session) :
+            session->round_trip_monitor->Start(*session, static_cast<DWORD>(pid));
         const auto now = MonotonicNowNs();
         const auto key = FrameIdKey(request.header.session_id);
         const auto approval = approval_states.find(key);
@@ -859,8 +866,6 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
                             const std::string &metadata) {
   const WindowsValidationFrameScope frame;
   const std::string session_key = FrameIdKey(request.header.session_id);
-  const auto previous_approval = approval_states.find(session_key);
-  if (previous_approval != approval_states.end()) previous_approval->second.Invalidate();
   const auto found = sessions.find(session_key);
   if (found == sessions.end())
     return Respond(pipe, request, MessageType::kError,
@@ -868,6 +873,11 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   const WindowsSession &session = found->second;
   if (!WindowsRoundTripCurrent(session) || (session.round_trip && !session.round_trip->MayObserve()))
     return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
+  bool round_trip_completed = false;
+  sprint_coder::computer_use::WindowsRoundTripPreflightGuard round_trip_guard{
+      session.round_trip.get(), round_trip_completed};
+  const auto previous_approval = approval_states.find(session_key);
+  if (previous_approval != approval_states.end()) previous_approval->second.Invalidate();
   WindowsTicketState &state = ticket_states[session_key];
   state.slot.Invalidate();
   ++state.generation;
@@ -926,8 +936,20 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     // measured ordinary or blocked decision continues to the interlock below, which issues the
     // ordinary ticket or refuses with the blocked reason code.
     switch (RouteWindowsApprovalPreflight(offered, measured)) {
-    case WindowsApprovalPreflightRoute::kOffered:
-      return Respond(pipe, request, MessageType::kPreflightResult, offer_receipt);
+    case WindowsApprovalPreflightRoute::kOffered: {
+      if (session.round_trip && !session.round_trip->MayLegacyStart()) {
+        ApprovalRoundTripBinding binding;
+        if (!ReadWindowsRoundTripBinding(session, metadata, &binding) ||
+            !WindowsRoundTripCurrent(session) || !session.round_trip->Offer(binding,
+                session.observation_revision, MonotonicNowNs() / 1000000)) {
+          approval.Invalidate();
+          return Respond(pipe, request, MessageType::kError, ErrorPayload("approval_round_trip_rejected"));
+        }
+      }
+      round_trip_completed = Respond(pipe, request, MessageType::kPreflightResult, offer_receipt);
+      if (!round_trip_completed) approval.Invalidate();
+      return round_trip_completed;
+    }
     case WindowsApprovalPreflightRoute::kRefuse:
       return Respond(pipe, request, MessageType::kPreflightResult,
           WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
@@ -989,6 +1011,7 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
       issued ? "" : "native_ticket_unavailable", issued ? token : "");
   const bool sent =
       Respond(pipe, request, MessageType::kPreflightResult, receipt);
+  round_trip_completed = issued && sent;
   // The secret only needs to live until it is on the wire (the slot keeps its own copy).
   ScrubString(&token);
   ScrubString(&receipt);

@@ -24,7 +24,7 @@ public:
              std::uint64_t observation, std::uint64_t ticket, bool monitor_ready) {
     std::lock_guard lock(mutex_);
     const auto identifier = [](const std::string &value) { return !value.empty() && value.size() <= 256; };
-    if (phase_ != Phase::kIdle || !identifier(binding.id) || !identifier(binding.session) ||
+    if ((phase_ != Phase::kIdle && phase_ != Phase::kOffered) || !identifier(binding.id) || !identifier(binding.session) ||
         !identifier(binding.task) || !identifier(binding.turn) || binding.generation == 0 ||
         binding.generation > 9007199254740991ULL || binding.epoch > 9007199254740991ULL ||
         used_.contains(binding.id) || duration == 0 || duration > kApprovalRoundTripMaxDurationMs ||
@@ -71,6 +71,18 @@ public:
     phase_ = Phase::kExchanged;
     return true;
   }
+  // Closing the V1 trip grants no input; its id remains spent.
+  bool Offer(const ApprovalRoundTripBinding &binding, std::uint64_t observation, std::uint64_t now) {
+    std::lock_guard lock(mutex_);
+    if (!Match(binding, now) || phase_ != Phase::kReturned || observation <= observation_)
+      return Fail("target_changed");
+    phase_ = Phase::kOffered;
+    return true;
+  }
+  bool MayBegin() const {
+    std::lock_guard lock(mutex_);
+    return phase_ == Phase::kIdle || phase_ == Phase::kOffered;
+  }
   bool End(const ApprovalRoundTripBinding &binding, bool approved, std::uint64_t now) {
     std::lock_guard lock(mutex_);
     if (!Match(binding, now) || !approved || phase_ != Phase::kExchanged)
@@ -102,6 +114,10 @@ public:
     std::lock_guard lock(mutex_);
     return failure_;
   }
+  void TargetEvent() {
+    std::lock_guard lock(mutex_);
+    if (phase_ != Phase::kIdle) Fail("target_changed");
+  }
   void Invalidate(const char *reason = "target_changed") {
     std::lock_guard lock(mutex_);
     Fail(reason);
@@ -112,7 +128,7 @@ public:
   }
 
 private:
-  enum class Phase { kIdle, kActive, kReturning, kReturned, kExchanged, kEnded, kFailed };
+  enum class Phase { kIdle, kActive, kReturning, kReturned, kOffered, kExchanged, kEnded, kFailed };
   bool Fail(const char *reason) {
     if (phase_ != Phase::kFailed) failure_ = reason;
     phase_ = Phase::kFailed;
@@ -133,5 +149,13 @@ private:
   std::set<std::string> used_;
   std::uint64_t last_ = 0, expires_ = 0, observation_ = 0, ticket_ = 0;
   std::string failure_ = "none";
+};
+// Every preflight exit must either commit an exchange/offer or latch failure.
+struct WindowsRoundTripPreflightGuard {
+  WindowsApprovalRoundTrip *state;
+  const bool &completed;
+  ~WindowsRoundTripPreflightGuard() {
+    if (!completed && state && !state->MayLegacyStart()) state->Invalidate();
+  }
 };
 } // namespace sprint_coder::computer_use

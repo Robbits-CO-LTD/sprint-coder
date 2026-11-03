@@ -135,5 +135,48 @@ inline bool CheckApprovalRoundTripState() {
     if (!check(s.Begin(next, 104, 60000, 60000, 8, 4, true),
                "RT_foreground_has_no_interaction_epoch")) return false;
   }
+  {
+    State s;
+    if (!begin(s) || !s.Return(binding, 101) || !s.Returned(binding, 102)) return false;
+    bool completed = false;
+    {
+      WindowsRoundTripPreflightGuard guard{&s, completed};
+      completed = s.Offer(binding, 8, 103);
+    }
+    s.Observe(Focus::kSprintCoder, true, true, 104);
+    if (!check(completed && !s.Failed() && !s.MayInput(104) && !s.MayLegacyStart() &&
+        s.MayBegin() && !s.Begin(binding, 104, 60000, 60000, 8, 4, true),
+        "RT_native_offer_closes_first_trip_without_input_or_id_reuse")) return false;
+    auto next = binding;
+    next.id = "trip-2";
+    if (!check(s.Begin(next, 105, 60000, 60000, 8, 4, true) &&
+        s.Return(next, 106) && s.Returned(next, 107) && s.Exchange(next, 9, 5, 108) &&
+        s.End(next, true, 109) && s.MayInput(109), "RT_two_cards_to_ordinary")) return false;
+  }
+  for (const auto *route : {"replay", "binding_denied", "refuse", "interlock_refusal", "invalid_action"}) {
+    State s;
+    if (!begin(s) || !s.Return(binding, 101) || !s.Returned(binding, 102)) return false;
+    const bool completed = false;
+    { WindowsRoundTripPreflightGuard guard{&s, completed}; }
+    if (!check(s.Failed() && !s.MayBegin() && !s.MayInput(103) &&
+        !s.Exchange(binding, 8, 4, 103), route)) return false;
+  }
+  for (int phase = 0; phase < 4; ++phase) {
+    State s;
+    if (!begin(s)) return false;
+    if (phase >= 1 && !s.Return(binding, 101)) return false;
+    if (phase >= 2 && !s.Returned(binding, 102)) return false;
+    if (phase >= 3 && !s.Offer(binding, 8, 103)) return false;
+    s.TargetEvent();
+    s.Observe(Focus::kTarget, true, true, 104);
+    if (!check(s.Failed() && !s.MayInput(104) && !s.MayBegin(),
+        "RT_target_event_failure_latches_in_all_trip_phases")) return false;
+  }
+  for (const auto *failure : {"registration", "heartbeat"}) {
+    State s;
+    if (!begin(s)) return false;
+    s.Invalidate("monitor_failed");
+    if (!check(s.Failed() && !s.Return(binding, 101) && !s.MayBegin(), failure)) return false;
+  }
   return !kWindowsBackgroundInputEnabled;
 }
