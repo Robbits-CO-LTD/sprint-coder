@@ -185,6 +185,9 @@ export type ComputerUseNativeHostOptions = Readonly<{
   /**
    * Internal PR7 seam. Enable only in PR10, together with the R8/R11 notifications (PR7c): without
    * them, a helper whose exit never arrives keeps refusing connections with no user notification.
+   * PR5b's start/resume ledger gate immediately before socket.write is also required.
+   * Keep disabled until Host requireStartIdentity/includeStartIdentity wiring and pre-send
+   * recording (PR5b-3), and new-start quarantine matching (PR8), are complete.
    */
   windowsKillStopTermination?: Readonly<{ enabled: true }>;
   /**
@@ -1558,6 +1561,7 @@ export function createComputerUseNativeHost(
       if (typeof resolvedPid === 'number' && Number.isSafeInteger(resolvedPid) && resolvedPid > 0)
         pids.push(resolvedPid);
       const publicCandidate = stripNativeEphemeralFields(raw);
+      delete publicCandidate['processStartTime'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
       publicCandidate['maximumMode'] = nativeMaximumMode(raw);
@@ -1672,6 +1676,19 @@ export function createComputerUseNativeHost(
   ): Promise<ComputerUseNativeSession> => {
     // SetForegroundWindow inside native start is not ledgered here; PR5b owns that handoff.
     assertStartOwner(owner);
+    const sendStart = async (request: Record<string, unknown>, creationTime: unknown) => {
+      if (ledger === undefined) return await invoke('startSession', request);
+      requireMethod('startSession');
+      const start = addon?.startSession;
+      if (start === undefined) throw new ComputerUseNativeUnavailableError('native_unavailable');
+      return await start(request, () => {
+        assertStartOwner(owner);
+        if (
+          ledgerBlocked(request['pid'], typeof creationTime === 'string' ? creationTime : undefined)
+        )
+          throw new ComputerUseNativeUnavailableError('native_unavailable');
+      });
+    };
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
       if (
@@ -1693,7 +1710,7 @@ export function createComputerUseNativeHost(
       };
       assertStartOwner(owner);
       owner.nativeInvoked = true;
-      const value = await invoke('startSession', request);
+      const value = await sendStart(request, existing.raw.processStartTime);
       assertStartOwner(owner);
       const raw = asRecord(value, 'native_session_invalid');
       const session = parseNativeSession(
@@ -1751,6 +1768,15 @@ export function createComputerUseNativeHost(
     const selectedRecord =
       selected === undefined ? null : asRecord(selected, 'native_window_invalid');
     if (selectedRecord === null) throw new ComputerUseNativeUnavailableError('native_window_stale');
+    const processStartTime = selectedRecord['processStartTime'];
+    if (
+      ledger !== undefined &&
+      processStartTime !== undefined &&
+      (typeof processStartTime !== 'string' ||
+        !/^[1-9][0-9]{0,19}$/u.test(processStartTime) ||
+        BigInt(processStartTime) > 0xffff_ffff_ffff_ffffn)
+    )
+      throw new ComputerUseNativeUnavailableError('native_unavailable');
     const selectedPid = selectedRecord['pid'];
     if (typeof selectedPid !== 'number' || !Number.isSafeInteger(selectedPid) || selectedPid < 1)
       throw new ComputerUseNativeUnavailableError('native_window_owner_invalid');
@@ -1784,7 +1810,7 @@ export function createComputerUseNativeHost(
     )
       throw new ComputerUseNativeUnavailableError('native_unavailable');
     owner.nativeInvoked = true;
-    const value = await invoke('startSession', request);
+    const value = await sendStart(request, processStartTime);
     assertStartOwner(owner);
     const raw = asRecord(value, 'native_session_invalid');
     const session = parseNativeSession(

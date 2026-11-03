@@ -1,7 +1,37 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { describe, expect, it } from 'vitest';
+import { parseNativeHandshake } from './computer-use-native-handshake';
+import { nativeProbeCapabilities } from './computer-use-native-probe-facts';
 
 const source = readWindowsHostSource();
+describe('Windows identity-bound start capability', () => {
+  const handshake = (identityBoundStart: unknown) => ({
+    protocolVersion: 1,
+    apiVersion: 3,
+    platform: 'win32',
+    napiVersion: 10,
+    capabilities: { identityBoundStart },
+  });
+
+  it.each([true, false])('accepts the boolean capability %s', (enabled) => {
+    expect(() => parseNativeHandshake(handshake(enabled), 'win32')).not.toThrow();
+  });
+
+  it.each([null, 1, 'true', {}])('rejects a non-boolean capability %j', (enabled) => {
+    expect(() => parseNativeHandshake(handshake(enabled), 'win32')).toThrow('HANDSHAKE_INVALID');
+  });
+
+  it('retains only a positively attested capability in Main probe facts', () => {
+    expect(nativeProbeCapabilities({ identityBoundStart: true })).toHaveProperty(
+      'identityBoundStart',
+      true,
+    );
+    for (const value of [undefined, false, null, 1, 'true'])
+      expect(nativeProbeCapabilities({ identityBoundStart: value })).not.toHaveProperty(
+        'identityBoundStart',
+      );
+  });
+});
 const section = (begin: string, end: string) =>
   source.slice(source.indexOf(begin), source.indexOf(end, source.indexOf(begin)));
 

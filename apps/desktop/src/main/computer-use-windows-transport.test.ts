@@ -44,6 +44,7 @@ import {
 } from './computer-use-native-host';
 import type {
   WindowsLedgerRow,
+  WindowsStorageHold,
   WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
 import * as stopKernel from './computer-use-windows-stop-outcome';
@@ -658,6 +659,141 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   const helperTempVariable = 'SPRINT_CODER_COMPUTER_USE_HELPER_TEMP';
+  it('PR5b refuses an identity-bound start when the connected helper has no capability', async () => {
+    const target = createTarget();
+    await expect(
+      target.addon.startSession!({
+        profile,
+        sessionId: 'identity-start',
+        requireStartIdentity: true,
+        pid: 42,
+        expectedProcessStartTime: '133000000000000001',
+      }),
+    ).rejects.toThrow('native_unavailable');
+    expect(
+      sockets
+        .flatMap((socket) => socket.writes)
+        .some(
+          (bytes) =>
+            JSON.parse(decodeComputerUseNativeFrame(bytes).metadata.toString())['operation'] ===
+            'start_session',
+        ),
+    ).toBe(false);
+  });
+
+  it('PR5b transmits the explicit discovery identity opt-in', async () => {
+    const requested = vi.fn(responders()['list_windows']!);
+    const target = createTarget({ ...responders(), list_windows: requested });
+    await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'identity-discovery',
+      includeStartIdentity: true,
+    });
+    expect(requested).toHaveBeenCalledWith(expect.objectContaining({ includeStartIdentity: true }));
+  });
+  it.each([false, true])('PR5b requires a true connected capability (%s)', async (enabled) => {
+    const base = responders();
+    const requested = vi.fn(base['start_session']!);
+    const target = createTarget({
+      ...base,
+      handshake: () => [
+        'handshake_result',
+        {
+          protocolVersion: 1,
+          apiVersion: 3,
+          platform: 'win32',
+          napiVersion: 10,
+          sourceCommit,
+          capabilities: { cancellableWindowDiscovery: true, identityBoundStart: enabled },
+        },
+      ],
+      start_session: requested,
+    });
+    const input = {
+      profile,
+      sessionId: 'identity-start',
+      requireStartIdentity: true,
+      pid: 42,
+      expectedProcessStartTime: '18446744073709551615',
+    };
+    if (enabled) {
+      await expect(target.addon.startSession!(input)).resolves.toMatchObject({
+        sessionId: input.sessionId,
+      });
+      expect(requested).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requireStartIdentity: true,
+          pid: 42,
+          expectedProcessStartTime: '18446744073709551615',
+        }),
+      );
+    } else {
+      await expect(target.addon.startSession!(input)).rejects.toThrow('native_unavailable');
+      expect(requested).not.toHaveBeenCalled();
+      await expect(
+        target.addon.startSession!({ profile, sessionId: 'legacy-start' }),
+      ).resolves.toMatchObject({ sessionId: 'legacy-start' });
+      expect(requested).toHaveBeenCalledTimes(1);
+      expect(requested.mock.calls[0]?.[0]).not.toHaveProperty('requireStartIdentity');
+    }
+  });
+
+  it.each([undefined, false])('PR5b preserves discovery without opt-in (%s)', async (enabled) => {
+    const requested = vi.fn(responders()['list_windows']!);
+    const target = createTarget({ ...responders(), list_windows: requested });
+    await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'legacy-discovery',
+      ...(enabled === undefined ? {} : { includeStartIdentity: enabled }),
+    });
+    if (enabled === undefined)
+      expect(requested.mock.calls[0]?.[0]).not.toHaveProperty('includeStartIdentity');
+    else expect(requested.mock.calls[0]?.[0]).toHaveProperty('includeStartIdentity', false);
+  });
+
+  it.each([null, 1, 'true'])(
+    'PR5b rejects malformed discovery opt-in %j before connecting',
+    async (enabled) => {
+      const target = createTarget();
+      await expect(
+        Promise.resolve().then(() =>
+          target.addon.discoverWindows!({
+            ...profile,
+            discoveryId: 'invalid-discovery',
+            includeStartIdentity: enabled,
+          }),
+        ),
+      ).rejects.toThrow('Invalid Windows discovery input');
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('PR5b retains integer-string discovery identity only at the Main boundary', async () => {
+    const base = responders();
+    const target = createTarget({
+      ...base,
+      list_windows: (metadata) => {
+        const [type, rows] = base['list_windows']!(metadata);
+        if (!Array.isArray(rows)) throw new Error('Expected fixture rows');
+        return [
+          type,
+          rows.map((row: Record<string, unknown>) => ({
+            ...row,
+            processStartTime: '18446744073709551615',
+          })),
+        ];
+      },
+    });
+    const result = await target.addon.discoverWindows!({
+      ...profile,
+      discoveryId: 'identity-discovery',
+      includeStartIdentity: true,
+    });
+    expect(result).toMatchObject({ windows: [{ processStartTime: '18446744073709551615' }] });
+    const windows = await target.host.listWindows(profile);
+    expect(windows).toHaveLength(1);
+    expect(JSON.stringify(windows)).not.toMatch(/processStartTime|18446744073709551615/);
+  });
   it('PR4 startup discards corrupt rows, retains valid isolation and persists restoration', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'ledger-restore-'));
     const path = join(directory, 'shared.sqlite');
@@ -800,6 +936,191 @@ describe('Computer Use Windows helper transport', () => {
     }
   });
 
+  it.each(['start', 'resume', 'other-target'] as const)(
+    'PR5b gates same-target start holds / resume quarantine, allows other targets (%s)',
+    async (entry) => {
+      const directory = mkdtempSync(join(tmpdir(), 'ledger-start-gate-'));
+      const path = join(directory, 'shared.sqlite');
+      const a = openWindowsLedgerStore({ path, userData: 'C:/synthetic/a' });
+      const b = openWindowsLedgerStore({ path, userData: 'C:/synthetic/b' });
+      let commit = false;
+      const holds: WindowsStorageHold[] = [];
+      const decide = stopKernel.decideWindowsStop;
+      // Supply a storage hold at the kernel seam; new-start quarantine matching belongs to PR8.
+      const kernel = vi
+        .spyOn(stopKernel, 'decideWindowsStop')
+        .mockImplementation((state, event) => {
+          const decision = decide(state, event);
+          if (event.kind !== 'restore_read' || decision.kind !== 'restored') return decision;
+          return {
+            ...decision,
+            state: { ...decision.state, holds: [...decision.state.holds, ...holds] },
+          };
+        });
+      try {
+        const original = responders();
+        const identity = { pid: 4242, processStartTime: '133000000000000001' };
+        const target = createTarget(
+          {
+            ...original,
+            list_windows: (metadata) => {
+              const [type, result] = original['list_windows']!(metadata);
+              return [
+                type,
+                (result as Record<string, unknown>[]).map((row) => ({
+                  ...row,
+                  pid: identity.pid,
+                  ...(metadata['includeStartIdentity'] === true ? identity : {}),
+                })),
+              ];
+            },
+            start_session: (metadata) => {
+              const [type, result] = original['start_session']!(metadata);
+              return [type, { ...(result as Record<string, unknown>), ...identity }];
+            },
+          },
+          undefined,
+          { windowsLedger: b, windowsKillStopTermination: { enabled: true } },
+          (addon) => ({
+            ...addon,
+            startSession: async (...args) => {
+              if (commit) {
+                if (entry !== 'resume')
+                  holds.push({
+                    id: 'synthetic-start-hold',
+                    operation: 'response',
+                    targets: [
+                      {
+                        pid: entry === 'other-target' ? 4343 : identity.pid,
+                        creationTime: '133000000000000002',
+                      },
+                    ],
+                    changes: [],
+                    recovery: 'reflect_response',
+                  });
+                expect(
+                  a.restoreQuarantines([
+                    {
+                      identity: {
+                        pid: entry === 'other-target' ? 4343 : identity.pid,
+                        creationTime:
+                          entry === 'other-target'
+                            ? '133000000000000002'
+                            : identity.processStartTime,
+                      },
+                      reason: 'exit_suspect',
+                    },
+                  ]),
+                ).toBe(true);
+                await target.host.restoreWindowsLedger();
+              }
+              return addon.startSession!(...args);
+            },
+          }),
+        );
+        await expect(target.host.restoreWindowsLedger()).resolves.toBe(true);
+        if (entry === 'resume') await startSession(target.host, 'shared-session', 'turn-a');
+        commit = true;
+        const attempt = target.host.startSession({
+          profile,
+          windowId: '100',
+          sessionId: 'shared-session',
+          taskId: 'task-1',
+          turnId: 'turn-a',
+          cancelEpoch: 0,
+          resume: entry === 'resume',
+        });
+        if (entry === 'other-target')
+          await expect(attempt).resolves.toMatchObject({ sessionId: 'shared-session' });
+        else await expect(attempt).rejects.toMatchObject({ reasonCode: 'native_unavailable' });
+        expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(
+          entry === 'start' ? 0 : 1,
+        );
+      } finally {
+        kernel.mockRestore();
+        a.close();
+        b.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+  it.each([
+    '0',
+    '01',
+    '-1',
+    '1.5',
+    '1e3',
+    '',
+    '18446744073709551616',
+    '123456789012345678901',
+    1,
+    null,
+  ])(
+    'PR5b rejects malformed discovery identity %j before sending start',
+    async (processStartTime) => {
+      const original = responders();
+      // Deliberately malformed helper output tests the Host boundary, not opt-in wiring.
+      const target = createTarget(
+        {
+          ...original,
+          list_windows: (metadata) => {
+            const [type, rows] = original['list_windows']!(metadata);
+            return [
+              type,
+              (rows as Record<string, unknown>[]).map((row) => ({ ...row, processStartTime })),
+            ];
+          },
+        },
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            read: () => ({ rows: [], quarantines: [] }),
+            restoreQuarantines: () => true,
+          },
+        },
+      );
+      await expect(startSession(target.host, 'invalid-identity', 'turn-a')).rejects.toMatchObject({
+        reasonCode: 'native_unavailable',
+      });
+      expect(target.helper().served).not.toContain('start_session');
+    },
+  );
+  it.each(['1', '18446744073709551615'])(
+    'PR5b accepts discovery identity boundary %s',
+    async (processStartTime) => {
+      const original = responders();
+      // Inject a valid identity at the discovery boundary ahead of PR5b-3 opt-in wiring.
+      const target = createTarget(
+        {
+          ...original,
+          list_windows: (metadata) => {
+            const [type, rows] = original['list_windows']!(metadata);
+            return [
+              type,
+              (rows as Record<string, unknown>[]).map((row) => ({ ...row, processStartTime })),
+            ];
+          },
+        },
+        undefined,
+        {
+          windowsLedger: {
+            write: () => true,
+            update: () => true,
+            delete: () => true,
+            read: () => ({ rows: [], quarantines: [] }),
+            restoreQuarantines: () => true,
+          },
+        },
+      );
+      await expect(startSession(target.host, 'valid-identity', 'turn-a')).resolves.toMatchObject({
+        sessionId: 'valid-identity',
+      });
+      expect(target.helper().served.filter((name) => name === 'start_session')).toHaveLength(1);
+    },
+  );
   it.each(['throw', 'timeout'] as const)(
     'PR4 unreadable startup blocks before helper launch and recovers (%s)',
     async (failure) => {

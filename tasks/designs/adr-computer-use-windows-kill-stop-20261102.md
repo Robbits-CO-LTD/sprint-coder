@@ -109,9 +109,9 @@ K-3 の移管では台帳の記録を先に失わず、対象の隔離として�
 
 **N9 は、N3 に K-1〜K-5 が入り、その試験が通るまで背景入力を公開しない。**
 
-### 2.2.1 前面化を送る前の identity 取得（PR5b の設計候補）
+### 2.2.1 前面化を送る前の identity 取得（PR5b、案 C 採用）
 
-K-4 の記録範囲は、N9 の新しい引渡しだけでなく、helper の `SetForegroundWindow` 全体とする。現在の `computer_use_windows_host_v2_targets.inc` の `StartWindowsNewSession` と `StartWindowsExistingSession` は V1 / V2 の共有経路で、開始応答より先に前面化する。PR2 で開始応答に加わった `processStartTime` は、その開始自身の送信前記録には間に合わない。以下は設計候補であり、実装済み・protocol の承認済みを意味しない。
+K-4 の記録範囲は、N9 の新しい引渡しだけでなく、helper の `SetForegroundWindow` 全体とする。現在の `computer_use_windows_host_v2_targets.inc` の `StartWindowsNewSession` と `StartWindowsExistingSession` は V1 / V2 の共有経路で、開始応答より先に前面化する。PR2 で開始応答に加わった `processStartTime` は、その開始自身の送信前記録には間に合わない。案 C を採用（2026-11-03 オーナー決定）し、有効化は PR10 と同時とする。以下の比較は判断の根拠であり、実装済みを意味しない。
 
 | 案 | 送信前の台帳記録 | identity の取り違え（TOCTOU） | MessageType・protocol の変更 | V1 / V2 の開始への影響 | 試験のしやすさ |
 | --- | --- | --- | --- | --- | --- |
@@ -119,11 +119,11 @@ K-4 の記録範囲は、N9 の新しい引渡しだけでなく、helper の `S
 | B: 前面化しない開始 → 記録 → 前面化 dispatch | 開始応答の identity を使い、別の dispatch の beforeWrite で保存できる | dispatch 時にも session の process handle・identity・窓・世代を再照合する | 開始の前面化抑止指定と前面化 operation・結果契約を追加。dispatch の MessageType は再利用可能でも protocol は拡張する | 現在の開始は前面化後の TargetWindowFacts や dialog の検証を含むため、単に前面化を飛ばせない。両方に未前面化 session と開始完了の状態管理が必要 | 台帳と前面化だけの試験は容易だが、未完了 session の observe / control 禁止、再開・取消し・後段失敗の試験が広がる |
 | C: discovery / check_target_identity → 記録 → identity に束縛した開始 | discovery の identity（既存 session では保持済みの値）を照合し、開始の beforeWrite で保存できる | check の後にも対象は変わりうる。既存の windowIdentityDigest による束縛と保持している process handle は維持する。追加の期待 identity は、台帳の値と helper が照合する値を一致させるためのものとする。開始要求に期待 identity を渡し、helper が前面化直前にも保持 handle・作成時刻・生存・窓を再照合する | 新しい MessageType は不要。discovery 応答の作成時刻、開始の期待 identity、対応能力の確認は追加する。開始の成功・失敗の応答に、前面化の試行・結果の内部項目を追加。既存 check の意味は変えない | 両方の discovery の内部応答と共有開始を拡張する。既存の前面化と後段検証の順序を維持できる | 既存 discovery・PR3 の identity seam・新規／既存 start seam を再利用できる。保存順序の Host/client 結合試験を加える |
 
-**推奨は C。** 前面化後の開始検証を保ち、新しい準備要求や未前面化 session の状態を作らずに送信前記録を実現できるためである。ただし、既存 protocol のままでできるという意味ではない。`computer_use_windows_host_discovery.inc` の `ReadProcessStartIdentity` は作成時刻を読めるが、PR3 の `CheckWindowsTargetIdentity` は要求された pid + 作成時刻への alive / terminated / unverifiable を返す照合であり、未知の作成時刻を返さない。V1 の窓列挙と V2 の `WindowsV2SelectableRow` は作成時刻を window identity の digest に使うが、生の値を返していない。この内部応答を拡張する。V1 に V2 専用の listTargets を呼ばせず、それぞれの既存 discovery 経路を使う。
+**C を採用（2026-11-03 オーナー決定）、有効化は PR10 と同時。** 前面化後の開始検証を保ち、新しい準備要求や未前面化 session の状態を作らずに送信前記録を実現できるためである。ただし、既存 protocol のままでできるという意味ではない。`computer_use_windows_host_discovery.inc` の `ReadProcessStartIdentity` は作成時刻を読めるが、PR3 の `CheckWindowsTargetIdentity` は要求された pid + 作成時刻への alive / terminated / unverifiable を返す照合であり、未知の作成時刻を返さない。V1 の窓列挙と V2 の `WindowsV2SelectableRow` は作成時刻を window identity の digest に使うが、生の値を返していない。この内部応答を拡張する。V1 に V2 専用の listTargets を呼ばせず、それぞれの既存 discovery 経路を使う。
 
 A / C の応答項目では、成功応答と stop_pending_start の receipt に載る既存の inputAttemptCount を失敗応答にも使う案を比較するが、試行回数だけでは効果の確定・未確認を区別できないため、結果を示す内部項目も必要になる。
 
-推奨案の順序と境界:
+採用案 C の順序と境界:
 
 1. 第1段は、前面化・入力・session 開始を行わない discovery から、選んだ候補に束縛された pid + processStartTime を取得する。新規開始では check_target_identity が alive でなければ第2段へ進まない。既存開始では discovery / check の段は不要で、保持済みの session identity と既存の process handle の照合で足り、別の値で上書きしない。作成時刻は整数文字列のまま Main 内に保持し、AI・Renderer への公開情報から除く。
 2. 第2段の開始要求に期待 identity を載せる。client が wire の request id と helper 世代を確定した beforeWrite で、Host が前面化行の全項目（§2.2）を保存する。開始前でも session id は開始要求の値を使い、種類は前面化、inputPath は前面経路とする。既に前面にある場合も前面化しうる開始として保守的に記録し、検証済みの結果で消す。保存失敗なら開始を送らない。
@@ -302,7 +302,7 @@ N4-2 の実装（2026-11-02）: `WindowsTargetRenameFollows` は、継承しな�
 | PR3 | C++ 対象 identity 照合命令 | signaled、PID 再利用、PID 不在、アクセス拒否。同一 PID だけで解除しない |
 | PR4 | N15 の Q23 のオーナー決定を前提とする、決定した保存先の台帳・隔離ストア、起動復元 | 永続往復、読書き失敗、不正行、identity 欠損、Main 再起動相当 |
 | PR5 | 全 dispatch の beforeWrite 台帳と応答処理、台帳の inputPath 列と前面化の種類・寿命 | 保存失敗なら未送信、timeout／failAll 後も残存、accepted=false は削除、SendInput／paste、R19a |
-| PR5b | 候補（§6.1 の 16、オーナー確認待ち。承認前は着手しない）。K-4 の開始の2段化（§2.2.1 の C）。native は `computer_use_windows_host_discovery.inc` の V1 窓列挙、`computer_use_windows_host_v2_targets.inc` の WindowsV2SelectableRow・WindowsStartInput・新規／既存開始、`computer_use_windows_host_session.inc` の ParseWindowsStartParameters・StartWindowsSession を変更。TS は `computer-use-native-host.ts` の discovery の内部保持・start、`computer-use-native-windows.ts` の call・beforeWrite・応答処理、`computer-use-native-types.ts` と関連する内部応答 parser を接続する。共有 schema の変更は packages/contracts を正本に利用先を追跡する。MessageType は追加せず、handshake の capabilities を出す `computer_use_windows_host_preflight.inc` の ProbeJson と、それを読む `computer-use-native-windows.ts` の parser の対応能力の契約を整合させる。Host options の内部 policy を正本に client へ渡し、既定は無効（Renderer 設定・環境変数に公開しない）。有効時に保存関数・対応 helper が無ければ拒否し、旧経路へ fallback しない。規模は試験込み追加＋削除 900〜1,200 行を目安とし、内訳は native 契約・試験 500〜650 行、TS 接続・試験 400〜550 行と見積もる。上限は 1,499 行とし、超える見込みなら native 契約と TS 接続を分割し、接続完了まで無効を維持 | PR5b-AC1: V1 / V2 × 新規／既存開始で、取得・照合 → 保存完了 → start 送信 → 前面化の順を証明。PR5b-AC2: identity 欠損、PID 再利用、窓交代、アクセス拒否、保存失敗、保存中の Stop／世代交代で前面化ゼロ。未送信取消し・消去失敗の保留も試験。PR5b-AC3: 前面化後の開始失敗、期待 identity と食い違う応答、応答消失を未実行扱いにせず、session が作られなかった場合も含め、R23 の保持・pause・receipt／exit／起動時の消去と隔離除外を確認。PR5b-AC4: 既定無効の V1 / V2 の既存期待を維持し、有効時の未対応 helper 拒否、identity の AI／Renderer 非露出を確認。新規／既存 start component・native seam、target identity component、Host・transport の fake store 結合試験、対象 typecheck と関連 Vitest を実施。Windows の実前面化は Computer Use で別途確認し、未実施は NOT_RUN / BLOCKED。実ストアの結合と PR6 の寿命処理が揃うまで製品経路で有効化しない |
+| PR5b | 採用（2026-11-03 オーナー決定）、有効化は PR10 と同時（§6.1 の 16）。K-4 の開始の2段化（§2.2.1 の C）。native は `computer_use_windows_host_discovery.inc` の V1 窓列挙、`computer_use_windows_host_v2_targets.inc` の WindowsV2SelectableRow・WindowsStartInput・新規／既存開始、`computer_use_windows_host_session.inc` の ParseWindowsStartParameters・StartWindowsSession を変更。TS は `computer-use-native-host.ts` の discovery の内部保持・start、`computer-use-native-windows.ts` の call・beforeWrite・応答処理、`computer-use-native-types.ts` と関連する内部応答 parser を接続する。共有 schema の変更は packages/contracts を正本に利用先を追跡する。MessageType は追加せず、handshake の capabilities を出す `computer_use_windows_host_preflight.inc` の ProbeJson と、それを読む `computer-use-native-windows.ts` の parser の対応能力の契約を整合させる。Host options の内部 policy を正本に client へ渡し、既定は無効（Renderer 設定・環境変数に公開しない）。有効時に保存関数・対応 helper が無ければ拒否し、旧経路へ fallback しない。規模は試験込み追加＋削除 900〜1,200 行を目安とし、内訳は native 契約・試験 500〜650 行、TS 接続・試験 400〜550 行と見積もる。上限は 1,499 行とし、超える見込みなら native 契約と TS 接続を分割し、接続完了まで無効を維持 | PR5b-AC1: V1 / V2 × 新規／既存開始で、取得・照合 → 保存完了 → start 送信 → 前面化の順を証明。PR5b-AC2: identity 欠損、PID 再利用、窓交代、アクセス拒否、保存失敗、保存中の Stop／世代交代で前面化ゼロ。未送信取消し・消去失敗の保留も試験。PR5b-AC3: 前面化後の開始失敗、期待 identity と食い違う応答、応答消失を未実行扱いにせず、session が作られなかった場合も含め、R23 の保持・pause・receipt／exit／起動時の消去と隔離除外を確認。PR5b-AC4: 既定無効の V1 / V2 の既存期待を維持し、有効時の未対応 helper 拒否、identity の AI／Renderer 非露出を確認。新規／既存 start component・native seam、target identity component、Host・transport の fake store 結合試験、対象 typecheck と関連 Vitest を実施。Windows の実前面化は Computer Use で別途確認し、未実施は NOT_RUN / BLOCKED。実ストアの結合と PR6 の寿命処理に加え、Host からの `requireStartIdentity`・`includeStartIdentity` の配線と送信前の記録（PR5b-3）、新規開始の隔離の照合（PR8）が揃うまで製品経路で有効化しない |
 | PR6 | receipt proof の全 session 化、idle teardown の順序 | R1–R3、偽 object、別世代、検証前終了防止、K-3 の背景行の原子的な隔離への移管、K-4 の除外、R19b |
 | PR7 | child の世代別保持、exit 分類、Host/client の全 owner 後始末 | kill 戻り値・pipe 切断は確定にしない、T 超過、遅い exit、crash、二重通知、R19c と R1a（有効化は PR10・PR11）。R8・R11 の通知先・理由値と settle の時間を決めて ADR に書き戻す |
 | PR8 | 対象隔離による start/resume/discovery 拒否、世代 token 失効 | 同対象拒否・他対象許可、古い ticket 不可、最初の照合と再観測 |
@@ -310,9 +310,9 @@ N4-2 の実装（2026-11-02）: `WindowsTargetRenameFollows` は、継承しな�
 | PR10 | E1 / E2 と、その Stop による共有 helper の終了（R12）、Stop の外の終了（R11）、遅着（R13）の kill-stop 有効化、transport の close 期限と stopWithDeadline の上限の調整（§3.1 の 1）、Controller 結果・UI・capture・全セッション後始末 | fake timer で最大1＋C＋T、cancel 失敗の上書き、B の通知、artifact 破棄 |
 | PR11 | E3 / E4 と、それらが起点の共有 helper の終了（R12）の有効化、全再送経路の廃止、transport と stopWithDeadline・discovery manager の上限の調整を含む期限統一（§3.1 の 1） | 最大C＋T、開始 catch の再確認なし、Scope/manager 再送なし、discovery 結果伝達。E4 で session が無い通知先・理由値を決めて ADR に書き戻す |
 
-表の順序で安全の前提を積み上げる。**中間の PR で、helper の隔離は消したが対象の隔離はまだ無い、という状態を作らない。新しい kill-stop の有効化は最後の PR10・PR11 とする。PR7 の共通の終了処理は PR8・PR9 が揃うまで内部でも有効化しない。** PR4 は保存先のオーナー判断（N15 の Q23）が前提である。PR5b は §6.1 の 16 のオーナー確認が前提である。
+表の順序で安全の前提を積み上げる。**中間の PR で、helper の隔離は消したが対象の隔離はまだ無い、という状態を作らない。新しい kill-stop の有効化は最後の PR10・PR11 とする。PR7 の共通の終了処理は PR8・PR9 が揃うまで内部でも有効化しない。** PR4 は保存先のオーナー判断（N15 の Q23）が前提である。PR5b は §6.1 の 16 の採用決定に従い、PR10 と同時に有効化する。
 
-PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とする。E1 / E2 と、その Stop による共有 helper の終了（R12）、Stop の外の終了（R11）、遅着（R13）の有効化は PR10 とする。E3 / E4 と、それらが起点の R12 は PR11 で有効化する。PR10 の後 PR11 の前の E3 / E4 は今の挙動のままにする。Controller 側の後始末（承認の失効・artifact の破棄・B への通知）は PR10 で一緒に有効化し、PR7 だけで有効にしない。PR8 の対象の隔離による拒否と PR9 の承認カードでの再開は、PR10 で E1 / E2 と一緒に有効化する。対象の隔離は kill-stop の結果と K-1 からしか生まれないためである。K-1〜K-5 の実行中の隔離の入口は PR9 で作り、有効になるのは N9 が背景入力を公開するときとする。N9 は N3 の後であり、それまでは background_semantic の行は生まれない。PR5b の有効化の時点（PR10 と同時か、オーナー承認の後の個別 PR か）と、N9 の公開の条件に PR5b の有効化を含めるかは未決で、オーナー確認を要する。前面化の行は終了時の clean / suspect の判定と起動時の対象の隔離への移行から外れるため、PR5b が無効でも kill-stop の隔離の判定は変わらず、失われるのは開始の前面化の結果が未確認のときの pause だけである。
+PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とする。E1 / E2 と、その Stop による共有 helper の終了（R12）、Stop の外の終了（R11）、遅着（R13）の有効化は PR10 とする。E3 / E4 と、それらが起点の R12 は PR11 で有効化する。PR10 の後 PR11 の前の E3 / E4 は今の挙動のままにする。Controller 側の後始末（承認の失効・artifact の破棄・B への通知）は PR10 で一緒に有効化し、PR7 だけで有効にしない。PR8 の対象の隔離による拒否と PR9 の承認カードでの再開は、PR10 で E1 / E2 と一緒に有効化する。対象の隔離は kill-stop の結果と K-1 からしか生まれないためである。K-1〜K-5 の実行中の隔離の入口は PR9 で作り、有効になるのは N9 が背景入力を公開するときとする。N9 は N3 の後であり、それまでは background_semantic の行は生まれない。PR5b の有効化は PR10 と同時とする（2026-11-03 オーナー決定）。N9 の公開条件への明記は別途整理する。前面化の行は終了時の clean / suspect の判定と起動時の対象の隔離への移行から外れるため、PR5b が無効でも kill-stop の隔離の判定は変わらず、失われるのは開始の前面化の結果が未確認のときの pause だけである。
 
 各実装 PR は対象 typecheck と関連 Vitest、C++ 変更では native seam を行う。最終受入は N2 の装置の全停止点、保存費用、Main 再起動、承認カードを含む。UI 操作は Computer Use で確認し、未実施の session 必須 live は NOT_RUN / BLOCKED のまま扱う。S4（N5）の worker 整理・サロゲートペア変更、一時フォルダの起動時掃除（§5 の 13）は N3 に混ぜない。
 
@@ -333,6 +333,8 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 
 13. N4-2: Main が helper の exit を受けずに終わる場合（crash に限らず、helper が生きたままの通常の終了を含む。§3.1 の 7 のとおり helper は job で終わる）、そのたびに `sc-cu-helper-*` のフォルダが残る。probe の削除が済んでいれば中身は空で、途中なら exe のコピーも残りうる。削除の再試行を使い切った場合も残りうる。起動時に残存フォルダを掃除する処理は N4 の範囲外とし、N3 の必須受入から外し、後のスライスで扱う。環境変数が無いか無効で GetTempPathW を使う呼出しは Main の削除対象外なので、終了確認の期限切れでも helper がファイル削除を試みるが、削除の成功は保証しない。終了確認の遅延で未測定になった probe も context に cache されるため、running image の一致判定は helper が再起動するまで劣化したままになる。
 
+14. 共有ストアの隔離の確認と start_session の送信は原子的ではなく、最後の await の後・socket.write の直前の同期ゲートで競合の窓を狭めるだけである。
+
 ## 6. オーナーの判断（2026-11-02）
 
 #988 のオーナー判断 D-1〜D-5 は、推奨どおりに確定した。
@@ -352,7 +354,7 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 
 ### 6.1 親の決定（2026-11-02、N3 着手前）
 
-以下は D-1〜D-5 の範囲で確定した実装条件であり、実装済みを示さない。ただし、16 の開始の 2 段化は候補で確定していない（オーナー確認待ち）。
+以下は D-1〜D-5 の範囲で確定した実装条件であり、実装済みを示さない。16 の開始の 2 段化は案 C を採用（2026-11-03 オーナー決定）、有効化は PR10 と同時とする。
 
 1. E4 の Stop の期限も C = 10 秒とし、結果が得られなければ C + T で結果を返す。別の期限を作らない（§2.6、§3.1 の 1）。
 2. T = 2 秒。全体の期限の起点はその入口の Stop の開始。E1 / E2 は最大 1 秒（cancel）+ C + T、E3 / E4 は最大 C + T。exit が来なければ停止確定でなく `termination_requested`（§2.6）。
@@ -370,4 +372,4 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 14. K-4 の前面化の行の寿命は §2.2 の 5・R23 に従う。前面化の行も、他の行と同じく送信前に種類を前面化として永続化する。応答で結果が確定したら（成功・検証済みの失敗）行を消す。結果が未確認ならセッションを pause し、行は「効果未確認」のまま残すが、終了時の clean / suspect の判定と起動時の対象の隔離への移行からは除く。その helper の世代の exit を確認したら、その世代の前面化の行を対象の隔離を作らずに消す。receipt で Stop を確定したときも、当該 Stop の前面化の行を同じく消す。Main の起動時に残った前面化の行は対象の隔離へ移さずに破棄し、最小の診断（行の種類と破棄の理由。理由は前面化行の起動時破棄を示す値）を残す。前面化が遅れて効いた場合の残余リスクは N9a の ADR の Q21 のとおり受け入れる。
 15. 保存先の決定に伴う読み替えと残件: N9a の ADR の K-1・K-3 が「SQLite のストア」と書く箇所は、本 ADR §2.2 の 5 の SID 共通 SQLite（B、2026-11-03 オーナー決定）と読み替える。保存の形は §2.2 の 5 に具体化した。PR1〜PR3 は保存に依存しない。N15 の ADR の該当の引用は N15 の Q23 の決定の後に追随して直す。
 
-16. **候補: 前面化の記録の範囲と開始の 2 段化（推奨案）**（2026-11-03）。K-4 は開始内を含む helper の SetForegroundWindow を対象とし、N9 の新しい引渡しだけには限らない。この記録範囲は Issue #988 の承認済みの方針であり、方式の候補とは区別する。方式は §2.2.1 の C（discovery / check_target_identity → 送信前記録 → identity に束縛した開始）を推奨し、実装範囲・受入は §4.1 の PR5b とする。**protocol を変えるならオーナーの確認が要る。C も MessageType は増やさないが 要求・応答の項目（開始の成功・失敗の応答に加える前面化の試行・結果を含む）と対応能力の契約を変えるため、オーナー確認待ちの候補であり、Accepted の既決事項や実装済みとして扱わない。** PR5b の有効化の時点（PR10 と同時か、オーナー承認の後の個別 PR か）と、N9 の公開の条件に PR5b の有効化を含めるかも未決で、オーナー確認を要する。保存先は B を採用済みであり、この候補では変更しない。
+16. **採用: 前面化の記録の範囲と開始の 2 段化（案 C）**（2026-11-03 オーナー決定）。K-4 は開始内を含む helper の SetForegroundWindow を対象とし、N9 の新しい引渡しだけには限らない。方式は §2.2.1 の C（discovery / check_target_identity → 送信前記録 → identity に束縛した開始）を採用し、実装範囲・受入は §4.1 の PR5b とする。MessageType は増やさず、要求・応答の項目（開始の成功・失敗の応答に加える前面化の試行・結果を含む）と対応能力の契約を拡張する。有効化は PR10 と同時とし、それまでは Host options の内部 policy で既定無効を維持する。採用決定は実装完了を意味しない。保存先は採用済みの B を維持する。
