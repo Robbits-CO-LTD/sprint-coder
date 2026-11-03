@@ -59,7 +59,7 @@ export type ComputerUseNativeProbe = Readonly<{
     cancellableWindowDiscovery?: boolean;
     /** Private Windows attest for reading one node; absence keeps artifact transfer closed. */
     artifactRead?: boolean;
-    /** Main-only Windows start identity contract; absence or false never enables it. */
+    /** Private Windows start identity contract; absence or false never enables it. */
     identityBoundStart?: boolean;
   }>;
 }>;
