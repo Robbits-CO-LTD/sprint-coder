@@ -58,6 +58,17 @@ inline bool CheckBackgroundMonitor() {
     if (!check(!s.Snapshot().paused && s.Claim(1, 1000) != 0,
                "BG08_stale_clock_sample_is_not_a_stall")) return false;
   }
+  {
+    WindowsBackgroundMonitorState s;
+    s.BeginMonitoring(1000);
+    s.Registered(true);
+    const auto claim = s.Claim(1, 1000);
+    // Hook blindness expires during the claim, before any watchdog pass notices it.
+    s.RawMouse(1010);
+    if (!check(claim != 0 && !s.Finish(claim, 1010 + kBackgroundMouseCorrelationMs + 1) &&
+                   s.Snapshot().paused && s.Snapshot().unknown_effect,
+               "BG08_finish_checks_monitor_health")) return false;
+  }
   for (bool hook_first : {false, true}) {
     WindowsBackgroundMonitorState s;
     s.BeginMonitoring(1000);

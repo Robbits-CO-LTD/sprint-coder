@@ -23,7 +23,8 @@ struct BackgroundMonitorSnapshot {
 };
 
 // This mutex is the linearization boundary for monitor callbacks and the final claim.
-// Callers may hold Stop before taking it, never the reverse. No OS/provider call runs locked.
+// Callers may hold Stop before taking it, never the reverse. No OS/provider call runs locked;
+// the claim boundaries read only the steady clock under it.
 // Notification delivery cannot reopen this state; human resume must create fresh authority.
 class WindowsBackgroundMonitorState {
 public:
@@ -95,17 +96,28 @@ public:
     std::lock_guard lock(mutex_);
     return ClaimLocked(expected_epoch, BackgroundMonitorNow());
   }
+  // Tests only: production passes no time, so a stale sample cannot cross a boundary.
   std::uint64_t Claim(std::uint64_t expected_epoch, std::uint64_t now) {
     std::lock_guard lock(mutex_);
     return ClaimLocked(expected_epoch, now);
   }
+  // The end boundary checks monitor health too: a stall seen only here still fails the claim.
   bool Finish(std::uint64_t claim) {
     std::lock_guard lock(mutex_);
+    return FinishLocked(claim, BackgroundMonitorNow());
+  }
+  // Tests only, like Claim.
+  bool Finish(std::uint64_t claim, std::uint64_t now) {
+    std::lock_guard lock(mutex_);
+    return FinishLocked(claim, now);
+  }
+private:
+  bool FinishLocked(std::uint64_t claim, std::uint64_t now) {
     if (claim == 0 || claim != active_claim_) return false;
+    CheckHealthLocked(ObserveLocked(now));
     active_claim_ = 0;
     return !state_.paused && !state_.unknown_effect;
   }
-private:
   std::uint64_t ClaimLocked(std::uint64_t expected_epoch, std::uint64_t now) {
     CheckHealthLocked(ObserveLocked(now));
     if (!registered_ || state_.paused || expected_epoch != state_.epoch || active_claim_ != 0)
