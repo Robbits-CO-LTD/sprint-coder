@@ -16,6 +16,47 @@ import {
 import { parseNativeHandshake } from './computer-use-native-handshake';
 
 describe('Windows background monitor (P3a)', () => {
+  it('pins P3b independent raw input and fail-closed health monitoring', () => {
+    const native = (name: string) =>
+      readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+    const monitor = native('computer_use_windows_host_background_monitor.inc');
+    for (const marker of [
+      'RawWindow',
+      'HWND_MESSAGE',
+      'RIDEV_INPUTSINK',
+      'GetRawInputData',
+      'RIM_TYPEMOUSE',
+      'raw_pump = std::jthread',
+      'watchdog = std::jthread',
+      'state.CheckHealth',
+      'PostThreadMessageW',
+      'state.MouseHook',
+      'state.RawMouse',
+    ]) {
+      expect(monitor).toContain(marker);
+    }
+    expect(monitor).not.toContain('GetLastInputInfo');
+    expect(monitor).toContain('RAWINPUTDEVICE device{0x01, 0x02, RIDEV_INPUTSINK, sink}');
+    expect(monitor).toContain('sink != nullptr && RegisterRawInputDevices');
+    expect(monitor).toContain('RID_HEADER');
+    expect(monitor).toContain('if (pending) state.Heartbeat(kind)');
+    expect(monitor).toContain('session.background_monitor->Stop()');
+    const seam = native('computer_use_windows_background_monitor_test.cc');
+    expect(seam).toContain('BG08_raw_sink_registration_failure_and_cleanup');
+    expect(seam).toContain('BG08_native_keyboard_ignored_mouse_requires_hook');
+    const fixture = native('computer_use_windows_background_monitor_test.h');
+    for (const test of [
+      'BG08_monitor_failure_requires_human_resume',
+      'BG08_registration_recovery_does_not_resume',
+      'BG08_keyboard_only_is_not_mouse_blindness',
+      'BG08_raw_hook_order_and_coalescing',
+      'BG08_raw_without_hook_closes_claim',
+      'BG08_late_heartbeat_cannot_hide_stall',
+    ]) {
+      expect(fixture).toContain(test);
+    }
+    expect(COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED).toBe(false);
+  });
   it('registers the native BG02/BG03 matrix without opening the public gate', () => {
     const native = (name: string) =>
       readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');

@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -6,6 +7,15 @@
 namespace sprint_coder::computer_use {
 
 enum class BackgroundInputOwner { kNone, kOther, kTarget, kUnknown };
+enum class BackgroundMonitorPump { kHook, kRaw };
+// Provisional fail-closed bounds; real-device measurements are required before publication.
+inline constexpr std::uint64_t kBackgroundMouseCorrelationMs = 100;
+inline constexpr std::uint64_t kBackgroundHeartbeatIntervalMs = 20;
+inline constexpr std::uint64_t kBackgroundHeartbeatTimeoutMs = 250;
+inline std::uint64_t BackgroundMonitorNow() {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 struct BackgroundMonitorSnapshot {
   std::uint64_t epoch = 1;
   bool paused = false;
@@ -25,6 +35,36 @@ public:
     std::lock_guard lock(mutex_);
     if (!success) PauseLocked();
     registered_ = success;
+  }
+  void BeginMonitoring(std::uint64_t now = BackgroundMonitorNow()) {
+    std::lock_guard lock(mutex_);
+    if (monitoring_) { PauseLocked(); return; }
+    monitoring_ = true;
+    hook_heartbeat_ = raw_heartbeat_ = now;
+  }
+  void Heartbeat(BackgroundMonitorPump pump, std::uint64_t now = BackgroundMonitorNow()) {
+    std::lock_guard lock(mutex_);
+    CheckHealthLocked(now);
+    (pump == BackgroundMonitorPump::kHook ? hook_heartbeat_ : raw_heartbeat_) = now;
+  }
+  void MouseHook(std::uint64_t now = BackgroundMonitorNow()) {
+    std::lock_guard lock(mutex_);
+    CheckHealthLocked(now);
+    hook_seen_ = true;
+    last_hook_ = now;
+    raw_pending_ = false;
+  }
+  void RawMouse(std::uint64_t now = BackgroundMonitorNow()) {
+    std::lock_guard lock(mutex_);
+    CheckHealthLocked(now);
+    // Coalescing and delivery order prohibit a one-to-one event-count assumption.
+    if (hook_seen_ && now >= last_hook_ && now - last_hook_ <= kBackgroundMouseCorrelationMs)
+      return;
+    if (!raw_pending_) { raw_pending_ = true; first_raw_ = now; }
+  }
+  void CheckHealth(std::uint64_t now = BackgroundMonitorNow()) {
+    std::lock_guard lock(mutex_);
+    CheckHealthLocked(now);
   }
   void Foreground(BackgroundInputOwner owner) {
     if (owner != BackgroundInputOwner::kOther) Pause();
@@ -46,8 +86,9 @@ public:
     std::lock_guard lock(mutex_);
     return state_;
   }
-  std::uint64_t Claim(std::uint64_t expected_epoch) {
+  std::uint64_t Claim(std::uint64_t expected_epoch, std::uint64_t now = BackgroundMonitorNow()) {
     std::lock_guard lock(mutex_);
+    CheckHealthLocked(now);
     if (!registered_ || state_.paused || expected_epoch != state_.epoch || active_claim_ != 0)
       return 0;
     if (next_claim_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -64,6 +105,15 @@ public:
     return !state_.paused && !state_.unknown_effect;
   }
 private:
+  void CheckHealthLocked(std::uint64_t now) {
+    if (!monitoring_) return;
+    const auto expired = [now](std::uint64_t time, std::uint64_t limit) {
+      return now < time || now - time > limit;
+    };
+    if (expired(hook_heartbeat_, kBackgroundHeartbeatTimeoutMs) ||
+        expired(raw_heartbeat_, kBackgroundHeartbeatTimeoutMs) ||
+        (raw_pending_ && expired(first_raw_, kBackgroundMouseCorrelationMs))) PauseLocked();
+  }
   void PauseLocked() {
     // Close first, then advance, then let a caller publish the snapshot. Saturation never wraps.
     if (!state_.paused) {
@@ -75,6 +125,11 @@ private:
   mutable std::mutex mutex_;
   BackgroundMonitorSnapshot state_;
   bool registered_ = false;
+  bool monitoring_ = false;
+  bool hook_seen_ = false;
+  bool raw_pending_ = false;
+  std::uint64_t hook_heartbeat_ = 0, raw_heartbeat_ = 0;
+  std::uint64_t last_hook_ = 0, first_raw_ = 0;
   std::uint64_t next_claim_ = 0;
   std::uint64_t active_claim_ = 0;
 };
