@@ -11,6 +11,19 @@ import {
 } from './computer-use-grant-identity';
 import { classifyTarget, denyRulesetVersion } from './computer-use-target-eligibility';
 import type { ComputerTargetWindowsGeneration } from './computer-use-target-model';
+import type { ComputerAppProfileRecord } from './persistence';
+
+export type WindowsComputerTargetCandidate = Readonly<{
+  profile: ComputerAppProfileRecord;
+  windows: readonly Readonly<{
+    windowId: string;
+    windowIdentityDigest: string;
+    title: string;
+    maximumMode: ComputerUseMode;
+    windowsGeneration: ComputerTargetWindowsGeneration;
+    eligible: true;
+  }>[];
+}>;
 
 type NativeSelectableTarget = Extract<
   ComputerWindowsNativeTargetList['targets'][number],
@@ -35,6 +48,62 @@ export type ComputerUseNativeTargetList = Readonly<{
 
 const asciiLower = (value: string): string =>
   value.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+
+/** Ephemeral profiles for enumeration only: no registration, grant, or egress agreement. */
+export function windowsComputerTargetCandidates(
+  list: ComputerUseNativeTargetList,
+): readonly WindowsComputerTargetCandidate[] {
+  const windowsGeneration = list.windowsGeneration;
+  if (
+    windowsGeneration === undefined ||
+    windowsGeneration.listGeneration !== list.generation ||
+    windowsGeneration.rulesetVersion !== list.rulesetVersion
+  )
+    throw new Error('Computer Use target generation changed');
+  const candidates = new Map<string, WindowsComputerTargetCandidate>();
+  for (const target of list.targets) {
+    if (target.kind !== 'selectable') continue;
+    const { native, maximumMode } = target;
+    // Byte identity also separates simultaneous versions of the same signed application.
+    const id = `native-target:${native.appIdentityDigest}:${native.executableDigest}`;
+    const previous = candidates.get(id);
+    const profile: ComputerAppProfileRecord = previous?.profile ?? {
+      id,
+      platform: 'win32',
+      kind: native.identity.packageFamilyName === null ? 'win32-executable' : 'windows-package',
+      label: native.identity.displayName,
+      canonicalPath: native.identity.executablePath,
+      appUrl: null,
+      identity: native.identity,
+      identityDigest: native.appIdentityDigest,
+      version: null,
+      executableDigest: native.executableDigest,
+      mode: 'full_access_app',
+      connectionId: '',
+      modelId: '',
+      providerEgressConsent: false,
+      remember: false,
+      revision: 1,
+      createdAt: '',
+      updatedAt: '',
+    };
+    candidates.set(id, {
+      profile,
+      windows: [
+        ...(previous?.windows ?? []),
+        {
+          windowId: native.windowId,
+          windowIdentityDigest: native.windowIdentityDigest,
+          title: native.title,
+          maximumMode,
+          windowsGeneration,
+          eligible: true,
+        },
+      ],
+    });
+  }
+  return [...candidates.values()];
+}
 
 /** Malformed evidence invalidates the whole response; ordinary refusals carry only their kind. */
 export function parseWindowsComputerUseTargets(value: unknown): ComputerUseNativeTargetList | null {

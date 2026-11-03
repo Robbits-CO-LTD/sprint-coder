@@ -7,7 +7,10 @@ import {
   type ComputerUseEligibilityMode,
   type ComputerWindowsNativeTargetList,
 } from '@sprint-coder/contracts';
-import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
+import {
+  parseWindowsComputerUseTargets,
+  windowsComputerTargetCandidates,
+} from './computer-use-native-targets';
 import { createComputerUseNativeHost } from './computer-use-native-host';
 import type { ComputerUseNativeBinding } from './computer-use-native-types';
 
@@ -122,6 +125,59 @@ function nativeFixture() {
 }
 
 describe('Windows native targets independently classified in Main', () => {
+  it('N6-2 groups candidate-only profiles without registration or consent and keeps exact generations', () => {
+    const native = row();
+    const parsed = parseWindowsComputerUseTargets(
+      envelope([
+        native,
+        { ...row('upper'), windowId: '43', windowIdentityDigest: 'e'.repeat(64) },
+        { kind: 'denied' },
+        { kind: 'unresolvable' },
+      ]),
+    )!;
+    const windowsGeneration = {
+      helper: Object.freeze({ helperGeneration: 2 }),
+      listGeneration: parsed.generation,
+      rulesetVersion: parsed.rulesetVersion,
+    };
+    const candidates = windowsComputerTargetCandidates({ ...parsed, windowsGeneration });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.profile).toMatchObject({
+      platform: 'win32',
+      kind: 'win32-executable',
+      identity: native.identity,
+      identityDigest: native.appIdentityDigest,
+      executableDigest: native.executableDigest,
+      providerEgressConsent: false,
+      remember: false,
+      connectionId: '',
+      modelId: '',
+    });
+    expect(candidates[0]!.windows.map((window) => window.maximumMode)).toEqual([
+      'full_access_app',
+      'observe_only',
+    ]);
+    expect(
+      candidates[0]!.windows.every((window) => window.windowsGeneration === windowsGeneration),
+    ).toBe(true);
+    expect(windowsComputerTargetCandidates({ ...parsed, windowsGeneration })[0]!.profile.id).toBe(
+      candidates[0]!.profile.id,
+    );
+    expect(() => windowsComputerTargetCandidates(parsed)).toThrow(/generation/);
+    expect(() =>
+      windowsComputerTargetCandidates({
+        ...parsed,
+        windowsGeneration: { ...windowsGeneration, listGeneration: 1 },
+      }),
+    ).toThrow(/generation/);
+    expect(() =>
+      windowsComputerTargetCandidates({
+        ...parsed,
+        windowsGeneration: { ...windowsGeneration, rulesetVersion: 1 },
+      }),
+    ).toThrow(/generation/);
+  });
+
   it('N6 carries exact response ownership separately from the native list generation', async () => {
     const fixture = nativeFixture();
     const helper = Object.freeze({ helperGeneration: 4 });
