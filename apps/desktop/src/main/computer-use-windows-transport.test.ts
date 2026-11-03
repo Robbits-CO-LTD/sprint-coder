@@ -8106,6 +8106,29 @@ int main() {
     },
   );
 
+  it('late_answer_to_a_deferred_request_does_not_terminate', async () => {
+    const child = new ControlledHelperChild();
+    vi.mocked(spawn).mockImplementationOnce(
+      () => child as unknown as NodeChildProcess.ChildProcess,
+    );
+    const target = ledgerTarget(true, undefined, true);
+    const session = await startSession(target.host, 'deferred-late', 'turn-1');
+    target.helper().hold('observe');
+    target.helper().hold('list_targets');
+    const observe = observeThroughTransport(target.addon, session.sessionId);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await queued).toBe('rejected');
+    target.helper().release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await observe).toBe('resolved');
+    // The helper answers the deferred request late: it is alive, so nothing is terminated.
+    target.helper().release('list_targets');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(child.killCalls).toBe(0);
+  });
+
   it.each(['exit', 'stop'] as const)(
     'deferred_watch_cleared_on_exit_and_stop (%s)',
     async (ending) => {

@@ -402,7 +402,7 @@ type HelperGeneration = {
   cause: 'stop' | 'crash' | 'abortTransport';
   exited: boolean;
   timer?: NodeJS.Timeout;
-  deferredRequests: Array<{ order: number; duration: number }>;
+  deferredRequests: Array<{ order: number; duration: number; requestId: string }>;
   deferredTimer?: NodeJS.Timeout;
 };
 
@@ -413,6 +413,25 @@ class WindowsComputerUseHelperClient {
     clearTimeout(generation.deferredTimer);
     delete generation.deferredTimer;
     generation.deferredRequests.length = 0;
+  }
+
+  /**
+   * A late answer to a deferred request proves the helper is still serving its queue, so that
+   * request no longer counts towards terminating the generation. Its result stays rejected.
+   */
+  private forgetDeferredRequest(requestId: string): void {
+    const generation = this.generations.get(this.helperGeneration);
+    if (generation === undefined) return;
+    const index = generation.deferredRequests.findIndex(
+      (request) => request.requestId === requestId,
+    );
+    if (index === -1) return;
+    generation.deferredRequests.splice(index, 1);
+    if (index === 0) {
+      clearTimeout(generation.deferredTimer);
+      delete generation.deferredTimer;
+      this.reevaluateDeferredRequests(generation);
+    }
   }
 
   private reevaluateDeferredRequests(generation: HelperGeneration): void {
@@ -1689,6 +1708,7 @@ class WindowsComputerUseHelperClient {
               generation.deferredRequests.push({
                 order: pending.order,
                 duration: timeoutMilliseconds,
+                requestId: requestId.hex,
               });
               generation.deferredRequests.sort((a, b) => a.order - b.order);
               this.reevaluateDeferredRequests(generation);
@@ -1868,7 +1888,10 @@ class WindowsComputerUseHelperClient {
       return;
     }
     const pending = this.pending.get(frame.requestId.hex);
-    if (pending === undefined) return;
+    if (pending === undefined) {
+      this.forgetDeferredRequest(frame.requestId.hex);
+      return;
+    }
     if (!isWindowsHelperResponseBound(frame, pending)) {
       const error = new Error('Computer Use Windows helper response binding mismatch');
       this.markSemanticUncertain(pending);
