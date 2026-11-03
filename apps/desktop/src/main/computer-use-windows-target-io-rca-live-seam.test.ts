@@ -57,23 +57,13 @@ function instrumentedHost(): string {
   );
   rejudge = replaceOnce(
     rejudge,
-    'void WindowsV2RejudgeWorkerLoop(WindowsV2RejudgeState *state) {',
-    'void WindowsV2RejudgeWorkerLoop(WindowsV2RejudgeState *state) {\n  Sc940RejudgeWorkerStarted();',
-  );
-  rejudge = replaceOnce(
-    rejudge,
-    '    CancelSynchronousIo(state.cancellation_thread);',
-    '    { Sc940RejudgeCancelAttempt(job_id, GetThreadId(state.cancellation_thread)); CancelSynchronousIo(state.cancellation_thread); }',
+    'WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work) {',
+    'WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work) {\n  Sc940RejudgeMeasurement();',
   );
   rejudge = replaceOnce(
     rejudge,
     '    context = CurrentWindowsTargetFactsContext(work.main_pid, std::move(signer),',
     '    Sc940RejudgeContextGate(work);\n    context = CurrentWindowsTargetFactsContext(work.main_pid, std::move(signer),',
-  );
-  rejudge = replaceOnce(
-    rejudge,
-    "    // Rejudge job retirement precedes result publication. No old job may touch a new job's slot.",
-    "    Sc940RejudgeRetired(job_id);\n    // Rejudge job retirement precedes result publication. No old job may touch a new job's slot.",
   );
   source = source.slice(0, rejudgeFrom) + rejudge + source.slice(rejudgeTo);
   const measureFrom = source.indexOf('bool MeasureWindowsNewStart(');
@@ -772,9 +762,7 @@ struct WindowsValidationWork;
 struct WindowsFileIdentity;
 struct WindowsV2RejudgeWork;
 bool Sc940RejudgeFileIdentity(const WindowsV2RejudgeWork &work, WindowsFileIdentity *identity);
-void Sc940RejudgeWorkerStarted();
-void Sc940RejudgeCancelAttempt(std::uint64_t job_id, DWORD thread_id);
-void Sc940RejudgeRetired(std::uint64_t job_id);
+void Sc940RejudgeMeasurement();
 void Sc940RejudgeContextGate(const WindowsV2RejudgeWork &work);
 std::string Sc940RejudgeProbe(const std::string &metadata);
 bool Sc940ValidationFileIdentity(const WindowsValidationWork &work, WindowsFileIdentity *identity);
@@ -901,14 +889,11 @@ const WindowsSession *validation_probe_source = nullptr;
 std::atomic<const WindowsSession *> rejudge_probe_source{nullptr};
 std::atomic<DWORD> rca_consumer_thread_id{0};
 std::atomic<unsigned> rejudge_file_reads{0}, rejudge_file_successes{0}, rejudge_hold_call{0};
-std::atomic<unsigned> rejudge_workers{0}, rejudge_cancel_attempts{0}, rejudge_retired_jobs{0};
+std::atomic<unsigned> rejudge_measurements{0};
+std::atomic<bool> rejudge_io_hold{false}, rejudge_io_canceled{false};
 std::atomic<unsigned> rejudge_context_calls{0};
 std::atomic<bool> rejudge_hold_context{false};
-std::atomic<DWORD> rejudge_thread_id{0};
 std::atomic<HANDLE> rejudge_source_file{INVALID_HANDLE_VALUE};
-std::atomic<std::uint64_t> rejudge_last_cancel_id{0};
-std::mutex rejudge_pending_mutex;
-std::shared_ptr<WindowsV2RejudgePending> rejudge_last_pending;
 HANDLE rejudge_other_file = INVALID_HANDLE_VALUE;
 
 void Require(bool condition, const char *reason) {
@@ -948,39 +933,39 @@ void Sc940ConsumerGate(std::uint8_t request) {
 }
 void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
 
-void Sc940RejudgeWorkerStarted() {
-  rejudge_workers.fetch_add(1);
-  rejudge_thread_id.store(GetCurrentThreadId());
+void Sc940RejudgeMeasurement() {
+  rejudge_measurements.fetch_add(1);
+  auto &control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  if (GetCurrentThreadId() != rca_consumer_thread_id.load() ||
+      control.new_start_thread == nullptr || GetThreadId(control.new_start_thread) != GetCurrentThreadId() ||
+      !WindowsTargetListWorkerRunning().load()) wrong_measurement.store(true);
 }
-void Sc940RejudgeCancelAttempt(std::uint64_t job_id, DWORD thread_id) {
-  if (thread_id == 0 || thread_id != rejudge_thread_id.load()) wrong_measurement.store(true);
-  rejudge_last_cancel_id.store(job_id);
-  rejudge_cancel_attempts.fetch_add(1);
-}
-void Sc940RejudgeRetired(std::uint64_t) { rejudge_retired_jobs.fetch_add(1); }
 void Sc940RejudgeContextGate(const WindowsV2RejudgeWork &work) {
-  {
-    std::lock_guard lock(rejudge_pending_mutex);
-    rejudge_last_pending = work.pending;
-  }
   rejudge_context_calls.fetch_add(1);
   if (!rejudge_hold_context.load()) return;
   SetEvent(gate_entered);
   if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
 }
 bool Sc940RejudgeFileIdentity(const WindowsV2RejudgeWork &work, WindowsFileIdentity *identity) {
-  // Work owns the duplicate. Never read or borrow the consumer's Session from this worker hook.
+  // Work owns the duplicate throughout synchronous measurement.
   if (work.executable.value == rejudge_source_file.load() || work.pid != fixture_pids[0] ||
-      work.window != fixture_windows[0] || GetCurrentThreadId() != rejudge_thread_id.load()) {
+      work.window != fixture_windows[0] || GetCurrentThreadId() != rca_consumer_thread_id.load()) {
     wrong_measurement.store(true);
     return false;
   }
-  {
-    std::lock_guard lock(rejudge_pending_mutex);
-    rejudge_last_pending = work.pending;
-  }
   const unsigned ordinal = rejudge_file_reads.fetch_add(1) + 1;
   if (ordinal == rejudge_hold_call.load()) {
+    if (rejudge_io_hold.load()) {
+      ScopedKernelHandle reader, writer;
+      Require(CreatePipe(&reader.value, &writer.value, nullptr, 0), "rejudge_sync_pipe");
+      SetEvent(gate_entered);
+      char byte = 0;
+      DWORD read = 0;
+      const BOOL completed = ReadFile(reader.value, &byte, 1, &read, nullptr);
+      rejudge_io_canceled.store(!completed && GetLastError() == ERROR_OPERATION_ABORTED);
+      return false;
+    }
     SetEvent(gate_entered);
     if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
   }
@@ -2776,25 +2761,10 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
   }
 }
 
-struct RejudgeStateView {
-  std::uint64_t active = 0, next = 0;
-  DWORD thread = 0;
-  bool queued = false;
-};
-RejudgeStateView RejudgeState() {
-  auto &state = WindowsV2RejudgeControl();
-  std::lock_guard lock(state.mutex);
-  return {state.active_job_id, state.next_job_id,
-          state.cancellation_thread == nullptr ? 0 : GetThreadId(state.cancellation_thread), state.queued != nullptr};
-}
-std::shared_ptr<WindowsV2RejudgePending> RejudgePending() {
-  std::lock_guard lock(rejudge_pending_mutex);
-  return rejudge_last_pending;
-}
-bool WaitRejudgeRetired(unsigned count) {
-  const ULONGLONG deadline = GetTickCount64() + 15'000;
-  while (rejudge_retired_jobs.load() != count && GetTickCount64() < deadline) Sleep(1);
-  return rejudge_retired_jobs.load() == count && !WindowsTargetListWorkerRunning().load();
+bool RejudgeIdle() {
+  auto &control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  return !WindowsTargetListWorkerRunning().load() && control.new_start_thread == nullptr;
 }
 void SendRejudgeProbe(RcaRun &run, std::uint8_t request, std::string_view mode = "normal") {
   // Each explicit diagnostic request binds a fresh component snapshot to its actual input epoch.
@@ -2824,7 +2794,6 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
   const std::string label(scenario.begin(), scenario.end());
   RcaRun run;
   ULONGLONG stop_ms = 0, close_ms = 0;
-  std::uint64_t old_job = 0, next_job = 0;
   try {
     run.AttachOwnedSibling(pid, window, created, fixture_path);
     // The unrelated zero-input control seed exists only for real Cancel/Close receipts.
@@ -2857,25 +2826,23 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     SendRejudgeProbe(run, 20);
     Require(run.Wait(20, 15'000) && RejudgeReply(run, 20, true, 1) &&
                 rejudge_file_reads.load() == 1 && rejudge_file_successes.load() == 1 &&
-                WaitRejudgeRetired(1), "rejudge_real_baseline_passes_without_foreground");
-    const auto baseline = RejudgeState();
-    Require(baseline.active == 0 && baseline.thread == 0 && !baseline.queued && rejudge_workers.load() == 1,
-            "rejudge_baseline_job_cleaned");
+                RejudgeIdle(), "rejudge_real_baseline_passes_without_foreground");
+    Require(RejudgeIdle() && rejudge_measurements.load() == 1, "rejudge_baseline_cleaned");
     if (repeat) {
       SendRejudgeProbe(run, 21, "repeat");
       Require(run.Wait(21, 15'000) && RejudgeReply(run, 21, true, 3) &&
                   rejudge_file_reads.load() == 4 && rejudge_file_successes.load() == 4 &&
-                  WaitRejudgeRetired(4), "rejudge_repeated_measurement_not_cached");
+                  (RejudgeIdle() && rejudge_measurements.load() == 4), "rejudge_repeated_measurement_not_cached");
       std::uint8_t request = 30;
       for (const char *mode : {"mode_mismatch", "app_mismatch", "start_mismatch", "file_mismatch", "read_failure"}) {
         SendRejudgeProbe(run, request, mode);
         Require(run.Wait(request, 15'000) && RejudgeReply(run, request, false), "rejudge_real_negative_refused");
         ++request;
       }
-      Require(rejudge_file_reads.load() == 6 && rejudge_file_successes.load() == 5 && WaitRejudgeRetired(9),
+      Require(rejudge_file_reads.load() == 6 && rejudge_file_successes.load() == 5 && (RejudgeIdle() && rejudge_measurements.load() == 9),
               "rejudge_real_file_mismatch_and_read_failure");
       SendRejudgeProbe(run, 40);
-      Require(run.Wait(40, 15'000) && RejudgeReply(run, 40, true, 1) && WaitRejudgeRetired(10),
+      Require(run.Wait(40, 15'000) && RejudgeReply(run, 40, true, 1) && (RejudgeIdle() && rejudge_measurements.load() == 10),
               "rejudge_negative_not_cached");
     } else {
       if (cold) {
@@ -2883,109 +2850,62 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
         WindowsV2FactsContextCache().reset();
         rejudge_hold_context.store(true);
       } else if (queued) hold_point.store(HoldPoint::kConsumer);
-      else rejudge_hold_call.store(2);
+      else { rejudge_hold_call.store(2); rejudge_io_hold.store(cancel); }
       SendRejudgeProbe(run, 2);
       Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0 &&
                   WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT,
-              "rejudge_actual_worker_or_prequeued_gate_entered");
-      const auto active = RejudgeState();
-      if (queued) {
-        Require(active.active == 0 && active.next == baseline.next && !active.queued &&
-                    rejudge_file_reads.load() == 1 && !WindowsTargetListWorkerRunning().load(),
-                "rejudge_prequeued_has_no_new_job");
-      } else {
-        old_job = active.active;
-        Require(old_job != 0 && !active.queued && active.thread == rejudge_thread_id.load() &&
-                    WindowsTargetListWorkerRunning().load() && rejudge_file_successes.load() == 1 &&
-                    rejudge_file_reads.load() == (cold ? 1u : 2u), "rejudge_real_worker_held");
+              "rejudge_consumer_or_prequeued_gate_entered");
+      Require(WindowsTargetListWorkerRunning().load() == !queued &&
+                  rejudge_measurements.load() == (queued ? 1u : 2u), "rejudge_consumer_owns_slot");
+      if (!queued) {
+        std::optional<bool> busy_not_web;
+        std::string busy_reason;
+        Require(!RejudgeWindowsV2Session(snapshot, &busy_not_web, &busy_reason) &&
+                    !busy_not_web.has_value() && rejudge_measurements.load() == 2 &&
+                    WindowsTargetListWorkerRunning().load(), "rejudge_busy_cannot_start_another_measurement");
       }
       if (cancel) {
-        const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
+        const auto serial = WindowsTargetListControl().stop_serial.load();
         const ULONGLONG sent = GetTickCount64();
         run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
         Require(WaitStopSerial(serial, 1000) && run.Wait(2, 1000) && RejudgeReply(run, 2, false) &&
                     run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
-                "rejudge_cancel_alone_before_close");
+                "rejudge_sync_io_cancel_receipt");
         stop_ms = GetTickCount64() - sent;
-        Require(stop_ms < 1000 && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
-                    rejudge_file_successes.load() == 1, "rejudge_cancel_receipt_before_real_read_release");
-        SendRejudgeProbe(run, 6);
-        Require(run.Wait(6, 1000) && RejudgeReply(run, 6, false), "rejudge_fresh_busy_refused");
-        const auto busy = RejudgeState();
-        Require(busy.active == old_job && busy.next == active.next && busy.thread == active.thread &&
-                    !busy.queued && rejudge_workers.load() == 1 && rejudge_file_reads.load() == 2,
-                "rejudge_busy_adds_no_job");
+        Require(stop_ms < 1000 && rejudge_io_canceled.load() && RejudgeIdle() &&
+                    rejudge_file_successes.load() == 1, "rejudge_sync_io_canceled_without_release");
       }
       const auto serial = WindowsTargetListControl().stop_serial.load();
       const ULONGLONG sent = GetTickCount64();
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":" +
           std::to_string(cancel ? 3 : 2) + "}");
       Require(WaitStopSerial(serial, 1000), "rejudge_close_reader_progress");
-      if (queued) {
-        Require(cancellation_epoch.load() == 1, "rejudge_prequeued_close_uses_serial");
+      if (!cancel) {
+        // Non-I/O stalls keep the consumer and slot until return. Permanent hangs use Main kill-stop.
+        Require(!run.Wait(2, 30) && WindowsTargetListWorkerRunning().load() == !queued,
+                "rejudge_no_result_or_slot_release_while_held");
+        Require(snapshot.input_api_attempts->load() == 0, "rejudge_stop_has_no_input");
+        if (cold) Require(!WindowsV2FactsContextCache().has_value(), "rejudge_held_context_not_adopted");
         hold_point.store(HoldPoint::kNone);
+        rejudge_hold_call.store(0);
+        rejudge_hold_context.store(false);
         SetEvent(run.release.value);
       }
       Require(run.Wait(2, 1000) && RejudgeReply(run, 2, false) && run.Wait(4, 1000) &&
                   run.Receipt(4, MessageType::kProbeResult, "closed", cancel ? 3 : 2), "rejudge_close_receipt");
       close_ms = GetTickCount64() - sent;
-      Require(close_ms < 1000 && sessions.empty() && ticket_states.empty(), "rejudge_control_closed_before_release");
-      if (!queued) {
-        Require(WindowsTargetListWorkerRunning().load() && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
-                    rejudge_file_successes.load() == 1, "rejudge_worker_remains_held_after_close");
-        // Response already rejected: its local Session copy is gone. The worker must own its file.
-        ReleaseWindowsSessionResources(&snapshot);
-        Require(snapshot.executable_file == INVALID_HANDLE_VALUE && snapshot.process_handle == nullptr,
-                "rejudge_original_snapshot_handles_closed");
-        if (cold) Require(!WindowsV2FactsContextCache().has_value(), "rejudge_canceled_context_not_adopted");
-        rejudge_hold_call.store(0);
-        rejudge_hold_context.store(false);
-        SetEvent(run.release.value);
-        Require(WaitRejudgeRetired(2) && run.WaitWorkerIdle(1000), "rejudge_late_worker_cleanup");
-        const auto pending = RejudgePending();
-        Require(pending != nullptr && pending->job_id == old_job, "rejudge_old_pending_identified");
-        {
-          std::unique_lock lock(pending->mutex);
-          Require(pending->ready.wait_for(lock, std::chrono::seconds(1), [&] { return pending->done; }) &&
-                      pending->abandoned.load() && !pending->result.matches && !pending->result.context.has_value(),
-                  "rejudge_late_result_publication_discards_abandoned_job");
-        }
-        if (cold) {
-          Require(!WindowsV2FactsContextCache().has_value() && rejudge_context_calls.load() == 1 &&
-                      rejudge_file_reads.load() == 1, "rejudge_late_context_not_adopted");
-        } else {
-          Require(rejudge_file_reads.load() == 2 && rejudge_file_successes.load() == 2,
-                  "rejudge_duplicate_read_succeeds_after_source_close_without_adoption");
-        }
-        SeedOwnedValidationIdentity(&snapshot);
-      } else Require(WaitRejudgeRetired(1) && RejudgeState().next == baseline.next, "rejudge_prequeued_starts_no_job");
-      if (cancel) {
-        ResetEvent(run.entered.value);
-        ResetEvent(run.release.value);
-        rejudge_hold_call.store(3);
-        SendRejudgeProbe(run, 21);
-        Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "rejudge_fresh_job_held");
-        const auto fresh = RejudgeState();
-        next_job = fresh.active;
-        const unsigned attempts = rejudge_cancel_attempts.load();
-        Require(next_job != 0 && next_job != old_job && fresh.thread == active.thread &&
-                    attempts > 0 && rejudge_last_cancel_id.load() == old_job, "rejudge_reused_physical_worker");
-        CancelWindowsV2RejudgeJob(old_job);
-        const auto unchanged = RejudgeState();
-        Require(rejudge_cancel_attempts.load() == attempts && unchanged.active == next_job &&
-                    unchanged.thread == fresh.thread && WindowsTargetListWorkerRunning().load() &&
-                    WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "rejudge_old_id_cannot_cancel_new_job");
-        rejudge_hold_call.store(0);
-        SetEvent(run.release.value);
-        Require(run.Wait(21, 15'000) && RejudgeReply(run, 21, true, 1) && WaitRejudgeRetired(3),
-                "rejudge_explicit_fresh_component_retry");
-      } else {
-        SendRejudgeProbe(run, 21);
-        Require(run.Wait(21, 15'000) && RejudgeReply(run, 21, true, 1) && WaitRejudgeRetired(queued ? 2 : 3),
-                "rejudge_explicit_fresh_component_retry");
-        if (cold) Require(WindowsV2FactsContextCache().has_value() && rejudge_context_calls.load() == 2,
-                          "rejudge_only_fresh_retry_adopts_context");
-      }
+      Require(close_ms < 1000 && sessions.empty() && ticket_states.empty() && RejudgeIdle(),
+              "rejudge_close_follows_cleanup");
+      if (cold) Require(!WindowsV2FactsContextCache().has_value() && rejudge_context_calls.load() == 1 &&
+                            rejudge_file_reads.load() == 1, "rejudge_late_context_not_adopted");
+      Require(rejudge_measurements.load() == (queued ? 1u : 2u), "rejudge_no_automatic_retry");
+      rejudge_hold_call.store(0);
+      rejudge_io_hold.store(false);
+      SendRejudgeProbe(run, 21);
+      Require(run.Wait(21, 15'000) && RejudgeReply(run, 21, true, 1) && RejudgeIdle() &&
+                  rejudge_measurements.load() == (queued ? 2u : 3u), "rejudge_explicit_fresh_component_retry");
+      if (cold) Require(WindowsV2FactsContextCache().has_value() && rejudge_context_calls.load() == 2,
+                        "rejudge_only_fresh_retry_adopts_context");
     }
     if (repeat) {
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
@@ -2996,7 +2916,7 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     Require(snapshot.input_api_attempts->load() == 0 && snapshot.maximum_mode == listed.mode &&
                 !snapshot.v2_input_not_web.has_value() && start_measurement_attempts.load() == 0 && start_focus_calls.load() == 0 &&
                 synchronous_session_probes.load() == 0 && ticket_states.empty() && sessions.empty() &&
-                rejudge_workers.load() == 1 && RejudgeState().active == 0 && RejudgeState().thread == 0 &&
+                RejudgeIdle() &&
                 !wrong_measurement.load() && !gate_timed_out.load(), "rejudge_component_never_admits_or_inputs");
     run.Cleanup();
     Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load() &&
@@ -3005,9 +2925,9 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
     std::cout << "{\"case\":\"" << label << "\",\"componentIntegrationOnly\":true,\"realListMode\":\"observe_only\""
               << ",\"realBaselineJudgement\":true,\"stopMs\":" << stop_ms << ",\"closeMs\":" << close_ms
               << ",\"fileReads\":" << rejudge_file_reads.load() << ",\"fileReadSuccesses\":" << rejudge_file_successes.load()
-              << ",\"retiredJobs\":" << rejudge_retired_jobs.load() << ",\"workerThreads\":" << rejudge_workers.load()
-              << ",\"contextCalls\":" << rejudge_context_calls.load() << ",\"cancelAttempts\":" << rejudge_cancel_attempts.load()
-              << ",\"oldJobId\":" << old_job << ",\"nextJobId\":" << next_job
+              << ",\"measurements\":" << rejudge_measurements.load() << ",\"workerThreads\":0"
+              << ",\"contextCalls\":" << rejudge_context_calls.load()
+              << ",\"syncIoCanceled\":" << (rejudge_io_canceled.load() ? "true" : "false")
               << ",\"lateResultAppliedToSession\":false,\"unknownCloseRejected\":true,\"inputAttempts\":0"
               << ",\"foregroundRequired\":false,\"healthyStartVerified\":false,\"controlSeedIsDiagnostic\":true"
               << ",\"freshRetryIsComponentOnly\":true,\"workerJoined\":false,\"joinedThreads\":\"pipe-reader-watchdog\""
@@ -4658,12 +4578,12 @@ describe('Windows target I/O RCA seam source', () => {
       'const bool read = ReadWindowsFileIdentity(work.executable.value, identity);',
     );
     expect(program).toContain('judged = RejudgeWindowsV2Session(source, &not_web, &reason);');
-    expect(generated.split('  Sc940RejudgeWorkerStarted();')).toHaveLength(2);
+    expect(generated.split('  Sc940RejudgeMeasurement();')).toHaveLength(2);
     expect(generated.split('    Sc940RejudgeContextGate(work);')).toHaveLength(2);
-    expect(generated.split('    Sc940RejudgeRetired(job_id);')).toHaveLength(2);
-    expect(
-      generated.split('Sc940RejudgeCancelAttempt(job_id, GetThreadId(state.cancellation_thread));'),
-    ).toHaveLength(2);
+    expect(generated).not.toContain('WindowsV2RejudgePending');
+    expect(program).toContain('rejudge_sync_io_canceled_without_release');
+    expect(program).toContain('rejudge_no_result_or_slot_release_while_held');
+    expect(program).toContain('rejudge_no_automatic_retry');
     const rejudgeHook = program.slice(
       program.indexOf(
         'bool Sc940RejudgeFileIdentity(const WindowsV2RejudgeWork &work, WindowsFileIdentity *identity) {',
@@ -4911,14 +4831,11 @@ describe.skipIf(
                     ? 3
                     : 2,
               fileReadSuccesses:
-                scenario === 'rejudge-repeat'
-                  ? 6
-                  : scenario === 'rejudge-cancel' || scenario === 'rejudge-close'
-                    ? 3
-                    : 2,
-              retiredJobs:
+                scenario === 'rejudge-repeat' ? 6 : scenario === 'rejudge-close' ? 3 : 2,
+              measurements:
                 scenario === 'rejudge-repeat' ? 10 : scenario === 'rejudge-prequeued-close' ? 2 : 3,
-              workerThreads: 1,
+              workerThreads: 0,
+              syncIoCanceled: scenario === 'rejudge-cancel',
               contextCalls: scenario === 'rejudge-cold-context-close' ? 2 : 0,
               lateResultAppliedToSession: false,
               unknownCloseRejected: true,

@@ -15,9 +15,9 @@
 inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;
 // The consumer's wait budget for list_targets. Completed rows survive it; unfinished measurements
 // are unresolvable. Listing, new V2 starts, session identity reads and V2 rejudgements share one
-// measurement slot. Listing and rejudgement measure on workers, and a driver may ignore best-effort
-// CancelSynchronousIo, so their cleanup can keep it occupied after the consumer answers; new starts
-// and session identity reads measure on the consumer and release it before the response (N5-C/G).
+// measurement slot. Listing measures on a worker, and a driver may ignore best-effort
+// CancelSynchronousIo, so list cleanup can keep it occupied after the consumer answers. New starts,
+// identity reads and rejudgements keep the slot on the consumer through cleanup before the response.
 // This list-only deadline is not a new native start deadline.
 inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
 
@@ -1019,22 +1019,13 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
 }
 
 // BEGIN windows v2 rejudge (#940)
-// Defined alongside the frame scope below. Only the value is copied to the worker.
+// Defined alongside the frame scope below.
 std::uint64_t WindowsValidationFrameStopSerial();
 
 struct WindowsV2RejudgeResult {
   bool matches = false;
   bool not_web = false;
   std::optional<WindowsTargetFactsContext> context;
-};
-
-struct WindowsV2RejudgePending {
-  std::mutex mutex;
-  std::condition_variable ready;
-  std::atomic<bool> abandoned{false};
-  std::uint64_t job_id = 0;
-  bool done = false;
-  WindowsV2RejudgeResult result;
 };
 
 struct WindowsV2RejudgeWork {
@@ -1049,24 +1040,7 @@ struct WindowsV2RejudgeWork {
   std::uint64_t epoch = 0;
   std::uint64_t stop_serial = 0;
   ScopedKernelHandle executable;
-  std::shared_ptr<WindowsV2RejudgePending> pending;
 };
-
-struct WindowsV2RejudgeState {
-  std::mutex mutex;
-  std::condition_variable wake;
-  std::unique_ptr<WindowsV2RejudgeWork> queued;
-  std::uint64_t active_job_id = 0;
-  std::uint64_t next_job_id = 0;
-  HANDLE cancellation_thread = nullptr;
-  bool worker_started = false;
-};
-
-WindowsV2RejudgeState &WindowsV2RejudgeControl() {
-  // An abandoned device call may outlive helper shutdown; never destroy state beneath this reader.
-  static auto *state = new WindowsV2RejudgeState;
-  return *state;
-}
 
 bool WindowsV2RejudgeStillCurrent(std::uint64_t epoch, std::uint64_t stop_serial) {
   return !parent_process_dead.load(std::memory_order_acquire) &&
@@ -1075,9 +1049,11 @@ bool WindowsV2RejudgeStillCurrent(std::uint64_t epoch, std::uint64_t stop_serial
 }
 
 WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work) {
+#if defined(SPRINT_CODER_COMPUTER_USE_TEST_HANG)
+  WindowsTestHang(WindowsTestHangPoint::Rejudge);
+#endif
   const auto still_valid = [&] {
-    return !work.pending->abandoned.load(std::memory_order_acquire) &&
-        WindowsV2RejudgeStillCurrent(work.epoch, work.stop_serial);
+    return WindowsV2RejudgeStillCurrent(work.epoch, work.stop_serial);
   };
   WindowsV2RejudgeResult result;
   if (work.main_pid == 0 || !still_valid()) return result;
@@ -1085,7 +1061,7 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
   if (work.context.has_value()) {
     context = *work.context;
   } else {
-    // The cold context and signer lookup both stay on this worker, before any target judgement.
+    // The cold context and signer lookup both run on the consumer, before any target judgement.
     std::string signer = WindowsV2SelfSignerThumbprint();
     if (!still_valid()) return result;
     context = CurrentWindowsTargetFactsContext(work.main_pid, std::move(signer),
@@ -1112,82 +1088,7 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
   return result;
 }
 
-void CancelWindowsV2RejudgeJob(std::uint64_t job_id) {
-  auto &state = WindowsV2RejudgeControl();
-  std::lock_guard lock(state.mutex);
-  if (state.active_job_id == job_id && job_id != 0 && state.cancellation_thread != nullptr)
-    CancelSynchronousIo(state.cancellation_thread);
-}
-
-void WindowsV2RejudgeWorkerLoop(WindowsV2RejudgeState *state) {
-  ScopedKernelHandle thread;
-  const bool thread_ready =
-      DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread.value,
-                      0, FALSE, DUPLICATE_SAME_ACCESS) &&
-      thread.value != nullptr && thread.value != INVALID_HANDLE_VALUE;
-  for (;;) {
-    std::unique_ptr<WindowsV2RejudgeWork> work;
-    {
-      std::unique_lock lock(state->mutex);
-      state->wake.wait(lock, [&] { return state->queued != nullptr; });
-      work = std::move(state->queued);
-      state->cancellation_thread = thread_ready ? thread.value : nullptr;
-    }
-    const auto pending = work->pending;
-    const std::uint64_t job_id = pending->job_id;
-    WindowsV2RejudgeResult result;
-    try {
-      // Package facts use WinRT/COM. Each job ends its apartment after its judgement and temporary
-      // handles have been destroyed, before releasing the shared measurement slot.
-      struct Apartment {
-        HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
-      } apartment;
-      if (thread_ready && SUCCEEDED(apartment.result)) result = MeasureWindowsV2Rejudge(*work);
-    } catch (...) {
-      result = {};
-    }
-    // Close the owned executable duplicate on this worker, even if the original session is gone.
-    work.reset();
-    {
-      std::lock_guard lock(state->mutex);
-      if (state->active_job_id == job_id) {
-        state->cancellation_thread = nullptr;
-        state->active_job_id = 0;
-        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-      }
-    }
-    // Rejudge job retirement precedes result publication. No old job may touch a new job's slot.
-    {
-      std::lock_guard lock(pending->mutex);
-      if (!pending->abandoned.load(std::memory_order_acquire)) pending->result = std::move(result);
-      pending->done = true;
-    }
-    pending->ready.notify_one();
-  }
-}
-
-struct WindowsV2RejudgeSubmission {
-  std::unique_ptr<WindowsV2RejudgeWork> work;
-  bool claimed = false;
-  ~WindowsV2RejudgeSubmission() {
-    if (!claimed) return;
-    // The job was never handed off; the original session still lives on this consumer.
-    work.reset();
-    WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
-  }
-};
-
-struct WindowsV2RejudgeWaitGuard {
-  std::shared_ptr<WindowsV2RejudgePending> pending;
-  ~WindowsV2RejudgeWaitGuard() {
-    std::lock_guard lock(pending->mutex);
-    if (pending->done) return;
-    pending->abandoned.store(true, std::memory_order_release);
-    // pending -> state, while the worker releases state before taking pending.
-    CancelWindowsV2RejudgeJob(pending->job_id);
-  }
-};
+WindowsV2RejudgeResult RunWindowsV2RejudgeMeasurement(const WindowsV2RejudgeWork &work);
 
 // What a v2 session's start (or resume) and every input re-judge: the target is still selectable,
 // with the mode, the application identity (the package digest for a package), the process start and
@@ -1196,77 +1097,53 @@ struct WindowsV2RejudgeWaitGuard {
 bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> *not_web,
                              std::string *reason) {
   *reason = "session_identity_changed";
-  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) || windows_v2_main_pid == 0)
-    return false;
-  auto pending = std::make_shared<WindowsV2RejudgePending>();
-  WindowsV2RejudgeSubmission submission;
-  submission.work = std::make_unique<WindowsV2RejudgeWork>();
-  auto &work = *submission.work;
+  const std::uint64_t epoch = session.cancel_epoch;
+  const std::uint64_t stop_serial = WindowsValidationFrameStopSerial();
+  auto &control = WindowsTargetListControl();
+  {
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!WindowsV2RejudgeStillCurrent(epoch, stop_serial) || windows_v2_main_pid == 0 ||
+        control.running.exchange(true, std::memory_order_acq_rel))
+      return false;
+  }
+  // Release the shared slot only after the owned executable handle is closed.
+  // Main's kill-stop bounds a consumer blocked outside cancellable synchronous I/O.
+  struct Slot {
+    ~Slot() { WindowsTargetListWorkerRunning().store(false, std::memory_order_release); }
+  } slot;
+  WindowsV2RejudgeWork work;
   work.pid = session.pid;
   work.window = session.window;
   work.maximum_mode = session.maximum_mode;
   work.app_identity = session.app_identity;
   work.process_start = session.process_start;
   work.not_web_file = session.not_web_file;
-  work.epoch = session.cancel_epoch;
-  work.stop_serial = WindowsValidationFrameStopSerial();
-  work.pending = pending;
-  const std::uint64_t epoch = work.epoch;
-  const std::uint64_t stop_serial = work.stop_serial;
-  auto &control = WindowsTargetListControl();
-  {
-    std::lock_guard stop_lock(control.stop_mutex);
-    if (!WindowsV2RejudgeStillCurrent(epoch, stop_serial) ||
-        control.running.load(std::memory_order_acquire) || windows_v2_main_pid == 0)
-      return false;
-    work.main_pid = windows_v2_main_pid;
-    work.context = WindowsV2FactsContextCache();
-    if (control.running.exchange(true, std::memory_order_acq_rel)) return false;
-    submission.claimed = true;
-  }
+  work.epoch = epoch;
+  work.stop_serial = stop_serial;
+  work.main_pid = windows_v2_main_pid;
+  work.context = WindowsV2FactsContextCache();
   const std::uint32_t main_pid = work.main_pid;
   if (session.executable_file == INVALID_HANDLE_VALUE ||
       !DuplicateHandle(GetCurrentProcess(), session.executable_file, GetCurrentProcess(), &work.executable.value,
                        0, FALSE, DUPLICATE_SAME_ACCESS))
     return false;
-  auto &state = WindowsV2RejudgeControl();
+  WindowsV2RejudgeResult measured;
   try {
-    std::lock_guard lock(state.mutex);
-    if (state.active_job_id != 0 || state.queued != nullptr ||
-        state.next_job_id == std::numeric_limits<std::uint64_t>::max())
-      return false;
-    if (!state.worker_started) {
-      std::thread(WindowsV2RejudgeWorkerLoop, &state).detach();
-      state.worker_started = true;
-    }
-    pending->job_id = ++state.next_job_id;
-    state.active_job_id = pending->job_id;
-    state.queued = std::move(submission.work);
-    submission.claimed = false;
+    measured = RunWindowsV2RejudgeMeasurement(work);
   } catch (...) {
     return false;
   }
-  state.wake.notify_one();
-  WindowsV2RejudgeWaitGuard guard{pending};
-  std::unique_lock lock(pending->mutex);
-  for (;;) {
-    {
-      // The value and context are adopted together under pending -> stop, never after Stop.
-      std::lock_guard stop_lock(control.stop_mutex);
-      if (!WindowsV2RejudgeStillCurrent(epoch, stop_serial) || windows_v2_main_pid != main_pid)
-        return false;
-      if (pending->done) {
-        if (pending->result.context.has_value() &&
-            pending->result.context->lineage_root_pid == main_pid && !WindowsV2FactsContextCache().has_value())
-          WindowsV2FactsContextCache() = std::move(pending->result.context);
-        if (!pending->result.matches) return false;
-        if (not_web != nullptr) *not_web = pending->result.not_web;
-        reason->clear();
-        return true;
-      }
-    }
-    pending->ready.wait_for(lock, std::chrono::milliseconds(20));
-  }
+  // The value and context are adopted together under Stop, never after it.
+  std::lock_guard stop_lock(control.stop_mutex);
+  if (!WindowsV2RejudgeStillCurrent(epoch, stop_serial) || windows_v2_main_pid != main_pid)
+    return false;
+  if (measured.context.has_value() &&
+      measured.context->lineage_root_pid == main_pid && !WindowsV2FactsContextCache().has_value())
+    WindowsV2FactsContextCache() = std::move(measured.context);
+  if (!measured.matches) return false;
+  if (not_web != nullptr) *not_web = measured.not_web;
+  reason->clear();
+  return true;
 }
 // END windows v2 rejudge
 
@@ -2258,6 +2135,20 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
 }
 
 // END windows shared existing start
+
+// BEGIN windows v2 rejudge measurement
+// Defined after the shared I/O registration used by starts and session validation.
+WindowsV2RejudgeResult RunWindowsV2RejudgeMeasurement(const WindowsV2RejudgeWork &work) {
+  WindowsNewStartIoRegistration cancellation;
+  if (cancellation.thread == nullptr) return {};
+  struct Apartment {
+    HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+  } apartment;
+  if (FAILED(apartment.result)) return {};
+  return MeasureWindowsV2Rejudge(work);
+}
+// END windows v2 rejudge measurement
 
 // END windows v2 targets
 

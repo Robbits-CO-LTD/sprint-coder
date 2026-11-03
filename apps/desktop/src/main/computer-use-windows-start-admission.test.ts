@@ -65,9 +65,11 @@ function findBuild(path: string, output: string): Build | null {
   };
 }
 
-function cut(start: string, end: string): string {
-  const from = host.indexOf(start),
+function cut(start: string, end: string, after = ''): string {
+  const from = host.indexOf(start, after === '' ? 0 : host.indexOf(after)),
     to = host.indexOf(end, from + start.length);
+  if (after !== '' && host.indexOf(after) < 0)
+    throw new Error('Native admission source markers changed');
   if (from < 0 || to < 0) throw new Error('Native admission source markers changed');
   return host.slice(from, to);
 }
@@ -96,7 +98,12 @@ describe('Windows native start ownership table', () => {
             'std::atomic<bool> &WindowsTargetListWorkerRunning() {',
           ) +
           retirementPreamble +
-          cut('  struct Slot {', '  ScopedKernelHandle target_process;') +
+          // The new start's own slot guard; the rejudge (N5-D) declares one earlier in the file.
+          cut(
+            '  struct Slot {',
+            '  ScopedKernelHandle target_process;',
+            'bool StartWindowsNewSession(WindowsStartInput input,',
+          ) +
           '\n}\npending->changed.notify_one();\n}\n' +
           driver,
       );

@@ -194,6 +194,41 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     );
   });
 
+  it('measures rejudge synchronously with a shared slot and adopts only before Stop', () => {
+    const rejudge = cut('// BEGIN windows v2 rejudge', '// END windows v2 rejudge');
+    expect(rejudge).not.toMatch(
+      /WindowsV2RejudgePending|WindowsV2RejudgeState|active_job_id|cancellation_thread|wait_for|std::thread/u,
+    );
+    expect(rejudge).toContain('control.running.exchange(true, std::memory_order_acq_rel)');
+    expect(rejudge.indexOf('struct Slot')).toBeLessThan(
+      rejudge.indexOf('WindowsV2RejudgeWork work;'),
+    );
+    const adoption = rejudge.slice(
+      rejudge.indexOf('measured = RunWindowsV2RejudgeMeasurement(work)'),
+    );
+    expect(adoption.indexOf('std::lock_guard stop_lock(control.stop_mutex)')).toBeLessThan(
+      adoption.indexOf('WindowsV2FactsContextCache() ='),
+    );
+    expect(adoption.indexOf('!WindowsV2RejudgeStillCurrent(epoch, stop_serial)')).toBeLessThan(
+      adoption.indexOf('WindowsV2FactsContextCache() ='),
+    );
+    expect(adoption).toContain('windows_v2_main_pid != main_pid');
+    expect(adoption).toContain(
+      'measured.context->lineage_root_pid == main_pid && !WindowsV2FactsContextCache().has_value()',
+    );
+    expect(adoption).toContain('if (!measured.matches) return false;');
+    const runner = cut(
+      '// BEGIN windows v2 rejudge measurement',
+      '// END windows v2 rejudge measurement',
+    );
+    expect(runner).toContain('WindowsNewStartIoRegistration cancellation;');
+    expect(runner).toContain('if (cancellation.thread == nullptr) return {};');
+    expect(runner).toContain('return MeasureWindowsV2Rejudge(work);');
+    expect(rejudge).toContain('JudgeWindowsV2Target(work.pid, work.window, context, &judged)');
+    expect(rejudge).toContain('SameWindowsFileIdentity(held, *judged.measured.file_identity)');
+    expect(rejudge).toContain('WindowsTargetIsNotWebByTable(');
+  });
+
   it('fixes the lineage root (Main) from the authenticated pipe client before the first request', () => {
     const serve = cut(
       'int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {',

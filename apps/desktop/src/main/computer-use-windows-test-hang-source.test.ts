@@ -29,6 +29,7 @@ const hooks = [
   ['ReadAuthenticodeSignerDigest(', 'WinVerifyTrust', 'const LONG verified = WinVerifyTrust('],
   ['OpenLockedWindowsExecutable(', 'CreateFileW', 'ScopedKernelHandle file(CreateFileW('],
   ['MeasureWindowsSessionIdentity(', 'Validation', 'const auto still_valid = [&] {'],
+  ['MeasureWindowsV2Rejudge(', 'Rejudge', 'const auto still_valid = [&] {'],
 ] as const;
 
 describe('Windows test-only hang hooks', () => {
@@ -85,7 +86,7 @@ describe('Windows test-only hang hooks', () => {
       expect(define).toBeGreaterThan(-1);
       expect(define).toBeLessThan(source.indexOf('#include "computer_use_windows_test_hang.h"'));
     }
-    expect(source.match(/#if defined\(SPRINT_CODER_COMPUTER_USE_TEST_HANG\)/gu)).toHaveLength(6);
+    expect(source.match(/#if defined\(SPRINT_CODER_COMPUTER_USE_TEST_HANG\)/gu)).toHaveLength(7);
   });
 
   it('caches the sidecar path but rereads selections and diagnoses unknown nonempty names', () => {

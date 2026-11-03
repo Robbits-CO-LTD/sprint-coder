@@ -293,8 +293,8 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
       // `serving` stays true until the exit cleanup below is done, so this watcher also bounds it.
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {
-          // A start or session identity measurement runs on the consumer itself (N5-C/G/H), and with
-          // Main gone no E1/E2 kill follows. A cancel can land just before the consumer issues its
+          // A start, session identity or per-input V2 rejudge measurement runs on the consumer itself
+          // (N5-C/D/G/H), and with Main gone no E1/E2 kill follows. A cancel can land just before the consumer issues its
           // next I/O, a stall outside I/O never returns, a thread may hold stop_mutex, and the exit
           // cleanup may stall: keep cancelling for a short grace period without waiting on the lock,
           // then end the process (its job ends any unverified child).
