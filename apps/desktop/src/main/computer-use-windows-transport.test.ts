@@ -773,6 +773,29 @@ describe('Computer Use Windows helper transport', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('PR10 refuses Stop without reconnecting when the helper exits during prepare', async () => {
+    const target = createTarget(responders());
+    const prepare = vi.fn(async (operation?: 'work' | 'stop_existing_helper') => {
+      if (operation === 'stop_existing_helper') {
+        children[0]!.emit('exit', 0, null);
+        await Promise.resolve();
+      }
+    });
+    target.addon.configureWindowsTermination!({
+      prepare,
+      started: () => undefined,
+      event: () => undefined,
+      exited: () => undefined,
+    });
+    await target.addon.startSession!({ profile, sessionId: 'keeper' });
+    await expect(target.addon.cancel!({ sessionId: 'keeper', cancelEpoch: 1 })).rejects.toThrow(
+      'native_stop_unconfirmed',
+    );
+    expect(prepare).toHaveBeenLastCalledWith('stop_existing_helper');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(1);
+  });
+
   it('PR10 keeps termination disabled by default even with a ledger', () => {
     const configure = vi.fn();
     createTarget(
