@@ -362,7 +362,64 @@ export function subscribeComputerUseWindowsStops(
   };
 }
 
+/** PR10 wires the card and consumes trusted activation; ordinary paused-session resume never calls this. */
+export async function startComputerUseWindowsQuarantineSession(
+  native: Pick<
+    ComputerUseNativeHost,
+    'approveWindowsQuarantineResume' | 'startSession' | 'observe' | 'close'
+  >,
+  input: Omit<
+    Parameters<ComputerUseNativeHost['startSession']>[0],
+    'sessionId' | 'cancelEpoch' | 'resume'
+  > & {
+    previousSessionId: string;
+    trustedActivation: boolean;
+  },
+): Promise<{
+  session: ComputerUseNativeSession;
+  observation: ComputerUseNativeObservation;
+} | null> {
+  if (!input.trustedActivation || native.approveWindowsQuarantineResume === undefined) return null;
+  const sessionId = randomUUID();
+  if (
+    !(await native.approveWindowsQuarantineResume({
+      previousSessionId: input.previousSessionId,
+      newSessionId: sessionId,
+      trustedActivation: true,
+    }))
+  )
+    return null;
+  const session = await native.startSession({
+    sessionId,
+    cancelEpoch: 0,
+    resume: false,
+    profile: input.profile,
+    windowId: input.windowId,
+    taskId: input.taskId,
+    turnId: input.turnId,
+    ...(input.classifierRoute === undefined ? {} : { classifierRoute: input.classifierRoute }),
+  });
+  try {
+    if (session.sessionId !== sessionId || session.cancelEpoch !== 0)
+      throw new Error('native_session_invalid');
+    const observation = await native.observe(session, { requestId: randomUUID(), cancelEpoch: 0 });
+    if (observation.sessionId !== sessionId) throw new Error('native_observation_invalid');
+    return { session, observation };
+  } catch (error) {
+    await native.close(session).catch(() => undefined);
+    throw error;
+  }
+}
+
 export interface ComputerUseNativeHost {
+  /** Main-only K-5 receiver. PR10 must consume a card's trusted activation before calling. */
+  approveWindowsQuarantineResume?(
+    input: Readonly<{
+      previousSessionId: string;
+      newSessionId: string;
+      trustedActivation: boolean;
+    }>,
+  ): Promise<boolean>;
   captureWindowsGeneration?(): WindowsGenerationToken | null;
   isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
   /** No IPC exposure. Subscribe before invoking native; disabled unless termination is enabled. */

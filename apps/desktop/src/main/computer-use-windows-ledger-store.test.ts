@@ -170,6 +170,113 @@ afterEach(() => {
 });
 ledgerStorageContract('SQLite Windows ledger contract', fixture);
 
+it('PR9 release persists only the approved identity across connections and restart', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  const other = {
+    ...quarantine,
+    identity: { ...row.identity, creationTime: 'synthetic-new-time' },
+  };
+  await a.restoreQuarantines([quarantine, other]);
+  await a.write(row);
+  expect(await a.releaseQuarantine!(quarantine.identity)).toBe(true);
+  expect(b.read()).toEqual({ rows: [], quarantines: [other] });
+  expect(a.read().rows).toEqual([row]);
+  a.close();
+  expect(f.open('a').read().quarantines).toEqual([other]);
+  expect(await b.releaseQuarantine!(quarantine.identity)).toBe(true);
+});
+
+it('PR9 approval release is conditional on the shared quarantine revision', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  await a.restoreQuarantines([quarantine]);
+  const approved = await a.quarantineRevision!(quarantine.identity);
+  expect(approved).toEqual(expect.any(Number));
+  // Another Host transfers newer evidence: the first reason stays, the revision changes.
+  expect(await b.transferReceipt!([], [{ ...quarantine, reason: 'response_lost' }])).toBe(true);
+  const newer = await b.quarantineRevision!(quarantine.identity);
+  expect(newer).toBeGreaterThan(approved!);
+  expect(await a.releaseQuarantine!(quarantine.identity, approved!)).toBe(false);
+  expect(b.read().quarantines).toEqual([quarantine]);
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(true);
+  expect(b.read().quarantines).toEqual([]);
+  // An absent row is an idempotent retry.
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(true);
+  expect(await a.quarantineRevision!(quarantine.identity)).toBeNull();
+  // A re-added row never reuses an earlier revision (no ABA on a delayed retry).
+  await b.restoreQuarantines([quarantine]);
+  expect(await b.quarantineRevision!(quarantine.identity)).toBeGreaterThan(newer!);
+  expect(await a.releaseQuarantine!(quarantine.identity, newer!)).toBe(false);
+  expect(a.read().quarantines).toEqual([quarantine]);
+  // R15 (proven termination) stays identity-only.
+  expect(await a.releaseQuarantine!(quarantine.identity)).toBe(true);
+  expect(b.read().quarantines).toEqual([]);
+});
+
+it.each([0, 1])(
+  'PR9 migrates a version %i store to the quarantine revision column',
+  async (legacy) => {
+    const f = fixture();
+    f.open().close();
+    const db = new Database(f.path);
+    connections.push(db);
+    db.exec('DROP TABLE quarantines; DROP TABLE quarantine_revision');
+    db.exec(
+      'CREATE TABLE quarantines (pid INTEGER NOT NULL, creation_time TEXT NOT NULL, ' +
+        'payload TEXT NOT NULL, PRIMARY KEY (pid, creation_time))',
+    );
+    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+      row.identity.pid,
+      row.identity.creationTime,
+      JSON.stringify(quarantine),
+    );
+    db.pragma(`user_version = ${legacy}`);
+    const store = f.open();
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
+    expect(store.read().quarantines).toEqual([quarantine]);
+    expect(await store.quarantineRevision!(quarantine.identity)).toBe(0);
+    await store.restoreQuarantines([quarantine]);
+    const bumped = await store.quarantineRevision!(quarantine.identity);
+    expect(bumped).toBeGreaterThan(0);
+    expect(await store.releaseQuarantine!(quarantine.identity, 0)).toBe(false);
+    expect(await store.releaseQuarantine!(quarantine.identity, bumped!)).toBe(true);
+    expect(store.read().quarantines).toEqual([]);
+  },
+);
+
+it('PR9 K-1 (a) writes the row update and its shared quarantine atomically', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  const updated: WindowsLedgerRow = {
+    ...row,
+    inputPath: 'background_semantic',
+    state: 'effect_unconfirmed',
+  };
+  const k1 = { identity: row.identity, reason: 'effect_unconfirmed' as const };
+  await a.write({ ...updated, state: 'awaiting_response' });
+  const db = new Database(f.path);
+  connections.push(db);
+  db.exec(
+    "CREATE TRIGGER fail_quarantine BEFORE INSERT ON quarantines BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END",
+  );
+  await expect(
+    Promise.resolve().then(() => a.updateWithQuarantines!(updated, [k1])),
+  ).rejects.toThrow();
+  expect(a.read()).toEqual({
+    rows: [{ ...updated, state: 'awaiting_response' }],
+    quarantines: [],
+  });
+  db.exec('DROP TRIGGER fail_quarantine');
+  expect(await a.updateWithQuarantines!(updated, [k1])).toBe(true);
+  expect(await a.updateWithQuarantines!(updated, [k1])).toBe(true);
+  expect(a.read()).toEqual({ rows: [updated], quarantines: [k1] });
+  expect(b.read()).toEqual({ rows: [], quarantines: [k1] });
+});
+
 it.each([
   ['unknown reason', JSON.stringify({ ...quarantine, reason: 'future-reason' })],
   ['unknown shape', 'null'],
@@ -186,7 +293,7 @@ it.each([
     await store.write(row);
     const db = new Database(f.path);
     connections.push(db);
-    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+    db.prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)').run(
       row.identity.pid,
       row.identity.creationTime,
       payload,
@@ -209,7 +316,7 @@ it('PR10 preserves unknown quarantine payloads for diagnostics and newer readers
   const values = [null, { ...quarantine, reason: 'future-reason' }];
   values.forEach((value, index) =>
     db
-      .prepare('INSERT INTO quarantines VALUES (?, ?, ?)')
+      .prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)')
       .run(100 + index, 'synthetic', JSON.stringify(value)),
   );
   expect(store.read().quarantines).toEqual(values);
@@ -222,7 +329,7 @@ it('PR10 records the schema version and preserves unknown-version rows', () => {
   const store = f.open();
   const db = new Database(f.path);
   connections.push(db);
-  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  expect(db.pragma('user_version', { simple: true })).toBe(2);
   db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)').run(
     windowsLedgerInstanceId('C:/synthetic/default'),
     1,
@@ -230,7 +337,11 @@ it('PR10 records the schema version and preserves unknown-version rows', () => {
     'future',
     'null',
   );
-  db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(100, 'synthetic', 'null');
+  db.prepare('INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)').run(
+    100,
+    'synthetic',
+    'null',
+  );
   db.pragma('user_version = 99');
   expect(() => store.read()).toThrow('Unsupported Windows ledger version');
   expect(() => store.delete(row)).toThrow('Unsupported Windows ledger version');
@@ -261,7 +372,7 @@ it('PR10 upgrades an unversioned store without losing existing rows or quarantin
   connections.push(db);
   db.pragma('user_version = 0');
   const reopened = f.open();
-  expect(db.pragma('user_version', { simple: true })).toBe(1);
+  expect(db.pragma('user_version', { simple: true })).toBe(2);
   expect(reopened.read()).toEqual({ rows: [row], quarantines: [quarantine] });
 });
 
@@ -326,7 +437,9 @@ it('releases an unknown reason by exact identity so a blocked transfer can recov
   const db = new Database(f.path);
   connections.push(db);
   const future = JSON.stringify({ ...quarantine, reason: 'future-reason' });
-  const insert = db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)');
+  const insert = db.prepare(
+    'INSERT INTO quarantines (pid, creation_time, payload) VALUES (?, ?, ?)',
+  );
   insert.run(row.identity.pid, row.identity.creationTime, future);
   insert.run(row.identity.pid, 'synthetic-other-time', future);
   expect(store.transferReceipt!([row], [quarantine])).toBe(false);

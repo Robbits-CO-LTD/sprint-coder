@@ -136,8 +136,8 @@ export type WindowsStorageHold = Readonly<{
    * quarantine, a K-3 / exit / restore transfer). The release was decided before that evidence, so
    * its retry must not clear it: retry_storage/before_write refuses the release before I/O.
    * If quarantine evidence exists, retain a restoration hold even after a failed/ambiguous write.
-   * Kept on the hold rather than as a version column on the
-   * quarantine, whose stored row holds only pid, creation time and reason (§2.2 の 5).
+   * This covers evidence seen by this Main. Evidence another Main commits to the shared row is
+   * caught by the store's quarantine revision, on which an approval release is conditional.
    * Before that evidence lands, an isolation hold for the same target (or unknown targets)
    * also supersedes the release on retry. This closes the window where an older release retries
    * before a pending K-1 write, independently of hold order.
