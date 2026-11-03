@@ -1,5 +1,11 @@
+#include "computer_use_windows_background_executor.h"
+
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
+  std::uint64_t background_epoch = 0;
+#endif
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::uint64_t approved_started_ns = 0;
   std::uint64_t approved_deadline_ns = 0;
@@ -70,7 +76,14 @@ bool AwaitWindowsSemanticValidation() {
     if (!WindowsV1UiaMayCall()) return false;
     pending->ready.wait_for(lock, std::chrono::milliseconds(20));
   }
-  return *pending->validation && WindowsV1UiaMayCall();
+  const bool valid = *pending->validation && WindowsV1UiaMayCall();
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (pending->background_monitor) {
+    pending->validation.reset();
+    pending->validation_requested = pending->validation_started = false;
+  }
+#endif
+  return valid;
 }
 
 template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *accepted) {
@@ -106,6 +119,7 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
 }
 
 struct WindowsSemanticWork {
+  bool background = false;
   sprint_coder::computer_use::NativeApprovalEffect approved_effect =
       sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
   std::uint32_t pid = 0;
@@ -945,6 +959,185 @@ bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **
   return true;
 }
 
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+// Test gate only. The monitor's Target hook pauses on every target WinEvent during the claim,
+// including the ones this call raises itself, so a real device reaches unknown_effect, never
+// completed: BG01 completed is fake-only. Real-device BG01 is BLOCKED until
+// "N9 P4a-attr claim-scoped own-call WinEvent attribution" lands (monitor.inc, Target hook).
+struct WindowsBackgroundPatternOperations {
+  using Preparation = windows_background_executor_detail::Preparation;
+  template <class T> using ComRef = sprint_coder::computer_use::windows_uia_source_detail::ComRef<T>;
+  using BstrHolder = sprint_coder::computer_use::windows_uia_source_detail::BstrHolder;
+  const WindowsSemanticWork &work;
+  IUIAutomationElement *target;
+  bool *accepted;
+  std::string *reason;
+  ComRef<IUIAutomationInvokePattern> invoke;
+  ComRef<IUIAutomationTogglePattern> toggle;
+  ComRef<IUIAutomationSelectionItemPattern> select;
+  ComRef<IUIAutomationValuePattern> value;
+  ComRef<IUIAutomationExpandCollapsePattern> expand;
+  std::wstring text;
+  BstrHolder text_value;
+  bool desired = false;
+
+  bool Guard() { return WindowsV1UiaMayCall() && AwaitWindowsSemanticValidation(); }
+  bool Window() { return Guard(); }
+  template <class T> Preparation Pattern(PATTERNID id, ComRef<T> &owner) {
+    T *&pattern = *owner.Receive();
+    const HRESULT result = WindowsV1UiaCall(pattern, [&] { return target->GetCurrentPatternAs(id, IID_PPV_ARGS(&pattern)); });
+    if (!WindowsV1UiaMayCall()) return Preparation::kRejected;
+    if (result == E_NOINTERFACE || result == UIA_E_NOTSUPPORTED ||
+        (SUCCEEDED(result) && pattern == nullptr)) return Preparation::kHandoff;
+    return SUCCEEDED(result) && pattern ? Preparation::kReady : Preparation::kRejected;
+  }
+  Preparation Prepare() {
+    BOOL enabled = FALSE;
+    if (!WindowsV1UiaRead(enabled, [&] { return target->get_CurrentIsEnabled(&enabled); }))
+      return Preparation::kRejected;
+    if (!enabled) return Preparation::kHandoff;
+    Preparation ready = Preparation::kRejected;
+    if (work.kind == "invoke") return Pattern(UIA_InvokePatternId, invoke);
+    if (work.kind == "toggle") {
+      const bool on = work.metadata.find("\"value\":true") != std::string::npos;
+      const bool off = work.metadata.find("\"value\":false") != std::string::npos;
+      if (on == off) return Preparation::kRejected;
+      desired = on;
+      ready = Pattern(UIA_TogglePatternId, toggle);
+      if (ready != Preparation::kReady) return ready;
+      ToggleState state = ToggleState_Indeterminate;
+      auto *pattern = toggle.Get();
+      if (!WindowsV1UiaRead(state, [&] { return pattern->get_CurrentToggleState(&state); }) ||
+          (state != ToggleState_On && state != ToggleState_Off)) return Preparation::kRejected;
+      return (state == ToggleState_On) == desired ? Preparation::kNoop : Preparation::kReady;
+    }
+    if (work.kind == "expand_collapse") {
+      const bool on = work.metadata.find("\"expanded\":true") != std::string::npos;
+      const bool off = work.metadata.find("\"expanded\":false") != std::string::npos;
+      if (on == off) return Preparation::kRejected;
+      desired = on;
+      ready = Pattern(UIA_ExpandCollapsePatternId, expand);
+      if (ready != Preparation::kReady) return ready;
+      ExpandCollapseState state = ExpandCollapseState_LeafNode;
+      auto *pattern = expand.Get();
+      if (!WindowsV1UiaRead(state, [&] { return pattern->get_CurrentExpandCollapseState(&state); }) ||
+          (state != ExpandCollapseState_Expanded && state != ExpandCollapseState_Collapsed))
+        return Preparation::kRejected;
+      return (state == ExpandCollapseState_Expanded) == desired ? Preparation::kNoop : Preparation::kReady;
+    }
+    if (work.kind == "select") {
+      std::string requested;
+      BstrHolder name;
+      BSTR &raw = *name.Receive();
+      if (!ReadJsonString(work.metadata, "value", &requested) ||
+          !WindowsV1UiaRead(raw, [&] { return target->get_CurrentName(&raw); }))
+        return Preparation::kRejected;
+      const auto label = raw ? Utf8FromWide(std::wstring_view(raw, SysStringLen(raw))) : std::string{};
+      if (requested != work.target_id && requested != label) return Preparation::kRejected;
+      ready = Pattern(UIA_SelectionItemPatternId, select);
+      if (ready != Preparation::kReady) return ready;
+      BOOL selected = FALSE;
+      auto *pattern = select.Get();
+      if (!WindowsV1UiaRead(selected, [&] { return pattern->get_CurrentIsSelected(&selected); }))
+        return Preparation::kRejected;
+      return selected ? Preparation::kNoop : Preparation::kReady;
+    }
+    if (work.kind == "set_text") {
+      std::string requested;
+      const bool parsed = ReadJsonString(work.metadata, "text", &requested) &&
+          Utf16FromUtf8(requested, &text);
+      std::fill(requested.begin(), requested.end(), '\0');
+      if (!parsed || text.size() > std::numeric_limits<UINT>::max()) return Preparation::kRejected;
+      // SetValue takes a BSTR (length-prefixed), the same allocation as the foreground set_text.
+      BSTR &allocated = *text_value.Receive();
+      allocated = SysAllocStringLen(text.data(), static_cast<UINT>(text.size()));
+      if (allocated == nullptr) return Preparation::kRejected;
+      ready = Pattern(UIA_ValuePatternId, value);
+      if (ready != Preparation::kReady) return ready;
+      BOOL readonly = TRUE;
+      auto *pattern = value.Get();
+      if (!WindowsV1UiaRead(readonly, [&] { return pattern->get_CurrentIsReadOnly(&readonly); }))
+        return Preparation::kRejected;
+      if (readonly) return Preparation::kHandoff;
+      bool matches = false;
+      if (!ValueMatches(&matches)) return Preparation::kRejected;
+      return matches ? Preparation::kNoop : Preparation::kReady;
+    }
+    return Preparation::kHandoff;
+  }
+  bool ValueMatches(bool *matches) {
+    BstrHolder current;
+    BSTR &raw = *current.Receive();
+    auto *pattern = value.Get();
+    if (!WindowsV1UiaRead(raw, [&] { return pattern->get_CurrentValue(&raw); })) return false;
+    *matches = (raw ? std::wstring_view(raw, SysStringLen(raw)) : std::wstring_view{}) == text;
+    return true;
+  }
+  std::uint64_t Claim() {
+    auto *pending = windows_semantic_operation;
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    if (!pending || WindowsSemanticOperations().active.get() != pending ||
+        !pending->background_monitor || pending->session_id.empty() || pending->ever_claimed ||
+        pending->input_in_flight || !WindowsV1UiaMayCall() ||
+        pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone ||
+        // The same set as the foreground claim boundary (InvokeWindowsSemanticInput): an approval
+        // round trip that expired or failed after Guard must still refuse here, under stop_mutex.
+        (pending->round_trip && !pending->round_trip->MayInput(MonotonicNowNs() / 1000000)) ||
+        (pending->approved_deadline_ns != 0 &&
+         (MonotonicNowNs() < pending->approved_started_ns ||
+          MonotonicNowNs() >= pending->approved_deadline_ns))) return 0;
+    const auto claim = pending->background_monitor->state.Claim(pending->background_epoch);
+    if (!claim) return 0;
+    pending->ever_claimed = pending->input_in_flight = true;
+    pending->attempts->fetch_add(1, std::memory_order_acq_rel);
+    *accepted = true;
+    return claim;
+  }
+  bool Call() {
+    HRESULT result = E_FAIL;
+    result = windows_background_executor_detail::CallPattern(
+        invoke.Get(), toggle.Get(), select.Get(), value.Get(), expand.Get(), *text_value.Receive(), desired,
+        [&](auto &&call) { return WindowsV1UiaContact(result, call); }, E_FAIL);
+    return WindowsV1UiaOk(result) && WindowsV1UiaMayCall();
+  }
+  bool Readback() {
+    if (invoke.Get()) return true; // Invoke may change Name or siblings; only the window is revalidated.
+    if (toggle.Get()) {
+      ToggleState state = ToggleState_Indeterminate;
+      auto *pattern = toggle.Get();
+      return WindowsV1UiaRead(state, [&] { return pattern->get_CurrentToggleState(&state); }) &&
+          state == (desired ? ToggleState_On : ToggleState_Off);
+    }
+    if (select.Get()) {
+      BOOL selected = FALSE;
+      auto *pattern = select.Get();
+      return WindowsV1UiaRead(selected, [&] { return pattern->get_CurrentIsSelected(&selected); }) && selected;
+    }
+    if (value.Get()) { bool matches = false; return ValueMatches(&matches) && matches; }
+    ExpandCollapseState state = ExpandCollapseState_LeafNode;
+    auto *pattern = expand.Get();
+    return pattern && WindowsV1UiaRead(state, [&] { return pattern->get_CurrentExpandCollapseState(&state); }) &&
+        state == (desired ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed);
+  }
+  bool Finish(std::uint64_t claim, bool confirmed) {
+    auto *pending = windows_semantic_operation;
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    if (!confirmed || pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)
+      pending->background_monitor->state.Pause();
+    const bool finished = pending->background_monitor->state.Finish(claim);
+    pending->input_in_flight = false;
+    pending->ready.notify_all();
+    return finished && pending->abandoned.load(std::memory_order_acquire) == WindowsV1UiaStop::kNone;
+  }
+  ~WindowsBackgroundPatternOperations() {
+    std::fill(text.begin(), text.end(), L'\0');
+    // Scrub the BSTR before its holder frees it.
+    if (BSTR allocated = *text_value.Receive()) SecureZeroMemory(allocated, SysStringByteLen(allocated));
+  }
+};
+// END background pattern adapter
+#endif
+
 bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool *accepted,
                                            std::string *reason) {
   using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
@@ -958,8 +1151,9 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
     return false;
   std::string current_target_signature;
   if (!work.observed_signature.has_value() ||
-      !ComputeWindowsControlSignature(target, work.pid, nullptr,
-                                      &current_target_signature) ||
+      !(work.background
+          ? ComputeWindowsBackgroundControlSignature(target, work.pid, work.window, &current_target_signature)
+          : ComputeWindowsControlSignature(target, work.pid, nullptr, &current_target_signature)) ||
       current_target_signature != *work.observed_signature) {
     *reason = "stale_target";
     return false;
@@ -967,6 +1161,17 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
   if (RejectWindowsRisk(ClassifyWindowsUiaElement(target), reason, work.approved_effect)) {
     return false;
   }
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (work.background) {
+    WindowsBackgroundPatternOperations operations{work, target, accepted, reason};
+    const auto outcome = windows_background_executor_detail::RunBackgroundExecutor(operations);
+    using Outcome = windows_background_executor_detail::Outcome;
+    if (outcome == Outcome::kCompleted) return true;
+    *reason = outcome == Outcome::kAwaitingForegroundHandoff ? "awaiting_foreground_handoff" :
+        outcome == Outcome::kUnknownEffect ? "input_not_confirmed" : "stale_target";
+    return false;
+  }
+#endif
   if (!AwaitWindowsSemanticValidation()) {
     *reason = "stale_target";
     return false;
@@ -1137,6 +1342,22 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   work->kind = std::string(kind);
   work->metadata = metadata;
   auto pending = std::make_shared<WindowsSemanticPending>();
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  work->background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
+  if (work->background) {
+    // Bound the entire test-only worker, including a provider stuck in a property read.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    if (!snapshot.has_deadline || deadline < snapshot.deadline) snapshot.deadline = deadline;
+    snapshot.has_deadline = true;
+    pending->background_monitor = session.background_monitor;
+    if (!pending->background_monitor ||
+        !ReadJsonUint64(metadata, "interactionEpoch", &pending->background_epoch) ||
+        pending->background_epoch == 0 ||
+        pending->background_monitor->state.Snapshot().epoch != pending->background_epoch) {
+      *reason = "user_takeover"; return false;
+    }
+  }
+#endif
   pending->approved_started_ns = session.approved_started_ns;
   pending->approved_deadline_ns = session.approved_deadline_ns;
   pending->session_id = session.session_id;
@@ -1205,6 +1426,10 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);
       auto none = WindowsV1UiaStop::kNone;
       pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+      if (pending->background_monitor && pending->ever_claimed && !pending->succeeded)
+        pending->background_monitor->state.Pause();
+#endif
       pending->ready.notify_all();
     }
   } abandon{pending};
@@ -1217,7 +1442,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
       auto stop = lane.stop;
       if (stop == WindowsV1UiaStop::kNone) stop = pending->abandoned.load(std::memory_order_acquire);
       if (stop == WindowsV1UiaStop::kNone && !WindowsValidationStillCurrent(snapshot.epoch, *snapshot.stop_serial)) stop = WindowsV1UiaStop::kCanceled;
-      if (stop == WindowsV1UiaStop::kNone && lane.has_deadline && std::chrono::steady_clock::now() > lane.deadline) stop = WindowsV1UiaStop::kBudget;
+      if (stop == WindowsV1UiaStop::kNone && snapshot.has_deadline && std::chrono::steady_clock::now() > snapshot.deadline) stop = WindowsV1UiaStop::kBudget;
       if (stop == WindowsV1UiaStop::kNone && pending->contact_active &&
           std::chrono::steady_clock::now() - pending->contact_started >= kWindowsV1UiaSlowContact) stop = WindowsV1UiaStop::kTimeout;
       if (stop != WindowsV1UiaStop::kNone) {
@@ -1257,7 +1482,8 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
           pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
           windows_v1_uia_lane->nodes += pending->nodes.load(std::memory_order_acquire);
           windows_v1_uia_lane->stop = pending->stop.load(std::memory_order_acquire);
-          *reason = "stale_target";
+          *accepted = pending->ever_claimed;
+          *reason = pending->ever_claimed ? "input_not_confirmed" : "stale_target";
           pending->ready.notify_all();
           return false;
         }

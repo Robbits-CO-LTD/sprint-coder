@@ -76,12 +76,18 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
                              const RECT &expected,
                              std::uint64_t expected_epoch) {
   if (!WindowsRoundTripMayInput(session)) return false;
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  const bool background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
+  if (background && !WindowsBackgroundMonitorReady(session)) return false;
+#else
+  constexpr bool background = false;
+#endif
   if ((session.approved_deadline_ns != 0 &&
        (MonotonicNowNs() < session.approved_started_ns ||
         MonotonicNowNs() >= session.approved_deadline_ns)) ||
       parent_process_dead.load(std::memory_order_acquire) ||
       !session.has_observation || session.active_window == nullptr ||
-      GetForegroundWindow() != session.active_window ||
+      (!background && GetForegroundWindow() != session.active_window) ||
       session.cancel_epoch != expected_epoch ||
       cancellation_epoch.load(std::memory_order_acquire) != expected_epoch)
     return false;
@@ -101,6 +107,9 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return 0;
+#endif
   if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
   std::unique_lock approval_lock(WindowsTargetListControl().stop_mutex, std::defer_lock);
   if (session.approved_deadline_ns != 0) {
@@ -116,6 +125,9 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
 }
 
 bool SetWindowsApprovedCursor(const WindowsSession &session, int x, int y) {
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return false;
+#endif
   if (!WindowsRoundTripMayInput(session)) return false;
   std::lock_guard lock(WindowsTargetListControl().stop_mutex);
   const auto now = MonotonicNowNs();
@@ -251,6 +263,18 @@ bool ValidateWindowsDispatchBinding(const WindowsSession &session,
     *reason = "stale_target";
     return false;
   }
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+    std::uint64_t epoch = 0;
+    if (!session.background_monitor || !ReadJsonUint64(metadata, "interactionEpoch", &epoch) ||
+        epoch == 0 || session.background_monitor->state.Snapshot().epoch != epoch) {
+      *reason = "user_takeover";
+      return false;
+    }
+    *bounds = observed;
+    return true;
+  }
+#endif
   if (*kind == "key" || *kind == "type") {
     std::string current_focused_signature;
     if (!session.has_focused_element_signature ||
@@ -547,6 +571,23 @@ bool DispatchWindowsAction(const WindowsSession &session,
       return false;
     }
   }
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+  if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+    if (!RevalidateWindowsTarget(session, bounds, expected_epoch)) {
+      *reason = "stale_target";
+      return false;
+    }
+    if (kind != "invoke" && kind != "toggle" && kind != "select" &&
+        kind != "set_text" && kind != "expand_collapse") {
+      *reason = "awaiting_foreground_handoff";
+      return false;
+    }
+    const bool completed = DispatchWindowsSemanticAction(session, bounds, expected_epoch, kind,
+                                                        metadata, accepted, reason, approved_effect);
+    if (completed) { *result = "completed"; reason->clear(); }
+    return completed;
+  }
+#endif
   // The evaluation took time (up to the lane's hold limit) after the binding check, and the focus
   // moved to another control of the same window in that time would send the key or the text to an
   // element the observation never saw. The same check as the binding's, again, before any input.
@@ -594,6 +635,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
         !RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       if (reason->empty())
         *reason = "stale_target";
+      return false;
+    }
+    // Defence in depth: a background session never moves the cursor, even if the background branch
+    // of the dispatch above is reordered or loosened. Nothing is attempted, so nothing is counted.
+    if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+      *reason = "input_unavailable";
       return false;
     }
     bool cursor_set = false;
@@ -674,6 +721,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
         !RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       if (reason->empty())
         *reason = "stale_target";
+      return false;
+    }
+    // Defence in depth: a background session never moves the cursor, even if the background branch
+    // of the dispatch above is reordered or loosened. Nothing is attempted, so nothing is counted.
+    if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+      *reason = "input_unavailable";
       return false;
     }
     bool cursor_set = false;
