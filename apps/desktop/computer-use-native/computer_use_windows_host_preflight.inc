@@ -661,6 +661,7 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   std::string kind, reason;
   RECT bounds{};
   if (!WindowsApprovalGate(session) || !limits.MayRead() || WindowsSemanticInputInFlight() ||
+      !ValidateWindowsBackgroundActionBinding(session, metadata) ||
       !ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, &reason)) return {};
   if (kind == "type") {
     std::string text;
@@ -703,6 +704,12 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   input.route = ClassifierRoute::kV2;
   input.attested_classifier_version = kNativeEligibilityClassifierVersion;
   input.approval_gate = true;
+  input.background = session.input_session.kind == InputSessionKind::kBackground;
+  if (input.background) {
+    const auto observed = session.semantic_control_signatures.find(target);
+    if (observed == session.semantic_control_signatures.end()) return {};
+    input.observed_background_binding = observed->second;
+  }
   input.strict = {true, session.pid, session.v2_input_not_web};
   input.identity.app_identity = {true, session.app_identity + ":" + session.executable_digest + ":" + session.signer_digest};
   input.identity.process_generation = {true, std::to_string(session.pid) + ":" + session.process_start};
@@ -724,9 +731,12 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
         windows_uia_source_detail::InterlockShellLookupRunning());
     if (!source) return WindowsApprovalSample{};
     WindowsUiaRisk native_risk;
-    source->SetSignatureProvider([pid = input.strict.process_id, &native_risk](
+    source->SetSignatureProvider([pid = input.strict.process_id, window, &input, &native_risk](
         IUIAutomationElement *element, std::string *signature) {
-      if (!ComputeWindowsControlSignature(element, pid, nullptr, signature)) return false;
+      if (input.background) {
+        if (!ComputeWindowsBackgroundControlSignature(element, pid, window, signature)) return false;
+        input.current_background_binding = *signature;
+      } else if (!ComputeWindowsControlSignature(element, pid, nullptr, signature)) return false;
       native_risk = ClassifyWindowsUiaElement(element);
       return native_risk.metadata_complete;
     });
@@ -905,6 +915,11 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   std::string kind;
   RECT bounds{};
   std::string reason;
+  if (!ValidateWindowsBackgroundActionBinding(session, metadata)) {
+    return Respond(pipe, request, MessageType::kPreflightResult,
+        WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
+                                "denied", "native_stale_target", ""));
+  }
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds,
                                       &reason)) {
     const bool denied_sent =

@@ -270,6 +270,8 @@ bool RevalidateWindowsTarget(const WindowsSession &, const RECT &, std::uint64_t
 }
 // The v2 input judgement (S5-c-3 PR-5) answers nothing for a v1 session, which every session here is.
 bool JudgeWindowsV2Input(const WindowsSession &, std::string *) { return true; }
+// Every session in this ordinary-ticket fixture is foreground.
+bool ValidateWindowsBackgroundActionBinding(const WindowsSession &, const std::string &) { return true; }
 bool WindowsFocusedElementSignature(std::uint32_t, const RECT &, std::string *signature) {
   if (!g_focus_ok) return false;
   *signature = "focus-signature";

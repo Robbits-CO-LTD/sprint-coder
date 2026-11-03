@@ -430,7 +430,7 @@ function instrumentedHost(): string {
     'bool ComputeWindowsControlSignature(',
     source.indexOf('struct WindowsUiaPointResult'),
   );
-  const signatureTo = source.indexOf('struct WindowsControlBindings', signatureFrom);
+  const signatureTo = source.indexOf('bool ReadWindowsBackgroundRuntimeId(', signatureFrom);
   let signature = source.slice(signatureFrom, signatureTo);
   signature = replaceOnce(
     signature,
@@ -780,7 +780,7 @@ WindowsUiaRisk Sc820CaptureRisk(POINT,std::uint32_t,std::string*);
 std::string Sc820CaptureDispatchProbe(const sprint_coder::computer_use::Frame&,const std::string&);
 bool Sc820ObserveValidate(const WindowsSession&, RECT*, std::string*, WindowsDialogSetSnapshot*);
 bool Sc820ObserveTree(std::uint32_t, HWND, std::string*, std::size_t*, bool);
-bool Sc820ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*);
+bool Sc820ObserveBindings(std::uint32_t, HWND, WindowsControlBindings*, bool);
 WindowsUiaRisk Sc820ObserveRisk(std::uint32_t);
 bool Sc820ObserveScreen(HWND, RECT*);
 bool Sc820ObserveSignature(std::uint32_t,const RECT&,std::string*);
@@ -1603,8 +1603,8 @@ bool Sc820ObserveTree(std::uint32_t pid,HWND window,std::string* tree,std::size_
   if(!observe_signature_mode&&!observe_capture_mode)return ReadUiaObservation(pid,window,tree,nodes,background);
   *tree="controlled-observe-prerequisite";*nodes=1;return true;
 }
-bool Sc820ObserveBindings(std::uint32_t pid,HWND window,WindowsControlBindings* bindings){
-  if(!observe_signature_mode&&!observe_capture_mode)return CaptureWindowsControlBindings(pid,window,bindings);
+bool Sc820ObserveBindings(std::uint32_t pid,HWND window,WindowsControlBindings* bindings,bool background){
+  if(!observe_signature_mode&&!observe_capture_mode)return CaptureWindowsControlBindings(pid,window,bindings,background);
   return true;
 }
 WindowsUiaRisk Sc820ObserveRisk(std::uint32_t pid){

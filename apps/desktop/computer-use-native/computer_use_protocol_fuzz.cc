@@ -28,6 +28,8 @@
 #include "computer_use_protocol.h"
 #include "computer_use_background_wire_test.h"
 #include "computer_use_windows_background_observe_test.h"
+#include "computer_use_windows_background_binding_test.h"
+#include "computer_use_windows_background_monitor_test.h"
 #include "computer_use_preflight_classifier.h"
 
 #include <algorithm>
@@ -7546,6 +7548,28 @@ bool CheckWindowsApprovalCore() {
   const auto measured = MeasureWindowsApproval(input);
   if (!Check(measured.eligible && measured.effect == NativeApprovalEffect::kSupervisedAction &&
                  !measured.authority_digest.empty(), "windows-document-approval")) return false;
+  {
+    auto background = input;
+    background.background = true;
+    for (const auto current : {std::string{}, std::string(64, 'b'), std::string(64, 'A')}) {
+      background.observed_background_binding = std::string(64, 'a');
+      background.current_background_binding = current;
+      const auto rejected = MeasureWindowsApproval(background);
+      if (!Check(!rejected.eligible && rejected.takeover,
+                 "BG-4-approval-missing-mismatch-invalid")) return false;
+    }
+    background.current_background_binding = background.observed_background_binding;
+    const auto bound = MeasureWindowsApproval(background);
+    if (!Check(bound.eligible && bound.authority_digest != measured.authority_digest,
+               "BG-4-approval-binds-content")) return false;
+    background.observed_background_binding = background.current_background_binding = std::string(64, 'c');
+    if (!Check(MeasureWindowsApproval(background).authority_digest != bound.authority_digest,
+               "BG-4-approval-content-changes-authority")) return false;
+    background.background = false;
+    background.current_background_binding.clear();
+    if (!Check(MeasureWindowsApproval(background).authority_digest == measured.authority_digest,
+               "BG-4-foreground-unchanged")) return false;
+  }
   // Authority and classification use the settled facts, not the original unknown origin.
   ShadowFacts settled = BuildWindowsShadowFacts(capture, input.request);
   settled.facts.target_not_web = true;
@@ -9479,8 +9503,10 @@ bool CheckStrictInterlock() {
 
 int main() {
   if (!CheckApprovalRoundTripState()) return 1;
+  if (!CheckBackgroundMonitor()) return 1;
   if (!Check(CheckBackgroundInputWire(), "background-input-wire")) return 1;
   if (!Check(CheckWindowsBackgroundObservation(), "background-observation")) return 1;
+  if (!Check(sprint_coder::computer_use::windows_background_binding_test::Check(), "background-binding")) return 1;
   if (!Check(windows_approval_handlers_test::Check(), "windows-approval-handlers")) return 1;
   if (!Check(CheckWindowsApprovalWire(kWindowsApprovalWireFixture), "windows-approval-wire")) return 1;
   if (!CheckNativePreflightClassifier()) return 1;

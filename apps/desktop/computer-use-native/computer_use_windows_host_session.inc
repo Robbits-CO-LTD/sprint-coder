@@ -782,6 +782,7 @@ bool StopPendingWindowsStart(const Frame& request, const std::string& metadata,
 bool ValidateWindowsSession(
     const WindowsSession &session, RECT *bounds, std::string *reason,
     WindowsDialogSetSnapshot *dialog_snapshot = nullptr) {
+  if (!WindowsBackgroundMonitorCurrent(session)) { *reason = "user_takeover"; return false; }
   bool valid = false;
   struct RoundTripValidation {
     const WindowsSession &session;
@@ -823,6 +824,7 @@ bool ValidateWindowsSession(
     *reason = "session_identity_changed";
     return false;
   }
+  if (!WindowsBackgroundMonitorCurrent(session)) { *reason = "user_takeover"; return false; }
   *bounds = current_dialogs.active_bounds;
   if (dialog_snapshot != nullptr)
     *dialog_snapshot = std::move(current_dialogs);

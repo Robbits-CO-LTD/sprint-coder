@@ -5,6 +5,7 @@
 #include "computer_use_effect_measurement.h"
 #include "computer_use_windows_interlock_capture.h"
 #include "computer_use_windows_association.h"
+#include "computer_use_windows_background_binding.h"
 
 namespace sprint_coder::computer_use {
 
@@ -22,6 +23,8 @@ struct WindowsApprovalMeasurementInput {
   std::uint32_t attested_classifier_version = 0;
   bool approval_gate = false;
   bool stopped_by_cancel = false;
+  bool background = false;
+  std::string observed_background_binding, current_background_binding;
 };
 
 [[nodiscard]] inline NativeApprovalMeasurement
@@ -30,6 +33,11 @@ MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input,
   // The classified kind is reported only for complete facts; every early answer stays a takeover.
   if (decision_kind != nullptr) *decision_kind = DecisionKind::kTakeover;
   NativeApprovalMeasurement measured;
+  if (!WindowsBackgroundBindingMatches(input.background, input.observed_background_binding,
+                                        input.current_background_binding)) {
+    measured.takeover = true;
+    return measured;
+  }
   if (!input.approval_gate || input.route != ClassifierRoute::kV2) return measured;
   if (input.capture == nullptr || input.stopped_by_cancel || input.capture->budget_exhausted) {
     measured.takeover = true;
@@ -66,7 +74,10 @@ MeasureWindowsApproval(const WindowsApprovalMeasurementInput &input,
   shared.attested_classifier_version = input.attested_classifier_version;
   shared.source = decision.approval_effect == NativeApprovalEffect::kHighImpactConfirmation
                       ? HighImpactSource::kNativeFacts : HighImpactSource::kNone;
-  return MeasureApprovalFromFacts(shared, built.facts);
+  auto result = MeasureApprovalFromFacts(shared, built.facts);
+  if (input.background && result.eligible)
+    result.authority_digest = Sha256Hex(result.authority_digest + input.current_background_binding);
+  return result;
 }
 
 } // namespace sprint_coder::computer_use

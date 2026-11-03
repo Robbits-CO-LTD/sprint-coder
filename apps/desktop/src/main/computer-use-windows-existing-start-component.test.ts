@@ -83,6 +83,8 @@ function componentSource(): string {
   );
   const functions: Record<string, string> = {
     WindowsBackgroundStartGate: 'ComponentBackgroundGate',
+    StartWindowsBackgroundMonitor: 'ComponentBackgroundMonitor',
+    WindowsBackgroundMonitorReady: 'ComponentBackgroundMonitorReady',
     WindowsBackgroundTargetSupported: 'ComponentBackgroundSupported',
     MeasureWindowsBackgroundStartFacts: 'ComponentBackgroundFacts',
     CaptureWindowsBackgroundStartDialogs: 'ComponentBackgroundDialogs',

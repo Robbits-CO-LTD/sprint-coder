@@ -156,7 +156,9 @@ struct WindowsStartLease {
 };
 
 struct WindowsRoundTripMonitor;
+struct WindowsBackgroundMonitor;
 struct WindowsSession {
+  std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<WindowsRoundTripMonitor> round_trip_monitor;
   std::uint64_t approved_started_ns = 0;

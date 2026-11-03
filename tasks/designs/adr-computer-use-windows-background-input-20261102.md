@@ -77,6 +77,7 @@ UIA の API 自体に「provider がフォーカスやカーソルを変えな�
 1. Main が session / Task / Turn、grant、policy、送信同意、mode、helper generation、対象の隔離（§2.5）を検査する。native は生存するプロセスの PID + 作成時刻、保持した実行中 image identity、署名・package・ruleset、HWND の所有と window identity を照合する。PID、HWND の数値だけを identity としない。
 2. 背景の active window は観測で明示的に束縛した window であり、GetForegroundWindow から選び直さない。window の存在、可視性、非最小化、非 cloak、現在の仮想デスクトップ、enabled、client geometry / DPI、dialog 集合と owner 関係を再検証する。dialog 集合は束縛 window とその owned window から作り、前面から選ばない。新規 modal、OS prompt、secure surface、対象の無効化は拒否する。別アプリの通常の前面変更だけは target change としない。
 3. 要素は束縛 window の UIA root から再解決する。runtime id、PID、control type、AutomationId、矩形、bounded ancestor chain の各所有 PID / runtime id と root への到達に加え、**内容の指紋**を照合する。指紋は Name、ItemStatus と値の種別（値の本文ではない）、親コンテナの中の位置（兄弟の中の index と兄弟の数）、取れれば ItemContainer の項目 identity から native の中で digest として作り、本文を helper の外に出さない。runtime id 単独、名前だけ、別 window の ElementFromPoint、現在の focused element で代用しない。欠落・重複・上限超過・要素の交換は入力前拒否である。runtime id が index 由来と判定できる proxy の要素（Win32 ListView / TreeView の UIA proxy など。ProviderDescription と runtime id の形で判定する。判定の具体は N9-2 で実機確認する）は、並べ替え・挿入・仮想化コンテナの再利用で同じ runtime id のまま中身が入れ替わるため、指紋があっても背景能力なしとする。
+   P2c は通常・承認共通の検証と合成 fixture までを実装し、未知の provider は拒否する。ProviderDescription・runtime ID による実 provider の許可表は P7a/P7b・N13b の実機確認後に接続する。
 4. observation revision、action / payload、`inputPath`、pattern、対象署名と内容の指紋、祖先・面・origin、効果、geometry、cancel epoch、Stop serial、helper / ticket generation、§2.3 の interaction epoch を authority に束縛する。観測は背景 window 自体から得る。遮蔽した前面画面の pixel や別アプリの focus chain を分類に流用しない。背景の capture は前面を条件にしない別の入口とし（遮蔽は許し、最小化・cloak は拒否する）、focused element 由来の欄は背景では「欠落」として扱い、focus が動いたとは扱わない。遮蔽された窓の capture（Windows Graphics Capture）が成り立つかは N9-2 の最初に実機で確かめる。成り立たない場合は pixel の無い観測とし、分類に画面が必要なのに対象由来と証明できなければ操作しない。再観測は旧 ticket を失効させる。
    P2b では 4 の pixel の無い観測を後段の契約変更へ分け、背景の画像取得に失敗したら観測そのものを拒否する（前面化・別画面の画像による代替なし）。
 5. preflight、承認交換、dispatch の各段で同じ対象から deny class・secure・面・実行トリガを再評価する。背景であることは §3.6 の E1 / E4 拒否や N8 の単発承認を外す理由にならない。N8 の承認の再測定（interlock の visual patch 照合を含む）も 4 の背景の capture を使う。背景の承認の測定はこの capture が成り立つことを前提とする。
@@ -342,7 +343,7 @@ N3 PR1〜PR9・N8-1〜N8-6 は main に反映済み、N3 PR10・PR11 は作業�
 | P1c：〜1,200行 | `M/computer-use-action.ts`、contracts、classifier・approval operation列挙と関連試験 | semantic scrollを別操作として定義。座標wheel不変、classifier/schema一致。P1a後 |
 | P2a：〜1,300行 | `N/computer_use_windows_host_v2_targets.inc`、`…_session.inc`、`…_target_facts.h`、start seam | 背景開始・再開、全新規Start非前面化、cloak/desktop拒否。P1a後 |
 | P2b：〜1,300行 | `N/…_observe.inc`、`…_capture.inc`、`computer_use_windows_interlock_capture.h` | 背景対象由来の観測・capture、focused欠落。分類根拠不足は拒否。P2a後 |
-| P2c：〜1,300行 | 新規案 `N/computer_use_windows_background_binding.h`、既存semantic/preflight/approval測定の接続 | 祖先・内容指紋・proxy除外、普通／承認共通検証、BG-4。P2b後 |
+| P2c：〜1,300行 | 新規案 `N/computer_use_windows_background_binding.h`、既存semantic/preflight/approval測定の接続 | 祖先・内容指紋・proxy除外、普通／承認共通検証、BG-4。P2b後。P2c は未知 provider 拒否と合成 fixture まで、実 provider の許可表は P7a/P7b・N13b の実機確認後 |
 | P3a：〜1,200行 | 新規案 `N/computer_use_windows_background_monitor.h`、host接続、native seam | WinEvent・mouse所属判定、interaction epoch、claim競合。P2c・P1b後 |
 | P3b：〜1,200行 | 同monitorと専用試験 | Raw Input受信、独立pump、心拍・登録失敗・hook失明検知。P3a後。実測閾値未確定なら公開不可 |
 | P3c：〜1,200行 | 新規案 `N/computer_use_windows_approval_round_trip.h`、session・approval接続 | 往復状態機械、前面監視、idなし迂回拒否、end先着・期限・失敗保持。P1b後 |

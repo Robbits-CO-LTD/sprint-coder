@@ -1716,6 +1716,8 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     return false;
   }
   if (background) session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kBackground;
+  if (background && !StartWindowsBackgroundMonitor(session, input.pid, input.window, false, reason))
+    return false;
   const auto target_facts = [&](RECT *bounds) {
     if (!background) return TargetWindowFacts(input.pid, input.window, bounds);
     return GetForegroundWindow() != input.window &&
@@ -1835,6 +1837,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
       *reason = "session_start_canceled";
       return false;
     }
+    if (!WindowsBackgroundMonitorCurrent(session)) { *reason = "user_takeover"; return false; }
     // All allocating session/response work precedes the ownership handoff. Cache adoption is also
     // consumer-only, and a late worker cannot install a context after Stop.
     if (v2 && measured.context.has_value() && !WindowsV2FactsContextCache().has_value())
@@ -2252,6 +2255,8 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   }
   WindowsDialogSetSnapshot background_dialogs;
   if (background) {
+    if (!StartWindowsBackgroundMonitor(session, input.pid, input.window, input.explicit_resume, reason))
+      return false;
     if (!CaptureWindowsBackgroundStartDialogs(session, &background_dialogs, reason)) return false;
     if (!session.dialog_set_digest.empty() && session.dialog_set_digest != background_dialogs.digest) {
       *reason = "session_refocus_stale";
@@ -2356,6 +2361,7 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   // Existing start final success decision; a completed late phase cannot resume after Stop.
   std::lock_guard stop_lock(control.stop_mutex);
   if (!current()) { *reason = "session_start_canceled"; return false; }
+  if (background && !WindowsBackgroundMonitorReady(session)) { *reason = "user_takeover"; return false; }
   InvalidateWindowsTicket(input.session_key);
   session.input_session = next_input_session;
   if (background) {

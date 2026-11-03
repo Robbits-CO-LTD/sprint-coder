@@ -403,7 +403,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // Each wrapper is handed the call's own out-value first (#823): it decides whether a slow success
     // is a cut-off one (empty) or an answer.
     const wrappedUiaCall = new RegExp(
-      `WindowsV1Uia(?:Read|Call|Contact)\\((\\*?\\w+), \\[&\\] \\{ return \\w+->(?:${uiaNames})\\(([^;]*)\\); \\}\\)`,
+      `WindowsV1Uia(?:Read|Call|Contact)\\((\\*?\\w+(?:\\.vt)?), \\[&\\] \\{ return \\w+->(?:${uiaNames})\\(([^;]*)\\); \\}\\)`,
       'gu',
     );
     const bareUiaCalls = (text: string): number =>
@@ -415,7 +415,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       [...text.matchAll(wrappedUiaCall)].filter(([, output, args]) =>
         output!.startsWith('*')
           ? !args!.includes(`IID_PPV_ARGS(${output!.slice(1)})`)
-          : !new RegExp(`&${output}\\b`, 'u').test(args!),
+          : !new RegExp(`&${output!.replace(/\.vt$/u, '')}\\b`, 'u').test(args!),
       ).length;
     // The checks themselves catch a bare call (a wrapped one and a bare one of the same method), a
     // wrapper without its output (the form before #823), and a wrapper handed another variable.
@@ -425,6 +425,17 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       ),
     ).toBe(1);
     expect(bareUiaCalls('WindowsV1UiaRead([&] { return element->get_CurrentName(&n); });')).toBe(1);
+    // A VARIANT's tag proves that the property output was filled, not a separate value.
+    expect(
+      misnamedOutputs(
+        'WindowsV1UiaRead(value.vt, [&] { return element->GetCurrentPropertyValueEx(id, TRUE, &value); });',
+      ),
+    ).toBe(0);
+    expect(
+      misnamedOutputs(
+        'WindowsV1UiaRead(other.vt, [&] { return element->GetCurrentPropertyValueEx(id, TRUE, &value); });',
+      ),
+    ).toBe(1);
     expect(
       misnamedOutputs(
         'WindowsV1UiaRead(m, [&] { return element->get_CurrentName(&n); }); WindowsV1UiaRead(*q, [&] { return t->GetCurrentPatternAs(id, IID_PPV_ARGS(p)); });',

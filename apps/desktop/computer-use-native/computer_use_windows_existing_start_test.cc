@@ -8,6 +8,9 @@ namespace {
 struct WindowsExecutableIdentity;
 struct WindowsSession;
 struct WindowsDialogSetSnapshot;
+// Monitor behavior is covered by the dedicated P3a native seam.
+bool ComponentBackgroundMonitor(WindowsSession&, DWORD, HWND, bool, std::string*) { return true; }
+bool ComponentBackgroundMonitorReady(const WindowsSession&) { return true; }
 bool ComponentBackgroundGate();
 bool ComponentBackgroundSupported(const WindowsExecutableIdentity&);
 sprint_coder::computer_use::WindowsBackgroundStartFacts ComponentBackgroundFacts(std::uint32_t, HWND, RECT*);
