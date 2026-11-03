@@ -39,9 +39,9 @@ export function windowsDocumentViewerDeclaration(platform) {
   return { windowsDocumentViewers: { version: Number(version), digest } };
 }
 
+// The build script reaches this on Linux too and skips the native afterwards, so the mode parse
+// does not judge the platform; eligibilityDeclaration rejects anything but darwin and win32.
 export function parseEligibilityMode(argv, target) {
-  if (target !== 'darwin' && target !== 'win32')
-    throw new Error('Computer Use native eligibility platform is unknown');
   const claims = argv.filter(
     (argument) => argument === '--eligibility' || argument.startsWith('--eligibility='),
   );
