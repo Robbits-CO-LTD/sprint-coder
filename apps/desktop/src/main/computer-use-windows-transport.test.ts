@@ -8270,6 +8270,51 @@ int main() {
     },
   );
 
+  it.each(['stalled', 'retired'] as const)(
+    'duplicate_flagged_deferred_answer_preserves_deadline_and_single_retirement (%s)',
+    async (kind) => {
+      const child = new ControlledHelperChild();
+      vi.mocked(spawn).mockImplementationOnce(
+        () => child as unknown as NodeChildProcess.ChildProcess,
+      );
+      const target = ledgerTarget(true, undefined, true);
+      const session = await startSession(target.host, 'deferred-duplicate', 'turn-1');
+      const helper = target.helper();
+      helper.hold('observe');
+      helper.hold('list_targets');
+      helper.residual.add('list_targets');
+      const observe = observeThroughTransport(target.addon, session.sessionId);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const queued = Promise.resolve(target.addon.listTargets!({})).catch(() => 'rejected');
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await queued).toBe('rejected');
+      helper.release('observe');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await observe).toBe('resolved');
+      const socket = sockets.at(-1)!;
+      const responses: Buffer[] = [];
+      const capture = (data: Buffer) => {
+        if (decodeComputerUseNativeFrame(data).flags === 1) responses.push(data);
+      };
+      socket.on('data', capture);
+      helper.release('list_targets');
+      socket.removeListener('data', capture);
+      expect(responses).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      socket.emit('data', responses[0]!);
+      if (kind === 'retired') helper.retire('list_targets');
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(child.killCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.killCalls).toBe(kind === 'retired' ? 0 : 1);
+      // One retirement must remove all ownership; a duplicate would arm another deadline.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(child.killCalls).toBe(kind === 'retired' ? 0 : 1);
+      child.emit('exit', 0, null);
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
   it('deferred_watch_cleared_on_exit', async () => {
     const child = new ControlledHelperChild();
     vi.mocked(spawn).mockImplementationOnce(
