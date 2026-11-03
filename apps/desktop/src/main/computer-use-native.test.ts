@@ -503,7 +503,13 @@ describe('Windows native helper compile boundary', () => {
     // The base-typed accessor may only read or release the target-list slot; a take through it
     // would skip the launch numbering that residual ownership relies on.
     // Free functions take a std::atomic<bool>* and would skip the numbering as well.
-    expect(source).not.toMatch(/\bstd::atomic_(?:exchange|store|compare_exchange)/u);
+    // With or without std:: (ADL), and every _explicit/_strong/_weak form; nor an explicit base call.
+    // The slot type itself is the one place that calls its base.
+    const outsideSlot =
+      source.slice(0, source.indexOf('// BEGIN windows worker slot launches')) +
+      source.slice(source.indexOf('// END windows worker slot launches'));
+    expect(outsideSlot).not.toMatch(/\batomic_(?:exchange|store|compare_exchange)/u);
+    expect(outsideSlot).not.toMatch(/std::atomic<bool>::(?:store|exchange|compare_exchange)/u);
     const uses = [...source.matchAll(/WindowsTargetListWorkerRunning\(\)\.(\w+)\(([^)]*)\)/gu)];
     expect(uses.length).toBeGreaterThan(0);
     for (const [, method, args] of uses)
