@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -245,13 +249,9 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
 
   it('adds no version', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
-      versions: Record<string, number>;
+      versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual({
-      rulesetVersion: 1,
-      classifierVersion: 1,
-      lexiconVersion: 1,
-    });
+    expect(eligibility.versions).toEqual(versionOneTable);
   });
 });
 

@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -134,13 +138,9 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
   it('moves no version', () => {
     expect(decisions).toContain('constexpr std::uint32_t kNativePreflightClassifierVersion = 1;');
     const eligibility = JSON.parse(read('eligibility.json')) as {
-      versions: Record<string, number>;
+      versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual({
-      rulesetVersion: 1,
-      classifierVersion: 1,
-      lexiconVersion: 1,
-    });
+    expect(eligibility.versions).toEqual(versionOneTable);
   });
 
   it('relaxes only an approved high-impact confirmation, on positive evidence, nothing else', () => {

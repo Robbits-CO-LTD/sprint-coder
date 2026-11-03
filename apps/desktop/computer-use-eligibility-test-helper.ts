@@ -1,0 +1,12 @@
+export const versionOneTable = {
+  darwin: {
+    v1: { rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 },
+    v2: { rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 },
+  },
+  win32: {
+    v1: { rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 },
+    v2: { rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 },
+  },
+};
+
+export type EligibilityVersionTable = typeof versionOneTable;

@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -263,13 +267,9 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
       ),
     ).toHaveLength(1);
     const eligibility = JSON.parse(read('eligibility.json')) as {
-      versions: Record<string, number>;
+      versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual({
-      rulesetVersion: 1,
-      classifierVersion: 1,
-      lexiconVersion: 1,
-    });
+    expect(eligibility.versions).toEqual(versionOneTable);
   });
 
   it('takes the rule set from its caller, answers an exception or a missing source as no verdict, and changes nothing', () => {
@@ -396,12 +396,8 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(harness).toContain('CheckWindowsInterlockCapture()');
     expect(harness).toContain('Computer Use native Windows interlock capture: PASS');
     const eligibility = JSON.parse(read('eligibility.json')) as {
-      versions: Record<string, number>;
+      versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual({
-      rulesetVersion: 1,
-      classifierVersion: 1,
-      lexiconVersion: 1,
-    });
+    expect(eligibility.versions).toEqual(versionOneTable);
   });
 });

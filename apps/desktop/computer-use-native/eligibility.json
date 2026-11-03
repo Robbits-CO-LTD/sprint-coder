@@ -1,8 +1,13 @@
 {
   "versions": {
-    "rulesetVersion": 1,
-    "classifierVersion": 1,
-    "lexiconVersion": 1
+    "darwin": {
+      "v1": { "rulesetVersion": 1, "classifierVersion": 1, "lexiconVersion": 1 },
+      "v2": { "rulesetVersion": 1, "classifierVersion": 1, "lexiconVersion": 1 }
+    },
+    "win32": {
+      "v1": { "rulesetVersion": 1, "classifierVersion": 1, "lexiconVersion": 1 },
+      "v2": { "rulesetVersion": 1, "classifierVersion": 1, "lexiconVersion": 1 }
+    }
   },
   "ticketRequired": {
     "darwin": true,

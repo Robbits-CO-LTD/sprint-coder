@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,17 +31,24 @@ const section = (source: string, from: string, to: string): string => {
 
 describe('Computer Use native eligibility attestation (D7-2)', () => {
   const table = JSON.parse(read('eligibility.json')) as {
-    versions: { rulesetVersion: number; classifierVersion: number; lexiconVersion: number };
+    versions: EligibilityVersionTable;
     ticketRequired: { darwin: boolean; win32: boolean };
   };
   const header = read('computer_use_native_eligibility.h');
 
   it('keeps eligibility.json, the portable header and the contracts in step', () => {
     for (const platform of ['darwin', 'win32'] as const)
-      for (const mode of ['v1-allowlist', 'v2-denylist'] as const)
+      for (const mode of ['v1-allowlist', 'v2-denylist'] as const) {
+        expect(eligibilityDeclaration(mode, platform)).toEqual({
+          mode,
+          ...table.versions[platform][mode === 'v1-allowlist' ? 'v1' : 'v2'],
+          ticketRequired: table.ticketRequired[platform],
+        });
         expect(
           computerUseEligibilitySchema.safeParse(eligibilityDeclaration(mode, platform)).success,
         ).toBe(true);
+      }
+    expect(table.versions).toEqual(versionOneTable);
     // The header's fallbacks (a build with no generated header) are the same v1 numbers.
     const fallback = (name: string): number => {
       const match = new RegExp(`#\\s*define SPRINT_CODER_ELIGIBILITY_${name} (\\d+)`, 'u').exec(
@@ -46,9 +57,13 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       expect(match, name).not.toBeNull();
       return Number(match![1]);
     };
-    expect(fallback('RULESET_VERSION')).toBe(table.versions.rulesetVersion);
-    expect(fallback('CLASSIFIER_VERSION')).toBe(table.versions.classifierVersion);
-    expect(fallback('LEXICON_VERSION')).toBe(table.versions.lexiconVersion);
+    for (const platform of ['darwin', 'win32'] as const)
+      for (const mode of ['v1', 'v2'] as const) {
+        const versions = table.versions[platform][mode];
+        expect(fallback('RULESET_VERSION')).toBe(versions.rulesetVersion);
+        expect(fallback('CLASSIFIER_VERSION')).toBe(versions.classifierVersion);
+        expect(fallback('LEXICON_VERSION')).toBe(versions.lexiconVersion);
+      }
     expect(fallback('V2')).toBe(0);
     // No generated header: both natives require a ticket (macOS: PR 5, Windows: S5-a), on every platform.
     expect(fallback('TICKET_REQUIRED')).toBe(1);

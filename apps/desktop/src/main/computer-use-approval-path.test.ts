@@ -1,3 +1,7 @@
+import {
+  versionOneTable,
+  type EligibilityVersionTable,
+} from '../../computer-use-eligibility-test-helper';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -228,14 +232,12 @@ describe('the declared versions keep the approval path closed (C5-1 tripwire)', 
   const table = JSON.parse(
     readFileSync(join(__dirname, '../../computer-use-native/eligibility.json'), 'utf8'),
   ) as {
-    versions: { rulesetVersion: number; classifierVersion: number; lexiconVersion: number };
+    versions: EligibilityVersionTable;
     ticketRequired: Record<string, boolean>;
   };
 
   it('declares classifier version 1 (raising it is C5-2, after the #777 measurement)', () => {
-    expect(table.versions.classifierVersion, 'C5-2 raises this, not another change').toBe(1);
-    expect(table.versions.rulesetVersion).toBe(1);
-    expect(table.versions.lexiconVersion).toBe(1);
+    expect(table.versions, 'C5-2 raises this, not another change').toEqual(versionOneTable);
   });
 
   it.each(['v1-allowlist', 'v2-denylist'] as const)(
@@ -243,7 +245,7 @@ describe('the declared versions keep the approval path closed (C5-1 tripwire)', 
     async (mode) => {
       const compiled = {
         mode,
-        ...table.versions,
+        ...table.versions.darwin[mode === 'v1-allowlist' ? 'v1' : 'v2'],
         ticketRequired: table.ticketRequired['darwin'] === true,
       } as ComputerUseEligibility;
       const wiring = createComputerUseEligibilityWiring({
