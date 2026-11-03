@@ -49,6 +49,34 @@ function findBuild(): Build | null {
 }
 
 describe('background executor native entry', () => {
+  it('connects semantic scroll to timed single-call execution and native readback tests', () => {
+    const executor = native('computer_use_windows_background_executor.h');
+    const semantic = native('computer_use_windows_host_uia_semantic.inc');
+    expect(executor).toContain('PrepareScroll');
+    expect(executor).toContain('ScrollMatches');
+    expect(executor).toContain('timed([&] { return scroll->Scroll(horizontal, vertical); })');
+    expect(executor).toContain('scroll->SetScrollPercent(horizontal_percent, vertical_percent)');
+    expect(semantic).toContain('work.kind == "semantic_scroll"');
+    expect(semantic).toContain('UIA_ScrollPatternId');
+    expect(semantic).toContain('windows_background_executor_detail::CallScroll(');
+    expect(semantic).toContain('return WindowsV1UiaContact(result, call);');
+    expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckBackgroundScroll()');
+    const tests = native('computer_use_windows_background_executor_test.h');
+    for (const name of [
+      'BG01_scroll_units_and_readback',
+      'BG01_scroll_same_percent_noop',
+      'BG06_scroll_unknown_never_retries_or_falls_back',
+    ]) {
+      expect(tests).toContain(name);
+    }
+    expect(executor).not.toContain('ScrollIntoView(');
+    const adapter = semantic.slice(
+      semantic.indexOf('struct WindowsBackgroundPatternOperations'),
+      semantic.indexOf('// END background pattern adapter'),
+    );
+    expect(adapter).not.toMatch(/ScrollIntoView|SendInput|SetFocus|SetCursorPos/u);
+  });
+
   it('routes every background pattern effect through the V1 timed contact', () => {
     const executor = native('computer_use_windows_background_executor.h');
     const semantic = native('computer_use_windows_host_uia_semantic.inc');
