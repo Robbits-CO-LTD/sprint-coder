@@ -216,33 +216,36 @@ it('PR9 approval release is conditional on the shared quarantine revision', asyn
   expect(b.read().quarantines).toEqual([]);
 });
 
-it('PR9 migrates a version 1 store to the quarantine revision column', async () => {
-  const f = fixture();
-  f.open().close();
-  const db = new Database(f.path);
-  connections.push(db);
-  db.exec('DROP TABLE quarantines; DROP TABLE quarantine_revision');
-  db.exec(
-    'CREATE TABLE quarantines (pid INTEGER NOT NULL, creation_time TEXT NOT NULL, ' +
-      'payload TEXT NOT NULL, PRIMARY KEY (pid, creation_time))',
-  );
-  db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
-    row.identity.pid,
-    row.identity.creationTime,
-    JSON.stringify(quarantine),
-  );
-  db.pragma('user_version = 1');
-  const store = f.open();
-  expect(db.pragma('user_version', { simple: true })).toBe(2);
-  expect(store.read().quarantines).toEqual([quarantine]);
-  expect(await store.quarantineRevision!(quarantine.identity)).toBe(0);
-  await store.restoreQuarantines([quarantine]);
-  const bumped = await store.quarantineRevision!(quarantine.identity);
-  expect(bumped).toBeGreaterThan(0);
-  expect(await store.releaseQuarantine!(quarantine.identity, 0)).toBe(false);
-  expect(await store.releaseQuarantine!(quarantine.identity, bumped!)).toBe(true);
-  expect(store.read().quarantines).toEqual([]);
-});
+it.each([0, 1])(
+  'PR9 migrates a version %i store to the quarantine revision column',
+  async (legacy) => {
+    const f = fixture();
+    f.open().close();
+    const db = new Database(f.path);
+    connections.push(db);
+    db.exec('DROP TABLE quarantines; DROP TABLE quarantine_revision');
+    db.exec(
+      'CREATE TABLE quarantines (pid INTEGER NOT NULL, creation_time TEXT NOT NULL, ' +
+        'payload TEXT NOT NULL, PRIMARY KEY (pid, creation_time))',
+    );
+    db.prepare('INSERT INTO quarantines VALUES (?, ?, ?)').run(
+      row.identity.pid,
+      row.identity.creationTime,
+      JSON.stringify(quarantine),
+    );
+    db.pragma(`user_version = ${legacy}`);
+    const store = f.open();
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
+    expect(store.read().quarantines).toEqual([quarantine]);
+    expect(await store.quarantineRevision!(quarantine.identity)).toBe(0);
+    await store.restoreQuarantines([quarantine]);
+    const bumped = await store.quarantineRevision!(quarantine.identity);
+    expect(bumped).toBeGreaterThan(0);
+    expect(await store.releaseQuarantine!(quarantine.identity, 0)).toBe(false);
+    expect(await store.releaseQuarantine!(quarantine.identity, bumped!)).toBe(true);
+    expect(store.read().quarantines).toEqual([]);
+  },
+);
 
 it('PR9 K-1 (a) writes the row update and its shared quarantine atomically', async () => {
   const f = fixture();

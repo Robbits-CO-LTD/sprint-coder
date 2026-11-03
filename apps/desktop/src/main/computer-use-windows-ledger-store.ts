@@ -83,8 +83,10 @@ export function openWindowsLedgerStore(options: { userData: string; path?: strin
         );
         INSERT OR IGNORE INTO quarantine_revision VALUES (0, 0);
       `);
-      // Version 1 rows keep revision 0; every later add takes a store-wide revision above it.
-      if (version === 1)
+      // Older tables (version 1, or an unversioned 0 store) lack the column: decide by the table
+      // itself, not the version. Their rows keep revision 0; later adds take a revision above it.
+      const columns = db.prepare<[], { name: string }>('PRAGMA table_info(quarantines)').all();
+      if (!columns.some((column) => column.name === 'revision'))
         db.exec('ALTER TABLE quarantines ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
       if (version !== STORE_VERSION) db.pragma(`user_version = ${STORE_VERSION}`);
     }).immediate();
