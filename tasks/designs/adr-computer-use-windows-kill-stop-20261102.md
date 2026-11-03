@@ -317,6 +317,16 @@ PR7〜PR9 の新しい処理は既定で無効（内部の切り替え）とす�
 
 各実装 PR は対象 typecheck と関連 Vitest、C++ 変更では native seam を行う。最終受入は N2 の装置の全停止点、保存費用、Main 再起動、承認カードを含む。UI 操作は Computer Use で確認し、未実施の session 必須 live は NOT_RUN / BLOCKED のまま扱う。S4（N5）の worker 整理・サロゲートペア変更、一時フォルダの起動時掃除（§5 の 13）は N3 に混ぜない。
 
+### PR10a / PR10b の分担（2026-11-03）
+
+PR10a は接続と試験を実装する段階とし、製品の切り替え `WINDOWS_KILL_STOP_ENABLED` の既定値は false のまま維持する。Main の index.ts は内部 policy に従い、Windows で有効な場合だけ LocalAppData の SID 共通 SQLite を開く。userData は realpath による実体確認を必須とし、ストアを開けない場合・必要な helper の機能がない場合は開始を拒否する。macOS はこの配線を使わない。
+
+内部で有効な E1/E2 は cancel の 1 秒、close の C=10 秒、終了確認の T=2 秒を上限にする。close の失敗・不正 receipt は終了要求へ進み、終了未確認は termination_requested として返す。Controller は終了種別によって cancel の失敗を上書きし、要求理由を保持する。共有 helper の通知は lifetime と世代を照合し、承認・候補 token・artifact を失効させて各セッションの停止後処理へ接続する。
+
+再起動後の解除カードは直近の discovery で Main が保持した窓 ID、windowIdentityDigest、pid と作成時刻に束縛する。Renderer には解除が必要という表示だけを渡す。通常の開始と Quick Start では解除しない。既存の承認カードの表示を再利用し、対象候補と quarantineResume を含む一致した trusted activation を IPC で消費した場合だけ解除し、新しい session と再観測へ進む。共有の revision が更新された場合は従来どおり解除を拒否する。未知の形式の隔離も identity と revision が一致した明示承認による releaseQuarantine の同一 transaction で解除できる（R17）。R15 は対象プロセスの終了証拠がある場合に限る。
+
+PR10b は上記の接続と検証の完了後に、既定値の 1 行とその既定無効を固定する試験を更新して製品を有効化する。PR10a の merge のみでは有効化完了と扱わない。E3/E4 起点の kill-stop と期限統一は PR11 に残す。実アプリの Computer Use、packaged helper、複数 OS の確認は親の検証で行う。
+
 ### 4.2 PR10 前提 3: 再起動後の承認と有効化の条件
 
 `windowsKillStopTermination` は既定で無効のままとする。有効化には、PR5b の最後の await の後・`socket.write` 直前の start/resume ゲート、R8/R11 の通知、共有隔離の revision を同一トランザクションで比較する解除、再起動後の承認カードの接続がすべて必要である。

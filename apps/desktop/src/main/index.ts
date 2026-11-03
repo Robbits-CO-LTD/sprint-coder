@@ -1,3 +1,4 @@
+import { configureWindowsKillStop } from './computer-use-windows-product';
 import {
   app,
   autoUpdater,
@@ -87,6 +88,7 @@ const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
 let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
+let windowsKillStop: ReturnType<typeof configureWindowsKillStop> | undefined;
 let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
@@ -181,7 +183,12 @@ if (squirrelStartup || !hasLock) {
       const computerUseBinding = loadComputerUseNative({ userEnabled: computerUseLoadedAtStartup });
       // Typed explicitly so the callback inside the conditional spread is checked against the host
       // options (its `bounds` parameter is contextually typed from them).
+      windowsKillStop = configureWindowsKillStop({
+        platform: process.platform,
+        userData: app.getPath('userData'),
+      });
       const computerUseNativeHostOptions: ComputerUseNativeHostOptions = {
+        ...windowsKillStop.options,
         // The approval path rests on the build's attest and the session's route (C5-1). While every
         // version is 1 the attest is classifier 1: no session is bound to v2 and nothing opens.
         classifierV2Attested: computerUseEligibilityWiring.classifierV2Attested(
@@ -465,6 +472,7 @@ async function disposeApplicationResources(): Promise<void> {
     secureLogger.error('CommandRunner shutdown did not fully drain', error);
   }
   try {
+    windowsKillStop?.close();
     persistence?.close();
   } catch (error) {
     secureLogger.error('Persistence shutdown did not complete cleanly', error);

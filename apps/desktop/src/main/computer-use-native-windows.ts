@@ -289,7 +289,7 @@ export function createWindowsComputerUseNativeAddon(
       );
     },
     close: (input) => {
-      const value = record(input);
+      const { killStopClose, ...value } = record(input);
       const sessionId = stringField(value, 'sessionId');
       return client.call(
         'probe',
@@ -297,6 +297,9 @@ export function createWindowsComputerUseNativeAddon(
         value,
         sessionId,
         windowsStopRequestKey('close', sessionId, value['cancelEpoch']),
+        undefined,
+        undefined,
+        killStopClose === true,
       );
     },
     stopPendingStart: (input) => {
@@ -999,6 +1002,7 @@ class WindowsComputerUseHelperClient {
     requestKey: string | undefined,
     dispatchCallbacks?: WindowsRequestCallbacks,
     assertStartSend?: () => void,
+    killStopClose = false,
   ): Promise<unknown> {
     if (sessionKey !== undefined && operation !== 'start_session')
       this.assertSessionGeneration(sessionKey);
@@ -1141,7 +1145,9 @@ class WindowsComputerUseHelperClient {
         requestKey === undefined
           ? newComputerUseNativeFrameId()
           : frameIdFromText(`request:${requestKey}`),
-        operationTimeoutMilliseconds(operation),
+        this.termination !== undefined && operation === 'close_session' && killStopClose
+          ? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS
+          : operationTimeoutMilliseconds(operation),
         isComputerUseStopOperation(operation),
         () => {
           this.assertGenerationToken(generationToken);

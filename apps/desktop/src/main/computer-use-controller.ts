@@ -306,7 +306,7 @@ export type ComputerUsePendingStartStop =
   | Readonly<{ kind: 'not_submitted' }>
   | Readonly<{ kind: 'closed'; inputReceipt: ComputerUseNativeInputReceipt }>;
 
-/** Opt-in Main-only receiver. PR10 binds handlers to records and enables product cleanup. */
+/** Main-only receiver: binds notifications to exact registered owner lifetimes. */
 export function subscribeComputerUseWindowsStops(
   native: Pick<ComputerUseNativeHost, 'subscribeWindowsStop'>,
   bind: (owner: WindowsStopOwner) =>
@@ -370,7 +370,7 @@ export function subscribeComputerUseWindowsStops(
   };
 }
 
-/** PR10 wires the card and consumes trusted activation; ordinary paused-session resume never calls this. */
+/** Main-only fresh-session receiver; ordinary paused-session resume never calls this. */
 export async function startComputerUseWindowsQuarantineSession(
   native: Pick<
     ComputerUseNativeHost,
@@ -420,7 +420,7 @@ export async function startComputerUseWindowsQuarantineSession(
 }
 
 export interface ComputerUseNativeHost {
-  /** Main-only K-5 receiver. PR10 must consume a card's trusted activation before calling. */
+  /** Main-only K-5 receiver. The caller must consume the card's exact trusted activation. */
   approveWindowsQuarantineResume?(
     input: Readonly<{
       newSessionId: string;
@@ -430,7 +430,7 @@ export interface ComputerUseNativeHost {
         | Readonly<{ previousSessionId: string; restoredTarget?: never }>
         | Readonly<{
             previousSessionId?: never;
-            /** Main-owned card evidence, never renderer/model supplied. PR10 binds the card. */
+            /** Main-owned card evidence, verified against the latest native discovery. */
             restoredTarget: {
               identity: { pid: number; creationTime: string };
               approvedWindow: {
@@ -441,6 +441,14 @@ export interface ComputerUseNativeHost {
             };
           }>
       ),
+  ): Promise<boolean>;
+  approveWindowsWindowResume?(
+    input: Readonly<{
+      windowId: string;
+      windowIdentityDigest: string;
+      newSessionId: string;
+      trustedActivation: boolean;
+    }>,
   ): Promise<boolean>;
   captureWindowsGeneration?(): WindowsGenerationToken | null;
   isWindowsGenerationCurrent?(token: WindowsGenerationToken): boolean;
@@ -570,7 +578,9 @@ export interface ComputerUseNativeHost {
     session: ComputerUseNativeSession,
     cancelEpoch: number,
   ): Promise<ComputerUseNativeInputReceipt | void>;
-  close(session: ComputerUseNativeSession): Promise<void | ComputerUseGenerationTerminated>;
+  close(
+    session: ComputerUseNativeSession,
+  ): Promise<void | ComputerUseGenerationTerminated | Readonly<{ kind: 'termination_requested' }>>;
 }
 
 export type ComputerUseControllerPersistence = Pick<
@@ -607,6 +617,9 @@ export type ComputerUseStartRequest = Readonly<{
   taskId: string;
   turnId?: string | undefined;
   resumeSessionId?: string | undefined;
+  quarantineResume?: true | undefined;
+  /** Main-only: the IPC boundary consumed the exact card intent. */
+  quarantineResumeTrusted?: boolean;
   maxRounds?: number | undefined;
   profileId: string;
   windowId: string;
@@ -1080,6 +1093,9 @@ export class ComputerUseController {
    */
   private startingProfileId: string | null = null;
 
+  private readonly windowsRequestedReasons = new Map<string, ComputerUseStopReason>();
+  private readonly windowsStopResults = new Map<string, WindowsOwnerStopNotification['result']>();
+  private readonly unsubscribeWindowsStops: () => void;
   private readonly unsubscribeApprovalStop: (() => void) | undefined;
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
@@ -1106,6 +1122,59 @@ export class ComputerUseController {
       implementationKind: 'built-in',
       authorizationDenied: (input, context) => this.recordDeniedAction(input, context),
       execute: (input, context, control) => this.executeAction(input, context, control.signal),
+    });
+    this.unsubscribeWindowsStops = subscribeComputerUseWindowsStops(deps.native, (owner) => {
+      if (owner.kind !== 'session') return undefined;
+      let bound = this.sessions.get(owner.id) ?? this.startingSessions.get(owner.id);
+      if (bound === undefined) return undefined;
+      return {
+        requestedReason: () =>
+          this.windowsRequestedReasons.get(owner.id) ??
+          this.startingSessions.get(owner.id)?.reason ??
+          bound?.status.stopReason ??
+          null,
+        receive: (notification) => {
+          const current = this.sessions.get(owner.id) ?? this.startingSessions.get(owner.id);
+          bound = current ?? bound;
+          if (bound === undefined) return;
+          this.windowCandidatePermits.clear();
+          this.targetAppTokens.clear();
+          this.targetEnumerations.clear();
+          for (const [token, record] of this.targetTokens)
+            if (
+              record.binding.windowsGeneration?.helper.helperGeneration === owner.helperGeneration
+            )
+              this.targetTokens.delete(token);
+          if (current === undefined) {
+            if (notification.phase !== 'exit_confirmed') return;
+            bound.status = {
+              ...bound.status,
+              stopReason: notification.stopReason,
+              terminationResult:
+                notification.result === 'terminated_target_suspect'
+                  ? 'terminated_target_suspect'
+                  : 'terminated_clean',
+            };
+            captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+              capture.record({
+                type: 'stop_acknowledged',
+                sessionDigest: computerUseCaptureDigest(owner.id),
+                nativeAcknowledged: true,
+                terminationResult:
+                  notification.result === 'terminated_target_suspect'
+                    ? 'terminated_target_suspect'
+                    : 'terminated_clean',
+              }),
+            );
+            this.statusRevisionBySession.set(owner.id, bound.status.statusRevision);
+            this.emit(bound.status);
+            this.statusRevisionBySession.delete(owner.id);
+            return;
+          }
+          this.windowsStopResults.set(owner.id, notification.result);
+          void this.stop(owner.id, notification.stopReason).catch(() => undefined);
+        },
+      };
     });
     this.unsubscribeApprovalStop = deps.native.subscribeWindowsStop?.((event) => {
       if (event.kind !== 'notification' || event.notification.owner.kind !== 'session') return;
@@ -3484,6 +3553,14 @@ export class ComputerUseController {
         window.eligible,
     );
     if (candidate === undefined) throw new Error('Computer Use window candidate is stale');
+    if (
+      candidate.quarantineResume &&
+      (!permit.native.quarantineResume ||
+        input.quarantineResume !== true ||
+        input.quarantineResumeTrusted !== true ||
+        input.agent !== undefined)
+    )
+      throw new Error('Computer Use quarantine requires explicit approval');
     const preflightPolicyLanguage = bindComputerUsePolicyLanguage(
       profilePolicyLanguage(selectedProfile),
       permit.native.policyLanguage,
@@ -3559,6 +3636,18 @@ export class ComputerUseController {
         throw new Error('Computer Use emergency stop could not be armed');
       controller.signal.throwIfAborted();
       permit.validateTarget?.();
+      if (candidate.quarantineResume) {
+        if (
+          !(await this.deps.native.approveWindowsWindowResume?.({
+            windowId: candidate.windowId,
+            windowIdentityDigest: candidate.windowIdentityDigest,
+            newSessionId: sessionId,
+            trustedActivation: input.quarantineResumeTrusted === true,
+          }))
+        )
+          throw new Error('Computer Use quarantine approval is stale');
+        controller.signal.throwIfAborted();
+      }
       starting.nativeStarted = true;
       const native = await this.deps.native.startSession({
         ...(permit.validateTarget === undefined
@@ -3700,12 +3789,14 @@ export class ComputerUseController {
       this.attachCarriedArtifacts(record, input.agent?.carry);
       this.emit(status);
       controller.signal.throwIfAborted();
+      if (candidate.quarantineResume) await this.observe(sessionId);
+      controller.signal.throwIfAborted();
       void this.run(record).catch((error) => {
         if (!controller.signal.aborted) void this.stop(sessionId, 'error');
         return error;
       });
       controller.signal.throwIfAborted();
-      return status;
+      return candidate.quarantineResume ? record.status : status;
     } catch (error) {
       if (starting.stopPromise === null) starting.failure = error;
       await this.stop(sessionId, starting.reason ?? 'error');
@@ -3801,6 +3892,11 @@ export class ComputerUseController {
   }
 
   stop(sessionId: string, reason: ComputerUseStopReason = 'user_stop'): Promise<void> {
+    if (
+      (this.sessions.has(sessionId) || this.startingSessions.has(sessionId)) &&
+      !this.windowsRequestedReasons.has(sessionId)
+    )
+      this.windowsRequestedReasons.set(sessionId, reason);
     const record = this.sessions.get(sessionId);
     if (record === undefined) {
       const starting = this.startingSessions.get(sessionId);
@@ -3849,8 +3945,9 @@ export class ComputerUseController {
     this.emit(starting.status);
     starting.controller.abort(new Error(`Computer Use start canceled: ${starting.reason}`));
     let acknowledged = true;
+    let terminationResult: ComputerUseSessionStatus['terminationResult'];
     let inputReceipt: ComputerUseNativeInputReceipt | void = undefined;
-    if (starting.native !== null) {
+    if (starting.native !== null && !this.windowsStopResults.has(sessionId)) {
       try {
         inputReceipt = await this.deps.native.cancel(
           starting.native,
@@ -3862,30 +3959,50 @@ export class ComputerUseController {
       let closed = false;
       for (
         let attempt = 0;
-        attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT && !closed;
+        attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT &&
+        !closed &&
+        !this.windowsStopResults.has(sessionId);
         attempt += 1
       )
         closed = await this.deps.native.close(starting.native).then(
-          () => true,
+          (result) => {
+            if (result?.kind === 'terminated') terminationResult = result.result;
+            if (result?.kind === 'termination_requested') {
+              acknowledged = false;
+              terminationResult = result.kind;
+            }
+            return true;
+          },
           () => false,
         );
-      acknowledged = acknowledged && closed;
-    } else if (starting.nativeStarted) {
+      acknowledged =
+        (terminationResult !== undefined && terminationResult !== 'termination_requested') ||
+        (acknowledged && closed);
+    } else if (starting.nativeStarted && !this.windowsStopResults.has(sessionId)) {
       try {
         if (this.deps.native.stopPendingStart === undefined)
           throw new Error('Pending stop unavailable');
         const result = await this.deps.native.stopPendingStart(sessionId);
         if (result.kind === 'closed') inputReceipt = result.inputReceipt;
+        if (result.kind === 'terminated') terminationResult = result.result;
       } catch {
         acknowledged = false;
       }
+    }
+    const notification = this.windowsStopResults.get(sessionId);
+    if (notification !== undefined) {
+      acknowledged = notification !== 'termination_requested';
+      terminationResult = notification;
     }
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
         type: 'stop_acknowledged',
         sessionDigest: computerUseCaptureDigest(sessionId),
         nativeAcknowledged: acknowledged,
-        ...(inputReceipt === undefined
+        ...(terminationResult === undefined || terminationResult === 'termination_requested'
+          ? {}
+          : { terminationResult }),
+        ...(inputReceipt === undefined || terminationResult !== undefined
           ? {}
           : {
               inputAttemptCount: inputReceipt.inputAttemptCount,
@@ -3899,7 +4016,11 @@ export class ComputerUseController {
       state: 'stopped',
       stopReason: acknowledged ? starting.reason : 'native_unavailable',
     });
+    if (terminationResult !== undefined)
+      starting.status = { ...starting.status, terminationResult };
     this.emit(starting.status);
+    this.windowsStopResults.delete(sessionId);
+    this.windowsRequestedReasons.delete(sessionId);
     if (this.startingSessions.get(sessionId) === starting) this.startingSessions.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
   }
@@ -3923,9 +4044,11 @@ export class ComputerUseController {
     record.observation = null;
     this.cancelPendingApprovals(sessionId, 'computer_session_ended');
     let nativeAcknowledged = true;
+    let terminationResult: ComputerUseSessionStatus['terminationResult'];
     let inputReceipt: ComputerUseNativeInputReceipt | void = undefined;
     try {
-      inputReceipt = await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
+      if (!this.windowsStopResults.has(sessionId))
+        inputReceipt = await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
     } catch {
       nativeAcknowledged = false;
       // Stop remains fail-closed even when native acknowledgement is unavailable.
@@ -3940,20 +4063,38 @@ export class ComputerUseController {
     let nativeClosed = false;
     for (
       let attempt = 0;
-      attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT && !nativeClosed;
+      attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT &&
+      !nativeClosed &&
+      !this.windowsStopResults.has(sessionId);
       attempt += 1
     )
       nativeClosed = await this.deps.native.close(record.native).then(
-        () => true,
+        (result) => {
+          if (result?.kind === 'terminated') terminationResult = result.result;
+          if (result?.kind === 'termination_requested') {
+            nativeAcknowledged = false;
+            terminationResult = result.kind;
+          }
+          return true;
+        },
         () => false,
       );
-    if (!nativeClosed) nativeAcknowledged = false;
+    const notification = this.windowsStopResults.get(sessionId);
+    if (notification !== undefined) terminationResult = notification;
+    nativeAcknowledged =
+      notification === 'termination_requested'
+        ? false
+        : (terminationResult !== undefined && terminationResult !== 'termination_requested') ||
+          (nativeAcknowledged && nativeClosed);
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
         type: 'stop_acknowledged',
         sessionDigest: computerUseCaptureDigest(sessionId),
         nativeAcknowledged,
-        ...(inputReceipt === undefined
+        ...(terminationResult === undefined || terminationResult === 'termination_requested'
+          ? {}
+          : { terminationResult }),
+        ...(inputReceipt === undefined || terminationResult !== undefined
           ? {}
           : {
               inputAttemptCount: inputReceipt.inputAttemptCount,
@@ -3977,8 +4118,18 @@ export class ComputerUseController {
       'stopped',
       nativeAcknowledged ? reason : 'native_unavailable',
     );
+    if (terminationResult !== undefined) record.status = { ...record.status, terminationResult };
     this.emit(record.status);
     this.sessions.delete(sessionId);
+    if (notification !== undefined || terminationResult !== undefined)
+      this.artifacts.discard(
+        this.artifacts
+          .referencesMadeBy(sessionId, this.artifactBinding(record))
+          .map((reference) => reference.artifactId),
+        this.artifactBinding(record),
+      );
+    this.windowsStopResults.delete(sessionId);
+    this.windowsRequestedReasons.delete(sessionId);
     this.copiedArtifacts.delete(sessionId);
     const carriedIn = this.attachedArtifacts.get(sessionId);
     if (carriedIn !== undefined)
@@ -4466,6 +4617,7 @@ export class ComputerUseController {
     const discoveryStop = this.stopDiscoveriesWhere(() => true);
     this.disposed = true;
     this.unsubscribeApprovalStop?.();
+    this.unsubscribeWindowsStops();
     this.withdrawAppGrantCardFor(() => true);
     const pendingStops = this.stopStartingWhere(() => true, 'app_closed');
     this.startingController?.abort(new Error('Computer Use disposed while starting'));

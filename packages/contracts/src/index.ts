@@ -4791,6 +4791,7 @@ export const computerUseWindowCandidateSchema = z
     bounds: computerUseBoundsSchema,
     focused: z.boolean(),
     eligible: z.boolean(),
+    quarantineResume: z.literal(true).optional(),
     ownerKind: z.enum(['application', 'dialog', 'unknown']),
     modal: z.boolean(),
     revision: z.number().int().nonnegative(),
@@ -5579,6 +5580,7 @@ export const computerUseStartInputSchema = z
     taskId: computerUseIdSchema,
     /** Reuses the start consent lane to resume the exact paused ephemeral session. */
     resumeSessionId: computerUseIdSchema.optional(),
+    quarantineResume: z.literal(true).optional(),
     maxRounds: computerUseRoundLimitSchema.optional(),
     profileId: computerUseIdSchema,
     windowId: computerUseIdSchema,
@@ -5834,6 +5836,9 @@ export const computerUseSessionStatusSchema = z
     expiresAt: timestampSchema,
     lastObservationAt: timestampSchema.nullable(),
     stopReason: computerUseStopReasonSchema.nullable(),
+    terminationResult: z
+      .enum(['terminated_clean', 'terminated_target_suspect', 'termination_requested'])
+      .optional(),
     /**
      * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
      * it when the session ends, and it is never persisted, logged or given to the outer agent.

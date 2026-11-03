@@ -234,71 +234,96 @@ function storedText(): string {
 }
 
 describe('J12: the real useComputerUse hook keeps a copied value nowhere', () => {
-  it('shows the value on the session card, sends it to nobody, stores it nowhere, and drops it when the session ends', async () => {
-    const fake = installFakePreload();
-    const container = document.createElement('div');
-    document.body.append(container);
-    const root = createRoot(container);
-    let feature: ComputerUseFeature | null = null;
-    await act(async () => {
-      root.render(
-        <Probe
-          taskId="task-1"
-          onFeature={(value) => {
-            feature = value;
-          }}
-        />,
+  it.each([false, true])(
+    'shows the value on the session card, sends it to nobody, stores it nowhere, and drops it when the session ends (late=%s)',
+    async (late) => {
+      const fake = installFakePreload();
+      const container = document.createElement('div');
+      document.body.append(container);
+      const root = createRoot(container);
+      let feature: ComputerUseFeature | null = null;
+      await act(async () => {
+        root.render(
+          <Probe
+            taskId="task-1"
+            onFeature={(value) => {
+              feature = value;
+            }}
+          />,
+        );
+      });
+      await settle();
+      expect(feature!.enabled).toBe(true);
+
+      // Open the onboarding and start the remembered profile with its one click.
+      await act(async () => feature!.open());
+      await settle();
+      const quickStart = container.querySelector<HTMLButtonElement>(
+        '[data-computer-use-activation="start"]',
       );
-    });
-    await settle();
-    expect(feature!.enabled).toBe(true);
+      expect(quickStart, 'the quick start of a remembered profile').not.toBeNull();
+      await act(async () => {
+        quickStart!.click();
+      });
+      await settle();
+      expect(feature!.active).toBe(true);
+      expect(fake.listenerCount()).toBe(1);
 
-    // Open the onboarding and start the remembered profile with its one click.
-    await act(async () => feature!.open());
-    await settle();
-    const quickStart = container.querySelector<HTMLButtonElement>(
-      '[data-computer-use-activation="start"]',
-    );
-    expect(quickStart, 'the quick start of a remembered profile').not.toBeNull();
-    await act(async () => {
-      quickStart!.click();
-    });
-    await settle();
-    expect(feature!.active).toBe(true);
-    expect(fake.listenerCount()).toBe(1);
+      // Main publishes a status that carries a copied value: it reaches the screen through the hook.
+      await act(async () => {
+        fake.publish(
+          status({
+            statusRevision: 2,
+            copied: [{ sizeClass: 'le_256', excerpt: MARKER }],
+          }),
+        );
+      });
+      expect(container.textContent).toContain(MARKER);
 
-    // Main publishes a status that carries a copied value: it reaches the screen through the hook.
-    await act(async () => {
-      fake.publish(
-        status({
-          statusRevision: 2,
-          copied: [{ sizeClass: 'le_256', excerpt: MARKER }],
-        }),
-      );
-    });
-    expect(container.textContent).toContain(MARKER);
+      // The hook sent the value to no one, and wrote it to no storage.
+      expect(fake.sent.join('\n')).not.toContain(MARKER);
+      expect(storedText()).not.toContain(MARKER);
 
-    // The hook sent the value to no one, and wrote it to no storage.
-    expect(fake.sent.join('\n')).not.toContain(MARKER);
-    expect(storedText()).not.toContain(MARKER);
+      // The session ends: the value is not on the screen, still not in storage, and still not sent.
+      await act(async () => {
+        fake.publish(
+          status({
+            statusRevision: 3,
+            state: 'stopped',
+            stopReason: late ? 'native_unavailable' : 'user_stop',
+            copied: [],
+            ...(late ? { terminationResult: 'termination_requested' as const } : {}),
+          }),
+        );
+      });
+      await settle();
+      expect(feature!.active).toBe(false);
+      expect(container.textContent).not.toContain(MARKER);
+      expect(storedText()).not.toContain(MARKER);
+      expect(fake.sent.join('\n')).not.toContain(MARKER);
 
-    // The session ends: the value is not on the screen, still not in storage, and still not sent.
-    await act(async () => {
-      fake.publish(
-        status({ statusRevision: 3, state: 'stopped', stopReason: 'user_stop', copied: [] }),
-      );
-    });
-    await settle();
-    expect(feature!.active).toBe(false);
-    expect(container.textContent).not.toContain(MARKER);
-    expect(storedText()).not.toContain(MARKER);
-    expect(fake.sent.join('\n')).not.toContain(MARKER);
-
-    await act(async () => root.unmount());
-    expect(document.body.textContent).not.toContain(MARKER);
-    expect(storedText()).not.toContain(MARKER);
-    expect(fake.listenerCount()).toBe(0);
-  });
+      if (late) {
+        await act(async () =>
+          fake.publish(
+            status({
+              statusRevision: 4,
+              state: 'stopped',
+              stopReason: 'native_unavailable',
+              terminationResult: 'terminated_target_suspect',
+              copied: [],
+            }),
+          ),
+        );
+        await settle();
+        expect(container.textContent).toContain('最後の操作が対象に後から反映');
+        expect(container.textContent).not.toContain('停止を確認できません');
+      }
+      await act(async () => root.unmount());
+      expect(document.body.textContent).not.toContain(MARKER);
+      expect(storedText()).not.toContain(MARKER);
+      expect(fake.listenerCount()).toBe(0);
+    },
+  );
 
   it('drops the value when the component unmounts in the middle of a session, and unsubscribes', async () => {
     const fake = installFakePreload();
