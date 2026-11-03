@@ -45,7 +45,10 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"cancellableWindowDiscovery\":true" +
          ",\"identityBoundStart\":true" +
          ",\"artifactRead\":true" +
-         ",\"approval\":false" +
+         (kWindowsApprovalHandlersEnabled
+              ? ",\"approval\":true,\"approvalWire\":" +
+                    std::to_string(sprint_coder::computer_use::kWindowsApprovalReceiptVersion)
+              : std::string(",\"approval\":false")) +
          "},\"eligibility\":{\"mode\":\"" +
          std::string(sprint_coder::computer_use::kNativeEligibilityModeName) +
          "\",\"rulesetVersion\":" +

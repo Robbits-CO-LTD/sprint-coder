@@ -249,6 +249,8 @@ D-7、AC-4 / V2 Q1 の「E2 / E3 は単発承認、上限クラスは操作ご�
 
 ### 5.1 N8-2c の追跡メモ（#991 / PR #1036）
 
+- N8-3 の interlockEnforced は内部のテスト注入点だけで検証し、本番では false のままとする。実宣言と照合への接続は N7 に残す。
+
 - gate を開いた preflight は、Offer の一回の計測で振り分ける（`RouteWindowsApprovalPreflight`）。経路は三つ。eligible なら offer。takeover、計測不能、offer できない approval、offer の失敗は拒否する（ordinary ticket にしない）。計測した ordinary / blocked と、一文字を超える type（承認の対象外）は既存の interlock へ渡す。interlock は approval を approval_closed で拒否する。
 - 承認計測の worker には値で所有したものだけを渡す（`WindowsApprovalOwnedRequest`）。ShadowRequestInfo の view は worker の中で作る。
 - click_opens の読み取りは承認計測にも置く（lane 上、worker の前、値で渡す）。interlock の入口は通常の preflight と dispatch 専用で再利用できない。また Offer の basis はオーナーの承認入力より前の input time になる。

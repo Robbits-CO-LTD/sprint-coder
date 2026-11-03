@@ -1,4 +1,7 @@
-import { parseNativeHandshake } from './computer-use-native-handshake';
+import {
+  parseNativeHandshake,
+  windowsApprovalEvidenceMatches,
+} from './computer-use-native-handshake';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -391,7 +394,15 @@ export function loadComputerUseNative(
             ? raw
             : null,
       });
-    return Object.freeze({ manifest, probe: result, artifactPath, addon: raw });
+    return Object.freeze({
+      manifest,
+      probe: result,
+      artifactPath,
+      addon: raw,
+      windowsApprovalVerified:
+        platform === 'win32' &&
+        windowsApprovalEvidenceMatches(compiledPin.value, manifest, handshake),
+    });
   } catch (error) {
     const reason =
       error instanceof Error && error.message.length > 0 ? error.message : 'NATIVE_LOAD_FAILED';
@@ -559,6 +570,9 @@ function loadRawBinding(
     signerDigest: manifest.signerDigest,
     sourceCommit: manifest.sourceCommit,
     ...(manifest.eligibility === undefined ? {} : { eligibility: manifest.eligibility }),
+    ...(manifest.windowsDocumentViewers === undefined
+      ? {}
+      : { windowsDocumentViewers: manifest.windowsDocumentViewers }),
   });
 }
 

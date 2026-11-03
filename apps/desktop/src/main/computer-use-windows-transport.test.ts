@@ -498,6 +498,7 @@ function createTarget(
   adaptAddon: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon = (addon) => addon,
   identityBoundStart?: boolean,
   eligibility?: ComputerUseNativeBinding['manifest']['eligibility'],
+  approvalEvidence?: ComputerUseNativeBinding['manifest']['windowsDocumentViewers'],
 ): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
@@ -540,12 +541,17 @@ function createTarget(
       reason: '',
       capabilities: { observe: true, control: true, cancellableWindowDiscovery: true },
     },
-    { ...expectedTrust, ...(eligibility === undefined ? {} : { eligibility }) },
+    {
+      ...expectedTrust,
+      ...(eligibility === undefined ? {} : { eligibility }),
+      ...(approvalEvidence === undefined ? {} : { windowsDocumentViewers: approvalEvidence }),
+    },
   );
   const hostBinding = binding(adaptAddon(addon));
   const host = createComputerUseNativeHost(
     {
       ...hostBinding,
+      windowsApprovalVerified: approvalEvidence !== undefined,
       manifest: { ...hostBinding.manifest, ...(eligibility === undefined ? {} : { eligibility }) },
       probe: {
         ...hostBinding.probe,
@@ -8911,5 +8917,228 @@ int main() {
     expect(COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS).toBeGreaterThan(
       COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
     );
+  });
+
+  it('sends the connection generation and distinct approval frames', async () => {
+    const eligibility = {
+      mode: 'v2-denylist',
+      classifierVersion: 2,
+      rulesetVersion: 2,
+      lexiconVersion: 3,
+      ticketRequired: true,
+    } as const;
+    const viewers = { version: 1, digest: 'a'.repeat(16) };
+    const seen: Record<string, Record<string, unknown>> = {};
+    const base = responders();
+    const target = createTarget(
+      {
+        ...base,
+        handshake: (input) => {
+          seen['handshake'] = input;
+          const [, value] = base['handshake']!(input);
+          return [
+            'handshake_result',
+            {
+              ...(value as object),
+              eligibility,
+              windowsDocumentViewers: viewers,
+              capabilities: { cancellableWindowDiscovery: true, approval: true, approvalWire: 3 },
+            },
+          ];
+        },
+        approval_approve: (input) => {
+          seen['approve'] = input;
+          return ['approval_approve_result', { ok: true }];
+        },
+        approval_discard: (input) => {
+          seen['discard'] = input;
+          return ['approval_discard_result', { discarded: true }];
+        },
+        dispatch_approved: (input) => {
+          seen['dispatch'] = input;
+          return ['dispatch_result', { result: 'completed' }];
+        },
+      },
+      undefined,
+      {},
+      undefined,
+      undefined,
+      eligibility,
+      viewers,
+    );
+    await startSession(target.host, 'approval-session', 'turn-1');
+    const request = {
+      sessionId: 'approval-session',
+      requestId: 'approval-request',
+      approvalGeneration: 1,
+      cancelEpoch: 0,
+      type: 'click',
+    };
+    expect(typeof target.addon.approvalApprove).toBe('function');
+    await target.addon.approvalApprove!(request);
+    await target.addon.approvalDiscard!(request);
+    await target.addon.dispatchApproved!(request);
+    expect(seen['handshake']!['helperGeneration']).toBe(1);
+    for (const key of ['approve', 'discard', 'dispatch'])
+      expect(seen[key]!['helperGeneration']).toBe(1);
+    expect(target.host.nativeApprovalPathEnabled?.('approval-session')).toBe(false);
+    const frames = sockets[0]!.writes.map((bytes) => decodeComputerUseNativeFrame(bytes));
+    for (const type of ['approval_approve', 'approval_discard', 'dispatch_approved'])
+      expect(frames.some((frame) => frame.messageType === type)).toBe(true);
+    expect(new Set(frames.slice(-3).map((frame) => frame.requestId.hex)).size).toBe(3);
+  });
+  it('connects the Windows host approval gate and distinguishes pre-input failure from unknown effect', async () => {
+    const eligibility = {
+      mode: 'v2-denylist',
+      classifierVersion: 2,
+      rulesetVersion: 2,
+      lexiconVersion: 3,
+      ticketRequired: true,
+    } as const;
+    const viewers = { version: 1, digest: 'a'.repeat(16) };
+    let failApprove = false;
+    let failPreflight = false;
+    let failDispatch = false;
+    const base = responders();
+    const table: Record<string, Responder> = {
+      ...base,
+      handshake: (input) => [
+        'handshake_result',
+        {
+          ...(base['handshake']!(input)[1] as object),
+          eligibility,
+          windowsDocumentViewers: viewers,
+          capabilities: { cancellableWindowDiscovery: true, approval: true, approvalWire: 3 },
+        },
+      ],
+      preflight: (i) =>
+        failPreflight
+          ? ['error', { code: 'NATIVE_APPROVAL_UNAVAILABLE', accepted: false }]
+          : [
+              'preflight_result',
+              {
+                receiptVersion: 3,
+                classifierVersion: 2,
+                decision: 'single_use_approval',
+                reasonCode: null,
+                deniedResult: null,
+                ticket: null,
+                sessionId: i['sessionId'],
+                requestId: i['requestId'],
+                cancelEpoch: i['cancelEpoch'],
+                observationRevision: i['observationRevision'],
+                inputAttemptCount: 0,
+                approvalGeneration: 1,
+                remainingMs: 60000,
+                effect: 'supervised_action',
+                display: {
+                  effect: 'supervised_action',
+                  operation: 'click',
+                  targetLabel: null,
+                  extension: null,
+                  externalApplication: 'not_applicable',
+                  unsignedWarning: 'none',
+                },
+              },
+            ],
+      approval_approve: (i) =>
+        failApprove
+          ? ['error', { code: 'NATIVE_APPROVAL_UNAVAILABLE', accepted: false }]
+          : [
+              'approval_approve_result',
+              {
+                ok: true,
+                reasonCode: null,
+                deniedResult: null,
+                sessionId: i['sessionId'],
+                requestId: i['requestId'],
+                cancelEpoch: i['cancelEpoch'],
+                observationRevision: i['observationRevision'],
+                approvalGeneration: i['approvalGeneration'],
+                inputAttemptCount: 0,
+              },
+            ],
+      approval_discard: () => ['approval_discard_result', { discarded: true }],
+      dispatch_approved: () =>
+        failDispatch
+          ? ['error', { code: 'INPUT_FAILED', accepted: true }]
+          : [
+              'dispatch_result',
+              {
+                result: 'completed',
+                reasonCode: null,
+                sessionId: 'approval-host',
+                cancelEpoch: 0,
+                inputAttemptCount: 1,
+              },
+            ],
+    };
+    const target = createTarget(
+      table,
+      undefined,
+      { classifierV2Attested: true, windowsApprovalInterlockForTesting: true },
+      undefined,
+      undefined,
+      eligibility,
+      viewers,
+    );
+    const session = await target.host.startSession({
+      profile,
+      windowId: '100',
+      sessionId: 'approval-host',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      classifierRoute: 'v2',
+    });
+    expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(true);
+    expect(target.host.nativeApprovalPathEnabled?.('unbound')).toBe(false);
+    const input = {
+      session,
+      requestId: 'approved-host-request',
+      approvalGeneration: 1,
+      observationRevision: 1,
+      cancelEpoch: 0,
+      action: { type: 'click', x: 0.5, y: 0.5, button: 'left' } as const,
+      signal: new AbortController().signal,
+    };
+    expect(await target.host.dispatch(input)).toMatchObject({
+      approvalOffer: { kind: 'approval_required', effect: 'supervised_action' },
+    });
+    failPreflight = true;
+    expect(await target.host.dispatch({ ...input, requestId: 'preflight-failed' })).toMatchObject({
+      result: 'rejected',
+    });
+    expect(await target.host.approvalApprove!(input)).toEqual({ kind: 'approved' });
+    failApprove = true;
+    expect(await target.host.approvalApprove!({ ...input, requestId: 'refused' })).toMatchObject({
+      kind: 'refused',
+      result: 'rejected',
+    });
+    failDispatch = true;
+    await expect(target.host.dispatchApproved!(input)).rejects.toThrow();
+    await target.host.approvalDiscard!({ session, approvalGeneration: 1 });
+    expect(target.helper().served).toContain('approval_discard');
+    await target.host.close(session);
+    expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
+    expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'rejected' });
+  });
+
+  it('refuses an old helper approval before sending any approval frame', async () => {
+    const target = createTarget();
+    await startSession(target.host, 'old-helper', 'turn-1');
+    expect(target.addon.windowsApprovalReady?.('old-helper')).toBe(false);
+    const before = sockets[0]!.writes.length;
+    for (const method of ['approvalApprove', 'approvalDiscard', 'dispatchApproved'] as const)
+      await expect(
+        target.addon[method]!({
+          sessionId: 'old-helper',
+          requestId: method,
+          approvalGeneration: 1,
+          cancelEpoch: 0,
+          type: 'click',
+        }),
+      ).rejects.toMatchObject({ accepted: false });
+    expect(sockets[0]!.writes).toHaveLength(before);
   });
 });

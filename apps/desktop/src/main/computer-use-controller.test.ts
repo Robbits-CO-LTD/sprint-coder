@@ -1883,6 +1883,9 @@ describe('ComputerUseController', () => {
         'computer-use-controller.ts',
         'computer-use-native-host.ts',
         'computer-use-native-types.ts',
+        // The Windows transport below the host frames the same three calls (N8-3); it has no caller
+        // of its own above the host.
+        'computer-use-native-windows.ts',
       ]);
       expect(hits.filter((hit) => !allowed.has(hit.split(':')[0]!))).toEqual([]);
       const controllerSource = readFileSync(
