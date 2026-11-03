@@ -169,6 +169,24 @@ afterEach(() => {
 });
 ledgerStorageContract('SQLite Windows ledger contract', fixture);
 
+it('PR9 release persists only the approved identity across connections and restart', async () => {
+  const f = fixture();
+  const a = f.open('a');
+  const b = f.open('b');
+  const other = {
+    ...quarantine,
+    identity: { ...row.identity, creationTime: 'synthetic-new-time' },
+  };
+  await a.restoreQuarantines([quarantine, other]);
+  await a.write(row);
+  expect(await a.releaseQuarantine!(quarantine.identity)).toBe(true);
+  expect(b.read()).toEqual({ rows: [], quarantines: [other] });
+  expect(a.read().rows).toEqual([row]);
+  a.close();
+  expect(f.open('a').read().quarantines).toEqual([other]);
+  expect(await b.releaseQuarantine!(quarantine.identity)).toBe(true);
+});
+
 it('retains quarantine when its release fails and retries after the store recovers', async () => {
   const f = fixture();
   const store = f.open();

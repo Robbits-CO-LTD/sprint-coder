@@ -88,7 +88,10 @@ export type WindowsDispatchLedgerStorage = Readonly<{
   delete(row: WindowsLedgerRow): boolean | Promise<boolean>;
   /** Adds quarantines; an existing quarantine for the same target keeps its first committed reason. */
   restoreQuarantines(quarantines: readonly WindowsTargetQuarantine[]): boolean | Promise<boolean>;
-  /** Remove only the proven terminated process identity; retries are idempotent. */
+  /**
+   * Remove only this identity: a proven terminated process (R15) or an explicit approval after a
+   * fresh identity check (R17). Retries are idempotent.
+   */
   releaseQuarantine?(identity: WindowsTargetQuarantine['identity']): boolean | Promise<boolean>;
   /** Startup snapshot: only this instance's rows, with all shared quarantines. */
   read?(): WindowsLedgerSnapshot | Promise<WindowsLedgerSnapshot>;
@@ -265,6 +268,11 @@ export function createComputerUseNativeHost(
   const terminationEnabled =
     ledger !== undefined && options.windowsKillStopTermination?.enabled === true;
   const ledgerStates = new Map<number, WindowsStopState>();
+  const resumeTargets = new Map<string, WindowsTargetQuarantine['identity']>();
+  const sameIdentity = (
+    a: WindowsTargetQuarantine['identity'],
+    b: WindowsTargetQuarantine['identity'],
+  ) => a.pid === b.pid && a.creationTime === b.creationTime;
   const stopDelivery = new WindowsStopDelivery();
   let holdSequence = 0;
   const pendingWrites = new Map<
@@ -316,11 +324,42 @@ export function createComputerUseNativeHost(
         : current;
     const decision = decideWindowsStop(previous, event);
     ledgerStates.set(generation, decision.state);
+    // Evidence in another generation must also supersede an in-flight approval release.
+    const evidence = decision.state.holds
+      .filter((hold) => !previous.holds.includes(hold) && hold.operation !== 'release')
+      .flatMap((hold) =>
+        hold.changes
+          .filter((change) => change.action === 'quarantine' || change.action === 'transfer')
+          .map((change) => change.row.identity),
+      );
+    if (event.kind === 'input_unconfirmed') {
+      const row = previous.rows.find(
+        (row) =>
+          row.sessionId === event.sessionId &&
+          row.requestId === event.requestId &&
+          row.inputPath === 'background_semantic',
+      );
+      if (row !== undefined && decision.pause) evidence.push(row.identity);
+    }
+    for (const q of decision.state.quarantines)
+      if (!previous.quarantines.includes(q)) evidence.push(q.identity);
+    if (evidence.length > 0)
+      for (const [id, state] of ledgerStates) {
+        ledgerStates.set(id, {
+          ...state,
+          holds: state.holds.map((hold) =>
+            hold.releaseTarget !== undefined &&
+            evidence.some((identity) => sameIdentity(identity, hold.releaseTarget!))
+              ? { ...hold, releaseSuperseded: true }
+              : hold,
+          ),
+        });
+      }
     for (const diagnostic of decision.diagnostics) options.windowsLedgerDiagnostic?.(diagnostic);
     if (terminationEnabled) {
       if (decision.kind === 'receipt_confirmed' && receiptOwner !== undefined)
         stopDelivery.complete(generation, 'session', previous.stopOwnerId, receiptOwner.lifetimeId);
-      ledgerStates.set(generation, stopDelivery.project(decision.state));
+      ledgerStates.set(generation, stopDelivery.project(ledgerState(generation)));
       stopDelivery.deliver(decision);
     }
     for (const hold of previous.holds) {
@@ -1156,8 +1195,10 @@ export function createComputerUseNativeHost(
         !owner.unconfirmed &&
         !owner.discoveryUnconfirmed &&
         owner.attempts.size === 0
-      )
+      ) {
         startOwners.delete(id);
+        resumeTargets.delete(id);
+      }
     }
   };
 
@@ -1967,6 +2008,15 @@ export function createComputerUseNativeHost(
     assertStartOwner(owner);
     owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
     sessions.set(session.sessionId, session);
+    if (
+      terminationEnabled &&
+      typeof session.raw['pid'] === 'number' &&
+      typeof session.raw.processStartTime === 'string'
+    )
+      resumeTargets.set(session.sessionId, {
+        pid: session.raw['pid'],
+        creationTime: session.raw.processStartTime,
+      });
     // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
     // implementation, but it is never returned to the controller or renderer.
     try {
@@ -1981,6 +2031,140 @@ export function createComputerUseNativeHost(
   };
 
   const host: ComputerUseNativeHost = {
+    ...(terminationEnabled
+      ? {
+          approveWindowsQuarantineResume: async (input: {
+            previousSessionId: string;
+            newSessionId: string;
+            trustedActivation: boolean;
+          }): Promise<boolean> => {
+            const identity = resumeTargets.get(input.previousSessionId);
+            const owner = startOwners.get(input.previousSessionId);
+            const previousGeneration = owner?.helperGeneration;
+            if (
+              !input.trustedActivation ||
+              identity === undefined ||
+              owner === undefined ||
+              previousGeneration == null ||
+              input.newSessionId.length === 0 ||
+              input.newSessionId === input.previousSessionId ||
+              startOwners.has(input.newSessionId) ||
+              confirmedClosed.has(input.newSessionId) ||
+              (!owner.receiptConfirmed && !owner.terminated) ||
+              ledger?.releaseQuarantine === undefined ||
+              addon?.checkTargetIdentity === undefined
+            )
+              return false;
+            const previousStop = owner.terminated ? ('exit' as const) : ('receipt' as const);
+            const blocked = (holdId?: string) =>
+              inputQuarantined() ||
+              [...ledgerStates.values()].some(
+                (state) =>
+                  (state.killRequested && !state.exitConfirmed) ||
+                  state.nativeBlockers.length > 0 ||
+                  state.rows.some((row) => sameIdentity(row.identity, identity)) ||
+                  state.holds.some(
+                    (hold) =>
+                      hold.id !== holdId &&
+                      (hold.targets === 'unknown' ||
+                        hold.targets.some((target) => sameIdentity(target, identity))),
+                  ),
+              ) ||
+              [...uncertainWrites].some((row) => sameIdentity(row.identity, identity));
+            await retryLedger();
+            if (
+              blocked() ||
+              ![...ledgerStates.values()].some((state) =>
+                state.quarantines.some((q) => sameIdentity(q.identity, identity)),
+              )
+            )
+              return false;
+            // This read is after approval; it can launch the new helper after a confirmed exit.
+            const reobserve = async () => {
+              try {
+                const result = await addon.checkTargetIdentity!([
+                  { pid: identity.pid, processStartTime: identity.creationTime },
+                ]);
+                return result.length === 1 && result[0]?.result === 'alive';
+              } catch {
+                return false;
+              }
+            };
+            if (!(await reobserve()) || blocked()) return false;
+            const generation = Math.max(
+              ...[...ledgerStates.values()]
+                .filter((state) => state.helperLaunched && !state.exitConfirmed)
+                .map((state) => state.helperGeneration),
+            );
+            if (
+              !Number.isSafeInteger(generation) ||
+              (previousStop === 'exit' && generation === previousGeneration)
+            )
+              return false;
+            const holdId = `approval-release-${++holdSequence}`;
+            // Keep the original quarantine beside the release hold, including after a generation
+            // change, so an ambiguous obsolete delete has a concrete compensating write.
+            const state = ledgerState(generation);
+            const quarantine = [...ledgerStates.values()]
+              .flatMap((state) => state.quarantines)
+              .find((q) => sameIdentity(q.identity, identity));
+            if (quarantine === undefined) return false;
+            if (!state.quarantines.some((q) => sameIdentity(q.identity, identity)))
+              ledgerStates.set(generation, {
+                ...state,
+                quarantines: [...state.quarantines, quarantine],
+              });
+            const event = {
+              kind: 'approve_new_session',
+              identity,
+              trustedActivation: true,
+              previousStop,
+              previousGeneration,
+              previousSessionId: input.previousSessionId,
+              newSessionId: input.newSessionId,
+            } as const;
+            const decision = ledgerEvent(generation, {
+              ...event,
+              storage: { status: 'failed', holdId },
+            });
+            if (decision.refusal !== null) return false;
+            let released = false;
+            pendingWrites.set(holdId, {
+              generation,
+              write: async () => {
+                if (blocked(holdId) || !(await reobserve()) || blocked(holdId)) return false;
+                const gate = ledgerEvent(generation, {
+                  kind: 'retry_storage',
+                  holdId,
+                  status: 'before_write',
+                });
+                if (gate.refusal !== null || startOwners.has(input.newSessionId)) return false;
+                return ledger.releaseQuarantine!(identity);
+              },
+              reflect: (written, uncertain) => {
+                const result = ledgerEvent(generation, {
+                  kind: 'retry_storage',
+                  holdId,
+                  status: written ? 'written' : 'failed',
+                  ...(uncertain ? { uncertain: true } : {}),
+                });
+                released = result.freshSession;
+                if (released)
+                  for (const [id, state] of ledgerStates)
+                    ledgerStates.set(id, {
+                      ...state,
+                      quarantines: state.quarantines.filter(
+                        (q) => !sameIdentity(q.identity, identity),
+                      ),
+                    });
+                return result;
+              },
+            });
+            await writePending(holdId);
+            return released;
+          },
+        }
+      : {}),
     ...(terminationEnabled ? { subscribeWindowsStop: stopDelivery.subscribe } : {}),
     listTargets: async () => {
       if (ledger !== undefined) await retryLedger();
@@ -2291,6 +2475,11 @@ export function createComputerUseNativeHost(
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
       const internal = sessions.get(input.session.sessionId);
+      if (ledger !== undefined && internal !== undefined) {
+        await retryLedger();
+        if (ledgerBlocked(internal.raw['pid'], internal.raw.processStartTime))
+          return { kind: 'refused', result: 'rejected', reasonCode: 'native_unavailable' };
+      }
       // approvalApprove has no input capability: every failure below is a typed pre-input result.
       if (internal === undefined)
         return Object.freeze({

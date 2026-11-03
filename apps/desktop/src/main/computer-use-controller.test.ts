@@ -23,6 +23,7 @@ import type {
 } from './persistence';
 import {
   ComputerUseController,
+  startComputerUseWindowsQuarantineSession,
   subscribeComputerUseWindowsStops,
   type ComputerUseControllerDeps,
   type ComputerUseNativeActionResult,
@@ -158,6 +159,69 @@ function observation(
     ...overrides,
   } as ComputerUseNativeObservation;
 }
+
+it('PR9 Controller receiver creates fresh credentials and observes only after approval and start', async () => {
+  const order: string[] = [];
+  const approveWindowsQuarantineResume = vi.fn(async () => {
+    order.push('approve');
+    return true;
+  });
+  const startSession = vi.fn(
+    async (
+      input: Parameters<ComputerUseNativeHost['startSession']>[0],
+    ): Promise<ComputerUseNativeSession> => {
+      order.push('start');
+      return {
+        sessionId: input.sessionId,
+        cancelEpoch: input.cancelEpoch,
+        platform: 'win32',
+        appIdentityDigest: profile.identityDigest,
+        windowIdentityDigest: 'd'.repeat(64),
+        windowId: input.windowId,
+        profileRevision: profile.revision,
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+        screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+      };
+    },
+  );
+  const observe = vi.fn(async (session: ComputerUseNativeSession) => {
+    order.push('observe');
+    return observation(1, { sessionId: session.sessionId });
+  });
+  const close = vi.fn(async () => undefined);
+  const native = { approveWindowsQuarantineResume, startSession, observe, close };
+  const input = {
+    previousSessionId: 'old-session',
+    trustedActivation: true,
+    profile,
+    windowId: 'window-1',
+    taskId: 'task-1',
+    turnId: 'turn-1',
+  };
+  const result = await startComputerUseWindowsQuarantineSession(native, input);
+  expect(order).toEqual(['approve', 'start', 'observe']);
+  expect(result?.session.sessionId).not.toBe('old-session');
+  expect(startSession.mock.calls[0]?.[0]).toMatchObject({ cancelEpoch: 0, resume: false });
+  expect(approveWindowsQuarantineResume).toHaveBeenCalledWith({
+    previousSessionId: 'old-session',
+    newSessionId: result?.session.sessionId,
+    trustedActivation: true,
+  });
+  expect(observe).toHaveBeenCalledWith(
+    result?.session,
+    expect.objectContaining({ cancelEpoch: 0 }),
+  );
+  approveWindowsQuarantineResume.mockResolvedValue(false);
+  expect(await startComputerUseWindowsQuarantineSession(native, input)).toBeNull();
+  expect(startSession).toHaveBeenCalledTimes(1);
+  approveWindowsQuarantineResume.mockResolvedValue(true);
+  observe.mockRejectedValueOnce(new Error('synthetic observe failure'));
+  await expect(startComputerUseWindowsQuarantineSession(native, input)).rejects.toThrow(
+    'synthetic observe failure',
+  );
+  expect(close).toHaveBeenCalledTimes(1);
+});
 
 function createFixture(
   options: {
