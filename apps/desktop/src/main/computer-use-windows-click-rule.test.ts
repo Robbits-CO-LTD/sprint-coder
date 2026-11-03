@@ -214,11 +214,15 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     const approvalRead = approval.indexOf(
       'request.click_opens = request.click_tracked && WindowsClickOpens();',
     );
-    const approvalWorker = approval.indexOf('return RunWindowsOpenMeasurement<WindowsApprovalSample>(');
+    const approvalWorker = approval.indexOf(
+      'return RunWindowsOpenMeasurement<WindowsApprovalSample>(',
+    );
     expect(approvalRead).toBeGreaterThan(0);
     expect(approvalWorker).toBeGreaterThan(approvalRead);
     expect(approval).toContain('click_basis.opens = request.click_opens;');
-    expect(approval).toContain('WindowsApprovalMeasurementRead( std::move(request), [window, point, input, target, epoch, click_basis](');
+    expect(approval).toContain(
+      'WindowsApprovalMeasurementRead( std::move(request), [window, point, input, target, epoch, click_basis](',
+    );
     expect(approval.slice(approvalWorker)).not.toContain('WindowsClickOpens(');
     expect(approval.slice(approvalWorker)).not.toContain('WindowsReadLastInputTick(');
     // The synchronous entry leaves before it uses the point when a click has none.

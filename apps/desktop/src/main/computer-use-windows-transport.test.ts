@@ -1,3 +1,4 @@
+import type * as FsPromises from 'node:fs/promises';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type {
   WindowsStopDeliveryEvent,
@@ -85,7 +86,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const actual = await importOriginal<typeof FsPromises>();
   let sequence = 0;
   return {
     ...actual,

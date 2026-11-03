@@ -86,7 +86,9 @@ describe('Windows private approval handlers', () => {
     expect(route.replace(/\s+/gu, ' ')).toContain(
       'case DecisionKind::kOrdinary: case DecisionKind::kBlocked: return WindowsApprovalPreflightRoute::kInterlock; case DecisionKind::kApproval: case DecisionKind::kTakeover: return WindowsApprovalPreflightRoute::kRefuse;',
     );
-    expect(route).toContain('if (sample.measured.takeover || sample.measured.eligible) return WindowsApprovalPreflightRoute::kRefuse;');
+    expect(route).toContain(
+      'if (sample.measured.takeover || sample.measured.eligible) return WindowsApprovalPreflightRoute::kRefuse;',
+    );
     const host = readWindowsHostSource();
     const preflight = host.slice(host.indexOf('bool HandleWindowsPreflight('));
     const gated = preflight.slice(
@@ -104,8 +106,12 @@ describe('Windows private approval handlers', () => {
   it('gives the abandoned measurement worker only what it owns', () => {
     const host = readWindowsHostSource();
     const approval = host.slice(
-      host.indexOf('sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane('),
-      host.indexOf('sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor('),
+      host.indexOf(
+        'sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(',
+      ),
+      host.indexOf(
+        'sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(',
+      ),
     );
     const worker = approval.indexOf('return RunWindowsOpenMeasurement<WindowsApprovalSample>(');
     expect(worker).toBeGreaterThan(0);

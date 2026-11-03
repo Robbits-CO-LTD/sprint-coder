@@ -77,8 +77,11 @@ template <class Measure>
     const WindowsApprovalMeasurementInput &input, WindowsApprovalDisplay display,
     NativeRiskBits risk, bool metadata_complete) {
   DecisionKind decision = DecisionKind::kTakeover;
-  WindowsApprovalSample sample{MeasureWindowsApproval(input, &decision), std::move(display), risk,
-                               metadata_complete};
+  WindowsApprovalSample sample;
+  sample.measured = MeasureWindowsApproval(input, &decision);
+  sample.display = std::move(display);
+  sample.risk = risk;
+  sample.metadata_complete = metadata_complete;
   sample.decision = decision;
   if (!sample.measured.eligible) return sample;
   const auto effect = sample.measured.effect;

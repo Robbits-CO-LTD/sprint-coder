@@ -324,7 +324,10 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     // replay, a failed binding, the gated approval refusal (#991 N8-2c), the two spellings of an
     // interlock refusal, the V1 answer
     expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(6);
-    const gated = text.slice(text.indexOf('if (WindowsApprovalGate(session))'), text.indexOf('WindowsInterlockRefusal('));
+    const gated = text.slice(
+      text.indexOf('if (WindowsApprovalGate(session))'),
+      text.indexOf('WindowsInterlockRefusal('),
+    );
     expect(gated.match(/WindowsPreflightReceipt\(/gu)?.length).toBe(1);
     expect(gated).toContain('"denied", "native_approval_unavailable"');
     expect(text).toContain('issued ? "ordinary" : "denied"');

@@ -173,6 +173,8 @@ const windowsCloseSeamPreamble = `
 #include <vector>
 // The extracted session block also holds the ordinary ticket state (S5-a), which Close forgets.
 #include "computer_use_native_ticket.h"
+// The same block also holds the private approval owners (N8-2), which Close forgets as well.
+#include "computer_use_windows_approval_handlers.h"
 struct FrameId { std::string key; };
 struct FrameHeader { FrameId session_id; };
 struct Frame { FrameHeader header; };
