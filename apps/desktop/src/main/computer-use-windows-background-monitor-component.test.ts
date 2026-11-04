@@ -60,7 +60,7 @@ const build = findBuild();
 
 // The native seam uses fake hooks and windows; it sends no real OS input.
 describe.skipIf(build === null)('Windows background monitor native component', () => {
-  it('compiles and runs the background monitor native seam', async () => {
+  async function compileAndRun(source: string) {
     const native = join(__dirname, '../../computer-use-native');
     const directory = mkdtempSync(join(tmpdir(), 'sc-bgmon-'));
     try {
@@ -74,8 +74,10 @@ describe.skipIf(build === null)('Windows background monitor native component', (
         '/DUNICODE',
         '/D_UNICODE',
         '/DNOMINMAX',
+        '/DWIN32_LEAN_AND_MEAN',
+        '/D_WIN32_WINNT=0x0A00',
         `/I${native}`,
-        join(native, 'computer_use_windows_background_monitor_test.cc'),
+        join(native, source),
         `/Fe:${exe}`,
         'user32.lib',
         'ole32.lib',
@@ -98,9 +100,20 @@ describe.skipIf(build === null)('Windows background monitor native component', (
       });
       const output = `Compile:\n${compiled.output}\nRun:\n${result.output}`;
       expect(result.status, output).toBe(0);
-      expect(result.output, output).toContain('Background monitor native seam: PASS');
+      return { result, output };
     } finally {
       rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
+  }
+
+  it('compiles and runs the background monitor native seam', async () => {
+    const { result, output } = await compileAndRun(
+      'computer_use_windows_background_monitor_test.cc',
+    );
+    expect(result.output, output).toContain('Background monitor native seam: PASS');
+  }, 540000);
+
+  it('compiles and runs the background executor native seam', async () => {
+    await compileAndRun('computer_use_windows_background_executor_test.cc');
   }, 540000);
 });
