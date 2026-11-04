@@ -56,7 +56,13 @@ const evidence = () => ({
 });
 
 function artifactProblems(
-  overrides: { compiled?: object; manifest?: object; handshake?: object; bundle?: string } = {},
+  overrides: {
+    compiled?: object;
+    manifest?: object;
+    handshake?: object;
+    bundle?: string;
+    afterPin?: string;
+  } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'sc-v2-artifact-'));
   const input = evidence();
@@ -78,6 +84,7 @@ function artifactProblems(
       mainBundlePath,
       overrides.bundle ??
         `var define_pin_default = ${JSON.stringify(pin)};
+${overrides.afterPin ?? ''}
 function resolveComputerUseNativeCompiledPin(options) {
   if (options.compiledPin) return parseComputerUseNativeCompiledPin(options.compiledPin);
   return { required: true, value: parseComputerUseNativeCompiledPin(define_pin_default) };
@@ -99,6 +106,16 @@ function resolveComputerUseNativeCompiledPin(options) {
 describe('Windows V2 artifact files', () => {
   it('windows_v2_artifact_three_way_attestation', () => {
     expect(artifactProblems()).toEqual([]);
+  });
+  it.each([
+    'define_pin_default.eligibility.interlockEnforced = false;',
+    'define_pin_default = { ...define_pin_default };',
+    'const alias = define_pin_default; alias.eligibility.ticketRequired = false;',
+    'Object.assign(define_pin_default, {});',
+  ])('refuses a Main pin define that is written after its declaration: %s', (afterPin) => {
+    expect(() => artifactProblems({ afterPin })).toThrow(
+      /pin is missing, ambiguous or unsupported/u,
+    );
   });
   it('rejects_actual_main_pin_mismatch', () => {
     expect(

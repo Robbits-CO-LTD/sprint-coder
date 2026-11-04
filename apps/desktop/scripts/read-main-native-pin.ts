@@ -82,8 +82,25 @@ export function readMainNativePin(path: string) {
   if (candidates.length !== 1) return fail();
   let candidate = candidates[0]!;
   if (ts.isIdentifier(candidate)) {
-    const values = initializers.get(candidate.text);
+    // A hoisted define (Vite emits `var`) is used by value only if nothing else can change it: a
+    // single declaration, referenced nowhere but its declaration and this parser argument. Any other
+    // reference (a property write, an alias, a call argument) could change what Main reads.
+    const name = candidate.text;
+    const values = initializers.get(name);
     if (values?.length !== 1) return fail();
+    let references = 0;
+    const count = (node: ts.Node) => {
+      if (
+        ts.isIdentifier(node) &&
+        node.text === name &&
+        !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+        !(ts.isPropertyAssignment(node.parent) && node.parent.name === node)
+      )
+        references += 1;
+      ts.forEachChild(node, count);
+    };
+    count(source);
+    if (references !== 2) return fail();
     candidate = values[0]!;
   }
   return parseComputerUseNativeCompiledPin(literal(candidate));
