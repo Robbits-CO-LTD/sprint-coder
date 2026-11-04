@@ -149,8 +149,8 @@ BLOCKEDの正のケースと、現buildで必要な拒否確認を分けて記�
 | W-T4：IL-only | 保護ルート・image anchor・隣接`.exe.config`を含む判断を確定してから正のfixtureを選ぶ。 | BLOCKED：`kWindowsIlOnlyImageAnchorReady=false`。#1100の判断後。現拒否はW-T4 |
 | W-S5：文書を開く操作 | 許可文書種別・関連付け・効果検証とsingle-use承認を接続する。未知の効果は拒否。 | BLOCKED：`document_open`拒否継続。#988 文書open方針／N8・N11-E |
 | W-R1（AC-5）：転記 | 合成値を別アプリへ転記。拒否でpasteゼロ、各pasteを人が承認し、値を外側の会話へ出さない。 | BLOCKED／後続：#988 N10。通常type成功を転記成功にしない |
-| W-R2（AC-6）：裏での操作 | 対応UIA操作で対象を背景に保ち、利用者のcursorを動かさずに操作する。 | BLOCKED／後続：#988 N9。通常の座標操作やUIA成功では代替しない |
-| W-R3（AC-7残り）：browser sensitive surface | browserとdownload-openのfixtureを確定。危険面を拒否し、将来の許可可能なE2／E3 openはsingle-use承認で試す。 | BLOCKED／後続：#988 N11（browser）・N8。通常アプリの成功からbrowser対応を推定しない |
+| W-R2（AC-6）：裏での操作 | 対応UIA操作で対象を背景に保ち、利用者のcursorを動かさずに操作する。 | 未確認：#988 N9 の実装は main に入った（受入専用の build のみ）。実機の受入は [human] #1119、手順は [P7b の手順](testing/computer-use/windows-background-p7b-tools.md)。通常の座標操作やUIA成功では代替しない |
+| W-R3（AC-7残り）：browser sensitive surface | browserとdownload-openのfixtureを確定。危険面を拒否し、将来の許可可能なE2／E3 openはsingle-use承認で試す。 | BLOCKED：#988 N11 の A〜D（ページの再確認）は main に入ったが、browser の操作は未開放（PR F と #1100 の判断の後）。今確かめられる拒否と再確認は [ブラウザのページの受入](testing/computer-use/windows-browser-page-acceptance.md)。通常アプリの成功からbrowser対応を推定しない |
 | W-R4（AC-8）：実AI実機受入 | Sprint Coder内の実AIで適用ケースを実施し、人が操作と証拠から結果を判定する。 | 未確認：#1099（[human]、N13b）。本書やCIだけでPASSにしない |
 | W-R5：結果の引継ぎ | 本書、対象成果物、各行の結果・BLOCKED理由・後続先を#1099に記録する。 | 引継ぎ先は#1099。旧#387／#333／#732へ戻さず、同じ目的のIssueを新設しない |
 | 署名済みWindows release | signer identity `AC-17 / INV-9`を署名済みpackageで確認する。 | BLOCKED／後続：#1101。未署名受入は署名の証明にならない |
