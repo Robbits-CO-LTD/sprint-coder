@@ -189,6 +189,27 @@ int wmain(int argc, wchar_t **argv) {
     for (int round = 0; round < 500; ++round)
       back_to_back += RunWindowsOpenMeasurement<int>(Limits(), [](const WindowsOpenMeasurementLimits &) { return 1; });
     ok = ok && Check(back_to_back == 500, "measurement-back-to-back-slot-free");
+    // A timed-out page worker remains held while another session measures approval.
+    auto page_clock = std::make_shared<std::atomic<std::uint64_t>>(1);
+    auto release_page = std::make_shared<std::atomic<bool>>(false);
+    auto &page_running = windows_association_detail::WindowsPageMeasurementRunning();
+    WindowsOpenMeasurementLimits page_limits{[] { return true; },
+        [page_clock] { return page_clock->load(); }, 1, 2};
+    const auto page_result = RunWindowsOpenMeasurement<int>(page_limits,
+        [page_clock, release_page](const WindowsOpenMeasurementLimits &) {
+          page_clock->store(2);
+          while (!release_page->load()) std::this_thread::yield();
+          return 1;
+        }, &discarded, page_running);
+    const bool page_held = page_running.load();
+    const auto approval_after_page = RunWindowsOpenMeasurement<int>(Limits(),
+        [](const WindowsOpenMeasurementLimits &) { return 7; });
+    release_page->store(true);
+    for (int wait = 0; wait < 2000 && page_running.load(); ++wait)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ok = ok && Check(page_result == 0 && discarded && page_held &&
+                     approval_after_page == 7 && !page_running.load(),
+                     "page-timeout-does-not-block-other-session-approval");
     auto cancelled = Limits();
     cancelled.still_valid = [] { return false; };
     ok = ok && Check(!MeasureWindowsAssociation(L"C:\\synthetic\\missing.txt", cancelled).complete,

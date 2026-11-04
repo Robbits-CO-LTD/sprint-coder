@@ -303,25 +303,33 @@ struct Key {
 // The ONE process-wide slot of every Windows open measurement (association and E3 selection
 // alike, whatever the Result / Read types). While a measurement runs or its abandoned worker is
 // still inside an OS call that does not return, every further measurement answers empty
-// (takeover). So at most ONE detached worker thread can ever be stuck. Never destroyed: an
+// (takeover). At most one detached worker can be stuck per slot. Never destroyed: an
 // abandoned worker may finish after the process has started to exit.
 [[nodiscard]] inline std::atomic<bool> &WindowsOpenMeasurementRunning() {
   static std::atomic<bool> *const running = new std::atomic<bool>(false);
   return *running;
 }
 
+// Page reads cannot occupy the association/approval slot, even after timeout.
+[[nodiscard]] inline std::atomic<bool> &WindowsPageMeasurementRunning() {
+  static std::atomic<bool> *const page_running = new std::atomic<bool>(false);
+  return *page_running;
+}
+
 } // namespace windows_association_detail
 
 // Runs `read` on its own MTA thread within min(ticket deadline, start + 150 ms), on the single
-// slot above. Late answers are private and discarded; process termination remains the Stop
-// owner's task. `limits` follows WindowsOpenMeasurementLimits's ownership contract.
+// default slot above (or the dedicated page slot). Late answers are private and discarded;
+// process termination remains the Stop owner's task. An alternate slot must outlive its worker.
+// `limits` follows WindowsOpenMeasurementLimits's ownership contract.
 template <class Result, class Read>
 [[nodiscard]] inline Result RunWindowsOpenMeasurement(WindowsOpenMeasurementLimits limits, Read read,
-                                                       bool *discarded = nullptr) {
+                                                       bool *discarded = nullptr,
+                                                       std::atomic<bool> &running =
+                                                           windows_association_detail::WindowsOpenMeasurementRunning()) {
   if (discarded) *discarded = true;
   limits.deadline_ns = WindowsOpenMeasurementDeadline(limits.started_ns, limits.deadline_ns);
   if (!limits.MayRead()) return {};
-  std::atomic<bool> &running = windows_association_detail::WindowsOpenMeasurementRunning();
   if (running.exchange(true)) return {};
   struct Pending {
     std::mutex mutex;

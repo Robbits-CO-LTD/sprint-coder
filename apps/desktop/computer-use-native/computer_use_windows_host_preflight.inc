@@ -847,7 +847,7 @@ sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSes
       window_identity == session.active_window_identity;
   unavailable.web = readable_page || capped_browser || (same_window && session.observed_page.web);
   // Electron/CEF and embedded WebView2 pages are not bound here; existing interlocks own them.
-  if (!unavailable.web) return unavailable;
+  if (!unavailable.web || session.maximum_mode == "observe_only") return unavailable;
   const auto epoch = session.cancel_epoch;
   const auto serial = WindowsValidationFrameStopSerial();
   const auto start = MonotonicNowNs();
@@ -868,7 +868,7 @@ sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSes
     auto evidence = reader.ReadPage();
     if (!budget.MayRead()) return WindowsPageEvidence{};
     return evidence;
-  });
+  }, nullptr, windows_association_detail::WindowsPageMeasurementRunning());
   // A missing/expired read cannot turn a known web window into a native window.
   page.web = true;
   return page;

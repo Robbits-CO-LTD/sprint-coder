@@ -217,7 +217,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     // The lock taken for the wait is still held: nothing unlocks it before the cancel.
     expect(runner).not.toContain('unlock(');
   });
-  it('runs every measurement on one process-wide slot', () => {
+  it('defaults association and approval to one process-wide slot', () => {
     const measurement = code(read('computer_use_windows_association_measurement.h'));
     const runner = between(
       measurement,
@@ -225,9 +225,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'MeasureWindowsAssociation(',
     );
     expect(runner).not.toMatch(/\bstatic\b/u);
-    expect(runner).toContain(
-      'std::atomic<bool> &running = windows_association_detail::WindowsOpenMeasurementRunning();',
-    );
+    expect(runner).toContain('windows_association_detail::WindowsOpenMeasurementRunning())');
     expect(measurement.match(/static std::atomic<bool> \*const running/gu)?.length).toBe(1);
     // The worker frees the slot inside the locked section, before `done`: a caller that sees
     // `done` and starts the next measurement finds the slot free.
@@ -239,7 +237,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       '"measurement-back-to-back-slot-free"',
     );
     expect(read('computer_use_windows_association_measurement.h')).toContain(
-      'So at most ONE detached worker thread can ever be stuck.',
+      'At most one detached worker can be stuck per slot.',
     );
     expect(read('computer_use_windows_association.h')).toContain('They must own');
   });
@@ -302,6 +300,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
       'NormalizeExtension',
       'IsPlainExtension',
       'WindowsOpenMeasurementRunning',
+      'WindowsPageMeasurementRunning',
       'WindowsOpenMeasurementDeadline',
       'RunWindowsOpenMeasurement',
       'MeasureWindowsAssociation',
