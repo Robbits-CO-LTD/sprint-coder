@@ -404,7 +404,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     const auto epoch = std::max(config.input_epoch, config.adopt_epoch.value_or(config.global_epoch));
     Check(session.eligibility_basis == input.eligibility_basis && session.cancel_epoch == epoch && cancellation_epoch.load() == epoch, "basis and epoch");
     Check(session.maximum_mode == (config.v2 ? "observe_only" : "full_access_app") && session.policy_language == "en", "mode and language");
-    if (config.store_notepad) {
+    if (config.store_notepad && sprint_coder::computer_use::kWindowsStoreNotepadNotWeb) {
       Check(session.not_web_file.has_value(), "Store start records not_web_file");
       const auto recorded = session.not_web_file;
       std::string rejudge_reason;
@@ -414,7 +414,16 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
       Check(JudgeWindowsV2Input(session, &rejudge_reason), "Store key-only rejudge completes");
       Check(session.v2_input_not_web == std::optional<bool>(false), "Store changed key is not not-web");
       Check(session.not_web_file == recorded, "Store rejudge cannot replace recorded start key");
-    } else Check(!session.not_web_file, "no invented not-web key");
+    } else {
+      Check(!session.not_web_file, "no invented not-web key");
+      if (config.store_notepad) {
+        std::string rejudge_reason;
+        Check(!JudgeWindowsV2Input(session, &rejudge_reason) &&
+              rejudge_reason == "eligibility_basis_unsupported", "default build still refuses V2 input");
+        Check(!session.v2_input_not_web.has_value(), "default Store has no not-web input claim");
+        Check(!session.not_web_file, "default Store rejudge cannot invent not-web key");
+      }
+    }
     std::string process_start;
     Check(ReadJsonString(response, "processStartTime", &process_start) && process_start == created &&
           process_start == session.process_start, "bound process creation time");
@@ -516,7 +525,9 @@ int wmain() {
     c.background_supported = true;
     Run("BG-v1-background-start", c, true, "", 2);
     c = {}; c.v2 = true; c.store_notepad = true;
-    Run("store-notepad-start-rejudge-changed-key", c, true, "", 1);
+    Run(sprint_coder::computer_use::kWindowsStoreNotepadNotWeb
+        ? "store-notepad-start-rejudge-changed-key" : "store_not_web_is_absent_in_default_build",
+        c, true, "", 1);
     CoUninitialize();
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }

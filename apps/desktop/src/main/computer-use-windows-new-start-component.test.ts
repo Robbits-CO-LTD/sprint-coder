@@ -164,7 +164,10 @@ it('registers cancellation only for measurement and refuses occupied sessions be
   expect(start).toContain('WindowsNewStartIoRegistration cancellation;');
 });
 
-describe.skipIf(process.platform !== 'win32')('Windows shared new-start component matrix', () => {
+const componentMatrix = describe
+  .skipIf(process.platform !== 'win32')
+  .each(['store_not_web_is_absent_in_default_build', 'store_not_web_enabled_acceptance_build']);
+componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
   it('preserves basis-specific policy, geometry, epochs, ticket updates and cleanup without GUI', ({
     skip,
   }) => {
@@ -199,9 +202,13 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
         '/DWIN32_LEAN_AND_MEAN',
         '/DNOMINMAX',
         '/D_WIN32_WINNT=0x0A00',
-        '/DSPRINT_CODER_ELIGIBILITY_V2=1',
-        '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
-        '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
+        ...(variant === 'store_not_web_enabled_acceptance_build'
+          ? [
+              '/DSPRINT_CODER_ELIGIBILITY_V2=1',
+              '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+              '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
+            ]
+          : []),
         `/FI${provenance}`,
         `/I${nativeDirectory}`,
         file,
@@ -243,7 +250,11 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
       expect(result.stdout).toContain(
         'PASS: 67 component cases, controlled focus only, no OS input',
       );
-      expect(result.stdout).toContain('CASE:store-notepad-start-rejudge-changed-key');
+      expect(result.stdout).toContain(
+        variant === 'store_not_web_enabled_acceptance_build'
+          ? 'CASE:store-notepad-start-rejudge-changed-key'
+          : 'CASE:store_not_web_is_absent_in_default_build',
+      );
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
