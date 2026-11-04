@@ -11,6 +11,12 @@ inline bool CheckOriginClassification() {
     OriginState state;
   };
   const Case cases[] = {
+      {"address-alias", "https://127.0.0.1.nip.io", "", OriginState::kUnknown},
+      {"hyphen-alias", "https://127-0-0-1.example", "", OriginState::kUnknown},
+      {"hex-alias", "https://7f000001.example", "", OriginState::kUnknown},
+      {"hex-prefix", "https://0xfeed.example", "", OriginState::kUnknown},
+      {"sensitive-alias", "https://login.127-0-0-1.example", "", OriginState::kSensitive},
+      {"sensitive-numeric", "https://bank.123.example", "", OriginState::kSensitive},
       {"empty", "", "", OriginState::kUnknown},
       {"missing-scheme", "docs.example/a", "", OriginState::kUnknown},
       {"missing-authority", "https:///a", "", OriginState::kUnknown},

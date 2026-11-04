@@ -65,8 +65,8 @@ function compiler(output: string): Command | null {
   };
 }
 
-describe('N11-A portable URL origin candidate', () => {
-  it('has no production caller and uses only portable headers', () => {
+describe('N11-B shared URL origin parser', () => {
+  it('shares its parser with page classification and uses only portable headers', () => {
     const header = readFileSync(join(native, headerName), 'utf8');
     expect([...header.matchAll(/^#include <([^>]+)>/gmu)].map((match) => match[1])).toEqual([
       'string',
@@ -79,7 +79,16 @@ describe('N11-A portable URL origin candidate', () => {
       if (readFileSync(join(entry.parentPath, entry.name), 'utf8').includes(headerName))
         references.push(entry.name);
     }
-    expect(references).toEqual(['computer_use_url_origin_test.cc']);
+    expect(references.sort()).toEqual([
+      'computer_use_origin_classify.h',
+      'computer_use_url_origin_test.cc',
+    ]);
+    expect(readFileSync(join(native, 'computer_use_origin_classify.h'), 'utf8')).toContain(
+      'NormalizeUrlOrigin(url)',
+    );
+    expect(readFileSync(join(native, 'computer_use_effect_measurement.h'), 'utf8')).toContain(
+      'ClassifyPageOrigin(url).normalized_origin',
+    );
   });
 
   it('compiles and runs synthetic golden cases through the shared effect classifier', async (ctx) => {

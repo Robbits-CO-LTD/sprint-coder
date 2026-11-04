@@ -26,6 +26,7 @@
 #include "computer_use_effect_shadow.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_sha256.h"
+#include "computer_use_origin_classify.h"
 
 #include <cstdint>
 #include <string>
@@ -124,44 +125,10 @@ inline void AppendNumber(std::string *output, std::string_view name, std::int64_
 
 } // namespace measurement_detail
 
-// scheme://host[:port], lowercase, the default port left out, no user information, no path, query
-// or fragment. Empty when the text is not a URL with an authority, and always empty for file: (a
-// local page has no host; an approval treats its origin as opaque and does not offer there). The
-// input is a URL the browser serialized (the AX URL attribute), so the authority ends at the first
-// "/", "?", "#" or backslash (browsers read a backslash as a slash in special schemes); it is not a
-// general URL parser, and anything it cannot read as scheme://host[:port] is empty.
+// Share page classification's restricted authority; opaque/rejected URLs never
+// contribute an empty, shared approval key.
 [[nodiscard]] inline std::string NormalizeOrigin(std::string_view url) {
-  using measurement_detail::LowerAscii;
-  const std::size_t marker = url.find("://");
-  if (marker == std::string_view::npos || marker == 0) return std::string();
-  const std::string scheme = LowerAscii(url.substr(0, marker));
-  std::string_view rest = url.substr(marker + 3);
-  const std::size_t end = rest.find_first_of("/?#\\");
-  std::string_view authority = end == std::string_view::npos ? rest : rest.substr(0, end);
-  const std::size_t at = authority.rfind('@');
-  if (at != std::string_view::npos) authority = authority.substr(at + 1);
-  std::string host;
-  std::string port;
-  if (!authority.empty() && authority.front() == '[') {
-    const std::size_t close = authority.find(']');
-    if (close == std::string_view::npos) return std::string();
-    host = LowerAscii(authority.substr(0, close + 1));
-    if (close + 1 < authority.size()) {
-      if (authority[close + 1] != ':') return std::string();
-      port = std::string(authority.substr(close + 2));
-    }
-  } else {
-    const std::size_t colon = authority.rfind(':');
-    host = LowerAscii(colon == std::string_view::npos ? authority : authority.substr(0, colon));
-    if (colon != std::string_view::npos) port = std::string(authority.substr(colon + 1));
-  }
-  for (const char digit : port)
-    if (digit < '0' || digit > '9') return std::string();
-  if ((scheme == "http" && port == "80") || (scheme == "https" && port == "443")) port.clear();
-  if (host.empty() || scheme == "file") return std::string();
-  std::string origin = scheme + "://" + host;
-  if (!port.empty()) origin += ":" + port;
-  return origin;
+  return ClassifyPageOrigin(url).normalized_origin;
 }
 
 [[nodiscard]] inline bool AuthorityIdentityIsWhole(const ApprovalAuthorityIdentity &identity) {
