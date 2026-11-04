@@ -36,7 +36,17 @@ constexpr std::uint32_t kMagic =
 constexpr std::uint16_t kCancelMessageType = 9;
 
 // N9 P1a: wire vocabulary only. No production start or dispatch consumes this extension yet.
+#ifndef SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+#define SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE 0
+#endif
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+#if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1 || !defined(SPRINT_CODER_BACKGROUND_FIXTURE_SHA256)
+#error Background acceptance requires unsigned acceptance and a pinned fixture
+#endif
+inline constexpr bool kWindowsBackgroundInputEnabled = true;
+#else
 inline constexpr bool kWindowsBackgroundInputEnabled = false;
+#endif
 // P1b metadata extension. No runtime consumer or capability advertisement yet.
 inline constexpr std::uint32_t kApprovalRoundTripVersion = 1;
 inline constexpr std::uint32_t kApprovalRoundTripMaxDurationMs = 60'000;

@@ -61,6 +61,24 @@ inline constexpr bool kWindowsExplorerException =
          target_eligibility_detail::AsciiLower(*facts.image_leaf) == "explorer.exe";
 }
 
+// Byte identity is measured from the locked running image, never its name.
+[[nodiscard]] inline bool WindowsBackgroundFixtureDigestMatches(std::string_view digest) {
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  constexpr std::string_view pinned = SPRINT_CODER_BACKGROUND_FIXTURE_SHA256;
+  return pinned.size() == 64 && digest == pinned;
+#else
+  (void)digest;
+  return false;
+#endif
+}
+
+[[nodiscard]] inline bool WindowsBackgroundFixtureProviderMatches(std::string_view digest,
+    std::string_view framework, std::string_view control_class, std::string_view automation_id) {
+  return WindowsBackgroundFixtureDigestMatches(digest) && framework == "P7aSynthetic" &&
+      control_class == "P7aControl" && automation_id.size() == 6 &&
+      automation_id.starts_with("slot-") && automation_id[5] >= '0' && automation_id[5] <= '5';
+}
+
 // Missing OS evidence never admits a background start. These are window facts, not a grant for
 // any control/pattern; the versioned provider capability must be checked separately.
 struct WindowsBackgroundStartFacts {

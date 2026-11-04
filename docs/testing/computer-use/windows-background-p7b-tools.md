@@ -1,6 +1,6 @@
 # Windows 背景入力 P7b: 合成 fixture・受動 observer の使い方
 
-この文書は Issue #988 / N9 P7a の道具の引渡しであり、実機受入の結果ではない。
+この文書は Issue #988 / N9 P7a の道具と P7b の受入専用 build の引渡しであり、実機受入の結果ではない。
 BG-1〜BG-8 はすべて **未確認**。背景公開 gate と製品の既定動作は変更しない。
 正本は [背景入力 ADR](../../../tasks/designs/adr-computer-use-windows-background-input-20261102.md)
 §2.7、BG-1〜BG-8、N9-7、§5.1。操作・証拠の扱いは [共通手順](README.md) に従う。
@@ -21,8 +21,66 @@ BG-1〜BG-8 はすべて **未確認**。背景公開 gate と製品の既定動
 
 **合成 provider は実 provider の対応表の根拠にならない。** とくにこの fixture は意図的に
 slot の HWND を使い続け、内容が変わっても UIA の runtime id を変えない。BG-4 の負例に利用し、公開対象の許可表に登録しない。
-BG-1 の executor 正例には親工程で用意する受入専用の合成対象経路が必要。
+BG-1 の executor 正例には、以下の受入専用 build と、その build に固定した fixture を使う。
 製品がこの対象を拒否する場合、通常の製品 gate を変更して先へ進めず BLOCKED を記録する。
+
+## P7b の受入専用 build（親工程で実行）
+
+`windows-background-acceptance` は既存の unsigned acceptance を含む単一の mode。
+通常 build と `windows-unsigned-acceptance` の背景入力は従来どおり無効。
+build 時に fixture.exe の SHA-256 を Main と native に焼き込む。実行時の環境変数、Renderer、
+モデルからハッシュや背景許可を変更する経路はない。release 指定は Forge が拒否し、
+生成物の共通 acceptance marker / receipt も verify の `--expect absent` が拒否する。
+
+fixture は元の console 形式・作業フォルダー配置では拒否される。GUI 形式へ変更したうえで、
+ハッシュが一致する場合だけ `imageRoot=other` の配置と unsigned の上限を受入専用判定で免除し、
+`full_access_app` とする。通常の配置規則・wire の実測 facts は変更しない。
+昇格、別ユーザー、別セッション、製品の子プロセス、未測定 facts 等の拒否は維持する。
+同名の別 exe は許可しない。開始・再判定・入力前で再照合し、UIA 呼出し中も exe の read lock を保持する。
+provider は固定した exe の P7aSynthetic / P7aControl / slot-0〜5 に限定する。
+合成対象だけの not-web と英語ポリシーを設定し、実 provider の公開対応表には追加しない。
+
+前提: Node **22.23.3**、インストール済み依存、MSVC / Windows SDK、署名なしの受入環境。
+以下は **NOT_RUN（親が実行）**。この作業では cl.exe と packaging を実行していない。
+PowerShell をリポジトリのルートで開く。
+
+```powershell
+cd F:/scg-988-n9a
+$env:PATH = 'F:\tools\node-v22.23.3-win-x64;' + $env:PATH
+node --version
+node --experimental-strip-types apps/desktop/scripts/build-background-input-tools.ts .artifacts/p7a-tools
+if ($LASTEXITCODE -ne 0) { throw 'fixture build failed' }
+$env:SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD = 'windows-background-acceptance'
+$env:SPRINT_CODER_BACKGROUND_ACCEPTANCE_FIXTURE = (Resolve-Path .artifacts/p7a-tools/fixture.exe).Path
+$env:SPRINT_CODER_COMPUTER_USE_ELIGIBILITY = 'v2'
+Get-FileHash -Algorithm SHA256 $env:SPRINT_CODER_BACKGROUND_ACCEPTANCE_FIXTURE
+npm run package --workspace @sprint-coder/desktop
+if ($LASTEXITCODE -ne 0) { throw 'acceptance package failed' }
+node apps/desktop/scripts/verify-computer-use-acceptance-build.mjs --expect present --out apps/desktop/out
+if ($LASTEXITCODE -ne 0) { throw 'acceptance marker missing' }
+Remove-Item Env:SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD
+Remove-Item Env:SPRINT_CODER_BACKGROUND_ACCEPTANCE_FIXTURE
+Remove-Item Env:SPRINT_CODER_COMPUTER_USE_ELIGIBILITY
+Start-Process -FilePath 'F:/scg-988-n9a/apps/desktop/out/Sprint Coder-win32-x64/Sprint Coder.exe'
+```
+
+この Start-Process は人が操作する実アプリを表示するもの。設定で Computer Use を有効にし、
+fixture を別の端末から以下の runner で起動する。fixture を製品自身から起動しない。
+対象一覧から fixture を選び、専用の別アプリを前面にして開始する。
+環境変数を消した後も受入経路が使えること、異なる fixture の bytes は拒否されることを記録する。
+fixture を再ビルドしたら製品も再ビルドする。Main / native / fixture のハッシュ、未 commit 差分も証拠に含める。
+一般配布・release・P8 の公開判断には使用しない。BG-1〜BG-8 はすべて **未確認** のまま。
+
+親が追加で実行する native 試験（cl.exe、OS 入力なし）:
+
+```powershell
+cd F:/scg-988-n9a/apps/desktop
+node --require "C:/Users/yusei/.claude/skills/issue-graph-flow-codex/scripts/sandbox-vite-shim.cjs" ../../node_modules/vitest/vitest.mjs run src/main/computer-use-windows-background-executor.test.ts --pool=threads
+```
+
+通常 / executor-test / background-acceptance の host 全体をコンパイルし、固定ハッシュの判定・
+ハッシュ不一致・console・network・昇格・自己子孫・別 class・未測定値の負例を native でも実行する。
+この結果も実機 BG 受入の代わりにはならない。
 
 ### P4a-attr 段 A の照合と残余リスク
 
@@ -74,7 +132,7 @@ native 自己試験は次の明示 opt-in で実行する。自分で生成し�
 別アプリで入力中には実行しない。SendInput や cursor 移動は行わない。
 
 ```powershell
-cd F:/scg-988-n1/apps/desktop
+cd F:/scg-988-n9a/apps/desktop
 $env:SPRINT_CODER_P7A_NATIVE_SELF_TEST = '1'
 node --require "C:/Users/yusei/.claude/skills/issue-graph-flow-codex/scripts/sandbox-vite-shim.cjs" ../../node_modules/vitest/vitest.mjs run src/main/computer-use-windows-background-tools.test.ts --pool=threads
 Remove-Item Env:SPRINT_CODER_P7A_NATIVE_SELF_TEST
@@ -98,14 +156,16 @@ fixture の子プロセス以外を終了しない。自己試験は `quit` / `s
 ## 起動・区間・終了
 
 PowerShell の窓を二つ用意し、一方で fixture、もう一方で observer を起動する。
+fixture は GUI subsystem なので、runner が stdin/stdout の pipe を保持する。
 stdout は **JSON Lines**（1 行に JSON オブジェクト 1 個）。標準入力はコマンド用に残す。
+runner は既存ログを上書きしない。再実行時は別のログ名を指定する。
 窓タイトル・prompt・response 等をログへ追加しない。
 
 ```powershell
 # 窓 A（リポジトリのルート）
-& ./.artifacts/p7a-tools/fixture.exe > ./.artifacts/p7a-tools/fixture.jsonl
+node apps/desktop/scripts/run-background-input-tool.mjs .artifacts/p7a-tools/fixture.exe .artifacts/p7a-tools/fixture.jsonl
 # 窓 B（リポジトリのルート）
-& ./.artifacts/p7a-tools/observer.exe > ./.artifacts/p7a-tools/observer.jsonl
+node apps/desktop/scripts/run-background-input-tool.mjs .artifacts/p7a-tools/observer.exe .artifacts/p7a-tools/observer.jsonl
 ```
 
 両ログの `ready` を確認する。fixture は非活性表示する。人が合成入力用の別アプリを前面に置く。
@@ -144,8 +204,8 @@ provider の読取りをどの client が行ったかは識別しないため、
 道具単体の UIA client もある（製品の受入を代替しない）。`control.hwnd` と index を指定する。
 
 ```powershell
-& ./.artifacts/p7a-tools/fixture.exe --probe <子HWNDの10進数> <index> read
-& ./.artifacts/p7a-tools/fixture.exe --probe <子HWNDの10進数> <index> apply
+node apps/desktop/scripts/run-background-input-tool.mjs .artifacts/p7a-tools/fixture.exe .artifacts/p7a-tools/probe-read.jsonl --probe <子HWNDの10進数> <index> read
+node apps/desktop/scripts/run-background-input-tool.mjs .artifacts/p7a-tools/fixture.exe .artifacts/p7a-tools/probe-apply.jsonl --probe <子HWNDの10進数> <index> apply
 ```
 
 同じ実行ファイル・fixture class の窓だけを許可する。`probe.runtimeId`、`name`、`hresult` を出す。
@@ -188,6 +248,10 @@ UIA interface の `SetFocus` メソッド宣言より前に macro を挿入し�
 計測対象の全 call site を確認できなければ「製品 API 0 回」は BLOCKED にする。
 
 ## BG ごとの実機受入
+
+受入 build では、背景に対応しない対象（fixture 以外）の新しい開始は、その対象が既に前面にある時だけ通る（BG-8 の設計どおり）。BG-2・BG-8 の前面 session は、対象を先に前面にしてから始める。
+
+受入 build では fixture 以外の前面 session でも P3c の承認の往復が有効になる。これは意図した挙動であり、BG-5 の supervised の前面の往復として確認する。
 
 各ケースは ADR の行全体を受入条件とする。この表は利用する道具と残りの証拠の対応表。
 人の操作は専用の合成入力用アプリと fixture を対象にし、通常作業中の窓を流用しない。
@@ -234,5 +298,5 @@ interval と JSONL、製品 API/監視/隔離の証拠、画面の証拠、未�
 公開の判断や実 provider の版付き対応表は P7b/P8 の工程に残す。P7a だけで gate を開かない。
 
 source pin について: 新規 native ソースは既存 scan が除外している `fixtures/` 配下で、
-製品ソースの切出し位置や試験用 define は変更しない。`*-component.test.ts`、`*-seam.test.ts`
+受入経路は既存の切出し位置を維持し、executor の build 条件に受入 mode を追加している。`*-component.test.ts`、`*-seam.test.ts`
 の source slice/replace と `computer-use-native.test.ts` の define scan を確認対象に含める。
