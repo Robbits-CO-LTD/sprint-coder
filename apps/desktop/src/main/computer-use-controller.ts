@@ -4174,10 +4174,10 @@ export class ComputerUseController {
       record.status.taskId !== intent.taskId ||
       record.turnId !== intent.turnId ||
       record.native.sessionId !== intent.sessionId ||
-      record.handoffHelperGeneration?.helperGeneration !== intent.helperGeneration ||
-      this.deps.native.isWindowsGenerationCurrent?.({
-        helperGeneration: intent.helperGeneration,
-      }) !== true ||
+      !record.handoffHelperGeneration ||
+      record.handoffHelperGeneration.helperGeneration !== intent.helperGeneration ||
+      // The real client compares the token by identity, so pass the captured token itself.
+      this.deps.native.isWindowsGenerationCurrent?.(record.handoffHelperGeneration) !== true ||
       record.native.cancelEpoch !== intent.cancelEpoch ||
       record.native.appIdentityDigest !== intent.appIdentityDigest ||
       record.native.windowIdentityDigest !== intent.windowIdentityDigest ||
