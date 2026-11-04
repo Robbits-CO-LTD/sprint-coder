@@ -3710,6 +3710,8 @@ export class ComputerUseController {
         throw new Error('Computer Use resume was canceled');
       }
       record.native = focused;
+      if (this.deps.foregroundHandoffForTesting && focused.inputSession?.kind === 'background')
+        record.handoffHelperGeneration = this.deps.native.captureWindowsGeneration?.() ?? null;
       this.revalidateNativeAttestation(
         record,
         focused.policyLanguage,

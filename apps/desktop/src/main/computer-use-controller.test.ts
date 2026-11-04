@@ -229,6 +229,7 @@ it('PR9 Controller receiver creates fresh credentials and observes only after ap
 function createFixture(
   options: {
     windowsBackgroundInputForTesting?: boolean;
+    inputSessionForStart?: () => NonNullable<ComputerUseNativeSession['inputSession']>;
     foregroundHandoffForTesting?: ComputerUseControllerDeps['foregroundHandoffForTesting'];
     handoffAllowed?: boolean;
     runtimeCapture?: ComputerUseRuntimeCapture;
@@ -473,6 +474,7 @@ function createFixture(
       nativeStartTurnIds.push(input.turnId);
       const started = {
         ...nativeSession,
+        ...(options.inputSessionForStart ? { inputSession: options.inputSessionForStart() } : {}),
         ...(input.foregroundHandoffId === undefined
           ? {}
           : { inputSession: { kind: 'foreground' as const, backgroundCapabilityVersion: null } }),
@@ -1396,6 +1398,111 @@ describe('ComputerUseController', () => {
         },
       };
     }
+
+    it.each(['current helper', 'replaced helper', 'closed gate'] as const)(
+      'item 11 resumes foreground to background with %s',
+      async (scenario) => {
+        let generation = 1;
+        let inputSession: NonNullable<ComputerUseNativeSession['inputSession']> = {
+          kind: 'foreground',
+          backgroundCapabilityVersion: null,
+        };
+        const activation = vi.fn(() => true);
+        const fixture = createFixture({
+          ...backgroundOptions,
+          windowsBackgroundInputForTesting: false,
+          inputSessionForStart: () => inputSession,
+          helperGeneration: () => generation,
+          ...(scenario === 'closed gate'
+            ? {}
+            : { foregroundHandoffForTesting: { consumeTrustedActivation: activation } }),
+          dispatch: async () => ({ result: 'paused', reasonCode: 'native_dialog_user_takeover' }),
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, handoffAction),
+        ).resolves.toMatchObject({
+          result: 'paused',
+        });
+        // Model StartWindowsExistingSession after another window becomes foreground.
+        inputSession = { kind: 'background', backgroundCapabilityVersion: 1 };
+        const capture = vi.spyOn(fixture.native, 'captureWindowsGeneration');
+        const resumed = await fixture.controller.start({
+          resumeSessionId: started.sessionId,
+          taskId: started.taskId,
+          profileId: started.profileId,
+          windowId: started.windowId,
+          mode: started.mode,
+          connectionId: started.connectionId,
+          modelId: started.modelId,
+          providerEgressConsent: true,
+          providerEgressConsentBinding: {
+            connectionId: started.connectionId,
+            modelId: started.modelId,
+          },
+          remember: false,
+          maxRounds: started.maxRounds,
+          expectedPolicyEpoch: started.policyEpoch,
+          expectedWindowRevision: 1,
+          expectedProfileRevision: started.profileRevision,
+        });
+        expect(resumed.state).toBe('observing');
+        expect(fixture.startedSessions.map((session) => session.inputSession?.kind)).toEqual([
+          'foreground',
+          'background',
+        ]);
+        const observationsBefore = fixture.observationCount();
+        await fixture.controller.observe(started.sessionId);
+        expect(fixture.observationCount()).toBeGreaterThan(observationsBefore);
+        const dispatchesBefore = fixture.dispatchCount();
+        if (scenario === 'closed gate') {
+          expect(capture).not.toHaveBeenCalled();
+          await expect(
+            fixture.controller.act(started.sessionId, handoffAction),
+          ).resolves.toMatchObject({
+            result: 'paused',
+            reasonCode: 'native_dialog_user_takeover',
+          });
+          expect(fixture.controller.getStatus(started.sessionId)?.inputDisplay).toBeUndefined();
+          expect(fixture.controller.pendingForegroundHandoff(started.sessionId)).toBeNull();
+        } else {
+          await expect(
+            fixture.controller.act(started.sessionId, handoffAction),
+          ).resolves.toMatchObject({
+            result: 'paused',
+            reasonCode: 'awaiting_foreground_handoff',
+          });
+          expect(capture).toHaveBeenCalledTimes(1);
+          const intent = fixture.controller.pendingForegroundHandoff(started.sessionId)!;
+          expect(intent).not.toBeNull();
+          expect(fixture.controller.getStatus(started.sessionId)?.inputDisplay).toEqual({
+            sessionKind: 'background',
+            handoff: { id: intent.id, operation: 'click', expiresAt: expect.any(String) },
+          });
+          const consume = () =>
+            fixture.controller.consumeForegroundHandoff({
+              sessionId: started.sessionId,
+              intentId: intent.id,
+              taskId: intent.taskId,
+              turnId: intent.turnId,
+              action: handoffAction,
+            });
+          if (scenario === 'replaced helper') {
+            generation += 1;
+            expect(consume).toThrow('Computer Use foreground handoff expired or binding changed');
+            expect(activation).not.toHaveBeenCalled();
+          } else {
+            expect(consume().state).toBe('consumed');
+          }
+        }
+        expect(fixture.dispatchCount()).toBe(
+          dispatchesBefore + (scenario === 'closed gate' ? 1 : 0),
+        );
+        expect(fixture.nativeLog).not.toContain('allowWindowsForegroundHandoff');
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
 
     it('P6 publishes only gated display facts and consumes a trusted handoff once', async () => {
       const { fixture, input, activation } = await handoffFixture({ handoffAllowed: true });
