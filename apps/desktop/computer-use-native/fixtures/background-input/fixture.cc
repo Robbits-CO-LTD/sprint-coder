@@ -4,6 +4,7 @@
 #include <atomic>
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include "evidence.h"
@@ -120,8 +121,9 @@ class Control final : public IRawElementProviderSimple,
     VariantInit(out);
     Read();
     if (id == UIA_NamePropertyId || id == UIA_AutomationIdPropertyId ||
-        id == UIA_FrameworkIdPropertyId || id == UIA_ClassNamePropertyId) {
-      std::wstring text = id == UIA_FrameworkIdPropertyId ? L"P7aSynthetic" :
+        id == UIA_FrameworkIdPropertyId || id == UIA_ClassNamePropertyId || id == UIA_ItemStatusPropertyId) {
+      std::wstring text = id == UIA_ItemStatusPropertyId ? L"generation-" + std::to_wstring(generation.load()) :
+        id == UIA_FrameworkIdPropertyId ? L"P7aSynthetic" :
         id == UIA_ClassNamePropertyId ? L"P7aControl" :
         id == UIA_AutomationIdPropertyId ? L"slot-" + std::to_wstring(index) :
         std::wstring(kNames[index]) + L" item-" + std::to_wstring(generation.load());
@@ -299,7 +301,7 @@ int Probe(HWND hwnd, int index, bool apply) {
   return SUCCEEDED(hr) ? 0 : 1;
 }
 
-int wmain(int argc, wchar_t** argv) {
+int RunFixture(int argc, wchar_t** argv) {
   p7a_api_probe::sink = [](p7a_api_probe::Api api, unsigned long long attempts) {
     Evidence("apiAttempt", Number("api", api) + Number("attempts", attempts));
   };
@@ -346,4 +348,9 @@ int wmain(int argc, wchar_t** argv) {
   Evidence("finished");
   // Process lifetime owns providers and gate; UIA may still hold references at shutdown.
   return 0;
+}
+
+// GUI subsystem: inherited stdin/stdout are pipes supplied by the acceptance runner.
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  return RunFixture(__argc, __wargv);
 }

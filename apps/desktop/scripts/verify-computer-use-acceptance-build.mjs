@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Verifies, on the produced package rather than on the build inputs, whether the Computer Use
-// `windows-unsigned-acceptance` mode was compiled into Main. Release jobs run it with
+// unsigned or background acceptance mode was compiled into Main. Release jobs run it with
 // `--expect absent`; the acceptance build workflow runs it with `--expect present`.
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
+import console from 'node:console';
 
 const MARKER = 'sprint-coder-computer-use-acceptance-build-do-not-release';
 const RECEIPT_NAME = 'computer-use-acceptance-build.json';

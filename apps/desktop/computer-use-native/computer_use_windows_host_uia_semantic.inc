@@ -2,7 +2,7 @@
 
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
   std::uint64_t background_epoch = 0;
 #endif
@@ -77,7 +77,7 @@ bool AwaitWindowsSemanticValidation() {
     pending->ready.wait_for(lock, std::chrono::milliseconds(20));
   }
   const bool valid = *pending->validation && WindowsV1UiaMayCall();
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (pending->background_monitor) {
     pending->validation.reset();
     pending->validation_requested = pending->validation_started = false;
@@ -494,6 +494,18 @@ bool ComputeWindowsBackgroundControlSignature(IUIAutomationElement *element,
   const auto provider = LowercaseAscii(facts.provider);
   if (provider.find("proxy") != std::string::npos || provider.find("msaa") != std::string::npos)
     facts.proxy = WindowsBackgroundProxy::kIndex;
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  std::string framework, control_class, automation_id;
+  LockedWindowsExecutable executable;
+  // The pinned synthetic provider owns these six slots even when UIA describes its HWND host as a proxy.
+  if (OpenLockedProcessExecutable(pid, &executable) &&
+      text(UIA_FrameworkIdPropertyId, &framework) &&
+      text(UIA_ClassNamePropertyId, &control_class) &&
+      text(UIA_AutomationIdPropertyId, &automation_id) &&
+      WindowsBackgroundFixtureProviderMatches(executable.identity.executable_digest,
+          framework, control_class, automation_id))
+    facts.proxy = WindowsBackgroundProxy::kStable;
+#endif
   if (facts.proxy != WindowsBackgroundProxy::kStable) return false;
   for (const auto property : {UIA_IsValuePatternAvailablePropertyId, UIA_IsRangeValuePatternAvailablePropertyId}) {
     VARIANT value;
@@ -959,7 +971,7 @@ bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **
   return true;
 }
 
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
 // Test gate only. The monitor's Target hook pauses on every target WinEvent during the claim,
 // including the ones this call raises itself, so a real device reaches unknown_effect, never
 // completed: BG01 completed is fake-only. Real-device BG01 is BLOCKED until
@@ -984,7 +996,19 @@ struct WindowsBackgroundPatternOperations {
   BstrHolder text_value;
   bool desired = false;
 
-  bool Guard() { return WindowsV1UiaMayCall() && AwaitWindowsSemanticValidation(); }
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  // Keep the freshly hashed executable read-locked across the subsequent claim and UIA call.
+  LockedWindowsExecutable acceptance_executable;
+#endif
+  bool Guard() {
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+    LockedWindowsExecutable current;
+    if (!OpenLockedProcessExecutable(work.pid, &current) ||
+        !WindowsBackgroundTargetSupported(current.identity)) return false;
+    acceptance_executable = std::move(current);
+#endif
+    return WindowsV1UiaMayCall() && AwaitWindowsSemanticValidation();
+  }
   bool Window() { return Guard(); }
   template <class T> Preparation Pattern(PATTERNID id, ComRef<T> &owner) {
     T *&pattern = *owner.Receive();
@@ -1218,7 +1242,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
   if (RejectWindowsRisk(ClassifyWindowsUiaElement(target), reason, work.approved_effect)) {
     return false;
   }
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (work.background) {
     WindowsBackgroundPatternOperations operations{work, target, accepted, reason};
     const auto outcome = windows_background_executor_detail::RunBackgroundExecutor(operations);
@@ -1399,7 +1423,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   work->kind = std::string(kind);
   work->metadata = metadata;
   auto pending = std::make_shared<WindowsSemanticPending>();
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   work->background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
   if (work->background) {
     // Bound the entire test-only worker, including a provider stuck in a property read.
@@ -1483,7 +1507,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);
       auto none = WindowsV1UiaStop::kNone;
       pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
       if (pending->background_monitor && pending->ever_claimed && !pending->succeeded)
         pending->background_monitor->state.Pause();
 #endif

@@ -361,6 +361,8 @@ N3 PR1〜PR9・N8-1〜N8-6 は main に反映済み、N3 PR10・PR11 は作業�
 
 P0〜P7 は背景 gate を既定無効に保つ。環境変数・Renderer・モデル指定では開けない。wire の producer・parser・fixture は native と TS を同じ PR で揃える。公開は最後の P8 だけとし、N3 PR10・PR11 の有効化、必要な N8/N7 条件、K-1〜K-5 の実 dispatch 接続試験、BG-1〜BG-8 の実機受入が揃った provider・control・pattern の組に限る。内部試験 gate の成功を本番配線の証明にしない。N9 の能力公開は release 公開や N11 のブラウザ・Explorer 有効化の許可ではない。
 
+P7b の受入専用の例外（2026-11-05）: build 時だけに与える `SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=windows-background-acceptance` は、P7a の fixture の SHA-256 を Main と native に焼き込み、その fixture と合成の control に限って背景の経路を開く。実行時の環境変数・Renderer・モデルでは開けない。release の packaging は Forge と `verify-computer-use-acceptance-build.mjs --expect absent` が拒否する。一般配布・P8 の公開の根拠にしない。
+
 現在の接続点は、native/computer_use_windows_host_v2_targets.inc の StartWindowsNewSession（前面化 :1676）と StartWindowsExistingSession（前面化 :2180）、main/computer-use-controller.ts の refocusAndReobserve（:4288）、cancelPendingApprovals（:4364）、V1 の expiresAt（:4942）と timer（:4978）、userTakeover（:4992）で確認した。新規開始の前面化を人の再開の例外に含めない。V1 の現行 60 分と userTakeover の pause 通知だけでは往復の 60 秒失効を満たさないため、P5b でカード失効を接続する。
 
 ### 5.2 未決事項と実測待ち

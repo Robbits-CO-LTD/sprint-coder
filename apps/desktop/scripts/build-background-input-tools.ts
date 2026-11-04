@@ -79,6 +79,7 @@ export async function buildTools(output: string) {
       `/Fo:${binaries[name]}.obj`,
       '/link',
       '/DEBUG:NONE',
+      ...(name === 'fixture' ? ['/SUBSYSTEM:WINDOWS'] : []),
       'user32.lib',
       'gdi32.lib',
       'ole32.lib',

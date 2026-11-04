@@ -3,7 +3,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { nativeAcceptanceBuildHeader } from '../../../../build-computer-use-acceptance.mjs';
 import { computerUseAcceptanceBuildForEnv } from '../../computer-use-acceptance-build';
-import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
+import {
+  computerUseCompiledAcceptanceMode,
+  computerUseWindowsSignerWaived,
+} from './computer-use-acceptance-mode';
 
 const read = (path: string) => readFileSync(join(__dirname, '../../../..', path), 'utf8');
 const native = 'apps/desktop/computer-use-native/';
@@ -16,6 +19,22 @@ afterEach(() => {
 });
 
 describe('Windows native acceptance build (#988 N7-4)', () => {
+  it.each(['windows-unsigned-acceptance', 'windows-background-acceptance'])(
+    'waives only unsigned Windows packages for %s',
+    (acceptanceMode) => {
+      vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__', { mode: acceptanceMode });
+      expect(computerUseWindowsSignerWaived('win32', null)).toBe(true);
+      expect(computerUseWindowsSignerWaived('win32', 'signed')).toBe(false);
+      expect(computerUseWindowsSignerWaived('darwin', null)).toBe(false);
+      expect(computerUseWindowsSignerWaived('linux', null)).toBe(false);
+    },
+  );
+
+  it.each([null, { mode: 'future-acceptance' }])('keeps signer verification for %j', (compiled) => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__', compiled);
+    expect(computerUseWindowsSignerWaived('win32', null)).toBe(false);
+  });
+
   it.each([undefined, '', mode, '1', 'true', 'false', ` ${mode}`, `${mode} `])(
     'matches Main build validation for %s on every platform',
     (value) => {

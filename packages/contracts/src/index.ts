@@ -5254,7 +5254,10 @@ export type ComputerUseOsPermission = z.infer<typeof computerUseOsPermissionSche
 // An acceptance-only build waives one named verification so #387 can run on an unsigned Windows
 // package. It is fixed at build time and reported here purely so Main and Renderer can keep it
 // visible; nothing consumes this value as authority.
-export const computerUseAcceptanceModeSchema = z.enum(['windows-unsigned-acceptance']);
+export const computerUseAcceptanceModeSchema = z.enum([
+  'windows-unsigned-acceptance',
+  'windows-background-acceptance',
+]);
 export type ComputerUseAcceptanceMode = z.infer<typeof computerUseAcceptanceModeSchema>;
 
 export const computerUseAvailabilitySchema = z

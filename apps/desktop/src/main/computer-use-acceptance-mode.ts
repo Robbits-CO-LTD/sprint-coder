@@ -4,6 +4,7 @@ import {
 } from '@sprint-coder/contracts';
 
 export const COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE = 'windows-unsigned-acceptance' as const;
+export const COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE = 'windows-background-acceptance' as const;
 
 /**
  * Build-time only.  Vite bakes this constant into the Main bundle from the build host's
@@ -24,7 +25,7 @@ export function computerUseCompiledAcceptanceMode(): ComputerUseAcceptanceMode |
 }
 
 /**
- * The only waiver this mode grants: a Windows package that carries no Authenticode signer at all.
+ * Signer waiver shared by acceptance modes: a Windows package with no Authenticode signer at all.
  * A signed package keeps its full signer verification even when the constant is compiled in, and
  * macOS is never waived.
  */
@@ -32,9 +33,27 @@ export function computerUseWindowsSignerWaived(
   platform: NodeJS.Platform,
   signerDigest: string | null,
 ): boolean {
+  const mode = computerUseCompiledAcceptanceMode();
   return (
     platform === 'win32' &&
     signerDigest === null &&
-    computerUseCompiledAcceptanceMode() === COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE
+    (mode === COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE ||
+      mode === COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE)
   );
+}
+
+export function computerUseBackgroundAcceptanceOptions(): {
+  windowsBackgroundInputForTesting?: true;
+} {
+  return computerUseCompiledAcceptanceMode() === COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE
+    ? { windowsBackgroundInputForTesting: true }
+    : {};
+}
+
+export function computerUseBackgroundFixtureDigest(): string | null {
+  if (computerUseCompiledAcceptanceMode() !== COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE)
+    return null;
+  const value = __SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__ as Record<string, unknown>;
+  const digest = value['fixtureDigest'];
+  return typeof digest === 'string' && /^[a-f0-9]{64}$/u.test(digest) ? digest : null;
 }
