@@ -187,7 +187,11 @@ export class WindowsInteractionEvents {
     this.held.delete(sessionId);
     this.overflowed.delete(sessionId);
   }
-  receive(event: WindowsInteractionEvent, generation: number): boolean {
+  receive(
+    event: WindowsInteractionEvent,
+    generation: number,
+    onOrderingFault?: WindowsInteractionListener,
+  ): boolean {
     const current = this.sessions.get(event.sessionId);
     if (
       !current ||
@@ -204,7 +208,12 @@ export class WindowsInteractionEvents {
       current.revoked = true;
     } else {
       if (event.roundTripId !== current.roundTripId) return false;
-      // Main must see gaps and reversed notifications too; its lifetime owner fails closed.
+      if (event.sequence <= current.tripSequence) {
+        // Report to Main's lifetime owner without accepting or advancing transport authority.
+        onOrderingFault?.(event);
+        return false;
+      }
+      // Main must still see gaps and early end notifications; its lifetime owner fails closed.
       if (current.tripEnded && event.state === 'active') return false;
       current.tripSequence = event.sequence;
       current.revoked = event.state === 'failed';
@@ -222,9 +231,13 @@ export class WindowsInteractionEvents {
     if (kept.length === 0) this.held.delete(sessionId);
     else this.held.set(sessionId, kept);
     if (!deliver) return [];
-    return queue
-      .filter((held) => selects(held.event) && this.receive(held.event, held.generation))
-      .map((held) => held.event);
+    const events: WindowsInteractionEvent[] = [];
+    for (const held of queue) {
+      if (!selects(held.event)) continue;
+      if (this.receive(held.event, held.generation, (event) => events.push(event)))
+        events.push(held.event);
+    }
+    return events;
   }
   private matches(a: WindowsInteractionBinding, b: WindowsInteractionBinding): boolean {
     return (
