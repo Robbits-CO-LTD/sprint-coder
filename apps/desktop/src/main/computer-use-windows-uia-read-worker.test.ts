@@ -234,6 +234,7 @@ const preamble = String.raw`
 #include <vector>
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_windows_approval_round_trip.h"
+#include "computer_use_windows_page.h"
 #include "computer_use_protocol.h"
 using sprint_coder::computer_use::Frame;
 using sprint_coder::computer_use::FrameHeader;

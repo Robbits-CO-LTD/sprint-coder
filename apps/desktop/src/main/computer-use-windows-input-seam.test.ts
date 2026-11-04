@@ -55,6 +55,9 @@ struct INPUT {
 };
 using LPINPUT = INPUT*;
 struct WindowsSession {
+  // This count seam uses a native target; browser page transitions have their own chunk seam.
+  struct { bool web = false; } observed_page;
+  int active_window = 1;
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts = std::make_shared<std::atomic<std::uint64_t>>(0);
   // Approved-input fields (N8-2c); zero keeps the ordinary path this seam covers.
   std::uint64_t approved_started_ns = 0;
@@ -69,12 +72,16 @@ std::uint64_t windows_helper_generation = 0;
 std::uint64_t MonotonicNowNs() { return 1; }
 std::uint64_t stopEpoch = 0;
 std::uint64_t stopSerial = 0;
+std::uint64_t WindowsValidationFrameStopSerial() { return stopSerial; }
+int GetForegroundWindow() { return 1; }
 bool WindowsValidationStillCurrent(std::uint64_t epoch, std::uint64_t serial) {
   return epoch == stopEpoch && serial == stopSerial;
 }
 bool WindowsSemanticInputInFlightLocked() { return false; }
 // N9 P3c: the approval round trip may close input; the seam keeps it open.
 bool WindowsRoundTripMayInput(const WindowsSession&) { return true; }
+// N11 D: the browser page recheck before each chunk; this seam's target is not a browser page.
+bool RecheckWindowsPageBeforeInput(const WindowsSession&) { return true; }
 BOOL SetCursorPos(int, int) { return 1; }
 bool valid = true;
 bool semanticInputInFlight = false;

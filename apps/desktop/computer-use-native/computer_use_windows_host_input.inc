@@ -118,9 +118,17 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return 0;
 #endif
   if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
+  if (!RecheckWindowsPageBeforeInput(session)) return 0;
   std::unique_lock approval_lock(WindowsTargetListControl().stop_mutex, std::defer_lock);
-  if (session.approved_deadline_ns != 0) {
+  // Page reads may block in UIA: keep them outside Stop, then serialize the actual chunk.
+  if (session.observed_page.web) {
     approval_lock.lock();
+    if (!WindowsValidationStillCurrent(expected_epoch, WindowsValidationFrameStopSerial()) ||
+        !WindowsRoundTripMayInput(session) || GetForegroundWindow() != session.active_window ||
+        WindowsSemanticInputInFlightLocked()) return 0;
+  }
+  if (session.approved_deadline_ns != 0) {
+    if (!approval_lock.owns_lock()) approval_lock.lock();
     const auto now = MonotonicNowNs();
     if (now < session.approved_started_ns || now >= session.approved_deadline_ns ||
         session.approved_helper_generation != windows_helper_generation ||
@@ -576,8 +584,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT bounds{};
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
     return false;
-  // PR D/F: recheck immediately before input and between chunks before enabling browsers.
-  // This page read alone does not close the TOCTOU gap to SendInput.
+  // Full reclassification here; SendInputForBoundTarget also checks page metadata per chunk.
   if (!RecheckWindowsPage(session)) {
     *reason = "native_target_unclassified";
     return false;

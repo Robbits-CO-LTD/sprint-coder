@@ -36,6 +36,31 @@ function run(
 }
 
 describe('background executor native entry', () => {
+  it('pins bound-page checks before the claim and BeginCall without foreground focus', () => {
+    const executor = native('computer_use_windows_background_executor.h');
+    expect(executor).toContain('if (!ops.CheckPage()) return Outcome::kRejected;');
+    expect(executor).toContain('if (ops.CheckPage() && ops.BeginCall(claim))');
+    const semantic = native('computer_use_windows_host_uia_semantic.inc');
+    expect(semantic).toContain('work->observed_page = session.observed_page;');
+    expect(semantic).toContain(
+      'RecheckWindowsBoundPageOnLane(work.window, work.pid, work.observed_page,',
+    );
+    expect(semantic).toContain('pending->page_invalidated.load(std::memory_order_acquire)');
+    expect(semantic).toContain('InvalidateWindowsPage(session);');
+    const preflight = native('computer_use_windows_host_preflight.inc');
+    const start = preflight.indexOf('bool RecheckWindowsBoundPageOnLane(');
+    const end = preflight.indexOf('bool RecheckWindowsPageBeforeInput(', start);
+    expect(preflight.slice(start, end)).not.toMatch(/Focused|GetForegroundWindow/u);
+    const tests = native('computer_use_windows_background_executor_test.h');
+    for (const name of [
+      'background_action_checks_bound_page',
+      'background_page_change_blocks_commit',
+      'stop_before_or_during_page_check_blocks_input',
+      'electron_background_page_check_is_neutral',
+    ])
+      expect(tests).toContain(name);
+  });
+
   it('connects semantic scroll to timed single-call execution and native readback tests', () => {
     const executor = native('computer_use_windows_background_executor.h');
     const semantic = native('computer_use_windows_host_uia_semantic.inc');
@@ -305,6 +330,115 @@ describe('background executor native entry', () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('background executor test build', () => {
+  it('blocks remaining chunks on a page change and input after Stop using the real send boundary', async ({
+    skip,
+  }) => {
+    const build = findBuild();
+    if (!build) {
+      skip();
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), 'sc-page-chunks-'));
+    try {
+      const input = native('computer_use_windows_host_input.inc');
+      const boundary = input.slice(
+        input.indexOf('UINT SendInputForBoundTarget('),
+        input.indexOf('bool SetWindowsApprovedCursor('),
+      );
+      const source = join(root, 'chunks.cc');
+      const binary = join(root, 'chunks.exe');
+      writeFileSync(
+        source,
+        `
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <iostream>
+using UINT = unsigned;
+struct RECT {};
+struct INPUT {};
+using LPINPUT = INPUT *;
+struct WindowsSession {
+  int active_window = 1;
+  struct { bool web = true; } observed_page;
+  std::uint64_t approved_deadline_ns = 0, approved_started_ns = 0;
+  std::uint64_t approved_helper_generation = 1, approved_stop_serial = 1;
+  std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+};
+struct Control { std::mutex stop_mutex; } control;
+Control &WindowsTargetListControl() { return control; }
+std::uint64_t windows_helper_generation = 1, serial = 1;
+std::uint64_t MonotonicNowNs() { return 100; }
+std::uint64_t WindowsValidationFrameStopSerial() { return 1; }
+bool WindowsValidationStillCurrent(std::uint64_t, std::uint64_t expected) { return serial == expected; }
+bool WindowsSemanticInputInFlight() { return false; }
+bool WindowsSemanticInputInFlightLocked() { return false; }
+bool WindowsRoundTripMayInput(const WindowsSession &) { return true; }
+int foreground_window = 1;
+int GetForegroundWindow() { return foreground_window; }
+bool RevalidateWindowsTarget(const WindowsSession &, const RECT &, std::uint64_t) { return serial == 1; }
+bool page_matches = true, stop_during_read = false, ticket_valid = true;
+int reads = 0, sends = 0;
+bool RecheckWindowsPageBeforeInput(const WindowsSession &session) {
+  if (!session.observed_page.web) return true;
+  ++reads;
+  if (stop_during_read) serial = 2;
+  if (!page_matches) ticket_valid = false;
+  return page_matches;
+}
+UINT SendInput(UINT count, LPINPUT, int) { ++sends; return count; }
+${boundary}
+int main() {
+  WindowsSession session; RECT bounds; INPUT events[2];
+  const auto send = [&] { return SendInputForBoundTarget(session, bounds, 1, 2, events); };
+  if (send() != 2 || sends != 1) return 1;
+  page_matches = false;
+  if (send() != 0 || sends != 1 || ticket_valid || *session.input_api_attempts != 1) return 2;
+  std::cout << "page_change_between_chunks_blocks_remaining: PASS\\n";
+  serial = 2; page_matches = true;
+  const int previous_reads = reads;
+  if (send() != 0 || sends != 1 || reads != previous_reads) return 3;
+  std::cout << "stop_before_page_check_blocks_input: PASS\\n";
+  serial = 1; stop_during_read = true;
+  if (send() != 0 || sends != 1) return 4;
+  std::cout << "stop_during_page_check_blocks_input: PASS\\n";
+  serial = 1; stop_during_read = false; page_matches = false;
+  session.observed_page.web = false;
+  const int electron_reads = reads;
+  if (send() != 2 || sends != 2 || reads != electron_reads) return 5;
+  std::cout << "electron_chunk_page_check_is_neutral: PASS\\n";
+  session.observed_page.web = true; page_matches = true;
+  session.approved_deadline_ns = 200;
+  if (send() != 2 || sends != 3) return 6;
+  foreground_window = 2;
+  if (send() != 0 || sends != 3) return 7;
+  return 0;
+}
+`,
+      );
+      const command = build.wrap([
+        '/nologo',
+        '/std:c++20',
+        '/EHsc',
+        source,
+        `/Fo:${join(root, 'chunks.obj')}`,
+        `/Fe:${binary}`,
+      ]);
+      const compiled = await run(command.file, command.args, {
+        verbatim: command.verbatim,
+        timeout: 120000,
+      });
+      expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+      const result = await run(binary, [], { timeout: 10000 });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('page_change_between_chunks_blocks_remaining: PASS');
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  }, 150000);
+
   // Compile-only matrix; never launches the helper or sends OS input.
   describe.each(['test', 'background-acceptance', 'production'] as const)(
     'native build %s',

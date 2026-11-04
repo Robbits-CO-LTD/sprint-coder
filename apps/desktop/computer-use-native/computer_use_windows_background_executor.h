@@ -129,9 +129,10 @@ template <class Operations> Outcome RunBackgroundExecutor(Operations &ops) {
     if (preparation == Preparation::kRejected) return Outcome::kRejected;
     if (preparation == Preparation::kHandoff) return Outcome::kAwaitingForegroundHandoff;
     if (preparation == Preparation::kNoop) return Outcome::kCompleted;
+    if (!ops.CheckPage()) return Outcome::kRejected;
     claim = ops.Claim();
     if (claim == 0) return Outcome::kRejected;
-    if (ops.BeginCall(claim)) {
+    if (ops.CheckPage() && ops.BeginCall(claim)) {
       bool called = false;
       try { called = ops.Call(); }
       catch (...) { ops.EndCall(claim); throw; }

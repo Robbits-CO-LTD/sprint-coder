@@ -1298,14 +1298,30 @@ describe('Windows UI Automation source only reads', () => {
     expect(page).toContain('RunWindowsOpenMeasurement<WindowsPageEvidence>');
     expect(page).toContain('reader.ReadPage()');
     expect(page).not.toMatch(/SendInput\(|SetCursorPos\(|InvokeWindowsSemanticInput\(/u);
-    // Outside this measured entry the scheduler still owns the reader, classifier and gate.
+    const inputPage = between(
+      host,
+      'bool RecheckWindowsBoundPageOnLane(HWND window, std::uint32_t pid,\n    const sprint_coder::computer_use::WindowsPageEvidence &page,\n    const std::function<bool()> &current) {',
+      'bool RecheckWindowsPageBeforeInput(const WindowsSession &session) {',
+    );
+    expect(inputPage).toContain('if (!current()) return false;');
+    expect(inputPage).toContain('if (!page.web) return true;');
+    expect(inputPage).toContain('reader.RecheckPage(page) && current()');
+    expect(inputPage).not.toMatch(
+      /Focused|SendInput\(|SetCursorPos\(|InvokeWindowsSemanticInput\(/u,
+    );
+    expect(host).toContain('RunWindowsOpenMeasurement<bool>(limits,');
+    expect(host).toContain('[] { return WindowsV1UiaMayCall(); }');
+    // Outside these measured entries the scheduler still owns the reader, classifier and gate.
     for (const name of [
       'WindowsShadowReader',
       'WindowsShadowClassify',
       'BuildWindowsShadowFacts',
       'ShadowGate',
     ])
-      expect(code(host.replace(approval, '').replace(page, '')), name).not.toContain(name);
+      expect(
+        code(host.replace(approval, '').replace(page, '').replace(inputPage, '')),
+        name,
+      ).not.toContain(name);
     // The version stays where the V1 preflight puts it, and the win32 v2 refusal is untouched.
     expect(host).toContain('kNativePreflightClassifierVersion');
     expect(host).not.toMatch(

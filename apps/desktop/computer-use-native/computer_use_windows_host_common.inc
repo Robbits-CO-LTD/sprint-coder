@@ -314,6 +314,10 @@ bool WindowsRoundTripCurrent(const WindowsSession &session);
 bool WindowsRoundTripMayInput(const WindowsSession &session);
 sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity);
 bool RecheckWindowsPage(const WindowsSession &session);
+bool RecheckWindowsPageBeforeInput(const WindowsSession &session);
+bool RecheckWindowsBoundPageOnLane(HWND window, std::uint32_t pid,
+    const sprint_coder::computer_use::WindowsPageEvidence &page,
+    const std::function<bool()> &current);
 
 bool WindowsApprovalSessionBindingCurrent(const WindowsSession &session) {
   return !session.approval_revoked &&

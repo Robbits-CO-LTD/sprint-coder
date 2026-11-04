@@ -1,6 +1,7 @@
 #pragma once
 #include "computer_use_windows_background_monitor.h"
 #include "computer_use_windows_background_executor.h"
+#include "computer_use_windows_page.h"
 #include <array>
 #include <iostream>
 #include <string>
@@ -31,6 +32,7 @@ struct FakeOperations {
   void Paste() { ++forbidden[5]; }
   FakeOperations() { monitor.Registered(true); }
   bool Guard() { return guard && !monitor.Snapshot().paused; }
+  bool CheckPage() { return true; }
   Preparation Prepare() {
     if (preparation != Preparation::kReady) return preparation;
     if (pattern == Pattern::kInvoke) return Preparation::kReady;
@@ -106,6 +108,59 @@ inline bool CheckBackgroundExecutor() {
     return ok;
   };
   if (!check(CheckCallPattern(), "BG01_call_pattern_one_timed_provider_call")) return false;
+  // Synthetic ordinary evidence exercises the seam without opening the product's browser gate.
+  struct PageOperations : FakeOperations {
+    sprint_coder::computer_use::WindowsPageEvidence observed{
+        true, true, sprint_coder::computer_use::OriginState::kOrdinary,
+        "https://example.test", "document-1", "url-hash-1"};
+    sprint_coder::computer_use::WindowsPageEvidence current = observed;
+    bool change_at_claim = false, stop_at_claim = false, stop_after_read = false;
+    bool ticket_valid = true;
+    int page_reads = 0;
+    bool CheckPage() {
+      if (monitor.Snapshot().paused) return false;
+      if (!observed.web) return true;
+      ++page_reads;
+      const bool matches = sprint_coder::computer_use::WindowsPageAllowsInput(observed, current);
+      if (!matches) ticket_valid = false;
+      if (stop_after_read) monitor.Pause();
+      return matches;
+    }
+    std::uint64_t Claim() {
+      const auto claim = FakeOperations::Claim();
+      if (change_at_claim) current.document_identity = "document-2";
+      if (stop_at_claim) monitor.Pause();
+      return claim;
+    }
+  };
+  for (bool changed : {false, true}) {
+    PageOperations ops;
+    if (changed) ops.current.location_digest = "url-hash-2";
+    if (!check(RunBackgroundExecutor(ops) == (changed ? Outcome::kRejected : Outcome::kCompleted) &&
+               ops.calls == (changed ? 0 : 1) && ops.ticket_valid == !changed,
+               "background_action_checks_bound_page")) return false;
+  }
+  {
+    PageOperations ops;
+    ops.change_at_claim = true;
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.calls == 0 &&
+               !ops.ticket_valid && ops.finishes == 1 && ops.begins == 0,
+               "background_page_change_blocks_commit")) return false;
+  }
+  for (bool during_read : {false, true}) {
+    PageOperations ops;
+    ops.stop_at_claim = !during_read;
+    ops.stop_after_read = during_read;
+    if (!check(RunBackgroundExecutor(ops) != Outcome::kCompleted && ops.calls == 0 &&
+               ops.page_reads == 1, "stop_before_or_during_page_check_blocks_input")) return false;
+  }
+  {
+    PageOperations ops;
+    ops.observed = {};
+    ops.change_at_claim = true;
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kCompleted && ops.calls == 1 &&
+               ops.page_reads == 0, "electron_background_page_check_is_neutral")) return false;
+  }
   for (int pattern = 0; pattern < 5; ++pattern) {
     FakeOperations ops;
     ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
