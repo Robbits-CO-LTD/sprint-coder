@@ -275,6 +275,8 @@ ADR の暫定 100 / 20 / 250 ms を実測済みの閾値と扱わない。hook �
 
 各 BG と pattern / phase / 負例の組ごとに、次を証拠索引へ記入する。現時点では全項目未記入。
 
+受入 build の receipt（`computer-use-acceptance-build.json`）の `fixtureDigest` も証拠に記録する。
+
 ```json
 {
   "case": "BG-6 / inside / Stop",

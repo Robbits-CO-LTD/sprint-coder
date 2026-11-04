@@ -2,7 +2,7 @@
 // Verifies, on the produced package rather than on the build inputs, whether the Computer Use
 // unsigned or background acceptance mode was compiled into Main. Release jobs run it with
 // `--expect absent`; the acceptance build workflow runs it with `--expect present`.
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import console from 'node:console';
@@ -69,6 +69,20 @@ for (const archive of archives) {
         ? `${archive} was not built with the acceptance mode`
         : `${archive} was built with the acceptance mode and must not be published`,
     );
+  if (expected === 'present') {
+    let contents;
+    try {
+      contents = JSON.parse(readFileSync(join(resources, RECEIPT_NAME), 'utf8'));
+    } catch {
+      fail(`${archive} has an unreadable acceptance receipt`);
+    }
+    if (
+      contents?.mode === 'windows-background-acceptance' &&
+      (typeof contents.fixtureDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/u.test(contents.fixtureDigest))
+    )
+      fail(`${archive} has a missing or invalid fixtureDigest`);
+  }
 }
 
 console.log(
