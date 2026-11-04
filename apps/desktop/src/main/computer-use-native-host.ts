@@ -3765,6 +3765,9 @@ export function createComputerUseNativeHost(
     // Session object and epoch prevent reuse after quarantine clears or the id is reopened.
     return {
       facts,
+      // P5 REQUIREMENT (M2): this measures Main's point at the time of the request. The dispatch
+      // must re-check the point owner and view natively, with WindowsActionPoint's POINT, before
+      // its first input API; this answer never authorizes an input by itself.
       measure: async (point) =>
         addon?.measureExplorerView?.({
           sessionId,

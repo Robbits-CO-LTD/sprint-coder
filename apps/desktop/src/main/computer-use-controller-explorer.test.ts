@@ -13,6 +13,7 @@ import {
 import type { TargetFacts } from './computer-use-target-eligibility';
 import {
   classifyWindowsExplorerOperation,
+  windowsExplorerItemInView,
   type WindowsExplorerOperation,
 } from './computer-use-explorer-effect';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
@@ -793,4 +794,48 @@ it('rejects measurement failure and evidence revoked while measurement is pendin
     return { shellView: facts.shellView, pointOwnerMatches: true };
   });
   expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+});
+
+it('accepts only a direct child of the measured folder, compared by ASCII case', async () => {
+  expect(windowsExplorerItemInView('C:\\Folder\\Child', 'C:\\Folder')).toBe(true);
+  expect(windowsExplorerItemInView('c:\\FOLDER\\Child', 'C:\\folder')).toBe(true);
+  expect(windowsExplorerItemInView('C:\\Folder\\Child', 'C:\\Folder\\')).toBe(true);
+  expect(windowsExplorerItemInView('C:\\Child', 'C:\\')).toBe(true);
+  for (const path of [
+    // Deeper descendants are not what the measured file list shows.
+    'C:\\Folder\\Child\\Grandchild',
+    'C:\\Folder',
+    'C:\\Folder\\',
+    'C:\\Folder\\Child\\',
+    'C:\\Folder\\\\Child',
+    'C:\\Folder/Child',
+    'C:\\Folder\\.',
+    'C:\\Folder\\..',
+    'C:\\Folder\\Child.',
+    'C:\\Folder\\Child ',
+    'C:\\Folder\\..\\Folder\\Child',
+    // ':' in the name addresses an alternate data stream.
+    'C:\\Folder\\Child:stream',
+    'C:\\Folder\\Child::$DATA',
+    'D:\\Folder\\Child',
+    '\\\\server\\share\\Child',
+    'C:\\Folderx\\Child',
+  ])
+    expect(windowsExplorerItemInView(path, 'C:\\Folder'), path).toBe(false);
+  // Unicode case folding is not NTFS's: a non-ASCII case difference is refused, never matched.
+  expect(windowsExplorerItemInView('C:\\\u00c4rger\\Child', 'C:\\\u00c4rger')).toBe(true);
+  expect(windowsExplorerItemInView('C:\\\u00e4rger\\Child', 'C:\\\u00c4rger')).toBe(false);
+  expect(windowsExplorerItemInView('C:\\\u212aey\\Child', 'C:\\key')).toBe(false);
+  expect(windowsExplorerItemInView('C:\\Key\\Child', 'C:\\\u212aey')).toBe(false);
+  expect(windowsExplorerItemInView('C:\\\u0130d\\Child', 'C:\\id')).toBe(false);
+  const { host, session } = await explorerScenario();
+  for (const path of ['C:\\Folder\\Child\\Grandchild', 'C:\\Folder\\Child:stream']) {
+    expect(
+      await windowsExplorerExceptionAllowedForTesting({
+        ...inputFor(host, session.sessionId),
+        operation: { ...operation, item: { path, kind: 'folder', surface: 'file_list' } },
+      }),
+      path,
+    ).toBe(false);
+  }
 });

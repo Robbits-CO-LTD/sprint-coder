@@ -123,8 +123,9 @@ namespace {
 #include "computer_use_windows_host_uia_semantic.inc"
 #include "computer_use_windows_host_input.inc"
 #include "computer_use_windows_host_preflight.inc"
-#include "computer_use_windows_host_explorer.inc"
 #include "computer_use_windows_host_pipe.inc"
+// After the pipe: seams cut the preflight and pipe fragments between markers that would enclose it.
+#include "computer_use_windows_host_explorer.inc"
 bool ParseUnsigned(std::wstring_view value, DWORD *output) {
   if (value.empty() || value.size() > 10)
     return false;

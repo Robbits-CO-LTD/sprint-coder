@@ -7438,6 +7438,11 @@ type WindowsExplorerExceptionInput = Readonly<{
   operation: WindowsExplorerOperation;
 }>;
 
+// P5 REQUIREMENT (M2, not wired here): a true answer is not an input authorization. The measured
+// point is Main's, the injected point is the helper's WindowsActionPoint, and time passes between
+// them. Before its first input API the native dispatch must re-check, with that same POINT, that the
+// window under it is inside the measured view of the verified explorer.exe and that the view is
+// still the same file-system folder.
 export async function windowsExplorerExceptionAllowed(
   input: WindowsExplorerExceptionInput,
 ): Promise<boolean> {
