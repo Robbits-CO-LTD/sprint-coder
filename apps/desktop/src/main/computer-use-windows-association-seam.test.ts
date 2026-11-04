@@ -188,10 +188,26 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     ];
     const file = join(scratch, `document.${extension}`);
     writeFileSync(file, '');
+    let diagnostic = 'association measurement not started';
     const measure = async (): Promise<Probe> => {
-      const measured = await probe('association', file, 'takeover');
-      expect(measured.status, measured.output).toBe(0);
-      return measured;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const measured = await probe('association', file, 'takeover');
+        diagnostic = `association attempt=${attempt} ${[
+          'measurement_discarded',
+          'real_path_verified',
+          'file_id_known',
+          'elapsed_ms',
+        ]
+          .map((name) => `${name}=${measured.facts.get(name) ?? 'missing'}`)
+          .join(' ')}`;
+        expect(measured.status, `${diagnostic}\n${measured.output}`).toBe(0);
+        // Never retry a completed read with unexpected facts, including a missing handler.
+        if (measured.facts.get('measurement_discarded') !== '1') {
+          expect(measured.facts.get('measurement_discarded'), diagnostic).toBe('0');
+          return measured;
+        }
+      }
+      throw new Error(`measurement discarded on all 5 attempts: ${diagnostic}`);
     };
     // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
     // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
@@ -349,6 +365,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       expect(unregistered.status, unregistered.output).toBe(0);
       expect(unregistered.facts.get('prog_id')).toBe('');
     } catch (error) {
+      console.error(diagnostic);
       failure = error;
     } finally {
       // The temporary association must be gone; a key that cannot be removed fails the test.

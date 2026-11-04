@@ -316,7 +316,9 @@ struct Key {
 // slot above. Late answers are private and discarded; process termination remains the Stop
 // owner's task. `limits` follows WindowsOpenMeasurementLimits's ownership contract.
 template <class Result, class Read>
-[[nodiscard]] inline Result RunWindowsOpenMeasurement(WindowsOpenMeasurementLimits limits, Read read) {
+[[nodiscard]] inline Result RunWindowsOpenMeasurement(WindowsOpenMeasurementLimits limits, Read read,
+                                                       bool *discarded = nullptr) {
+  if (discarded) *discarded = true;
   limits.deadline_ns = WindowsOpenMeasurementDeadline(limits.started_ns, limits.deadline_ns);
   if (!limits.MayRead()) return {};
   std::atomic<bool> &running = windows_association_detail::WindowsOpenMeasurementRunning();
@@ -326,6 +328,7 @@ template <class Result, class Read>
     std::condition_variable ready;
     std::atomic<bool> abandoned{false};
     bool done = false;
+    bool discarded = true;
     // A real handle of the worker thread (under `mutex`), closed when the last owner goes. It
     // names that thread even after it ends, so a cancel can never reach a thread that reused its id.
     HANDLE thread = nullptr;
@@ -350,17 +353,24 @@ template <class Result, class Read>
       }
       const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
       Result result{};
+      bool discarded = true;
       if (SUCCEEDED(initialized)) {
         const HRESULT cancellation = CoEnableCallCancellation(nullptr);
         try {
-          if (SUCCEEDED(cancellation) && limits.MayRead()) result = read(limits);
+          if (SUCCEEDED(cancellation) && limits.MayRead()) {
+            discarded = false;
+            result = read(limits);
+          }
         } catch (...) { result = {}; }
         if (SUCCEEDED(cancellation)) CoDisableCallCancellation(nullptr);
         CoUninitialize();
       }
       {
         std::lock_guard lock(pending->mutex);
-        if (!pending->abandoned.load()) pending->result = std::move(result);
+        if (!pending->abandoned.load()) {
+          pending->result = std::move(result);
+          pending->discarded = discarded;
+        }
         // The slot is free BEFORE `done` is seen: a caller that returns on `done` can start the
         // next measurement at once. The OS call has returned, so at most one worker is still stuck.
         running.store(false);
@@ -372,7 +382,10 @@ template <class Result, class Read>
   std::unique_lock lock(pending->mutex);
   while (!pending->done && limits.MayRead())
     pending->ready.wait_for(lock, std::chrono::milliseconds(1));
-  if (pending->done && limits.MayRead()) return std::move(pending->result);
+  if (pending->done && limits.MayRead()) {
+    if (discarded) *discarded = pending->discarded;
+    return std::move(pending->result);
+  }
   // Given up, or no longer wanted. A result that is already done is only discarded: nothing is
   // canceled. A worker that is not done is told to stop at its next step, and its blocked COM call
   // and synchronous I/O are canceled -- under the lock while `done` is false, so the worker has not
@@ -387,10 +400,13 @@ template <class Result, class Read>
 
 [[nodiscard]] inline WindowsAssociationFacts MeasureWindowsAssociation(
     std::wstring path, const WindowsOpenMeasurementLimits &limits) {
-  return RunWindowsOpenMeasurement<WindowsAssociationFacts>(limits,
+  bool discarded = false;
+  auto facts = RunWindowsOpenMeasurement<WindowsAssociationFacts>(limits,
       [path = std::move(path)](const WindowsOpenMeasurementLimits &budget) {
         return windows_association_detail::ReadAssociation(path, budget);
-      });
+      }, &discarded);
+  facts.measurement_discarded = discarded;
+  return facts;
 }
 } // namespace sprint_coder::computer_use
 #endif

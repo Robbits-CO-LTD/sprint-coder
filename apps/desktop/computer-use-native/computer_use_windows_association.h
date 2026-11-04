@@ -17,6 +17,8 @@ enum class WindowsOpenVerdict { kVerified, kBlocked, kTakeover };
 // (FILE_ID_INFO: volume serial ":" 128-bit file id, both hex). A shell display path (SIGDN_FILESYSPATH,
 // "C:\..." with junctions unresolved) is never taken for a real path.
 struct WindowsAssociationFacts {
+  // Internal diagnostic only; excluded from verdicts and the facts digest.
+  bool measurement_discarded = false;
   bool complete = false;
   bool real_path_verified = false;
   bool dangerous = false;
