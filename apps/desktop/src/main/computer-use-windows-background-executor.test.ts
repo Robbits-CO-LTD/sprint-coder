@@ -195,7 +195,8 @@ describe('background executor native entry', () => {
 
   it('pins generation time, grace exclusion, dedicated child HWNDs and per-kind fail-closed limits', () => {
     const monitor = native('computer_use_windows_background_monitor.h');
-    expect(monitor).toContain('return GetTickCount();');
+    expect(monitor).toContain('return ::GetTickCount();');
+    expect(monitor).not.toContain('#include <windows.h>');
     expect(monitor).toContain('claim_tick_ = tick_clock_();');
     expect(monitor).toContain('static_cast<std::int32_t>(event_tick - claim_tick_) > 0');
     expect(monitor).toContain('(grace_ && now < grace_deadline_)');
