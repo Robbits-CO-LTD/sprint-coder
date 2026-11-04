@@ -202,7 +202,6 @@ const explorerScenario = async (
     platform,
     {
       classifierV2Attested: true,
-      windowsApprovalInterlockForTesting: true,
       effectiveEligibilityMode: () => 'v2-denylist',
       ...overrides,
       windowsPhysicalBoundsToDip: (bounds) => bounds,

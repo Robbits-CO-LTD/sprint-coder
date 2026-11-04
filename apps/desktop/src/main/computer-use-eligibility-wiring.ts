@@ -5,6 +5,7 @@ import {
 } from './computer-use-eligibility';
 import { computerUseCompiledEligibility } from './computer-use-native';
 import { computerUseAgentDrivenV2Enabled } from './feature-flags';
+import type { ComputerUseNativeHostOptions } from './computer-use-native-host';
 
 /**
  * The production wiring of the two terms the native approval path and the session route rest on
@@ -42,3 +43,14 @@ export const computerUseEligibilityWiring = createComputerUseEligibilityWiring({
   agentDrivenV2: () => computerUseAgentDrivenV2Enabled(),
   environment: () => process.env,
 });
+
+/** Shared by startup and its integration tests; enabling approval still requires loader evidence. */
+export function computerUseNativeHostEligibilityOptions(
+  gateOpen: boolean,
+  wiring = computerUseEligibilityWiring,
+): Pick<ComputerUseNativeHostOptions, 'classifierV2Attested' | 'effectiveEligibilityMode'> {
+  return {
+    classifierV2Attested: wiring.classifierV2Attested(gateOpen),
+    effectiveEligibilityMode: wiring.effectiveEligibilityMode,
+  };
+}

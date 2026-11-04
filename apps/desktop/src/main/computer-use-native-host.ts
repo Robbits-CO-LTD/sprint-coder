@@ -324,7 +324,7 @@ export type ComputerUseNativeHostOptions = Readonly<{
    * addendum, section 0).
    */
   classifierV2Attested?: boolean;
-  /** Test-only interlock evidence; production stays false until N7 wires the real attestation. */
+  /** Test-only veto. A true value never substitutes for verified production evidence. */
   windowsApprovalInterlockForTesting?: boolean;
   /**
    * The effective eligibility mode, read at every use so that the V2 flag or the force-v1 variable
@@ -2074,17 +2074,23 @@ export function createComputerUseNativeHost(
     if (binding === undefined) return 'unbound';
     return binding.expectedVersion === 2 ? 'v2' : 'v1';
   };
-  // Discovery has no session yet: only build, provenance and handshake evidence apply.
-  const windowsApprovalAvailable = (): boolean =>
+  // The loader verifies package provenance and all three declarations. The transport rechecks
+  // the live helper handshake; session readiness additionally binds its generation and Stop state.
+  const windowsApprovalEvidenceReady = (sessionId?: string): boolean =>
     platform === 'win32' &&
-    options.windowsApprovalInterlockForTesting === true &&
-    options.classifierV2Attested === true &&
+    options.windowsApprovalInterlockForTesting !== false &&
     binding.windowsApprovalVerified === true &&
     packageReady &&
     handshakeReady &&
     probeReady &&
     !inputQuarantined() &&
     addon?.windowsApprovalAvailable?.() === true &&
+    (sessionId === undefined ||
+      (sessions.has(sessionId) && addon?.windowsApprovalReady?.(sessionId) === true));
+  // Discovery has no session yet: only build, provenance and live helper evidence apply.
+  const windowsApprovalAvailable = (): boolean =>
+    windowsApprovalEvidenceReady() &&
+    options.classifierV2Attested === true &&
     (options.effectiveEligibilityMode?.() ?? binding.manifest.eligibility?.mode) ===
       'v2-denylist' &&
     hasMethod(addon, 'preflight') &&
@@ -2112,15 +2118,7 @@ export function createComputerUseNativeHost(
       effectiveMode:
         options.effectiveEligibilityMode?.() ?? (route === 'v2' ? 'v2-denylist' : 'v1-allowlist'),
       route,
-      windowsApprovalReady:
-        options.windowsApprovalInterlockForTesting === true &&
-        binding.windowsApprovalVerified === true &&
-        packageReady &&
-        handshakeReady &&
-        probeReady &&
-        !inputQuarantined() &&
-        sessions.has(sessionId) &&
-        addon?.windowsApprovalReady?.(sessionId) === true,
+      windowsApprovalReady: windowsApprovalEvidenceReady(sessionId),
     });
     if (platform !== 'win32') return enabled;
     const session = sessions.get(sessionId);

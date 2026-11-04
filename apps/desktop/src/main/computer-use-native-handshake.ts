@@ -123,7 +123,8 @@ export function windowsApprovalEvidenceMatches(
       attested === null ||
       pin.data.mode !== 'v2-denylist' ||
       pin.data.classifierVersion !== 2 ||
-      !pin.data.ticketRequired
+      !pin.data.ticketRequired ||
+      pin.data.interlockEnforced !== true
     )
       return false;
     for (const value of [declared.data, attested])
@@ -132,7 +133,8 @@ export function windowsApprovalEvidenceMatches(
         value.classifierVersion !== pin.data.classifierVersion ||
         value.rulesetVersion !== pin.data.rulesetVersion ||
         value.lexiconVersion !== pin.data.lexiconVersion ||
-        value.ticketRequired !== pin.data.ticketRequired
+        value.ticketRequired !== pin.data.ticketRequired ||
+        value.interlockEnforced !== true
       )
         return false;
     const viewers = [compiled, manifest, handshake].map((value) =>
