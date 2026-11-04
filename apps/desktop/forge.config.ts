@@ -28,7 +28,10 @@ import {
   COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
   computerUseAcceptanceBuildForEnv,
 } from './computer-use-acceptance-build';
-import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
+import {
+  computerUseNativeCompiledPin,
+  verifyWindowsMainAddonDigest,
+} from './src/main/computer-use-native-provenance';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -145,6 +148,7 @@ export const COMPUTER_USE_NATIVE_MANIFEST_PATH = join(
   COMPUTER_USE_NATIVE_RESOURCE_ROOT,
   'computer-use-native.manifest.json',
 );
+const WINDOWS_MAIN_ADDON = 'sprint_coder_computer_use_windows_main.node';
 
 function computerUseNativeResources(): string[] {
   if (process.platform === 'darwin')
@@ -155,6 +159,7 @@ function computerUseNativeResources(): string[] {
   if (process.platform === 'win32')
     return [
       join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe'),
+      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, WINDOWS_MAIN_ADDON),
       COMPUTER_USE_NATIVE_MANIFEST_PATH,
     ];
   return [];
@@ -164,6 +169,7 @@ export function isComputerUseNativeArtifactPath(path: string): boolean {
   const normalized = path.replaceAll('\\', '/').toLowerCase();
   return (
     normalized.endsWith('/sprint-coder-computer-use-host.exe') ||
+    normalized.endsWith(`/${WINDOWS_MAIN_ADDON}`) ||
     normalized.endsWith('/sprint_coder_computer_use_native.node')
   );
 }
@@ -206,8 +212,28 @@ async function prepareComputerUseNativeForViteBuild(
       : 'sprint-coder-computer-use-host.exe',
   );
   if (platform === 'win32') {
-    if (windowsSign !== undefined)
-      await signWindowsFiles({ files: [artifactPath], ...windowsSign });
+    verifyComputerUseNativeBuild(platform, architecture);
+    if (windowsSign !== undefined) {
+      const mainAddonPath = join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, WINDOWS_MAIN_ADDON);
+      await signWindowsFiles({ files: [artifactPath, mainAddonPath], ...windowsSign });
+      const manifest = computerUseNativeManifestSchema.parse(
+        JSON.parse(readFileSync(COMPUTER_USE_NATIVE_MANIFEST_PATH, 'utf8')) as unknown,
+      );
+      writeFileSync(
+        COMPUTER_USE_NATIVE_MANIFEST_PATH,
+        `${JSON.stringify(
+          {
+            ...manifest,
+            windowsMainAddon: {
+              ...manifest.windowsMainAddon,
+              sha256: createHash('sha256').update(readFileSync(mainAddonPath)).digest('hex'),
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    }
     refreshPackagedComputerUseArtifactDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'win32');
     refreshPackagedComputerUseWindowsSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
   } else {
@@ -246,6 +272,8 @@ export function verifyComputerUseNativeBuild(platform: ForgePlatform, architectu
   );
   const digest = createHash('sha256').update(readFileSync(expectedArtifact)).digest('hex');
   const sourceCommit = computerUseRepositorySourceCommit();
+  if (platform === 'win32')
+    verifyWindowsMainAddonDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, manifest);
   if (
     manifest.sourceCommit !== sourceCommit ||
     manifest.platform !== platform ||
@@ -284,6 +312,11 @@ export function verifyPackagedComputerUseNativeBundle(
       ? 'sprint_coder_computer_use_native.node'
       : 'sprint-coder-computer-use-host.exe';
   const artifactPath = join(resources, artifactName);
+  if (platform === 'win32') {
+    verifyWindowsMainAddonDigest(resources, manifest);
+    if (countResourceBasename(resources, WINDOWS_MAIN_ADDON) !== 1)
+      throw new Error('Packaged Windows Main addon must occur exactly once');
+  }
   const packagedArtifactCount = countResourceBasename(resources, artifactName);
   const packagedManifestCount = countResourceBasename(
     resources,
@@ -298,6 +331,8 @@ export function verifyPackagedComputerUseNativeBundle(
     (entry) =>
       entry.includes('/computer-use-native/') ||
       entry.startsWith('computer-use-native/') ||
+      entry === WINDOWS_MAIN_ADDON ||
+      entry.endsWith(`/${WINDOWS_MAIN_ADDON}`) ||
       entry === manifestEntry ||
       entry.endsWith(`/${manifestEntry}`) ||
       entry === artifactEntry ||

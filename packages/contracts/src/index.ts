@@ -6770,9 +6770,19 @@ export const computerUseNativeManifestSchema = z
     // Absent on a manifest written before D7 (read as the legacy allow-list).
     eligibility: computerUseEligibilitySchema.optional(),
     windowsDocumentViewers: computerUseWindowsDocumentViewersSchema.optional(),
+    windowsMainAddon: z
+      .object({
+        kind: z.literal('windows-main-addon'),
+        file: z.literal('sprint_coder_computer_use_windows_main.node'),
+        sha256: computerUseDigestSchema,
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((manifest, context) => {
+    if (manifest.platform !== 'win32' && manifest.windowsMainAddon !== undefined)
+      context.addIssue({ code: 'custom', message: 'Main addon is Windows-only' });
     if (manifest.platform !== 'win32' && Object.hasOwn(manifest, 'windowsDocumentViewers'))
       context.addIssue({ code: 'custom', message: 'Document viewers are Windows-only' });
     if (new Set(manifest.capabilities).size !== manifest.capabilities.length)

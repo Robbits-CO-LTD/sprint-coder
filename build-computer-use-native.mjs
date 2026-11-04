@@ -193,6 +193,7 @@ if (sanitizerSelfCheckOnly) {
   const sourceCommit = computerUseSourceCommit();
   const declaration = eligibilityDeclaration(eligibilityMode, target);
   let artifact;
+  let windowsMainAddon;
   if (target === 'darwin') {
     // The generated header sits outside the build directory (node-gyp rebuild cleans that one) and
     // is found through binding.gyp's include_dirs. It is rewritten on every build, so it can never
@@ -233,6 +234,26 @@ if (sanitizerSelfCheckOnly) {
       sha256: sha256File(path),
     };
   } else {
+    // Rebuild cleans build/Release; emit the helper and its headers only after node-gyp.
+    run(process.execPath, [
+      require.resolve('@electron/node-gyp/bin/node-gyp.js'),
+      'rebuild',
+      '--directory',
+      nativeDirectory,
+      `--target=${electronVersion}`,
+      `--arch=${architecture}`,
+      '--dist-url=https://electronjs.org/headers',
+      '--loglevel=error',
+    ]);
+    const mainAddonFile = 'sprint_coder_computer_use_windows_main.node';
+    const mainAddonPath = join(outputDirectory, mainAddonFile);
+    if (!existsSync(mainAddonPath) || !statSync(mainAddonPath).isFile())
+      throw new Error('Computer Use Windows Main N-API module was not produced');
+    windowsMainAddon = {
+      kind: 'windows-main-addon',
+      file: mainAddonFile,
+      sha256: sha256File(mainAddonPath),
+    };
     const executable = join(outputDirectory, 'sprint-coder-computer-use-host.exe');
     const provenanceHeader = join(outputDirectory, 'computer_use_build_provenance.h');
     writeFileSync(
@@ -317,7 +338,7 @@ if (sanitizerSelfCheckOnly) {
     protocolVersion,
     apiVersion,
     nativeVersion: 'computer-use-native-gate0-1',
-    // V1 has one native artifact per platform. Binding both canonical digest fields to the same
+    // The primary artifact is the macOS module or Windows helper. Binding both fields to the same
     // signed bytes keeps package verification uniform for the N-API module and Windows helper.
     moduleDigest: digest,
     binaryDigest: digest,
@@ -328,6 +349,7 @@ if (sanitizerSelfCheckOnly) {
     // Main compiles the same value in (from this manifest) and the native attests it at handshake.
     eligibility: declaration,
     ...windowsDocumentViewerDeclaration(target),
+    ...(windowsMainAddon === undefined ? {} : { windowsMainAddon }),
   };
   const manifestPath = join(outputDirectory, 'computer-use-native.manifest.json');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
