@@ -10,10 +10,11 @@ using namespace windows_background_executor_detail;
 struct FakeOperations {
   enum class Pattern { kInvoke, kToggle, kSelect, kValue, kExpand };
   Pattern pattern = Pattern::kInvoke;
-  sprint_coder::computer_use::WindowsBackgroundMonitorState monitor;
+  sprint_coder::computer_use::WindowsBackgroundMonitorState monitor{1, [] { return 1000u; }};
   Preparation preparation = Preparation::kReady;
   bool guard = true, call_ok = true, read_ok = true, window_ok = true;
   bool changed_content = false, throw_call = false, takeover = false, applies = true;
+  bool other_hwnd = false;
   bool own_event = false; // The provider raises the WinEvent our own pattern call causes.
   bool state = false, desired = true;
   std::string text = "Synthetic before", desired_text = "Synthetic after";
@@ -35,7 +36,11 @@ struct FakeOperations {
     const bool same = pattern == Pattern::kValue ? text == desired_text : state == desired;
     return same ? Preparation::kNoop : Preparation::kReady;
   }
-  std::uint64_t Claim() { ++claims; return monitor.Claim(expected_epoch); }
+  std::uint64_t Claim() {
+    ++claims;
+    const char *kinds[] = {"invoke", "toggle", "select", "set_text", "expand_collapse"};
+    return monitor.Claim(expected_epoch, ClaimPermission(kinds[static_cast<int>(pattern)], 5));
+  }
   bool Call() {
     ++calls;
     changed_content = true;
@@ -45,7 +50,11 @@ struct FakeOperations {
       if (pattern == Pattern::kValue) text = desired_text;
       else state = desired;
     }
-    if (own_event) monitor.TargetEvent(sprint_coder::computer_use::BackgroundInputOwner::kTarget);
+    if (own_event) {
+      const std::uint32_t events[] = {0x8013, 0x800a, 0x8006, 0x800e, 0x800a};
+      monitor.TargetEvent(sprint_coder::computer_use::BackgroundInputOwner::kTarget,
+          events[static_cast<int>(pattern)], other_hwnd ? 6 : 5, 0, 0, 1001);
+    }
     return call_ok;
   }
   bool Readback() {
@@ -132,19 +141,25 @@ inline bool CheckBackgroundExecutor() {
                "BG06_claimed_uia_never_retries_or_falls_back")) return false;
   }
   for (int pattern = 0; pattern < 5; ++pattern) {
-    // BG01 completed above is FAKE-ONLY. On a real device the target raises STATECHANGE /
-    // VALUECHANGE / SELECTION / EXPANDCOLLAPSE (or INVOKED) for our own call while the claim is
-    // active, the Target WinEvent hook pauses without own-call attribution, and the claim closes as
-    // unknown_effect. Real-device BG01 completed stays BLOCKED until
-    // "N9 P4a-attr claim-scoped own-call WinEvent attribution" lands; this case pins fail-closed.
+    for (bool other : {false, true}) {
+      FakeOperations ops;
+      ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
+      ops.own_event = true;
+      ops.other_hwnd = other;
+      if (!check(RunBackgroundExecutor(ops) == (other ? Outcome::kUnknownEffect : Outcome::kCompleted) &&
+                     ops.calls == 1 && ops.finishes == 1 && ops.monitor.Snapshot().paused == other &&
+                     ops.monitor.Snapshot().unknown_effect == other &&
+                     ops.forbidden == std::array<int, 6>{},
+                 "BG01_attributed_event_or_other_hwnd_takeover")) return false;
+    }
+  }
+  {
     FakeOperations ops;
-    ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
+    ops.pattern = FakeOperations::Pattern::kToggle;
     ops.own_event = true;
-    if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.calls == 1 &&
-                   ops.finishes == 1 && ops.monitor.Snapshot().paused &&
-                   ops.monitor.Snapshot().unknown_effect &&
-                   ops.forbidden == std::array<int, 6>{},
-               "BG01_real_device_completed_blocked_until_own_call_attribution")) return false;
+    ops.applies = false;
+    if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.reads == 1,
+               "BG01_attribution_does_not_replace_readback")) return false;
   }
   {
     FakeOperations ops;

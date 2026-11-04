@@ -7,7 +7,10 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <atomic>
 #include "computer_use_protocol.h"
+inline DWORD TestEventTick() { return 1000; }
+#define GetTickCount TestEventTick
 #include "computer_use_windows_background_monitor_test.h"
 
 namespace {
@@ -32,6 +35,7 @@ HWND TestAncestor(HWND hwnd, UINT) {
   return found == windows.end() ? nullptr : found->second.root;
 }
 HWND TestOwner(HWND hwnd, UINT) { return windows.at(hwnd).owner; }
+BOOL TestChild(HWND parent, HWND child) { return child != parent && TestAncestor(child, GA_ROOT) == parent; }
 BOOL TestWindow(HWND hwnd) { return windows.contains(hwnd); }
 BOOL TestThreadInfo(DWORD, GUITHREADINFO *info) {
   info->hwndCapture = capture;
@@ -68,6 +72,18 @@ BOOL TestRegisterRaw(PCRAWINPUTDEVICE device, UINT count, UINT size) {
   return raw_registration_ok;
 }
 BOOL TestDestroyWindow(HWND hwnd) { if (hwnd == Id(100)) ++raw_destroyed; return TRUE; }
+std::atomic<bool> scrolling_hook_failed = false;
+HWINEVENTHOOK TestEventHook(DWORD first, DWORD, HMODULE, WINEVENTPROC, DWORD, DWORD, DWORD) {
+  if (first == EVENT_SYSTEM_SCROLLINGSTART) { scrolling_hook_failed = true; return nullptr; }
+  return reinterpret_cast<HWINEVENTHOOK>(1);
+}
+HHOOK TestMouseHook(int, HOOKPROC, HINSTANCE, DWORD) { return reinterpret_cast<HHOOK>(1); }
+BOOL TestUnhookEvent(HWINEVENTHOOK) { return TRUE; }
+BOOL TestUnhookMouse(HHOOK) { return TRUE; }
+#define SetWinEventHook TestEventHook
+#define SetWindowsHookExW TestMouseHook
+#define UnhookWinEvent TestUnhookEvent
+#define UnhookWindowsHookEx TestUnhookMouse
 #define GetRawInputData TestRawData
 #define DefWindowProcW TestDefWindow
 #define RegisterClassExW TestRegisterClass
@@ -77,14 +93,21 @@ BOOL TestDestroyWindow(HWND hwnd) { if (hwnd == Id(100)) ++raw_destroyed; return
 #define GetWindowThreadProcessId TestWindowThread
 #define GetAncestor TestAncestor
 #define GetWindow TestOwner
+#define IsChild TestChild
 #define IsWindow TestWindow
 #define GetGUIThreadInfo TestThreadInfo
 #define GetForegroundWindow TestForeground
 #define WindowFromPoint TestHit
 #include "computer_use_windows_host_background_monitor.inc"
+#undef GetTickCount
+#undef SetWinEventHook
+#undef SetWindowsHookExW
+#undef UnhookWinEvent
+#undef UnhookWindowsHookEx
 #undef GetWindowThreadProcessId
 #undef GetAncestor
 #undef GetWindow
+#undef IsChild
 #undef IsWindow
 #undef GetGUIThreadInfo
 #undef GetForegroundWindow
@@ -104,7 +127,249 @@ bool Check(bool value, const char *name) {
 
 int main() {
   using Owner = sprint_coder::computer_use::BackgroundInputOwner;
+  using namespace sprint_coder::computer_use;
   if (!CheckBackgroundMonitor()) return 1;
+  const auto value = BackgroundPatternPermission(BackgroundPattern::kValue, 5);
+  for (const auto tick : {999u, 1000u, 1001u}) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, tick, 1100);
+    if (!Check(state.Finish(claim, 1101) == (tick > 1000) &&
+                   state.Snapshot().unknown_effect == (tick <= 1000),
+               "ATTR_generation_before_or_same_tick_delivered_after_claim")) return 1;
+  }
+  for (const auto tick : {0xffffffefu, 0xfffffff0u, 0x10u}) {
+    WindowsBackgroundMonitorState state(1, [] { return 0xfffffff0u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, tick, 1001);
+    if (!Check(state.Finish(claim, 1002) == (tick == 0x10u), "ATTR_generation_tick_wrap")) return 1;
+  }
+  {
+    static std::uint32_t tick = 1000;
+    WindowsBackgroundMonitorState state(1, [] { return tick; });
+    state.Registered(true);
+    const auto first = state.Claim(1, value, 1000);
+    if (!state.Finish(first, 1010)) return 1;
+    tick = 1160;
+    const auto second = state.Claim(1, value, 1160);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1161);
+    if (!Check(second != 0 && !state.Finish(second, 1162) && state.Snapshot().unknown_effect,
+               "ATTR_previous_claim_delayed_event_cannot_use_next_claim")) return 1;
+  }
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto first = state.Claim(1, value, 1000);
+    if (!state.Finish(first, 1010)) return 1;
+    if (!Check(state.Claim(1, value, 1159) == 0 && state.Claim(1, 1159) == 0 &&
+                   !state.Snapshot().paused && state.Claim(1, value, 1160) != 0,
+               "ATTR_grace_refuses_claim_until_deadline")) return 1;
+  }
+  for (auto pattern : {BackgroundPattern::kInvoke, BackgroundPattern::kValue,
+                       BackgroundPattern::kToggle, BackgroundPattern::kSelectionItem,
+                       BackgroundPattern::kExpandCollapse, BackgroundPattern::kScroll}) {
+    const auto permission = BackgroundPatternPermission(pattern, 5);
+    const std::array<unsigned, 5> expected = pattern == BackgroundPattern::kInvoke ?
+        std::array<unsigned, 5>{1, 2} : pattern == BackgroundPattern::kValue ?
+        std::array<unsigned, 5>{2, 2} : pattern == BackgroundPattern::kSelectionItem ?
+        std::array<unsigned, 5>{2, 1, 1, 1, 1} : std::array<unsigned, 5>{2};
+    if (!Check(permission.limits == expected, "ATTR_pattern_kind_caps")) return 1;
+    for (std::size_t kind = 0; kind < permission.events.size(); ++kind) {
+      if (permission.events[kind] == 0) continue;
+      for (bool grace : {false, true}) {
+        WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+        state.Registered(true);
+        const auto claim = state.Claim(1, permission, 1000);
+        for (unsigned count = 0; count < permission.limits[kind]; ++count)
+          state.TargetEvent(Owner::kTarget, permission.events[kind], 5, 0, 0, 1001, 1001);
+        if (!Check(!state.Snapshot().paused, "ATTR_kind_limit_inclusive")) return 1;
+        if (grace && !state.Finish(claim, 1002)) return 1;
+        state.TargetEvent(Owner::kTarget, permission.events[kind], 5, 0, 0, 1002, 1003);
+        if (!Check(state.Snapshot().paused && state.Snapshot().unknown_effect == !grace,
+                   "ATTR_each_kind_first_excess_pauses")) return 1;
+      }
+    }
+  }
+  {
+    // Exercise the independent total cap with a synthetic permission, not the production table.
+    auto permission = value;
+    permission.limits = {16, 16};
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    state.Claim(1, permission, 1000);
+    for (unsigned count = 0; count < 16; ++count)
+      state.TargetEvent(Owner::kTarget, permission.events[count % 2], 5, 0, 0, 1001, 1001);
+    if (!Check(!state.Snapshot().paused, "ATTR_total_limit_inclusive")) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
+    if (!Check(state.Snapshot().unknown_effect, "ATTR_total_first_excess_pauses")) return 1;
+  }
+  for (auto pattern : {BackgroundPattern::kExpandCollapse, BackgroundPattern::kScroll}) {
+    for (auto event : {EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE,
+                       EVENT_SYSTEM_SCROLLINGSTART, EVENT_SYSTEM_SCROLLINGEND}) {
+      WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+      state.Registered(true);
+      state.Claim(1, BackgroundPatternPermission(pattern, 5), 1000);
+      state.TargetEvent(Owner::kTarget, event, 5, 0, 0, 1001, 1001);
+      if (!Check(state.Snapshot().unknown_effect, "ATTR_show_hide_scrolling_never_exempt")) return 1;
+    }
+  }
+  // Arrival order matrix. Synthetic times avoid sleep and OS input.
+  for (int order = 0; order < 7; ++order) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    std::uint64_t claim = 0;
+    if (order != 0) claim = state.Claim(1, value, 1000);
+    if (order >= 2 && !state.Finish(claim, 1010)) return 1;
+    if (order == 5) claim = state.Claim(1,
+        BackgroundPatternPermission(BackgroundPattern::kInvoke, 6), 1160);
+    if (order == 6) claim = state.Claim(1, value, 1160);
+    const auto now = order == 0 ? 999 : order == 1 ? 1001 :
+        order == 2 ? 1010 : order == 3 ? 1159 : order == 4 ? 1160 : 1161;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, OBJID_CLIENT, 0, 1001, now);
+    const bool pause = order == 0 || order == 4 || order == 5;
+    if (!Check(state.Snapshot().paused == pause &&
+                   state.Snapshot().unknown_effect == (order == 5),
+               "ATTR_arrival_before_during_after_finish_grace_and_next_claim")) return 1;
+  }
+  for (auto pattern : {BackgroundPattern::kInvoke, BackgroundPattern::kValue,
+                       BackgroundPattern::kToggle, BackgroundPattern::kSelectionItem,
+                       BackgroundPattern::kExpandCollapse, BackgroundPattern::kScroll}) {
+    const auto permission = BackgroundPatternPermission(pattern, 5);
+    for (auto event : permission.events) {
+      if (event == 0) continue;
+      WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+      state.Registered(true);
+      const auto claim = state.Claim(1, permission, 1000);
+      state.TargetEvent(Owner::kTarget, event, 5, OBJID_CLIENT, 0, 1001, 1001);
+      if (!Check(state.Finish(claim, 1002) && !state.Snapshot().paused,
+                 "ATTR_each_pattern_expected_event")) return 1;
+    }
+  }
+  for (int mismatch = 0; mismatch < 7; ++mismatch) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    auto permission = value;
+    permission.child_known = mismatch == 2 || mismatch == 3;
+    permission.object = OBJID_CLIENT;
+    permission.child = 7;
+    if (mismatch == 6) permission.hwnd = 0;
+    const auto claim = state.Claim(1, permission, 1000);
+    state.TargetEvent(mismatch == 4 ? Owner::kUnknown : Owner::kTarget,
+        mismatch == 1 ? EVENT_OBJECT_INVOKED : EVENT_OBJECT_VALUECHANGE,
+        mismatch == 0 ? 6 : 5, mismatch == 2 ? OBJID_WINDOW : OBJID_CLIENT,
+        mismatch == 3 ? 8 : 7, 1001, mismatch == 5 ? 999 : 1001);
+    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().unknown_effect,
+               "ATTR_wrong_hwnd_kind_object_child_owner_time_or_missing_hwnd")) return 1;
+  }
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    auto permission = value;
+    permission.child_known = true;
+    permission.object = OBJID_CLIENT;
+    permission.child = 7;
+    const auto claim = state.Claim(1, permission, 1000);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, OBJID_CLIENT, 7, 1001, 1001);
+    if (!Check(state.Finish(claim, 1002), "ATTR_known_child_matches")) return 1;
+  }
+  for (bool finish_first : {false, true}) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    for (unsigned count = 0; count < 2; ++count)
+      state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
+    if (!Check(!state.Snapshot().paused, "ATTR_limit_inclusive")) return 1;
+    if (finish_first && !state.Finish(claim, 1002)) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1003);
+    if (!Check(state.Snapshot().paused && state.Snapshot().unknown_effect == !finish_first,
+               "ATTR_limit_shared_by_claim_and_grace")) return 1;
+  }
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto first = state.Claim(1, value, 1000);
+    for (unsigned count = 0; count < 2; ++count)
+      state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
+    if (!state.Finish(first, 1002)) return 1;
+    const auto second = state.Claim(1, value, 1152);
+    if (!Check(!state.Finish(first, 1153), "ATTR_old_finish_cannot_end_next_claim")) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1154);
+    if (!Check(state.Finish(second, 1155), "ATTR_next_claim_gets_fresh_count")) return 1;
+    // An old Finish must not refresh the existing grace interval either.
+    if (state.Finish(second, 1200)) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1305);
+    if (!Check(state.Snapshot().paused, "ATTR_old_finish_cannot_extend_grace")) return 1;
+  }
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto first = state.Claim(1, value, 1000);
+    if (!state.Finish(first, 1001) || !state.Claim(1, 1151)) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1152, 1152);
+    if (!Check(state.Snapshot().unknown_effect,
+               "ATTR_unattributed_next_claim_discards_old_permission")) return 1;
+  }
+  for (bool stop_first : {false, true}) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    if (stop_first) state.Pause();
+    const auto claim = state.Claim(1, value, 1000);
+    if (!stop_first) state.Pause();
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
+    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().paused &&
+                   state.Snapshot().unknown_effect == !stop_first,
+               "ATTR_stop_before_or_after_claim_linearization")) return 1;
+  }
+  for (DWORD event : {EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTUREEND,
+                     EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_OBJECT_CREATE,
+                     EVENT_OBJECT_DESTROY, EVENT_OBJECT_FOCUS}) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1,
+        BackgroundPatternPermission(BackgroundPattern::kExpandCollapse, 5), 1000);
+    state.TargetEvent(Owner::kTarget, event, 5, OBJID_WINDOW, 0, 1001, 1001);
+    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().unknown_effect,
+               "ATTR_foreground_capture_movesize_popup_never_exempt")) return 1;
+  }
+  for (bool after_finish : {false, true}) {
+    for (int termination = 0; termination < 4; ++termination) {
+      WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+      state.Registered(true);
+      const auto claim = state.Claim(1, value, 1000);
+      if (after_finish && !state.Finish(claim, 1010)) return 1;
+      if (termination == 0) state.Pause(); // Stop / helper exit.
+      if (termination == 1) state.Registered(false);
+      if (termination == 2) state.Registered(true); // Re-registration is not resume.
+      if (termination == 3) { state.BeginMonitoring(1000); state.CheckHealth(1300); }
+      state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1011);
+      state.Registered(true);
+      if (!Check(state.Snapshot().paused && !state.Claim(state.Snapshot().epoch, value, 1301) &&
+                     state.Snapshot().unknown_effect == !after_finish,
+                 "ATTR_stop_exit_reregister_health_revoke_permission")) return 1;
+      WindowsBackgroundMonitorState resumed(state.Snapshot().epoch + 1);
+      resumed.Registered(true);
+      resumed.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1302);
+      if (!Check(resumed.Snapshot().paused, "ATTR_fresh_monitor_does_not_inherit_grace")) return 1;
+    }
+  }
+  for (const auto event_tick : {999u, 1000u, 1001u}) {
+    WindowsBackgroundMonitor monitor(10, Id(1), 1);
+    monitor.state.Registered(true);
+    WindowsBackgroundMonitor::current = &monitor;
+    auto permission = value;
+    permission.child_known = true;
+    permission.object = OBJID_CLIENT;
+    permission.child = 7;
+    const auto claim = monitor.state.Claim(1, permission);
+    WindowsBackgroundMonitor::Target(nullptr, EVENT_OBJECT_VALUECHANGE, Id(5), OBJID_CLIENT, 7, 10, event_tick);
+    if (!Check(monitor.state.Finish(claim) == (event_tick > 1000), "ATTR_callback_passes_metadata")) return 1;
+    monitor.Stop();
+    WindowsBackgroundMonitor::Target(nullptr, EVENT_OBJECT_VALUECHANGE, Id(5), OBJID_CLIENT, 7, 10, event_tick);
+    if (!Check(monitor.state.Snapshot().paused, "ATTR_native_stop_revokes_grace")) return 1;
+    WindowsBackgroundMonitor::current = nullptr;
+  }
   for (int scenario = 0; scenario < 3; ++scenario) {
     WindowsBackgroundMonitor monitor(10, Id(1), 1);
     monitor.state.BeginMonitoring();
@@ -142,6 +407,21 @@ int main() {
   windows = {{Id(1), {10, Id(1)}}, {Id(2), {10, Id(2)}},
              {Id(3), {20, Id(3), Id(1)}}, {Id(4), {30, Id(4)}},
              {Id(5), {10, Id(1)}}, {Id(6), {40, Id(6)}}};
+  windows.emplace(Id(7), Window{20, Id(1)}); // Foreign-process child.
+  windows.emplace(Id(8), Window{10, Id(2)}); // Same PID, different top-level.
+  for (auto hwnd : {static_cast<HWND>(nullptr), Id(99), Id(1), Id(2), Id(7), Id(8), Id(5)}) {
+    if (!Check(WindowsBackgroundElementWindowValid(hwnd, 10, Id(1)) == (hwnd == Id(5)),
+               "ATTR_element_hwnd_requires_live_same_pid_descendant_not_root")) return 1;
+  }
+  {
+    foreground = Id(4);
+    raw_window_ok = raw_registration_ok = true;
+    WindowsBackgroundMonitor monitor(10, Id(1), 1);
+    if (!Check(!monitor.Start() && scrolling_hook_failed && monitor.state.Snapshot().paused &&
+                   monitor.state.Claim(1) == 0,
+               "ATTR_scrolling_hook_registration_failure_pauses")) return 1;
+    monitor.Stop();
+  }
   foreground = Id(4);
   for (auto target : {Id(1), Id(2), Id(3), Id(5)}) {
     WindowsBackgroundMonitor monitor(10, Id(1), 1);
