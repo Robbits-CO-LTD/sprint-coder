@@ -209,6 +209,16 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       }
       throw new Error(`measurement discarded on all 5 attempts: ${diagnostic}`);
     };
+    // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
+    // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
+    const measureUntilComplete = async (): Promise<string | undefined> => {
+      const deadline = Date.now() + 3_000;
+      for (;;) {
+        const complete = (await measure()).facts.get('complete');
+        if (complete === '1' || Date.now() >= deadline) return complete;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    };
     const flags = [
       'delegate_execute',
       'drop_target',
@@ -310,7 +320,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
           expect(await reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(
             0,
           );
-        expect((await measure()).facts.get('complete'), `${label} removed`).toBe('1');
+        expect(await measureUntilComplete(), `${label} removed`).toBe('1');
       }
 
       // The perceived type's SystemFileAssociations layer (a type of its own, not the user's "text").
