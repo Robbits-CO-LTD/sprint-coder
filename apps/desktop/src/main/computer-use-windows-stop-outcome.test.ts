@@ -2070,3 +2070,28 @@ describe('PR7c-1 result types', () => {
       .toEqualTypeOf<Extract<WindowsStopDecision, { kind: 'refused' }>['refusal']>();
   });
 });
+
+it('P4c background dispatch to failed receipt retains the row and K-2 isolation', () => {
+  const sent = decideWindowsStop(state(), {
+    ...dispatch,
+    input: { kind: 'semantic', inputPath: 'background_semantic' },
+  });
+  expect(sent.dispatch).toBe('allow');
+  const unknown = decideWindowsStop(sent.state, unconfirmedResponse);
+  expect(unknown.pause).toBe(true);
+  expect(windowsTargetMayStart(unknown.state, target)).toBe(false);
+  const stopped = decideWindowsStop(unknown.state, { ...receipt, storage: failed });
+  expect(stopped.state.rows).toMatchObject([
+    { inputPath: 'background_semantic', state: 'effect_unconfirmed' },
+  ]);
+  expect(decideWindowsStop(stopped.state, gate).dispatch).toBe('deny');
+  const retried = decideWindowsStop(stopped.state, {
+    kind: 'retry_storage',
+    holdId: failed.holdId,
+    status: 'written',
+  });
+  expect(retried.state.quarantines).toMatchObject([
+    { identity: target, reason: 'effect_unconfirmed' },
+  ]);
+  expect(decideWindowsStop(retried.state, gate).dispatch).toBe('deny');
+});

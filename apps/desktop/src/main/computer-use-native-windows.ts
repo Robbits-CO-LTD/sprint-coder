@@ -396,6 +396,7 @@ const semanticActionTypes: ReadonlySet<unknown> = new Set([
   'select',
   'toggle',
   'expand_collapse',
+  'semantic_scroll',
 ]);
 function semanticNotSubmitted(): Error {
   return Object.assign(new Error('native_stop_unconfirmed'), {

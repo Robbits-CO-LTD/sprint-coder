@@ -30,6 +30,7 @@ import {
   computerUseWindowsApprovalDisplaySchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
+  type ComputerUseSemanticScrollAction,
   type ComputerUseEligibilityMode,
   type ComputerUseNativeManifest,
   type ComputerUseObservation,
@@ -298,6 +299,8 @@ type ComputerUseNativeBounds = Readonly<{
 export type ComputerUseNativeHostOptions = Readonly<{
   /** Opt-in storage and startup restoration. Product activation remains PR10b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
+  /** Test injection only; never sourced from environment, Renderer, or model input. */
+  windowsBackgroundInputForTesting?: boolean;
   /** Isolate session lifetime tests from the completed start's separate Stop owner. */
   windowsCompletedStartForTesting?: (forget: (sessionId: string) => boolean) => void;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
@@ -333,6 +336,18 @@ export type ComputerUseNativeHostOptions = Readonly<{
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds;
 }>;
 
+// Keep internal semantic scroll out of the Controller/model action contract.
+type NativeDispatchInput = Omit<Parameters<ComputerUseNativeHost['dispatch']>[0], 'action'> & {
+  action:
+    Parameters<ComputerUseNativeHost['dispatch']>[0]['action'] | ComputerUseSemanticScrollAction;
+};
+type InternalActionNativeHost = Omit<ComputerUseNativeHost, 'dispatch' | 'dispatchApproved'> & {
+  dispatch(input: NativeDispatchInput): Promise<ComputerUseNativeActionResult>;
+  dispatchApproved(
+    input: NativeDispatchInput & { approvalGeneration: number },
+  ): Promise<ComputerUseNativeActionResult>;
+};
+
 /**
  * Adapt the signed loader result to the Main controller contract.  The loader intentionally
  * exposes optional addon methods so malformed or older packages fail closed. A missing picker or
@@ -343,7 +358,7 @@ export function createComputerUseNativeHost(
   binding: ComputerUseNativeBinding,
   platform: NodeJS.Platform = process.platform,
   options: ComputerUseNativeHostOptions = {},
-): ComputerUseNativeHost & { restoreWindowsLedger(): Promise<boolean> } {
+): InternalActionNativeHost & { restoreWindowsLedger(): Promise<boolean> } {
   const addon = binding.addon;
   const runtimePlatform = runtimePlatformFor(platform);
   const acceptanceMode = computerUseCompiledAcceptanceMode();
@@ -1290,11 +1305,20 @@ export function createComputerUseNativeHost(
       completed: () => reflect('success'),
     };
   };
-  const dispatchLedger = (
-    input: Parameters<ComputerUseNativeHost['dispatch']>[0],
-    internal: InternalNativeSession,
-  ) =>
-    inputLedger({
+  const dispatchLedger = (input: NativeDispatchInput, internal: InternalNativeSession) => {
+    if (
+      internal.inputSession?.kind === 'background' &&
+      (ledger === undefined ||
+        input.inputKind === 'paste' ||
+        !['invoke', 'set_text', 'select', 'toggle', 'expand_collapse', 'semantic_scroll'].includes(
+          input.action.type,
+        ))
+    )
+      throw Object.assign(new ComputerUseNativeUnavailableError('native_unavailable'), {
+        code: 'UNAVAILABLE',
+        accepted: false,
+      });
+    return inputLedger({
       sessionId: input.session.sessionId,
       identity:
         typeof internal.raw['pid'] === 'number' && typeof internal.raw.processStartTime === 'string'
@@ -1305,14 +1329,20 @@ export function createComputerUseNativeHost(
         kind:
           input.inputKind === 'paste'
             ? 'paste'
-            : ['invoke', 'set_text', 'select', 'toggle', 'expand_collapse'].includes(
-                  input.action.type,
-                )
+            : [
+                  'invoke',
+                  'set_text',
+                  'select',
+                  'toggle',
+                  'expand_collapse',
+                  'semantic_scroll',
+                ].includes(input.action.type)
               ? 'semantic'
               : 'SendInput',
-        inputPath: 'normal',
+        inputPath: internal.inputSession?.kind === 'background' ? 'background_semantic' : 'normal',
       },
     });
+  };
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
   const inputAttemptsBySession = new Map<string, number>();
@@ -2441,6 +2471,7 @@ export function createComputerUseNativeHost(
                   input,
                   request,
                   options.windowsPhysicalBoundsToDip,
+                  options.windowsBackgroundInputForTesting === true && ledger !== undefined,
                 );
                 if (
                   raw['pid'] !== request['pid'] ||
@@ -2517,6 +2548,7 @@ export function createComputerUseNativeHost(
         input,
         request,
         options.windowsPhysicalBoundsToDip,
+        options.windowsBackgroundInputForTesting === true && ledger !== undefined,
       );
       if (
         existing.platform === 'win32' &&
@@ -2661,6 +2693,7 @@ export function createComputerUseNativeHost(
       input,
       request,
       options.windowsPhysicalBoundsToDip,
+      options.windowsBackgroundInputForTesting === true && ledger !== undefined,
     );
     assertStartOwner(owner);
     owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
@@ -2700,7 +2733,7 @@ export function createComputerUseNativeHost(
     options.effectiveEligibilityMode?.() === 'v2-denylist' &&
     generation.rulesetVersion === denyRulesetVersion('win32') &&
     computerTargetWindowsGenerationMatches(targetGeneration, generation);
-  const host: ComputerUseNativeHost = {
+  const host: InternalActionNativeHost = {
     ...(terminationEnabled
       ? {
           approveWindowsWindowResume: async (input) => {
@@ -4274,6 +4307,7 @@ function parseNativeSession(
   },
   requestBindings: Readonly<Record<string, unknown>>,
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds,
+  backgroundInputForTesting = false,
 ): InternalNativeSession {
   const sessionId = stringField(raw, 'sessionId', input.sessionId);
   const windowId = stringField(raw, 'windowId', input.windowId);
@@ -4291,7 +4325,9 @@ function parseNativeSession(
     inputSession !== undefined &&
     (!inputSession.success ||
       platform !== 'win32' ||
-      (inputSession.data.kind === 'background' && !COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED))
+      (inputSession.data.kind === 'background' &&
+        !COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED &&
+        !backgroundInputForTesting))
   )
     throw new ComputerUseNativeUnavailableError('native_session_invalid');
   const policyLanguage = nativePolicyLanguage(raw);
