@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -55,13 +55,23 @@ const finalDeclaration = [
   'TICKET_REQUIRED=1',
   'INTERLOCK_ENFORCED=1',
 ].map((definition) => '/DSPRINT_CODER_ELIGIBILITY_' + definition);
-const diagnostic =
-  '#988 P5b requires an Explorer pre-send hook after SendInputForBoundTarget revalidation';
+// The IL-only anchor lives in the host .inc, which needs the whole host to compile. Its declaration
+// block is taken verbatim from the source, so this unit compiles the real expression.
+function ilOnlyAnchorDeclaration(): string {
+  const source = readFileSync(
+    join(nativeDirectory, 'computer_use_windows_host_target_facts.inc'),
+    'utf8',
+  );
+  const start = source.indexOf('inline constexpr bool kWindowsIlOnlyImageAnchorReady');
+  const end = source.indexOf('#endif', source.indexOf('#else', start));
+  if (start < 0 || end < 0) throw new Error('IL-only anchor declaration not found');
+  return source.slice(start, end + '#endif'.length);
+}
 
 describe.skipIf(process.platform !== 'win32')(
   'Windows production eligibility compile guard',
   () => {
-    it('rejects the final production declaration and accepts current and isolated acceptance builds', () => {
+    it('compiles the final declaration with only the approval route on, and keeps the test seam out', () => {
       const build = findBuild();
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       if (!build) throw new Error('MSVC unavailable');
@@ -70,8 +80,8 @@ describe.skipIf(process.platform !== 'win32')(
       if (!target.startsWith(resolve(tmpdir()) + sep)) throw new Error('Unexpected temporary path');
       try {
         const unit = join(directory, 'guard.cc');
-        writeFileSync(unit, '#include "computer_use_windows_target_facts.h"\n');
-        const compile = (definitions: string[]) => {
+        const compile = (definitions: string[], body = '') => {
+          writeFileSync(unit, '#include "computer_use_windows_target_facts.h"\n' + body);
           const command = build.wrap([
             '/nologo',
             '/std:c++20',
@@ -109,9 +119,24 @@ describe.skipIf(process.platform !== 'win32')(
           const result = compile(definitions);
           expect(result.status, result.output).toBe(0);
         }
-        const final = compile(finalDeclaration);
-        expect(final.status, final.output).not.toBe(0);
-        expect(final.output).toContain(diagnostic);
+        // A final declaration compiles. The approval route follows the declaration alone, while
+        // Explorer, Store Notepad not-web and the IL-only anchor each wait for their own flag.
+        const checks = [
+          ilOnlyAnchorDeclaration(),
+          'namespace sc = sprint_coder::computer_use;',
+          'static_assert(sc::kNativeEligibilityWindowsV2Final, "sc-check final declaration");',
+          'static_assert(!sc::kWindowsExplorerException, "sc-check Explorer");',
+          'static_assert(!sc::kWindowsStoreNotepadNotWeb, "sc-check Store Notepad");',
+          'static_assert(!kWindowsIlOnlyImageAnchor, "sc-check IL-only anchor");',
+          '',
+        ].join('\n');
+        const final = compile(finalDeclaration, checks);
+        expect(final.status, final.output).toBe(0);
+        // The same checks fail without the final declaration, so they are not vacuous.
+        const current = compile([], checks);
+        expect(current.status, current.output).not.toBe(0);
+        expect(current.output).toContain('sc-check final declaration');
+        expect(current.output).not.toMatch(/sc-check (?:Explorer|Store Notepad|IL-only anchor)/u);
         const forbidden = compile([
           ...finalDeclaration,
           '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',

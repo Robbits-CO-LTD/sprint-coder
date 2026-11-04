@@ -36,14 +36,13 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   };
   const header = read('computer_use_native_eligibility.h');
 
-  it('blocks the final production declaration until the P5b pre-send hook exists', () => {
+  it('keeps Explorer off in a final declaration until the P5b pre-send hook exists', () => {
     const facts = read('computer_use_windows_target_facts.h');
     expect(facts).toContain('inline constexpr bool kWindowsExplorerPreSendHookReady = false;');
+    // The final declaration alone compiles; Explorer additionally waits for the hook flag.
+    expect(facts).not.toContain('static_assert(!kNativeEligibilityWindowsV2Final');
     expect(facts.replace(/\s+/gu, ' ')).toContain(
-      'static_assert(!kNativeEligibilityWindowsV2Final || kWindowsExplorerPreSendHookReady,',
-    );
-    expect(facts).toContain(
-      '#988 P5b requires an Explorer pre-send hook after SendInputForBoundTarget revalidation',
+      'inline constexpr bool kWindowsExplorerException = kNativeEligibilityWindowsV2Final && kWindowsExplorerPreSendHookReady;',
     );
     const seam = section(
       facts,
@@ -98,28 +97,34 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     }
   });
 
-  it('all four native gates have only the guarded test branch or the final declaration', () => {
-    for (const [file, name, guard] of [
+  it('the three extras need the final declaration and their own ready flag; approval only the declaration', () => {
+    for (const [file, name, guard, ready] of [
       [
         'computer_use_windows_target_facts.h',
         'kWindowsExplorerException',
         '#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)',
+        'kWindowsExplorerPreSendHookReady',
       ],
       [
         'computer_use_windows_target_facts.h',
         'kWindowsStoreNotepadNotWeb',
         '#if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)',
+        'kWindowsStoreNotepadNotWebReady',
       ],
       [
         'computer_use_windows_host_target_facts.inc',
         'kWindowsIlOnlyImageAnchor',
         '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
+        'kWindowsIlOnlyImageAnchorReady',
       ],
     ] as const) {
       const source = read(file);
       const qualified = file.endsWith('.inc') ? 'sprint_coder::computer_use::' : '';
       const test = `inline constexpr bool ${name} = true || ${qualified}kNativeEligibilityWindowsV2Final;`;
-      const production = `inline constexpr bool ${name} = ${qualified}kNativeEligibilityWindowsV2Final;`;
+      const production = `inline constexpr bool ${name} = ${qualified}kNativeEligibilityWindowsV2Final && ${ready};`;
+      expect(source.match(new RegExp(`constexpr bool ${ready} =[^;]+;`, 'gu'))).toEqual([
+        `constexpr bool ${ready} = false;`,
+      ]);
       const normalized = source.replace(/\s+/gu, ' ');
       expect(normalized).toContain(`${test} #else ${production} #endif`);
       expect(normalized.match(new RegExp(`constexpr bool ${name} =`, 'gu'))).toHaveLength(2);

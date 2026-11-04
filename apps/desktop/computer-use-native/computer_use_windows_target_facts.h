@@ -26,9 +26,9 @@
 
 namespace sprint_coder::computer_use {
 
+// #988 P5b: the final declaration alone does not enable Explorer. It also needs a pre-send hook
+// after SendInputForBoundTarget revalidation, and this stays false until that hook exists.
 inline constexpr bool kWindowsExplorerPreSendHookReady = false;
-static_assert(!kNativeEligibilityWindowsV2Final || kWindowsExplorerPreSendHookReady,
-    "#988 P5b requires an Explorer pre-send hook after SendInputForBoundTarget revalidation");
 
 #if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
 #if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \
@@ -41,7 +41,8 @@ static_assert(!kNativeEligibilityWindowsV2Final || kWindowsExplorerPreSendHookRe
 #define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1
 inline constexpr bool kWindowsExplorerException = true || kNativeEligibilityWindowsV2Final;
 #else
-inline constexpr bool kWindowsExplorerException = kNativeEligibilityWindowsV2Final;
+inline constexpr bool kWindowsExplorerException =
+    kNativeEligibilityWindowsV2Final && kWindowsExplorerPreSendHookReady;
 #endif
 
 // P3 preparation only: these facts come from the held, matched running image. The canonical
@@ -1126,6 +1127,9 @@ struct WindowsFileKey {
 // The one entry of the table so far: System32's notepad.exe. Path relative to %WINDIR%, ASCII lower.
 inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notepad.exe";
 
+// The final declaration alone does not enable Store Notepad not-web.
+inline constexpr bool kWindowsStoreNotepadNotWebReady = false;
+
 #if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)
 #if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \
     SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1 || \
@@ -1135,7 +1139,8 @@ inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notep
 #endif
 inline constexpr bool kWindowsStoreNotepadNotWeb = true || kNativeEligibilityWindowsV2Final;
 #else
-inline constexpr bool kWindowsStoreNotepadNotWeb = kNativeEligibilityWindowsV2Final;
+inline constexpr bool kWindowsStoreNotepadNotWeb =
+    kNativeEligibilityWindowsV2Final && kWindowsStoreNotepadNotWebReady;
 #endif
 
 // `package` comes only from the verified identity of the same held running image. A family name

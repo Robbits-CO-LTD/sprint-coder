@@ -13,7 +13,10 @@ import {
   type ComputerUseEligibility,
   type ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
-import { checkComputerUseEligibility } from './computer-use-eligibility';
+import {
+  checkComputerUseEligibility,
+  checkComputerUseWindowsV2InterlockAttestation,
+} from './computer-use-eligibility';
 import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
   knownNativeProbeReason,
@@ -222,6 +225,17 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   });
   if (eligibility === 'mismatch') return DENIED_PROBE('ELIGIBILITY_MISMATCH');
   if (eligibility === 'ticket_unattested') return DENIED_PROBE('ELIGIBILITY_TICKET_UNATTESTED');
+  // ADR G: a Windows v2 build also has to declare the input interlock in all three places. A v1 or
+  // macOS artifact is not asked.
+  if (
+    checkComputerUseWindowsV2InterlockAttestation({
+      platform: parsed.platform,
+      compiled: compiledEligibility,
+      manifest: parsed.eligibility,
+      attested: attestedEligibility,
+    }) !== 'ok'
+  )
+    return DENIED_PROBE('ELIGIBILITY_INTERLOCK_UNATTESTED');
   // Only now is the package fully verified, so the native probe's own refusal is the most specific
   // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
   // observe/control stay false either way.
