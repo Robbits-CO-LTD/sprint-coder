@@ -677,6 +677,18 @@ describe('Computer Use accessibility policy projection', () => {
 });
 
 describe('Windows native helper compile boundary', () => {
+  it('P5c2b-W clamps received duration without weakening Begin validation', () => {
+    const native = join(__dirname, '../../computer-use-native');
+    const preflight = readFileSync(join(native, 'computer_use_windows_host_preflight.inc'), 'utf8');
+    const state = readFileSync(join(native, 'computer_use_windows_approval_round_trip.h'), 'utf8');
+    expect(preflight).toContain(
+      'Begin(binding, received_ms, (std::min)(duration, remaining), remaining,',
+    );
+    expect(preflight).toContain('(approval->second.deadline() - now) / 1000000');
+    expect(preflight).toContain('duration == 0 || duration > kApprovalRoundTripMaxDurationMs');
+    expect(state).toContain('duration == 0 || duration > kApprovalRoundTripMaxDurationMs');
+    expect(state).toContain('duration > remaining');
+  });
   it('binds the lazy spawned helper image, digest, signer, and source commit', () => {
     const thumbprint = 'A'.repeat(40);
     const expected = {

@@ -46,6 +46,46 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe('P5b Main round-trip lifetime (no OS input)', () => {
+  it('P5c2b-W ended permits the next offer without forgetting ids or sequence', async () => {
+    vi.useFakeTimers();
+    const { trips, revoked } = fixture();
+    await trips.begin(begin);
+    trips.receive(event);
+    trips.returning(binding.sessionId, binding.roundTripId);
+    trips.exchange(binding.sessionId);
+    await trips.exchanged(binding.sessionId);
+    expect(trips.offered(binding.sessionId)).toBeUndefined();
+    await expect(trips.begin(begin)).rejects.toThrow();
+    await trips.begin({ ...begin, roundTripId: 'card-2' });
+    trips.receive({ ...event, roundTripId: 'card-2', sequence: 2 });
+    expect(revoked).not.toHaveBeenCalled();
+  });
+  it('P5c2b-W offered cannot be offered twice', async () => {
+    vi.useFakeTimers();
+    const { trips } = fixture();
+    await trips.begin(begin);
+    trips.returning(binding.sessionId, binding.roundTripId);
+    trips.exchange(binding.sessionId);
+    expect(trips.offered(binding.sessionId)).toBe(binding.roundTripId);
+    expect(() => trips.offered(binding.sessionId)).toThrow();
+  });
+  it('P5c2b-W accepts only the previous ended after the next begin', async () => {
+    vi.useFakeTimers();
+    const { trips, revoked } = fixture();
+    await trips.begin(begin);
+    trips.receive(event);
+    trips.returning(binding.sessionId, binding.roundTripId);
+    trips.exchange(binding.sessionId);
+    trips.offered(binding.sessionId);
+    await trips.begin({ ...begin, roundTripId: 'card-2' });
+    trips.receive({ ...event, sequence: 2 });
+    trips.receive({ ...event, sequence: 2, state: 'ended', turnId: 'foreign' });
+    trips.receive({ ...event, sequence: 2, state: 'ended' });
+    trips.receive({ ...event, sequence: 3, state: 'ended' });
+    trips.receive({ ...event, roundTripId: 'card-2', sequence: 3 });
+    expect(revoked).not.toHaveBeenCalled();
+    expect(trips.returning(binding.sessionId, 'card-2')).toMatchObject({ roundTripId: 'card-2' });
+  });
   it('Offer ends the first card without End; the second uses a fresh id and exchanges', async () => {
     vi.useFakeTimers();
     const { trips, send } = fixture();

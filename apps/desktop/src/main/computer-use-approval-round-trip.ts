@@ -16,6 +16,8 @@ type Trip = {
   phase:
     'pending' | 'active' | 'returned' | 'exchanging' | 'offered' | 'ending' | 'ended' | 'failed';
   sequence: number;
+  previousBegin?: Begin | undefined;
+  endedNotified: boolean;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -44,6 +46,8 @@ export class ApprovalRoundTrips {
       deadline: this.now() + wire.durationMs,
       phase: 'pending',
       sequence: previous?.sequence ?? 0,
+      previousBegin: previous && !previous.endedNotified ? previous.begin : undefined,
+      endedNotified: false,
       timer: setTimeout(() => {
         void this.cancel(wire.sessionId, 'expired').catch(() => undefined);
         this.fail(trip, 'expired');
@@ -69,7 +73,7 @@ export class ApprovalRoundTrips {
       throw new Error('Round trip acknowledgement refused');
   }
 
-  private matches(trip: Trip, wire: Wire): boolean {
+  private matches(trip: Pick<Trip, 'begin'>, wire: Wire): boolean {
     return (
       ['roundTripId', 'sessionId', 'taskId', 'turnId', 'helperGeneration', 'cancelEpoch'] as const
     ).every((key) => wire[key] === trip.begin[key]);
@@ -112,7 +116,7 @@ export class ApprovalRoundTrips {
   /** Only the validated, re-observation-bound native offer may close the first card. */
   offered(sessionId: string): string | undefined {
     const trip = this.trips.get(sessionId);
-    if (!trip) return;
+    if (!trip || trip.phase === 'ended') return;
     this.live(trip);
     if (trip.phase !== 'exchanging') throw new Error('Round trip offer out of order');
     trip.phase = 'offered';
@@ -173,7 +177,26 @@ export class ApprovalRoundTrips {
   receive(event: WindowsInteractionEvent): void {
     if (event.kind !== 'event') return;
     const trip = this.trips.get(event.sessionId);
-    if (!trip || !this.matches(trip, event)) return;
+    if (!trip || trip.phase === 'failed') return;
+    if (!this.matches(trip, event)) {
+      // Only the previous card's successful terminal notification may fill this sequence slot.
+      if (
+        !trip.previousBegin ||
+        !this.matches({ begin: trip.previousBegin }, event) ||
+        event.state !== 'ended' ||
+        event.failureLatched ||
+        event.failureReason !== 'none' ||
+        event.foreground === 'other'
+      )
+        return;
+      if (event.sequence !== trip.sequence + 1) {
+        this.fail(trip, 'monitor_failed');
+        return;
+      }
+      trip.sequence = event.sequence;
+      trip.previousBegin = undefined;
+      return;
+    }
     if (event.state === 'failed' || event.foreground === 'other') {
       this.fail(trip, event.failureReason === 'none' ? 'third_window' : event.failureReason);
       return;
@@ -188,6 +211,7 @@ export class ApprovalRoundTrips {
       return;
     }
     trip.sequence = event.sequence;
+    if (event.state === 'ended') trip.endedNotified = true;
   }
 
   private fail(trip: Trip, reason: Extract<Wire, { kind: 'event' }>['failureReason']): void {

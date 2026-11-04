@@ -3720,8 +3720,16 @@ export function createComputerUseNativeHost(
             )
               return nativePreflightInvalidResult(null)!;
             if (outcome.approvalOffer !== undefined) {
-              const id = roundTrips?.offered(input.session.sessionId);
-              if (id !== undefined) addon?.completeApprovalRoundTrip?.(input.session.sessionId, id);
+              if (interactionRevoked.has(input.session.sessionId))
+                return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+              try {
+                const id = roundTrips?.offered(input.session.sessionId);
+                if (id !== undefined)
+                  addon?.completeApprovalRoundTrip?.(input.session.sessionId, id);
+              } catch {
+                interactionRevoked.add(input.session.sessionId);
+                return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+              }
               settled = true;
             } else await roundTrips?.cancel(input.session.sessionId, 'rejected');
             return Object.freeze({

@@ -30,6 +30,8 @@ export function loadWindowsMainAddon(helperPath: string): WindowsMainAddon {
   };
 }
 
+let mainImage: Readonly<{ path: string; digest: string }> | undefined;
+
 export function readWindowsMainIdentity(addon: WindowsMainAddon): ApprovalRoundTripIdentity {
   const value = addon.readMainIdentity();
   if (
@@ -46,10 +48,17 @@ export function readWindowsMainIdentity(addon: WindowsMainAddon): ApprovalRoundT
     !value.imagePath
   )
     throw new Error('Windows Main identity unavailable');
+  if (mainImage !== undefined && mainImage.path !== value.imagePath)
+    throw new Error('Windows Main image changed');
+  // The running executable is immutable. Process facts above are still validated on every call.
+  mainImage ??= {
+    path: value.imagePath,
+    digest: createHash('sha256').update(readFileSync(value.imagePath)).digest('hex'),
+  };
   return {
     mainPid: process.pid,
     mainProcessStartTime: value.mainProcessStartTime,
-    mainImageIdentity: createHash('sha256').update(readFileSync(value.imagePath)).digest('hex'),
+    mainImageIdentity: mainImage.digest,
   };
 }
 

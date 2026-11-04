@@ -11922,11 +11922,19 @@ int main() {
     ).rejects.toThrow('native_approval_ceiling_mismatch');
   });
 
-  it.each(['full_access_app', 'supervised', 'background', 'P5b two cards'] as const)(
+  it.each([
+    'full_access_app',
+    'supervised',
+    'background',
+    'P5b two cards',
+    'P5c2b-W failed preflight',
+    'P5c2b-W completion revoked',
+  ] as const)(
     'P4c connects the Windows host approval gate and distinguishes pre-input failure from unknown effect (%s)',
     async (mode) => {
       const background = mode === 'background';
-      const twoCards = mode === 'P5b two cards';
+      const race = mode === 'P5c2b-W failed preflight' || mode === 'P5c2b-W completion revoked';
+      const twoCards = mode === 'P5b two cards' || race;
       const maximumMode = background || twoCards ? 'full_access_app' : mode;
       const tripCalls: Array<[unknown, unknown]> = [];
       const tripReply: Responder = (wire) => {
@@ -12016,7 +12024,7 @@ int main() {
                   requestId: i['requestId'],
                   cancelEpoch: i['cancelEpoch'],
                   observationRevision: i['observationRevision'],
-                  inputAttemptCount: 0,
+                  inputAttemptCount: attempts,
                   approvalGeneration: 1,
                   remainingMs: 60000,
                   effect: 'supervised_action',
@@ -12110,7 +12118,17 @@ int main() {
             }),
           ),
         },
-        (addon) => ({ ...addon, captureWindowsGeneration: () => ({ helperGeneration: 1 }) }),
+        (addon) => ({
+          ...addon,
+          captureWindowsGeneration: () => ({ helperGeneration: 1 }),
+          ...(mode === 'P5c2b-W completion revoked'
+            ? {
+                completeApprovalRoundTrip: () => {
+                  throw new Error('Unbound round trip completion');
+                },
+              }
+            : {}),
+        }),
         undefined,
         eligibility,
         viewers,
@@ -12157,6 +12175,54 @@ int main() {
         });
       };
       if (twoCards) await beginAndReturn('V1-card');
+      if (race) {
+        target.helper().holdOnly('preflight');
+        const pending = target.host.dispatch(input);
+        const assertion = expect(pending).resolves.toMatchObject({
+          result: 'rejected',
+          reasonCode: 'native_interaction_revoked',
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(
+          JSON.parse(
+            decodeComputerUseNativeFrame(sockets.at(-1)!.writes.at(-1)!).metadata.toString(),
+          ).operation,
+        ).toBe('preflight');
+        if (mode === 'P5c2b-W failed preflight') {
+          const socket = sockets.at(-1)!;
+          const frame = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+          socket.emit(
+            'data',
+            encodeComputerUseNativeFrame({
+              ...frame,
+              messageType: 'approval_round_trip_event',
+              metadata: Buffer.from(
+                JSON.stringify({
+                  version: 1,
+                  kind: 'event',
+                  sessionId: session.sessionId,
+                  taskId: 'task-1',
+                  turnId: 'turn-1',
+                  helperGeneration: 1,
+                  cancelEpoch: 0,
+                  roundTripId: 'V1-card',
+                  sequence: 1,
+                  state: 'failed',
+                  foreground: 'other',
+                  failureReason: 'third_window',
+                  failureLatched: true,
+                }),
+              ),
+            }),
+          );
+        }
+        target.helper().release('preflight');
+        await assertion;
+        expect(target.helper().served).not.toContain('dispatch');
+        expect(target.helper().served).not.toContain('dispatch_approved');
+        await target.host.close(session);
+        return;
+      }
       expect(await target.host.dispatch(input)).toMatchObject({
         approvalOffer: { kind: 'approval_required', effect: 'supervised_action' },
       });
@@ -12164,6 +12230,37 @@ int main() {
         expect(tripCalls).toEqual([['begin', 'V1-card']]);
         expect(target.helper().served).not.toContain('dispatch');
         await beginAndReturn('native-card');
+        const socket = sockets.at(-1)!;
+        const frame = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+        for (const [roundTripId, sequence, state] of [
+          ['V1-card', 1, 'ended'],
+          ['native-card', 2, 'active'],
+        ] as const) {
+          socket.emit(
+            'data',
+            encodeComputerUseNativeFrame({
+              ...frame,
+              messageType: 'approval_round_trip_event',
+              metadata: Buffer.from(
+                JSON.stringify({
+                  version: 1,
+                  kind: 'event',
+                  sessionId: session.sessionId,
+                  taskId: 'task-1',
+                  turnId: 'turn-1',
+                  helperGeneration: 1,
+                  cancelEpoch: 0,
+                  roundTripId,
+                  sequence,
+                  state,
+                  foreground: 'target',
+                  failureReason: 'none',
+                  failureLatched: false,
+                }),
+              ),
+            }),
+          );
+        }
         expect(await target.host.approvalApprove!(input)).toEqual({ kind: 'approved' });
         expect(tripCalls).toEqual([
           ['begin', 'V1-card'],
@@ -12171,6 +12268,11 @@ int main() {
           ['end', 'native-card'],
         ]);
         expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'completed' });
+        expect(
+          await target.host.dispatch({ ...input, requestId: 'next-native-offer' }),
+        ).toMatchObject({
+          approvalOffer: { kind: 'approval_required' },
+        });
         await target.host.close(session);
         return;
       }
