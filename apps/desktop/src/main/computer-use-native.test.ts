@@ -93,6 +93,60 @@ it('keeps the IL-only test switch out of production build inputs', () => {
     );
 });
 
+it('keeps the Explorer exception closed and its test macro out of production inputs', () => {
+  const native = join(__dirname, '../../computer-use-native');
+  const facts = readFileSync(join(native, 'computer_use_windows_target_facts.h'), 'utf8');
+  expect(facts).toContain('#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)');
+  expect(facts).toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1');
+  expect(facts).toContain('defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)');
+  expect(facts).toContain('defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)');
+  expect(facts).toMatch(/#error[^\n]*Explorer/u);
+  expect(facts).toContain('inline constexpr bool kWindowsExplorerException = false;');
+  const controller = readFileSync(join(__dirname, 'computer-use-controller.ts'), 'utf8');
+  expect(controller).toContain('const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;');
+  expect(controller).toMatch(
+    /export function windowsExplorerExceptionAllowed\(\s*input: WindowsExplorerExceptionInput,?\s*\): boolean \{\s*return WINDOWS_EXPLORER_EXCEPTION_ENABLED && evaluateWindowsExplorerException\(input\);\s*\}/u,
+  );
+  expect(controller.match(/WINDOWS_EXPLORER_EXCEPTION_ENABLED/gu)).toHaveLength(2);
+  expect(controller.match(/windowsExplorerExceptionAllowed\(/gu)).toHaveLength(1);
+  // The test entry and the evaluation are defined once and used only by the two entries, so no
+  // production path in the controller reaches the evaluation around the constant.
+  expect(controller.match(/windowsExplorerExceptionAllowedForTesting\(/gu)).toHaveLength(1);
+  expect(controller.match(/evaluateWindowsExplorerException\(/gu)).toHaveLength(3);
+  for (const file of readdirSync(__dirname)) {
+    if (!file.endsWith('.ts') || file.endsWith('.test.ts') || file === 'computer-use-controller.ts')
+      continue;
+    expect(readFileSync(join(__dirname, file), 'utf8'), file).not.toContain(
+      'windowsExplorerExceptionAllowed',
+    );
+  }
+  expect(readWindowsHostSource().match(/WindowsExplorerFileWindowRestriction\(/gu)).toHaveLength(1);
+  expect(readWindowsHostSource()).toContain('shell_view_is_filesystem_folder = std::nullopt');
+  expect(readWindowsHostSource()).toContain(
+    'shell_view_is_filesystem_folder == std::optional<bool>(true)',
+  );
+  expect(controller).toContain('|explorer|regedit|');
+  expect(controller).toContain('|finder|file explorer|');
+  const repository = join(__dirname, '../../../..');
+  const inputs = [join(native, 'binding.gyp')];
+  for (const directory of ['apps/desktop/scripts', '.', 'scripts', '.github/workflows']) {
+    if (directory === 'scripts' && !existsSync(join(repository, directory))) continue;
+    for (const entry of readdirSync(join(repository, directory), { withFileTypes: true })) {
+      if (
+        entry.isFile() &&
+        (directory === 'apps/desktop/scripts' ||
+          /^build-computer-use-.*\.mjs$/u.test(entry.name) ||
+          /\.ya?ml$/u.test(entry.name))
+      )
+        inputs.push(join(repository, directory, entry.name));
+    }
+  }
+  for (const path of inputs)
+    expect(readFileSync(path, 'utf8'), path).not.toContain(
+      'SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION',
+    );
+});
+
 it('measures validation identity on the consumer with cancellable I/O and fresh Stop guards', () => {
   const source = readFileSync(
     join(__dirname, '../../computer-use-native/computer_use_windows_host_session.inc'),
