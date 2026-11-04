@@ -188,20 +188,26 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     ];
     const file = join(scratch, `document.${extension}`);
     writeFileSync(file, '');
+    let diagnostic = 'association measurement not started';
     const measure = async (): Promise<Probe> => {
-      const measured = await probe('association', file, 'takeover');
-      expect(measured.status, measured.output).toBe(0);
-      return measured;
-    };
-    // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
-    // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
-    const measureUntilComplete = async (): Promise<string | undefined> => {
-      const deadline = Date.now() + 3_000;
-      for (;;) {
-        const complete = (await measure()).facts.get('complete');
-        if (complete === '1' || Date.now() >= deadline) return complete;
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const measured = await probe('association', file, 'takeover');
+        diagnostic = `association attempt=${attempt} ${[
+          'measurement_discarded',
+          'real_path_verified',
+          'file_id_known',
+          'elapsed_ms',
+        ]
+          .map((name) => `${name}=${measured.facts.get(name) ?? 'missing'}`)
+          .join(' ')}`;
+        expect(measured.status, `${diagnostic}\n${measured.output}`).toBe(0);
+        // Never retry a completed read with unexpected facts, including a missing handler.
+        if (measured.facts.get('measurement_discarded') !== '1') {
+          expect(measured.facts.get('measurement_discarded'), diagnostic).toBe('0');
+          return measured;
+        }
       }
+      throw new Error(`measurement discarded on all 5 attempts: ${diagnostic}`);
     };
     const flags = [
       'delegate_execute',
@@ -304,7 +310,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
           expect(await reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(
             0,
           );
-        expect(await measureUntilComplete(), `${label} removed`).toBe('1');
+        expect((await measure()).facts.get('complete'), `${label} removed`).toBe('1');
       }
 
       // The perceived type's SystemFileAssociations layer (a type of its own, not the user's "text").
@@ -349,6 +355,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       expect(unregistered.status, unregistered.output).toBe(0);
       expect(unregistered.facts.get('prog_id')).toBe('');
     } catch (error) {
+      console.error(diagnostic);
       failure = error;
     } finally {
       // The temporary association must be gone; a key that cannot be removed fails the test.

@@ -207,8 +207,8 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     );
     expect(runner).toContain('~Pending() { if (thread != nullptr) CloseHandle(thread); }');
     // A result done in time is only discarded; nothing is canceled for it.
-    expect(runner).toContain(
-      'if (pending->done && limits.MayRead()) return std::move(pending->result);',
+    expect(runner.replace(/\s+/gu, ' ')).toContain(
+      'if (pending->done && limits.MayRead()) { if (discarded) *discarded = pending->discarded; return std::move(pending->result); }',
     );
     const cancel = between(runner, 'pending->abandoned.store(true);', 'return {};\n}');
     expect(cancel).toContain('if (!pending->done && pending->thread != nullptr) {');
@@ -232,7 +232,7 @@ describe('Windows association and selection measurement (N8-1b)', () => {
     // The worker frees the slot inside the locked section, before `done`: a caller that sees
     // `done` and starts the next measurement finds the slot free.
     expect(runner.replace(/\s+/gu, ' ')).toContain(
-      'pending->result = std::move(result); running.store(false); pending->done = true; }',
+      'pending->result = std::move(result); pending->discarded = discarded; } running.store(false); pending->done = true; }',
     );
     expect(runner.match(/running\.store\(false\)/gu)?.length).toBe(2);
     expect(read('computer_use_windows_association_seam.cc')).toContain(
