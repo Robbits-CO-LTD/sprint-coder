@@ -362,6 +362,8 @@ std::string WindowsDispatchContextDigest(const WindowsSession &session) {
                     true);
   AppendDigestField(&frame, "focused", session.focused_element_signature,
                     session.has_focused_element_signature);
+  if (session.observed_page.web)
+    AppendDigestField(&frame, "page", sprint_coder::computer_use::WindowsPageBinding(session.observed_page), true);
   return Sha256String(frame);
 }
 
@@ -574,6 +576,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT bounds{};
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
     return false;
+  // PR D/F: recheck immediately before input and between chunks before enabling browsers.
+  // This page read alone does not close the TOCTOU gap to SendInput.
+  if (!RecheckWindowsPage(session)) {
+    *reason = "native_target_unclassified";
+    return false;
+  }
   if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
     if (!BeginWindowsExplorerDispatch(session, kind, &explorer_evidence)) {
       *reason = "stale_target";

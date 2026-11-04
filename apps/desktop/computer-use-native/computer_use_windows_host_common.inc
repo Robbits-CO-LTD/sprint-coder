@@ -292,6 +292,8 @@ struct WindowsSession {
   mutable std::optional<bool> v2_input_not_web;
   std::uint64_t cancel_epoch = 0;
   std::uint64_t observation_revision = 0;
+  sprint_coder::computer_use::WindowsPageEvidence observed_page;
+  mutable bool page_observation_invalidated = false;
   bool has_observation = false;
   std::uint64_t dialog_set_revision = 0;
   std::string dialog_set_digest;
@@ -310,6 +312,8 @@ struct WindowsSession {
 // Start evaluates capability and binding before the operation-mode check.
 bool WindowsRoundTripCurrent(const WindowsSession &session);
 bool WindowsRoundTripMayInput(const WindowsSession &session);
+sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity);
+bool RecheckWindowsPage(const WindowsSession &session);
 
 bool WindowsApprovalSessionBindingCurrent(const WindowsSession &session) {
   return !session.approval_revoked &&
@@ -353,6 +357,17 @@ void ForgetWindowsTicket(const std::string &session_key) {
   if (found == ticket_states.end()) return;
   found->second.slot.Invalidate();
   ticket_states.erase(found);
+}
+
+void InvalidateWindowsPage(const WindowsSession &session) {
+  session.page_observation_invalidated = true;
+  for (const auto &[key, owned] : sessions) {
+    if (owned.session_id != session.session_id) continue;
+    owned.page_observation_invalidated = true;
+    InvalidateWindowsTicket(key);
+    const auto approval = approval_states.find(key);
+    if (approval != approval_states.end()) approval->second.Invalidate();
+  }
 }
 std::uint64_t last_closed_cancel_epoch = 0;
 

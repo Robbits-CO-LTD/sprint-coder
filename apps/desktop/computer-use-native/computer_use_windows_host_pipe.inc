@@ -33,6 +33,7 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
           cancellation_epoch.load(std::memory_order_acquire))
     return false;
   std::string tree;
+  auto observed_page = ReadWindowsPage(session, dialogs.active_window, dialogs.active_identity);
   std::size_t nodes = 0;
   if (!ReadUiaObservation(session.pid, dialogs.active_window, &tree, &nodes, background)) {
     *reason = unreadable("accessibility_unavailable");
@@ -110,6 +111,26 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
     return false;
   }
   const std::size_t screenshot_bytes = binary->size();
+  const auto current_page = ReadWindowsPage(session, dialogs.active_window, dialogs.active_identity);
+  if (session.has_observation && !sprint_coder::computer_use::WindowsSamePage(session.observed_page, current_page)) {
+    InvalidateWindowsPage(session);
+  }
+  if (observed_page.web || current_page.web) {
+    // Returning from a card must not replace the page to which the pending approval belonged.
+    const bool returning = session.round_trip && !session.round_trip->MayLegacyStart();
+    if (!sprint_coder::computer_use::WindowsSamePage(observed_page, current_page) ||
+        (returning && !sprint_coder::computer_use::WindowsPageAllowsInput(session.observed_page, current_page))) {
+      observed_page = {};
+      observed_page.web = true;
+      InvalidateWindowsPage(session);
+      if (returning) {
+        session.round_trip->Invalidate();
+        binary->clear();
+        *reason = "native_target_unclassified";
+        return false;
+      }
+    }
+  }
   const std::size_t tree_bytes = tree.size();
   if (screenshot_bytes == 0 || screenshot_bytes > 8 * 1024 * 1024 ||
       tree_bytes == 0 || tree_bytes > 512 * 1024 ||
@@ -187,6 +208,8 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
     if (commit_failure == nullptr) {
       session.dialog_set_revision = next_dialog_revision;
       session.observation_revision = next_revision;
+      std::swap(session.observed_page, observed_page);
+      session.page_observation_invalidated = false;
       session.active_window = dialogs.active_window;
       session.active_window_identity.swap(dialogs.active_identity);
       session.active_window_kind.swap(dialogs.active_kind);

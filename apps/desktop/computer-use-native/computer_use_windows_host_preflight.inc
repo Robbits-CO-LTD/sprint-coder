@@ -830,6 +830,59 @@ bool ReadWindowsApprovalReference(const WindowsSession &session, const std::stri
       facts.observation_revision == session.observation_revision;
 }
 
+sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity) {
+  using namespace sprint_coder::computer_use;
+  WindowsPageEvidence unavailable;
+  wchar_t class_name[256]{};
+  ShadowUiaCapture window_class;
+  window_class.window_class_read = GetClassNameW(window, class_name, 256) > 0;
+  window_class.window_class = Utf8FromWide(class_name);
+  const auto path = Utf8FromWide(session.canonical_path);
+  const bool readable_page = window_class.window_class_read &&
+      window_class.window_class == "Chrome_WidgetWin_1" &&
+      windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(path)) == "chrome.exe";
+  const bool capped_browser = (session.maximum_mode == "observe_only" || session.maximum_mode == "supervised") &&
+      artifact_read_detail::IsBrowserExecutable(path) && windows_shadow_detail::IsWebWindowClass(window_class);
+  const bool same_window = window == session.active_window && !window_identity.empty() &&
+      window_identity == session.active_window_identity;
+  unavailable.web = readable_page || capped_browser || (same_window && session.observed_page.web);
+  // Electron/CEF and embedded WebView2 pages are not bound here; existing interlocks own them.
+  if (!unavailable.web) return unavailable;
+  const auto epoch = session.cancel_epoch;
+  const auto serial = WindowsValidationFrameStopSerial();
+  const auto start = MonotonicNowNs();
+  WindowsOpenMeasurementLimits limits{[epoch, serial] {
+    return WindowsValidationStillCurrent(epoch, serial);
+  }, MonotonicNowNs, start, start + 150'000'000};
+  auto page = RunWindowsOpenMeasurement<WindowsPageEvidence>(limits,
+      [window, pid = session.pid, epoch](const WindowsOpenMeasurementLimits &budget) {
+    const WindowsV1UiaPath path(std::chrono::milliseconds(150), epoch);
+    auto source = WindowsUiaShadowSource::Create(window, POINT{}, [budget] { return budget.MayRead(); },
+        WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
+        windows_uia_source_detail::InterlockShellLookupRunning());
+    if (!source) return WindowsPageEvidence{};
+    source->SetSignatureProvider([pid](IUIAutomationElement *element, std::string *signature) {
+      return ComputeWindowsControlSignature(element, pid, nullptr, signature);
+    });
+    WindowsShadowReader reader(*source);
+    auto evidence = reader.ReadPage();
+    if (!budget.MayRead()) return WindowsPageEvidence{};
+    return evidence;
+  });
+  // A missing/expired read cannot turn a known web window into a native window.
+  page.web = true;
+  return page;
+}
+
+bool RecheckWindowsPage(const WindowsSession &session) {
+  const auto current = ReadWindowsPage(session, session.active_window, session.active_window_identity);
+  if (!session.page_observation_invalidated &&
+      sprint_coder::computer_use::WindowsPageAllowsInput(session.observed_page, current)) return true;
+  InvalidateWindowsPage(session);
+  if (session.round_trip && !session.round_trip->MayLegacyStart()) session.round_trip->Invalidate();
+  return false;
+}
+
 sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
     const WindowsSession &session, const std::string &metadata, std::uint64_t deadline) {
   using namespace sprint_coder::computer_use;
@@ -844,6 +897,11 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   if (!WindowsApprovalGate(session) || !limits.MayRead() || WindowsSemanticInputInFlight() ||
       !ValidateWindowsBackgroundActionBindingWithinFrame(session, metadata) ||
       !ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, &reason)) return {};
+  if (!RecheckWindowsPage(session)) {
+    WindowsApprovalSample refused;
+    refused.measured.takeover = true;
+    return refused;
+  }
   if (kind == "type") {
     std::string text;
     std::vector<std::uint32_t> scalars;
@@ -895,6 +953,8 @@ sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
   input.identity.app_identity = {true, session.app_identity + ":" + session.executable_digest + ":" + session.signer_digest};
   input.identity.process_generation = {true, std::to_string(session.pid) + ":" + session.process_start};
   input.identity.window_identity = {true, session.active_window_identity};
+  if (session.observed_page.web)
+    input.identity.window_identity.value += ":" + WindowsPageBinding(session.observed_page);
   input.identity.geometry_present = true;
   input.identity.x = bounds.left;
   input.identity.y = bounds.top;
@@ -1114,6 +1174,10 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
       ScheduleWindowsEffectShadow(session, metadata, kind, false, false);
     return denied_sent;
   }
+  if (!RecheckWindowsPage(session))
+    return Respond(pipe, request, MessageType::kPreflightResult,
+        WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
+                                "takeover", "native_target_unclassified", "", "rejected"));
   if (WindowsApprovalGate(session)) {
     using namespace sprint_coder::computer_use;
     auto &approval = approval_states[session_key];

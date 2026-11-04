@@ -3192,6 +3192,98 @@ struct FakeExplorer {
   }
 };
 
+bool CheckWindowsPageRecheck() {
+  using namespace sprint_coder::computer_use;
+  const auto fixture = [] {
+    FakeForm form;
+    form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+    form.source.process_path = "C:\\Apps\\chrome.exe";
+    auto &document = form.Node(form.pane);
+    document.control_type = "Document";
+    document.has_url = true;
+    document.url = "https://docs.example.test/first";
+    document.signature = "runtime-id-1";
+    return form;
+  };
+  const auto read = [](FakeForm &form) { return WindowsShadowReader(form.source).ReadPage(); };
+  auto form = fixture();
+  const auto observed = read(form);
+  if (!Check(observed.web && observed.complete && observed.origin == OriginState::kUnknown &&
+             WindowsSamePage(observed, read(form)) && !WindowsPageAllowsInput(observed, observed),
+             "page-current-policy-remains-closed")) return false;
+  form.Node(form.pane).url = "https://other.example.test/second";
+  const auto switched = read(form);
+  NativeOrdinaryTicketBinding binding{"session", "request", "action", "payload",
+      WindowsPageBinding(observed), 1, 1};
+  NativeOrdinaryTicketSlot ticket;
+  const std::string token(64, 'a');
+  if (!ticket.Issue(token, binding, 1, 100)) return false;
+  binding.context_digest = WindowsPageBinding(switched);
+  if (!Check(!WindowsSamePage(observed, switched) && !ticket.Consume(token, binding, 2) &&
+             !ticket.occupied(), "tab_switch_invalidates_pending_action")) return false;
+  form = fixture();
+  form.Node(form.pane).signature = "runtime-id-2";
+  if (!Check(!WindowsSamePage(observed, read(form)) &&
+             WindowsPageBinding(observed) != WindowsPageBinding(read(form)),
+             "same_origin_other_tab_rejects_old_approval")) return false;
+  form = fixture();
+  form.Node(form.pane).url = "https://docs.example.test/second";
+  if (!Check(!WindowsSamePage(observed, read(form)), "same_origin_navigation_invalidates_page")) return false;
+  form.Node(form.pane).url = "https://login.example.test/confirm";
+  const auto sensitive = read(form);
+  if (!Check(sensitive.origin == OriginState::kSensitive &&
+             !WindowsPageAllowsInput(observed, sensitive),
+             "approval_return_rechecks_sensitive_surface")) return false;
+  for (int mode = 0; mode < 5; ++mode) {
+    form = fixture();
+    if (mode == 0) form.Node(form.pane).url.clear();
+    if (mode == 1) form.Node(form.pane).url_result = ShadowReadResult::kFailed;
+    if (mode == 2) form.source.url_read_hook = [&] { form.source.now += 31'000'000; };
+    if (mode == 3) form.source.url_read_hook = [&] { form.source.cancel_after = 0; };
+    if (mode == 4) form.Node(form.pane).signature.clear();
+    const auto unreadable = read(form);
+    if (!Check(!unreadable.complete && unreadable.normalized_origin.empty() &&
+               !WindowsPageAllowsInput(observed, unreadable),
+               "unreadable_origin_never_reuses_previous_origin")) return false;
+  }
+  form = fixture();
+  form.source.url_read_hook = [&] { form.Node(form.window).children.clear(); };
+  if (!Check(!read(form).complete, "detached_document_rejected_after_url_read")) return false;
+  form = fixture();
+  int parent = form.pane;
+  for (int depth = 0; depth < 30; ++depth) parent = form.source.Add(parent, "Pane");
+  if (!Check(read(form).complete, "page-read-does-not-traverse-document-content")) return false;
+  FakeForm native;
+  const auto native_page = read(native);
+  if (!Check(!native_page.web && WindowsPageAllowsInput(native_page, native_page) &&
+             native.source.url_calls == 0, "native-window-page-check-is-neutral")) return false;
+  for (const char *exe : {"slack.exe", "Code.exe", "renamed-electron.exe"}) {
+    form = fixture();
+    form.source.process_path = std::string("C:\\Apps\\") + exe;
+    const auto electron = read(form);
+    if (!Check(!electron.web && WindowsPageAllowsInput(electron, electron) && form.source.url_calls == 0,
+               "electron_page_check_defers_to_existing_interlock")) return false;
+  }
+  // The existing confirmation binding must still reject changed captions on the same page.
+  ShadowAxCapture capture;
+  ApprovalAuthorityIdentity identity;
+  identity.geometry_present = true;
+  ApprovalTargetFrame target{true, 0, 0, 20, 20};
+  EffectFacts facts;
+  facts.neighbor_labels_complete = true;
+  facts.neighbor_labels = {"Confirm purchase: 10"};
+  EffectDecision decision;
+  decision.approval_effect = NativeApprovalEffect::kHighImpactConfirmation;
+  const auto before = DeriveAuthorityBinding(capture, identity, target, facts, decision);
+  facts.neighbor_labels = {"Confirm purchase: 100"};
+  const auto after = DeriveAuthorityBinding(capture, identity, target, facts, decision);
+  if (!Check(before.complete && after.complete &&
+             before.binding.neighbors_digest != after.binding.neighbors_digest,
+             "confirmation_change_invalidates_approval")) return false;
+  std::cout << "Windows page recheck: PASS\n";
+  return true;
+}
+
 bool CheckWindowsPageOrigin() {
   const auto page = [] {
     FakeForm form;
@@ -9709,6 +9801,7 @@ int main() {
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
   if (!CheckWindowsPageOrigin()) return 1;
+  if (!CheckWindowsPageRecheck()) return 1;
   if (!CheckWindowsShadowScheduler()) return 1;
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
