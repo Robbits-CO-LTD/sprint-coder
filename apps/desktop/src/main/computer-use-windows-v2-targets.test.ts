@@ -1,6 +1,7 @@
+import { findBuild } from './test-support/msvc-build';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -23,7 +24,6 @@ import { TARGET_FACT_MAX_BYTES } from './computer-use-target-eligibility';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const fixtureDirectory = join(nativeDirectory, 'fixtures', 'win32-acceptance');
 const host = readWindowsHostSource();
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 
 function cut(start: string, end: string): string {
   const from = host.indexOf(start);
@@ -353,10 +353,6 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
   });
 });
 
-type Build = Readonly<{
-  wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
-}>;
-
 // A long synchronous compiler/native run prevents the worker from receiving Vitest RPC replies.
 function runNative(
   file: string,
@@ -377,41 +373,6 @@ function runNative(
       });
     });
   });
-}
-
-function findBuild(): Build | null {
-  if (process.platform !== 'win32') return null;
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return { wrap: (args) => ({ file: 'cl.exe', args, verbatim: false }) };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    wrap: (args) => ({
-      file: 'cmd.exe',
-      args: [
-        '/d',
-        '/s',
-        '/c',
-        `"call "${vcvars}" >nul && cl.exe ${args.map((argument) => `"${argument}"`).join(' ')}"`,
-      ],
-      verbatim: true,
-    }),
-  };
 }
 
 const program = String.raw`
