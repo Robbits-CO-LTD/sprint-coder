@@ -1,6 +1,7 @@
+import { findBuild, type BuildCommand } from './test-support/msvc-build';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
@@ -8,10 +9,8 @@ import { computerUseObservationSchema } from '@sprint-coder/contracts';
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readWindowsHostSource();
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
-type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
 
-function findBuild(path: string, output: string): Build | null {
+function findCompiler(path: string, output: string): BuildCommand | null {
   if (process.platform !== 'win32') {
     if (spawnSync('clang++', ['--version'], { stdio: 'ignore' }).status !== 0) return null;
     return {
@@ -42,36 +41,7 @@ function findBuild(path: string, output: string): Build | null {
     `/Fe:${output}`,
     `/Fo:${output}.obj`,
   ];
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return { name: 'cl.exe', file: 'cl.exe', args: clArguments, verbatim: false };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    name: 'cl.exe (vcvars64)',
-    file: 'cmd.exe',
-    args: [
-      '/d',
-      '/s',
-      '/c',
-      `"call "${vcvars}" >nul && cl.exe ${clArguments.map((argument) => `"${argument}"`).join(' ')}"`,
-    ],
-    verbatim: true,
-  };
+  return findBuild(clArguments);
 }
 
 // A long synchronous compiler/native run prevents the worker from receiving Vitest RPC replies.
@@ -206,7 +176,7 @@ it('preserves UIA result policy, stop ordering and resource retirement in the sh
   try {
     const source = join(root, 'seam.cc');
     const binary = join(root, process.platform === 'win32' ? 'seam.exe' : 'seam');
-    const compiler = findBuild(source, binary);
+    const compiler = findCompiler(source, binary);
     if (compiler === null) {
       if (process.env.CI) throw new Error('Native compiler required');
       skip();

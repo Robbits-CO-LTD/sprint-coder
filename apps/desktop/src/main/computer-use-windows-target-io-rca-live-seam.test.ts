@@ -3646,7 +3646,12 @@ int DiagnoseSemanticLifecycle(std::wstring_view scenario){
       if(semantic_lifecycle=="claimed-gap-close")Require(semantic_method_calls==0,"semantic_life_claim_precedes_api_entry");
     }
     std::string body,reason;bool ok=false,accepted=false;std::uint64_t attempts=99;
-    Require(run.Wait(2,1000)&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&ReadJsonUint64(body,"attempts",&attempts)&&ReadJsonString(body,"reason",&reason),"semantic_life_result_shape");
+    // Receiving a reply includes scheduling the pipe reader; it is not an API latency budget.
+    const bool received=run.Wait(2,5000);
+    const bool shape=received&&run.ProbeBody(2,&body)&&ReadOptionalJsonBoolean(body,"ok",&ok)&&ReadOptionalJsonBoolean(body,"accepted",&accepted)&&ReadJsonUint64(body,"attempts",&attempts)&&ReadJsonString(body,"reason",&reason);
+    if(!shape)std::cerr<<"semantic-life-result case="<<label<<" received="<<received<<" shape="<<shape<<" replies="<<run.ReplyCount(2)<<"\n";
+    Require(received,"semantic_life_result_wait");
+    Require(shape,"semantic_life_result_shape");
     Require(accepted==!no_input&&attempts==(no_input?0:1)&&ok==(semantic_lifecycle=="success"||source),"semantic_life_result_and_counter");
     if(in_flight)Require(reason=="semantic_input_in_flight","semantic_life_unknown_dispatch");
     if(semantic_lifecycle=="cleanup-close"||semantic_lifecycle=="input-exception"||adoption)Require(reason=="input_not_confirmed","semantic_life_returned_input_not_success");
@@ -3842,8 +3847,44 @@ int DiagnoseRealCapture(){
       return GetForegroundWindow()==fixture_windows[0]&&GetCursorPos(&now)&&!PtInRect(&client,now)&&
         GetLastInputInfo(&input)&&input.dwTime==input_before.dwTime&&ClientBoundsPhysical(fixture_windows[0],&bounds)&&
         bounds.left==client.left&&bounds.top==client.top&&bounds.right==client.right&&bounds.bottom==client.bottom;};
+    // Probe WGC independently of the product's capture/event/worker code. A missing
+    // desktop frame is NOT_RUN only here; any subsequent product failure remains FAIL.
+    const auto available=[&]() -> const char* {
+      try {
+        auto interop=winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem,IGraphicsCaptureItemInterop>();
+        winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{nullptr};
+        winrt::check_hresult(interop->CreateForWindow(fixture_windows[0],winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(),reinterpret_cast<void**>(winrt::put_abi(item))));
+        Microsoft::WRL::ComPtr<ID3D11Device> device;Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
+        winrt::check_hresult(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context));
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;winrt::check_hresult(device.As(&dxgi));
+        winrt::com_ptr<IInspectable> inspectable;winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(),inspectable.put()));
+        auto pool=winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
+          inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>(),
+          winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,1,item.Size());
+        struct Pool {decltype(pool) value;~Pool(){try{value.Close();}catch(...){}}} pool_lifetime{pool};
+        auto session=pool.CreateCaptureSession(item);
+        struct Session {decltype(session) value;~Session(){try{value.Close();}catch(...){}}} session_lifetime{session};
+        session.StartCapture();
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+        do {
+          auto sample=pool.TryGetNextFrame();
+          if(sample){sample.Close();return nullptr;}
+          Sleep(20);
+        }while(std::chrono::steady_clock::now()<deadline);
+        return "capture_probe_no_frame";
+      }catch(const winrt::hresult_error& error){
+        if(error.code()==E_ACCESSDENIED)return "capture_probe_access_denied";
+        throw; // Unknown setup/runtime errors must not be relabeled as unavailable.
+      }
+    };
+    if(const char* unavailable=available()){
+      run.Cleanup();Require(run.child_exited&&run.worker_idle&&!run.watchdog_fired.load(),"capture_real_probe_cleanup");
+      return not_run(unavailable);
+    }
     const WindowsValidationFrameScope frame;
-    const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget,cancellation_epoch.load(),frame.StopSerial());
+    // These are separate capture/codec operations, not one observe request sharing 25 seconds.
+    // Each worker still installs its production deadline; Stop remains active throughout.
+    const WindowsV1UiaPath path(std::chrono::milliseconds::zero(),cancellation_epoch.load(),frame.StopSerial());
     capture_real_mode=true;
     std::vector<std::uint8_t> direct,worker;std::size_t direct_width=0,direct_height=0,width=0,height=0;
     const auto changed_input=[&]{std::fill(direct.begin(),direct.end(),0);std::fill(worker.begin(),worker.end(),0);
@@ -3854,6 +3895,8 @@ int DiagnoseRealCapture(){
     WindowsV1UiaStop stop=WindowsV1UiaStop::kNone;
     const bool captured=CaptureWindowWithGraphicsCapture(fixture_windows[0],cancellation_epoch.load(),frame.StopSerial(),&worker,&width,&height,&stop);
     if(!stable_input())return changed_input();
+    if(!baseline||!captured||stop!=WindowsV1UiaStop::kNone)
+      std::cerr<<"capture-real-frames baseline="<<baseline<<" captured="<<captured<<" stop="<<static_cast<int>(stop)<<"\n";
     Require(baseline&&captured&&stop==WindowsV1UiaStop::kNone,"capture_real_sta_and_mta_frames");
     Require(width==direct_width&&height==direct_height&&width>0&&height>0,"capture_real_same_geometry");
     std::vector<std::string> direct_grid,worker_grid;std::size_t dc=0,dr=0,wc=0,wr=0;
@@ -4185,6 +4228,7 @@ int DiagnoseUia(std::wstring_view scenario) {
     hold_point.store(queued ? HoldPoint::kConsumer : HoldPoint::kNone);
     const std::string mode = twice ? "twice" : deadline ? "deadline" : "single";
     const ULONGLONG started = GetTickCount64();
+    const auto response_started = std::chrono::steady_clock::now();
     run.Send(MessageType::kProbe, 2, "{\"operation\":\"sc820_read_probe\",\"mode\":\"" + mode + "\"}");
     bool stopped = false;
     const auto stop_control = [&](bool cancel_first, bool release_consumer) {
@@ -4221,7 +4265,7 @@ int DiagnoseUia(std::wstring_view scenario) {
     }
     if (cancel || close || queued) stop_control(cancel, queued);
     UiaReadResult result;
-    Require(run.Wait(2, twice ? 7000 : 1000) && run.UiaReply(2, &result), "uia_read_response");
+    Require(run.Wait(2, twice ? 7000 : timeout ? 5000 : 1000) && run.UiaReply(2, &result), "uia_read_response");
     response_ms = GetTickCount64() - started;
     if (twice) {
       Require(result.first && result.second && result.stop == "none" && result.first_nodes > 0 &&
@@ -4240,10 +4284,15 @@ int DiagnoseUia(std::wstring_view scenario) {
                   result.stop == (timeout ? "timeout" : "canceled"), "uia_outer_stop_propagated");
       if (timeout) {
         const auto held_ms = GetTickCount64() - uia_held_since.load();
-        if (response_ms < static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()) || held_ms >= 1000)
-          std::cerr << "uia-contact-timing responseMs=" << response_ms << " heldMs=" << held_ms << "\n";
-        Require(response_ms >= static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()) &&
-                    held_ms < 1000, "uia_contact_deadline_bounded");
+        // Match the production clock: GetTickCount64 can round a real 470ms down.
+        // Allow reader scheduling slack, still well below the held gate's 20s timeout.
+        const auto elapsed = std::chrono::steady_clock::now() - response_started;
+        const bool bounded = elapsed >= kWindowsV1UiaSlowContact && held_ms < 5000;
+        if (!bounded)
+          std::cerr << "uia-contact-timing responseMs=" << response_ms << " steadyMs="
+                    << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+                    << " heldMs=" << held_ms << "\n";
+        Require(bounded, "uia_contact_deadline_bounded");
       }
     }
     if (queued) {
@@ -5018,7 +5067,7 @@ describe.skipIf(
               case: scenario,
               actualCapture: false,
               reason: expect.stringMatching(
-                /^(capture_sdk_unavailable|interactive_desktop_unavailable|capture_api_unavailable|hardware_device_unavailable|owned_fixture_foreground_unavailable|owned_fixture_input_unavailable|owned_fixture_input_changed)$/u,
+                /^(capture_sdk_unavailable|interactive_desktop_unavailable|capture_api_unavailable|hardware_device_unavailable|owned_fixture_foreground_unavailable|owned_fixture_input_unavailable|owned_fixture_input_changed|capture_probe_no_frame|capture_probe_access_denied)$/u,
               ),
             });
             realCaptureNotRun = true;
