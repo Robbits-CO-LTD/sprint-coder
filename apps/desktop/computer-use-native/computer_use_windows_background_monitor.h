@@ -4,8 +4,9 @@
 #include <limits>
 #include <mutex>
 #include <array>
-#if defined(_WIN32)
-#include <windows.h>
+#if defined(_WIN32) && !defined(_WINDOWS_)
+// The same declaration as <windows.h>, without its macros (min/max/near) in every includer.
+extern "C" __declspec(dllimport) unsigned long __stdcall GetTickCount(void);
 #endif
 
 namespace sprint_coder::computer_use {
@@ -54,7 +55,7 @@ inline std::uint64_t BackgroundMonitorNow() {
 }
 inline std::uint32_t BackgroundEventTick() {
 #if defined(_WIN32)
-  return GetTickCount(); // Same wrapping clock as WinEvent's dwmsEventTime.
+  return ::GetTickCount(); // Same wrapping clock as WinEvent's dwmsEventTime.
 #else
   return static_cast<std::uint32_t>(BackgroundMonitorNow());
 #endif
@@ -218,7 +219,7 @@ private:
     CheckHealthLocked(now);
     active_claim_ = 0;
     grace_ = !state_.paused && !state_.unknown_effect && permission_.hwnd != 0 &&
-        now <= std::numeric_limits<std::uint64_t>::max() - kBackgroundEventGraceMs;
+        now <= (std::numeric_limits<std::uint64_t>::max)() - kBackgroundEventGraceMs;
     if (grace_) grace_deadline_ = now + kBackgroundEventGraceMs;
     return !state_.paused && !state_.unknown_effect;
   }
@@ -229,7 +230,7 @@ private:
     if (!registered_ || state_.paused || expected_epoch != state_.epoch || active_claim_ != 0 ||
         (grace_ && now < grace_deadline_))
       return 0;
-    if (next_claim_ == std::numeric_limits<std::uint64_t>::max()) {
+    if (next_claim_ == (std::numeric_limits<std::uint64_t>::max)()) {
       PauseLocked();
       return 0;
     }
@@ -263,7 +264,7 @@ private:
     // Close first, then advance, then let a caller publish the snapshot. Saturation never wraps.
     if (!state_.paused) {
       state_.paused = true;
-      if (state_.epoch != std::numeric_limits<std::uint64_t>::max()) ++state_.epoch;
+      if (state_.epoch != (std::numeric_limits<std::uint64_t>::max)()) ++state_.epoch;
     }
     if (active_claim_ != 0) state_.unknown_effect = true;
   }
