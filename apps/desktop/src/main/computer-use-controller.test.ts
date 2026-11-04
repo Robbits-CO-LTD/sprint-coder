@@ -383,6 +383,14 @@ function createFixture(
     maximumMode: options.sessionMaximumMode ?? 'full_access_app',
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
+  let generationToken: Readonly<{ helperGeneration: number }> | null = null;
+  const captureGeneration = () => {
+    const number = options.helperGeneration?.() ?? null;
+    if (number === null) generationToken = null;
+    else if (generationToken?.helperGeneration !== number)
+      generationToken = Object.freeze({ helperGeneration: number });
+    return generationToken;
+  };
   const native: ComputerUseNativeHost = {
     allowWindowsForegroundHandoff: (_session, consume) => {
       nativeLog.push('allowWindowsForegroundHandoff');
@@ -407,12 +415,8 @@ function createFixture(
     ...(options.helperGeneration === undefined
       ? {}
       : {
-          captureWindowsGeneration: () => {
-            const helperGeneration = options.helperGeneration!();
-            return helperGeneration === null ? null : { helperGeneration };
-          },
-          isWindowsGenerationCurrent: (token) =>
-            token.helperGeneration === options.helperGeneration!(),
+          captureWindowsGeneration: captureGeneration,
+          isWindowsGenerationCurrent: (token) => token === captureGeneration(),
         }),
     availability: () => ({ ...availability, platform: currentProfile.platform }),
     pickApplication: async () => appIdentity,
@@ -758,6 +762,7 @@ function createFixture(
   controllerRef = controller;
   return {
     controller,
+    native,
     statuses,
     approvals,
     audits,
@@ -1372,6 +1377,19 @@ describe('ComputerUseController', () => {
         },
       };
     }
+
+    it('P5c2b-T2 generation capability rejects reconstruction from the same number', () => {
+      let generation: number | null = 1;
+      const fixture = createFixture({ helperGeneration: () => generation });
+      const token = fixture.native.captureWindowsGeneration!()!;
+      expect(fixture.native.captureWindowsGeneration!()).toBe(token);
+      expect(fixture.native.isWindowsGenerationCurrent!(token)).toBe(true);
+      expect(fixture.native.isWindowsGenerationCurrent!({ ...token })).toBe(false);
+      generation = null;
+      expect(fixture.native.isWindowsGenerationCurrent!(token)).toBe(false);
+      generation = 1;
+      expect(fixture.native.isWindowsGenerationCurrent!(token)).toBe(false);
+    });
 
     it('P5c2a consumes once, publishes no card, calls no foreground or input API', async () => {
       const { fixture, intent, input, activation } = await handoffFixture();
