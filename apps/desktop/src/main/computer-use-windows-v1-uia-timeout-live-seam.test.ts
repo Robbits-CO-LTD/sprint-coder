@@ -1,6 +1,7 @@
+import { findBuild, type BuildCommand } from './test-support/msvc-build';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -592,7 +593,6 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
   });
 });
 
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 const libraries = [
   'ole32.lib',
   'oleaut32.lib',
@@ -636,47 +636,8 @@ function compileArguments(path: string, output: string, provenance: string): str
   ];
 }
 
-type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
-
-function findBuild(path: string, output: string, provenance: string): Build | null {
-  if (process.platform !== 'win32') return null;
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return {
-      name: 'cl.exe',
-      file: 'cl.exe',
-      args: compileArguments(path, output, provenance),
-      verbatim: false,
-    };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    name: 'cl.exe (vcvars64)',
-    file: 'cmd.exe',
-    args: [
-      '/d',
-      '/s',
-      '/c',
-      `"call "${vcvars}" >nul && cl.exe ${compileArguments(path, output, provenance)
-        .map((argument) => `"${argument}"`)
-        .join(' ')}"`,
-    ],
-    verbatim: true,
-  };
+function findCompiler(path: string, output: string, provenance: string): BuildCommand | null {
+  return findBuild(compileArguments(path, output, provenance));
 }
 
 const program = String.raw`
@@ -1409,7 +1370,7 @@ int main(int argc, char **argv) {
 
 const onWindows = process.platform === 'win32';
 
-type Context = { scratch: string; source: string; binary: string; compiler: Build | null };
+type Context = { scratch: string; source: string; binary: string; compiler: BuildCommand | null };
 let context: Context | null = null;
 
 // Nothing is created, searched for or compiled off Windows. On Windows without a compiler the test is
@@ -1425,7 +1386,7 @@ beforeAll(() => {
     provenance,
     '#pragma once\n#define SPRINT_CODER_SOURCE_COMMIT "0123456789abcdef0123456789abcdef01234567"\n',
   );
-  context = { scratch, source, binary, compiler: findBuild(source, binary, provenance) };
+  context = { scratch, source, binary, compiler: findCompiler(source, binary, provenance) };
 });
 
 // The directory is removed with retries (a program that has only just ended may still hold its files for

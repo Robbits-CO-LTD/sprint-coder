@@ -1,6 +1,7 @@
+import { findBuild, type BuildCommand } from './test-support/msvc-build';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -36,11 +37,8 @@ function runAsync(file: string, args: string[], options: ExecFileOptionsWithStri
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readWindowsHostSource();
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 
-type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
-
-function findBuild(path: string, output: string): Build | null {
+function findCompiler(path: string, output: string): BuildCommand | null {
   if (process.platform !== 'win32') {
     if (spawnSync('clang++', ['--version'], { stdio: 'ignore' }).status !== 0) return null;
     return {
@@ -62,36 +60,7 @@ function findBuild(path: string, output: string): Build | null {
     `/Fe:${output}`,
     `/Fo:${output}.obj`,
   ];
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return { name: 'cl.exe', file: 'cl.exe', args: clArguments, verbatim: false };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    name: 'cl.exe (vcvars64)',
-    file: 'cmd.exe',
-    args: [
-      '/d',
-      '/s',
-      '/c',
-      `"call "${vcvars}" >nul && cl.exe ${clArguments.map((argument) => `"${argument}"`).join(' ')}"`,
-    ],
-    verbatim: true,
-  };
+  return findBuild(clArguments);
 }
 
 const headFrom = host.indexOf('bool DispatchWindowsAction(');
@@ -334,7 +303,7 @@ int main() {
 const scratch = mkdtempSync(join(tmpdir(), 'computer-use-dispatch-interlock-'));
 const source = join(scratch, 'seam.cc');
 const binary = join(scratch, process.platform === 'win32' ? 'seam.exe' : 'seam');
-const build = findBuild(source, binary);
+const build = findCompiler(source, binary);
 
 describe.skipIf(build === null && process.env['CI'] === undefined)(
   'dispatch interlock check, the real head of DispatchWindowsAction (#500 S5-c-2 PR-5)',

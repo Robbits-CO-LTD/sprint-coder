@@ -1,13 +1,7 @@
+import { findBuild } from './test-support/msvc-build';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { execFile, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -33,45 +27,6 @@ function runAsync(file: string, args: string[], options: ExecFileOptionsWithStri
   });
 }
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
-type Build = Readonly<{
-  wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
-}>;
-
-function findBuild(): Build | null {
-  if (process.platform !== 'win32') return null;
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return { wrap: (args) => ({ file: 'cl.exe', args, verbatim: false }) };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    wrap: (args) => ({
-      file: 'cmd.exe',
-      args: [
-        '/d',
-        '/s',
-        '/c',
-        `"call "${vcvars}" >nul && cl.exe ${args.map((argument) => `"${argument}"`).join(' ')}"`,
-      ],
-      verbatim: true,
-    }),
-  };
-}
 
 const source = readWindowsHostSource();
 const program = readFileSync(
