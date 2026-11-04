@@ -1091,19 +1091,58 @@ struct WindowsFileKey {
 // The one entry of the table so far: System32's notepad.exe. Path relative to %WINDIR%, ASCII lower.
 inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notepad.exe";
 
+#if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)
+#if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \
+    SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1 || \
+    defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || \
+    defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)
+#error Store Notepad not-web is restricted to acceptance test builds
+#endif
+inline constexpr bool kWindowsStoreNotepadNotWeb = true;
+#else
+inline constexpr bool kWindowsStoreNotepadNotWeb = false;
+#endif
+
+// `package` comes only from the verified identity of the same held running image. A family name
+// alone is not evidence. Package signatures, rather than an embedded executable signer, bind this
+// entry; the session's file key must still match even when a Store update preserves its identity.
+[[nodiscard]] inline bool WindowsStoreNotepadIsNotWeb(
+    const TargetFacts &facts, const std::optional<WindowsPackageIdentityParts> &package,
+    const std::optional<WindowsFileKey> &held, const std::optional<WindowsFileKey> &recorded,
+    bool session_recorded) {
+  if constexpr (!kWindowsStoreNotepadNotWeb) return false;
+  if (!package.has_value() || !held.has_value() ||
+      facts.running_image_matches != std::optional<bool>(true) ||
+      facts.packaged != std::optional<bool>(true) ||
+      facts.package_development_mode != std::optional<bool>(false) ||
+      (facts.package_signature_kind != std::optional<std::string>("store") &&
+       facts.package_signature_kind != std::optional<std::string>("system")) ||
+      facts.image_root != std::optional<std::string>("windows_apps") ||
+      facts.image_volume != std::optional<std::string>("fixed") ||
+      facts.pe_subsystem != std::optional<std::string>("gui") ||
+      facts.package_family != std::optional<std::string>(package->family) ||
+      package->family != "Microsoft.WindowsNotepad_8wekyb3d8bbwe" ||
+      package->publisher_id != "8wekyb3d8bbwe" ||
+      package->relative_path != "notepad\\notepad.exe")
+    return false;
+  return !session_recorded || (recorded.has_value() && *recorded == *held);
+}
+
 // Whether the measured target is the table's entry, so its Document may be taken as showing no web
 // content. Every condition is "there and true": the running image matched and was verified signed to
 // the Microsoft root, it is not a package, it lies at %WINDIR%\System32\notepad.exe, and the held
 // file is the very file that path names now (`table`, opened from the system directory by the host)
 // and, once a session has recorded one (`session_recorded`), the file it recorded at its start
-// (`recorded`). A copy of notepad.exe anywhere else, a Store Notepad, or a System32 notepad whose
+// (`recorded`). A copy of notepad.exe anywhere else, a Store Notepad in a default build, or a System32 notepad whose
 // volume serial or file id changed since the session started (an OS update) is not the entry: false,
 // and its Document stays a takeover. Nothing the app reports (a title, a framework, a class) is read.
 [[nodiscard]] inline bool WindowsTargetIsNotWebByTable(const TargetFacts &facts,
                                                        const std::optional<WindowsFileKey> &held,
                                                        const std::optional<WindowsFileKey> &table,
                                                        const std::optional<WindowsFileKey> &recorded,
-                                                       bool session_recorded) {
+                                                       bool session_recorded,
+                                                       const std::optional<WindowsPackageIdentityParts> &package = std::nullopt) {
+  if (WindowsStoreNotepadIsNotWeb(facts, package, held, recorded, session_recorded)) return true;
   if (!(facts.running_image_matches.has_value() && *facts.running_image_matches)) return false;
   if (!(facts.signature.has_value() && *facts.signature == "valid")) return false;
   if (!(facts.signer_microsoft_root.has_value() && *facts.signer_microsoft_root)) return false;
