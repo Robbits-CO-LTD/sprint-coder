@@ -1293,7 +1293,9 @@ bool CheckNativeEligibility() {
                  kNativeEligibilityLexiconVersion > 0 && kNativeEligibilityLexiconVersion <= 0xffff,
              "eligibility-versions")) return false;
   // The classifier version the native attests is the one its classifier actually is.
-  if (!Check(kNativeEligibilityClassifierVersion == kNativePreflightClassifierVersion,
+  if (!Check(kNativeEligibilityClassifierVersion ==
+                 (kNativeEligibilityWindowsV2Final ? kEffectClassifierVersion
+                                                  : kNativePreflightClassifierVersion),
              "eligibility-classifier-version-matches-classifier")) return false;
 #if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)
   // CI names the mode the harness was compiled for (the matrix row), so a harness built against
@@ -1306,7 +1308,7 @@ bool CheckNativeEligibility() {
 #if !defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
   // The harness is compiled without the generated header: the legacy defaults apply. The one
   // exception is the mode, which the Windows v2 harness row (S5-c-3 PR-1) names on the command
-  // line (-DSPRINT_CODER_ELIGIBILITY_V2=1) because no v2 artifact may be built for Windows yet; that
+  // line (-DSPRINT_CODER_ELIGIBILITY_V2=1) for portable seam coverage; that
   // row must then expect v2 as well. The ticket claim is true on both platforms: each native
   // requires a ticket for every input.
 #if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)

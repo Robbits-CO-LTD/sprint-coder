@@ -36,7 +36,7 @@ if (artifactsPath !== undefined) {
 
 const eligibility = {
   mode: 'v2-denylist',
-  rulesetVersion: 4,
+  rulesetVersion: 3,
   classifierVersion: 2,
   lexiconVersion: 3,
   ticketRequired: true,
@@ -119,11 +119,11 @@ describe('Windows V2 artifact files', () => {
   });
   it('rejects_actual_main_pin_mismatch', () => {
     expect(
-      artifactProblems({ compiled: { eligibility: { ...eligibility, rulesetVersion: 3 } } }),
+      artifactProblems({ compiled: { eligibility: { ...eligibility, rulesetVersion: 2 } } }),
     ).toContain('compiled eligibility.rulesetVersion differs');
   });
   it('rejects unanimous stale evidence against the independently requested versions', () => {
-    const stale = { eligibility: { ...eligibility, rulesetVersion: 3 } };
+    const stale = { eligibility: { ...eligibility, rulesetVersion: 2 } };
     expect(
       artifactProblems({
         compiled: stale,
@@ -161,7 +161,7 @@ describe('Windows full V2 build eligibility verification preparation', () => {
   for (const source of ['compiled', 'manifest', 'handshake'] as const) {
     it.each([
       ['mode', 'v1-allowlist'],
-      ['rulesetVersion', 3],
+      ['rulesetVersion', 2],
       ['classifierVersion', 1],
       ['lexiconVersion', 2],
       ['ticketRequired', false],
@@ -185,7 +185,7 @@ describe('Windows full V2 build eligibility verification preparation', () => {
 
   it('rejects unanimous stale evidence against the independently requested versions', () => {
     const input = evidence();
-    const stale = { ...eligibility, rulesetVersion: 3 };
+    const stale = { ...eligibility, rulesetVersion: 2 };
     expect(
       windowsV2EligibilityProblems({
         ...input,

@@ -56,7 +56,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     }
   });
 
-  it('does not name the shadow headers in the host directly, and changes no version', () => {
+  it('does not name the shadow headers in the host directly', () => {
     // S5-b-2a added the reader and the UI Automation source (S5-b-2b wires them); the host reaches the shadow only through that source header.
     expect(windowsHost).not.toContain('computer_use_windows_shadow.h');
     expect(windowsHost).not.toContain('computer_use_effect_shadow.h');
@@ -64,8 +64,6 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     // The versions are candidates only, in the classifier core; nothing here names an attested one.
     for (const header of [sharedShadow, windowsShadow])
       expect(header).not.toMatch(/kNativePreflightClassifierVersion|classifierVersion/u);
-    const eligibility = JSON.parse(read('eligibility.json')) as Record<string, unknown>;
-    expect(JSON.stringify(eligibility)).not.toMatch(/"classifier[A-Za-z]*":\s*2\b/u);
   });
 
   it('defines the read helpers in the shared header, and builds the Windows facts on the shared builder', () => {

@@ -23,7 +23,7 @@ describe('Windows private approval handlers', () => {
     // condition must remain false for both declarations currently emitted by the build.
     const header = native('computer_use_native_eligibility.h');
     expect(header).toContain(
-      'return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 &&',
+      'return from_build && v2 && ruleset == 3 && classifier == 2 && lexicon == 3 &&',
     );
     for (const mode of ['v1-allowlist', 'v2-denylist'] as const)
       expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 4).toBe(false);

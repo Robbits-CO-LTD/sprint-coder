@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -174,7 +174,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
       'kNativePreflightClassifierVersion = 1;',
     );
     const table = JSON.parse(read('eligibility.json')) as { versions: EligibilityVersionTable };
-    expect(table.versions).toEqual(versionOneTable);
+    expect(table.versions).toEqual(expectedEligibilityVersionTable);
     expect(macos).not.toContain('single_use_approval');
   });
 

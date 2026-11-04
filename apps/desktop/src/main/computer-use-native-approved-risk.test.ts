@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -140,7 +140,7 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 
   it('relaxes only an approved high-impact confirmation, on positive evidence, nothing else', () => {

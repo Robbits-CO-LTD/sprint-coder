@@ -35,8 +35,8 @@ describe('Computer Use native --eligibility argument', () => {
     expect(() => parseEligibilityMode(argv, 'darwin')).toThrow(/eligibility/iu);
   });
 
-  it('refuses a Windows deny-list build until S5', () => {
-    expect(() => parseEligibilityMode(['--eligibility=v2'], 'win32')).toThrow(/S5/u);
+  it('accepts an explicitly requested Windows deny-list build', () => {
+    expect(parseEligibilityMode(['--eligibility=v2'], 'win32')).toBe('v2-denylist');
   });
 
   it('never reads the environment', () => {
@@ -57,9 +57,9 @@ describe('Computer Use native eligibility declaration', () => {
       for (const mode of ['v1-allowlist', 'v2-denylist']) {
         expect(eligibilityDeclaration(mode, platform)).toEqual({
           mode,
-          rulesetVersion: 1,
-          classifierVersion: 1,
-          lexiconVersion: 1,
+          rulesetVersion: platform === 'win32' && mode === 'v2-denylist' ? 3 : 1,
+          classifierVersion: platform === 'win32' && mode === 'v2-denylist' ? 2 : 1,
+          lexiconVersion: platform === 'win32' && mode === 'v2-denylist' ? 3 : 1,
           ticketRequired: true,
           interlockEnforced: platform === 'win32' && mode === 'v2-denylist',
         });
@@ -156,6 +156,16 @@ describe('Computer Use native eligibility declaration', () => {
     expect(eligibilityBuildHeader(eligibilityDeclaration('v2-denylist', 'win32'))).toContain(
       '#define SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED 1',
     );
+    const windowsV2 = eligibilityBuildHeader(eligibilityDeclaration('v2-denylist', 'win32'));
+    for (const definition of [
+      'FROM_BUILD 1',
+      'V2 1',
+      'RULESET_VERSION 3',
+      'CLASSIFIER_VERSION 2',
+      'LEXICON_VERSION 3',
+      'TICKET_REQUIRED 1',
+    ])
+      expect(windowsV2).toContain(`#define SPRINT_CODER_ELIGIBILITY_${definition}`);
     // The harness conditions its default-value checks on this macro.
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_FROM_BUILD 1');
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_V2 1');

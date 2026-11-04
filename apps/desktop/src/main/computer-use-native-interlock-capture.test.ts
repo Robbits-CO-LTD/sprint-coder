@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readFileSync } from 'node:fs';
@@ -121,6 +121,6 @@ describe('synchronous interlock evaluation (classifier v2, S4-1b-1)', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 });

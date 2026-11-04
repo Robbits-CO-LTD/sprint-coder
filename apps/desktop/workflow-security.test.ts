@@ -330,7 +330,7 @@ describe('workflow security boundaries', () => {
     expect(macosPackage).not.toContain('gh attestation verify');
   });
 
-  it('builds and checks the native in both eligibility modes on macOS, v1 only on Windows, and ships only v1', () => {
+  it('builds and checks the native in both eligibility modes on macOS and Windows, and releases only v1', () => {
     const ci = workflows['.github/workflows/ci.yml'];
     const gate = jobBlock(ci, 'computer-use-native-gate');
     const entries = [...gate.matchAll(/- label: (.+)\n\s+os: (.+)\n\s+eligibility: (v[12])/gu)].map(
@@ -340,6 +340,7 @@ describe('workflow security boundaries', () => {
       ['macOS', 'macos-latest', 'v1'],
       ['macOS v2', 'macos-latest', 'v2'],
       ['Windows', 'windows-2022', 'v1'],
+      ['Windows v2', 'windows-2022', 'v2'],
     ]);
     expect(stepBlock(gate, 'Compile and manifest native artifact')).toContain(
       'npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}',
@@ -372,8 +373,8 @@ describe('workflow security boundaries', () => {
     expect(harness).toContain('eligibility-mode-matches-matrix');
   });
 
-  it('compiles only the harnesses and the target eligibility seam as v2 on Windows, and requires them', () => {
-    // S5-c-3 PR-1: Windows still may not build a v2 artifact, so this row builds none; it passes
+  it('keeps the portable Windows v2 harnesses and seams alongside the artifact builds', () => {
+    // The portable seam row builds no artifact; it passes
     // the v2 mode to the compiler of the portable harnesses and the seam only.
     const ci = workflows['.github/workflows/ci.yml'];
     const row = jobBlock(ci, 'computer-use-windows-v2-harness');
@@ -407,9 +408,9 @@ describe('workflow security boundaries', () => {
     expect(required).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
     expect(required).toContain('run: node ci-scope.mjs gate');
     expect(row).toContain("if: needs.classify.outputs.full_matrix == 'true'");
-    // The Windows build route itself still refuses v2 (the PR that lifts it is the enabling one).
+    // The separate native gate also builds a real Windows V2 artifact.
     const gate = jobBlock(ci, 'computer-use-native-gate');
-    expect(gate).not.toMatch(/os: windows-2022\n\s+eligibility: v2/u);
+    expect(gate).toMatch(/os: windows-2022\n\s+eligibility: v2/u);
     // The macOS rows run the same target eligibility harness with clang.
     expect(stepBlock(gate, 'Run protocol harness with macOS sanitizers')).toContain(
       'computer_use_target_eligibility_harness.cc',
@@ -449,7 +450,7 @@ describe('workflow security boundaries', () => {
 
   it('keeps shared package builders and evidence workflows at the default eligibility mode', () => {
     // Every route that builds the Computer Use native for a package, by either spelling of its
-    // name, must leave the mode at its v1 default. Explicit modes belong in dedicated workflows.
+    // name, keeps the v1 default. Forge permits an explicit local build environment override.
     const rootPackage = JSON.parse(
       readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8'),
     ) as { scripts: Record<string, string> };
@@ -467,7 +468,11 @@ describe('workflow security boundaries', () => {
       expect(script, name).not.toContain('--eligibility');
     const forge = readFileSync(resolve(repositoryRoot, 'apps/desktop/forge.config.ts'), 'utf8');
     expect(forge).toContain('build-computer-use-native.mjs');
-    expect(forge).not.toContain('--eligibility');
+    expect(forge).toContain("process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY'] === undefined");
+    expect(forge).toContain('? []');
+    expect(forge).toContain(
+      "`--eligibility=${process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY']}`",
+    );
     for (const file of [
       '.github/workflows/computer-use-final-gate.yml',
       '.github/workflows/computer-use-evidence-harness.yml',

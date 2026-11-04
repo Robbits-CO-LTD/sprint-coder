@@ -42,6 +42,8 @@ export function windowsDocumentViewerDeclaration(platform) {
 // The build script reaches this on Linux too and skips the native afterwards, so the mode parse
 // does not judge the platform; eligibilityDeclaration rejects anything but darwin and win32.
 export function parseEligibilityMode(argv, target) {
+  // Keep the caller's platform argument; platform validation belongs to eligibilityDeclaration.
+  void target;
   const claims = argv.filter(
     (argument) => argument === '--eligibility' || argument.startsWith('--eligibility='),
   );
@@ -54,10 +56,6 @@ export function parseEligibilityMode(argv, target) {
   if (!Object.hasOwn(MODES, value))
     throw new Error('Computer Use native --eligibility accepts only v1 or v2');
   const mode = MODES[value];
-  if (mode === MODES.v2 && target === 'win32')
-    throw new Error(
-      'Computer Use native --eligibility=v2 is unsupported on Windows until S5 (no deny-list there yet)',
-    );
   return mode;
 }
 

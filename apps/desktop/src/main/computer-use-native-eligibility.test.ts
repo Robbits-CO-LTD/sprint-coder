@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -56,7 +56,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   it('WindowsV2FinalDeclaration requires the exact final build declaration', () => {
     const body = /constexpr bool WindowsV2FinalDeclaration\([^}]+\{([^}]+)\}/u.exec(header)?.[1];
     expect(body?.replace(/\s+/gu, ' ').trim()).toBe(
-      'return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 && ticket_required && interlock_enforced;',
+      'return from_build && v2 && ruleset == 3 && classifier == 2 && lexicon == 3 && ticket_required && interlock_enforced;',
     );
     expect(header).toContain(
       '#if defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)\nconstexpr bool kNativeEligibilityFromBuild = true;\n#else\nconstexpr bool kNativeEligibilityFromBuild = false;\n#endif',
@@ -68,19 +68,19 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     const assertions = harness.match(/static_assert\(!?WindowsV2FinalDeclaration\([^;]+;/gu);
     expect(assertions).toHaveLength(11);
     expect(assertions).toContain(
-      'static_assert(WindowsV2FinalDeclaration(true, true, 4, 2, 3, true, true));',
+      'static_assert(WindowsV2FinalDeclaration(true, true, 3, 2, 3, true, true));',
     );
     for (const arguments_ of [
-      'false, true, 4, 2, 3, true, true',
-      'true, false, 4, 2, 3, true, true',
-      'true, true, 3, 2, 3, true, true',
-      'true, true, 5, 2, 3, true, true',
-      'true, true, 4, 1, 3, true, true',
-      'true, true, 4, 3, 3, true, true',
-      'true, true, 4, 2, 2, true, true',
-      'true, true, 4, 2, 4, true, true',
-      'true, true, 4, 2, 3, false, true',
-      'true, true, 4, 2, 3, true, false',
+      'false, true, 3, 2, 3, true, true',
+      'true, false, 3, 2, 3, true, true',
+      'true, true, 2, 2, 3, true, true',
+      'true, true, 4, 2, 3, true, true',
+      'true, true, 3, 1, 3, true, true',
+      'true, true, 3, 3, 3, true, true',
+      'true, true, 3, 2, 2, true, true',
+      'true, true, 3, 2, 4, true, true',
+      'true, true, 3, 2, 3, false, true',
+      'true, true, 3, 2, 3, true, false',
     ])
       expect(assertions).toContain(
         'static_assert(!WindowsV2FinalDeclaration(' + arguments_ + '));',
@@ -92,7 +92,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
           declaration.rulesetVersion,
           declaration.classifierVersion,
           declaration.lexiconVersion,
-        ]).not.toEqual([4, 2, 3]);
+        ]).toEqual(platform === 'win32' && mode === 'v2-denylist' ? [3, 2, 3] : [1, 1, 1]);
       }
     }
   });
@@ -151,7 +151,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
           computerUseEligibilitySchema.safeParse(eligibilityDeclaration(mode, platform)).success,
         ).toBe(true);
       }
-    expect(table.versions).toEqual(versionOneTable);
+    expect(table.versions).toEqual(expectedEligibilityVersionTable);
     // The header's fallbacks (a build with no generated header) are the same v1 numbers.
     const fallback = (name: string): number => {
       const match = new RegExp(`#\\s*define SPRINT_CODER_ELIGIBILITY_${name} (\\d+)`, 'u').exec(
@@ -163,6 +163,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     for (const platform of ['darwin', 'win32'] as const)
       for (const mode of ['v1', 'v2'] as const) {
         const versions = table.versions[platform][mode];
+        if (platform === 'win32' && mode === 'v2') continue;
         expect(fallback('RULESET_VERSION')).toBe(versions.rulesetVersion);
         expect(fallback('CLASSIFIER_VERSION')).toBe(versions.classifierVersion);
         expect(fallback('LEXICON_VERSION')).toBe(versions.lexiconVersion);

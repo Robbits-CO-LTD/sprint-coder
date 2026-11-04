@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -69,7 +69,7 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 
   it('uses the ADR reason codes and the receipt results', () => {
@@ -204,7 +204,7 @@ describe('strict interlock of v2 sessions (S5-c-3 PR-3)', () => {
     const ci = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     expect(build).toContain("'/we4062',");
     expect(gyp).toContain('"-Werror=switch"');
-    expect(ci.match(/\/W4 \/GS \/sdl \/utf-8 \/we4062 /gu)).toHaveLength(2);
+    expect(ci.match(/\/W4 \/GS \/sdl \/utf-8 \/we4062 /gu)).toHaveLength(3);
     expect(ci.match(/-fno-omit-frame-pointer[^\n]*-Werror=switch \\/gu)).toHaveLength(2);
   });
 

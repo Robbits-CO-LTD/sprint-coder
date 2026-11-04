@@ -137,8 +137,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # ADR v2 D7-3: macOS is built and checked in both eligibility modes. Windows has no
-        # deny-list until S5, so it is built as v1 only. Only v1 ever ships (release-beta builds v1).
+        # Both platforms build and check V1 and opt-in V2. Release builds still default to V1.
         include:
           - label: macOS
             os: macos-latest
@@ -149,6 +148,9 @@ jobs:
           - label: Windows
             os: windows-2022
             eligibility: v1
+          - label: Windows v2
+            os: windows-2022
+            eligibility: v2
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -227,17 +229,26 @@ jobs:
         run: |
           $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
           $include = 'apps/desktop/computer-use-native'
+          $header = Join-Path $include 'build/Release/computer_use_build_eligibility.h'
+          $expectedV2 = '${{ matrix.eligibility == 'v2' && '1' || '0' }}'
+          $declaration = @("/FI$header", "/DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=$expectedV2")
+          $target = Join-Path $env:RUNNER_TEMP 'computer-use-target-eligibility-harness.exe'
+          $targetObject = Join-Path $env:RUNNER_TEMP 'computer-use-target-eligibility-harness.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 "/I$include" @declaration "$include/computer_use_target_eligibility_harness.cc" "/Fo$targetObject" "/Fe$target"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $normal = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.exe'
           $normalObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.obj'
           # /utf-8: the harness sources carry CJK lexicon terms; the default code page would misread them.
-          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 "/I$include" $source "/Fo$normalObject" "/Fe$normal"
+          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 "/I$include" @declaration $source "/Fo$normalObject" "/Fe$normal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $normal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $asan = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.exe'
           $asanObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.obj'
-          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /utf-8 /fsanitize=address "/I$include" $source "/Fo$asanObject" "/Fe$asan"
+          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /utf-8 /fsanitize=address "/I$include" @declaration $source "/Fo$asanObject" "/Fe$asan"
           if ($LASTEXITCODE -ne 0) {
             'Windows ASan: SKIP - windows-2022 MSVC sanitizer compile/link unavailable; mandatory malformed-frame harness passed.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
             exit 0
@@ -254,6 +265,9 @@ jobs:
           npx vitest run
           src/main/computer-use-native.test.ts
           src/main/computer-use-eligibility-artifact.test.ts
+          src/main/computer-use-native-interlock-gate.test.ts
+          src/main/computer-use-windows-eligibility-build.test.ts
+          src/main/computer-use-windows-approval-handlers.test.ts
           src/main/computer-use-windows-ticket.test.ts
           src/main/computer-use-windows-ticket-seam.test.ts
           verify-computer-use-eligibility.test.mjs
@@ -296,9 +310,7 @@ jobs:
           exit $LASTEXITCODE
 
   computer-use-windows-v2-harness:
-    # S5-c-3 PR-1 (#500): Windows may not build a v2 (deny-list) native yet, so
-    # build-computer-use-eligibility.mjs and the contracts still refuse it. This row compiles only
-    # the portable harnesses and the target eligibility seam as v2 with MSVC; no artifact is built.
+    # Portable V2 seams complement the real Windows V2 artifact row above.
     # PR-2 adds the live seam of the host's target facts (still called from nowhere).
     name: Computer Use native Windows v2 harness
     needs: classify

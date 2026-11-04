@@ -49,7 +49,7 @@ function findBuild(): Build | null {
 const finalDeclaration = [
   'FROM_BUILD=1',
   'V2=1',
-  'RULESET_VERSION=4',
+  'RULESET_VERSION=3',
   'CLASSIFIER_VERSION=2',
   'LEXICON_VERSION=3',
   'TICKET_REQUIRED=1',
