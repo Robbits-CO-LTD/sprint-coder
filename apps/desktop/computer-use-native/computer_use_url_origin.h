@@ -6,8 +6,7 @@
 
 namespace sprint_coder::computer_use {
 
-// N11-A candidate only. No capture/input path includes this header. Keep the existing
-// ClassifyPageOrigin and macOS ApplyShadowOrigin unchanged until the integration review.
+// Shared URL syntax for page classification and private approval binding.
 // This is a deliberately restricted parser, not a browser URL repair algorithm or IDNA library.
 // ordinary describes the scheme, never trust in a site. No DNS or hostname permission table.
 struct UrlOrigin {
@@ -16,6 +15,7 @@ struct UrlOrigin {
   // Private binding material only: never log, serialize or send to a provider.
   // Empty for unknown and file (opaque); file must not share an approval origin digest.
   std::string normalized_origin;
+  bool sensitive_label = false;
 };
 
 namespace url_origin_detail {
@@ -68,7 +68,18 @@ inline bool AddressAliasLabel(std::string_view label) {
   return groups == 4 && digits > 0;
 }
 
-inline bool PlainHost(std::string_view host) {
+// These labels are refusal-only signals for the categories in ADR 3.5, not a complete site list.
+// A missing signal cannot establish that a site is safe, including a lookalike or an internal site.
+inline bool SensitiveLabel(std::string_view label) {
+  constexpr std::string_view labels[] = {
+      "bank", "banking", "payment", "payments", "checkout", "pay", "billing", "oauth",
+      "sso", "login", "auth", "admin", "console", "account", "accounts"};
+  for (auto candidate : labels)
+    if (label == candidate) return true;
+  return false;
+}
+
+inline bool PlainHost(std::string_view host, bool *address_alias, bool *sensitive) {
   if (host.empty() || host.size() > 253 || host.back() == '.') return false;
   std::size_t begin = 0;
   while (begin < host.size()) {
@@ -86,7 +97,9 @@ inline bool PlainHost(std::string_view host) {
     }
     // Includes numeric-address aliases under arbitrary domains. Never infer loopback or
     // local trust from a host prefix (and never resolve DNS to decide classification).
-    if (numeric || label.starts_with("0x") || AddressAliasLabel(label)) return false;
+    *address_alias = *address_alias || numeric || label.starts_with("0x") || AddressAliasLabel(label);
+    *sensitive = *sensitive || SensitiveLabel(label);
+    if (dot == std::string_view::npos && (numeric || label.starts_with("0x"))) return false;
     if (dot == std::string_view::npos) return true;
     begin = dot + 1;
   }
@@ -125,7 +138,8 @@ inline bool PlainHost(std::string_view host) {
   }
   const auto port_at = authority.find(':');
   std::string host = Lower(authority.substr(0, port_at));
-  if (!PlainHost(host)) return unknown;
+  bool address_alias = false, sensitive = false;
+  if (!PlainHost(host, &address_alias, &sensitive)) return unknown;
   std::string port;
   if (port_at != std::string_view::npos) {
     const auto digits = authority.substr(port_at + 1);
@@ -139,7 +153,9 @@ inline bool PlainHost(std::string_view host) {
     if (!((scheme == "http" && number == 80) || (scheme == "https" && number == 443)))
       port = ":" + std::to_string(number);
   }
-  return {OriginState::kOrdinary, dev_tools, scheme + "://" + host + port};
+  sensitive = sensitive && !dev_tools && host.find('.') != std::string::npos;
+  if (address_alias) return {OriginState::kUnknown, dev_tools, {}, sensitive};
+  return {OriginState::kOrdinary, dev_tools, scheme + "://" + host + port, sensitive};
 }
 
 // Optional pre-existing sensitive evidence may only strengthen the result. There is no

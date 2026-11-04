@@ -157,10 +157,11 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
   });
 
   it('treats a page whose origin cannot be told as nobody to approve for', () => {
-    // The authority ends at "/", "?", "#" or a backslash; a local file has no host; an empty origin
-    // makes the binding incomplete (a takeover) instead of a shared "no origin".
-    expect(measurement).toContain('rest.find_first_of("/?#\\\\")');
-    expect(measurement).toContain('if (host.empty() || scheme == "file") return std::string();');
+    // Classification and binding share the restricted parser; opaque/rejected origins refuse.
+    expect(measurement).toContain('ClassifyPageOrigin(url).normalized_origin');
+    expect(measurement).toContain(
+      'facts.origin == OriginState::kOrdinary && capture.web_area_url_read',
+    );
     expect(measurement).toContain('if (origin.empty()) derived.complete = false;');
     // A flag added to the rule set must be compared in RulesetIsTheVersionsOwn.
     expect(measurement).toContain('static_assert(sizeof(EffectRuleset) == 4 * sizeof(bool),');

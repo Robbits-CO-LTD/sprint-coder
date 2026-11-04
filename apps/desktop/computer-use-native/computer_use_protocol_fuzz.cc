@@ -3221,6 +3221,19 @@ bool CheckWindowsPageOrigin() {
     if (!Check(reader.Capture("click", "").page_origin == OriginState::kUnknown,
                "winorigin-empty-never-reuses-origin")) return false;
   }
+  for (const auto url : {"https://docs.example", "https://127.0.0.1.nip.io",
+                         "file:///C:/synthetic/a", "devtools://devtools/", "https://docs.example."}) {
+    auto form = page();
+    form.Node(form.pane).url = url;
+    if (!Check(read(form).page_origin == OriginState::kUnknown,
+               "winorigin-unified-parser-never-enables-pages")) return false;
+  }
+  {
+    auto form = page();
+    form.Node(form.pane).url = "https://login.127-0-0-1.example";
+    if (!Check(read(form).page_origin == OriginState::kSensitive,
+               "winorigin-alias-keeps-sensitive-evidence")) return false;
+  }
   // Origin-only work must not change the legacy capture when its own budget runs out.
   for (int mode = 0; mode < 3; ++mode) {
     auto baseline = page();
@@ -4190,10 +4203,10 @@ bool CheckEffectMeasurementBinding() {
                  NormalizeOrigin("http://shop.example:80") == "http://shop.example" &&
                  NormalizeOrigin("http://shop.example:8080/a") == "http://shop.example:8080" &&
                  NormalizeOrigin("https://shop.example:80/") == "https://shop.example:80" &&
-                 NormalizeOrigin("HTTPS://user:pw@Shop.Example/") == "https://shop.example" &&
-                 NormalizeOrigin("https://[::1]:8443/x") == "https://[::1]:8443" &&
-                 NormalizeOrigin("https://good.example\\evil.example/path") == "https://good.example" &&
-                 NormalizeOrigin("https://good.example:8443\\x") == "https://good.example:8443",
+                 NormalizeOrigin("HTTPS://user:pw@Shop.Example/").empty() &&
+                 NormalizeOrigin("https://[::1]:8443/x").empty() &&
+                 NormalizeOrigin("https://good.example\\evil.example/path").empty() &&
+                 NormalizeOrigin("https://good.example:8443\\x").empty(),
              "binding-origin-normalization")) return false;
   if (!Check(NormalizeOrigin("").empty() && NormalizeOrigin("shop.example/a").empty() &&
                  NormalizeOrigin("https:///x").empty() && NormalizeOrigin("https://host:12a/").empty() &&

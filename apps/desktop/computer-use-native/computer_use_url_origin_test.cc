@@ -1,10 +1,13 @@
 #include "computer_use_url_origin.h"
+#include "computer_use_origin_classify_test.h"
+#include "computer_use_effect_measurement.h"
 #include <iostream>
 
 using namespace sprint_coder::computer_use;
 
 // Synthetic fixtures only. Failure output contains an ordinal and classification, never a URL.
 int main() {
+  if (!CheckOriginClassification()) return 10;
   struct Case {
     std::string_view input;
     std::string_view normalized;
@@ -89,6 +92,18 @@ int main() {
       std::cerr << "golden-classification FAIL " << index << '\n';
       return 1;
     }
+    const auto page = ClassifyPageOrigin(entry.input);
+    if (page.state == OriginState::kOrdinary ||
+        NormalizeOrigin(entry.input) != page.normalized_origin) return 11;
+    ShadowAxCapture capture;
+    capture.web_area_url_read = true;
+    capture.web_area_url = entry.input;
+    EffectFacts binding_facts;
+    binding_facts.origin = OriginState::kOrdinary;
+    const auto binding = DeriveAuthorityBinding(capture, {}, {}, binding_facts, {});
+    if (binding.complete != !page.normalized_origin.empty() ||
+        binding.binding.origin.present != !page.normalized_origin.empty() ||
+        binding.binding.origin.value != page.normalized_origin) return 12;
     EffectFacts facts;
     facts.metadata_complete = facts.chain_complete = facts.text_language_supported = true;
     facts.action = ActionKind::kScroll;
