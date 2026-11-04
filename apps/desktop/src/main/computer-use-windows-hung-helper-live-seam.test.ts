@@ -1,5 +1,12 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import {
+  execFile,
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type SpawnOptions,
+  type ExecFileOptionsWithStringEncoding,
+} from 'node:child_process';
 import type * as NodeChildProcess from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -37,6 +44,27 @@ import {
   type WindowsInputKind,
 } from './computer-use-windows-stop-outcome';
 import type { ComputerAppProfileRecord } from './persistence';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // Pass through every OS operation. The observer owns only the child/exit/kill timestamps and cleanup;
 // attestation, framing, pipe, deadlines, Host and Controller are all the production implementations.
@@ -269,7 +297,7 @@ async function run(file: string, args: string[], timeout: number, verbatim = fal
 // The product deadline, attestation and process are untouched: a later attestation that still
 // exceeds 10 s fails its case and is a product finding.
 const attestWarmupTimeout = 120_000;
-function attestWarmup() {
+async function attestWarmup() {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     '$total = [System.Diagnostics.Stopwatch]::StartNew()',
@@ -295,7 +323,7 @@ function attestWarmup() {
     '[pscustomobject]@{import_ms=$importMs;main_module_ms=$mainModuleMs;images=@($images);script_ms=$total.ElapsedMilliseconds} | ConvertTo-Json -Compress -Depth 4',
   ].join('\n');
   const start = performance.now();
-  const warm = spawnSync(
+  const warm = await runAsync(
     'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
     {
@@ -405,7 +433,7 @@ beforeAll(async () => {
     expect(probe.status, 'native probe exit code').toBe(0);
     probes.set(binary, record(JSON.parse(probe.stdout) as unknown));
   }
-  attestWarmup();
+  await attestWarmup();
   ready = true;
 }, 950_000);
 

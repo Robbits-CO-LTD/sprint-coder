@@ -1,9 +1,30 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // A LIVE seam for the Windows shadow wiring (classifier v2, S5-b-2b/2c). The wiring block of
 // computer_use_windows_host.cc (between its BEGIN/END markers) is cut out as it is and compiled with
@@ -340,21 +361,21 @@ const build = (() => {
 describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
   'Windows shadow wiring, live against UI Automation (S5-b-2)',
   () => {
-    it('hands a capture over, records exactly, and the process survives', () => {
+    it('hands a capture over, records exactly, and the process survives', async () => {
       expect(build, 'a Windows build context').not.toBeNull();
       const context = build!;
       try {
         expect(context.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
         writeFileSync(context.source, program.replace('//@@BLOCK@@', pointBlock() + wiringBlock()));
         const compiler = context.compiler!;
-        const built = spawnSync(compiler.file, compiler.args, {
+        const built = await runAsync(compiler.file, compiler.args, {
           encoding: 'utf8',
           windowsVerbatimArguments: compiler.verbatim,
           timeout: 180_000,
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(context.binary, [], { encoding: 'utf8', timeout: 60_000 });
+        const run = await runAsync(context.binary, [], { encoding: 'utf8', timeout: 60_000 });
         // The probe lines say why a capture could not read, which differs per runner.
         console.log(run.stdout);
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
