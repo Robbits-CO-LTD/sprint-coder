@@ -1,6 +1,18 @@
 {
   "targets": [
     {
+      "target_name": "sprint_coder_computer_use_windows_main",
+      "sources": ["computer_use_windows_main.cc"],
+      "defines": ["NAPI_VERSION=10"],
+      "conditions": [
+        ["OS!='win'", { "type": "none" }],
+        ["OS=='win'", {
+          "libraries": ["user32.lib"],
+          "msvs_settings": { "VCCLCompilerTool": { "AdditionalOptions": ["/std:c++20"] } }
+        }]
+      ]
+    },
+    {
       "target_name": "sprint_coder_computer_use_native",
       "sources": ["computer_use_macos.mm"],
       "defines": ["NAPI_VERSION=10"],

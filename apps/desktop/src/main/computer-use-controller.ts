@@ -442,6 +442,11 @@ export async function startComputerUseWindowsQuarantineSession(
 }
 
 export interface ComputerUseNativeHost {
+  /** Internal P5c2 seam only; no card or tool may call this without consuming its handoff. */
+  allowWindowsForegroundHandoff?(
+    session: ComputerUseNativeSession,
+    consumeHandoff: () => void,
+  ): boolean;
   beginApprovalRoundTrip?(input: {
     session: ComputerUseNativeSession;
     taskId: string;

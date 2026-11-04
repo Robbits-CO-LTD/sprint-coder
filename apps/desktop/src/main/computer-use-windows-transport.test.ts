@@ -1,4 +1,6 @@
 import type { ComputerUseDiscoveryResult } from './computer-use-discovery-scope';
+import { readWindowsMainIdentity } from './computer-use-windows-main';
+import * as windowsMain from './computer-use-windows-main';
 import type * as FsPromises from 'node:fs/promises';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import type {
@@ -5391,6 +5393,7 @@ int main() {
     store?: WindowsDispatchLedgerStorage,
     background = false,
     backgroundGate = background,
+    foregroundHandoff = false,
   ) {
     const rows = new Map<string, WindowsLedgerRow>();
     const quarantines: WindowsTargetQuarantine[] = [];
@@ -5525,6 +5528,7 @@ int main() {
       {
         ...(termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
         windowsBackgroundInputForTesting: backgroundGate,
+        windowsForegroundHandoffForTesting: foregroundHandoff,
         windowsLedger: store ?? {
           write: async (row) => {
             written.push(row);
@@ -11287,6 +11291,153 @@ int main() {
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.destroyed).toBe(false);
   });
+
+  it('P5c1 transport binds the permit to its live helper and rejects stale generations', async () => {
+    const permit = vi.fn(() => true);
+    const createHelperPermit = vi.fn(() => permit);
+    const load = vi.spyOn(windowsMain, 'loadWindowsMainAddon').mockReturnValue({
+      createHelperPermit,
+      readMainIdentity: () => ({
+        mainPid: process.pid,
+        mainProcessStartTime: '123',
+        imagePath: process.execPath,
+      }),
+    });
+    try {
+      const target = ledgerTarget(false, undefined, true, undefined, true, true, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      expect(target.addon.readWindowsMainIdentity!()).toMatchObject({
+        mainPid: process.pid,
+        mainProcessStartTime: '123',
+      });
+      const generation = target.addon.captureWindowsGeneration!()!;
+      expect(target.addon.allowWindowsHelperForeground!({ ...generation })).toBe(false);
+      expect(target.host.allowWindowsForegroundHandoff!(session, () => {})).toBe(true);
+      expect(createHelperPermit).toHaveBeenCalledExactlyOnceWith(4242);
+      expect(permit).toHaveBeenCalledExactlyOnceWith(4242);
+      target.addon.requestWindowsTermination!();
+      expect(target.addon.allowWindowsHelperForeground!(generation)).toBe(false);
+      expect(permit).toHaveBeenCalledTimes(1);
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it.each(['ready', 'missing', 'throws', 'wrong pid', 'gate closed'] as const)(
+    'P5c1 round trip uses Main identity or fails closed: %s',
+    async (path) => {
+      const seen: Readonly<Record<string, unknown>>[] = [];
+      const readIdentity = vi.fn(() => {
+        if (path === 'throws') throw new Error('identity unavailable');
+        return readWindowsMainIdentity({
+          createHelperPermit: vi.fn(),
+          readMainIdentity: () => ({
+            mainPid: path === 'wrong pid' ? 0 : process.pid,
+            mainProcessStartTime: '123',
+            imagePath: process.execPath,
+          }),
+        });
+      });
+      const permit = vi.fn(() => true);
+      const target = createTarget(
+        {
+          ...responders(),
+          approval_round_trip_begin: (metadata) => {
+            seen.push(metadata);
+            const {
+              durationMs: _d,
+              mainPid: _p,
+              mainProcessStartTime: _s,
+              mainImageIdentity: _i,
+              operation: _o,
+              ...bound
+            } = metadata;
+            return [
+              'approval_round_trip_begin_result',
+              {
+                ...bound,
+                kind: 'begin_result',
+                accepted: true,
+                failureReason: 'none',
+                failureLatched: false,
+              },
+            ];
+          },
+        },
+        undefined,
+        { windowsBackgroundInputForTesting: path !== 'gate closed' },
+        ({ readWindowsMainIdentity: _readIdentity, ...addon }) => ({
+          ...addon,
+          captureWindowsGeneration: () => ({ helperGeneration: 1 }),
+          ...(path === 'missing' ? {} : { readWindowsMainIdentity: readIdentity }),
+          allowWindowsHelperForeground: permit,
+        }),
+      );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      if (path === 'gate closed') {
+        expect(target.host.beginApprovalRoundTrip).toBeUndefined();
+        expect(target.host.allowWindowsForegroundHandoff).toBeUndefined();
+        expect(readIdentity).not.toHaveBeenCalled();
+      } else {
+        const begin = target.host.beginApprovalRoundTrip!({
+          session,
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          roundTripId: 'card-1',
+          durationMs: 60_000,
+        });
+        if (path === 'ready') {
+          await begin;
+          expect(seen).toEqual([
+            expect.objectContaining({
+              mainPid: process.pid,
+              mainProcessStartTime: '123',
+              mainImageIdentity: createHash('sha256')
+                .update(readFileSync(process.execPath))
+                .digest('hex'),
+            }),
+          ]);
+        } else {
+          await expect(begin).rejects.toThrow();
+          expect(seen).toHaveLength(0);
+          expect(target.helper().served).not.toContain('dispatch');
+        }
+      }
+      expect(permit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['allowed', 'gate closed', 'native refused', 'consume refused', 'Stop'] as const)(
+    'P5c1 handoff permit stays behind its gate and Stop: %s',
+    async (path) => {
+      const generation = { helperGeneration: 1 };
+      let current = true;
+      const permit = vi.fn(() => path !== 'native refused');
+      const target = ledgerTarget(
+        false,
+        (addon) => ({
+          ...addon,
+          captureWindowsGeneration: () => generation,
+          isWindowsGenerationCurrent: () => current,
+          allowWindowsHelperForeground: permit,
+        }),
+        false,
+        undefined,
+        true,
+        true,
+        path !== 'gate closed',
+      );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      const consume = vi.fn(() => {
+        if (path === 'consume refused') throw new Error('handoff already consumed');
+        if (path === 'Stop') current = false;
+      });
+      expect(target.host.allowWindowsForegroundHandoff!(session, consume)).toBe(path === 'allowed');
+      expect(permit).toHaveBeenCalledTimes(path === 'allowed' || path === 'native refused' ? 1 : 0);
+      if (path === 'gate closed') expect(consume).not.toHaveBeenCalled();
+      expect(target.helper().served).not.toContain('dispatch');
+    },
+  );
 
   it.each(['approved', 'missing id', 'end first'] as const)(
     'P5b host and transport round trip: %s',
