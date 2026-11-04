@@ -386,10 +386,12 @@ export function verifyPackagedComputerUseNativeBundle(
     !mainContainsCompiledPin
   )
     throw new Error(`Packaged Computer Use native artifact verification failed for ${platform}`);
+  const receiptPath = join(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME);
   assertPackagedComputerUseAcceptanceConsistency(
     packagedMain,
     existsSync(join(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME)),
     computerUseAcceptanceBuildForEnv(process.env, process.platform)?.mode ?? null,
+    existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : null,
   );
 }
 
@@ -402,8 +404,22 @@ export function assertPackagedComputerUseAcceptanceConsistency(
   packagedMain: string,
   hasReceipt: boolean,
   expectedMode: string | null,
+  receipt: unknown = null,
 ): void {
   const markedMain = packagedMain.includes(COMPUTER_USE_ACCEPTANCE_BUILD_MARKER);
+  if (expectedMode === 'windows-background-acceptance') {
+    if (
+      !receipt ||
+      typeof receipt !== 'object' ||
+      !('mode' in receipt) ||
+      receipt.mode !== expectedMode ||
+      !('fixtureDigest' in receipt) ||
+      typeof receipt.fixtureDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(receipt.fixtureDigest) ||
+      !packagedMain.includes(JSON.stringify(receipt.fixtureDigest))
+    )
+      throw new Error('Packaged Computer Use acceptance fixtureDigest is missing or inconsistent');
+  }
   if (markedMain === (expectedMode !== null) && hasReceipt === (expectedMode !== null)) return;
   throw new Error(
     `Packaged Computer Use acceptance build state is inconsistent (main: ${markedMain}, receipt: ${hasReceipt}, expected: ${expectedMode ?? 'none'})`,
@@ -437,7 +453,7 @@ export function writeComputerUseAcceptanceBuildReceipt(
   if (acceptance === null) return false;
   writeFileSync(
     join(resourcesPath, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME),
-    `${JSON.stringify({ mode: acceptance.mode, sourceCommit }, null, 2)}\n`,
+    `${JSON.stringify({ mode: acceptance.mode, sourceCommit, ...(acceptance.mode === 'windows-background-acceptance' ? { fixtureDigest: acceptance.fixtureDigest } : {}) }, null, 2)}\n`,
     { mode: 0o600 },
   );
   return true;

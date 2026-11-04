@@ -10,6 +10,7 @@ import { computerUseAcceptanceBuildForEnv } from '../../computer-use-acceptance-
 import {
   assertComputerUseAcceptanceBuildAllowed,
   assertPackagedComputerUseAcceptanceConsistency,
+  writeComputerUseAcceptanceBuildReceipt,
 } from '../../forge.config';
 import {
   computerUseBackgroundAcceptanceOptions,
@@ -61,6 +62,39 @@ function facts() {
 }
 
 describe('P7b background acceptance build', () => {
+  it('records the background fixture digest and checks it against packaged Main bytes', () => {
+    const { compiled, environment, path } = build();
+    const sourceCommit = 'a'.repeat(40);
+    expect(
+      writeComputerUseAcceptanceBuildReceipt(dirname(path), 'win32', sourceCommit, environment),
+    ).toBe(true);
+    const receipt = JSON.parse(
+      readFileSync(join(dirname(path), 'computer-use-acceptance-build.json'), 'utf8'),
+    );
+    expect(receipt).toEqual({ mode, sourceCommit, fixtureDigest: compiled.fixtureDigest });
+    const main = JSON.stringify(compiled);
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency(main, true, mode, receipt),
+    ).not.toThrow();
+    for (const fixtureDigest of [undefined, 'b'.repeat(64), 'A'.repeat(64), 'a'.repeat(63), 123]) {
+      expect(() =>
+        assertPackagedComputerUseAcceptanceConsistency(main, true, mode, {
+          ...receipt,
+          fixtureDigest,
+        }),
+      ).toThrow('fixtureDigest');
+    }
+    expect(() => assertPackagedComputerUseAcceptanceConsistency(main, false, mode)).toThrow();
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency(
+        JSON.stringify({ ...compiled, fixtureDigest: undefined }),
+        true,
+        mode,
+        receipt,
+      ),
+    ).toThrow('fixtureDigest');
+  });
+
   it('preserves BG-8 focus_required for unsupported new starts in acceptance builds', () => {
     const targets = source('computer_use_windows_host_v2_targets.inc');
     const start = targets.slice(
@@ -192,9 +226,10 @@ describe('P7b background acceptance build', () => {
         "await import('@electron/asar')",
         'await Promise.resolve({ extractFile: fixtureExtractFile })',
       );
-    const run = (expected: string) =>
+    const run = (expected: string, receipt: unknown = compiled) =>
       runInNewContext(`(async () => { ${script} })()`, {
         existsSync: () => true,
+        readFileSync: () => JSON.stringify(receipt),
         readdirSync: () => [
           { name: 'app.asar', isSymbolicLink: () => false, isDirectory: () => false },
         ],
@@ -213,6 +248,17 @@ describe('P7b background acceptance build', () => {
       });
     await expect(run('absent')).rejects.toThrow('verifier exit 1');
     await expect(run('present')).resolves.toBeUndefined();
+    for (const fixtureDigest of [
+      undefined,
+      '',
+      'A'.repeat(64),
+      'a'.repeat(63),
+      'a'.repeat(65),
+      123,
+    ]) {
+      await expect(run('present', { mode, fixtureDigest })).rejects.toThrow('verifier exit 1');
+    }
+    await expect(run('present', { mode: 'windows-unsigned-acceptance' })).resolves.toBeUndefined();
   });
 
   it('admits only the pinned GUI fixture and rejudges changed facts without rewriting evidence', () => {
