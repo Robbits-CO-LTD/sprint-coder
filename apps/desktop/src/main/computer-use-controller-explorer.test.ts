@@ -488,7 +488,10 @@ it.each([
   };
   expect(classifyWindowsExplorerOperation(operation)).toBe('document_open');
   expect(
-    windowsExplorerExceptionAllowedForTesting({ ...inputFor(host, session.sessionId), operation }),
+    await windowsExplorerExceptionAllowedForTesting({
+      ...inputFor(host, session.sessionId),
+      operation,
+    }),
   ).toBe(false);
 });
 it('rejects caller Explorer facts for a session bound to Target.exe', async () => {
@@ -626,10 +629,10 @@ it('rejects the old cancel epoch after ledger receipt completion without replaci
     },
   );
   const old = inputFor(scenario.host, scenario.session.sessionId);
-  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(true);
+  expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(true);
   expect(forgetCompletedStart(scenario.session.sessionId)).toBe(true);
   await scenario.host.cancel(scenario.session, 1);
-  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+  expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
   expect(readWindowsExplorerApproval(scenario.host, scenario.session.sessionId)).toBeUndefined();
   ledger.received(1, scenario.session.sessionId);
   const completed = vi.fn();
@@ -640,8 +643,8 @@ it('rejects the old cancel epoch after ledger receipt completion without replaci
   expect(ledger.blocked(1)).toBe(false);
   const fresh = inputFor(scenario.host, scenario.session.sessionId);
   expect(fresh.approval).toBeDefined();
-  expect(windowsExplorerExceptionAllowedForTesting(fresh)).toBe(true);
-  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+  expect(await windowsExplorerExceptionAllowedForTesting(fresh)).toBe(true);
+  expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
   expect(scenario.startSession).toHaveBeenCalledTimes(1);
 });
 it.each([false, true])(
