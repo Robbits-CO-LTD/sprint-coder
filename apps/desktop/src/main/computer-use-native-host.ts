@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
 import {
@@ -87,6 +88,58 @@ import {
   type WindowsStopDecision,
   type WindowsTargetQuarantine,
 } from './computer-use-windows-stop-outcome';
+
+const windowsExplorerApprovalBrand: unique symbol = Symbol('windows-explorer-approval');
+export type WindowsExplorerApproval = Readonly<{
+  [windowsExplorerApprovalBrand]: true;
+}>;
+// P5 supplies the measured shell view. Missing evidence remains closed.
+const explorerFactsSchema = z.object({
+  platform: z.literal('win32'),
+  imageRoot: z.literal('windows_directory'),
+  imageRelativePath: z.string(),
+  imageLeaf: z.string(),
+  imageVolume: z.literal('fixed'),
+  runningImageMatches: z.literal(true),
+  signature: z.literal('valid'),
+  signerMicrosoftRoot: z.literal(true),
+  packaged: z.literal(false),
+  windowClass: z.string(),
+  shellView: z.object({ kind: z.literal('filesystem_folder'), path: z.string() }).strict(),
+});
+export type WindowsExplorerFacts = Readonly<z.infer<typeof explorerFactsSchema>>;
+type ExplorerEvidence = Readonly<{ facts: WindowsExplorerFacts; current: () => boolean }>;
+const explorerApprovalReaders = new WeakMap<
+  ComputerUseNativeHost,
+  (sessionId: string) => ExplorerEvidence | undefined
+>();
+const explorerApprovals = new WeakMap<
+  WindowsExplorerApproval,
+  ExplorerEvidence & { host: ComputerUseNativeHost; sessionId: string }
+>();
+
+// Main-only evidence: neither an IPC boolean nor a caller-supplied host method can mint it.
+export function readWindowsExplorerApproval(
+  host: ComputerUseNativeHost,
+  sessionId: string,
+): WindowsExplorerApproval | undefined {
+  const evidence = explorerApprovalReaders.get(host)?.(sessionId);
+  if (evidence === undefined || !evidence.current()) return undefined;
+  const approval: WindowsExplorerApproval = Object.freeze({ [windowsExplorerApprovalBrand]: true });
+  explorerApprovals.set(approval, { host, sessionId, ...evidence });
+  return approval;
+}
+
+export function readCurrentWindowsExplorerFacts(
+  approval: WindowsExplorerApproval | undefined,
+  host: ComputerUseNativeHost,
+  sessionId: string,
+): WindowsExplorerFacts | undefined {
+  const evidence = approval === undefined ? undefined : explorerApprovals.get(approval);
+  return evidence?.host === host && evidence.sessionId === sessionId && evidence.current()
+    ? evidence.facts
+    : undefined;
+}
 
 /**
  * Each row is keyed by (helperGeneration, sessionId, requestId); the wire request id alone can repeat
@@ -316,6 +369,7 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  const explorerSessionFacts = new WeakMap<InternalNativeSession, WindowsExplorerFacts>();
   const interactionRevoked = new Set<string>();
   const interactionListeners = new Set<WindowsInteractionListener>();
   if (platform === 'win32')
@@ -2542,6 +2596,14 @@ export function createComputerUseNativeHost(
     pid = selectedPid;
     pidsByIdentity.set(input.profile.identityDigest, selectedPid);
     const selectedBounds = asRecord(selectedRecord['bounds'], 'native_window_invalid');
+    const explorerFacts = explorerFactsSchema.safeParse(selectedRecord['facts']);
+    const explorerBoundFacts =
+      explorerFacts.success && selectedRecord['appIdentityDigest'] === input.profile.identityDigest
+        ? Object.freeze({
+            ...explorerFacts.data,
+            shellView: Object.freeze({ ...explorerFacts.data.shellView }),
+          })
+        : undefined;
     const expectedMaximumMode = bindComputerUseMaximumMode(
       nativeMaximumMode(input.profile.identity),
       nativeMaximumMode(selectedRecord),
@@ -2596,6 +2658,11 @@ export function createComputerUseNativeHost(
         pid: session.raw['pid'],
         creationTime: session.raw.processStartTime,
       });
+    if (
+      explorerBoundFacts !== undefined &&
+      session.windowIdentityDigest === selectedRecord['windowIdentityDigest']
+    )
+      explorerSessionFacts.set(session, explorerBoundFacts);
     // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
     // implementation, but it is never returned to the controller or renderer.
     try {
@@ -3658,7 +3725,30 @@ export function createComputerUseNativeHost(
       return stopWithTermination(close, () => startOwners.get(session.sessionId)?.helperGeneration);
     },
   };
-  return Object.freeze({ ...host, restoreWindowsLedger });
+  const frozenHost = Object.freeze({ ...host, restoreWindowsLedger });
+  explorerApprovalReaders.set(frozenHost, (sessionId) => {
+    const session = sessions.get(sessionId);
+    if (session === undefined) return undefined;
+    const facts = explorerSessionFacts.get(session);
+    if (facts === undefined) return undefined;
+    const windowDigest = session.windowIdentityDigest;
+    const appDigest = session.appIdentityDigest;
+    const epoch = stopEpochs.get(sessionId) ?? session.cancelEpoch;
+    // Session object and epoch prevent reuse after quarantine clears or the id is reopened.
+    return {
+      facts,
+      current: () =>
+        sessions.get(sessionId) === session &&
+        session.windowIdentityDigest === windowDigest &&
+        session.appIdentityDigest === appDigest &&
+        (stopEpochs.get(sessionId) ?? session.cancelEpoch) === epoch &&
+        !interactionRevoked.has(sessionId) &&
+        windowsApprovalAvailable() &&
+        approvalRouteOf(sessionId) === 'v2' &&
+        approvalPathEnabled(sessionId),
+    };
+  });
+  return frozenHost;
 }
 
 /** Default for unit/embedded callers that do not provide a loaded native binding. */

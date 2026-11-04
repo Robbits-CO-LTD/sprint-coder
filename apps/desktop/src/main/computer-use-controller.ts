@@ -1,4 +1,12 @@
 import {
+  readCurrentWindowsExplorerFacts,
+  type WindowsExplorerApproval,
+} from './computer-use-native-host';
+import {
+  classifyWindowsExplorerOperation,
+  type WindowsExplorerOperation,
+} from './computer-use-explorer-effect';
+import {
   ComputerUseDiscoveryScope,
   type ComputerUseDiscoveryResult,
 } from './computer-use-discovery-scope';
@@ -7418,4 +7426,38 @@ function safeUntrustedDisplayText(value: string, maximum = 256): string {
       (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
     );
   return [...normalized].slice(0, maximum).join('') || 'unnamed';
+}
+
+const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;
+
+type WindowsExplorerExceptionInput = Readonly<{
+  host: ComputerUseNativeHost;
+  sessionId: string;
+  approval: WindowsExplorerApproval | undefined;
+  operation: WindowsExplorerOperation;
+}>;
+
+// P5 must verify the window under the input point belongs to the verified explorer.exe PID;
+// preview handlers can own child windows in another process.
+export function windowsExplorerExceptionAllowed(input: WindowsExplorerExceptionInput): boolean {
+  return WINDOWS_EXPLORER_EXCEPTION_ENABLED && evaluateWindowsExplorerException(input);
+}
+export function windowsExplorerExceptionAllowedForTesting(
+  input: WindowsExplorerExceptionInput,
+): boolean {
+  return evaluateWindowsExplorerException(input);
+}
+function evaluateWindowsExplorerException(input: WindowsExplorerExceptionInput): boolean {
+  const facts = readCurrentWindowsExplorerFacts(input.approval, input.host, input.sessionId);
+  if (facts === undefined || classifyWindowsExplorerOperation(input.operation) !== 'ordinary')
+    return false;
+  // CabinetWClass is necessary, not sufficient: namespace views share this class.
+  return (
+    facts.imageRelativePath.toLowerCase() === 'explorer.exe' &&
+    facts.imageLeaf.toLowerCase() === 'explorer.exe' &&
+    facts.windowClass === 'CabinetWClass' &&
+    facts.shellView.kind === 'filesystem_folder' &&
+    /^[a-z]:\\[^:*?"<>|]+$/iu.test(facts.shellView.path) &&
+    !facts.shellView.path.split('\\').some((part) => part === '.' || part === '..')
+  );
 }

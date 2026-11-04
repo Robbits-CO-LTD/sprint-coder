@@ -1776,6 +1776,113 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
   },
 );
 
+describe.skipIf(!onWindows || (build === null && !ci))(
+  'Explorer exception native preparation',
+  () => {
+    it('checks held-image facts, file-window restriction, and acceptance-only compilation', async () => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-'));
+      try {
+        const restriction = cut(
+          '[[nodiscard]] bool WindowsExplorerFileWindowRestriction(',
+          '// Each window is judged by itself',
+        );
+        const program = String.raw`
+#include "computer_use_windows_target_facts.h"
+using namespace sprint_coder::computer_use;
+${restriction}
+int main() {
+  TargetFacts facts;
+  facts.platform = TargetPlatform::kWin32;
+  facts.running_image_matches = true;
+  facts.signature = "valid";
+  facts.signer_microsoft_root = true;
+  facts.packaged = false;
+  facts.image_volume = "fixed";
+  facts.image_root = "windows_directory";
+  facts.image_relative_path = "explorer.exe";
+  facts.image_leaf = "explorer.exe";
+  facts.window_class = "CabinetWClass";
+  if (WindowsExplorerFileWindowRestriction(facts)) return 8;
+  if (WindowsExplorerFileWindowRestriction(facts, false)) return 9;
+  if (WindowsExplorerFileWindowRestriction(facts, true) != kWindowsExplorerException) return 1;
+  if (!kWindowsExplorerException) return 0;
+  const auto original = facts;
+  for (auto field : {&TargetFacts::running_image_matches, &TargetFacts::signer_microsoft_root,
+                     &TargetFacts::packaged}) {
+    facts = original;
+    (facts.*field).reset();
+    if (WindowsExplorerFileWindowRestriction(facts, true)) return 2;
+    facts.*field = !(original.*field).value();
+    if (WindowsExplorerFileWindowRestriction(facts, true)) return 3;
+  }
+  for (auto field : {&TargetFacts::signature, &TargetFacts::image_volume, &TargetFacts::image_root,
+                     &TargetFacts::image_relative_path, &TargetFacts::image_leaf,
+                     &TargetFacts::window_class}) {
+    facts = original;
+    (facts.*field).reset();
+    if (WindowsExplorerFileWindowRestriction(facts, true)) return 4;
+    facts.*field = "unverified";
+    if (WindowsExplorerFileWindowRestriction(facts, true)) return 5;
+  }
+  for (const auto name : {"Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"}) {
+    facts = original;
+    facts.window_class = name;
+    if (WindowsExplorerFileWindowRestriction(facts, true)) return 6;
+  }
+  facts = original;
+  facts.platform = TargetPlatform::kDarwin;
+  if (WindowsExplorerFileWindowRestriction(facts, true)) return 7;
+  return 0;
+}
+`;
+        const file = join(scratch, 'explorer.cc');
+        writeFileSync(file, program);
+        const compile = async (defines: string[]) => {
+          const command = build!.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/utf-8',
+            ...defines.map((define) => `/D${define}`),
+            `/I${nativeDirectory}`,
+            file,
+            `/Fo:${join(scratch, 'explorer.obj')}`,
+            `/Fe:${join(scratch, 'explorer.exe')}`,
+          ]);
+          return promisify(execFile)(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 60_000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+        };
+        const seam = 'SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION';
+        const acceptance = 'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1';
+        for (const defines of [[], [acceptance], [seam, acceptance]]) {
+          await compile(defines);
+          await promisify(execFile)(join(scratch, 'explorer.exe'), [], { timeout: 10_000 });
+        }
+        for (const defines of [
+          [seam],
+          [seam, 'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=0'],
+          [seam, acceptance, 'SPRINT_CODER_ELIGIBILITY_FROM_BUILD'],
+          [seam, acceptance, 'SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE'],
+        ]) {
+          await expect(compile(defines)).rejects.toMatchObject({
+            stdout: expect.stringContaining(
+              'Explorer exception test seam must not enter a product build',
+            ),
+          });
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 120_000);
+  },
+);
+
 describe('Windows target facts seam source', () => {
   it('cuts the facts block, and only the v2 targets block calls it or the core', () => {
     const block = cut('// BEGIN windows target facts', '// END windows target facts');

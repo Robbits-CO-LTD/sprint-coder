@@ -468,6 +468,17 @@ bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
   return true;
 }
 
+// P3 preparation, not connected to classification until P5. A class only excludes windows of an
+// already verified Explorer; it cannot establish an executable identity or an eligibility route.
+[[nodiscard]] bool WindowsExplorerFileWindowRestriction(
+    const sprint_coder::computer_use::TargetFacts &facts,
+    std::optional<bool> shell_view_is_filesystem_folder = std::nullopt) {
+  // CabinetWClass is necessary, not sufficient. P5 supplies measured shell-view evidence.
+  return shell_view_is_filesystem_folder == std::optional<bool>(true) &&
+         sprint_coder::computer_use::WindowsTargetIsVerifiedExplorer(facts) &&
+         facts.window_class == std::optional<std::string>("CabinetWClass");
+}
+
 // The judgement of one window of the process: the process's facts with this window's own class.
 // Each window is judged by itself, so neither the order the windows are listed in nor another
 // window of the process (a console it allocated, a window gone between listing and measuring)

@@ -25,6 +25,34 @@
 
 namespace sprint_coder::computer_use {
 
+#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+#if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \
+    SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1 || \
+    defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || \
+    defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)
+#error Explorer exception test seam must not enter a product build
+#endif
+inline constexpr bool kWindowsExplorerException = true;
+#else
+inline constexpr bool kWindowsExplorerException = false;
+#endif
+
+// P3 preparation only: these facts come from the held, matched running image. The canonical
+// placement is relative to the measured Windows directory, never a supplied path or label.
+// No window class participates in establishing this identity; P5 retains the shared deny rules.
+[[nodiscard]] inline bool WindowsTargetIsVerifiedExplorer(const TargetFacts &facts) {
+  return kWindowsExplorerException && facts.platform == TargetPlatform::kWin32 &&
+         facts.running_image_matches == std::optional<bool>(true) &&
+         facts.signature == std::optional<std::string>("valid") &&
+         facts.signer_microsoft_root == std::optional<bool>(true) &&
+         facts.packaged == std::optional<bool>(false) &&
+         facts.image_volume == std::optional<std::string>("fixed") &&
+         facts.image_root == std::optional<std::string>("windows_directory") &&
+         facts.image_relative_path.has_value() && facts.image_leaf.has_value() &&
+         target_eligibility_detail::AsciiLower(*facts.image_relative_path) == "explorer.exe" &&
+         target_eligibility_detail::AsciiLower(*facts.image_leaf) == "explorer.exe";
+}
+
 // Missing OS evidence never admits a background start. These are window facts, not a grant for
 // any control/pattern; the versioned provider capability must be checked separately.
 struct WindowsBackgroundStartFacts {
