@@ -66,6 +66,8 @@ function checkNativeTestDefinition(
     'computer_use_windows_background_observe_test.cc',
     'computer_use_windows_discovery_launch_test.cc',
     'computer_use_windows_existing_start_test.cc',
+    'computer_use_windows_explorer_live_test.cc',
+    'computer_use_windows_explorer_transport_test.cc',
     'computer_use_windows_hung_helper_test.cc',
     'computer_use_windows_new_start_test.cc',
     'computer_use_windows_target_identity_test.cc',
