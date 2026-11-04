@@ -125,6 +125,11 @@ describe('P7a portable tool contracts', () => {
     const gyp = readFileSync(join(fixtureDirectory, '../../binding.gyp'), 'utf8');
     expect(gyp).not.toContain('background-input');
     expect(source).not.toContain('SPRINT_CODER_TEST_');
+    expect(source).toContain('int WINAPI wWinMain(');
+    expect(source).toContain('UIA_ItemStatusPropertyId');
+    expect(
+      readFileSync(join(__dirname, '../../scripts/build-background-input-tools.ts'), 'utf8'),
+    ).toContain("name === 'fixture' ? ['/SUBSYSTEM:WINDOWS']");
   });
 });
 

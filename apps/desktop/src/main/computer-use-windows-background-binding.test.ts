@@ -37,7 +37,13 @@ describe('background binding native entry', () => {
     expect(guard).toContain('WindowsBackgroundBindingMatches(true, observed->second, current)');
     expect(guard).not.toMatch(/SetForegroundWindow|SetFocus|SendInput|GetFocusedElement/u);
     expect(semantic).toContain('if (facts.proxy != WindowsBackgroundProxy::kStable) return false;');
-    expect(semantic).not.toContain('facts.proxy = WindowsBackgroundProxy::kStable');
+    // Only the P7b acceptance block may certify the pinned synthetic provider as stable.
+    const product = semantic.replace(
+      /#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE[\s\S]*?#endif/gu,
+      '',
+    );
+    expect(product).not.toContain('facts.proxy = WindowsBackgroundProxy::kStable');
+    expect(semantic.split('facts.proxy = WindowsBackgroundProxy::kStable')).toHaveLength(2);
     const observe = native('computer_use_windows_host_pipe.inc');
     expect(observe).toContain('&bindings, background)');
     expect(observe).toContain('&stable_bindings, background)');

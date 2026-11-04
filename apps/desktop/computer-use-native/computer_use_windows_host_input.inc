@@ -76,9 +76,16 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
                              const RECT &expected,
                              std::uint64_t expected_epoch) {
   if (!WindowsRoundTripMayInput(session)) return false;
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   const bool background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
   if (background && !WindowsBackgroundMonitorReady(session)) return false;
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  if (background) {
+    LockedWindowsExecutable current;
+    if (!OpenLockedProcessExecutable(session.pid, &current) ||
+        !WindowsBackgroundTargetSupported(current.identity)) return false;
+  }
+#endif
 #else
   constexpr bool background = false;
 #endif
@@ -107,7 +114,7 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return 0;
 #endif
   if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
@@ -125,7 +132,7 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
 }
 
 bool SetWindowsApprovedCursor(const WindowsSession &session, int x, int y) {
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return false;
 #endif
   if (!WindowsRoundTripMayInput(session)) return false;
@@ -263,7 +270,7 @@ bool ValidateWindowsDispatchBinding(const WindowsSession &session,
     *reason = "stale_target";
     return false;
   }
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
     std::uint64_t epoch = 0;
     if (!session.background_monitor || !ReadJsonUint64(metadata, "interactionEpoch", &epoch) ||
@@ -594,7 +601,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
       return false;
     }
   }
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
     if (!RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       *reason = "stale_target";

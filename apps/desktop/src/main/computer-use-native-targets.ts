@@ -1,3 +1,4 @@
+import { computerUseBackgroundFixtureDigest } from './computer-use-acceptance-mode';
 import { win32 } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
@@ -10,7 +11,11 @@ import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
-import { classifyTarget, denyRulesetVersion } from './computer-use-target-eligibility';
+import {
+  classifyTarget,
+  denyRulesetVersion,
+  type TargetFacts,
+} from './computer-use-target-eligibility';
 import type { ComputerTargetWindowsGeneration } from './computer-use-target-model';
 import type { ComputerAppProfileRecord } from './persistence';
 
@@ -108,6 +113,32 @@ export function windowsComputerTargetCandidates(
   return [...candidates.values()];
 }
 
+/** Independently check the private native list against Main's build-time pin. */
+export function backgroundAcceptanceTargetVerdict(
+  facts: TargetFacts,
+  digest: string,
+): ReturnType<typeof classifyTarget> {
+  const pinned = computerUseBackgroundFixtureDigest();
+  if (
+    pinned !== null &&
+    digest === pinned &&
+    facts.platform === 'win32' &&
+    facts.runningImageMatches === true &&
+    facts.imageVolume === 'fixed' &&
+    facts.signature === 'unsigned' &&
+    facts.packaged === false &&
+    facts.peSubsystem === 'gui' &&
+    facts.windowClass === 'P7aFixture'
+  ) {
+    return classifyTarget({
+      ...facts,
+      imageRoot: facts.imageRoot === 'other' ? 'local_programs' : facts.imageRoot,
+      signature: 'valid',
+    });
+  }
+  return classifyTarget(facts);
+}
+
 /** Malformed evidence invalidates the whole response; ordinary refusals carry only their kind. */
 export function parseWindowsComputerUseTargets(
   value: unknown,
@@ -127,7 +158,10 @@ export function parseWindowsComputerUseTargets(
       computerAppNativeIdentityDigest(native.identity, derived) !== native.appIdentityDigest
     )
       return null;
-    const verdict = classifyTarget(native.facts);
+    const verdict =
+      computerUseBackgroundFixtureDigest() === null
+        ? classifyTarget(native.facts)
+        : backgroundAcceptanceTargetVerdict(native.facts, native.executableDigest);
     if (verdict.kind === 'denied' || verdict.kind === 'unresolvable') {
       targets.push({ kind: verdict.kind });
       continue;

@@ -385,6 +385,10 @@ bool BuildLockedWindowsExecutableIdentity(HANDLE file,
     display.resize(extension);
   const std::string display_name = BoundedUtf8(Utf8FromWide(display), 256);
   std::string policy_language = PolicyLanguageForWindowsExecutable(path);
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  if (sprint_coder::computer_use::WindowsBackgroundFixtureDigestMatches(executable_digest))
+    policy_language = "en";
+#endif
   if (policy_language == "unknown" && IsAcceptanceFixtureExecutable(path) &&
       !signer_digest.empty() && signer_digest == CurrentHelperSignerDigest())
     policy_language = "en";

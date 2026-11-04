@@ -30,7 +30,10 @@ import {
   NativeSafeFsError,
   type NativeSafeFs,
 } from './native-safe-fs';
-import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
+import {
+  computerUseBackgroundAcceptanceOptions,
+  computerUseCompiledAcceptanceMode,
+} from './computer-use-acceptance-mode';
 import { loadComputerUseNative } from './computer-use-native';
 import {
   computerUseRequestedAtStartup,
@@ -211,7 +214,7 @@ if (squirrelStartup || !hasLock) {
       const computerUseNativeHost = createComputerUseNativeHost(
         computerUseBinding,
         process.platform,
-        computerUseNativeHostOptions,
+        { ...computerUseNativeHostOptions, ...computerUseBackgroundAcceptanceOptions() },
       );
       const computerUseAcceptanceMode = computerUseCompiledAcceptanceMode();
       if (computerUseAcceptanceMode !== null)
