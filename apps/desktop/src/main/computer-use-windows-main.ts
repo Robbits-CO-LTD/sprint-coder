@@ -3,17 +3,33 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import type { ApprovalRoundTripIdentity } from './computer-use-approval-round-trip';
+import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
+import {
+  computerUseNativeManifestDigest,
+  parseComputerUseNativeCompiledPin,
+  verifyWindowsMainAddonDigest,
+} from './computer-use-native-provenance';
 
 export type WindowsMainAddon = Readonly<{
   readMainIdentity(): unknown;
   createHelperPermit(pid: number): unknown;
 }>;
 
-// Loaded only behind the internal N9 gate. Packaging/provenance activation belongs to P8.
+// Loaded only behind the internal N9 gate; verify the bytes before native code runs.
 export function loadWindowsMainAddon(helperPath: string): WindowsMainAddon {
-  const value: unknown = createRequire(__filename)(
-    join(dirname(helperPath), 'sprint_coder_computer_use_windows_main.node'),
+  const directory = dirname(helperPath);
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(
+      readFileSync(join(directory, 'computer-use-native.manifest.json'), 'utf8'),
+    ) as unknown,
   );
+  if (typeof __SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__ !== 'undefined') {
+    const pin = parseComputerUseNativeCompiledPin(__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__);
+    if (pin.manifestDigest !== computerUseNativeManifestDigest(manifest))
+      throw new Error('Windows Main addon provenance mismatch');
+  }
+  const path = verifyWindowsMainAddonDigest(directory, manifest);
+  const value: unknown = createRequire(__filename)(path);
   if (
     typeof value !== 'object' ||
     value === null ||

@@ -362,10 +362,23 @@ jobs:
           $manifestKeys = @($nativeManifest.PSObject.Properties.Name | Sort-Object)
           $expectedManifestKeys = @(
             'architecture', 'apiVersion', 'binaryDigest', 'capabilities', 'eligibility', 'moduleDigest',
-            'nativeVersion', 'platform', 'protocolVersion', 'signerDigest', 'sourceCommit', 'version'
+            'nativeVersion', 'platform', 'protocolVersion', 'signerDigest', 'sourceCommit', 'version',
+            'windowsDocumentViewers', 'windowsMainAddon'
           ) | Sort-Object
           if (($manifestKeys -join '|') -ne ($expectedManifestKeys -join '|')) {
             throw 'Windows Computer Use native manifest has unexpected keys.'
+          }
+          $mainAddon = @(
+            Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint_coder_computer_use_windows_main.node'
+          )
+          $mainAddonEntry = $nativeManifest.windowsMainAddon
+          if (
+            $mainAddon.Count -ne 1 -or
+            $mainAddonEntry.kind -ne 'windows-main-addon' -or
+            $mainAddonEntry.file -ne 'sprint_coder_computer_use_windows_main.node' -or
+            $mainAddonEntry.sha256 -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $mainAddon[0].FullName).Hash.ToLowerInvariant()
+          ) {
+            throw 'Portable package must contain exactly one Windows Main addon matching the native manifest.'
           }
           # A distributed package is always the v1 allow-list: no deny-list build ships, and the
           # helper refuses every input without a ticket (S5-a), so it claims the requirement (ADR v2 D7).

@@ -702,3 +702,73 @@ describe('Computer Use acceptance-only build mode', () => {
     ).toThrow('acceptance');
   });
 });
+
+describe('Windows Main addon package provenance', () => {
+  it('packages the addon resource and excludes it from a second signing pass', () => {
+    const name = 'sprint_coder_computer_use_windows_main.node';
+    expect(isComputerUseNativeArtifactPath(`C:/resources/${name}`)).toBe(true);
+    if (process.platform === 'win32')
+      expect(config.packagerConfig?.extraResource).toContain(
+        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, name),
+      );
+  });
+  it.each(['valid', 'tampered', 'missing', 'duplicate', 'asar-duplicate', 'no-entry'] as const)(
+    'verifies the packaged Main addon: %s',
+    async (scenario) => {
+      const root = mkdtempSync(join(tmpdir(), 'sc-main-package-'));
+      try {
+        const resources = join(root, 'out/resources');
+        const asarSource = join(root, 'source');
+        const addonName = 'sprint_coder_computer_use_windows_main.node';
+        const sha = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
+        mkdirSync(resources, { recursive: true });
+        mkdirSync(join(asarSource, '.vite/build'), { recursive: true });
+        const manifest = computerUseNativeManifestSchema.parse({
+          version: 1,
+          sourceCommit: 'a'.repeat(40),
+          platform: 'win32',
+          architecture: 'x64',
+          protocolVersion: 1,
+          apiVersion: 3,
+          nativeVersion: 'fixture',
+          moduleDigest: sha('helper'),
+          binaryDigest: sha('helper'),
+          signerDigest: null,
+          capabilities: ['observe'],
+          ...(scenario === 'no-entry'
+            ? {}
+            : {
+                windowsMainAddon: {
+                  kind: 'windows-main-addon',
+                  file: addonName,
+                  sha256: sha('addon'),
+                },
+              }),
+        });
+        writeFileSync(join(resources, 'sprint-coder-computer-use-host.exe'), 'helper');
+        if (scenario !== 'missing')
+          writeFileSync(join(resources, addonName), scenario === 'tampered' ? 'changed' : 'addon');
+        if (scenario === 'duplicate') {
+          mkdirSync(join(resources, 'extra'));
+          writeFileSync(join(resources, 'extra', addonName), 'addon');
+        }
+        if (scenario === 'asar-duplicate') writeFileSync(join(asarSource, addonName), 'addon');
+        writeFileSync(
+          join(resources, 'computer-use-native.manifest.json'),
+          JSON.stringify(manifest),
+        );
+        writeFileSync(
+          join(asarSource, '.vite/build/index.js'),
+          `const pin=${JSON.stringify(computerUseNativeCompiledPin(manifest))};`,
+        );
+        await createAsarPackage(asarSource, join(resources, 'app.asar'));
+        const verify = () =>
+          verifyPackagedComputerUseNativeBundle(join(root, 'out'), 'win32', 'x64');
+        if (scenario === 'valid') expect(verify).not.toThrow();
+        else expect(verify).toThrow();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});

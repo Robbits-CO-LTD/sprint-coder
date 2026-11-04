@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   computerUseEligibilitySchema,
   computerUseWindowsDocumentViewersSchema,
@@ -53,6 +55,15 @@ export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManif
     ...(manifest.windowsDocumentViewers === undefined
       ? []
       : [[manifest.windowsDocumentViewers.version, manifest.windowsDocumentViewers.digest]]),
+    ...(manifest.windowsMainAddon === undefined
+      ? []
+      : [
+          [
+            manifest.windowsMainAddon.kind,
+            manifest.windowsMainAddon.file,
+            manifest.windowsMainAddon.sha256,
+          ],
+        ]),
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -133,4 +144,20 @@ export function computerUseNativeCompiledPinMatches(
       (manifest.platform === 'darwin' ? manifest.moduleDigest : manifest.binaryDigest) &&
     pin.manifestDigest === computerUseNativeManifestDigest(manifest)
   );
+}
+
+export function verifyWindowsMainAddonDigest(
+  directory: string,
+  manifest: ComputerUseNativeManifest,
+): string {
+  const entry = manifest.windowsMainAddon;
+  if (manifest.platform !== 'win32' || entry === undefined)
+    throw new Error('Windows Main addon provenance unavailable');
+  const path = join(directory, entry.file);
+  if (
+    !lstatSync(path).isFile() ||
+    createHash('sha256').update(readFileSync(path)).digest('hex') !== entry.sha256
+  )
+    throw new Error('Windows Main addon digest mismatch');
+  return path;
 }
