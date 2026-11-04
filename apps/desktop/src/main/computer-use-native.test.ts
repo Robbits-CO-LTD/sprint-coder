@@ -303,7 +303,15 @@ it('keeps the Explorer exception closed and its test macro out of production inp
       /windowsCompletedStartForTesting/gu,
     )?.length,
   ).toBe(2);
-  expect(readWindowsHostSource().match(/WindowsExplorerFileWindowRestriction\(/gu)).toHaveLength(1);
+  const v2 = readFileSync(join(native, 'computer_use_windows_host_v2_targets.inc'), 'utf8');
+  expect(v2.match(/WindowsExplorerFileWindowRestriction\(/gu)).toHaveLength(2);
+  // Measurement and its explicit admission evidence stay behind the compile-time gate.
+  expect(v2).toMatch(
+    /if constexpr \(kWindowsExplorerException\) \{[^}]*const bool measured_view =[^}]*MeasureWindowsExplorerPrestart\([^}]*if \(WindowsExplorerFileWindowRestriction\(for_window.facts, measured_view\)\)/u,
+  );
+  expect(v2).toMatch(
+    /if constexpr \(kWindowsExplorerException\) \{\s*if \(explorer_admitted\)\s*\*explorer_admitted = judged.explorer_prestart_admitted;/u,
+  );
   expect(readWindowsHostSource()).toContain('shell_view_is_filesystem_folder = std::nullopt');
   expect(readWindowsHostSource()).toContain(
     'shell_view_is_filesystem_folder == std::optional<bool>(true)',

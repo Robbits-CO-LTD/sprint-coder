@@ -78,6 +78,7 @@ struct Case {
   bool v2 = false, unsigned_image = false, bad_signer = false, bad_digest = false;
   bool bad_identity = false, bad_path = false, bad_window_identity = false;
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
+  bool unmeasured_explorer = false;
   bool bad_before_geometry = false, changed_after_geometry = false, resume = false;
   bool stop_during_read = false, parent_during_read = false, io_failure = false;
   bool measurement_failure = false, after_measurement_failure = false, com_failure = false;
@@ -89,6 +90,7 @@ struct Case {
   std::uint64_t session_epoch = 0;
 };
 Case current;
+unsigned admission_reads = 0;
 unsigned identity_reads = 0;
 std::wstring canonical;
 std::atomic<unsigned> reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
@@ -133,6 +135,7 @@ bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
   identity.path = current.bad_path ? L"C:\\different.exe" : canonical;
   if (current.proxy) identity.path = L"C:\\Windows\\System32\\ApplicationFrameHost.exe";
   if (current.denied) identity.path = L"C:\\Windows\\System32\\cmd.exe";
+  if (current.unmeasured_explorer) identity.path = L"C:\\Windows\\explorer.exe";
   identity.identity_digest = std::string(64, current.bad_identity ? 'f' : 'a');
   identity.executable_digest = std::string(64, current.bad_digest ? 'f' : 'b');
   identity.signer_digest = current.unsigned_image ? "" : std::string(64, current.bad_signer ? 'f' : 'c');
@@ -146,6 +149,7 @@ WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
   contexts.fetch_add(1); WindowsTargetFactsContext value; value.lineage_root_pid = pid; return value;
 }
 bool ComponentAdmit(const WindowsStartInput&, WindowsExistingStartMeasurement* measured) {
+  ++admission_reads;
   measured->maximum_mode = "observe_only"; return true;
 }
 bool ComponentBackgroundGate() { return current.background_gate; }
@@ -231,6 +235,7 @@ bool ComponentReadHeld(HANDLE handle, WindowsFileIdentity* output) {
   return read;
 }
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
+  admission_reads = 0;
   identity_reads = 0;
   consumer_thread = GetCurrentThreadId();
   current=config;reads=0;contexts=0;com_calls=0;com_releases=0;input_calls=0;
@@ -243,7 +248,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   input.pid=GetCurrentProcessId();input.window=reinterpret_cast<HWND>(static_cast<UINT_PTR>(1));input.window_value=1;
   input.session_key=std::string(16,static_cast<char>('A'+case_count));input.session_id=name;
   input.app_identity=std::string(64,'a');input.executable_digest=std::string(64,'b');input.signer_digest=std::string(64,'c');
-  input.canonical_path=canonical;input.bounds_width=100;input.bounds_height=80;input.explicit_resume=config.resume;
+  input.canonical_path=config.unmeasured_explorer ? L"C:\\Windows\\explorer.exe" : canonical;input.bounds_width=100;input.bounds_height=80;input.explicit_resume=config.resume;
   input.cancel_epoch=config.input_epoch;input.profile_revision=4;input.ruleset_version=1;
   std::string created;Check(ReadProcessStartIdentity(GetCurrentProcess(),&created),"own creation time");
   if (config.bound_start) input.expected_process_start = config.bad_start ? "1" : created;
@@ -255,7 +260,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   WindowsSession session;session.session_id=name;session.pid=input.pid;session.window=input.window;session.active_window=input.window;
   if (config.background_session) session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kBackground;
   session.app_identity=input.app_identity;session.window_identity=identity;session.active_window_identity=identity;session.process_start=created;
-  session.canonical_path=canonical;session.executable_volume_serial=executable.identity.file_identity.volume_serial;session.executable_file_id=executable.identity.file_identity.file_id;
+  session.canonical_path=input.canonical_path;session.executable_volume_serial=executable.identity.file_identity.volume_serial;session.executable_file_id=executable.identity.file_identity.file_id;
   session.executable_digest=config.source_bad_digest?std::string(64,'f'):input.executable_digest;session.signer_digest=input.signer_digest;session.policy_language="en";
   session.maximum_mode=config.v2?"observe_only":"full_access_app";session.eligibility_basis=input.eligibility_basis;session.cancel_epoch=config.session_epoch;
   session.process_handle=process.release();session.executable_file=executable.file;executable.file=INVALID_HANDLE_VALUE;
@@ -290,6 +295,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(response.empty(), "late measurement never publishes success");
     if (config.hold_before_file) Check(input_calls.load() == 0, "Stop before focus prevents input");
   }
+  if(config.unmeasured_explorer)Check(admission_reads==1,"eligible route reached before final executable refusal");
   Check(succeeded==expected,name);if(!expected)Check(failure==reason,"refusal reason");
   Check(ticket_states[input.session_key].generation==10+ticket_calls,"ticket count");
   Check(sessions.size()==1,"existing lifetime remains until explicit close");
@@ -340,6 +346,22 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
 }
 int wmain() {
   try {
+    WindowsV2Judgement unmeasured;
+    WindowsExplorerPrestartScope scope{1, 0, 0, [] { return true; }};
+    Check(!MeasureWindowsExplorerPrestart(unmeasured, nullptr, scope), "unmeasured prestart refused");
+    unmeasured.identity_ok = true;
+    auto& facts = unmeasured.measured.facts;
+    facts.platform = sprint_coder::computer_use::TargetPlatform::kWin32;
+    facts.running_image_matches = true; facts.signature = "valid";
+    facts.signer_microsoft_root = true; facts.packaged = false;
+    facts.image_volume = "fixed"; facts.image_root = "windows_directory";
+    facts.image_relative_path = "explorer.exe"; facts.image_leaf = "explorer.exe";
+    facts.window_class = "CabinetWClass";
+    Check(!MeasureWindowsExplorerPrestart(unmeasured, reinterpret_cast<HWND>(1), scope),
+          "fake Explorer window refused even with claimed identity");
+    unmeasured.explorer_prestart_admitted = true;
+    (void)WindowsV2VerdictForWindowClass(&unmeasured, "CabinetWClass");
+    Check(!unmeasured.explorer_prestart_admitted, "next window cannot inherit prestart evidence");
     std::vector<wchar_t> system(32768); const auto length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
     Check(length != 0 && length < system.size(), "system directory"); canonical.assign(system.data(), length); canonical += L"\\notepad.exe";
     Run("v1-normal",{},true,"",2);
@@ -369,7 +391,8 @@ int wmain() {
     c={};c.hold_before_file=true;Run("v1-held-before-file",c,false,"session_start_canceled",0);
     c={};c.hold_after_file=true;c.move_focus=true;Run("v1-held-after-file-counter",c,false,"session_start_canceled",1);
     c={};c.v2=true;Run("v2-normal",c,true,"",2);
-    c.input_epoch=7;Run("v2-epoch-entry",c,false,"session_start_canceled",1);
+    c.unmeasured_explorer=true;Run("v2-unmeasured-explorer-refused",c,false,"session_target_rejected",1);
+    c.unmeasured_explorer=false;c.input_epoch=7;Run("v2-epoch-entry",c,false,"session_start_canceled",1);
     c={};c.v2=true;c.duplicate_failure=true;Run("v2-dup-entry",c,false,"session_target_rejected",1);
     c={};c.v2=true;c.move_focus=true;c.after_stop=true;Run("v2-after-stop-counter",c,false,"session_start_canceled",1);
     for (const bool v2 : {false, true}) {

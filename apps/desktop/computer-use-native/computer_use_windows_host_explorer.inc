@@ -1,4 +1,4 @@
-// Explorer measurements run on the pipe consumer's STA. No COM pointer crosses a thread.
+// Explorer measurements run on their owning measurement lane. No COM pointer crosses a thread.
 //
 // Internal refusal reasons. They never reach the wire: the response says only "unknown",
 // pointOwnerMatches false, or the generic explorer_view_unreadable error. Tests read the reason of
@@ -354,8 +354,8 @@ WindowsExplorerShellView ReadWindowsExplorerShellView(
 // Main's existing request deadline kills the helper. Never adopt a late result, including cleanup.
 class WindowsExplorerDeadline {
 public:
-  WindowsExplorerDeadline(std::uint64_t epoch, std::uint64_t serial)
-      : epoch_(epoch), serial_(serial), thread_(GetCurrentThreadId()),
+  WindowsExplorerDeadline(std::uint64_t epoch, std::uint64_t serial, bool lane_registered = false)
+      : io_(!lane_registered), epoch_(epoch), serial_(serial), thread_(GetCurrentThreadId()),
         deadline_(std::chrono::steady_clock::now() + std::chrono::milliseconds(800)) {
     enabled_ = SUCCEEDED(CoEnableCallCancellation(nullptr));
     if (!enabled_) return;
@@ -406,6 +406,62 @@ private:
   std::condition_variable ready_;
   std::thread watcher_;
 };
+
+// ReadWindowsExplorerShellView is the session-independent view/ordinary-folder measurement shared
+// with M2 below. Prestart chooses a probe point inside that view; it never issues input and never
+// creates dispatch evidence. The result is consumed on this lane before its held image is released.
+bool MeasureWindowsExplorerPrestart(const WindowsV2Judgement &process, HWND window,
+                                    const WindowsExplorerPrestartScope &scope) {
+  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) {
+    return false;
+  } else {
+    try {
+      if (!scope.current || scope.generation == 0 || !scope.current() ||
+          !process.identity_ok || window == nullptr ||
+          !sprint_coder::computer_use::WindowsTargetIsVerifiedExplorer(process.measured.facts))
+        return false;
+      WindowsExplorerDeadline deadline(scope.epoch, scope.stop_serial, /*lane_registered=*/true);
+      const auto current = [&] { return deadline.Current() && scope.current(); };
+      const auto window_identity = [&](const std::string &start) {
+        return Sha256String("computer-window-identity-v1\n" + process.app_identity + "\n" + start +
+                            "\n" + std::to_string(reinterpret_cast<std::uintptr_t>(window)));
+      };
+      const std::string expected_window_identity = window_identity(process.process_start);
+      const auto bound = [&] {
+        DWORD owner = 0;
+        std::string start;
+        WindowsFileIdentity held{};
+        LockedWindowsExecutable running;
+        return current() && GetWindowThreadProcessId(window, &owner) != 0 &&
+            owner == process.measured.pid &&
+            WindowsTargetWindowClass(window, owner) == std::optional<std::string>("CabinetWClass") &&
+            ReadProcessStartIdentity(owner, &start) && start == process.process_start &&
+            window_identity(start) == expected_window_identity &&
+            ReadWindowsFileIdentity(process.executable.file, &held) &&
+            SameWindowsFileIdentity(held, process.executable.identity.file_identity) &&
+            OpenLockedProcessExecutable(owner, &running) &&
+            SameWindowsFileIdentity(held, running.identity.file_identity) &&
+            SameWindowsTargetName(process.executable.identity.path, running.identity.path) && current();
+      };
+      if (!bound()) return false;
+      const auto view = ReadWindowsExplorerShellView(window, current);
+      if (!current() || view.refusal != WindowsExplorerRefusal::kNone ||
+          view.folder_refusal != WindowsExplorerRefusal::kNone || !view.folder || !view.view)
+        return false;
+      RECT bounds{};
+      if (!GetClientRect(view.view, &bounds) || bounds.right <= bounds.left ||
+          bounds.bottom <= bounds.top) return false;
+      POINT point{bounds.left + (bounds.right - bounds.left) / 2,
+                  bounds.top + (bounds.bottom - bounds.top) / 2};
+      if (!ClientToScreen(view.view, &point) || !current() ||
+          WindowsExplorerPointRefusal(window, view.view, process.measured.pid, point) !=
+              WindowsExplorerRefusal::kNone) return false;
+      return bound();
+    } catch (...) {
+      return false;
+    }
+  }
+}
 
 // P5 REQUIREMENT (M2): the answer alone never authorizes input. Dispatch consumes the native
 // evidence and remeasures using its own WindowsActionPoint before attempting any input API.

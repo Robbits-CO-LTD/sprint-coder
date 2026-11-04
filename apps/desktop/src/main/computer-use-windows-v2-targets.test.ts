@@ -135,7 +135,7 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(list).toContain('MeasureWindowsV2Process(owner, context, judgement.get());');
     expect(list).not.toContain('JudgeWindowsV2Target(');
     expect(list).toMatch(
-      /WindowsV2VerdictForWindowClass\(&judgement, WindowsTargetWindowClass\(window, owner\),\s+&window_facts\);/u,
+      /WindowsV2VerdictForWindowClass\(&judgement, WindowsTargetWindowClass\(window, owner\),\s+&window_facts, window, &explorer_scope\);/u,
     );
     // Each row carries its own window's mode and facts; no row is refused for another window's.
     expect(list).not.toContain('judgement.verdict');
@@ -253,7 +253,9 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(runner).toContain('WindowsNewStartIoRegistration cancellation;');
     expect(runner).toContain('if (cancellation.thread == nullptr) return {};');
     expect(runner).toContain('return MeasureWindowsV2Rejudge(work);');
-    expect(rejudge).toContain('JudgeWindowsV2Target(work.pid, work.window, context, &judged)');
+    expect(rejudge).toContain(
+      'JudgeWindowsV2Target(work.pid, work.window, context, &judged, &explorer_scope)',
+    );
     expect(rejudge).toContain('SameWindowsFileIdentity(held, *judged.measured.file_identity)');
     expect(rejudge).toContain('WindowsTargetIsNotWebByTable(');
   });
