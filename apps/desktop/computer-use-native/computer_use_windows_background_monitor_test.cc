@@ -130,39 +130,96 @@ int main() {
   using namespace sprint_coder::computer_use;
   if (!CheckBackgroundMonitor()) return 1;
   const auto value = BackgroundPatternPermission(BackgroundPattern::kValue, 5);
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    state.Claim(1, value, 1000);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
+    if (!Check(state.Snapshot().paused, "ATTR_before_begin_call_pauses")) return 1;
+  }
   for (const auto tick : {999u, 1000u, 1001u}) {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
     const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1000);
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, tick, 1100);
-    if (!Check(state.Finish(claim, 1101) == (tick > 1000) &&
+    if (!Check((state.EndCall(claim, 1101), state.Finish(claim, 1101)) == (tick > 1000) &&
                    state.Snapshot().unknown_effect == (tick <= 1000),
                "ATTR_generation_before_or_same_tick_delivered_after_claim")) return 1;
+  }
+  // Separate claim, call and completion clocks; no sleeps or OS input.
+  for (int phase = 0; phase < 3; ++phase) {
+    static std::uint32_t tick;
+    tick = 1000;
+    WindowsBackgroundMonitorState state(1, [] { return tick; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    tick = 1020;
+    if (!state.BeginCall(claim, 1020)) return 1;
+    if (phase != 0 && !state.EndCall(claim, 1030)) return 1;
+    const auto arrival = phase == 0 ? 1021 : phase == 1 ? 1179 : 1180;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0,
+        1021, arrival);
+    if (!Check(state.Snapshot().paused == (phase >= 2),
+               "ATTR_call_and_end_grace_but_not_expired_before_finish")) return 1;
+  }
+  for (const auto generated : {1010u, 1020u}) {
+    WindowsBackgroundMonitorState state(1, [] { return 1020u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1020);
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, generated, 1021);
+    if (!Check(state.Snapshot().paused, "ATTR_generation_before_or_at_begin_call_pauses")) return 1;
+  }
+  for (int invalid = 0; invalid < 5; ++invalid) {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    if (invalid != 0 && invalid != 2) state.BeginCall(claim, 1000);
+    if (invalid == 4) state.EndCall(claim, 1001);
+    const bool accepted = invalid == 1 || invalid == 2 ?
+        state.BeginCall(claim + (invalid == 2), 1002) :
+        state.EndCall(claim + (invalid == 3), 1002);
+    if (!Check(!accepted && state.Snapshot().paused && state.Snapshot().unknown_effect,
+               "ATTR_invalid_call_boundary_order_or_claim_pauses")) return 1;
+  }
+  {
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1000);
+    state.EndCall(claim, 1010);
+    if (!Check(state.Finish(claim, 1200) && state.Claim(1, value, 1200) != 0,
+               "ATTR_finish_does_not_restart_end_call_grace")) return 1;
   }
   for (const auto tick : {0xffffffefu, 0xfffffff0u, 0x10u}) {
     WindowsBackgroundMonitorState state(1, [] { return 0xfffffff0u; });
     state.Registered(true);
     const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1000);
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, tick, 1001);
-    if (!Check(state.Finish(claim, 1002) == (tick == 0x10u), "ATTR_generation_tick_wrap")) return 1;
+    if (!Check((state.EndCall(claim, 1002), state.Finish(claim, 1002)) == (tick == 0x10u), "ATTR_generation_tick_wrap")) return 1;
   }
   {
     static std::uint32_t tick = 1000;
     WindowsBackgroundMonitorState state(1, [] { return tick; });
     state.Registered(true);
     const auto first = state.Claim(1, value, 1000);
-    if (!state.Finish(first, 1010)) return 1;
+    state.BeginCall(first, 1000);
+    if (!(state.EndCall(first, 1010), state.Finish(first, 1010))) return 1;
     tick = 1160;
     const auto second = state.Claim(1, value, 1160);
+    state.BeginCall(second, 1160);
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1161);
-    if (!Check(second != 0 && !state.Finish(second, 1162) && state.Snapshot().unknown_effect,
+    if (!Check(second != 0 && !(state.EndCall(second, 1162), state.Finish(second, 1162)) && state.Snapshot().unknown_effect,
                "ATTR_previous_claim_delayed_event_cannot_use_next_claim")) return 1;
   }
   {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
     const auto first = state.Claim(1, value, 1000);
-    if (!state.Finish(first, 1010)) return 1;
+    state.BeginCall(first, 1000);
+    if (!(state.EndCall(first, 1010), state.Finish(first, 1010))) return 1;
     if (!Check(state.Claim(1, value, 1159) == 0 && state.Claim(1, 1159) == 0 &&
                    !state.Snapshot().paused && state.Claim(1, value, 1160) != 0,
                "ATTR_grace_refuses_claim_until_deadline")) return 1;
@@ -182,10 +239,11 @@ int main() {
         WindowsBackgroundMonitorState state(1, [] { return 1000u; });
         state.Registered(true);
         const auto claim = state.Claim(1, permission, 1000);
+        state.BeginCall(claim, 1000);
         for (unsigned count = 0; count < permission.limits[kind]; ++count)
           state.TargetEvent(Owner::kTarget, permission.events[kind], 5, 0, 0, 1001, 1001);
         if (!Check(!state.Snapshot().paused, "ATTR_kind_limit_inclusive")) return 1;
-        if (grace && !state.Finish(claim, 1002)) return 1;
+        if (grace && !(state.EndCall(claim, 1002), state.Finish(claim, 1002))) return 1;
         state.TargetEvent(Owner::kTarget, permission.events[kind], 5, 0, 0, 1002, 1003);
         if (!Check(state.Snapshot().paused && state.Snapshot().unknown_effect == !grace,
                    "ATTR_each_kind_first_excess_pauses")) return 1;
@@ -198,7 +256,8 @@ int main() {
     permission.limits = {16, 16};
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
-    state.Claim(1, permission, 1000);
+    const auto claim = state.Claim(1, permission, 1000);
+    state.BeginCall(claim, 1000);
     for (unsigned count = 0; count < 16; ++count)
       state.TargetEvent(Owner::kTarget, permission.events[count % 2], 5, 0, 0, 1001, 1001);
     if (!Check(!state.Snapshot().paused, "ATTR_total_limit_inclusive")) return 1;
@@ -210,7 +269,8 @@ int main() {
                        EVENT_SYSTEM_SCROLLINGSTART, EVENT_SYSTEM_SCROLLINGEND}) {
       WindowsBackgroundMonitorState state(1, [] { return 1000u; });
       state.Registered(true);
-      state.Claim(1, BackgroundPatternPermission(pattern, 5), 1000);
+      const auto claim = state.Claim(1, BackgroundPatternPermission(pattern, 5), 1000);
+      state.BeginCall(claim, 1000);
       state.TargetEvent(Owner::kTarget, event, 5, 0, 0, 1001, 1001);
       if (!Check(state.Snapshot().unknown_effect, "ATTR_show_hide_scrolling_never_exempt")) return 1;
     }
@@ -221,10 +281,12 @@ int main() {
     state.Registered(true);
     std::uint64_t claim = 0;
     if (order != 0) claim = state.Claim(1, value, 1000);
-    if (order >= 2 && !state.Finish(claim, 1010)) return 1;
+    if (order != 0) state.BeginCall(claim, 1000);
+    if (order >= 2 && !(state.EndCall(claim, 1010) && state.Finish(claim, 1010))) return 1;
     if (order == 5) claim = state.Claim(1,
         BackgroundPatternPermission(BackgroundPattern::kInvoke, 6), 1160);
     if (order == 6) claim = state.Claim(1, value, 1160);
+    if (order >= 5) state.BeginCall(claim, 1160);
     const auto now = order == 0 ? 999 : order == 1 ? 1001 :
         order == 2 ? 1010 : order == 3 ? 1159 : order == 4 ? 1160 : 1161;
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, OBJID_CLIENT, 0, 1001, now);
@@ -242,8 +304,9 @@ int main() {
       WindowsBackgroundMonitorState state(1, [] { return 1000u; });
       state.Registered(true);
       const auto claim = state.Claim(1, permission, 1000);
+      state.BeginCall(claim, 1000);
       state.TargetEvent(Owner::kTarget, event, 5, OBJID_CLIENT, 0, 1001, 1001);
-      if (!Check(state.Finish(claim, 1002) && !state.Snapshot().paused,
+      if (!Check((state.EndCall(claim, 1002), state.Finish(claim, 1002)) && !state.Snapshot().paused,
                  "ATTR_each_pattern_expected_event")) return 1;
     }
   }
@@ -256,11 +319,12 @@ int main() {
     permission.child = 7;
     if (mismatch == 6) permission.hwnd = 0;
     const auto claim = state.Claim(1, permission, 1000);
+    state.BeginCall(claim, 1000);
     state.TargetEvent(mismatch == 4 ? Owner::kUnknown : Owner::kTarget,
         mismatch == 1 ? EVENT_OBJECT_INVOKED : EVENT_OBJECT_VALUECHANGE,
         mismatch == 0 ? 6 : 5, mismatch == 2 ? OBJID_WINDOW : OBJID_CLIENT,
         mismatch == 3 ? 8 : 7, 1001, mismatch == 5 ? 999 : 1001);
-    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().unknown_effect,
+    if (!Check(!(state.EndCall(claim, 1002), state.Finish(claim, 1002)) && state.Snapshot().unknown_effect,
                "ATTR_wrong_hwnd_kind_object_child_owner_time_or_missing_hwnd")) return 1;
   }
   {
@@ -271,17 +335,19 @@ int main() {
     permission.object = OBJID_CLIENT;
     permission.child = 7;
     const auto claim = state.Claim(1, permission, 1000);
+    state.BeginCall(claim, 1000);
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, OBJID_CLIENT, 7, 1001, 1001);
-    if (!Check(state.Finish(claim, 1002), "ATTR_known_child_matches")) return 1;
+    if (!Check((state.EndCall(claim, 1002), state.Finish(claim, 1002)), "ATTR_known_child_matches")) return 1;
   }
   for (bool finish_first : {false, true}) {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
     const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1000);
     for (unsigned count = 0; count < 2; ++count)
       state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
     if (!Check(!state.Snapshot().paused, "ATTR_limit_inclusive")) return 1;
-    if (finish_first && !state.Finish(claim, 1002)) return 1;
+    if (finish_first && !(state.EndCall(claim, 1002), state.Finish(claim, 1002))) return 1;
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1003);
     if (!Check(state.Snapshot().paused && state.Snapshot().unknown_effect == !finish_first,
                "ATTR_limit_shared_by_claim_and_grace")) return 1;
@@ -290,13 +356,15 @@ int main() {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
     const auto first = state.Claim(1, value, 1000);
+    state.BeginCall(first, 1000);
     for (unsigned count = 0; count < 2; ++count)
       state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
-    if (!state.Finish(first, 1002)) return 1;
+    if (!(state.EndCall(first, 1002), state.Finish(first, 1002))) return 1;
     const auto second = state.Claim(1, value, 1152);
+    state.BeginCall(second, 1152);
     if (!Check(!state.Finish(first, 1153), "ATTR_old_finish_cannot_end_next_claim")) return 1;
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1154);
-    if (!Check(state.Finish(second, 1155), "ATTR_next_claim_gets_fresh_count")) return 1;
+    if (!Check((state.EndCall(second, 1155), state.Finish(second, 1155)), "ATTR_next_claim_gets_fresh_count")) return 1;
     // An old Finish must not refresh the existing grace interval either.
     if (state.Finish(second, 1200)) return 1;
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1305);
@@ -306,7 +374,8 @@ int main() {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
     const auto first = state.Claim(1, value, 1000);
-    if (!state.Finish(first, 1001) || !state.Claim(1, 1151)) return 1;
+    state.BeginCall(first, 1000);
+    if (!(state.EndCall(first, 1001), state.Finish(first, 1001)) || !state.Claim(1, 1151)) return 1;
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1152, 1152);
     if (!Check(state.Snapshot().unknown_effect,
                "ATTR_unattributed_next_claim_discards_old_permission")) return 1;
@@ -316,9 +385,10 @@ int main() {
     state.Registered(true);
     if (stop_first) state.Pause();
     const auto claim = state.Claim(1, value, 1000);
+    state.BeginCall(claim, 1000);
     if (!stop_first) state.Pause();
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
-    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().paused &&
+    if (!Check(!(state.EndCall(claim, 1002), state.Finish(claim, 1002)) && state.Snapshot().paused &&
                    state.Snapshot().unknown_effect == !stop_first,
                "ATTR_stop_before_or_after_claim_linearization")) return 1;
   }
@@ -329,8 +399,9 @@ int main() {
     state.Registered(true);
     const auto claim = state.Claim(1,
         BackgroundPatternPermission(BackgroundPattern::kExpandCollapse, 5), 1000);
+    state.BeginCall(claim, 1000);
     state.TargetEvent(Owner::kTarget, event, 5, OBJID_WINDOW, 0, 1001, 1001);
-    if (!Check(!state.Finish(claim, 1002) && state.Snapshot().unknown_effect,
+    if (!Check(!(state.EndCall(claim, 1002), state.Finish(claim, 1002)) && state.Snapshot().unknown_effect,
                "ATTR_foreground_capture_movesize_popup_never_exempt")) return 1;
   }
   for (bool after_finish : {false, true}) {
@@ -338,7 +409,8 @@ int main() {
       WindowsBackgroundMonitorState state(1, [] { return 1000u; });
       state.Registered(true);
       const auto claim = state.Claim(1, value, 1000);
-      if (after_finish && !state.Finish(claim, 1010)) return 1;
+      state.BeginCall(claim, 1000);
+      if (after_finish && !(state.EndCall(claim, 1010), state.Finish(claim, 1010))) return 1;
       if (termination == 0) state.Pause(); // Stop / helper exit.
       if (termination == 1) state.Registered(false);
       if (termination == 2) state.Registered(true); // Re-registration is not resume.
@@ -363,7 +435,9 @@ int main() {
     permission.object = OBJID_CLIENT;
     permission.child = 7;
     const auto claim = monitor.state.Claim(1, permission);
+    monitor.state.BeginCall(claim);
     WindowsBackgroundMonitor::Target(nullptr, EVENT_OBJECT_VALUECHANGE, Id(5), OBJID_CLIENT, 7, 10, event_tick);
+    monitor.state.EndCall(claim);
     if (!Check(monitor.state.Finish(claim) == (event_tick > 1000), "ATTR_callback_passes_metadata")) return 1;
     monitor.Stop();
     WindowsBackgroundMonitor::Target(nullptr, EVENT_OBJECT_VALUECHANGE, Id(5), OBJID_CLIENT, 7, 10, event_tick);

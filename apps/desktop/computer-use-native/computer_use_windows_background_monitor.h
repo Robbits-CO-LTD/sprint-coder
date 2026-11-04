@@ -145,7 +145,7 @@ private:
     CheckHealthLocked(observed);
     // This bounded correlation is not proof of origin: another UIA client can perform the same
     // operation on the same element concurrently. ADR 2.5 display/isolation still applies.
-    // Reject pre-claim generation even if delivery was delayed. Same-tick ordering is
+    // Reject pre-call generation even if delivery was delayed. Same-tick ordering is
     // ambiguous, so equality fails closed too; signed subtraction tolerates DWORD wrap.
     std::size_t kind = permission_.events.size();
     for (std::size_t i = 0; i < permission_.events.size(); ++i)
@@ -153,9 +153,9 @@ private:
     const bool forbidden = event == 3 || (event >= 8 && event <= 11) ||
         event == 0x8000 || event == 0x8001;
     if (owner == BackgroundInputOwner::kTarget && registered_ && !state_.paused &&
-        permission_.hwnd != 0 && hwnd == permission_.hwnd && now >= claim_started_ &&
-        static_cast<std::int32_t>(event_tick - claim_tick_) > 0 &&
-        (active_claim_ != 0 || (grace_ && observed < grace_deadline_)) &&
+        permission_.hwnd != 0 && hwnd == permission_.hwnd && now >= call_started_ &&
+        static_cast<std::int32_t>(event_tick - call_tick_) > 0 &&
+        (call_active_ || (grace_ && observed < grace_deadline_)) &&
         (!permission_.child_known || (object == permission_.object && child == permission_.child)) &&
         kind < permission_.events.size() && !forbidden && exempted_ < kBackgroundEventLimit &&
         kind_counts_[kind] < permission_.limits[kind]) {
@@ -202,6 +202,23 @@ public:
     std::lock_guard lock(mutex_);
     return ClaimLocked(expected_epoch, now, permission);
   }
+  bool BeginCall(std::uint64_t claim) {
+    std::lock_guard lock(mutex_);
+    return CallBoundaryLocked(claim, true, BackgroundMonitorNow());
+  }
+  bool EndCall(std::uint64_t claim) {
+    std::lock_guard lock(mutex_);
+    return CallBoundaryLocked(claim, false, BackgroundMonitorNow());
+  }
+  // Tests only: production samples both boundary clocks under the monitor lock.
+  bool BeginCall(std::uint64_t claim, std::uint64_t now) {
+    std::lock_guard lock(mutex_);
+    return CallBoundaryLocked(claim, true, now);
+  }
+  bool EndCall(std::uint64_t claim, std::uint64_t now) {
+    std::lock_guard lock(mutex_);
+    return CallBoundaryLocked(claim, false, now);
+  }
   // The end boundary checks monitor health too: a stall seen only here still fails the claim.
   bool Finish(std::uint64_t claim) {
     std::lock_guard lock(mutex_);
@@ -213,14 +230,32 @@ public:
     return FinishLocked(claim, now);
   }
 private:
+  bool CallBoundaryLocked(std::uint64_t claim, bool begin, std::uint64_t now) {
+    now = ObserveLocked(now);
+    CheckHealthLocked(now);
+    if (!registered_ || state_.paused || claim == 0 || claim != active_claim_ ||
+        (begin ? call_begun_ : !call_active_)) {
+      PauseLocked();
+      return false;
+    }
+    if (begin) {
+      call_begun_ = call_active_ = true;
+      call_started_ = now;
+      call_tick_ = tick_clock_();
+    } else {
+      call_active_ = false;
+      grace_ = permission_.hwnd != 0 &&
+          now <= (std::numeric_limits<std::uint64_t>::max)() - kBackgroundEventGraceMs;
+      if (grace_) grace_deadline_ = now + kBackgroundEventGraceMs;
+    }
+    return true;
+  }
   bool FinishLocked(std::uint64_t claim, std::uint64_t now) {
     if (claim == 0 || claim != active_claim_) return false;
     now = ObserveLocked(now);
     CheckHealthLocked(now);
+    if (call_active_ || (permission_.hwnd != 0 && !call_begun_)) PauseLocked();
     active_claim_ = 0;
-    grace_ = !state_.paused && !state_.unknown_effect && permission_.hwnd != 0 &&
-        now <= (std::numeric_limits<std::uint64_t>::max)() - kBackgroundEventGraceMs;
-    if (grace_) grace_deadline_ = now + kBackgroundEventGraceMs;
     return !state_.paused && !state_.unknown_effect;
   }
   std::uint64_t ClaimLocked(std::uint64_t expected_epoch, std::uint64_t now,
@@ -236,8 +271,7 @@ private:
     }
     active_claim_ = ++next_claim_;
     permission_ = permission;
-    claim_tick_ = tick_clock_();
-    claim_started_ = now;
+    call_begun_ = call_active_ = false;
     exempted_ = 0;
     kind_counts_ = {};
     grace_ = false;
@@ -260,6 +294,7 @@ private:
   }
   void PauseLocked() {
     permission_ = {};
+    call_begun_ = call_active_ = false;
     grace_ = false;
     // Close first, then advance, then let a caller publish the snapshot. Saturation never wraps.
     if (!state_.paused) {
@@ -281,11 +316,12 @@ private:
   std::uint64_t active_claim_ = 0;
   BackgroundEventPermission permission_;
   const TickClock tick_clock_;
-  std::uint32_t claim_tick_ = 0;
+  std::uint32_t call_tick_ = 0;
   std::array<unsigned, 5> kind_counts_{};
-  std::uint64_t claim_started_ = 0, grace_deadline_ = 0;
+  std::uint64_t call_started_ = 0, grace_deadline_ = 0;
   unsigned exempted_ = 0;
   bool grace_ = false;
+  bool call_begun_ = false, call_active_ = false;
 };
 
 } // namespace sprint_coder::computer_use
