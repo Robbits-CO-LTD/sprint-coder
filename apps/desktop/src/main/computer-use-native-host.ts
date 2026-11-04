@@ -306,6 +306,7 @@ export type ComputerUseNativeHostOptions = Readonly<{
   /** Test injection only; never sourced from environment, Renderer, or model input. */
   windowsBackgroundInputForTesting?: boolean;
   windowsApprovalRoundTripForTesting?: ApprovalRoundTripIdentity;
+  windowsForegroundHandoffForTesting?: boolean;
   /** Isolate session lifetime tests from the completed start's separate Stop owner. */
   windowsCompletedStartForTesting?: (forget: (sessionId: string) => boolean) => void;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
@@ -417,7 +418,9 @@ export function createComputerUseNativeHost(
     for (const listener of interactionListeners) listener(event);
   };
   const roundTrips =
-    platform === 'win32' && options.windowsApprovalRoundTripForTesting
+    platform === 'win32' &&
+    (options.windowsBackgroundInputForTesting === true ||
+      options.windowsApprovalRoundTripForTesting)
       ? new ApprovalRoundTrips(async (wire) => {
           if (!addon?.approvalRoundTrip) throw new Error('Round trip unavailable');
           return addon.approvalRoundTrip(wire);
@@ -3005,6 +3008,31 @@ export function createComputerUseNativeHost(
     ...(roundTrips === undefined
       ? {}
       : {
+          allowWindowsForegroundHandoff: (
+            session: ComputerUseNativeSession,
+            consumeHandoff: () => void,
+          ) => {
+            if (options.windowsForegroundHandoffForTesting !== true) return false;
+            const generation = addon?.captureWindowsGeneration?.();
+            const internal = sessions.get(session.sessionId);
+            const available = () =>
+              generation != null &&
+              addon?.isWindowsGenerationCurrent?.(generation) === true &&
+              internal != null &&
+              sessions.get(session.sessionId) === internal &&
+              internal.cancelEpoch === session.cancelEpoch &&
+              (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) === session.cancelEpoch &&
+              internal.inputSession?.kind === 'background' &&
+              !interactionRevoked.has(session.sessionId) &&
+              !inputQuarantined();
+            if (!available()) return false;
+            try {
+              consumeHandoff();
+              return available() && addon?.allowWindowsHelperForeground?.(generation!) === true;
+            } catch {
+              return false;
+            }
+          },
           beginApprovalRoundTrip: async (
             input: Parameters<NonNullable<ComputerUseNativeHost['beginApprovalRoundTrip']>>[0],
           ) => {
@@ -3016,8 +3044,15 @@ export function createComputerUseNativeHost(
               interactionRevoked.has(input.session.sessionId)
             )
               throw new Error('Round trip session unavailable');
+            const identity =
+              options.windowsApprovalRoundTripForTesting ?? addon?.readWindowsMainIdentity?.();
+            if (
+              !identity ||
+              (!options.windowsApprovalRoundTripForTesting && identity.mainPid !== process.pid)
+            )
+              throw new Error('Windows Main identity unavailable');
             await roundTrips.begin({
-              ...options.windowsApprovalRoundTripForTesting!,
+              ...identity,
               version: 1,
               kind: 'begin',
               roundTripId: input.roundTripId,

@@ -381,6 +381,10 @@ function createFixture(
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
+    allowWindowsForegroundHandoff: () => {
+      nativeLog.push('allowWindowsForegroundHandoff');
+      return false;
+    },
     ...(options.beginApprovalRoundTrip
       ? { beginApprovalRoundTrip: options.beginApprovalRoundTrip }
       : {}),
@@ -1425,6 +1429,39 @@ describe('ComputerUseController', () => {
         vi.useRealTimers();
       }
     });
+
+    it.each(['V1', 'native'] as const)(
+      'P5c1 identity failure closes the %s card path',
+      async (path) => {
+        const begin = vi.fn(async () => {
+          throw new Error('Windows Main identity unavailable');
+        });
+        const { fixture, acting, sessionId } = await offered(
+          {
+            ...backgroundOptions,
+            windowsBackgroundInputForTesting: false,
+            authorizationRequired: path === 'V1',
+            beginApprovalRoundTrip: begin,
+          },
+          path === 'V1' ? 'supervised' : 'full_access_app',
+        );
+        if (path === 'V1') await expect(acting).rejects.toThrow();
+        else
+          await expect(acting).resolves.toMatchObject({
+            result: 'rejected',
+            reasonCode: 'native_approval_revoked',
+          });
+        expect(begin).toHaveBeenCalledOnce();
+        expect(fixture.controller.getStatus(sessionId)).toMatchObject({
+          state: 'paused',
+          pendingApproval: null,
+        });
+        expect(fixture.approvals).toHaveLength(0);
+        expect(fixture.approvedDispatches).toHaveLength(0);
+        expect(fixture.nativeLog).not.toContain('allowWindowsForegroundHandoff');
+        await fixture.controller.stop(sessionId);
+      },
+    );
 
     it.each(['V1', 'native', 'two cards', 'foreground'] as const)(
       'P5a approval return: %s reobserves before dispatch and never reuses a card',

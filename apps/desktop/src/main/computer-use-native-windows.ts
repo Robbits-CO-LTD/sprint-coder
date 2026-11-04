@@ -10,6 +10,11 @@ import {
 } from './computer-use-windows-transport-events';
 import { computerUseApprovalRoundTripWireSchema } from '@sprint-coder/contracts';
 import {
+  loadWindowsMainAddon,
+  readWindowsMainIdentity,
+  allowWindowsHelperForeground,
+} from './computer-use-windows-main';
+import {
   computerUseNativeCloseReceiptSchema,
   computerUseNativeInputReceiptSchema,
   computerUseNativeDiscoveryResultSchema,
@@ -167,6 +172,8 @@ export function createWindowsComputerUseNativeAddon(
   const discoverySupported = windowsDiscoveryCapability(probe);
   const client = new WindowsComputerUseHelperClient(helperPath, expectedTrust, discoverySupported);
   return Object.freeze({
+    readWindowsMainIdentity: () => readWindowsMainIdentity(loadWindowsMainAddon(helperPath)),
+    allowWindowsHelperForeground: (token) => client.allowHelperForeground(token),
     subscribeWindowsInteraction: (listener) => client.subscribeWindowsInteraction(listener),
     approvalRoundTrip: (input) => client.approvalRoundTrip(input),
     completeApprovalRoundTrip: (sessionId, id) => client.completeApprovalRoundTrip(sessionId, id),
@@ -654,6 +661,18 @@ class WindowsComputerUseHelperClient {
   captureWindowsGeneration(): WindowsGenerationToken | null {
     const token = this.generationToken;
     return token !== null && this.isWindowsGenerationCurrent(token) ? token : null;
+  }
+
+  allowHelperForeground(token: WindowsGenerationToken): boolean {
+    if (!this.isWindowsGenerationCurrent(token) || this.hasUnconfirmedSemanticInputs())
+      return false;
+    const pid = this.generations.get(token.helperGeneration)?.child.pid;
+    if (pid === undefined || this.child?.pid !== pid) return false;
+    try {
+      return allowWindowsHelperForeground(loadWindowsMainAddon(this.helperPath), pid, pid);
+    } catch {
+      return false;
+    }
   }
 
   windowsGenerationFor(response: unknown): WindowsGenerationToken | null {

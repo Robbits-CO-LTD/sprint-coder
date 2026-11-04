@@ -3,6 +3,7 @@ import type {
   ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
+import type { ApprovalRoundTripIdentity } from './computer-use-approval-round-trip';
 
 export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 
@@ -88,6 +89,8 @@ export type ComputerUseNativeProbe = Readonly<{
 }>;
 
 export type ComputerUseNativeAddon = Readonly<{
+  readWindowsMainIdentity?(): ApprovalRoundTripIdentity;
+  allowWindowsHelperForeground?(token: WindowsGenerationToken): boolean;
   subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
   approvalRoundTrip?(input: unknown): Promise<unknown>;
   completeApprovalRoundTrip?(sessionId: string, roundTripId: string): void;
