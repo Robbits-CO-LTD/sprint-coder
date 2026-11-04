@@ -1,5 +1,5 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,32 @@ import { describe, expect, it } from 'vitest';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const native = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+type Run = Readonly<{ status: number | null; stdout: string; stderr: string }>;
+// Compiles run asynchronously: a spawnSync longer than 60s blocks the vitest worker RPC.
+function run(
+  file: string,
+  args: string[],
+  options: { verbatim?: boolean; timeout: number; env?: NodeJS.ProcessEnv },
+): Promise<Run> {
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args,
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: options.verbatim ?? false,
+        timeout: options.timeout,
+        maxBuffer: 64 * 1024 * 1024,
+        ...(options.env ? { env: options.env } : {}),
+      },
+      (error, stdout, stderr) => {
+        const code = error && typeof error.code === 'number' ? error.code : error ? null : 0;
+        resolve({ status: code, stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
+  });
+}
 type Build = Readonly<{
   wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
 }>;
@@ -281,7 +307,9 @@ describe.skipIf(process.platform !== 'win32')('background executor test build', 
   describe.each(['test', 'background-acceptance', 'production'] as const)(
     'native build %s',
     (variant) => {
-      it('compiles the host translation unit and checks the fixture predicate', ({ skip }) => {
+      it('compiles the host translation unit and checks the fixture predicate', async ({
+        skip,
+      }) => {
         const build = findBuild();
         if (!build) {
           if (process.env.CI) throw new Error('MSVC required');
@@ -331,9 +359,8 @@ describe.skipIf(process.platform !== 'win32')('background executor test build', 
             host,
             `/Fo:${object}`,
           ]);
-          const compiled = spawnSync(command.file, command.args, {
-            encoding: 'utf8',
-            windowsVerbatimArguments: command.verbatim,
+          const compiled = await run(command.file, command.args, {
+            verbatim: command.verbatim,
             timeout: 500000,
             env: { ...process.env, VSLANG: '1033' },
           });
@@ -416,15 +443,13 @@ int main() {
             `/Fo:${join(root, 'predicate.obj')}`,
             `/Fe:${predicateBinary}`,
           ]);
-          const predicateBuild = spawnSync(predicateCommand.file, predicateCommand.args, {
-            encoding: 'utf8',
-            windowsVerbatimArguments: predicateCommand.verbatim,
-            windowsHide: true,
+          const predicateBuild = await run(predicateCommand.file, predicateCommand.args, {
+            verbatim: predicateCommand.verbatim,
             timeout: 120000,
             env: { ...process.env, VSLANG: '1033' },
           });
           expect(predicateBuild.status, predicateBuild.stdout + predicateBuild.stderr).toBe(0);
-          const checked = spawnSync(predicateBinary, [], { windowsHide: true, timeout: 10000 });
+          const checked = await run(predicateBinary, [], { timeout: 10000 });
           expect(checked.status).toBe(0);
         } finally {
           rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
