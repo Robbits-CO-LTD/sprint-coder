@@ -277,6 +277,8 @@ describe('background executor native entry', () => {
       'ATTR_call_and_end_grace_but_not_expired_before_finish',
       'ATTR_generation_before_or_at_begin_call_pauses',
       'ATTR_invalid_call_boundary_order_or_claim_pauses',
+      'ATTR_finish_without_end_call_pauses_and_revokes_permission',
+      'ATTR_finish_without_begin_call_pauses_and_revokes_permission',
       'ATTR_finish_does_not_restart_end_call_grace',
     ])
       expect(tests).toContain(name);

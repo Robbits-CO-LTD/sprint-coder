@@ -137,6 +137,25 @@ int main() {
     state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1001);
     if (!Check(state.Snapshot().paused, "ATTR_before_begin_call_pauses")) return 1;
   }
+  for (bool begin_call : {true, false}) {
+    const char *name = begin_call ?
+        "ATTR_finish_without_end_call_pauses_and_revokes_permission" :
+        "ATTR_finish_without_begin_call_pauses_and_revokes_permission";
+    WindowsBackgroundMonitorState state(1, [] { return 1000u; });
+    state.Registered(true);
+    const auto epoch = state.Snapshot().epoch;
+    const auto claim = state.Claim(epoch, value, 1000);
+    if (!Check(claim != 0 && (!begin_call || state.BeginCall(claim, 1000)), name)) return 1;
+    if (!Check(!state.Finish(claim, 1010), name)) return 1;
+    const auto finished = state.Snapshot();
+    if (!Check(finished.paused && finished.unknown_effect && finished.epoch > epoch, name)) return 1;
+    state.TargetEvent(Owner::kTarget, EVENT_OBJECT_VALUECHANGE, 5, 0, 0, 1001, 1011);
+    const auto after_event = state.Snapshot();
+    // Pausing is latched: a later matching event cannot restore the old authority.
+    if (!Check(after_event.paused && after_event.unknown_effect &&
+                   after_event.epoch == finished.epoch && after_event.epoch > epoch &&
+                   state.Claim(after_event.epoch, value, 1012) == 0, name)) return 1;
+  }
   for (const auto tick : {999u, 1000u, 1001u}) {
     WindowsBackgroundMonitorState state(1, [] { return 1000u; });
     state.Registered(true);
