@@ -10,6 +10,17 @@ const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
 describe('Explorer W2 prestart source boundaries', () => {
   const targets = native('computer_use_windows_host_v2_targets.inc');
+  it('item 12 keeps a consumed foreground handoff out of background reselection', () => {
+    const existing = targets.slice(targets.indexOf('bool StartWindowsExistingSession('));
+    expect(existing).toMatch(
+      /const bool background = !input\.foreground_handoff && !session\.foreground_handoff_consumed &&/u,
+    );
+    expect(existing).toContain('if (v2) InvalidateWindowsTicket(input.session_key);');
+    expect(existing).toContain('} else if (input.explicit_resume) {');
+    expect(existing).toContain(
+      'ResolveWindowsExplicitResumeTarget(&session, &refocus_window, reason)',
+    );
+  });
   const prestart = explorer.slice(
     explorer.indexOf('bool MeasureWindowsExplorerPrestart('),
     explorer.indexOf('// P5 REQUIREMENT (M2)'),

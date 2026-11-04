@@ -1654,6 +1654,61 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(input.sessionId);
     });
 
+    it('item 12 resumes a handed-off session with a fresh observation and foreground visual input', async () => {
+      let inputSession: NonNullable<ComputerUseNativeSession['inputSession']> = {
+        kind: 'background',
+        backgroundCapabilityVersion: 1,
+      };
+      const { fixture, input } = await handoffFixture({
+        handoffAllowed: true,
+        inputSessionForStart: () => inputSession,
+      });
+      const consumed = fixture.controller.consumeForegroundHandoff(input);
+      await fixture.controller.transitionForegroundHandoff(consumed);
+      const paused = fixture.controller.getStatus(input.sessionId)!;
+      expect(paused.state).toBe('paused');
+      expect(fixture.dispatchCount()).toBe(0);
+      // Native retains the consumed handoff's foreground route even when Main has focus.
+      // The corresponding native branch is covered by the source-boundary regression.
+      inputSession = { kind: 'foreground', backgroundCapabilityVersion: null };
+      const observations = fixture.observationCount();
+      await fixture.controller.start({
+        resumeSessionId: paused.sessionId,
+        taskId: paused.taskId,
+        profileId: paused.profileId,
+        windowId: paused.windowId,
+        mode: paused.mode,
+        connectionId: paused.connectionId,
+        modelId: paused.modelId,
+        providerEgressConsent: true,
+        providerEgressConsentBinding: {
+          connectionId: paused.connectionId,
+          modelId: paused.modelId,
+        },
+        remember: false,
+        maxRounds: paused.maxRounds,
+        expectedPolicyEpoch: paused.policyEpoch,
+        expectedWindowRevision: 1,
+        expectedProfileRevision: paused.profileRevision,
+      });
+      await fixture.controller.observe(input.sessionId);
+      expect(fixture.observationCount()).toBeGreaterThan(observations);
+      await expect(fixture.controller.act(input.sessionId, handoffAction)).resolves.toMatchObject({
+        result: 'completed',
+      });
+      expect(fixture.dispatchCount()).toBe(1);
+      expect(fixture.controller.pendingForegroundHandoff(input.sessionId)).toBeNull();
+      expect(fixture.startedSessions.map((session) => session.inputSession?.kind)).toEqual([
+        'background',
+        'foreground',
+        'foreground',
+      ]);
+      await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+      expect(() => fixture.controller.consumeForegroundHandoff(input)).toThrow();
+      expect(fixture.dispatchCount()).toBe(1);
+      await fixture.controller.stop(input.sessionId);
+    });
+
     it.each(['Stop', 'generation'] as const)(
       'P5c2b rejects a late native result after %s',
       async (failure) => {

@@ -4943,6 +4943,11 @@ export class ComputerUseController {
       if (record.interactionRevoked || focusedSession.cancelEpoch < record.native.cancelEpoch)
         throw new Error('Computer Use interaction authority was revoked');
       record.native = focusedSession;
+      if (
+        this.deps.foregroundHandoffForTesting &&
+        focusedSession.inputSession?.kind === 'background'
+      )
+        record.handoffHelperGeneration = this.deps.native.captureWindowsGeneration?.() ?? null;
       this.revalidateNativeAttestation(
         record,
         focusedSession.policyLanguage,
