@@ -1,10 +1,11 @@
+import { findBuild, type BuildCommand } from './test-support/msvc-build';
 import {
   expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -255,10 +256,6 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
   });
 });
 
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
-
-type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
-
 function compileArguments(path: string, output: string): string[] {
   return [
     '/nologo',
@@ -281,45 +278,8 @@ function compileArguments(path: string, output: string): string[] {
   ];
 }
 
-function findBuild(path: string, output: string): Build | null {
-  if (process.platform !== 'win32') return null;
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return {
-      name: 'cl.exe',
-      file: 'cl.exe',
-      args: compileArguments(path, output),
-      verbatim: false,
-    };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    name: 'cl.exe (vcvars64)',
-    file: 'cmd.exe',
-    args: [
-      '/d',
-      '/s',
-      '/c',
-      `"call "${vcvars}" >nul && cl.exe ${compileArguments(path, output)
-        .map((argument) => `"${argument}"`)
-        .join(' ')}"`,
-    ],
-    verbatim: true,
-  };
+function findCompiler(path: string, output: string): BuildCommand | null {
+  return findBuild(compileArguments(path, output));
 }
 
 // The host's own helpers, cut out as they are, with a stub session that has only what they read.
@@ -462,7 +422,7 @@ const build = (() => {
   const scratch = mkdtempSync(join(tmpdir(), 'computer-use-click-rule-'));
   const source = join(scratch, 'seam.cc');
   const binary = join(scratch, 'seam.exe');
-  return { scratch, source, binary, compiler: findBuild(source, binary) };
+  return { scratch, source, binary, compiler: findCompiler(source, binary) };
 })();
 
 describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(

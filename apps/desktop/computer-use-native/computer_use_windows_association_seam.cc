@@ -29,7 +29,8 @@ WindowsOpenMeasurementLimits Limits() {
 }
 void PrintAssociation(const WindowsAssociationFacts &facts) {
   const auto flag = [](bool value) { return value ? "1" : "0"; };
-  std::cout << "real_path_verified=" << flag(facts.real_path_verified) << '\n'
+  std::cout << "measurement_discarded=" << flag(facts.measurement_discarded) << '\n'
+            << "real_path_verified=" << flag(facts.real_path_verified) << '\n'
             << "real_path=" << facts.real_path << '\n'
             << "file_id_known=" << flag(!facts.file_id.empty()) << '\n'
             << "extension=" << facts.extension << '\n'
@@ -140,7 +141,9 @@ int wmain(int argc, wchar_t **argv) {
         (std::wstring_view(argv[3]) == L"blocked" || std::wstring_view(argv[3]) == L"takeover")) {
       const auto wanted = std::wstring_view(argv[3]) == L"blocked" ? WindowsOpenVerdict::kBlocked
                                                                  : WindowsOpenVerdict::kTakeover;
-      const auto facts = MeasureWindowsAssociation(argv[2], Limits());
+      const auto limits = Limits();
+      const auto facts = MeasureWindowsAssociation(argv[2], limits);
+      std::cout << "elapsed_ms=" << (Now() - limits.started_ns) / 1'000'000 << '\n';
       PrintAssociation(facts);
       ok = ok && Check(JudgeWindowsAssociation(facts) == wanted, "live-association-verdict");
     } else if (argc == 3 && std::wstring_view(argv[1]) == L"identity") {
@@ -155,6 +158,31 @@ int wmain(int argc, wchar_t **argv) {
     const auto result = RunWindowsOpenMeasurement<int>(expired,
         [&calls](const WindowsOpenMeasurementLimits &) { ++calls; return 1; });
     ok = ok && Check(result == 0 && calls == 0, "expired-no-os-call");
+    const auto expired_association = MeasureWindowsAssociation(L"C:\\synthetic\\missing.txt", expired);
+    ok = ok && Check(expired_association.measurement_discarded && !expired_association.complete,
+                     "expired-association-discarded");
+    bool discarded = true;
+    const auto completed_empty = RunWindowsOpenMeasurement<WindowsAssociationFacts>(Limits(),
+        [](const WindowsOpenMeasurementLimits &) { return WindowsAssociationFacts{}; }, &discarded);
+    ok = ok && Check(!discarded && !completed_empty.real_path_verified,
+                     "completed-empty-not-discarded");
+    auto clock = std::make_shared<std::atomic<std::uint64_t>>(1);
+    WindowsOpenMeasurementLimits deadline{[] { return true; }, [clock] { return clock->load(); }, 1, 2};
+    const auto late = RunWindowsOpenMeasurement<WindowsAssociationFacts>(deadline,
+        [clock](const WindowsOpenMeasurementLimits &) {
+          WindowsAssociationFacts facts;
+          facts.real_path_verified = true;
+          clock->store(2);
+          return facts;
+        }, &discarded);
+    ok = ok && Check(discarded && !late.real_path_verified, "late-association-discarded");
+    for (int wait = 0; wait < 2000 && windows_association_detail::WindowsOpenMeasurementRunning().load(); ++wait)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto &running = windows_association_detail::WindowsOpenMeasurementRunning();
+    running.store(true);
+    const auto busy = MeasureWindowsAssociation(L"C:\\synthetic\\missing.txt", Limits());
+    running.store(false);
+    ok = ok && Check(busy.measurement_discarded && !busy.complete, "busy-association-discarded");
     // Measurements back to back (association, then the E3 selection, at each boundary): the slot
     // is free once a result is returned, so the next one is never answered empty.
     int back_to_back = 0;

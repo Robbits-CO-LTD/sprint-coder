@@ -1,13 +1,6 @@
-import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { findBuild, type BuildCommand } from './test-support/msvc-build';
+import { execFile, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -33,7 +26,6 @@ function runAsync(file: string, args: string[], options: ExecFileOptionsWithStri
   });
 }
 const nativeDirectory = join(__dirname, '../../computer-use-native');
-const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 const libraries = [
   'ole32.lib',
   'oleaut32.lib',
@@ -65,47 +57,8 @@ function compileArguments(path: string, output: string): string[] {
   ];
 }
 
-type Build = Readonly<{ name: string; file: string; args: string[]; verbatim: boolean }>;
-
-function findBuild(path: string, output: string): Build | null {
-  if (process.platform !== 'win32') return null;
-  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
-    return {
-      name: 'cl.exe',
-      file: 'cl.exe',
-      args: compileArguments(path, output),
-      verbatim: false,
-    };
-  if (!existsSync(vswhere)) return null;
-  const found = spawnSync(
-    vswhere,
-    [
-      '-latest',
-      '-products',
-      '*',
-      '-requires',
-      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '-property',
-      'installationPath',
-    ],
-    { encoding: 'utf8' },
-  );
-  const root = found.stdout.trim();
-  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
-  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
-  return {
-    name: 'cl.exe (vcvars64)',
-    file: 'cmd.exe',
-    args: [
-      '/d',
-      '/s',
-      '/c',
-      `"call "${vcvars}" >nul && cl.exe ${compileArguments(path, output)
-        .map((argument) => `"${argument}"`)
-        .join(' ')}"`,
-    ],
-    verbatim: true,
-  };
+function findCompiler(path: string, output: string): BuildCommand | null {
+  return findBuild(compileArguments(path, output));
 }
 
 type Probe = Readonly<{ status: number | null; output: string; facts: Map<string, string> }>;
@@ -127,7 +80,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
   beforeAll(async () => {
     scratch = mkdtempSync(join(tmpdir(), 'computer-use-association-seam-'));
     binary = join(scratch, 'seam.exe');
-    const compiler = findBuild(
+    const compiler = findCompiler(
       join(nativeDirectory, 'computer_use_windows_association_seam.cc'),
       binary,
     );
@@ -235,10 +188,26 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     ];
     const file = join(scratch, `document.${extension}`);
     writeFileSync(file, '');
+    let diagnostic = 'association measurement not started';
     const measure = async (): Promise<Probe> => {
-      const measured = await probe('association', file, 'takeover');
-      expect(measured.status, measured.output).toBe(0);
-      return measured;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const measured = await probe('association', file, 'takeover');
+        diagnostic = `association attempt=${attempt} ${[
+          'measurement_discarded',
+          'real_path_verified',
+          'file_id_known',
+          'elapsed_ms',
+        ]
+          .map((name) => `${name}=${measured.facts.get(name) ?? 'missing'}`)
+          .join(' ')}`;
+        expect(measured.status, `${diagnostic}\n${measured.output}`).toBe(0);
+        // Never retry a completed read with unexpected facts, including a missing handler.
+        if (measured.facts.get('measurement_discarded') !== '1') {
+          expect(measured.facts.get('measurement_discarded'), diagnostic).toBe('0');
+          return measured;
+        }
+      }
+      throw new Error(`measurement discarded on all 5 attempts: ${diagnostic}`);
     };
     // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
     // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
@@ -396,6 +365,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       expect(unregistered.status, unregistered.output).toBe(0);
       expect(unregistered.facts.get('prog_id')).toBe('');
     } catch (error) {
+      console.error(diagnostic);
       failure = error;
     } finally {
       // The temporary association must be gone; a key that cannot be removed fails the test.
