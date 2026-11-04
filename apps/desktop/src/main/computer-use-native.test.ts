@@ -212,16 +212,20 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   expect(controller.match(/windowsExplorerExceptionAllowedForTesting\(/gu)).toHaveLength(1);
   expect(controller.match(/evaluateWindowsExplorerException\(/gu)).toHaveLength(3);
   for (const file of readdirSync(__dirname)) {
-    if (!file.endsWith('.ts') || file.endsWith('.test.ts') || file === 'computer-use-controller.ts')
-      continue;
-    expect(readFileSync(join(__dirname, file), 'utf8'), file).not.toContain(
-      'windowsExplorerExceptionAllowed',
-    );
+    if (!file.endsWith('.ts') || file.endsWith('.test.ts')) continue;
+    const text = readFileSync(join(__dirname, file), 'utf8');
+    if (file !== 'computer-use-controller.ts')
+      expect(text, file).not.toContain('windowsExplorerExceptionAllowed');
+    // The test-only start option is declared and read in the host alone; no production file,
+    // the controller included, passes it.
     if (file !== 'computer-use-native-host.ts')
-      expect(readFileSync(join(__dirname, file), 'utf8'), file).not.toContain(
-        'windowsCompletedStartForTesting',
-      );
+      expect(text, file).not.toContain('windowsCompletedStartForTesting');
   }
+  expect(
+    readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8').match(
+      /windowsCompletedStartForTesting/gu,
+    )?.length,
+  ).toBe(2);
   expect(readWindowsHostSource().match(/WindowsExplorerFileWindowRestriction\(/gu)).toHaveLength(1);
   expect(readWindowsHostSource()).toContain('shell_view_is_filesystem_folder = std::nullopt');
   expect(readWindowsHostSource()).toContain(

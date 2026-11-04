@@ -1960,6 +1960,7 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
+  bool windows_apps_from_package_override = false;
   if (path.has_value()) {
     facts.image_leaf = WindowsImageLeaf(*path);
     if (context.roots.has_value()) {
@@ -1974,12 +1975,14 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
     // package stays windows_directory (W-SYS) and does not slip onto the package route. This is
     // only reached for a target that is itself a package, so it never gives a non-package exe
     // windows_apps either.
+    // Kept only for the IL-only gate below: a package override is not limited to WindowsApps.
     if (facts.packaged == std::optional<bool>(true) && facts.image_root == std::string("other") &&
         measured.package_install_root.has_value()) {
       const sprint_coder::computer_use::WindowsImageRootPrefix roots[] = {
           {"windows_apps", *measured.package_install_root}};
       WindowsImagePlacement placement = PlaceWindowsImage(*path, roots);
       if (placement.root == "windows_apps") {
+        windows_apps_from_package_override = true;
         facts.image_root = std::move(placement.root);
         facts.image_relative_path = std::move(placement.relative_path);
       }
@@ -1992,10 +1995,14 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
   // An adjacent .exe.config can select an AppDomainManager that loads arbitrary assemblies.
   // The IL-only anchor is usable only under protected roots, even in an opt-in test build.
   // Use the held file's placement, including a verified package's install root, not its name.
+  // windows_apps counts only from the fixed %ProgramFiles%WindowsApps prefix: a loose-registered or
+  // external-location package's install root, which the override above also calls windows_apps,
+  // can be a folder a standard user writes to.
   if (held.il_only_anchor &&
       facts.image_root != std::optional<std::string>("windows_directory") &&
       facts.image_root != std::optional<std::string>("program_files") &&
-      facts.image_root != std::optional<std::string>("windows_apps")) {
+      (facts.image_root != std::optional<std::string>("windows_apps") ||
+       windows_apps_from_package_override)) {
     facts.running_image_matches = false;
     return;
   }
