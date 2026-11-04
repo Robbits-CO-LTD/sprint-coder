@@ -1221,6 +1221,25 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    it.each(['native_interaction_revoked', 'native_preflight_failed', 'native_target_refused'])(
+      'N9 records the host round-trip rejection %s without unknown_effect',
+      async (reasonCode) => {
+        const fixture = createFixture({
+          observationOverrides: planObservation,
+          nativeDispatch: async () => ({ result: 'rejected', reasonCode }),
+        });
+        const started = await start(fixture, 'full_access_app');
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, planAction, 'round-trip-failed'),
+        ).resolves.toMatchObject({ result: 'rejected', reasonCode });
+        expect([...fixture.audits.values()]).toEqual([
+          expect.objectContaining({ state: 'rejected', reasonCode }),
+        ]);
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
     it('records a malformed approval receipt as a typed rejection, not unknown_effect', async () => {
       const host = createPreflightHost((request) => ({
         ...approvalReceipt(request),
@@ -2651,6 +2670,11 @@ describe('ComputerUseController', () => {
 
     it('records an approvalApprove refusal as a rejected (c), never unknown_effect, and offers no new card', async () => {
       const cases: Array<[ComputerUseNativeApprovalApproveResult, string, string]> = [
+        [
+          { kind: 'refused', result: 'rejected', reasonCode: 'native_approval_approve_failed' },
+          'rejected',
+          'native_approval_revalidation_failed',
+        ],
         [
           { kind: 'refused', result: 'rejected', reasonCode: 'native_x' },
           'rejected',

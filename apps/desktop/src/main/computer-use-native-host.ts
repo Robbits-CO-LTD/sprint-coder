@@ -3575,8 +3575,21 @@ export function createComputerUseNativeHost(
           result: outcome.result,
           reasonCode: outcome.reasonCode,
         });
+      } catch {
+        return Object.freeze({
+          kind: 'refused',
+          result: 'rejected',
+          reasonCode: 'native_approval_approve_failed',
+        });
       } finally {
-        if (!exchanged) await roundTrips?.cancel(input.session.sessionId, 'rejected');
+        if (!exchanged) {
+          try {
+            await roundTrips?.cancel(input.session.sessionId, 'rejected');
+          } catch {
+            // Cleanup cannot replace a pre-input refusal with an exception.
+            interactionRevoked.add(input.session.sessionId);
+          }
+        }
       }
     },
 
@@ -3735,7 +3748,12 @@ export function createComputerUseNativeHost(
                 inputReceipt: preflightReceipt,
               });
             ticket = outcome.ticket;
-            await roundTrips?.exchanged(input.session.sessionId);
+            try {
+              await roundTrips?.exchanged(input.session.sessionId);
+            } catch {
+              interactionRevoked.add(input.session.sessionId);
+              return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+            }
             settled = true;
           }
           if (outcome.kind === 'refused') {
@@ -3758,7 +3776,7 @@ export function createComputerUseNativeHost(
                 return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
               }
               settled = true;
-            } else await roundTrips?.cancel(input.session.sessionId, 'rejected');
+            }
             return Object.freeze({
               result: outcome.result,
               reasonCode: outcome.reasonCode,
@@ -3770,7 +3788,14 @@ export function createComputerUseNativeHost(
           }
         }
       } finally {
-        if (!settled) await roundTrips?.cancel(input.session.sessionId, 'rejected');
+        if (!settled) {
+          try {
+            await roundTrips?.cancel(input.session.sessionId, 'rejected');
+          } catch {
+            // Preflight cannot input; preserve its typed result even if End fails.
+            interactionRevoked.add(input.session.sessionId);
+          }
+        }
       }
       let value: unknown;
       const callbacks = dispatchLedger(input, internal);

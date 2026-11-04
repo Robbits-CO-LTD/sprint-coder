@@ -1,3 +1,4 @@
+import { ApprovalRoundTrips } from './computer-use-approval-round-trip';
 import type { ComputerUseDiscoveryResult } from './computer-use-discovery-scope';
 import { readWindowsMainIdentity } from './computer-use-windows-main';
 import * as windowsMain from './computer-use-windows-main';
@@ -19,7 +20,10 @@ import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
-import { computerUseApprovalSchema } from '@sprint-coder/contracts';
+import {
+  computerUseApprovalSchema,
+  computerUseApprovalRoundTripWireSchema,
+} from '@sprint-coder/contracts';
 import { computerUseNativeDiscoveryResultSchema } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -12481,6 +12485,17 @@ int main() {
     'supervised',
     'background',
     'P5b two cards',
+    'N9 dispatch End lost',
+    'N9 dispatch End refused',
+    'N9 dispatch revoked',
+    'N9 preflight transport failure',
+    'N9 preflight refused',
+    'N9 preflight cancel once',
+    'N9 preflight unavailable',
+    'N9 preflight completion throw',
+    'N9 approve End lost',
+    'N9 approve cancel failure',
+    'N9 approve completion throw',
     'P5c2b-W failed preflight',
     'P5c2b-W completion revoked',
   ] as const)(
@@ -12488,7 +12503,8 @@ int main() {
     async (mode) => {
       const background = mode === 'background';
       const race = mode === 'P5c2b-W failed preflight' || mode === 'P5c2b-W completion revoked';
-      const twoCards = mode === 'P5b two cards' || race;
+      const rejectionCase = mode.startsWith('N9 ');
+      const twoCards = mode === 'P5b two cards' || race || rejectionCase;
       const maximumMode = background || twoCards ? 'full_access_app' : mode;
       const tripCalls: Array<[unknown, unknown]> = [];
       const tripReply: Responder = (wire) => {
@@ -12675,6 +12691,49 @@ int main() {
         (addon) => ({
           ...addon,
           captureWindowsGeneration: () => ({ helperGeneration: 1 }),
+          ...(rejectionCase
+            ? {
+                approvalRoundTrip: async (input: unknown) => {
+                  const wire = computerUseApprovalRoundTripWireSchema.parse(input);
+                  if (wire.kind === 'end' && mode !== 'N9 preflight cancel once')
+                    if (mode === 'N9 dispatch End refused')
+                      return { ...wire, kind: 'end_result', accepted: false };
+                    else throw new Error('End response lost');
+                  return addon.approvalRoundTrip!(wire);
+                },
+                preflight: async (request: unknown) => {
+                  if (mode === 'N9 preflight transport failure')
+                    throw new Error('transport timeout');
+                  const value = await addon.preflight!(request);
+                  if (mode.startsWith('N9 dispatch') || mode.startsWith('N9 preflight')) {
+                    const ordinary: Record<string, unknown> = {
+                      ...(value as Record<string, unknown>),
+                      receiptVersion: 2,
+                      decision: 'ordinary',
+                      ticket: 'ab'.repeat(32),
+                    };
+                    for (const key of ['approvalGeneration', 'remainingMs', 'effect', 'display'])
+                      delete ordinary[key];
+                    if (mode.startsWith('N9 preflight'))
+                      Object.assign(ordinary, {
+                        decision: 'denied',
+                        ticket: null,
+                        reasonCode: 'native_target_refused',
+                        deniedResult: 'rejected',
+                      });
+                    return ordinary;
+                  }
+                  return value;
+                },
+                ...(mode === 'N9 approve cancel failure'
+                  ? {
+                      approvalApprove: () => {
+                        throw new Error('transport disconnected');
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
           ...(mode === 'P5c2b-W completion revoked'
             ? {
                 completeApprovalRoundTrip: () => {
@@ -12729,6 +12788,52 @@ int main() {
         });
       };
       if (twoCards) await beginAndReturn('V1-card');
+      if (rejectionCase) {
+        const cancel = vi.spyOn(ApprovalRoundTrips.prototype, 'cancel');
+        const exchanged =
+          mode === 'N9 dispatch revoked'
+            ? vi
+                .spyOn(ApprovalRoundTrips.prototype, 'exchanged')
+                .mockRejectedValueOnce(new Error('Round trip revoked during end'))
+            : undefined;
+        if (mode === 'N9 approve completion throw')
+          cancel.mockImplementationOnce(() => {
+            throw new Error('Unbound round trip completion');
+          });
+        if (mode === 'N9 preflight completion throw')
+          cancel.mockImplementationOnce(() => {
+            throw new Error('Unbound round trip completion');
+          });
+        if (mode === 'N9 preflight unavailable')
+          cancel.mockRejectedValueOnce(new Error('Round trip unavailable'));
+        try {
+          const approving = mode.startsWith('N9 approve');
+          if (mode === 'N9 approve completion throw') failApprove = true;
+          const result = approving
+            ? await target.host.approvalApprove!(input)
+            : await target.host.dispatch(input);
+          expect(result).toMatchObject({
+            ...(approving ? { kind: 'refused' } : {}),
+            result: 'rejected',
+            reasonCode: approving
+              ? 'native_approval_approve_failed'
+              : mode.startsWith('N9 dispatch')
+                ? 'native_interaction_revoked'
+                : mode === 'N9 preflight transport failure'
+                  ? 'native_preflight_failed'
+                  : 'native_target_refused',
+          });
+          expect(cancel).toHaveBeenCalledTimes(1);
+          expect(target.helper().served).not.toContain('dispatch');
+          expect(target.helper().served).not.toContain('dispatch_approved');
+          expect(attempts).toBe(0);
+        } finally {
+          cancel.mockRestore();
+          exchanged?.mockRestore();
+          await target.host.close(session);
+        }
+        return;
+      }
       if (race) {
         target.helper().holdOnly('preflight');
         const pending = target.host.dispatch(input);
