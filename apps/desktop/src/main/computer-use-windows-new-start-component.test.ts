@@ -184,6 +184,7 @@ const componentMatrix = describe
   .each([
     'store_not_web_is_absent_in_default_build',
     'store_not_web_enabled_acceptance_build',
+    'store_not_web_enabled_final_build',
     'explorer_gate_off_with_hooks',
     'explorer_gate_on',
   ]);
@@ -228,6 +229,17 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
               '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
               '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
             ]
+          : []),
+        ...(variant === 'store_not_web_enabled_final_build'
+          ? [
+              'FROM_BUILD=1',
+              'V2=1',
+              'RULESET_VERSION=3',
+              'CLASSIFIER_VERSION=2',
+              'LEXICON_VERSION=3',
+              'TICKET_REQUIRED=1',
+              'INTERLOCK_ENFORCED=1',
+            ].map((definition) => '/DSPRINT_CODER_ELIGIBILITY_' + definition)
           : []),
         ...(variant === 'explorer_gate_off_with_hooks'
           ? ['/DSPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS=1']
@@ -281,7 +293,7 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
         'PASS: 68 component cases, controlled focus only, no OS input',
       );
       expect(result.stdout).toContain(
-        variant === 'store_not_web_enabled_acceptance_build'
+        variant.startsWith('store_not_web_enabled_')
           ? 'CASE:store-notepad-start-rejudge-changed-key'
           : 'CASE:store_not_web_is_absent_in_default_build',
       );

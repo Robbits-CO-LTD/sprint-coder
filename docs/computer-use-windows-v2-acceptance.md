@@ -7,12 +7,12 @@ Issue #988 N13a（ADR S9a）の正式なWindows受入手順。基準は2026-11-0
 opt-in buildで使う。共有表はruleset 3、最終宣言はruleset/classifier/lexicon **3/2/3**。
 S5やP5全体の完了、ruleset 4への更新を、通常アプリ向けV2 buildの前提にはしない。
 
-ただし、次の2件はこの基準には未mergeであり、本書の該当する正のケースはその後に行う。
+ただし、次の1件はこの基準には未mergeであり、本書の該当する正のケースはその後に行う。
 
 - **PR #1103 の後**: 検証済み証拠でWindows V2承認を開く。「監督つき」（supervised）の
   アプリと危険な操作について、操作ごとの承認で進める。試験用の値で本番gateを開かない。
-- **PR #1104 の後**: Windows 11標準のStore版メモ帳を対象にする
-  （`kWindowsStoreNotepadNotWebReady=true`）。
+
+PR #1104 で、Windows 11標準のStore版メモ帳を対象にした（`kWindowsStoreNotepadNotWebReady=true`）。
 
 **実機受入は未確認**。本書の整備、build成功、単体試験、AIの成功報告は実機PASSではない。
 実施先は **#1099（[human]、N13b）**。未確認ケースをPASSにしない。後続の前提が満たされない
@@ -86,7 +86,7 @@ Windowsにもdeny-listがあり、アプリ承認で禁止対象を解除でき�
 | --- | --- | --- | --- |
 | W-T1 | Program Filesの通常GUIアプリ。該当すればProgram Files (x86)も別parameterで実施。 | 署名ありはeligible。署名なしはsupervised上限。W-Aの開始・操作が対象だけに届く。 | 未確認。supervisedの操作はPR #1103 の後 |
 | W-T2 | `%LOCALAPPDATA%\Programs`の通常GUIアプリ。 | W-T1と同じ。書込み可能な配置でもidentity確認を省略しない。 | 未確認。supervisedの操作はPR #1103 の後 |
-| W-T3 | Windows 11標準のStore版メモ帳。人がpackageと実process／windowの対応を照合する。 | 検証済みのStoreメモ帳を対象にできる。Store表示やaliasだけで対象と決めない。 | BLOCKED：PR #1104 の後に正のケースを実施 |
+| W-T3 | Windows 11標準のStore版メモ帳。人がpackageと実process／windowの対応を照合する。 | 検証済みのStoreメモ帳を対象にできる。Store表示やaliasだけで対象と決めない。 | 未確認（PR #1104 で接続済み）。正のケースを W-A1〜W-A4 で実施 |
 | W-T4 | 保護ルートにあるIL-only（.NET）アプリ。 | 現在はanchorを有効にせず拒否する。WPF／WinFormsという名称だけで許可しない。 | 正のケースはBLOCKED：`kWindowsIlOnlyImageAnchorReady=false`。判断は#1100 |
 | W-T5 | Explorerの使い捨てfolderを表示するfile window。 | W-SYSとして拒否。desktop、taskbar、他のshell画面も許可しない。 | 拒否確認は未確認。例外の正のケースはBLOCKED：§6 |
 | W-T6 | 電卓などApplicationFrameHost／AppContainer対象。 | W-PXとして拒否。Storeメモ帳と同一扱いにしない。 | 未確認 |

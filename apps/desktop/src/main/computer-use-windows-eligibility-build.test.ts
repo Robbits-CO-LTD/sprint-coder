@@ -71,7 +71,7 @@ function ilOnlyAnchorDeclaration(): string {
 describe.skipIf(process.platform !== 'win32')(
   'Windows production eligibility compile guard',
   () => {
-    it('compiles the final declaration with only the approval route on, and keeps the test seam out', () => {
+    it('compiles the final declaration with approval and Store Notepad on, and keeps the test seam out', () => {
       const build = findBuild();
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       if (!build) throw new Error('MSVC unavailable');
@@ -120,13 +120,13 @@ describe.skipIf(process.platform !== 'win32')(
           expect(result.status, result.output).toBe(0);
         }
         // A final declaration compiles. The approval route follows the declaration alone, while
-        // Explorer, Store Notepad not-web and the IL-only anchor each wait for their own flag.
+        // Store Notepad is ready; Explorer and the IL-only anchor still wait for their own flag.
         const checks = [
           ilOnlyAnchorDeclaration(),
           'namespace sc = sprint_coder::computer_use;',
           'static_assert(sc::kNativeEligibilityWindowsV2Final, "sc-check final declaration");',
           'static_assert(!sc::kWindowsExplorerException, "sc-check Explorer");',
-          'static_assert(!sc::kWindowsStoreNotepadNotWeb, "sc-check Store Notepad");',
+          'static_assert(sc::kWindowsStoreNotepadNotWeb, "sc-check Store Notepad");',
           'static_assert(!kWindowsIlOnlyImageAnchor, "sc-check IL-only anchor");',
           '',
         ].join('\n');
@@ -136,7 +136,13 @@ describe.skipIf(process.platform !== 'win32')(
         const current = compile([], checks);
         expect(current.status, current.output).not.toBe(0);
         expect(current.output).toContain('sc-check final declaration');
-        expect(current.output).not.toMatch(/sc-check (?:Explorer|Store Notepad|IL-only anchor)/u);
+        expect(current.output).toContain('sc-check Store Notepad');
+        expect(current.output).not.toMatch(/sc-check (?:Explorer|IL-only anchor)/u);
+        const defaultBuild = compile(
+          [],
+          'static_assert(!sprint_coder::computer_use::kWindowsStoreNotepadNotWeb);',
+        );
+        expect(defaultBuild.status, defaultBuild.output).toBe(0);
         const forbidden = compile([
           ...finalDeclaration,
           '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',

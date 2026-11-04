@@ -1741,6 +1741,7 @@ int wmain(int argc, wchar_t **argv) {
 
 const storeNotepadUnitSource = [
   includes,
+  '#include "computer_use_windows_interlock_capture.h"',
   program.slice(0, program.indexOf('std::string Show(')),
   program.slice(
     program.indexOf('void CheckStoreNotepadBinding('),
@@ -1768,7 +1769,20 @@ int main() {
   facts.package_signature_kind = "system";
   package.signature_kind = "system";
   CheckStoreNotepadBinding(facts, package, key);
-  // Both builds retain the original System32 entry and its file-key refusal.
+  const auto verified = WindowsTargetIsNotWebByTable(
+      facts, key, std::nullopt, key, true, WindowsPackageIdentityFor(package));
+  ShadowUiaCapture capture;
+  ShadowUiaNode document;
+  document.control_type = "Document";
+  document.framework_read = true;
+  document.framework_id = "Win32";
+  capture.chain.push_back(document);
+  Check(WindowsCaptureTargetNotWeb(capture, verified) == std::optional<bool>(kWindowsStoreNotepadNotWeb),
+        "store_notepad_native_framework_retains_verified_binding");
+  capture.chain[0].framework_id = "Chrome";
+  Check(WindowsCaptureTargetNotWeb(capture, verified) == std::optional<bool>(false),
+        "store_notepad_web_framework_revokes_not_web");
+  // Every build retains the original System32 entry and its file-key refusal.
   facts.packaged = false;
   facts.image_root = "windows_directory";
   facts.image_relative_path = "system32\\notepad.exe";
@@ -2430,7 +2444,7 @@ describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows target facts, live (#500 S5-c-3 PR-2)',
   () => {
-    it('checks Store Notepad binding with the gate off and on and rejects production defines', async () => {
+    it('checks Store Notepad binding in default, acceptance and final V2 builds and rejects test defines in production', async () => {
       expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-store-notepad-'));
       try {
@@ -2460,7 +2474,20 @@ describe.skipIf(!onWindows || (build === null && !ci))(
             env: { ...process.env, VSLANG: '1033' },
           });
         };
-        for (const definitions of [[], [acceptance], [acceptance, enabled]]) {
+        for (const definitions of [
+          [],
+          [acceptance],
+          [acceptance, enabled],
+          [
+            'FROM_BUILD=1',
+            'V2=1',
+            'RULESET_VERSION=3',
+            'CLASSIFIER_VERSION=2',
+            'LEXICON_VERSION=3',
+            'TICKET_REQUIRED=1',
+            'INTERLOCK_ENFORCED=1',
+          ].map((definition) => '/DSPRINT_CODER_ELIGIBILITY_' + definition),
+        ]) {
           await compile(definitions);
           const result = await promisify(execFile)(binary, [], {
             encoding: 'utf8',

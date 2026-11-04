@@ -128,12 +128,12 @@ it('normalizes continued owner guards before matching the exact allowed occurren
   ).not.toThrow();
 });
 
-it('keeps Store Notepad not-web binding acceptance-test-only and bound at start and rejudge', () => {
+it('enables Store Notepad not-web only for final V2 or guarded acceptance tests and binds start and rejudge', () => {
   const facts = readFileSync(
     join(__dirname, '../../computer-use-native/computer_use_windows_target_facts.h'),
     'utf8',
   );
-  expect(facts).toContain('inline constexpr bool kWindowsStoreNotepadNotWebReady = false;');
+  expect(facts).toContain('inline constexpr bool kWindowsStoreNotepadNotWebReady = true;');
   expect(facts).toMatch(
     /inline constexpr bool kWindowsStoreNotepadNotWeb =\s*kNativeEligibilityWindowsV2Final && kWindowsStoreNotepadNotWebReady;/u,
   );
