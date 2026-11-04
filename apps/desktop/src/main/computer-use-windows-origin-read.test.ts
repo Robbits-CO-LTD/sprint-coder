@@ -39,6 +39,13 @@ describe('Windows page origin metadata (N11-B)', () => {
 });
 
 describe('Windows page recheck (N11-C)', () => {
+  it('skips page comparison and invalidation for observe-only sessions', () => {
+    const observe = native('computer_use_windows_host_pipe.inc');
+    expect(observe).toContain('session.maximum_mode != "observe_only" && session.has_observation');
+    expect(observe).toContain(
+      'session.maximum_mode != "observe_only" && (observed_page.web || current_page.web)',
+    );
+  });
   it('binds the observation to tickets and approval remeasurement without extending the wire', () => {
     const input = native('computer_use_windows_host_input.inc');
     const preflight = native('computer_use_windows_host_preflight.inc');

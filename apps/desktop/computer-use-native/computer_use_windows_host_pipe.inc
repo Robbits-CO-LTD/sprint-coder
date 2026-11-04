@@ -112,10 +112,11 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   const std::size_t screenshot_bytes = binary->size();
   const auto current_page = ReadWindowsPage(session, dialogs.active_window, dialogs.active_identity);
-  if (session.has_observation && !sprint_coder::computer_use::WindowsSamePage(session.observed_page, current_page)) {
+  if (session.maximum_mode != "observe_only" && session.has_observation &&
+      !sprint_coder::computer_use::WindowsSamePage(session.observed_page, current_page)) {
     InvalidateWindowsPage(session);
   }
-  if (observed_page.web || current_page.web) {
+  if (session.maximum_mode != "observe_only" && (observed_page.web || current_page.web)) {
     // Returning from a card must not replace the page to which the pending approval belonged.
     const bool returning = session.round_trip && !session.round_trip->MayLegacyStart();
     if (!sprint_coder::computer_use::WindowsSamePage(observed_page, current_page) ||

@@ -90,7 +90,20 @@ const pageFrom = host.indexOf(
   'sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity) {',
 );
 const pageTo = host.indexOf('  const auto epoch = session.cancel_epoch;', pageFrom);
-const pagePrefix = host.slice(pageFrom, pageTo) + '  return unavailable;\n}';
+const pagePrefix =
+  host.slice(pageFrom, pageTo) +
+  '  ++g_page_reads; unavailable.complete = true; return unavailable;\n}';
+
+const pageComparisonFrom = host.indexOf(
+  '  const auto current_page = ReadWindowsPage(session, dialogs.active_window, dialogs.active_identity);',
+);
+const pageComparisonTo = host.indexOf(
+  '  const std::size_t tree_bytes = tree.size();',
+  pageComparisonFrom,
+);
+if (pageComparisonFrom < 0 || pageComparisonTo < 0)
+  throw new Error('Page comparison markers changed');
+const pageComparison = host.slice(pageComparisonFrom, pageComparisonTo);
 
 const program = String.raw`
 #include <cstdint>
@@ -123,6 +136,7 @@ struct WindowsSession {
   ${explorerSessionMember}
   sprint_coder::computer_use::WindowsPageEvidence observed_page;
   mutable bool page_observation_invalidated = false;
+  bool has_observation = true;
   HWND active_window = 1;
   std::string active_window_identity = "window-1";
   std::wstring canonical_path = L"C:\\Apps\\slack.exe";
@@ -153,7 +167,20 @@ bool g_binding_ok = true;
 std::wstring g_class = L"Chrome_WidgetWin_1";
 int GetClassNameW(HWND, wchar_t *out, int) { std::wcscpy(out, g_class.c_str()); return static_cast<int>(g_class.size()); }
 std::string Utf8FromWide(const std::wstring &value) { return std::string(value.begin(), value.end()); }
+int g_page_reads = 0;
 ${pagePrefix}
+int g_page_invalidations = 0;
+void InvalidateWindowsPage(const WindowsSession&) { ++g_page_invalidations; }
+bool CompareObservedPage(WindowsSession& session) {
+  struct { HWND active_window; std::string active_identity; } dialogs{session.active_window, session.active_window_identity};
+  auto observed_page = session.observed_page;
+  std::vector<unsigned char> bytes;
+  auto* binary = &bytes;
+  std::string failure;
+  auto* reason = &failure;
+  ${pageComparison}
+  return true;
+}
 bool g_page_ok = true;
 bool RecheckWindowsPage(const WindowsSession &session) {
   g_calls.push_back("page");
@@ -250,6 +277,15 @@ int main() {
     session.canonical_path = L"C:\\Apps\\msedge.exe";
     session.maximum_mode = "observe_only";
     Check(ReadWindowsPage(session, 1, "window-1").web, "capped_browser_stays_closed");
+    g_page_reads = 0;
+    auto page = ReadWindowsPage(session, 1, "window-1");
+    Check(page.web && !page.complete && g_page_reads == 0, "observe_only_skips_page_uia");
+    Check(CompareObservedPage(session) && g_page_reads == 0 && g_page_invalidations == 0,
+          "observe_only_does_not_invalidate_approval_or_ticket");
+    session.maximum_mode = "supervised";
+    page = ReadWindowsPage(session, 1, "window-1");
+    Check(page.web && page.complete && g_page_reads == 1, "supervised_reads_page");
+    Check(CompareObservedPage(session) && g_page_invalidations > 0, "supervised_still_compares_page");
   }
   g_page_ok = false;
   { const Outcome out = Run(); Check(!out.ran_on && !out.accepted && out.reason == "native_target_unclassified" &&

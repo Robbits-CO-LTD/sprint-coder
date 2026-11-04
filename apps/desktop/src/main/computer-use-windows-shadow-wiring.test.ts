@@ -179,6 +179,9 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(host).toContain('#include "computer_use_windows_shadow_scheduler.h"');
     const text = code(host.replace(approvalMeasurement, '').replace(pageMeasurement, ''));
     expect(pageMeasurement).toContain('RunWindowsOpenMeasurement<WindowsPageEvidence>');
+    expect(pageMeasurement).toContain(
+      'nullptr, windows_association_detail::WindowsPageMeasurementRunning()',
+    );
     expect(pageMeasurement).toContain('reader.ReadPage()');
     for (const name of [
       'WindowsShadowReader',
