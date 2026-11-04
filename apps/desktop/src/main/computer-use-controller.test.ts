@@ -1654,60 +1654,93 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(input.sessionId);
     });
 
-    it('item 12 resumes a handed-off session with a fresh observation and foreground visual input', async () => {
-      let inputSession: NonNullable<ComputerUseNativeSession['inputSession']> = {
-        kind: 'background',
-        backgroundCapabilityVersion: 1,
-      };
-      const { fixture, input } = await handoffFixture({
-        handoffAllowed: true,
-        inputSessionForStart: () => inputSession,
-      });
-      const consumed = fixture.controller.consumeForegroundHandoff(input);
-      await fixture.controller.transitionForegroundHandoff(consumed);
-      const paused = fixture.controller.getStatus(input.sessionId)!;
-      expect(paused.state).toBe('paused');
-      expect(fixture.dispatchCount()).toBe(0);
-      // Native retains the consumed handoff's foreground route even when Main has focus.
-      // The corresponding native branch is covered by the source-boundary regression.
-      inputSession = { kind: 'foreground', backgroundCapabilityVersion: null };
-      const observations = fixture.observationCount();
-      await fixture.controller.start({
-        resumeSessionId: paused.sessionId,
-        taskId: paused.taskId,
-        profileId: paused.profileId,
-        windowId: paused.windowId,
-        mode: paused.mode,
-        connectionId: paused.connectionId,
-        modelId: paused.modelId,
-        providerEgressConsent: true,
-        providerEgressConsentBinding: {
+    it.each([0, 60_001])(
+      'item 12 resumes a handed-off session with a fresh observation and foreground visual input after %i ms',
+      async (resumeDelayMs) => {
+        let clock = 100;
+        let inputSession: NonNullable<ComputerUseNativeSession['inputSession']> = {
+          kind: 'background',
+          backgroundCapabilityVersion: 1,
+        };
+        const { fixture, input } = await handoffFixture({
+          handoffAllowed: true,
+          inputSessionForStart: () => inputSession,
+          foregroundHandoffForTesting: {
+            consumeTrustedActivation: () => true,
+            monotonicNow: () => clock,
+          },
+        });
+        const consumed = fixture.controller.consumeForegroundHandoff(input);
+        await fixture.controller.transitionForegroundHandoff(consumed);
+        const record = (
+          fixture.controller as unknown as {
+            sessions: Map<string, { foregroundHandoff?: unknown }>;
+          }
+        ).sessions.get(input.sessionId)!;
+        expect(record).toBeDefined();
+        expect(record.foregroundHandoff).toBeUndefined();
+        const paused = fixture.controller.getStatus(input.sessionId)!;
+        expect(paused.state).toBe('paused');
+        expect(fixture.dispatchCount()).toBe(0);
+        // Native retains the consumed handoff's foreground route even when Main has focus.
+        // The corresponding native branch is covered by the source-boundary regression.
+        inputSession = { kind: 'foreground', backgroundCapabilityVersion: null };
+        // The deadline guards the handoff, not resume after a completed transition.
+        clock += resumeDelayMs;
+        expect(clock > consumed.deadline).toBe(resumeDelayMs > 60_000);
+        const observations = fixture.observationCount();
+        const statusesBeforeResume = fixture.statuses.length;
+        const resumed = await fixture.controller.start({
+          resumeSessionId: paused.sessionId,
+          taskId: paused.taskId,
+          profileId: paused.profileId,
+          windowId: paused.windowId,
+          mode: paused.mode,
           connectionId: paused.connectionId,
           modelId: paused.modelId,
-        },
-        remember: false,
-        maxRounds: paused.maxRounds,
-        expectedPolicyEpoch: paused.policyEpoch,
-        expectedWindowRevision: 1,
-        expectedProfileRevision: paused.profileRevision,
-      });
-      await fixture.controller.observe(input.sessionId);
-      expect(fixture.observationCount()).toBeGreaterThan(observations);
-      await expect(fixture.controller.act(input.sessionId, handoffAction)).resolves.toMatchObject({
-        result: 'completed',
-      });
-      expect(fixture.dispatchCount()).toBe(1);
-      expect(fixture.controller.pendingForegroundHandoff(input.sessionId)).toBeNull();
-      expect(fixture.startedSessions.map((session) => session.inputSession?.kind)).toEqual([
-        'background',
-        'foreground',
-        'foreground',
-      ]);
-      await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
-      expect(() => fixture.controller.consumeForegroundHandoff(input)).toThrow();
-      expect(fixture.dispatchCount()).toBe(1);
-      await fixture.controller.stop(input.sessionId);
-    });
+          providerEgressConsent: true,
+          providerEgressConsentBinding: {
+            connectionId: paused.connectionId,
+            modelId: paused.modelId,
+          },
+          remember: false,
+          maxRounds: paused.maxRounds,
+          expectedPolicyEpoch: paused.policyEpoch,
+          expectedWindowRevision: 1,
+          expectedProfileRevision: paused.profileRevision,
+        });
+        expect(resumed.state).toBe('observing');
+        expect(record.foregroundHandoff).toBeUndefined();
+        expect(fixture.dispatchCount()).toBe(0);
+        expect(fixture.dispatchedActions()).toEqual([]);
+        await fixture.controller.observe(input.sessionId);
+        expect(fixture.observationCount()).toBeGreaterThan(observations);
+        const nextAction: ComputerUseAction = { type: 'click', x: 0.7, y: 0.6, button: 'left' };
+        await expect(fixture.controller.act(input.sessionId, nextAction)).resolves.toMatchObject({
+          result: 'completed',
+        });
+        expect(fixture.dispatchCount()).toBe(1);
+        expect(fixture.dispatchedActions()).toEqual([nextAction]);
+        expect(fixture.dispatchedActions()).not.toContainEqual(handoffAction);
+        // Inspect before the accessor, which can invalidate an unusable intent.
+        expect(record.foregroundHandoff).toBeUndefined();
+        expect(fixture.controller.getStatus(input.sessionId)!.state).not.toBe('paused');
+        expect(
+          fixture.statuses.slice(statusesBeforeResume).map((status) => status.state),
+        ).not.toContain('paused');
+        expect(fixture.controller.pendingForegroundHandoff(input.sessionId)).toBeNull();
+        expect(fixture.startedSessions.map((session) => session.inputSession?.kind)).toEqual([
+          'background',
+          'foreground',
+          'foreground',
+        ]);
+        await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+        expect(() => fixture.controller.consumeForegroundHandoff(input)).toThrow();
+        expect(fixture.dispatchCount()).toBe(1);
+        expect(fixture.dispatchedActions()).toEqual([nextAction]);
+        await fixture.controller.stop(input.sessionId);
+      },
+    );
 
     it.each(['Stop', 'generation'] as const)(
       'P5c2b rejects a late native result after %s',

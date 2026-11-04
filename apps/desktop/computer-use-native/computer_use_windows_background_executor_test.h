@@ -20,6 +20,7 @@ struct FakeOperations {
   std::string text = "Synthetic before", desired_text = "Synthetic after";
   std::uint64_t expected_epoch = 1;
   int calls = 0, reads = 0, windows = 0, claims = 0, finishes = 0;
+  int begins = 0, ends = 0;
   // These are deliberately available on the same fake as the UIA operations.
   std::array<int, 6> forbidden{};
   void SetForegroundWindow() { ++forbidden[0]; }
@@ -41,6 +42,8 @@ struct FakeOperations {
     const char *kinds[] = {"invoke", "toggle", "select", "set_text", "expand_collapse"};
     return monitor.Claim(expected_epoch, ClaimPermission(kinds[static_cast<int>(pattern)], 5));
   }
+  bool BeginCall(std::uint64_t claim) { ++begins; return monitor.BeginCall(claim); }
+  bool EndCall(std::uint64_t claim) { ++ends; return monitor.EndCall(claim); }
   bool Call() {
     ++calls;
     changed_content = true;
@@ -107,7 +110,7 @@ inline bool CheckBackgroundExecutor() {
     FakeOperations ops;
     ops.pattern = static_cast<FakeOperations::Pattern>(pattern);
     if (!check(RunBackgroundExecutor(ops) == Outcome::kCompleted && ops.calls == 1 &&
-                   ops.claims == 1 && ops.finishes == 1 &&
+                   ops.claims == 1 && ops.finishes == 1 && ops.begins == 1 && ops.ends == 1 &&
                    ops.forbidden == std::array<int, 6>{},
                "BG01_background_forbidden_api_attempts_zero")) return false;
     if (!check(ops.windows == 1 && ops.changed_content && (pattern != 0 || ops.reads == 0),
@@ -135,7 +138,7 @@ inline bool CheckBackgroundExecutor() {
     if (failure == 3) ops.window_ok = false;
     if (failure == 4) ops.takeover = true; // Finish fails after a successful call.
     if (!check(RunBackgroundExecutor(ops) == Outcome::kUnknownEffect && ops.calls == 1 &&
-                   ops.finishes == 1 && ops.monitor.Snapshot().unknown_effect &&
+                   ops.finishes == 1 && ops.ends == 1 && ops.monitor.Snapshot().unknown_effect &&
                    ops.monitor.Claim(ops.monitor.Snapshot().epoch) == 0 &&
                    ops.forbidden == std::array<int, 6>{},
                "BG06_claimed_uia_never_retries_or_falls_back")) return false;

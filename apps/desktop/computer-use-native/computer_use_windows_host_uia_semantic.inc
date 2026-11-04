@@ -1180,6 +1180,20 @@ struct WindowsBackgroundPatternOperations {
     *accepted = true;
     return claim;
   }
+  bool BeginCall(std::uint64_t claim) {
+    auto *pending = windows_semantic_operation;
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    if (pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)
+      pending->background_monitor->state.Pause();
+    return pending->background_monitor->state.BeginCall(claim);
+  }
+  bool EndCall(std::uint64_t claim) {
+    auto *pending = windows_semantic_operation;
+    std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+    if (pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)
+      pending->background_monitor->state.Pause();
+    return pending->background_monitor->state.EndCall(claim);
+  }
   bool Call() {
     HRESULT result = E_FAIL;
     if (scroll.Get()) {

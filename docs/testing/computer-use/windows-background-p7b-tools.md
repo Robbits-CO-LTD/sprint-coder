@@ -84,7 +84,7 @@ node --require "C:/Users/yusei/.claude/skills/issue-graph-flow-codex/scripts/san
 
 ### P4a-attr 段 A の照合と残余リスク
 
-claim 内と成功した Finish 後の **150ms 未満**だけ、検証済みの子 HWND と pattern ごとの
+BeginCall から EndCall 後の **150ms 未満**までに届いた通知だけ、検証済みの子 HWND と pattern ごとの
 WinEvent 種類が一致する通知を免除する。合計 **16 件**と下表の種類別上限は claim と猶予で共有する。
 期限ちょうど・最初の上限超過は pause。猶予中の次 claim は 0 で拒否し、期限以降に取得できる。
 Stop、helper 終了、監視失敗・再登録では許可を破棄し、新しい monitor にも引き継がない。
@@ -98,8 +98,8 @@ Stop、helper 終了、監視失敗・再登録では許可を破棄し、新し
 | ExpandCollapse | OBJECT_STATECHANGE: 2                                                                           |
 | Scroll         | OBJECT_VALUECHANGE: 2                                                                           |
 
-claim の鍵の中で GetTickCount を記録し、通知の dwmsEventTime との差を符号付き32ビットで比較する。
-差が正の場合だけ免除候補にする。claim 前に生成され後で届いた通知、同じ tick の通知は pause。
+BeginCall の鍵の中で GetTickCount を記録し、通知の dwmsEventTime との差を符号付き32ビットで比較する。
+差が正の場合だけ免除候補にする。BeginCall 前に生成され後で届いた通知、同じ tick の通知は pause。
 同じ tick（約16ms）の順序は決められないため、自分の呼出しの通知でも拒否する。
 
 HWND が無い、無効、別 PID、top-level 自身、対象 top-level の子孫でない場合は Prepare で
@@ -111,11 +111,16 @@ fixture.cc の6 control は WS_CHILD と main_window を指定して作成され
 免除は効果の確認ではなく、executor の読戻し・窓検証を維持する。
 
 **別 UIA client が同じ要素へ同じ種類の操作を同じ許可区間内の時刻に行う場合は識別できない。**
-claim と同じ tick 自体は拒否するが、claim より後の許可された tick で自分と他 client の通知が
+BeginCall と同じ tick 自体は拒否するが、BeginCall より後の許可された tick で自分と他 client の通知が
 重なる場合は見分けられない。同じ HWND 内の子識別不能も残る。ADR §2.5 の表示・隔離で扱う。
-免除区間は provider 呼出しの前後だけでなく claim 全体＋猶予のまま。許可表・種類別上限・150ms は
+Claim から BeginCall までと、EndCall の猶予期限以降は Finish 前でも免除しない。
+Readback・Window 中も同じ期限を適用し、Finish は猶予を延長しない。
+BeginCall／EndCall の順序違反・別 claim ID は pause する。許可表・種類別上限・150ms は
 実測前の暫定値である。P7b で各 pattern の実通知と読戻し、BG-3 の別 client、BG-6/8 の停止を測る。
 特に BG-1 の正例が同一 tick 拒否により通らない場合は、条件を緩めず親へ相談する。
+自分の通知が EndCall から 150ms を過ぎて Readback・Window の最中に届いた場合も、pause になる（fail-closed）。
+BG-1 では、各 pattern の通知が EndCall から何 ms 後に届くかと、Readback・Window にかかる時間を記録し、落ちても期限を延ばさず親へ相談する。
+Readback・Window が猶予より長いと、次の claim は Finish の直後に受理されうる。前の操作の遅れた通知は、tick の比較で pause になる。
 段 A の合成 native 試験は OS 入力を送らない。native 実行と実機 BG-1 は親工程で確認し、未実施を PASS としない。
 
 ## ビルドと道具の自己試験（親工程）
@@ -274,6 +279,8 @@ ADR の暫定 100 / 20 / 250 ms を実測済みの閾値と扱わない。hook �
 ## 記録の形・引渡し
 
 各 BG と pattern / phase / 負例の組ごとに、次を証拠索引へ記入する。現時点では全項目未記入。
+
+受入 build の receipt（`computer-use-acceptance-build.json`）の `fixtureDigest` も証拠に記録する。
 
 ```json
 {
