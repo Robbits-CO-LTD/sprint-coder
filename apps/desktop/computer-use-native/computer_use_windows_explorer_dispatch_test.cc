@@ -287,6 +287,14 @@ int wmain() {
       std::string copied_result, copied_reason; bool copied_accepted = false;
       Require(!DispatchWindowsAction(copy, action, &copied_result, &copied_reason, &copied_accepted) &&
           !copied_accepted && m2_inputs == 0, "session_copy_cannot_replay_evidence");
+      reset(); m2_kind = kind;
+      WindowsSession non_explorer_copy = session;
+      non_explorer_copy.canonical_path = L"C:\\synthetic-app.exe";
+      Require(dispatch(), "original_dispatch_before_non_explorer_replay");
+      m2_inputs = 0;
+      Require(!DispatchWindowsAction(non_explorer_copy, action, &copied_result, &copied_reason,
+          &copied_accepted) && !copied_accepted && copied_reason == "stale_target" && m2_inputs == 0,
+          "non_explorer_copy_cannot_replay_evidence");
       reset(); m2_kind = kind; m2_view = reinterpret_cast<HWND>(202);
       blocked("explorer_view_change_before_input_emits_nothing");
       reset(); m2_kind = kind; m2_folder = L"C:\\changed-folder";

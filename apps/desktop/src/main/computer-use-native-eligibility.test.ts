@@ -36,24 +36,25 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   };
   const header = read('computer_use_native_eligibility.h');
 
+  it('blocks the final production declaration until the P5b pre-send hook exists', () => {
+    const facts = read('computer_use_windows_target_facts.h');
+    expect(facts).toContain('inline constexpr bool kWindowsExplorerPreSendHookReady = false;');
+    expect(facts.replace(/\s+/gu, ' ')).toContain(
+      'static_assert(!kNativeEligibilityWindowsV2Final || kWindowsExplorerPreSendHookReady,',
+    );
+    expect(facts).toContain(
+      '#988 P5b requires an Explorer pre-send hook after SendInputForBoundTarget revalidation',
+    );
+    const seam = section(
+      facts,
+      '#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)',
+      '// Derived only',
+    );
+    expect(seam).toContain('defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)');
+    expect(seam).toContain('#error Explorer exception test seam must not enter a product build');
+  });
+
   it('WindowsV2FinalDeclaration requires the exact final build declaration', () => {
-    const predicate = (
-      from_build: boolean,
-      v2: boolean,
-      ruleset: number,
-      classifier: number,
-      lexicon: number,
-      ticket_required: boolean,
-      interlock_enforced: boolean,
-    ) =>
-      from_build &&
-      v2 &&
-      ruleset === 4 &&
-      classifier === 2 &&
-      lexicon === 3 &&
-      ticket_required &&
-      interlock_enforced;
-    // Pin the complete C++ body to the evaluator, including conjunctions and exact equality.
     const body = /constexpr bool WindowsV2FinalDeclaration\([^}]+\{([^}]+)\}/u.exec(header)?.[1];
     expect(body?.replace(/\s+/gu, ' ').trim()).toBe(
       'return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 && ticket_required && interlock_enforced;',
@@ -64,34 +65,35 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     expect(header).toMatch(
       /constexpr bool kNativeEligibilityWindowsV2Final = WindowsV2FinalDeclaration\(\s*kNativeEligibilityFromBuild, kNativeEligibilityIsV2, kNativeEligibilityRulesetVersion,\s*kNativeEligibilityClassifierVersion, kNativeEligibilityLexiconVersion,\s*kNativeEligibilityTicketRequired, kNativeEligibilityInterlockEnforced\);/u,
     );
-    expect(predicate(true, true, 4, 2, 3, true, true)).toBe(true);
-    expect(predicate(false, true, 4, 2, 3, true, true)).toBe(false);
-    expect(predicate(true, false, 4, 2, 3, true, true)).toBe(false);
-    expect(predicate(true, true, 4, 2, 3, false, true)).toBe(false);
-    expect(predicate(true, true, 4, 2, 3, true, false)).toBe(false);
-    for (const [ruleset, classifier, lexicon] of [
-      [3, 2, 3],
-      [5, 2, 3],
-      [4, 1, 3],
-      [4, 3, 3],
-      [4, 2, 2],
-      [4, 2, 4],
-    ] as const)
-      expect(predicate(true, true, ruleset, classifier, lexicon, true, true)).toBe(false);
+    const harness = read('computer_use_target_eligibility_harness.cc');
+    const assertions = harness.match(/static_assert\(!?WindowsV2FinalDeclaration\([^;]+;/gu);
+    expect(assertions).toHaveLength(11);
+    expect(assertions).toContain(
+      'static_assert(WindowsV2FinalDeclaration(true, true, 4, 2, 3, true, true));',
+    );
+    for (const arguments_ of [
+      'false, true, 4, 2, 3, true, true',
+      'true, false, 4, 2, 3, true, true',
+      'true, true, 3, 2, 3, true, true',
+      'true, true, 5, 2, 3, true, true',
+      'true, true, 4, 1, 3, true, true',
+      'true, true, 4, 3, 3, true, true',
+      'true, true, 4, 2, 2, true, true',
+      'true, true, 4, 2, 4, true, true',
+      'true, true, 4, 2, 3, false, true',
+      'true, true, 4, 2, 3, true, false',
+    ])
+      expect(assertions).toContain(
+        'static_assert(!WindowsV2FinalDeclaration(' + arguments_ + '));',
+      );
     for (const platform of ['darwin', 'win32'] as const) {
-      for (const mode of ['v1', 'v2'] as const) {
-        const declaration = table.versions[platform][mode];
-        expect(
-          predicate(
-            true,
-            mode === 'v2',
-            declaration.rulesetVersion,
-            declaration.classifierVersion,
-            declaration.lexiconVersion,
-            table.ticketRequired[platform],
-            platform === 'win32' && mode === 'v2',
-          ),
-        ).toBe(false);
+      for (const mode of ['v1-allowlist', 'v2-denylist'] as const) {
+        const declaration = eligibilityDeclaration(mode, platform);
+        expect([
+          declaration.rulesetVersion,
+          declaration.classifierVersion,
+          declaration.lexiconVersion,
+        ]).not.toEqual([4, 2, 3]);
       }
     }
   });

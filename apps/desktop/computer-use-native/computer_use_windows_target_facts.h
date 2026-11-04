@@ -26,6 +26,10 @@
 
 namespace sprint_coder::computer_use {
 
+inline constexpr bool kWindowsExplorerPreSendHookReady = false;
+static_assert(!kNativeEligibilityWindowsV2Final || kWindowsExplorerPreSendHookReady,
+    "#988 P5b requires an Explorer pre-send hook after SendInputForBoundTarget revalidation");
+
 #if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
 #if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \
     SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1 || \

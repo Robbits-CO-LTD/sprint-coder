@@ -377,18 +377,19 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
   // Dispatch may be refused before its handler (admission, replay, ticket or approval). All exits
   // consume the evidence, including copies sharing it; successful dispatch consumes it at entry.
   struct FinishExplorerDispatch {
-    const Frame &request;
-    MessageType type;
-    ~FinishExplorerDispatch() {
+    WindowsSession *session = nullptr;
+    ~FinishExplorerDispatch() noexcept {
       if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
-        if (type == MessageType::kDispatch || type == MessageType::kDispatchApproved) {
-          if (auto *session = FindWindowsSession(request))
-            (void)ConsumeWindowsExplorerDispatchEvidence(
-                std::exchange(session->explorer_dispatch_evidence, nullptr));
-        }
+        if (session != nullptr)
+          (void)ConsumeWindowsExplorerDispatchEvidence(
+              std::exchange(session->explorer_dispatch_evidence, nullptr));
       }
     }
-  } finish_explorer_dispatch{request, type};
+  } finish_explorer_dispatch;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    if (type == MessageType::kDispatch || type == MessageType::kDispatchApproved)
+      finish_explorer_dispatch.session = FindWindowsSession(request);
+  }
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
   const std::string metadata(

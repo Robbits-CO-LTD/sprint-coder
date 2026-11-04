@@ -172,12 +172,9 @@ describe('Explorer dispatch M2 source boundaries', () => {
 
   it('gate_off_pipe_cleanup_never_looks_up_a_session', () => {
     const pipe = native('computer_use_windows_host_pipe.inc');
-    const cleanup = pipe.slice(
-      pipe.indexOf('~FinishExplorerDispatch()'),
-      pipe.indexOf('} finish_explorer_dispatch'),
-    );
-    expect(cleanup.replace(/\s+/gu, ' ').trim()).toBe(
-      '~FinishExplorerDispatch() { if constexpr (sprint_coder::computer_use::kWindowsExplorerException) { if (type == MessageType::kDispatch || type == MessageType::kDispatchApproved) { if (auto *session = FindWindowsSession(request)) (void)ConsumeWindowsExplorerDispatchEvidence( std::exchange(session->explorer_dispatch_evidence, nullptr)); } } }',
+    const handler = pipe.slice(pipe.indexOf('bool HandlePipeRequest('));
+    expect(handler).toMatch(
+      /if constexpr \(sprint_coder::computer_use::kWindowsExplorerException\) \{\s*if \(type == MessageType::kDispatch \|\| type == MessageType::kDispatchApproved\)\s*finish_explorer_dispatch.session = FindWindowsSession\(request\);/u,
     );
   });
 
@@ -199,10 +196,7 @@ describe('Explorer dispatch M2 source boundaries', () => {
     expect(begin).not.toContain('session.explorer_dispatch_evidence');
     const pipe = native('computer_use_windows_host_pipe.inc');
     const handler = pipe.slice(pipe.indexOf('bool HandlePipeRequest('));
-    expect(handler).toMatch(
-      /~FinishExplorerDispatch\(\) \{\s*if constexpr \(sprint_coder::computer_use::kWindowsExplorerException\) \{\s*if \(type == MessageType::kDispatch \|\| type == MessageType::kDispatchApproved\) \{\s*if \(auto \*session = FindWindowsSession\(request\)\)\s*\(void\)ConsumeWindowsExplorerDispatchEvidence\(\s*std::exchange\(session->explorer_dispatch_evidence, nullptr\)\);/u,
-    );
-    const cleanup = handler.indexOf('finish_explorer_dispatch{request, type}');
+    const cleanup = handler.indexOf('} finish_explorer_dispatch;');
     expect(cleanup).toBeGreaterThan(0);
     for (const boundary of [
       'if (!IsBoundedUtf8(',

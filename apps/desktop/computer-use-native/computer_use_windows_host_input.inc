@@ -549,9 +549,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
                            std::string *reason, bool *accepted,
                            sprint_coder::computer_use::NativeApprovalEffect approved_effect =
                                sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
+  const bool had_evidence = session.explorer_dispatch_evidence != nullptr;
   auto explorer_evidence = ConsumeWindowsExplorerDispatchEvidence(
       std::exchange(session.explorer_dispatch_evidence, nullptr));
   *accepted = false;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    if (had_evidence && !explorer_evidence) { *reason = "stale_target"; return false; }
+  }
   if (!WindowsRoundTripMayInput(session)) { *reason = "approval_round_trip_rejected"; return false; }
   struct RoundTripInputFinished {
     const WindowsSession &session;
