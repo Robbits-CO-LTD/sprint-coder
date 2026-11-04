@@ -1,4 +1,8 @@
-import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './src/main/computer-use-acceptance-mode';
+import { backgroundAcceptanceFixtureDigest } from '../../build-computer-use-acceptance.mjs';
+import {
+  COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE,
+  COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+} from './src/main/computer-use-acceptance-mode';
 
 export const COMPUTER_USE_ACCEPTANCE_BUILD_ENV = 'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD';
 export const COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME = 'computer-use-acceptance-build.json';
@@ -13,7 +17,10 @@ export const COMPUTER_USE_ACCEPTANCE_BUILD_MARKER =
   'sprint-coder-computer-use-acceptance-build-do-not-release';
 
 export type ComputerUseAcceptanceBuild = Readonly<{
-  mode: typeof COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE;
+  mode:
+    | typeof COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE
+    | typeof COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE;
+  fixtureDigest?: string;
   marker: typeof COMPUTER_USE_ACCEPTANCE_BUILD_MARKER;
 }>;
 
@@ -28,16 +35,22 @@ export function computerUseAcceptanceBuildForEnv(
 ): ComputerUseAcceptanceBuild | null {
   const value = environment[COMPUTER_USE_ACCEPTANCE_BUILD_ENV];
   if (value === undefined || value.length === 0) return null;
-  if (value !== COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE)
+  if (
+    value !== COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE &&
+    value !== COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE
+  )
     throw new Error(
-      `${COMPUTER_USE_ACCEPTANCE_BUILD_ENV} accepts only the acceptance build mode ${COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE}`,
+      `${COMPUTER_USE_ACCEPTANCE_BUILD_ENV} accepts only the acceptance build modes ${COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE} or ${COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE}`,
     );
   if (platform !== 'win32')
     throw new Error(
       `${COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE} requires a Windows build host; ${platform} cannot produce it`,
     );
   return Object.freeze({
-    mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+    mode: value,
+    ...(value === COMPUTER_USE_WINDOWS_BACKGROUND_ACCEPTANCE
+      ? { fixtureDigest: backgroundAcceptanceFixtureDigest(environment) }
+      : {}),
     marker: COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
   });
 }

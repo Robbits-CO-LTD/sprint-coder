@@ -182,59 +182,159 @@ describe('background executor native entry', () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('background executor test build', () => {
-  // No product build defines the flag, so this is the only place the real UIA adapter
-  // (WindowsBackgroundPatternOperations and the flag-1 input branches) is compiled.
-  it('compiles the host translation unit with SPRINT_CODER_BACKGROUND_EXECUTOR_TEST=1', ({
-    skip,
-  }) => {
-    const build = findBuild();
-    if (!build) {
-      if (process.env.CI) throw new Error('MSVC required');
-      skip();
-      return;
-    }
-    const root = mkdtempSync(join(tmpdir(), 'sc-background-executor-build-'));
-    try {
-      const provenance = join(root, 'provenance.h');
-      writeFileSync(
-        provenance,
-        '#pragma once\n#define SPRINT_CODER_SOURCE_COMMIT "0000000000000000000000000000000000000000"\n',
-      );
-      // The same expanded host translation unit the component tests compile.
-      const host = join(root, 'background-executor-host.cc');
-      writeFileSync(host, readWindowsHostSource());
-      const object = join(root, 'host.obj');
-      const command = build.wrap([
-        '/nologo',
-        '/c',
-        '/std:c++20',
-        '/EHsc',
-        '/W4',
-        '/we4062',
-        '/sdl',
-        '/permissive-',
-        '/utf-8',
-        '/DUNICODE',
-        '/D_UNICODE',
-        '/DWIN32_LEAN_AND_MEAN',
-        '/DNOMINMAX',
-        '/D_WIN32_WINNT=0x0A00',
-        '/DSPRINT_CODER_BACKGROUND_EXECUTOR_TEST=1',
-        `/FI${provenance}`,
-        `/I${nativeDirectory}`,
-        host,
-        `/Fo:${object}`,
-      ]);
-      const compiled = spawnSync(command.file, command.args, {
-        encoding: 'utf8',
-        windowsVerbatimArguments: command.verbatim,
-        timeout: 500000,
-        env: { ...process.env, VSLANG: '1033' },
-      });
-      expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
-      expect(existsSync(object)).toBe(true);
-    } finally {
-      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-    }
-  }, 540000);
+  // Compile-only matrix; never launches the helper or sends OS input.
+  describe.each(['test', 'background-acceptance', 'production'] as const)(
+    'native build %s',
+    (variant) => {
+      it('compiles the host translation unit and checks the fixture predicate', ({ skip }) => {
+        const build = findBuild();
+        if (!build) {
+          if (process.env.CI) throw new Error('MSVC required');
+          skip();
+          return;
+        }
+        const root = mkdtempSync(join(tmpdir(), 'sc-background-executor-build-'));
+        try {
+          const provenance = join(root, 'provenance.h');
+          writeFileSync(
+            provenance,
+            '#pragma once\n#define SPRINT_CODER_SOURCE_COMMIT "0000000000000000000000000000000000000000"\n',
+          );
+          // The same expanded host translation unit the component tests compile.
+          const host = join(root, 'background-executor-host.cc');
+          writeFileSync(host, readWindowsHostSource());
+          if (variant === 'background-acceptance') {
+            writeFileSync(
+              provenance,
+              readFileSync(provenance, 'utf8') +
+                '#define SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD 1\n' +
+                '#define SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE 1\n' +
+                '#define SPRINT_CODER_BACKGROUND_FIXTURE_SHA256 "' +
+                'a'.repeat(64) +
+                '"\n',
+            );
+          }
+          const object = join(root, 'host.obj');
+          const command = build.wrap([
+            '/nologo',
+            '/c',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/we4062',
+            '/sdl',
+            '/permissive-',
+            '/utf-8',
+            '/DUNICODE',
+            '/D_UNICODE',
+            '/DWIN32_LEAN_AND_MEAN',
+            '/DNOMINMAX',
+            '/D_WIN32_WINNT=0x0A00',
+            ...(variant === 'test' ? ['/DSPRINT_CODER_BACKGROUND_EXECUTOR_TEST=1'] : []),
+            `/FI${provenance}`,
+            `/I${nativeDirectory}`,
+            host,
+            `/Fo:${object}`,
+          ]);
+          const compiled = spawnSync(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 500000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+          expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
+          expect(existsSync(object)).toBe(true);
+          const hostSource = readWindowsHostSource();
+          const verdictStart = hostSource.indexOf(
+            '// BEGIN background acceptance fixture verdicts',
+          );
+          const verdictEnd = hostSource.indexOf('// END background acceptance fixture verdicts');
+          expect(verdictStart).toBeGreaterThanOrEqual(0);
+          expect(verdictEnd).toBeGreaterThan(verdictStart);
+          const fixtureVerdicts = hostSource.slice(verdictStart, verdictEnd);
+          const predicateSource = join(root, 'acceptance-predicate.cc');
+          const predicateBinary = join(root, 'acceptance-predicate.exe');
+          writeFileSync(
+            predicateSource,
+            `
+#include "computer_use_protocol.h"
+#include "computer_use_windows_target_facts.h"
+#include "computer_use_target_eligibility_golden_generated.h"
+using namespace sprint_coder::computer_use;
+${fixtureVerdicts}
+int main() {
+  auto facts = TargetGoldenCases().front().facts;
+  facts.image_root = "other";
+  facts.image_leaf = "fixture.exe";
+  facts.signature = "unsigned";
+  facts.window_class = "P7aFixture";
+  const auto admitted = [&](const TargetFacts &value, std::string_view digest) {
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+    return WindowsBackgroundFixtureVerdict(value, digest).kind == TargetVerdictKind::kEligible;
+#else
+    (void)value;
+    (void)digest;
+    return false;
+#endif
+  };
+  const std::string pin(64, 'a');
+  if (admitted(facts, pin) != bool(SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE)) return 1;
+  if (kWindowsBackgroundInputEnabled != bool(SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE)) return 2;
+  if (admitted(facts, std::string(64, 'b'))) return 3;
+  auto changed = facts; changed.token_elevated = true;
+  if (admitted(changed, pin)) return 4;
+  changed = facts; changed.running_image_matches = false;
+  if (admitted(changed, pin)) return 5;
+  changed = facts; changed.pe_subsystem = "console";
+  if (admitted(changed, pin)) return 6;
+  changed = facts; changed.image_volume = "network";
+  if (admitted(changed, pin)) return 7;
+  changed = facts; changed.own_descendant = true;
+  if (admitted(changed, pin)) return 8;
+  changed = facts; changed.window_class = "Other";
+  if (admitted(changed, pin)) return 9;
+  changed = facts; changed.image_root = "self_install";
+  if (admitted(changed, pin)) return 10;
+  changed = facts; changed.token_other_user.reset();
+  if (admitted(changed, pin)) return 11;
+  for (int slot = 0; slot < 6; ++slot)
+    if (WindowsBackgroundFixtureProviderMatches(pin, "P7aSynthetic", "P7aControl",
+        "slot-" + std::to_string(slot)) != bool(SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE)) return 12;
+  if (WindowsBackgroundFixtureProviderMatches(pin, "Other", "P7aControl", "slot-0") ||
+      WindowsBackgroundFixtureProviderMatches(pin, "P7aSynthetic", "Other", "slot-0") ||
+      WindowsBackgroundFixtureProviderMatches(pin, "P7aSynthetic", "P7aControl", "slot-6") ||
+      WindowsBackgroundFixtureProviderMatches(std::string(64, 'b'), "P7aSynthetic", "P7aControl", "slot-0")) return 13;
+  return 0;
+}
+`,
+          );
+          const predicateCommand = build.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/sdl',
+            '/permissive-',
+            `/FI${provenance}`,
+            `/I${nativeDirectory}`,
+            predicateSource,
+            `/Fo:${join(root, 'predicate.obj')}`,
+            `/Fe:${predicateBinary}`,
+          ]);
+          const predicateBuild = spawnSync(predicateCommand.file, predicateCommand.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: predicateCommand.verbatim,
+            windowsHide: true,
+            timeout: 120000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+          expect(predicateBuild.status, predicateBuild.stdout + predicateBuild.stderr).toBe(0);
+          const checked = spawnSync(predicateBinary, [], { windowsHide: true, timeout: 10000 });
+          expect(checked.status).toBe(0);
+        } finally {
+          rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+        }
+      }, 540000);
+    },
+  );
 });

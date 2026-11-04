@@ -440,6 +440,31 @@ sprint_coder::computer_use::TargetVerdict WindowsExplorerPrestartVerdict(
   return {TargetVerdictKind::kUpper, "supervised"};
 }
 
+// BEGIN background acceptance fixture verdicts
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+[[nodiscard]] inline sprint_coder::computer_use::TargetVerdict WindowsBackgroundFixtureFactsVerdict(const sprint_coder::computer_use::TargetFacts &facts) {
+  using namespace sprint_coder::computer_use;
+  if (!TargetFactsAreComplete(facts) ||
+      facts.platform != TargetPlatform::kWin32 || facts.running_image_matches != true ||
+      facts.image_volume != "fixed" || facts.signature != "unsigned" || facts.packaged != std::optional<bool>(false) ||
+      facts.pe_subsystem != "gui" || facts.window_class != "P7aFixture") return {};
+  // Only other-placement and unsigned's ceiling are waived. Wire facts stay unchanged.
+  auto scoped = facts;
+  if (scoped.image_root == "other") scoped.image_root = "local_programs";
+  scoped.signature = "valid";
+  return ClassifyTarget(scoped);
+}
+
+[[nodiscard]] inline sprint_coder::computer_use::TargetVerdict WindowsBackgroundFixtureVerdict(const sprint_coder::computer_use::TargetFacts &facts,
+                                                                  std::string_view digest) {
+  using namespace sprint_coder::computer_use;
+  if (!WindowsBackgroundFixtureDigestMatches(digest)) return {};
+  return WindowsBackgroundFixtureFactsVerdict(facts);
+}
+
+#endif
+// END background acceptance fixture verdicts
+
 // The core's verdict for these facts, with the V1 deny-side tables on top. Refusals never become
 // eligible here; a missing piece is unresolvable.
 sprint_coder::computer_use::TargetVerdict
@@ -531,6 +556,17 @@ WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
   if (measured_facts != nullptr)
     *measured_facts = for_window.facts;
   TargetVerdict verdict = WindowsV2VerdictFor(for_window);
+#if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  if (WindowsBackgroundFixtureFactsVerdict(for_window.facts).kind == TargetVerdictKind::kEligible &&
+      !IsKnownProxyExecutable(for_window.image_path) &&
+      !IsDisallowedTargetExecutable(for_window.image_path) && !IsProcessElevated(for_window.pid) &&
+      EnsureWindowsV2Identity(process)) {
+    const auto acceptance = WindowsBackgroundFixtureVerdict(for_window.facts,
+        process->executable.identity.executable_digest);
+    if (acceptance.kind == TargetVerdictKind::kEligible)
+      verdict = acceptance;
+  }
+#endif
   if constexpr (kWindowsExplorerException) {
     const bool measured_view = explorer_scope && WindowsTargetIsVerifiedExplorer(for_window.facts) &&
         window_class == std::optional<std::string>("CabinetWClass") &&
@@ -1158,7 +1194,8 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
       SameWindowsFileIdentity(held, *judged.measured.file_identity);
   if (!still_valid()) return WindowsV2RejudgeResult{};
   if (result.matches)
-    result.not_web = sprint_coder::computer_use::WindowsTargetIsNotWebByTable(
+    result.not_web = sprint_coder::computer_use::WindowsBackgroundFixtureDigestMatches(
+        judged.executable.identity.executable_digest) || sprint_coder::computer_use::WindowsTargetIsNotWebByTable(
         judged.measured.facts, judged.held_key, judged.table_key, work.not_web_file,
         /*session_recorded=*/true, judged.not_web_package);
   // As before, a completed cold context can survive a target refusal. An exception or Stop never
@@ -1321,7 +1358,9 @@ bool WindowsBackgroundStartGate() {
   return sprint_coder::computer_use::kWindowsBackgroundInputEnabled;
 }
 
-bool WindowsBackgroundTargetSupported(const WindowsExecutableIdentity &) { return false; }
+bool WindowsBackgroundTargetSupported(const WindowsExecutableIdentity &identity) {
+  return sprint_coder::computer_use::WindowsBackgroundFixtureDigestMatches(identity.executable_digest);
+}
 
 sprint_coder::computer_use::WindowsBackgroundStartFacts
 MeasureWindowsBackgroundStartFacts(std::uint32_t pid, HWND window, RECT *bounds) {
