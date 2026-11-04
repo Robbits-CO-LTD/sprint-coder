@@ -874,15 +874,6 @@ sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSes
   return page;
 }
 
-bool RecheckWindowsPage(const WindowsSession &session) {
-  const auto current = ReadWindowsPage(session, session.active_window, session.active_window_identity);
-  if (!session.page_observation_invalidated &&
-      sprint_coder::computer_use::WindowsPageAllowsInput(session.observed_page, current)) return true;
-  InvalidateWindowsPage(session);
-  if (session.round_trip && !session.round_trip->MayLegacyStart()) session.round_trip->Invalidate();
-  return false;
-}
-
 bool RecheckWindowsBoundPageOnLane(HWND window, std::uint32_t pid,
     const sprint_coder::computer_use::WindowsPageEvidence &page,
     const std::function<bool()> &current) {
@@ -897,6 +888,15 @@ bool RecheckWindowsBoundPageOnLane(HWND window, std::uint32_t pid,
   });
   sprint_coder::computer_use::WindowsShadowReader reader(*source);
   return reader.RecheckPage(page) && current();
+}
+
+bool RecheckWindowsPage(const WindowsSession &session) {
+  const auto current = ReadWindowsPage(session, session.active_window, session.active_window_identity);
+  if (!session.page_observation_invalidated &&
+      sprint_coder::computer_use::WindowsPageAllowsInput(session.observed_page, current)) return true;
+  InvalidateWindowsPage(session);
+  if (session.round_trip && !session.round_trip->MayLegacyStart()) session.round_trip->Invalidate();
+  return false;
 }
 
 bool RecheckWindowsPageBeforeInput(const WindowsSession &session) {
