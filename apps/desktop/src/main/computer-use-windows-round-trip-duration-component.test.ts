@@ -1,12 +1,55 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// Parent runs this in an MSVC shell. The production Begin call and state machine are used;
+const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+type Build = Readonly<{
+  wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
+}>;
+
+// The same MSVC lookup as the other Windows component tests: cl.exe on PATH, else vcvars64.
+function findBuild(): Build | null {
+  if (process.platform !== 'win32') return null;
+  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
+    return { wrap: (args) => ({ file: 'cl.exe', args, verbatim: false }) };
+  if (!existsSync(vswhere)) return null;
+  const found = spawnSync(
+    vswhere,
+    [
+      '-latest',
+      '-products',
+      '*',
+      '-requires',
+      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+      '-property',
+      'installationPath',
+    ],
+    { encoding: 'utf8' },
+  );
+  const root = found.stdout.trim();
+  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
+  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
+  return {
+    wrap: (args) => ({
+      file: 'cmd.exe',
+      args: [
+        '/d',
+        '/s',
+        '/c',
+        `"call "${vcvars}" >nul && cl.exe ${args.map((argument) => `"${argument}"`).join(' ')}"`,
+      ],
+      verbatim: true,
+    }),
+  };
+}
+
+const build = findBuild();
+
+// The production Begin call and state machine are used;
 // ticket invalidation is a counter, and no Windows API or OS input is involved.
-describe.skipIf(process.platform !== 'win32')('P5c2b-W native duration component', () => {
+describe.skipIf(build === null)('P5c2b-W native duration component', () => {
   it('offer 59000ms and remaining 58990ms begins and expires at the shorter deadline', () => {
     const native = join(__dirname, '../../computer-use-native');
     const source = readFileSync(join(native, 'computer_use_windows_host_preflight.inc'), 'utf8');
@@ -55,15 +98,20 @@ int main() {
       const cpp = join(directory, 'duration.cc');
       const exe = join(directory, 'duration.exe');
       writeFileSync(cpp, program);
-      const built = spawnSync(
-        'cl.exe',
-        ['/nologo', '/std:c++20', '/EHsc', `/I${native}`, cpp, `/Fe:${exe}`],
-        {
-          cwd: directory,
-          encoding: 'utf8',
-          windowsHide: true,
-        },
-      );
+      const command = build!.wrap([
+        '/nologo',
+        '/std:c++20',
+        '/EHsc',
+        `/I${native}`,
+        cpp,
+        `/Fe:${exe}`,
+      ]);
+      const built = spawnSync(command.file, command.args, {
+        cwd: directory,
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: command.verbatim,
+      });
       expect(built.status, `${built.error ?? ''}\n${built.stdout}\n${built.stderr}`).toBe(0);
       const ran = spawnSync(exe, [], { encoding: 'utf8', windowsHide: true });
       expect(ran.status, `${ran.stdout}\n${ran.stderr}`).toBe(0);
