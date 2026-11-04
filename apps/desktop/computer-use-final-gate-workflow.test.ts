@@ -709,7 +709,10 @@ describe('Computer Use external final gate', () => {
         workflow,
       )?.[1];
       expect(windows).toBeDefined();
-      expect(quoted(windows!).sort()).toEqual(built);
+      // A Windows build also writes its document viewers and the Main addon entry.
+      expect(quoted(windows!).sort()).toEqual(
+        [...built, 'windowsDocumentViewers', 'windowsMainAddon'].sort(),
+      );
       const macos = /const expected = \[([\s\S]*?)\]\.sort\(\);/u.exec(workflow)?.[1];
       expect(macos).toBeDefined();
       expect(quoted(macos!).sort()).toEqual(built);
