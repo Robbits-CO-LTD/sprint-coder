@@ -1,9 +1,30 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // A LIVE seam for the Windows synchronous interlock entry (classifier v2, S5-c-2 PR-1). The two
 // blocks of computer_use_windows_host.cc that matter (the point mapping and the entry, each between
@@ -584,7 +605,7 @@ const build = (() => {
 describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
   'Windows synchronous interlock entry, live against UI Automation (S5-c-2 PR-1)',
   () => {
-    it('refuses a console class window, bounds the lane at 500 ms, and starts one worker at a time', () => {
+    it('refuses a console class window, bounds the lane at 500 ms, and starts one worker at a time', async () => {
       expect(build, 'a Windows build context').not.toBeNull();
       const context = build!;
       try {
@@ -599,7 +620,7 @@ describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
             ),
         );
         const compiler = context.compiler!;
-        const built = spawnSync(compiler.file, compiler.args, {
+        const built = await runAsync(compiler.file, compiler.args, {
           encoding: 'utf8',
           cwd: context.scratch,
           windowsVerbatimArguments: compiler.verbatim,
@@ -607,7 +628,7 @@ describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(context.binary, process.env['CI'] ? ['ci'] : [], {
+        const run = await runAsync(context.binary, process.env['CI'] ? ['ci'] : [], {
           encoding: 'utf8',
           timeout: 90_000,
         });

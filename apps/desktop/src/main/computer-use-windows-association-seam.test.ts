@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -11,6 +11,27 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 const libraries = [
@@ -93,8 +114,8 @@ type Probe = Readonly<{ status: number | null; output: string; facts: Map<string
 describe.skipIf(process.platform !== 'win32')('Windows association / selection seam', () => {
   let scratch = '';
   let binary = '';
-  const probe = (...args: string[]): Probe => {
-    const run = spawnSync(binary, args, { encoding: 'utf8', timeout: 30_000 });
+  const probe = async (...args: string[]): Promise<Probe> => {
+    const run = await runAsync(binary, args, { encoding: 'utf8', timeout: 30_000 });
     const facts = new Map<string, string>();
     for (const line of run.stdout.split(/\r?\n/u)) {
       const equals = line.indexOf('=');
@@ -103,7 +124,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     return { status: run.status, output: run.stdout + run.stderr, facts };
   };
 
-  beforeAll(() => {
+  beforeAll(async () => {
     scratch = mkdtempSync(join(tmpdir(), 'computer-use-association-seam-'));
     binary = join(scratch, 'seam.exe');
     const compiler = findBuild(
@@ -111,7 +132,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       binary,
     );
     expect(compiler, 'MSVC is required; a missing compiler is not a passing seam').not.toBeNull();
-    const built = spawnSync(compiler!.file, compiler!.args, {
+    const built = await runAsync(compiler!.file, compiler!.args, {
       encoding: 'utf8',
       cwd: scratch,
       windowsVerbatimArguments: compiler!.verbatim,
@@ -125,17 +146,17 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     if (scratch !== '') rmSync(scratch, { recursive: true, force: true });
   });
 
-  it('runs the portable negative matrix and the OS failure / cancellation boundaries', () => {
-    const run = probe();
+  it('runs the portable negative matrix and the OS failure / cancellation boundaries', async () => {
+    const run = await probe();
     expect(run.status, run.output).toBe(0);
     expect(run.output).toContain('OK');
   });
 
-  it('takes the extension from the resolved real path, never from the display spelling', () => {
+  it('takes the extension from the resolved real path, never from the display spelling', async () => {
     // A right-to-left override shows "report-exe.txt"; the real extension is exe.
     const spoof = join(scratch, 'report-\u202etxt.exe');
     writeFileSync(spoof, '');
-    const rlo = probe('association', spoof, 'blocked');
+    const rlo = await probe('association', spoof, 'blocked');
     expect(rlo.status, rlo.output).toBe(0);
     expect(rlo.facts.get('real_path_verified')).toBe('1');
     expect(rlo.facts.get('extension')).toBe('exe');
@@ -143,19 +164,19 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     // Windows runs "setup.exe." as setup.exe: the trailing dot does not hide the extension.
     const dotted = `\\\\?\\${realpathSync.native(scratch)}\\setup.exe.`;
     writeFileSync(dotted, '');
-    const trailing = probe('association', dotted, 'blocked');
+    const trailing = await probe('association', dotted, 'blocked');
     expect(trailing.status, trailing.output).toBe(0);
     expect(trailing.facts.get('extension')).toBe('exe');
   });
 
-  it('resolves a junction to the file itself, with the same file id as the direct path', () => {
+  it('resolves a junction to the file itself, with the same file id as the direct path', async () => {
     const target = join(scratch, 'target');
     const link = join(scratch, 'link');
     mkdirSync(target);
     writeFileSync(join(target, 'document.txt'), '');
     symlinkSync(target, link, 'junction');
-    const direct = probe('identity', join(target, 'document.txt'));
-    const through = probe('identity', join(link, 'document.txt'));
+    const direct = await probe('identity', join(target, 'document.txt'));
+    const through = await probe('identity', join(link, 'document.txt'));
     expect(direct.status, direct.output).toBe(0);
     expect(through.status, through.output).toBe(0);
     const real = realpathSync.native(join(target, 'document.txt'));
@@ -167,7 +188,7 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     expect(through.facts.get('file_id')).toBe(direct.facts.get('file_id'));
   });
 
-  it('rejects a file that is itself a reparse point (a file symbolic link)', (context) => {
+  it('rejects a file that is itself a reparse point (a file symbolic link)', async (context) => {
     const target = join(scratch, 'symlink-target.txt');
     const link = join(scratch, 'symlink.txt');
     writeFileSync(target, '');
@@ -181,17 +202,17 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       }
       throw error;
     }
-    const identity = probe('identity', link);
+    const identity = await probe('identity', link);
     expect(identity.status, identity.output).toBe(1);
     expect(identity.output).toContain('live-identity');
-    const association = probe('association', link, 'takeover');
+    const association = await probe('association', link, 'takeover');
     expect(association.status, association.output).toBe(0);
     expect(association.facts.get('real_path_verified')).toBe('0');
     // The target itself resolves: only the reparse point is refused.
-    expect(probe('identity', target).status).toBe(0);
+    expect((await probe('identity', target)).status).toBe(0);
   });
 
-  it('reads a temporary HKCU association and takes over on every non-static handler', () => {
+  it('reads a temporary HKCU association and takes over on every non-static handler', async () => {
     const extension = `scgt991x${process.pid}`;
     const progId = `ScgT991.Document${process.pid}`;
     const perceived = `scgp991x${process.pid}`;
@@ -199,8 +220,8 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     // An executable with an embedded Authenticode signature (System32's notepad is catalog-signed).
     const handler = process.execPath;
     const command = `"${handler}" "%1"`;
-    const reg = (...args: string[]): number | null =>
-      spawnSync('reg.exe', args, { encoding: 'utf8', timeout: 30_000 }).status;
+    const reg = async (...args: string[]): Promise<number | null> =>
+      (await runAsync('reg.exe', args, { encoding: 'utf8', timeout: 30_000 })).status;
     const extensionKey = `${classes}\\.${extension}`;
     const progIdKey = `${classes}\\${progId}`;
     const verbKey = `${progIdKey}\\shell\\open`;
@@ -214,19 +235,19 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     ];
     const file = join(scratch, `document.${extension}`);
     writeFileSync(file, '');
-    const measure = (): Probe => {
-      const measured = probe('association', file, 'takeover');
+    const measure = async (): Promise<Probe> => {
+      const measured = await probe('association', file, 'takeover');
       expect(measured.status, measured.output).toBe(0);
       return measured;
     };
     // A removal can reach the association queries a moment after reg.exe returns (CI shard 4/5
     // saw the removed handler once more). Measure again briefly; an added handler is not waited for.
-    const measureUntilComplete = (): string | undefined => {
+    const measureUntilComplete = async (): Promise<string | undefined> => {
       const deadline = Date.now() + 3_000;
       for (;;) {
-        const complete = measure().facts.get('complete');
+        const complete = (await measure()).facts.get('complete');
         if (complete === '1' || Date.now() >= deadline) return complete;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
     };
     const flags = [
@@ -239,11 +260,11 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     ];
     let failure: unknown = null;
     try {
-      expect(reg('add', extensionKey, '/ve', '/d', progId, '/f')).toBe(0);
-      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
-      expect(reg('add', `${progIdKey}\\shell`, '/ve', '/d', 'open', '/f')).toBe(0);
-      expect(reg('add', commandKey, '/ve', '/d', command, '/f')).toBe(0);
-      const plain = measure();
+      expect(await reg('add', extensionKey, '/ve', '/d', progId, '/f')).toBe(0);
+      expect(await reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
+      expect(await reg('add', `${progIdKey}\\shell`, '/ve', '/d', 'open', '/f')).toBe(0);
+      expect(await reg('add', commandKey, '/ve', '/d', command, '/f')).toBe(0);
+      const plain = await measure();
       expect(plain.facts.get('real_path_verified')).toBe('1');
       expect(plain.facts.get('file_id_known')).toBe('1');
       expect(plain.facts.get('extension')).toBe(extension);
@@ -320,22 +341,24 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
       ];
       for (const entry of cases) {
         const label = `${entry.flag} ${entry.add.join(' ')}`;
-        expect(reg(...entry.add), label).toBe(0);
-        const flagged = measure();
+        expect(await reg(...entry.add), label).toBe(0);
+        const flagged = await measure();
         expect(flagged.facts.get(entry.flag), label).toBe('1');
         expect(flagged.facts.get('complete'), label).toBe('0');
-        expect(reg(...entry.remove), label).toBe(0);
+        expect(await reg(...entry.remove), label).toBe(0);
         // Removing the handler leaves an empty ContextMenuHandlers key behind: it holds no handler.
         if (entry.remove[1]!.endsWith('\\ContextMenuHandlers\\Synthetic'))
-          expect(reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(0);
-        expect(measureUntilComplete(), `${label} removed`).toBe('1');
+          expect(await reg('query', entry.remove[1]!.slice(0, -'\\Synthetic'.length)), label).toBe(
+            0,
+          );
+        expect(await measureUntilComplete(), `${label} removed`).toBe('1');
       }
 
       // The perceived type's SystemFileAssociations layer (a type of its own, not the user's "text").
-      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', perceived, '/f')).toBe(0);
-      expect(measure().facts.get('shell_extension')).toBe('0');
+      expect(await reg('add', extensionKey, '/v', 'PerceivedType', '/d', perceived, '/f')).toBe(0);
+      expect((await measure()).facts.get('shell_extension')).toBe('0');
       expect(
-        reg(
+        await reg(
           'add',
           `${keys[3]}\\shellex\\ContextMenuHandlers\\Synthetic`,
           '/ve',
@@ -344,14 +367,14 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
           '/f',
         ),
       ).toBe(0);
-      expect(measure().facts.get('shell_extension')).toBe('1');
-      expect(reg('delete', keys[3]!, '/f')).toBe(0);
-      expect(reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
-      expect(measure().facts.get('complete')).toBe('1');
+      expect((await measure()).facts.get('shell_extension')).toBe('1');
+      expect(await reg('delete', keys[3]!, '/f')).toBe(0);
+      expect(await reg('add', extensionKey, '/v', 'PerceivedType', '/d', 'text', '/f')).toBe(0);
+      expect((await measure()).facts.get('complete')).toBe('1');
 
       // A UserChoice whose ProgId is not the resolved ProgID stops the measurement.
       expect(
-        reg(
+        await reg(
           'add',
           `${keys[4]}\\UserChoice`,
           '/v',
@@ -361,15 +384,15 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
           '/f',
         ),
       ).toBe(0);
-      const mismatch = measure();
+      const mismatch = await measure();
       expect(mismatch.facts.get('real_path_verified')).toBe('1');
       expect(mismatch.facts.get('prog_id')).toBe('');
       expect(mismatch.facts.get('complete')).toBe('0');
-      expect(reg('delete', keys[4]!, '/f')).toBe(0);
+      expect(await reg('delete', keys[4]!, '/f')).toBe(0);
 
       const unknown = join(scratch, `document.scgu991x${process.pid}`);
       writeFileSync(unknown, '');
-      const unregistered = probe('association', unknown, 'takeover');
+      const unregistered = await probe('association', unknown, 'takeover');
       expect(unregistered.status, unregistered.output).toBe(0);
       expect(unregistered.facts.get('prog_id')).toBe('');
     } catch (error) {
@@ -377,8 +400,8 @@ describe.skipIf(process.platform !== 'win32')('Windows association / selection s
     } finally {
       // The temporary association must be gone; a key that cannot be removed fails the test.
       for (const key of keys) {
-        reg('delete', key, '/f');
-        if (reg('query', key) !== 1) failure ??= new Error(`HKCU key left behind: ${key}`);
+        await reg('delete', key, '/f');
+        if ((await reg('query', key)) !== 1) failure ??= new Error(`HKCU key left behind: ${key}`);
       }
     }
     if (failure !== null) throw failure;
