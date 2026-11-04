@@ -1975,7 +1975,11 @@ class WindowsComputerUseHelperClient {
         frame.sessionId.hex !== frameIdFromText(`session:${event.sessionId}`).hex
       )
         return;
-      if (!this.interactionEvents.receive(event, this.helperGeneration)) {
+      if (
+        !this.interactionEvents.receive(event, this.helperGeneration, (fault) =>
+          this.deliverInteraction([fault]),
+        )
+      ) {
         // It may precede, in the same read, the start response or begin_result it depends on.
         const start = this.starts.get(event.sessionId);
         const startPending = start !== undefined && start.attempts.size !== 0 && !start.stopped;

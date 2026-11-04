@@ -119,6 +119,38 @@ describe('P3d interaction authority', () => {
     expect(delivery.receive({ ...trip, sequence: 5, state: 'ended' }, 2)).toBe(false);
     expect(delivery.blocked(binding.sessionId)).toBe(true);
   });
+  it('reports ordering faults without accepting them or rolling back the sequence', () => {
+    const delivery = new WindowsInteractionEvents();
+    const faults: WindowsInteractionEvent[] = [];
+    const receive = (event: WindowsInteractionEvent) =>
+      delivery.receive(event, 2, (fault) => faults.push(fault));
+    delivery.bind(binding);
+    delivery.begin(binding, 'trip-1');
+    delivery.settleBegin(binding.sessionId, 'trip-1', true);
+    expect(receive({ ...trip, sequence: 3 })).toBe(true);
+    expect(receive({ ...trip, roundTripId: 'unknown' })).toBe(false);
+    expect(faults).toEqual([]);
+    expect(receive(trip)).toBe(false);
+    expect(receive({ ...trip, sequence: 3 })).toBe(false);
+    expect(faults.map((event) => event.sequence)).toEqual([1, 3]);
+    expect(receive({ ...trip, sequence: 4 })).toBe(true);
+    delivery.completeTrip(binding.sessionId, 'trip-1');
+    expect(delivery.begin(binding, 'trip-2')).toBe(true);
+    delivery.settleBegin(binding.sessionId, 'trip-2', true);
+    expect(receive({ ...trip, roundTripId: 'trip-2', sequence: 4 })).toBe(false);
+    expect(receive({ ...trip, roundTripId: 'trip-2', sequence: 5 })).toBe(true);
+  });
+  it('replays held ordering faults for Main without rolling back transport authority', () => {
+    const delivery = new WindowsInteractionEvents();
+    delivery.bind(binding);
+    delivery.begin(binding, 'trip-1');
+    for (const sequence of [2, 1, 2]) delivery.hold({ ...trip, sequence }, 2, false);
+    expect(
+      delivery.settleBegin(binding.sessionId, 'trip-1', true).map((event) => event.sequence),
+    ).toEqual([2, 1, 2]);
+    expect(delivery.receive({ ...trip, sequence: 2 }, 2)).toBe(false);
+    expect(delivery.receive({ ...trip, sequence: 3 }, 2)).toBe(true);
+  });
   it('RT_id_binding: validates closed metadata without accepting unknown fields', () => {
     for (const valid of [event, trip]) {
       expect(parseWindowsInteractionEvent(valid)).toEqual(valid);
