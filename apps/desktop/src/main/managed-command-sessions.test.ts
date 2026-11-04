@@ -223,7 +223,9 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       try {
         const started = await sessions.start(spec, owner, hooks);
         controller.abort();
-        await expect(sessions.waitFor(started.sessionId, owner, 5_000)).resolves.toMatchObject({
+        // A loaded CI runner can take several seconds to retire the sandboxed process; stay under
+        // the 20s test timeout.
+        await expect(sessions.waitFor(started.sessionId, owner, 15_000)).resolves.toMatchObject({
           state: 'canceled',
         });
       } finally {
