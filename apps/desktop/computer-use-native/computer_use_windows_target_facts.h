@@ -1127,8 +1127,8 @@ struct WindowsFileKey {
 // The one entry of the table so far: System32's notepad.exe. Path relative to %WINDIR%, ASCII lower.
 inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notepad.exe";
 
-// The final declaration alone does not enable Store Notepad not-web.
-inline constexpr bool kWindowsStoreNotepadNotWebReady = false;
+// The verified Store Notepad entry is ready; production still requires the final V2 declaration.
+inline constexpr bool kWindowsStoreNotepadNotWebReady = true;
 
 #if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)
 #if !defined(SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD) || \

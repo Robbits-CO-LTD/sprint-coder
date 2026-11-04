@@ -57,7 +57,8 @@ Restart Sprint Coder with these values inherited. The saved Computer Use setting
 but the agent-driven V2 tools require both exact environment opt-ins above. Open a disposable target,
 then approve that application in the conversation. Calculator and ordinary applications under
 Program Files are candidates only when their measured identity, integrity level and deny-list facts
-pass. Explorer, the Store Notepad not-web exception and IL-only support remain disabled. Browsers
+pass. Windows 11 の標準のメモ帳（Store 版） is also a basic V2 target when its verified package
+identity, file key and running image match. Explorer and IL-only support remain disabled. Browsers
 retain the observe-only ceiling; elevated, shell, credential and remote-control targets retain their
 existing refusals. Installation location alone never grants permission.
 
@@ -110,7 +111,7 @@ to verification; never supply an executable path, PID or window handle to the AI
 | ---- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | W-T1 | An eligible ordinary app under `Program Files`; also exercise `Program Files (x86)` where applicable. | It can be discovered and started with one app approval card, subject to identity and class checks.                                                  | N6/N7, after P5; N13b, 未確認.                                                   |
 | W-T2 | An eligible ordinary app under `%LOCALAPPDATA%\Programs`.                                             | Same start flow; writable location does not bypass identity checks or strict interlock.                                                             | N6/N7, after P5; N13b, 未確認.                                                   |
-| W-T3 | Store Notepad verified to be packaged Win32, using local process/window inspection by the human.      | Verified package identity and file binding allow the intended native document window. The Store label or package family name alone is insufficient. | P2 merged preparation; after P5/N7a connection; N13b, 未確認.                    |
+| W-T3 | Windows 11 の標準のメモ帳（Store 版、`Microsoft.WindowsNotepad_8wekyb3d8bbwe`）, verified as packaged Win32 by local process/window inspection.      | Verified package identity and file binding allow the intended native document window. The Store label or package family name alone is insufficient. | Basic V2 stage A connected; test document click/input with W-A1–W-A4; N13b, 未確認.                    |
 | W-T4 | Eligible WPF and WinForms apps, including an IL-only case where P5 permits it.                        | Verified image identity permits the app; an IL-only image only under a protected root; unsupported or unreadable facts remain refused.              | P1 merged preparation; after P5/N7a connection; N13b, 未確認.                    |
 | W-T5 | A genuine Explorer file window showing a disposable local folder.                                     | Only the verified file-window exception is available; the desktop, taskbar, command surfaces and unrelated shell windows are not admitted.          | P3 PR #1088 preparation, then P5/N11-E connection and view checks; N13b, 未確認. |
 | W-T6 | A target actually hosted by `ApplicationFrameHost`, if present.                                       | Refused; do not treat it as packaged Win32 Notepad or weaken identity binding to make W-T3 pass.                                                    | Existing refusal retained after P5; N13b negative case, 未確認.                  |
