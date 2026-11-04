@@ -170,18 +170,21 @@ int wmain() {
       if (m2_sent[index].type != INPUT_MOUSE || m2_sent[index++].mi.dwFlags != flag) return false;
     return true;
   };
+  // Windows' own mapping of an ABSOLUTE|VIRTUALDESK value to a pixel offset from the virtual desktop
+  // origin, written here independently of the host: floor(normalized * extent / 65536).
+  const auto windows_absolute_pixel = [](LONG normalized, int extent) {
+    if (normalized < 0 || normalized > 65535) return LONG{-1};
+    return static_cast<LONG>((static_cast<std::int64_t>(normalized) * extent) / 65536);
+  };
   // The first event moves to exactly (60, 70) on the virtual desktop, in the same array as the rest.
   const auto moves_to_action_point = [&] {
     if (m2_sent.empty() || m2_sent[0].type != INPUT_MOUSE ||
         m2_sent[0].mi.dwFlags != (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
       return false;
-    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    const auto pixel = [](LONG value, int extent) {
-      return static_cast<LONG>(std::lround(static_cast<double>(value) * (extent - 1) / 65535.0));
-    };
-    return GetSystemMetrics(SM_XVIRTUALSCREEN) + pixel(m2_sent[0].mi.dx, width) == 60 &&
-        GetSystemMetrics(SM_YVIRTUALSCREEN) + pixel(m2_sent[0].mi.dy, height) == 70;
+    return GetSystemMetrics(SM_XVIRTUALSCREEN) +
+            windows_absolute_pixel(m2_sent[0].mi.dx, GetSystemMetrics(SM_CXVIRTUALSCREEN)) == 60 &&
+        GetSystemMetrics(SM_YVIRTUALSCREEN) +
+            windows_absolute_pixel(m2_sent[0].mi.dy, GetSystemMetrics(SM_CYVIRTUALSCREEN)) == 70;
   };
   if constexpr (!gate) {
     reset(); Require(dispatch() && m2_inputs == 2, "gate_off_click_unchanged");
@@ -194,6 +197,32 @@ int wmain() {
     reset(); m2_kind = "invoke";
     Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "gate_off_semantic_unchanged");
   } else {
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    {
+      // Every chosen value lands, by Windows' mapping, on the very pixel asked for.
+      struct AxisCase { LONG coordinate; int origin; int extent; };
+      for (const AxisCase axis : {AxisCase{100, 0, 7680}, AxisCase{0, 0, 1920},
+               AxisCase{1919, 0, 1920}, AxisCase{-1920, -1920, 3840}, AxisCase{1919, -1920, 3840},
+               AxisCase{1, 0, 2}, AxisCase{0, 0, 2}, AxisCase{7679, 0, 7680}}) {
+        LONG normalized = -1;
+        Require(WindowsExplorerNormalizeAxis(axis.coordinate, axis.origin, axis.extent, &normalized) &&
+            windows_absolute_pixel(normalized, axis.extent) == axis.coordinate - axis.origin,
+            "absolute_move_matches_windows_pixel_mapping");
+      }
+      for (int extent = 1; extent <= 8192; extent += (extent < 64 ? 1 : 97))
+        for (LONG offset = 0; offset < extent; offset += (extent < 64 ? 1 : 13)) {
+          LONG normalized = -1;
+          Require(WindowsExplorerNormalizeAxis(offset, 0, extent, &normalized) &&
+              windows_absolute_pixel(normalized, extent) == offset,
+              "absolute_move_matches_windows_pixel_mapping_sweep");
+        }
+      LONG unused = 0;
+      Require(!WindowsExplorerNormalizeAxis(1920, 0, 1920, &unused) &&
+          !WindowsExplorerNormalizeAxis(-1921, -1920, 3840, &unused),
+          "absolute_move_refuses_off_desktop");
+      std::cout << "OK absolute_move_matches_windows_pixel_mapping\n";
+    }
+#endif
     for (const std::string kind : {"click", "scroll"}) {
       reset(); m2_kind = kind;
       // One cursor placement and ONE SendInput: [absolute move to the POINT, button or wheels].

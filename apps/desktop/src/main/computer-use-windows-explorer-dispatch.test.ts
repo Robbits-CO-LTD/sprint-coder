@@ -26,6 +26,13 @@ describe('Explorer dispatch M2 source boundaries', () => {
   it('explorer_move_and_input_atomic', () => {
     const guard = explorer.slice(explorer.indexOf('bool SendWindowsExplorerPointInput('));
     expect(explorer).toContain('MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK');
+    // Windows maps the value to floor(value * extent / 65536): the middle of the pixel's interval
+    // is chosen and checked back with that same mapping (no 65535 / (extent - 1) approximation).
+    expect(explorer).toContain(
+      '((2 * offset + 1) * 65536) / (2 * static_cast<std::int64_t>(extent))',
+    );
+    expect(explorer).toContain('(value * extent) / 65536 != offset');
+    expect(explorer).not.toMatch(/65535\.0|extent - 1\)/u);
     // After the last re-measure: the cursor is at the POINT and no input came, then one array.
     const order = [
       'RecheckWindowsExplorerDispatch(session, evidence, point)',
@@ -113,6 +120,7 @@ describe('Explorer dispatch M2 source boundaries', () => {
     }
     // The coordinate-carrying send exists only in the acceptance-test build.
     for (const definition of [
+      'bool WindowsExplorerNormalizeAxis(',
       'bool WindowsExplorerAbsoluteMove(',
       'bool WindowsExplorerWheelReachesView(',
       'bool SendWindowsExplorerPointInput(',

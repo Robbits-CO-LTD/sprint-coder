@@ -561,24 +561,27 @@ bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
 // stream reaches them. An Explorer session therefore sends an absolute move to the re-measured
 // POINT in the SAME SendInput array as its button or wheel events, which the OS never interleaves
 // with a person's input. False when the point cannot be expressed exactly on the virtual desktop.
+// One axis. Windows maps an ABSOLUTE|VIRTUALDESK coordinate to the pixel
+// floor(normalized * extent / 65536) from the virtual desktop's origin, so the value chosen is the
+// middle of the pixel's interval, ((2 * offset + 1) * 65536) / (2 * extent), which stays in 0..65535.
+// False when the coordinate is off the desktop or the value does not map back to the same pixel.
+bool WindowsExplorerNormalizeAxis(LONG coordinate, int origin, int extent, LONG *normalized) {
+  const std::int64_t offset = static_cast<std::int64_t>(coordinate) - origin;
+  if (extent < 1 || offset < 0 || offset >= extent) return false;
+  const std::int64_t value = ((2 * offset + 1) * 65536) / (2 * static_cast<std::int64_t>(extent));
+  if (value < 0 || value > 65535 || (value * extent) / 65536 != offset) return false;
+  *normalized = static_cast<LONG>(value);
+  return true;
+}
+
 bool WindowsExplorerAbsoluteMove(POINT point, INPUT *move) {
-  const int left = GetSystemMetrics(SM_XVIRTUALSCREEN), top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-  const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-  if (width < 2 || height < 2 || point.x < left || point.y < top ||
-      point.x - left >= width || point.y - top >= height) return false;
-  const auto normalize = [](LONG offset, int extent) {
-    return static_cast<LONG>(std::lround(static_cast<double>(offset) * 65535.0 / (extent - 1)));
-  };
-  const auto pixel = [](LONG normalized, int extent) {
-    return static_cast<LONG>(std::lround(static_cast<double>(normalized) * (extent - 1) / 65535.0));
-  };
   *move = INPUT{};
   move->type = INPUT_MOUSE;
-  move->mi.dx = normalize(point.x - left, width);
-  move->mi.dy = normalize(point.y - top, height);
   move->mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-  return pixel(move->mi.dx, width) == point.x - left && pixel(move->mi.dy, height) == point.y - top;
+  return WindowsExplorerNormalizeAxis(point.x, GetSystemMetrics(SM_XVIRTUALSCREEN),
+                                      GetSystemMetrics(SM_CXVIRTUALSCREEN), &move->mi.dx) &&
+         WindowsExplorerNormalizeAxis(point.y, GetSystemMetrics(SM_YVIRTUALSCREEN),
+                                      GetSystemMetrics(SM_CYVIRTUALSCREEN), &move->mi.dy);
 }
 
 // With "scroll inactive windows when hovering" off the wheel goes to the keyboard focus, not to the
