@@ -24,6 +24,7 @@ import {
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
   computerUseApprovalResolveInputSchema,
+  computerUseForegroundHandoffResolveInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseProfileListInputSchema,
   computerAppGrantResolveInputSchema,
@@ -7941,6 +7942,8 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.computerUseStatusGet]: computerUseSessionStatusInputSchema,
   [IPC_CHANNELS.computerUseStop]: computerUseStopInputSchema,
   [IPC_CHANNELS.computerUseApprovalResolve]: computerUseApprovalResolveInputSchema,
+  [IPC_CHANNELS.computerUseForegroundHandoffResolve]:
+    computerUseForegroundHandoffResolveInputSchema,
   [IPC_CHANNELS.commandsList]: taskIdPayloadSchema,
   [IPC_CHANNELS.commandsOutputPage]: commandOutputPageInputSchema,
   [IPC_CHANNELS.commandsOutputTail]: commandOutputTailInputSchema,
