@@ -49,8 +49,27 @@ inline bool PlainUrl(std::string_view url) {
   return true;
 }
 
+// Shape-only refusal: no DNS lookup or inference about the resolved address.
+inline bool AddressAliasLabel(std::string_view label) {
+  bool hex = label.size() == 8;
+  for (char c : label) hex = hex && Hex(c) >= 0;
+  if (hex) return true;
+  unsigned groups = 1, digits = 0;
+  for (char c : label) {
+    if (c >= '0' && c <= '9') {
+      if (++digits > 3) return false;
+    } else if (c == '-' && digits > 0) {
+      ++groups;
+      digits = 0;
+    } else {
+      return false;
+    }
+  }
+  return groups == 4 && digits > 0;
+}
+
 inline bool PlainHost(std::string_view host) {
-  if (host.empty() || host.size() > 253) return false;
+  if (host.empty() || host.size() > 253 || host.back() == '.') return false;
   std::size_t begin = 0;
   while (begin < host.size()) {
     const auto dot = host.find('.', begin);
@@ -67,7 +86,7 @@ inline bool PlainHost(std::string_view host) {
     }
     // Includes numeric-address aliases under arbitrary domains. Never infer loopback or
     // local trust from a host prefix (and never resolve DNS to decide classification).
-    if (numeric || label.starts_with("0x")) return false;
+    if (numeric || label.starts_with("0x") || AddressAliasLabel(label)) return false;
     if (dot == std::string_view::npos) return true;
     begin = dot + 1;
   }
@@ -77,40 +96,46 @@ inline bool PlainHost(std::string_view host) {
 
 [[nodiscard]] inline UrlOrigin NormalizeUrlOrigin(std::string_view url, bool url_read = true) {
   using namespace url_origin_detail;
-  if (!url_read || !PlainUrl(url)) return {};
+  if (!url_read) return {};
   const auto colon = url.find(':');
   if (colon == std::string_view::npos) return {};
   const auto scheme = Lower(url.substr(0, colon));
   const bool dev_tools = scheme == "devtools" || scheme == "chrome-devtools";
   if (scheme != "http" && scheme != "https" && scheme != "file" && !dev_tools) return {};
+  const UrlOrigin unknown{OriginState::kUnknown, dev_tools, {}};
+  if (!PlainUrl(url)) return unknown;
   const auto rest = url.substr(colon + 1);
-  if (!rest.starts_with("//")) return {};
+  if (!rest.starts_with("//")) return unknown;
   const auto location = rest.substr(2);
   const auto end = location.find_first_of("/?#");
   const auto authority = location.substr(0, end);
   // Userinfo is discarded by rejecting the whole authority, never by trusting the text
   // before '@'. Percent-encoded delimiters, IPv6 and browser-repaired hosts stay unknown.
-  if (authority.find_first_of("@%[]") != std::string_view::npos) return {};
+  if (authority.find_first_of("@%[]") != std::string_view::npos) return unknown;
   if (scheme == "file") {
     // Only an absolute local file URL. Remote/ambiguous file authorities stay unknown.
     if ((!authority.empty() && Lower(authority) != "localhost") ||
-        end == std::string_view::npos || location[end] != '/') return {};
+        end == std::string_view::npos || location[end] != '/') return unknown;
+    const auto path = location.substr(end, location.find_first_of("?#", end) - end);
+    if (path.size() < 3 || path[0] != '/' ||
+        !((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) ||
+        (path[2] != ':' && path[2] != '|') ||
+        (path.size() > 3 && path[3] != '/')) return unknown;
     return {OriginState::kOrdinary, false, {}};
   }
   const auto port_at = authority.find(':');
   std::string host = Lower(authority.substr(0, port_at));
-  if (!host.empty() && host.back() == '.') host.pop_back();
-  if (!PlainHost(host)) return {};
+  if (!PlainHost(host)) return unknown;
   std::string port;
   if (port_at != std::string_view::npos) {
     const auto digits = authority.substr(port_at + 1);
-    if (digits.empty() || digits.size() > 5 || dev_tools) return {};
+    if (digits.empty() || digits.size() > 5 || dev_tools) return unknown;
     unsigned number = 0;
     for (char c : digits) {
-      if (c < '0' || c > '9') return {};
+      if (c < '0' || c > '9') return unknown;
       number = number * 10 + static_cast<unsigned>(c - '0');
     }
-    if (number == 0 || number > 65535) return {};
+    if (number == 0 || number > 65535) return unknown;
     if (!((scheme == "http" && number == 80) || (scheme == "https" && number == 443)))
       port = ":" + std::to_string(number);
   }
@@ -120,7 +145,8 @@ inline bool PlainHost(std::string_view host) {
 // Optional pre-existing sensitive evidence may only strengthen the result. There is no
 // hostname-based sensitive detector here. Do not replace another measured dangerous surface.
 inline void ApplyUrlOrigin(const UrlOrigin &origin, EffectFacts *facts) {
-  if (facts->origin != OriginState::kSensitive) facts->origin = origin.state;
+  // OriginState orders evidence: not applicable < ordinary < unknown < sensitive.
+  if (origin.state > facts->origin) facts->origin = origin.state;
   if (origin.dev_tools &&
       (facts->surface == SurfaceKind::kOrdinary || facts->surface == SurfaceKind::kUnknown))
     facts->surface = SurfaceKind::kDevToolsConsole;
