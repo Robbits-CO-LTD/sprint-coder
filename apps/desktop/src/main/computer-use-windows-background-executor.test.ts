@@ -290,6 +290,18 @@ describe('background executor native entry', () => {
       expect(tests).toContain(name);
   });
 
+  it('opens every executor guard, including the Stop pauses, in the P7b acceptance build too', () => {
+    for (const name of [
+      'computer_use_windows_host_uia_semantic.inc',
+      'computer_use_windows_host_input.inc',
+    ]) {
+      const guards = native(name).match(/^#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST\b.*$/gmu) ?? [];
+      expect(guards.length, name).toBeGreaterThan(0);
+      for (const guard of guards)
+        expect(guard, name).toContain('|| SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE');
+    }
+  });
+
   it('does not expose foreground APIs to the background pattern adapter', () => {
     const semantic = native('computer_use_windows_host_uia_semantic.inc');
     const start = semantic.indexOf('struct WindowsBackgroundPatternOperations');

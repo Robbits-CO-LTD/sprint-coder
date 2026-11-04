@@ -40,7 +40,7 @@ bool WindowsSemanticInputInFlight() {
 }
 bool StopWindowsSemanticInput(const WindowsSession &session, std::uint64_t *attempts) {
   std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.background_monitor) session.background_monitor->state.Pause();
 #endif
   const auto &active = WindowsSemanticOperations().active;
@@ -60,7 +60,7 @@ void DrainWindowsSemanticInputForExit() {
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);
       const auto &active = WindowsSemanticOperations().active;
       if (active == nullptr) return;
-#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
       if (active->background_monitor) active->background_monitor->state.Pause();
 #endif
       auto expected = WindowsV1UiaStop::kNone;
