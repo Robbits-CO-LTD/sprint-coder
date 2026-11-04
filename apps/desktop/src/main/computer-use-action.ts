@@ -62,7 +62,9 @@ export function computerUseKeyedDigest(
     .digest('hex');
 }
 
-export function computerUseActionDigest(action: ComputerUsePlannedAction): string {
+export function computerUseActionDigest(
+  action: ComputerUsePlannedAction | ComputerUseSemanticScrollAction,
+): string {
   return computerUseKeyedDigest('action', stableStringify(action));
 }
 

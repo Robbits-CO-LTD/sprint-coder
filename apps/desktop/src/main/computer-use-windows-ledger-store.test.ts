@@ -628,3 +628,26 @@ it.each([false, true])(
     }
   },
 );
+
+it.each(['awaiting_response', 'effect_unconfirmed'] as const)(
+  'P4c background %s survives failed receipt transfer and reopening',
+  async (state) => {
+    const f = fixture();
+    let store = f.open();
+    const background: WindowsLedgerRow = { ...row, inputPath: 'background_semantic', state };
+    const isolation = { ...quarantine, reason: 'effect_unconfirmed' as const };
+    await store.write(background);
+    await store.restoreQuarantines([isolation]);
+    f.failDelete(true);
+    await expect(
+      Promise.resolve().then(() => store.transferReceipt!([background], [isolation])),
+    ).rejects.toThrow();
+    store.close();
+    store = f.open();
+    expect(store.read()).toEqual({ rows: [background], quarantines: [isolation] });
+    f.failDelete(false);
+    await store.transferReceipt!([background], [isolation]);
+    store.close();
+    expect(f.open().read()).toEqual({ rows: [], quarantines: [isolation] });
+  },
+);

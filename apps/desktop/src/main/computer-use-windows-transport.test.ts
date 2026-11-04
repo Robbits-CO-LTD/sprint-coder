@@ -5388,6 +5388,8 @@ int main() {
     adaptAddon?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon,
     termination = false,
     store?: WindowsDispatchLedgerStorage,
+    background = false,
+    backgroundGate = background,
   ) {
     const rows = new Map<string, WindowsLedgerRow>();
     const quarantines: WindowsTargetQuarantine[] = [];
@@ -5496,6 +5498,9 @@ int main() {
               ...(result as Record<string, unknown>),
               pid: control.pid,
               processStartTime: control.creationTime,
+              ...(background
+                ? { inputSession: { kind: 'background', backgroundCapabilityVersion: 1 } }
+                : {}),
             },
           ];
         },
@@ -5518,6 +5523,7 @@ int main() {
       undefined,
       {
         ...(termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
+        windowsBackgroundInputForTesting: backgroundGate,
         windowsLedger: store ?? {
           write: async (row) => {
             written.push(row);
@@ -5608,6 +5614,253 @@ int main() {
         );
     return { ...target, rows, written, deleted, control, dispatch, quarantines };
   }
+  const backgroundSamples = [
+    ledgerActions[4],
+    {
+      name: 'semantic scroll',
+      action: {
+        type: 'semantic_scroll',
+        targetId: 'node-1',
+        operation: 'scroll',
+        axis: 'vertical',
+        amount: 'small_increment',
+      },
+    },
+  ] as const;
+  const backgroundDispatch = (
+    target: ReturnType<typeof ledgerTarget>,
+    session: Awaited<ReturnType<typeof startSession>>,
+    action = backgroundSamples[0].action as (typeof backgroundSamples)[number]['action'],
+    signal = new AbortController().signal,
+  ) =>
+    target.host.dispatch({
+      session,
+      requestId: 'background-request',
+      action,
+      observationRevision: 1,
+      cancelEpoch: 0,
+      signal,
+    });
+
+  it('P4c production gate rejects a background session without test injection', async () => {
+    const target = ledgerTarget(true, undefined, false, undefined, true, false);
+    await expect(startSession(target.host, 'session-1', 'turn-1')).rejects.toThrow(
+      'native_session_invalid',
+    );
+    expect(dispatchWrites(sockets.at(-1)!)).toHaveLength(0);
+  });
+  it.each(backgroundSamples)(
+    'P4c $name dispatch records background and K-1 blocks duplicate input before and after receipt',
+    async ({ action }) => {
+      const target = ledgerTarget(true, undefined, true, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      const other = await startSession(target.host, 'other-session', 'turn-2');
+      target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+      await expect(backgroundDispatch(target, session, action)).rejects.toMatchObject({
+        accepted: true,
+        code: 'input_not_confirmed',
+      });
+      expect(target.written).toMatchObject([
+        { kind: 'semantic', inputPath: 'background_semantic' },
+      ]);
+      expect([...target.rows.values()]).toMatchObject([
+        { state: 'effect_unconfirmed', inputPath: 'background_semantic' },
+      ]);
+      expect(target.quarantines).toMatchObject([
+        { identity: { pid: 42 }, reason: 'effect_unconfirmed' },
+      ]);
+      await expect(backgroundDispatch(target, session, action)).resolves.toMatchObject({
+        result: 'rejected',
+      });
+      await target.host.close(session);
+      expect(target.deleted).toEqual([]);
+      expect(target.quarantines.length).toBeGreaterThan(0);
+      await expect(backgroundDispatch(target, other, action)).resolves.toMatchObject({
+        result: 'rejected',
+      });
+      expect(dispatchWrites(sockets[0]!)).toHaveLength(1);
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: session.sessionId,
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        target.host.approveWindowsQuarantineResume!({
+          previousSessionId: session.sessionId,
+          newSessionId: 'fresh-session',
+          trustedActivation: true,
+        }),
+      ).resolves.toBe(true);
+      expect(target.quarantines).toEqual([]);
+      await expect(startSession(target.host, 'fresh-session', 'turn-3')).resolves.toMatchObject({
+        sessionId: 'fresh-session',
+      });
+    },
+  );
+  it.each(['write', 'stop', 'receipt'] as const)(
+    'P4c storage/Stop boundary: %s',
+    async (boundary) => {
+      const target = ledgerTarget(true, undefined, false, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      const signal = new AbortController();
+      if (boundary === 'write') target.control.failWrite = true;
+      if (boundary === 'receipt') {
+        target.control.response = ['error', { code: 'input_timeout_unconfirmed', accepted: true }];
+        await expect(backgroundDispatch(target, session)).rejects.toMatchObject({ accepted: true });
+        target.control.failTransfer = true;
+        await target.host.close(session);
+        expect([...target.rows.values()]).toMatchObject([
+          { inputPath: 'background_semantic', state: 'effect_unconfirmed' },
+        ]);
+        expect(target.deleted).toEqual([]);
+        expect(target.quarantines.length).toBeGreaterThan(0);
+        return;
+      }
+      let release!: () => void;
+      if (boundary === 'stop')
+        target.control.wait = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      const result = backgroundDispatch(target, session, undefined, signal.signal);
+      await vi.advanceTimersByTimeAsync(1);
+      if (boundary === 'stop') {
+        signal.abort();
+        release();
+      }
+      await expect(result).resolves.toMatchObject({ result: 'rejected' });
+      expect(dispatchWrites(sockets[0]!)).toHaveLength(0);
+    },
+  );
+
+  it.each(['awaiting_response', 'effect_unconfirmed', 'receipt'] as const)(
+    'P4c SQLite restart preserves background isolation after %s',
+    async (phase) => {
+      const folder = mkdtempSync(join(tmpdir(), 'p4c-ledger-'));
+      const options = { path: join(folder, 'ledger.sqlite'), userData: 'C:/synthetic/p4c' };
+      let store = openWindowsLedgerStore(options);
+      try {
+        const target = ledgerTarget(true, undefined, false, store, true);
+        const session = await startSession(target.host, 'session-1', 'turn-1');
+        if (phase === 'awaiting_response') target.helper().holdOnly('dispatch');
+        else target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+        const result = backgroundDispatch(target, session).catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(store.read().rows).toMatchObject([
+          {
+            inputPath: 'background_semantic',
+            state: phase === 'awaiting_response' ? phase : 'effect_unconfirmed',
+          },
+        ]);
+        if (phase !== 'awaiting_response') await result;
+        if (phase === 'receipt') await target.host.close(session);
+        store.close();
+        store = openWindowsLedgerStore(options);
+        const restarted = ledgerTarget(true, undefined, false, store, true);
+        await expect(restarted.host.restoreWindowsLedger()).resolves.toBe(true);
+        expect(store.read().quarantines).toMatchObject([
+          { identity: { pid: 42, creationTime: '133000000000000001' } },
+        ]);
+        await expect(startSession(restarted.host, 'new-session', 'new-turn')).rejects.toThrow(
+          'native_unavailable',
+        );
+        expect(sockets.flatMap((socket) => dispatchWrites(socket))).toHaveLength(1);
+        if (phase === 'awaiting_response') {
+          target.helper().release('dispatch');
+          await result;
+          expect(store.read().quarantines).toHaveLength(1);
+        }
+      } finally {
+        store.close();
+        rmSync(folder, { recursive: true, force: true });
+      }
+    },
+  );
+  it.each(['timeout', 'failAll', 'abortTransport'] as const)(
+    'P4c background response loss %s never reissues input',
+    async (loss) => {
+      const target = ledgerTarget(true, undefined, false, undefined, true);
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      target.helper().holdOnly('dispatch');
+      const result = backgroundDispatch(target, session).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1);
+      expect([...target.rows.values()]).toMatchObject([
+        { inputPath: 'background_semantic', state: 'awaiting_response' },
+      ]);
+      if (loss === 'timeout')
+        await vi.advanceTimersByTimeAsync(operationTimeoutMilliseconds('dispatch'));
+      else if (loss === 'failAll') sockets[0]!.emit('error', new Error('synthetic loss'));
+      else sockets[0]!.emit('data', Buffer.alloc(COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES, 255));
+      await result;
+      expect(target.control.restoreQuarantines).toHaveBeenCalled();
+      expect(target.rows.size).toBe(1);
+      await expect(backgroundDispatch(target, session)).resolves.toMatchObject({
+        result: 'rejected',
+      });
+      expect(sockets.flatMap((socket) => dispatchWrites(socket))).toHaveLength(1);
+    },
+  );
+
+  it('P4c awaiting background receipt transfers before late success and never dispatches after Stop', async () => {
+    const target = ledgerTarget(true, undefined, false, undefined, true);
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await startSession(target.host, 'keeper', 'turn-2');
+    target.helper().holdOnly('dispatch');
+    const first = backgroundDispatch(target, session).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(target.written).toHaveLength(1);
+    const duplicate = backgroundDispatch(target, session).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dispatchWrites(sockets[0]!)).toHaveLength(1);
+    await target.host.close(session);
+    expect(target.quarantines).toMatchObject([{ reason: 'response_lost' }]);
+    expect(target.deleted).toEqual([]);
+    await expect(backgroundDispatch(target, session)).rejects.toThrow();
+    target.helper().release('dispatch');
+    await Promise.all([first, duplicate]);
+    expect(dispatchWrites(sockets[0]!)).toHaveLength(1);
+    expect(target.quarantines).toMatchObject([{ reason: 'response_lost' }]);
+  });
+  it('P4c caller session cannot relabel a foreground dispatch as background', async () => {
+    const target = ledgerTarget();
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await backgroundDispatch(target, {
+      ...session,
+      inputSession: { kind: 'background', backgroundCapabilityVersion: 1 },
+    });
+    expect(target.written).toMatchObject([{ inputPath: 'normal' }]);
+  });
+
+  it('P4c failed K-1 persistence retains the awaiting row and closes admission', async () => {
+    const target = ledgerTarget(true, undefined, false, undefined, true);
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    target.control.failReflect = true;
+    target.control.response = ['error', { code: 'input_not_confirmed', accepted: true }];
+    await expect(backgroundDispatch(target, session)).rejects.toMatchObject({ accepted: true });
+    expect([...target.rows.values()]).toMatchObject([
+      { inputPath: 'background_semantic', state: 'awaiting_response' },
+    ]);
+    await expect(backgroundDispatch(target, session)).resolves.toMatchObject({
+      result: 'rejected',
+    });
+    await expect(startSession(target.host, 'new-session', 'turn-2')).rejects.toThrow(
+      'native_unavailable',
+    );
+    expect(dispatchWrites(sockets[0]!)).toHaveLength(1);
+    expect(target.deleted).toEqual([]);
+  });
+  it('P4c background session refuses visual input before recording or sending', async () => {
+    const target = ledgerTarget(true, undefined, false, undefined, true);
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    expect(await target.dispatch(session, ledgerActions[0])).toMatchObject({
+      outcome: 'rejected',
+      accepted: false,
+    });
+    expect(target.written).toEqual([]);
+    expect(dispatchWrites(sockets[0]!)).toHaveLength(0);
+  });
+
   it.each([false, true])(
     'PR9 approval reobserves after receipt and persists release (failure: %s)',
     async (failRelease) => {
@@ -11405,9 +11658,14 @@ int main() {
     ).rejects.toThrow('native_approval_ceiling_mismatch');
   });
 
-  it.each(['full_access_app', 'supervised'] as const)(
-    'connects the Windows host approval gate and distinguishes pre-input failure from unknown effect (%s)',
-    async (maximumMode) => {
+  it.each(['full_access_app', 'supervised', 'background'] as const)(
+    'P4c connects the Windows host approval gate and distinguishes pre-input failure from unknown effect (%s)',
+    async (mode) => {
+      const background = mode === 'background';
+      const maximumMode = background ? 'full_access_app' : mode;
+      const written: WindowsLedgerRow[] = [];
+      const removed: WindowsLedgerRow[] = [];
+      const isolated: WindowsTargetQuarantine[] = [];
       const eligibility = {
         mode: 'v2-denylist',
         classifierVersion: 2,
@@ -11427,7 +11685,18 @@ int main() {
         ...base,
         start_session: (input) => {
           const [type, result] = base['start_session']!(input);
-          return [type, { ...(result as object), maximumMode }];
+          return [
+            type,
+            {
+              ...(result as object),
+              maximumMode,
+              pid: 42,
+              processStartTime: '133000000000000001',
+              ...(background
+                ? { inputSession: { kind: 'background', backgroundCapabilityVersion: 1 } }
+                : {}),
+            },
+          ];
         },
         // The close receipt reports every input attempt the approved dispatch made.
         close_session: (metadata) => {
@@ -11510,6 +11779,31 @@ int main() {
         table,
         undefined,
         {
+          windowsBackgroundInputForTesting: background,
+          ...(background
+            ? {
+                windowsLedger: {
+                  write: (row: WindowsLedgerRow) => {
+                    written.push(row);
+                    return true;
+                  },
+                  update: () => true,
+                  delete: (row: WindowsLedgerRow) => {
+                    removed.push(row);
+                    return true;
+                  },
+                  updateWithQuarantines: (
+                    _row: WindowsLedgerRow,
+                    added: readonly WindowsTargetQuarantine[],
+                  ) => {
+                    isolated.push(...added);
+                    return true;
+                  },
+                  restoreQuarantines: () => true,
+                  transferReceipt: () => true,
+                },
+              }
+            : {}),
           ...computerUseNativeHostEligibilityOptions(
             true,
             createComputerUseEligibilityWiring({
@@ -11541,7 +11835,9 @@ int main() {
         approvalGeneration: 1,
         observationRevision: 1,
         cancelEpoch: 0,
-        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' } as const,
+        action: background
+          ? ({ type: 'set_text', targetId: 'node-1', text: 'x' } as const)
+          : ({ type: 'click', x: 0.5, y: 0.5, button: 'left' } as const),
         signal: new AbortController().signal,
       };
       expect(await target.host.dispatch(input)).toMatchObject({
@@ -11563,6 +11859,14 @@ int main() {
       expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'completed' });
       failDispatch = true;
       await expect(target.host.dispatchApproved!(input)).rejects.toThrow();
+      if (background) {
+        expect(written).toMatchObject([
+          { inputPath: 'background_semantic' },
+          { inputPath: 'background_semantic' },
+        ]);
+        expect(removed).toHaveLength(1);
+        expect(isolated).toMatchObject([{ reason: 'effect_unconfirmed' }]);
+      }
       await target.host.approvalDiscard!({ session, approvalGeneration: 1 });
       expect(target.helper().served).toContain('approval_discard');
       if (maximumMode === 'supervised') {
