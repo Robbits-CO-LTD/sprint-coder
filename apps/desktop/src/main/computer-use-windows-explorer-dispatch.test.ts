@@ -8,6 +8,163 @@ const input = native('computer_use_windows_host_input.inc');
 const explorer = native('computer_use_windows_host_explorer.inc');
 const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
+describe('Explorer W2 prestart source boundaries', () => {
+  const targets = native('computer_use_windows_host_v2_targets.inc');
+  const prestart = explorer.slice(
+    explorer.indexOf('bool MeasureWindowsExplorerPrestart('),
+    explorer.indexOf('// P5 REQUIREMENT (M2)'),
+  );
+  const section = (from: string, to: string) => {
+    const start = targets.indexOf(from);
+    const end = targets.indexOf(to, start + from.length);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    return targets.slice(start, end);
+  };
+
+  it('keeps measurement unreachable when the build gate is off', () => {
+    expect(prestart).toMatch(
+      /if constexpr \(!sprint_coder::computer_use::kWindowsExplorerException\) \{\s*return false;\s*\} else \{/u,
+    );
+    const classification = section(
+      'WindowsV2VerdictForWindowClass(WindowsV2Judgement',
+      '// Judges one window',
+    );
+    expect(classification).toMatch(
+      /if constexpr \(kWindowsExplorerException\) \{[^}]*EnsureWindowsV2Identity\(process\)[^}]*MeasureWindowsExplorerPrestart\(\*process, window, \*explorer_scope\)/u,
+    );
+    expect(targets.match(/MeasureWindowsExplorerPrestart\(/gu)).toHaveLength(2);
+  });
+
+  it('binds session-free measurement without creating M2 evidence', () => {
+    expect(prestart.length).toBeGreaterThan(1000);
+    expect(prestart).not.toMatch(/FindWindowsSession|explorer_dispatch_evidence|sessions\b/u);
+    for (const binding of [
+      'scope.generation == 0',
+      'scope.epoch, scope.stop_serial',
+      'scope.current()',
+      'owner == process.measured.pid',
+      'start == process.process_start',
+      'window_identity(start) == expected_window_identity',
+      'ReadWindowsFileIdentity(process.executable.file, &held)',
+      'SameWindowsFileIdentity(held, running.identity.file_identity)',
+      'WindowsTargetIsVerifiedExplorer(process.measured.facts)',
+      'WindowsExplorerPointRefusal(window, view.view, process.measured.pid, point)',
+    ])
+      expect(prestart).toContain(binding);
+    expect(prestart).toContain('if (!bound()) return false;');
+    expect(prestart).toContain('return bound();');
+    expect(prestart).toContain('ReadWindowsExplorerShellView(window, current)');
+    expect(explorer).toContain('ReadWindowsExplorerShellView(session->window, current)');
+    expect(prestart).toContain('/*lane_registered=*/true');
+  });
+
+  it('uses window and scope only inside the exception gate and resets per-window evidence', () => {
+    const classification = section(
+      'WindowsV2VerdictForWindowClass(WindowsV2Judgement',
+      '// Judges one window',
+    );
+    const body = classification.slice(classification.indexOf(') {') + 3);
+    const gateStart = body.indexOf('  if constexpr (kWindowsExplorerException) {');
+    const gateEnd = body.indexOf('  if ((verdict.kind', gateStart);
+    expect(gateStart).toBeGreaterThan(0);
+    expect(gateEnd).toBeGreaterThan(gateStart);
+    expect(body.slice(0, gateStart) + body.slice(gateEnd)).not.toMatch(
+      /\b(?:window|explorer_scope)\b/u,
+    );
+    expect(body.indexOf('process->explorer_prestart_admitted = false;')).toBeLessThan(gateStart);
+    expect(body.slice(gateStart, gateEnd)).toMatch(
+      /if \(WindowsExplorerFileWindowRestriction\(for_window.facts, measured_view\)\) \{\s*verdict = WindowsExplorerPrestartVerdict\(for_window.facts\);\s*process->explorer_prestart_admitted = verdict.kind == TargetVerdictKind::kUpper;/u,
+    );
+    const admission = section('bool AdmitWindowsV2StartInContext(', 'bool AdmitWindowsV2Start(');
+    expect(admission).toContain('*explorer_admitted = judged.explorer_prestart_admitted;');
+    expect(admission).not.toContain('WindowsExplorerFileWindowRestriction(');
+  });
+
+  it('keeps default I/O registration unchanged with the Explorer gate off', () => {
+    const registration = section(
+      'struct WindowsNewStartIoRegistration',
+      'bool StartWindowsNewSession(',
+    );
+    expect(registration).toContain(
+      'explicit WindowsNewStartIoRegistration(bool register_thread = true) : registered(register_thread)',
+    );
+    expect(registration).toContain('if (!register_thread) return;');
+    expect(registration).toContain('control.new_start_thread = thread;');
+    expect(registration).toContain('if (registered) control.new_start_thread = nullptr;');
+    expect(registration).not.toMatch(/kWindowsExplorerException|#if/u);
+    for (const [from, to] of [
+      ['bool StartWindowsNewSession(', '// BEGIN windows shared existing start'],
+      ['bool RunWindowsExistingStartMeasurement(', 'bool StartWindowsExistingSession('],
+    ] as const) {
+      expect(section(from, to)).toContain('WindowsNewStartIoRegistration cancellation;');
+    }
+    expect(explorer).toContain('io_(!lane_registered)');
+    expect(prestart).toContain('/*lane_registered=*/true');
+  });
+
+  it('passes fresh scopes through list, admission, rejudge, and both common refusals', () => {
+    expect(targets).toContain('&window_facts, window, &explorer_scope)');
+    expect(targets).toContain(
+      'JudgeWindowsV2Target(work.pid, work.window, context, &judged, &explorer_scope)',
+    );
+    expect(targets).toContain(
+      'JudgeWindowsV2Target(pid, window, context, &judged, explorer_scope)',
+    );
+    for (const [from, to, executable] of [
+      [
+        'bool MeasureWindowsNewStart(',
+        'struct WindowsNewStartIoRegistration',
+        'process_executable->',
+      ],
+      [
+        'WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(',
+        'WindowsExistingStartMeasurement MeasureWindowsExistingStartAfter(',
+        'current_executable.',
+      ],
+    ] as const) {
+      const body = section(from, to);
+      expect(body).toContain('bool explorer_admitted = false;');
+      expect(body).toContain(
+        'if constexpr (sprint_coder::computer_use::kWindowsExplorerException)',
+      );
+      expect(body).toContain('&explorer_scope, &explorer_admitted)');
+      expect(body).toContain(
+        `(IsDisallowedTargetExecutable(${executable}identity.path) && !explorer_admitted)`,
+      );
+    }
+  });
+
+  it('preserves other denied classes and refuses missing approval capability', () => {
+    const verdict = section('TargetVerdict WindowsExplorerPrestartVerdict(', '// The core');
+    expect(verdict).toContain('if (!TargetFactsAreComplete(facts)) return {};');
+    expect(verdict).toContain('rule.class_id != "W-SYS"');
+    expect(verdict).toContain('AllHold(facts, rule.when)');
+    expect(verdict).toMatch(
+      /if \(!kWindowsApprovalHandlersEnabled \|\| windows_helper_generation == 0\)\s*return \{TargetVerdictKind::kDenied/u,
+    );
+    expect(verdict).not.toContain('observe_only');
+    const approval = section('bool JudgeWindowsV2Input(', '// The v2 admission');
+    expect(approval).toContain(
+      'session.maximum_mode == "supervised" && !WindowsApprovalSessionGate(session)',
+    );
+    expect(approval).toContain('session.approval_revoked = true;');
+    expect(approval).toContain('*reason = "native_approval_closed";');
+  });
+
+  it('retains the common Explorer denial and V1 discovery rejection', () => {
+    const discovery = native('computer_use_windows_host_discovery.inc');
+    expect(discovery).not.toContain('kWindowsExplorerException');
+    expect(discovery).toContain('L"explorer.exe"');
+    expect(discovery).toMatch(
+      /context.proxy = IsKnownProxyExecutable\(process_executable.identity.path\) \|\|\s*IsDisallowedTargetExecutable\(\s*process_executable.identity.path\)/u,
+    );
+    expect(native('computer_use_windows_host_discovery_worker.inc')).not.toContain(
+      'kWindowsExplorerException',
+    );
+  });
+});
+
 describe('Explorer dispatch M2 source boundaries', () => {
   it('explorer_dispatch_rechecks_same_action_point', () => {
     for (const [kind, point] of [

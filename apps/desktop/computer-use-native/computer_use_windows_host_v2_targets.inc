@@ -404,12 +404,41 @@ struct WindowsV2Judgement {
   // The identity above is read once, the first time a window of the process is selectable.
   bool identity_read = false;
   bool identity_ok = false;
+  // Set only by a successful prestart measurement that supplies the limited exception.
+  bool explorer_prestart_admitted = false;
 
   [[nodiscard]] bool Selectable() const {
     using sprint_coder::computer_use::TargetVerdictKind;
     return verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper;
   }
 };
+
+// A value snapshot owned by the current measurement lane, never a process-wide permission.
+struct WindowsExplorerPrestartScope {
+  std::uint64_t generation = 0, epoch = 0, stop_serial = 0;
+  std::function<bool()> current;
+};
+
+bool MeasureWindowsExplorerPrestart(const WindowsV2Judgement &process, HWND window,
+                                    const WindowsExplorerPrestartScope &scope);
+
+// Only W-SYS's Windows-directory exclusion is replaced by the verified Explorer route.
+// All other denials (including incomplete facts) still win, regardless of rule order.
+sprint_coder::computer_use::TargetVerdict WindowsExplorerPrestartVerdict(
+    const sprint_coder::computer_use::TargetFacts &facts) {
+  using namespace sprint_coder::computer_use;
+  using namespace target_eligibility_detail;
+  if (!TargetFactsAreComplete(facts)) return {};
+  const auto bit = TargetPlatformBit(facts.platform);
+  for (const auto &rule : kTargetRules)
+    if (rule.verdict == TargetRuleVerdict::kDenied && rule.class_id != "W-SYS" &&
+        (rule.platforms & bit) != 0 && AllHold(facts, rule.when))
+      return {TargetVerdictKind::kDenied, {}};
+  // Explorer never falls back to observe-only when its approval capability is missing.
+  if (!kWindowsApprovalHandlersEnabled || windows_helper_generation == 0)
+    return {TargetVerdictKind::kDenied, {}};
+  return {TargetVerdictKind::kUpper, "supervised"};
+}
 
 // The core's verdict for these facts, with the V1 deny-side tables on top. Refusals never become
 // eligible here; a missing piece is unresolvable.
@@ -474,7 +503,7 @@ bool WindowsExplorerVerifiedWindow(DWORD pid, HWND window) {
          measured.facts.window_class == std::optional<std::string>("CabinetWClass");
 }
 
-// P3 preparation, not connected to classification until P5. A class only excludes windows of an
+// A class only excludes windows of an
 // already verified Explorer; it cannot establish an executable identity or an eligibility route.
 [[nodiscard]] bool WindowsExplorerFileWindowRestriction(
     const sprint_coder::computer_use::TargetFacts &facts,
@@ -492,13 +521,27 @@ bool WindowsExplorerVerifiedWindow(DWORD pid, HWND window) {
 sprint_coder::computer_use::TargetVerdict
 WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
                                const std::optional<std::string> &window_class,
-                               sprint_coder::computer_use::TargetFacts *measured_facts = nullptr) {
+                               sprint_coder::computer_use::TargetFacts *measured_facts = nullptr,
+                               HWND window = nullptr,
+                               const WindowsExplorerPrestartScope *explorer_scope = nullptr) {
   using namespace sprint_coder::computer_use;
   WindowsTargetFactsMeasurement for_window = process->measured;
+  process->explorer_prestart_admitted = false;
   for_window.facts.window_class = window_class;
   if (measured_facts != nullptr)
     *measured_facts = for_window.facts;
   TargetVerdict verdict = WindowsV2VerdictFor(for_window);
+  if constexpr (kWindowsExplorerException) {
+    const bool measured_view = explorer_scope && WindowsTargetIsVerifiedExplorer(for_window.facts) &&
+        window_class == std::optional<std::string>("CabinetWClass") &&
+        EnsureWindowsV2Identity(process) && !IsKnownProxyExecutable(for_window.image_path) &&
+        !IsProcessElevated(for_window.pid) &&
+        MeasureWindowsExplorerPrestart(*process, window, *explorer_scope);
+    if (WindowsExplorerFileWindowRestriction(for_window.facts, measured_view)) {
+      verdict = WindowsExplorerPrestartVerdict(for_window.facts);
+      process->explorer_prestart_admitted = verdict.kind == TargetVerdictKind::kUpper;
+    }
+  }
   if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
       !EnsureWindowsV2Identity(process))
     verdict = TargetVerdict{TargetVerdictKind::kUnresolvable, {}};
@@ -507,10 +550,11 @@ WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
 
 // Judges one window of one process (the start, the resume and every input of a v2 session).
 void JudgeWindowsV2Target(std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context,
-                          WindowsV2Judgement *out) {
+                          WindowsV2Judgement *out,
+                          const WindowsExplorerPrestartScope *explorer_scope = nullptr) {
   MeasureWindowsV2Process(pid, context, out);
   const std::optional<std::string> window_class = WindowsTargetWindowClass(window, pid);
-  out->verdict = WindowsV2VerdictForWindowClass(out, window_class);
+  out->verdict = WindowsV2VerdictForWindowClass(out, window_class, nullptr, window, explorer_scope);
   out->measured.facts.window_class = window_class;
 }
 
@@ -891,9 +935,14 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
     // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
     // after it was listed) is unresolvable on its own; it does not touch its process's others.
     TargetFacts window_facts;
+    WindowsExplorerPrestartScope explorer_scope;
+    if constexpr (kWindowsExplorerException) {
+      explorer_scope = {generation, cancellation_epoch.load(std::memory_order_acquire),
+                        expected_stop, still_valid};
+    }
     const TargetVerdict verdict =
         WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner),
-                                       &window_facts);
+                                       &window_facts, window, &explorer_scope);
     if (!still_valid()) return false;
     RECT client{};
     RECT screen{};
@@ -1064,6 +1113,7 @@ struct WindowsV2RejudgeWork {
   std::uint32_t main_pid = 0;
   std::uint64_t epoch = 0;
   std::uint64_t stop_serial = 0;
+  std::uint64_t generation = 0;
   ScopedKernelHandle executable;
 };
 
@@ -1094,7 +1144,11 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
   }
   if (!still_valid() || context.lineage_root_pid != work.main_pid) return result;
   WindowsV2Judgement judged;
-  JudgeWindowsV2Target(work.pid, work.window, context, &judged);
+  WindowsExplorerPrestartScope explorer_scope;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    explorer_scope = {work.generation, work.epoch, work.stop_serial, still_valid};
+  }
+  JudgeWindowsV2Target(work.pid, work.window, context, &judged, &explorer_scope);
   if (!still_valid()) return result;
   WindowsFileIdentity held{};
   result.matches = judged.Selectable() && std::string(judged.verdict.maximum_mode) == work.maximum_mode &&
@@ -1145,6 +1199,8 @@ bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> 
   work.not_web_file = session.not_web_file;
   work.epoch = epoch;
   work.stop_serial = stop_serial;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException)
+    work.generation = windows_v2_list_generation;
   work.main_pid = windows_v2_main_pid;
   work.context = WindowsV2FactsContextCache();
   const std::uint32_t main_pid = work.main_pid;
@@ -1203,14 +1259,19 @@ bool AdmitWindowsV2StartInContext(
     std::uint64_t generation, std::uint64_t expected_generation, bool new_session,
     std::string_view app_identity, std::string_view executable_digest,
     std::string_view signer_digest, std::string *maximum_mode,
-    std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file) {
+    std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file,
+    const WindowsExplorerPrestartScope *explorer_scope = nullptr,
+    bool *explorer_admitted = nullptr) {
   using namespace sprint_coder::computer_use;
+  if constexpr (kWindowsExplorerException) {
+    if (explorer_admitted) *explorer_admitted = false;
+  }
   if (context.lineage_root_pid == 0 || ruleset_version == 0 ||
       ruleset_version != DenyRulesetVersion(TargetPlatform::kWin32) ||
       (new_session && (generation == 0 || generation != expected_generation)))
     return false;
   WindowsV2Judgement judged;
-  JudgeWindowsV2Target(pid, window, context, &judged);
+  JudgeWindowsV2Target(pid, window, context, &judged, explorer_scope);
   if (!judged.Selectable() || judged.app_identity != app_identity ||
       judged.executable.identity.executable_digest != executable_digest ||
       !SameWindowsFileIdentity(judged.executable.identity.file_identity,
@@ -1223,6 +1284,10 @@ bool AdmitWindowsV2StartInContext(
                              : judged.executable.identity.signer_digest != signer_digest))
     return false;
   *maximum_mode = std::string(judged.verdict.maximum_mode);
+  if constexpr (kWindowsExplorerException) {
+    if (explorer_admitted)
+      *explorer_admitted = judged.explorer_prestart_admitted;
+  }
   *not_web_file = WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key,
                                                judged.table_key, std::nullopt,
                                                /*session_recorded=*/false, judged.not_web_package)
@@ -1389,6 +1454,11 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
       !still_valid() || !SameWindowsPath(process_executable->identity.path, input.canonical_path))
     return false;
   std::optional<WindowsTargetFactsContext> context;
+  bool explorer_admitted = false;
+  WindowsExplorerPrestartScope explorer_scope;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    explorer_scope = {input.generation, input.initial_epoch, input.stop_serial, still_valid};
+  }
   if (v2) {
     context = input.context.has_value() ? *input.context :
         CurrentWindowsTargetFactsContext(input.main_pid, WindowsV2SelfSignerThumbprint(),
@@ -1397,12 +1467,13 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
             input.pid, input.window, *process_executable, *context, input.ruleset_version,
             input.requested_generation, input.generation, /*new_session=*/true,
             input.app_identity, input.executable_digest, input.signer_digest,
-            &measured->maximum_mode, &measured->not_web_file)) return false;
+            &measured->maximum_mode, &measured->not_web_file,
+            &explorer_scope, &explorer_admitted)) return false;
   } else if (!MeasureWindowsV1NewStartEligibility(input, *process_executable, measured)) {
     return false;
   }
   if (!still_valid() || IsKnownProxyExecutable(process_executable->identity.path) ||
-      IsDisallowedTargetExecutable(process_executable->identity.path) ||
+      (IsDisallowedTargetExecutable(process_executable->identity.path) && !explorer_admitted) ||
       IsProcessElevated(input.pid) || !still_valid() ||
       !ReadProcessStartIdentity(target_process->value, &measured->process_start) ||
       !still_valid() || WaitForSingleObject(target_process->value, 0) != WAIT_TIMEOUT ||
@@ -1421,9 +1492,11 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
 
 struct WindowsNewStartIoRegistration {
   HANDLE thread = nullptr;
-  WindowsNewStartIoRegistration() {
+  bool registered = false;
+  explicit WindowsNewStartIoRegistration(bool register_thread = true) : registered(register_thread) {
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
                          &thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    if (!register_thread) return;
     auto& control = WindowsTargetListControl();
     std::lock_guard lock(control.stop_mutex);
     control.new_start_thread = thread;
@@ -1433,7 +1506,7 @@ struct WindowsNewStartIoRegistration {
   ~WindowsNewStartIoRegistration() {
     auto& control = WindowsTargetListControl();
     std::lock_guard lock(control.stop_mutex);
-    control.new_start_thread = nullptr;
+    if (registered) control.new_start_thread = nullptr;
     if (thread != nullptr) CloseHandle(thread);
   }
 };
@@ -1815,6 +1888,11 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsE
   if (!still_valid() || (v2 && input.main_pid == 0)) return measured;
   ScopedKernelHandle target_process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, input.pid));
   LockedWindowsExecutable current_executable;
+  bool explorer_admitted = false;
+  WindowsExplorerPrestartScope explorer_scope;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    explorer_scope = {input.generation, work.expected.cancel_epoch, input.stop_serial, still_valid};
+  }
   if (target_process.value == nullptr || !still_valid() ||
       !OpenLockedProcessExecutable(target_process.value, &current_executable) || !still_valid() ||
       !SameWindowsPath(current_executable.identity.path, input.canonical_path))
@@ -1835,12 +1913,13 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsE
     std::optional<sprint_coder::computer_use::WindowsFileKey> not_web_file;
     if (!AdmitWindowsV2StartInContext(input.pid, input.window, current_executable, context,
             input.ruleset_version, 0, 0, /*new_session=*/false, input.app_identity,
-            input.executable_digest, input.signer_digest, &measured.maximum_mode, &not_web_file)) return measured;
+            input.executable_digest, input.signer_digest, &measured.maximum_mode, &not_web_file,
+            &explorer_scope, &explorer_admitted)) return measured;
   } else if (!MeasureWindowsV1ExistingStartEligibility(input, current_executable, &measured)) {
     return measured;
   }
   if (!still_valid() || IsKnownProxyExecutable(current_executable.identity.path) ||
-      IsDisallowedTargetExecutable(current_executable.identity.path) || IsProcessElevated(input.pid) ||
+      (IsDisallowedTargetExecutable(current_executable.identity.path) && !explorer_admitted) || IsProcessElevated(input.pid) ||
       !still_valid() || !ReadProcessStartIdentity(target_process.value, &measured.process_start) ||
       !still_valid() || WaitForSingleObject(target_process.value, 0) != WAIT_TIMEOUT ||
       !IsWindow(input.window) || !IsApplicationWindow(input.window))
@@ -1925,6 +2004,8 @@ bool RunWindowsExistingStartMeasurement(
       AdoptWindowsV2ContextCandidate(input.stop_serial);
       work->input.context = WindowsV2FactsContextCache();
       work->input.main_pid = windows_v2_main_pid;
+      if constexpr (sprint_coder::computer_use::kWindowsExplorerException)
+        work->input.generation = windows_v2_list_generation;
       if (work->input.main_pid == 0) return false;
     }
     control.running.store(true, std::memory_order_release);

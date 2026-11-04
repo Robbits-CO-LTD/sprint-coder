@@ -343,6 +343,135 @@ int ExpectView(HWND window, Refusal expected, const char *what, int code,
   if (view.folder.has_value() != (expected == Refusal::kNone)) return Fail(code, what);
   if (ReadWindowsExplorerShellView(window, [] { return false; }).refusal != Refusal::kCancelled)
     return Fail(code, "cancelled_view");
+  if (expected != Refusal::kNone) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    WindowsV2Judgement process;
+    MeasureWindowsV2Process(pid, WindowsV2FactsContext(), &process);
+    if (!EnsureWindowsV2Identity(&process)) return Fail(code, "prestart_negative_identity");
+    const WindowsExplorerPrestartScope scope{windows_v2_list_generation,
+        cancellation_epoch.load(), WindowsValidationFrameStopSerial(), [] { return true; }};
+    if (MeasureWindowsExplorerPrestart(process, window, scope))
+      return Fail(code, "explorer_prestart_rejects_namespace_or_junction");
+  }
+  return 0;
+}
+
+// Measurement-only acceptance cases: no session is installed and no input API is invoked.
+int CheckExplorerPrestart(HWND window, DWORD pid, HWND view) {
+  using namespace sprint_coder::computer_use;
+  const auto &context = WindowsV2FactsContext();
+  WindowsV2Judgement process;
+  MeasureWindowsV2Process(pid, context, &process);
+  if (!EnsureWindowsV2Identity(&process) || !sessions.empty()) return Fail(60, "prestart_fixture");
+  const auto generation = windows_v2_list_generation;
+  const auto epoch = cancellation_epoch.load();
+  const auto serial = WindowsValidationFrameStopSerial();
+  const WindowsExplorerPrestartScope scope{generation, epoch, serial, [] { return true; }};
+  if (!MeasureWindowsExplorerPrestart(process, window, scope) || !sessions.empty())
+    return Fail(60, "explorer_prestart_measurement_requires_no_session");
+  std::cout << "OK explorer_prestart_measurement_requires_no_session\n";
+  // A fabricated image never obtains an exception, even with a real Explorer HWND.
+  const auto signature = process.measured.facts.signature;
+  process.measured.facts.signature = "unsigned";
+  if (MeasureWindowsExplorerPrestart(process, window, scope)) return Fail(61, "fake_explorer");
+  process.measured.facts.signature = signature;
+  for (HWND other : {GetShellWindow(), FindWindowW(L"Shell_TrayWnd", nullptr)}) {
+    if (other && MeasureWindowsExplorerPrestart(process, other, scope))
+      return Fail(61, "desktop_or_taskbar");
+  }
+  auto stale = scope;
+  stale.current = [] { return false; };
+  if (MeasureWindowsExplorerPrestart(process, window, stale)) return Fail(62, "prestart_deadline");
+  stale = scope;
+  stale.stop_serial = serial + 1;
+  if (MeasureWindowsExplorerPrestart(process, window, stale)) return Fail(62, "prestart_stop");
+  stale = scope;
+  stale.epoch = epoch + 1;
+  if (MeasureWindowsExplorerPrestart(process, window, stale)) return Fail(62, "prestart_epoch");
+  stale = scope;
+  stale.generation = 0;
+  if (MeasureWindowsExplorerPrestart(process, window, stale)) return Fail(62, "prestart_generation");
+  stale = scope;
+  unsigned checks = 0;
+  stale.current = [&] {
+    if (++checks == 2) Sleep(850);  // Expires the production 800ms COM deadline on this lane.
+    return true;
+  };
+  if (MeasureWindowsExplorerPrestart(process, window, stale)) return Fail(62, "prestart_expired");
+
+  // The same process cache cannot authorize any window without that window's measurement.
+  const HWND unmeasured = reinterpret_cast<HWND>(reinterpret_cast<std::uintptr_t>(window) + 1);
+  if (WindowsV2VerdictForWindowClass(&process, std::string("CabinetWClass"), nullptr, unmeasured).kind !=
+      TargetVerdictKind::kDenied) return Fail(63, "explorer_exception_is_per_window_not_per_pid");
+  std::cout << "OK explorer_exception_is_per_window_not_per_pid\n";
+  if (!kWindowsApprovalHandlersEnabled || IsProcessElevated(pid)) {
+    std::cout << "NOT_RUN explorer_start_and_rejudge_remeasure_view approval_or_elevation\n";
+    return 0;
+  }
+  const auto old_helper = windows_helper_generation;
+  struct RestoreHelper {
+    std::uint64_t value;
+    ~RestoreHelper() { windows_helper_generation = value; }
+  } restore{old_helper};
+  windows_helper_generation = 1;
+  std::string maximum_mode;
+  std::optional<WindowsFileKey> not_web;
+  bool admitted = false;
+  const auto start = [&] {
+    return AdmitWindowsV2StartInContext(pid, window, process.executable, context,
+        DenyRulesetVersion(TargetPlatform::kWin32), generation, generation, true,
+        process.app_identity, process.executable.identity.executable_digest,
+        process.executable.identity.signer_digest, &maximum_mode, &not_web, &scope, &admitted);
+  };
+  if (!start() || !admitted || maximum_mode != "supervised") return Fail(64, "prestart_admission");
+  WindowsStartInput start_input;
+  start_input.pid = pid;
+  start_input.window = window;
+  start_input.window_value = reinterpret_cast<std::uintptr_t>(window);
+  start_input.app_identity = process.app_identity;
+  start_input.canonical_path = process.executable.identity.path;
+  start_input.executable_digest = process.executable.identity.executable_digest;
+  start_input.signer_digest = process.executable.identity.signer_digest;
+  start_input.expected_window_identity = Sha256String("computer-window-identity-v1\n" +
+      process.app_identity + "\n" + process.process_start + "\n" + std::to_string(start_input.window_value));
+  start_input.main_pid = windows_v2_main_pid;
+  start_input.context = context;
+  start_input.ruleset_version = DenyRulesetVersion(TargetPlatform::kWin32);
+  start_input.requested_generation = start_input.generation = generation;
+  start_input.initial_epoch = epoch;
+  start_input.stop_serial = serial;
+  const auto new_start = [&] {
+    ScopedKernelHandle target;
+    LockedWindowsExecutable image;
+    WindowsNewStartMeasurement measured;
+    return MeasureWindowsNewStart(start_input, scope.current, &target, &image, &measured);
+  };
+  if (!new_start()) return Fail(64, "prestart_common_admission");
+  WindowsV2RejudgeWork work;
+  work.pid = pid;
+  work.window = window;
+  work.maximum_mode = maximum_mode;
+  work.app_identity = process.app_identity;
+  work.process_start = process.process_start;
+  work.context = context;
+  work.main_pid = windows_v2_main_pid;
+  work.epoch = epoch;
+  work.stop_serial = serial;
+  work.generation = generation;
+  if (!DuplicateHandle(GetCurrentProcess(), process.executable.file, GetCurrentProcess(),
+          &work.executable.value, 0, FALSE, DUPLICATE_SAME_ACCESS) ||
+      !MeasureWindowsV2Rejudge(work).matches) return Fail(64, "prestart_rejudge");
+  ShowWindow(view, SW_HIDE);
+  const bool started_hidden = start();
+  const bool common_started_hidden = new_start();
+  const bool rejudged_hidden = MeasureWindowsV2Rejudge(work).matches;
+  ShowWindow(view, SW_SHOW);
+  if (started_hidden || common_started_hidden || admitted || rejudged_hidden)
+    return Fail(64, "explorer_start_and_rejudge_remeasure_view");
+  if (!start() || !new_start() || !MeasureWindowsV2Rejudge(work).matches || !sessions.empty())
+    return Fail(64, "prestart_restored");
+  std::cout << "OK explorer_start_and_rejudge_remeasure_view\n";
   return 0;
 }
 
@@ -384,6 +513,15 @@ int wmain(int argc, wchar_t **argv) {
   const auto add_folder = [](const std::wstring &path) {
     return CreateDirectoryW(path.c_str(), nullptr) != FALSE;
   };
+  const std::wstring reparse = scratch + L"\\Reparse";
+  if (CreateSymbolicLinkW(reparse.c_str(), scratch.c_str(),
+          SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    const int failed = ExpectFolder(reparse, Refusal::kReparsePoint, "prestart_reparse_folder", 65);
+    if (!RemoveDirectoryW(reparse.c_str())) return Fail(65, "reparse_cleanup");
+    if (failed) return failed;
+  } else {
+    std::cout << "NOT_RUN prestart_reparse_folder symlink_privilege\n";
+  }
   const std::wstring junction_like = scratch + L"\\JunctionLike";
   if (!add_folder(junction_like) || !add_folder(junction_like + L"\\Sub") ||
       !WritePrivateProfileStringW(L".ShellClassInfo", L"CLSID",
@@ -467,6 +605,8 @@ int wmain(int argc, wchar_t **argv) {
       return hit != nullptr && GetAncestor(hit, GA_ROOT) == parent;
     };
     if (!in_window(inside)) { std::cout << "NOT_RUN explorer_window_covered" << std::endl; return 0; }
+
+    if (int failed = CheckExplorerPrestart(parent, parent_pid, view.view)) return failed;
 
     ExplorerPipe pipe;
     if (!pipe.Connect()) return Fail(40, "pipe");

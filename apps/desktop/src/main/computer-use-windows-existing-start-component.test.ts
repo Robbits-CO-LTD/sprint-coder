@@ -78,7 +78,7 @@ function componentSource(): string {
   );
   shared = replaceOne(
     shared,
-    /AdmitWindowsV2StartInContext\([\s\S]*?&not_web_file\)/gu,
+    /AdmitWindowsV2StartInContext\([\s\S]*?&not_web_file,\s*&explorer_scope, &explorer_admitted\)/gu,
     'ComponentAdmit(input, &measured)',
   );
   const functions: Record<string, string> = {
@@ -139,11 +139,27 @@ it('limits component substitutions to the shared measurement and retains real el
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');
+  for (const [from, to] of [
+    ['WindowsV2VerdictForWindowClass(WindowsV2Judgement', '// Judges one window'],
+    ['TargetVerdict WindowsExplorerPrestartVerdict(', '// The core'],
+    [
+      'bool MeasureWindowsExplorerPrestart(const WindowsV2Judgement &process, HWND window,\n                                    const WindowsExplorerPrestartScope &scope) {',
+      '// P5 REQUIREMENT (M2)',
+    ],
+  ] as const) {
+    const begin = source.indexOf(from);
+    const end = source.indexOf(to, begin);
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(begin);
+    expect(built).toContain(source.slice(begin, end));
+  }
 });
 
-describe.skipIf(process.platform !== 'win32')(
-  'Windows shared existing-start component matrix',
-  () => {
+describe
+  .skipIf(process.platform !== 'win32')
+  .each(['explorer_gate_off', 'explorer_gate_off_with_hooks', 'explorer_gate_on'])(
+  'Windows shared existing-start component matrix: %s',
+  (variant) => {
     it('preserves basis-specific policy, geometry, epochs, ticket updates and cleanup without GUI', ({
       skip,
     }) => {
@@ -179,6 +195,15 @@ describe.skipIf(process.platform !== 'win32')(
           '/DNOMINMAX',
           '/D_WIN32_WINNT=0x0A00',
           '/DSPRINT_CODER_ELIGIBILITY_V2=1',
+          ...(variant === 'explorer_gate_off_with_hooks'
+            ? ['/DSPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS=1']
+            : []),
+          ...(variant === 'explorer_gate_on'
+            ? [
+                '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+                '/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION=1',
+              ]
+            : []),
           `/FI${provenance}`,
           `/I${nativeDirectory}`,
           file,
@@ -218,7 +243,7 @@ describe.skipIf(process.platform !== 'win32')(
         });
         expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
         expect(result.stdout).toContain(
-          'PASS: 59 component cases, controlled focus only, no OS input',
+          'PASS: 60 component cases, controlled focus only, no OS input',
         );
       } finally {
         rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

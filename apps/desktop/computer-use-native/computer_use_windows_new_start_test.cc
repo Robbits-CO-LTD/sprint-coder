@@ -20,7 +20,8 @@ struct WindowsStartInput;
 struct WindowsNewStartMeasurement;
 struct WindowsTargetFactsContext;
 struct WindowsV2Judgement;
-void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement*);
+struct WindowsExplorerPrestartScope;
+void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement*, const WindowsExplorerPrestartScope*);
 HANDLE ComponentOpenProcess(DWORD access, BOOL inherit, DWORD pid);
 bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output);
 BOOL ComponentCloseHandle(HANDLE handle);
@@ -28,7 +29,7 @@ BOOL ComponentCancelSynchronousIo(HANDLE thread);
 BOOL ComponentDuplicateHandle(HANDLE source_process, HANDLE source, HANDLE target_process,
                               LPHANDLE target, DWORD access, BOOL inherit, DWORD options);
 WindowsTargetFactsContext ComponentContext(std::uint32_t pid);
-bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement*);
+bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement*, const WindowsExplorerPrestartScope*, bool*);
 bool ComponentElevated(std::uint32_t);
 BOOL ComponentWindow(HWND);
 bool ComponentStartTime(HANDLE, std::string*);
@@ -77,6 +78,7 @@ struct Case {
   bool v2 = false, unsigned_image = false, bad_signer = false, bad_digest = false;
   bool bad_identity = false, bad_path = false, bad_window_identity = false;
   bool unknown_language = false, elevated = false, proxy = false, denied = false;
+  bool unmeasured_explorer = false;
   bool bad_before_geometry = false, changed_after_geometry = false, resume = false;
   bool stop_during_read = false, parent_during_read = false, io_failure = false;
   bool measurement_failure = false, allocation_failure = false, com_failure = false;
@@ -87,6 +89,7 @@ struct Case {
   std::optional<std::uint64_t> adopt_epoch;
 };
 Case current;
+unsigned admission_reads = 0;
 unsigned identity_reads = 0, background_reads = 0;
 std::wstring canonical;
 std::atomic<unsigned> reads{0}, contexts{0}, com_calls{0}, com_releases{0}, input_calls{0};
@@ -139,6 +142,7 @@ bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
   identity.path = current.bad_path ? L"C:\\different.exe" : canonical;
   if (current.proxy) identity.path = L"C:\\Windows\\System32\\ApplicationFrameHost.exe";
   if (current.denied) identity.path = L"C:\\Windows\\System32\\cmd.exe";
+  if (current.unmeasured_explorer) identity.path = L"C:\\Windows\\explorer.exe";
   identity.identity_digest = std::string(64, current.bad_identity ? 'f' : 'a');
   identity.executable_digest = std::string(64, current.bad_digest ? 'f' : 'b');
   identity.signer_digest = current.unsigned_image ? "" : std::string(64, current.bad_signer ? 'f' : 'c');
@@ -151,9 +155,9 @@ bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
 WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
   contexts.fetch_add(1); WindowsTargetFactsContext value; value.lineage_root_pid = pid; return value;
 }
-void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement* out) {
+void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement* out, const WindowsExplorerPrestartScope*) {
   using namespace sprint_coder::computer_use;
-  Check(current.store_notepad, "controlled Store measurement only");
+  Check(current.store_notepad || current.unmeasured_explorer, "controlled measurement only");
   Check(ComponentOpenExecutable(GetCurrentProcess(), &out->executable), "Store held image");
   out->verdict = {TargetVerdictKind::kEligible, "observe_only"};
   out->app_identity = std::string(64, 'a');
@@ -167,18 +171,32 @@ void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, Wind
   facts.package_family = "Microsoft.WindowsNotepad_8wekyb3d8bbwe";
   facts.package_signature_kind = "store"; facts.package_development_mode = false;
   facts.image_root = "windows_apps"; facts.image_volume = "fixed"; facts.pe_subsystem = "gui";
+  if (current.unmeasured_explorer) {
+    // Deliberately eligible by a synthetic route, without any prestart measurement.
+    facts.packaged = false; facts.signature = "valid"; facts.signer_microsoft_root = true;
+    facts.image_root = "windows_directory"; facts.image_relative_path = "explorer.exe";
+    facts.image_leaf = "explorer.exe"; facts.window_class = "CabinetWClass";
+    Check(!out->explorer_prestart_admitted, "synthetic eligibility has no prestart evidence");
+    return;
+  }
   out->not_web_package = WindowsPackageIdentityParts{*facts.package_family,
       "8wekyb3d8bbwe", "notepad\\notepad.exe", {}};
 }
-bool ComponentAdmit(const WindowsStartInput& input, WindowsNewStartMeasurement* measured) {
-  if (current.store_notepad) {
+bool ComponentAdmit(const WindowsStartInput& input, WindowsNewStartMeasurement* measured,
+                    const WindowsExplorerPrestartScope* scope, bool* explorer_admitted) {
+  ++admission_reads;
+  if (current.store_notepad || current.unmeasured_explorer) {
     LockedWindowsExecutable locked;
     Check(ComponentOpenExecutable(GetCurrentProcess(), &locked), "Store start locked image");
     WindowsTargetFactsContext context; context.lineage_root_pid = GetCurrentProcessId();
-    return AdmitWindowsV2StartInContext(input.pid, input.window, locked, context,
+    const bool admitted = AdmitWindowsV2StartInContext(input.pid, input.window, locked, context,
         sprint_coder::computer_use::DenyRulesetVersion(sprint_coder::computer_use::TargetPlatform::kWin32),
         1, 1, true, input.app_identity, input.executable_digest, input.signer_digest,
-        &measured->maximum_mode, &measured->not_web_file);
+        &measured->maximum_mode, &measured->not_web_file, scope, explorer_admitted);
+    if (current.unmeasured_explorer)
+      Check(admitted && !*explorer_admitted,
+            "eligible judgement without prestart cannot bypass executable denial");
+    return admitted;
   }
   measured->maximum_mode = current.supervised_ceiling ? "supervised" : "observe_only"; return true;
 }
@@ -332,6 +350,7 @@ void CheckStartContract() {
       "refused discovery never reveals identity");
 }
 void Run(const char* name, Case config, bool expected, const char* reason, unsigned ticket_calls) {
+  admission_reads = 0;
   identity_reads = 0; background_reads = 0;
   current = config; reads = 0; contexts = 0; com_calls = 0; com_releases = 0; input_calls = 0;
   parent_process_dead = false; cancellation_epoch = config.global_epoch;
@@ -346,6 +365,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   input.signer_digest = config.unsigned_image ? "" : std::string(64, 'c'); input.canonical_path = canonical;
   if (config.proxy) input.canonical_path = L"C:\\Windows\\System32\\ApplicationFrameHost.exe";
   if (config.denied) input.canonical_path = L"C:\\Windows\\System32\\cmd.exe";
+  if (config.unmeasured_explorer) input.canonical_path = L"C:\\Windows\\explorer.exe";
   input.bounds_width = 100; input.bounds_height = 80; input.explicit_resume = config.resume;
   input.cancel_epoch = config.input_epoch; input.profile_revision = 4;
   input.ruleset_version = 1; input.requested_generation = 1;
@@ -372,6 +392,7 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(cancel_calls == 1, "later Stop cannot cancel unrelated consumer I/O");
   }
   Check(!WindowsTargetListWorkerRunning().load(), "synchronous measurement releases slot");
+  if (config.unmeasured_explorer) Check(admission_reads == 1, "eligible route reached before final executable refusal");
   Check(succeeded == expected, name);
   if (!expected) Check(failure == reason, "expected refusal reason");
   Check(ticket_states[input.session_key].generation == 10 + ticket_calls, "ticket invalidation count");
@@ -416,12 +437,18 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
       Check(session.not_web_file == recorded, "Store rejudge cannot replace recorded start key");
     } else {
       Check(!session.not_web_file, "no invented not-web key");
-      if (config.store_notepad) {
+      if (config.store_notepad && !sprint_coder::computer_use::kNativeEligibilityIsV2) {
         std::string rejudge_reason;
         Check(!JudgeWindowsV2Input(session, &rejudge_reason) &&
               rejudge_reason == "eligibility_basis_unsupported", "default build still refuses V2 input");
         Check(!session.v2_input_not_web.has_value(), "default Store has no not-web input claim");
         Check(!session.not_web_file, "default Store rejudge cannot invent not-web key");
+      } else if (config.store_notepad) {
+        // A V2 build without the Store table rejudges in production code but never claims not-web.
+        std::string rejudge_reason;
+        Check(JudgeWindowsV2Input(session, &rejudge_reason), "V2 build rejudges Store input");
+        Check(session.v2_input_not_web == std::optional<bool>(false), "Store without table is not not-web");
+        Check(!session.not_web_file, "Store rejudge without table cannot invent not-web key");
       }
     }
     std::string process_start;
@@ -443,6 +470,22 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
 }
 int wmain() {
   try {
+    WindowsV2Judgement unmeasured;
+    WindowsExplorerPrestartScope scope{1, 0, 0, [] { return true; }};
+    Check(!MeasureWindowsExplorerPrestart(unmeasured, nullptr, scope), "unmeasured prestart refused");
+    unmeasured.identity_ok = true;
+    auto& facts = unmeasured.measured.facts;
+    facts.platform = sprint_coder::computer_use::TargetPlatform::kWin32;
+    facts.running_image_matches = true; facts.signature = "valid";
+    facts.signer_microsoft_root = true; facts.packaged = false;
+    facts.image_volume = "fixed"; facts.image_root = "windows_directory";
+    facts.image_relative_path = "explorer.exe"; facts.image_leaf = "explorer.exe";
+    facts.window_class = "CabinetWClass";
+    Check(!MeasureWindowsExplorerPrestart(unmeasured, reinterpret_cast<HWND>(1), scope),
+          "fake Explorer window refused even with claimed identity");
+    unmeasured.explorer_prestart_admitted = true;
+    (void)WindowsV2VerdictForWindowClass(&unmeasured, "CabinetWClass");
+    Check(!unmeasured.explorer_prestart_admitted, "next window cannot inherit prestart evidence");
     Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "production consumer STA");
     consumer_thread = GetCurrentThreadId();
     CheckStartContract();
@@ -524,6 +567,8 @@ int wmain() {
     Run("BG08-v1-new-start-never-autofocus", c, false, "focus_required", 1);
     c.background_supported = true;
     Run("BG-v1-background-start", c, true, "", 2);
+    c = {}; c.v2 = true; c.unmeasured_explorer = true;
+    Run("v2-eligible-without-prestart-still-denied", c, false, "session_target_rejected", 0);
     c = {}; c.v2 = true; c.store_notepad = true;
     Run(sprint_coder::computer_use::kWindowsStoreNotepadNotWeb
         ? "store-notepad-start-rejudge-changed-key" : "store_not_web_is_absent_in_default_build",

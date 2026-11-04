@@ -78,8 +78,8 @@ function componentSource(): string {
   );
   shared = replaceOne(
     shared,
-    /AdmitWindowsV2StartInContext\([\s\S]*?&measured->not_web_file\)/gu,
-    'ComponentAdmit(input, measured)',
+    /AdmitWindowsV2StartInContext\([\s\S]*?&measured->not_web_file,\s*&explorer_scope, &explorer_admitted\)/gu,
+    'ComponentAdmit(input, measured, &explorer_scope, &explorer_admitted)',
   );
   const functions: Record<string, string> = {
     WindowsBackgroundStartGate: 'ComponentBackgroundGate',
@@ -130,8 +130,8 @@ function componentSource(): string {
   // Only the measured judgement is synthetic. Keep admission, session adoption, rejudge and
   // not-web binding as production code, so a lost file-key handoff fails the Store case.
   for (const call of [
-    'JudgeWindowsV2Target(work.pid, work.window, context, &judged);',
-    'JudgeWindowsV2Target(pid, window, context, &judged);',
+    'JudgeWindowsV2Target(work.pid, work.window, context, &judged, &explorer_scope);',
+    'JudgeWindowsV2Target(pid, window, context, &judged, explorer_scope);',
   ]) {
     component = replaceOne(
       component,
@@ -149,6 +149,21 @@ it('limits component substitutions to the shared measurement and retains real el
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');
+  for (const [from, to] of [
+    ['WindowsV2VerdictForWindowClass(WindowsV2Judgement', '// Judges one window'],
+    ['TargetVerdict WindowsExplorerPrestartVerdict(', '// The core'],
+    [
+      'bool MeasureWindowsExplorerPrestart(const WindowsV2Judgement &process, HWND window,\n                                    const WindowsExplorerPrestartScope &scope) {',
+      '// P5 REQUIREMENT (M2)',
+    ],
+  ] as const) {
+    const begin = source.indexOf(from);
+    const end = source.indexOf(to, begin);
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(begin);
+    expect(built).toContain(source.slice(begin, end));
+  }
+
   expect(built).toContain('/*session_recorded=*/true, judged.not_web_package);');
   expect(built).toContain('/*session_recorded=*/false, judged.not_web_package)');
   expect(built).toContain('session.not_web_file = measured.not_web_file;');
@@ -166,7 +181,12 @@ it('registers cancellation only for measurement and refuses occupied sessions be
 
 const componentMatrix = describe
   .skipIf(process.platform !== 'win32')
-  .each(['store_not_web_is_absent_in_default_build', 'store_not_web_enabled_acceptance_build']);
+  .each([
+    'store_not_web_is_absent_in_default_build',
+    'store_not_web_enabled_acceptance_build',
+    'explorer_gate_off_with_hooks',
+    'explorer_gate_on',
+  ]);
 componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
   it('preserves basis-specific policy, geometry, epochs, ticket updates and cleanup without GUI', ({
     skip,
@@ -209,6 +229,16 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
               '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
             ]
           : []),
+        ...(variant === 'explorer_gate_off_with_hooks'
+          ? ['/DSPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS=1']
+          : []),
+        ...(variant === 'explorer_gate_on'
+          ? [
+              '/DSPRINT_CODER_ELIGIBILITY_V2=1',
+              '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+              '/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION=1',
+            ]
+          : []),
         `/FI${provenance}`,
         `/I${nativeDirectory}`,
         file,
@@ -248,7 +278,7 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
       });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: 67 component cases, controlled focus only, no OS input',
+        'PASS: 68 component cases, controlled focus only, no OS input',
       );
       expect(result.stdout).toContain(
         variant === 'store_not_web_enabled_acceptance_build'
