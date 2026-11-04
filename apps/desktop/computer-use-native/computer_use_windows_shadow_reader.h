@@ -194,6 +194,28 @@ public:
     return page;
   }
 
+  // Input-time metadata only: the caller already bound this window to a browser page.
+  // Resolve its current Document from that window, never from the foreground focus.
+  [[nodiscard]] bool RecheckPage(const WindowsPageEvidence &observed) {
+    if (!observed.web) return true;
+    BeginOrigin();
+    Element root = 0, document = 0;
+    int count = 0;
+    bool failed = false;
+    std::string url, identity;
+    auto current = observed;
+    current.complete = ShadowSettle(Root(&root), &failed) &&
+        ScanPageDocuments(root, 0, &count, &document) && count == 1 &&
+        ShadowSettle(ControlSignature(document, &identity), &failed) &&
+        ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &url), &failed) &&
+        PageDocumentStillCurrent(root, document);
+    current.document_identity = std::move(identity);
+    current.location_digest = url.empty() ? std::string{} : Sha256Hex(url);
+    const bool within = OriginWithinBudget();
+    EndOrigin();
+    return within && !failed && !gate_.Stopped() && WindowsPageAllowsInput(observed, current);
+  }
+
   // The action was canceled (or stopped being valid) during the capture: the caller records a
   // skipped capture rather than a classification.
   [[nodiscard]] bool Canceled() const { return gate_.Canceled(); }

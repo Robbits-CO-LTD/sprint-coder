@@ -75,6 +75,8 @@ bool WindowsValidationStillCurrent(std::uint64_t epoch, std::uint64_t serial) {
 bool WindowsSemanticInputInFlightLocked() { return false; }
 // N9 P3c: the approval round trip may close input; the seam keeps it open.
 bool WindowsRoundTripMayInput(const WindowsSession&) { return true; }
+// N11 D: the browser page recheck before each chunk; this seam's target is not a browser page.
+bool RecheckWindowsPageBeforeInput(const WindowsSession&) { return true; }
 BOOL SetCursorPos(int, int) { return 1; }
 bool valid = true;
 bool semanticInputInFlight = false;

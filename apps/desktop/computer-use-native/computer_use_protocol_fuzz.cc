@@ -3208,6 +3208,20 @@ bool CheckWindowsPageRecheck() {
   const auto read = [](FakeForm &form) { return WindowsShadowReader(form.source).ReadPage(); };
   auto form = fixture();
   const auto observed = read(form);
+  auto input_page = observed;
+  input_page.origin = OriginState::kOrdinary;
+  if (!Check(WindowsShadowReader(form.source).RecheckPage(input_page),
+             "input_page_metadata_matches_bound_document")) return false;
+  for (int mode = 0; mode < 5; ++mode) {
+    auto changed = fixture();
+    if (mode == 0) changed.Node(changed.pane).signature = "runtime-id-2";
+    if (mode == 1) changed.Node(changed.pane).url = "https://docs.example.test/second";
+    if (mode == 2) changed.source.cancel_after = 0;
+    if (mode == 3) changed.source.url_read_hook = [&] { changed.source.now += 31'000'000; };
+    if (mode == 4) changed.source.url_read_hook = [&] { changed.Node(changed.window).children.clear(); };
+    if (!Check(!WindowsShadowReader(changed.source).RecheckPage(input_page),
+               "input_page_metadata_change_or_stop_rejects")) return false;
+  }
   if (!Check(observed.web && observed.complete && observed.origin == OriginState::kUnknown &&
              WindowsSamePage(observed, read(form)) && !WindowsPageAllowsInput(observed, observed),
              "page-current-policy-remains-closed")) return false;
@@ -3261,6 +3275,8 @@ bool CheckWindowsPageRecheck() {
     form = fixture();
     form.source.process_path = std::string("C:\\Apps\\") + exe;
     const auto electron = read(form);
+    if (!Check(WindowsShadowReader(form.source).RecheckPage(electron) && form.source.url_calls == 0,
+               "electron_input_page_check_is_neutral")) return false;
     if (!Check(!electron.web && WindowsPageAllowsInput(electron, electron) && form.source.url_calls == 0,
                "electron_page_check_defers_to_existing_interlock")) return false;
   }

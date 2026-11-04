@@ -2,6 +2,7 @@
 
 // BEGIN windows semantic operation ownership
 struct WindowsSemanticPending : WindowsUiaReadProgress {
+  std::atomic<bool> page_invalidated{false};
 #if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
   std::uint64_t background_epoch = 0;
@@ -125,6 +126,7 @@ template <class Call> HRESULT InvokeWindowsSemanticInput(Call &&call, bool *acce
 }
 
 struct WindowsSemanticWork {
+  sprint_coder::computer_use::WindowsPageEvidence observed_page;
   bool background = false;
   sprint_coder::computer_use::NativeApprovalEffect approved_effect =
       sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
@@ -1183,7 +1185,8 @@ struct WindowsBackgroundPatternOperations {
   bool BeginCall(std::uint64_t claim) {
     auto *pending = windows_semantic_operation;
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
-    if (pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)
+    if (!WindowsV1UiaMayCall() ||
+        pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)
       pending->background_monitor->state.Pause();
     return pending->background_monitor->state.BeginCall(claim);
   }
@@ -1207,6 +1210,15 @@ struct WindowsBackgroundPatternOperations {
         invoke.Get(), toggle.Get(), select.Get(), value.Get(), expand.Get(), *text_value.Receive(), desired,
         [&](auto &&call) { return WindowsV1UiaContact(result, call); }, E_FAIL);
     return WindowsV1UiaOk(result) && WindowsV1UiaMayCall();
+  }
+  bool CheckPage() {
+    if (!WindowsV1UiaMayCall()) return false;
+    if (!work.observed_page.web) return true;
+    // Worker-owned UIA read, outside Stop/monitor locks. BeginCall rechecks Stop afterwards.
+    if (RecheckWindowsBoundPageOnLane(work.window, work.pid, work.observed_page,
+                                    [] { return WindowsV1UiaMayCall(); })) return true;
+    windows_semantic_operation->page_invalidated.store(true, std::memory_order_release);
+    return false;
   }
   bool Readback() {
     if (scroll.Get()) {
@@ -1443,6 +1455,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   snapshot.epoch = expected_epoch;
   if (!snapshot.stop_serial.has_value()) snapshot.stop_serial = WindowsValidationFrameStopSerial();
   auto work = std::make_unique<WindowsSemanticWork>();
+  work->observed_page = session.observed_page;
   work->approved_effect = approved_effect;
   if (!ReadJsonString(metadata, "targetId", &work->target_id) || work->target_id.empty() || work->target_id.size() > 128) {
     *reason = "target_required"; return false;
@@ -1534,7 +1547,15 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
   }
   struct Abandon {
     std::shared_ptr<WindowsSemanticPending> pending;
+    const WindowsSession &session;
     ~Abandon() {
+      // Session/ticket maps belong to this consumer, never to the detached UIA worker.
+      if (session.observed_page.web &&
+          (pending->page_invalidated.load(std::memory_order_acquire) ||
+           pending->abandoned.load(std::memory_order_acquire) != WindowsV1UiaStop::kNone)) {
+        InvalidateWindowsPage(session);
+        if (session.round_trip) session.round_trip->Invalidate();
+      }
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);
       auto none = WindowsV1UiaStop::kNone;
       pending->abandoned.compare_exchange_strong(none, WindowsV1UiaStop::kCanceled);
@@ -1544,7 +1565,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session, const RECT &ex
 #endif
       pending->ready.notify_all();
     }
-  } abandon{pending};
+  } abandon{pending, session};
   std::unique_lock lock(pending->mutex);
   for (;;) {
     bool validate = false;

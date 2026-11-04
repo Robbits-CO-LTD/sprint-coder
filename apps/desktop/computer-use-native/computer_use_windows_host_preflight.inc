@@ -883,6 +883,44 @@ bool RecheckWindowsPage(const WindowsSession &session) {
   return false;
 }
 
+bool RecheckWindowsBoundPageOnLane(HWND window, std::uint32_t pid,
+    const sprint_coder::computer_use::WindowsPageEvidence &page,
+    const std::function<bool()> &current) {
+  if (!current()) return false;
+  if (!page.web) return true;
+  auto source = sprint_coder::computer_use::WindowsUiaShadowSource::Create(window, POINT{}, current,
+      sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
+      sprint_coder::computer_use::windows_uia_source_detail::InterlockShellLookupRunning());
+  if (!source) return false;
+  source->SetSignatureProvider([pid](IUIAutomationElement *element, std::string *signature) {
+    return ComputeWindowsControlSignature(element, pid, nullptr, signature);
+  });
+  sprint_coder::computer_use::WindowsShadowReader reader(*source);
+  return reader.RecheckPage(page) && current();
+}
+
+bool RecheckWindowsPageBeforeInput(const WindowsSession &session) {
+  using namespace sprint_coder::computer_use;
+  if (!session.observed_page.web) return true;
+  const auto epoch = session.cancel_epoch;
+  const auto serial = WindowsValidationFrameStopSerial();
+  const auto start = MonotonicNowNs();
+  WindowsOpenMeasurementLimits limits{[epoch, serial] {
+    return WindowsValidationStillCurrent(epoch, serial);
+  }, MonotonicNowNs, start, start + 150'000'000};
+  const bool matches = !session.page_observation_invalidated &&
+      RunWindowsOpenMeasurement<bool>(limits,
+          [window = session.active_window, pid = session.pid, page = session.observed_page, epoch]
+          (const WindowsOpenMeasurementLimits &budget) {
+    const WindowsV1UiaPath path(std::chrono::milliseconds(150), epoch);
+    return RecheckWindowsBoundPageOnLane(window, pid, page, [budget] { return budget.MayRead(); });
+  });
+  if (matches) return true;
+  InvalidateWindowsPage(session);
+  if (session.round_trip) session.round_trip->Invalidate();
+  return false;
+}
+
 sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(
     const WindowsSession &session, const std::string &metadata, std::uint64_t deadline) {
   using namespace sprint_coder::computer_use;

@@ -77,4 +77,9 @@ describe.skipIf(build === null)('Windows background monitor native component', (
   it('compiles and runs the background executor native seam', async () => {
     await compileAndRun('computer_use_windows_background_executor_test.cc');
   }, 540000);
+
+  it('compiles and runs page metadata change, cancellation and Electron components', async () => {
+    const { result, output } = await compileAndRun('computer_use_protocol_fuzz.cc');
+    expect(result.output, output).toContain('Windows page recheck: PASS');
+  }, 540000);
 });
