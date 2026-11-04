@@ -2137,7 +2137,8 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   const bool background_gate = WindowsBackgroundStartGate();
   const bool was_background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
   const bool background_supported = background_gate && WindowsBackgroundTargetSupported(before.executable);
-  const bool background = !input.foreground_handoff && (was_background ||
+  // A consumed handoff keeps this session on the approved foreground route across resume.
+  const bool background = !input.foreground_handoff && !session.foreground_handoff_consumed && (was_background ||
       (input.explicit_resume && background_supported && GetForegroundWindow() != input.window));
   if (background && (!background_supported || GetForegroundWindow() == input.window)) {
     *reason = "focus_required";
