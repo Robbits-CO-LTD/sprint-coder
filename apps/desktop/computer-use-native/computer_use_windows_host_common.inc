@@ -236,7 +236,10 @@ struct WindowsStartLease {
 
 struct WindowsRoundTripMonitor;
 struct WindowsBackgroundMonitor;
+struct WindowsExplorerDispatchEvidence;
 struct WindowsSession {
+  // Native-only, single-use view evidence. Session copies keep the same binding.
+  mutable std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_dispatch_evidence;
   std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<WindowsRoundTripMonitor> round_trip_monitor;
