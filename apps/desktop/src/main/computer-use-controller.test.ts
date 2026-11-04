@@ -227,6 +227,7 @@ it('PR9 Controller receiver creates fresh credentials and observes only after ap
 
 function createFixture(
   options: {
+    windowsBackgroundInputForTesting?: boolean;
     runtimeCapture?: ComputerUseRuntimeCapture;
     plannerFactory?: ComputerUseControllerDeps['plannerFactory'];
     captureInputReceipts?: boolean;
@@ -360,6 +361,9 @@ function createFixture(
   >[0][] = [];
   const nativeSession: ComputerUseNativeSession = {
     sessionId: 'session-1',
+    ...(options.windowsBackgroundInputForTesting
+      ? { inputSession: { kind: 'background' as const, backgroundCapabilityVersion: 1 as const } }
+      : {}),
     platform: currentProfile.platform,
     appIdentityDigest: currentProfile.identityDigest,
     windowIdentityDigest: 'd'.repeat(64),
@@ -1291,6 +1295,131 @@ describe('ComputerUseController', () => {
         maximumMode: 'full_access_app',
       },
     };
+
+    const backgroundOptions = {
+      profileRecord: windowsProfile,
+      windowExecutableDigest: profile.executableDigest!,
+      helperGeneration: () => 1,
+      windowsBackgroundInputForTesting: true,
+    };
+
+    it.each(['V1', 'native', 'two cards', 'foreground'] as const)(
+      'P5a approval return: %s reobserves before dispatch and never reuses a card',
+      async (path) => {
+        const v1 = path === 'V1' || path === 'two cards';
+        const { fixture, acting, sessionId } = await offered(
+          {
+            ...backgroundOptions,
+            windowsBackgroundInputForTesting: path !== 'foreground',
+            authorizationRequired: v1,
+            ...(path === 'V1'
+              ? { nativeDispatch: async () => ({ result: 'completed' as const, reasonCode: null }) }
+              : {}),
+          },
+          v1 ? 'supervised' : 'full_access_app',
+        );
+        await viWait();
+        const before = fixture.nativeLog.length;
+        const first = pendingCard(fixture);
+        await clickCard(fixture);
+        if (path === 'two cards') {
+          await viWait();
+          expect(pendingCard(fixture).id).not.toBe(first.id);
+          expect(fixture.approvedDispatches).toHaveLength(0);
+          await clickCard(fixture);
+        }
+        await expect(acting).resolves.toMatchObject({ result: 'completed' });
+        const log = fixture.nativeLog.slice(before);
+        expect(log).toEqual(
+          path === 'V1'
+            ? ['observe', 'dispatch']
+            : [
+                ...(path === 'foreground' ? ['startSession'] : []),
+                ...(path === 'two cards' ? ['observe', 'dispatch'] : []),
+                'observe',
+                'approvalApprove',
+                'dispatchApproved',
+              ],
+        );
+        expect(fixture.startSessionEnteredCount()).toBe(path === 'foreground' ? 2 : 1);
+        if (path !== 'V1') {
+          expect(fixture.approveInputs[0]?.observationRevision).toBe(path === 'two cards' ? 3 : 2);
+          expect(fixture.approvedDispatches[0]?.observationRevision).toBe(
+            fixture.approveInputs[0]?.observationRevision,
+          );
+        }
+        await expect(
+          fixture.controller.resolveApproval({
+            approvalId: first.id,
+            expectedRevision: first.revision,
+            challenge: first.challenge,
+            decision: 'allow_once',
+          }),
+        ).rejects.toThrow(/not found/u);
+        await fixture.controller.stop(sessionId);
+      },
+    );
+
+    it.each(['V1', 'native'] as const)(
+      'P5a %s rejects changed target, generation, epoch, Stop and expiry during return',
+      async (path) => {
+        for (const change of ['target', 'generation', 'takeover', 'Stop', 'expiry'] as const) {
+          let generation = 1;
+          let now = Date.now();
+          let onObserve = () => {};
+          let receive: Parameters<
+            NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>
+          >[0] = () => {};
+          const { fixture, acting, sessionId } = await offered(
+            {
+              ...backgroundOptions,
+              helperGeneration: () => generation,
+              now: () => now,
+              authorizationRequired: path === 'V1',
+              subscribeWindowsInteraction: (listener) => {
+                receive = listener;
+                return () => {};
+              },
+              observationOverridesForRevision: (revision) => {
+                if (revision > 1) onObserve();
+                return revision > 1 && change === 'target'
+                  ? { targetSignatures: { button: 'e'.repeat(64) } }
+                  : {};
+              },
+            },
+            path === 'V1' ? 'supervised' : 'full_access_app',
+          );
+          await viWait();
+          onObserve = () => {
+            if (change === 'generation') generation += 1;
+            if (change === 'expiry') now += path === 'native' ? 30_001 : 3_600_001;
+            if (change === 'Stop') void fixture.controller.stop(sessionId);
+            if (change === 'takeover')
+              receive({
+                version: 1,
+                kind: 'background_event',
+                sessionId,
+                taskId: 'task-1',
+                turnId: fixture.nativeStartTurnIds[0]!,
+                helperGeneration: 1,
+                cancelEpoch: 0,
+                sequence: 1,
+                interactionEpoch: 2,
+                state: 'takeover',
+              });
+          };
+          const result = acting.catch(() => null);
+          await clickCard(fixture);
+          expect((await result)?.result).not.toBe('completed');
+          expect(fixture.approveInputs, change).toHaveLength(0);
+          expect(fixture.approvedDispatches, change).toHaveLength(0);
+          expect(fixture.dispatchCount()).toBe(path === 'V1' ? 0 : 1);
+          expect(fixture.startSessionEnteredCount()).toBe(1);
+          expect(fixture.approvals.filter((card) => card.state === 'pending')).toHaveLength(1);
+          await fixture.controller.stop(sessionId);
+        }
+      },
+    );
 
     it.each([
       'supervised_action',

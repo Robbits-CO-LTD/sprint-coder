@@ -4517,7 +4517,10 @@ export class ComputerUseController {
       this.emit(record.status);
       return record.status;
     }
-    let approved = decision !== 'deny';
+    let approved =
+      decision !== 'deny' &&
+      (record.native.inputSession?.kind !== 'background' ||
+        this.now() < Date.parse(pending.approval.expiresAt));
     let focusedSession: ComputerUseNativeSession | null = null;
     if (approved) {
       const ctx: { focusedSession: ComputerUseNativeSession | null } = { focusedSession: null };
@@ -4544,6 +4547,8 @@ export class ComputerUseController {
         approved = false;
       }
       focusedSession = ctx.focusedSession;
+      if (record.native.inputSession?.kind === 'background')
+        approved &&= this.now() < Date.parse(pending.approval.expiresAt);
     }
     await this.cleanupAbandonedRefocus(record, focusedSession);
     if (record.controller.signal.aborted || this.sessions.get(record.status.sessionId) !== record) {
@@ -4581,7 +4586,8 @@ export class ComputerUseController {
   }
 
   /**
-   * Restores focus to the approved target and re-observes it. Throws if any binding changed. The
+   * Re-observes the approved target, restoring focus only for foreground sessions. The host
+   * admits background sessions only behind its test gate. Throws if any binding changed. The
    * focused session is reported through `ctx` so a caller can clean it up even when this throws.
    */
   private async refocusAndReobserve(
@@ -4596,42 +4602,45 @@ export class ComputerUseController {
     this.assertSessionLive(record);
     if (requireFreshObservation && !this.observationIsFresh(record))
       throw new Error('Computer Use approval observation expired');
-    const focusedSession = await this.deps.native.startSession({
-      profile: record.profile,
-      windowId: record.native.windowId,
-      sessionId: record.status.sessionId,
-      taskId: record.status.taskId,
-      turnId: record.turnId,
-      cancelEpoch: record.native.cancelEpoch,
-      classifierRoute: record.classifierRoute,
-    });
-    ctx.focusedSession = focusedSession;
-    if (
-      focusedSession.sessionId !== record.native.sessionId ||
-      focusedSession.appIdentityDigest !== record.native.appIdentityDigest ||
-      focusedSession.windowIdentityDigest !== record.native.windowIdentityDigest ||
-      focusedSession.windowId !== record.native.windowId ||
-      focusedSession.profileRevision !== record.native.profileRevision ||
-      record.controller.signal.aborted ||
-      this.sessions.get(record.status.sessionId) !== record
-    )
-      throw new Error('Computer Use approval focus binding changed');
-    // A revocation during the await bumped cancelEpoch; the refocus must neither lower it nor
-    // resurrect the revoked record.
-    if (record.interactionRevoked || focusedSession.cancelEpoch < record.native.cancelEpoch)
-      throw new Error('Computer Use interaction authority was revoked');
-    record.native = focusedSession;
-    this.revalidateNativeAttestation(
-      record,
-      focusedSession.policyLanguage,
-      focusedSession.maximumMode,
-      focusedSession.screenBounds,
-    );
-    if (
-      !(await this.repositionEmergencyStop(record.status.sessionId, focusedSession.screenBounds))
-    ) {
-      await this.stop(record.status.sessionId, 'emergency_stop');
-      throw new Error('Computer Use Stop overlay could not follow the native target');
+    const approvedSession = record.native;
+    if (approvedSession.inputSession?.kind !== 'background') {
+      const focusedSession = await this.deps.native.startSession({
+        profile: record.profile,
+        windowId: record.native.windowId,
+        sessionId: record.status.sessionId,
+        taskId: record.status.taskId,
+        turnId: record.turnId,
+        cancelEpoch: record.native.cancelEpoch,
+        classifierRoute: record.classifierRoute,
+      });
+      ctx.focusedSession = focusedSession;
+      if (
+        focusedSession.sessionId !== record.native.sessionId ||
+        focusedSession.appIdentityDigest !== record.native.appIdentityDigest ||
+        focusedSession.windowIdentityDigest !== record.native.windowIdentityDigest ||
+        focusedSession.windowId !== record.native.windowId ||
+        focusedSession.profileRevision !== record.native.profileRevision ||
+        record.controller.signal.aborted ||
+        this.sessions.get(record.status.sessionId) !== record
+      )
+        throw new Error('Computer Use approval focus binding changed');
+      // A revocation during the await bumped cancelEpoch; the refocus must neither lower it nor
+      // resurrect the revoked record.
+      if (record.interactionRevoked || focusedSession.cancelEpoch < record.native.cancelEpoch)
+        throw new Error('Computer Use interaction authority was revoked');
+      record.native = focusedSession;
+      this.revalidateNativeAttestation(
+        record,
+        focusedSession.policyLanguage,
+        focusedSession.maximumMode,
+        focusedSession.screenBounds,
+      );
+      if (
+        !(await this.repositionEmergencyStop(record.status.sessionId, focusedSession.screenBounds))
+      ) {
+        await this.stop(record.status.sessionId, 'emergency_stop');
+        throw new Error('Computer Use Stop overlay could not follow the native target');
+      }
     }
     const previousObservation = record.observation;
     if (previousObservation === null)
@@ -4643,6 +4652,12 @@ export class ComputerUseController {
         cancelEpoch: record.native.cancelEpoch,
       }),
     );
+    if (approvedSession.inputSession?.kind === 'background') this.assertSessionLive(record);
+    if (
+      this.sessions.get(record.status.sessionId) !== record ||
+      (approvedSession.inputSession?.kind === 'background' && record.native !== approvedSession)
+    )
+      throw new Error('Computer Use approval session binding changed');
     if (!equivalent(previousObservation, freshObservation))
       throw new Error('Computer Use approval observation changed');
     record.observation = stripComputerUseObservationPayload(freshObservation);
