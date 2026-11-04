@@ -1,5 +1,5 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,27 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseNativePreflightReceipt } from './computer-use-native-host';
 import type { ComputerUseNativeSession } from './computer-use-controller';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // Behavioural seam for the Windows helper's ordinary ticket (S5-a). The production functions that
 // issue, bind and consume the ticket are cut out of computer_use_windows_host.cc and compiled with
@@ -956,7 +977,7 @@ function assembled(): string {
 describe.skipIf(compiler === null && process.env['CI'] === undefined)(
   'Windows helper ordinary ticket behaviour seam (S5-a)',
   () => {
-    it('issues, binds, consumes and voids the ticket as the contract says', () => {
+    it('issues, binds, consumes and voids the ticket as the contract says', async () => {
       expect(compiler, 'a C++ compiler is required to run this seam in CI').not.toBeNull();
       const root = mkdtempSync(join(tmpdir(), 'computer-use-win-ticket-seam-'));
       try {
@@ -964,14 +985,14 @@ describe.skipIf(compiler === null && process.env['CI'] === undefined)(
         const binary = join(root, process.platform === 'win32' ? 'seam.exe' : 'seam');
         writeFileSync(path, assembled());
         const command = compiler!.command(path, binary);
-        const built = spawnSync(command.file, command.args, {
+        const built = await runAsync(command.file, command.args, {
           encoding: 'utf8',
           timeout: 120_000,
           windowsVerbatimArguments: command.verbatim,
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler!.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 20_000 });
+        const run = await runAsync(binary, [], { encoding: 'utf8', timeout: 20_000 });
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain('OK');
         const session: ComputerUseNativeSession = {
