@@ -11,13 +11,16 @@ rows are no longer a dependency) and #732 (the first on-device acceptance Issue)
 where results go any more. The sections below still describe the **V1** flow (register an
 application through the picker, then bind a window). The V2 flow (the agent lists running
 applications, one in-conversation approval card per application, `SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2=1`)
-has a **Windows-only draft** in [Windows V2 acceptance journeys](computer-use-windows-v2-acceptance.md).
-Windows production V2 is still refused; P5 enablement and N13b on-device acceptance are pending.
-Writing the V2 journeys is slice **S9a** of
-`tasks/designs/adr-computer-use-agent-driven-v2.md` §9. S9a runs **before** the V1 removal (S8),
-with V1 left in place, and a new [human] acceptance Issue is opened when S9a completes; until then
-there is no Issue to record results in. Do not start an on-device run from the V1 journeys below
-expecting it to count as the V2 acceptance.
+has a formal Windows definition in [Windows V2 acceptance journeys](computer-use-windows-v2-acceptance.md).
+**Windows V2 update (2026-11-04):** ordinary GUI applications are available in an explicit V2
+opt-in build (ruleset/classifier/lexicon 3/2/3); default builds and releases remain V1. Follow the
+linked V2 build, launch and setting prerequisites. Supervised and high-impact operation approval
+is accepted **PR #1103 の後 (after PR #1103)**; Store Notepad is a positive case **PR #1104 の後 (after PR #1104)**. Ordinary
+unsigned Windows releases remain refused by Main; signing is tracked in #1101.
+The V2 journey definition is slice **S9a / N13a** of
+`tasks/designs/adr-computer-use-agent-driven-v2.md` §9, before V1 removal (S8).
+On-device V2 results belong in **#1099 ([human], N13b)** and remain unverified until recorded there.
+Do not run the V1 journeys below expecting them to count as V2 acceptance.
 
 Two packages are used, and they are not symmetric:
 
@@ -69,8 +72,9 @@ release workflow independently refuses to publish such a build.
    Store/UWP Notepad hosted by `ApplicationFrameHost.exe` is unsupported and makes the row `FAIL`,
    not `SKIP`. Windows 11 may redirect `notepad.exe` to the packaged (MSIX) Notepad through an app
    execution alias, so check which one actually runs (process tree and window class) before
-   starting. For V2, use the separate Windows draft: packaged Win32 Notepad is a planned positive
-   case after P5; `ApplicationFrameHost` targets remain refused. Neither is a V2 PASS here.
+   starting. For V2, use the separate Windows acceptance: Windows 11 Store Notepad is a positive
+   case **PR #1104 の後 (after PR #1104)**; Calculator and `ApplicationFrameHost` / AppContainer
+   targets remain refused (W-PX). Neither is a V2 PASS here.
 2. SmartScreen blocks an unsigned installer: choose **More info → Run anyway** each time. If
    Defender or an endpoint agent quarantines the helper, record that and stop — do not disable
    protection silently.
