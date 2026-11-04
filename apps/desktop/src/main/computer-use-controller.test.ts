@@ -230,6 +230,7 @@ function createFixture(
   options: {
     windowsBackgroundInputForTesting?: boolean;
     foregroundHandoffForTesting?: ComputerUseControllerDeps['foregroundHandoffForTesting'];
+    handoffAllowed?: boolean;
     runtimeCapture?: ComputerUseRuntimeCapture;
     plannerFactory?: ComputerUseControllerDeps['plannerFactory'];
     captureInputReceipts?: boolean;
@@ -383,9 +384,10 @@ function createFixture(
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
-    allowWindowsForegroundHandoff: () => {
+    allowWindowsForegroundHandoff: (_session, consume) => {
       nativeLog.push('allowWindowsForegroundHandoff');
-      return false;
+      consume();
+      return options.handoffAllowed === true;
     },
     ...(options.beginApprovalRoundTrip
       ? { beginApprovalRoundTrip: options.beginApprovalRoundTrip }
@@ -467,6 +469,9 @@ function createFixture(
       nativeStartTurnIds.push(input.turnId);
       const started = {
         ...nativeSession,
+        ...(input.foregroundHandoffId === undefined
+          ? {}
+          : { inputSession: { kind: 'foreground' as const, backgroundCapabilityVersion: null } }),
         sessionId: input.sessionId,
         ...(options.captureInputReceipts
           ? { inputReceipt: { sessionId: input.sessionId, inputAttemptCount: 0, cancelEpoch: 0 } }
@@ -1326,7 +1331,7 @@ describe('ComputerUseController', () => {
 
     const handoffAction: ComputerUseAction = { type: 'click', x: 0.2, y: 0.2, button: 'left' };
 
-    async function handoffFixture() {
+    async function handoffFixture(extra: Parameters<typeof createFixture>[0] = {}) {
       let clock = 100;
       let generation = 1;
       const activation = vi.fn(() => true);
@@ -1337,6 +1342,7 @@ describe('ComputerUseController', () => {
           consumeTrustedActivation: activation,
           monotonicNow: () => clock,
         },
+        ...extra,
       });
       const status = await start(fixture);
       await fixture.controller.observe(status.sessionId);
@@ -1390,6 +1396,81 @@ describe('ComputerUseController', () => {
       expect(fixture.startSessionEnteredCount()).toBe(1);
       await fixture.controller.stop(input.sessionId);
     });
+
+    it('P5c2b transitions once and observes without replaying the original action', async () => {
+      const { fixture, input } = await handoffFixture({ handoffAllowed: true });
+      const consumed = fixture.controller.consumeForegroundHandoff(input);
+      const observations = fixture.observationCount();
+      await fixture.controller.transitionForegroundHandoff(consumed);
+      expect(fixture.startedSessions.at(-1)?.inputSession?.kind).toBe('foreground');
+      expect(fixture.observationCount()).toBe(observations + 1);
+      expect(fixture.nativeLog.slice(-3)).toEqual([
+        'allowWindowsForegroundHandoff',
+        'startSession',
+        'observe',
+      ]);
+      await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+      await expect(
+        fixture.controller.transitionForegroundHandoff({ ...consumed }),
+      ).rejects.toThrow();
+      expect(fixture.dispatchCount()).toBe(0);
+      expect(fixture.approvals).toHaveLength(0);
+      await fixture.controller.stop(input.sessionId);
+    });
+
+    it.each(['Stop', 'generation'] as const)(
+      'P5c2b rejects a late native result after %s',
+      async (failure) => {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const { fixture, input, replaceHelper } = await handoffFixture({
+          handoffAllowed: true,
+          focusRestoreGate: gate,
+        });
+        const consumed = fixture.controller.consumeForegroundHandoff(input);
+        const observations = fixture.observationCount();
+        const pending = fixture.controller.transitionForegroundHandoff(consumed);
+        const rejected = expect(pending).rejects.toThrow();
+        await viWait();
+        expect(fixture.startSessionEnteredCount()).toBe(2);
+        if (failure === 'Stop') await fixture.controller.stop(input.sessionId);
+        else replaceHelper();
+        release();
+        await rejected;
+        expect(fixture.observationCount()).toBe(observations);
+        expect(fixture.dispatchCount()).toBe(0);
+        if (failure !== 'Stop') await fixture.controller.stop(input.sessionId);
+      },
+    );
+
+    it.each(['permission', 'focus', 'Stop', 'generation', 'expiry', 'identity', 'epoch'])(
+      'P5c2b rejects %s with zero input and no reusable intent',
+      async (failure) => {
+        const { fixture, input, expire, replaceHelper } = await handoffFixture({
+          handoffAllowed: failure !== 'permission',
+          failFocusRestore: failure === 'focus',
+        });
+        const consumed = fixture.controller.consumeForegroundHandoff(input);
+        if (failure === 'Stop') await fixture.controller.stop(input.sessionId);
+        if (failure === 'generation') replaceHelper();
+        if (failure === 'expiry') expire();
+        if (failure === 'identity')
+          Object.assign(fixture.startedSessions[0]!, { windowIdentityDigest: 'b'.repeat(64) });
+        if (failure === 'epoch') Object.assign(fixture.startedSessions[0]!, { cancelEpoch: 1 });
+        await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+        await expect(fixture.controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+        expect(fixture.dispatchCount()).toBe(0);
+        expect(fixture.approvals).toHaveLength(0);
+        if (!['permission', 'focus'].includes(failure))
+          expect(fixture.nativeLog).not.toContain('allowWindowsForegroundHandoff');
+        if (failure !== 'Stop') {
+          expect(fixture.statuses.at(-1)?.state).toBe('paused');
+          await fixture.controller.stop(input.sessionId);
+        }
+      },
+    );
 
     it.each([
       'expiry',

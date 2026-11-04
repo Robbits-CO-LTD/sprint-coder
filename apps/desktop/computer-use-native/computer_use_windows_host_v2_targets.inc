@@ -1386,6 +1386,8 @@ bool CaptureWindowsBackgroundStartDialogs(const WindowsSession &session,
 
 // BEGIN windows shared new start
 struct WindowsStartInput {
+  bool foreground_handoff = false;
+  std::uint64_t handoff_interaction_epoch = 0;
   bool approval_route_v2 = false;
   std::uint64_t approval_helper_generation = 0;
   std::string expected_process_start;
@@ -1512,6 +1514,7 @@ struct WindowsNewStartIoRegistration {
 };
 
 bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std::string *reason) {
+  if (input.foreground_handoff) { *reason = "session_input_invalid"; return false; }
   *reason = "session_target_rejected";
   auto &control = WindowsTargetListControl();
   const bool v2 = input.eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
@@ -2068,6 +2071,28 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   // V2 invalidates at entry; V1 keeps its candidate-identity boundary before invalidation.
   if (v2) InvalidateWindowsTicket(input.session_key);
   WindowsSession &session = found->second;
+  // Every attempted handoff closes its old background authority, including early rejection.
+  struct HandoffMonitorCleanup {
+    std::shared_ptr<WindowsBackgroundMonitor> monitor;
+    ~HandoffMonitorCleanup() { if (monitor) monitor->Stop(); }
+  } handoff_cleanup{input.foreground_handoff ? session.background_monitor : nullptr};
+  if (!input.foreground_handoff && session.foreground_handoff_consumed &&
+      session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) {
+    *reason = "session_refocus_stale"; return false;
+  }
+  if (input.foreground_handoff) {
+    const bool already_consumed = session.foreground_handoff_consumed;
+    session.foreground_handoff_consumed = true;
+    InvalidateWindowsTicket(input.session_key);
+    if (already_consumed || !WindowsBackgroundStartGate() || input.explicit_resume ||
+        session.input_session.kind != sprint_coder::computer_use::InputSessionKind::kBackground ||
+        input.approval_helper_generation == 0 ||
+        input.approval_helper_generation != windows_helper_generation ||
+        input.approval_helper_generation != session.approval_helper_generation ||
+        !session.background_monitor || !WindowsBackgroundMonitorReady(session)) {
+      *reason = "session_refocus_stale"; return false;
+    }
+  }
   const auto expected = WindowsExistingStartBinding(session);
   auto &control = WindowsTargetListControl();
   const auto measurement_current = [&] {
@@ -2112,8 +2137,8 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   const bool background_gate = WindowsBackgroundStartGate();
   const bool was_background = session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground;
   const bool background_supported = background_gate && WindowsBackgroundTargetSupported(before.executable);
-  const bool background = was_background ||
-      (input.explicit_resume && background_supported && GetForegroundWindow() != input.window);
+  const bool background = !input.foreground_handoff && (was_background ||
+      (input.explicit_resume && background_supported && GetForegroundWindow() != input.window));
   if (background && (!background_supported || GetForegroundWindow() == input.window)) {
     *reason = "focus_required";
     return false;
@@ -2136,6 +2161,17 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   if (!CheckWindowsStartFocusIdentity(session.process_handle, input.pid, input.expected_process_start,
       session.process_start, input.window, refocus_window, input.app_identity, input.expected_window_identity)) {
     *reason = "session_identity_changed"; return false;
+  }
+  if (input.foreground_handoff) {
+    {
+      std::lock_guard stop_lock(control.stop_mutex);
+      if (!current() || !session.background_monitor->state.RetireForForeground(input.handoff_interaction_epoch)) {
+        *reason = "session_start_canceled"; return false;
+      }
+    }
+    // Do not join while holding Stop. The retired state cannot issue another background claim.
+    session.background_monitor->Stop();
+    if (!check_current()) return false;
   }
   const auto begin_focus = [&](HWND focus_window) {
     if (!CheckWindowsStartFocusIdentity(session.process_handle, input.pid, input.expected_process_start,
@@ -2231,6 +2267,11 @@ bool StartWindowsExistingSession(WindowsStartInput input, std::string *response,
   if (background && !WindowsBackgroundMonitorReady(session)) { *reason = "user_takeover"; return false; }
   InvalidateWindowsTicket(input.session_key);
   session.input_session = next_input_session;
+  if (background && !was_background && input.explicit_resume) session.foreground_handoff_consumed = false;
+  if (input.foreground_handoff) {
+    session.background_monitor.reset();
+    InvalidateWindowsObservation(&session);
+  }
   if (background) {
     session.dialog_set_digest = std::move(background_dialogs.digest);
     if (session.dialog_set_revision == 0) session.dialog_set_revision = 1;

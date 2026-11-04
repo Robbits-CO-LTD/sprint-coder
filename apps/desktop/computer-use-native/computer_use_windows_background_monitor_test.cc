@@ -182,6 +182,16 @@ int main() {
     if (!Check(!monitor.state.Claim(1), "BG03_unattributed_target_winevent")) return 1;
     WindowsBackgroundMonitor::current = nullptr;
   }
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    WindowsBackgroundMonitor monitor(10, Id(1), 1);
+    monitor.state.Registered(scenario != 4);
+    if (scenario == 1) monitor.state.Pause();
+    if (scenario == 2) monitor.state.Claim(1);
+    const bool retired = monitor.state.RetireForForeground(scenario == 3 ? 2 : 1);
+    if (!Check(retired == (scenario == 0), "handoff requires healthy idle current authority")) return 1;
+    if (!Check(!monitor.state.Claim(monitor.state.Snapshot().epoch), "retirement closes background input")) return 1;
+    if (!Check(!monitor.state.RetireForForeground(1), "retirement cannot be reused")) return 1;
+  }
   std::cout << "Background monitor native seam: PASS\n";
   return 0;
 }

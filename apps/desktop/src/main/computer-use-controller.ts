@@ -522,6 +522,7 @@ export interface ComputerUseNativeHost {
       cancelEpoch: number;
       resume?: boolean;
       roundTripId?: string;
+      foregroundHandoffId?: string;
       /**
        * The classifier route this session is bound to (ADR v2 D7 / classifier C3). Chosen by Main
        * alone when the session is created and repeated on every later start of the same session;
@@ -1107,6 +1108,7 @@ function computerAppGrantVersionUnreadable(
 }
 
 export class ComputerUseController {
+  private readonly consumedHandoffs = new WeakSet<ConsumedComputerUseForegroundHandoff>();
   private readonly broker: MainToolBroker;
   private readonly registry: ComputerUseToolRegistry;
   private readonly sessions = new Map<string, SessionRecord>();
@@ -4202,7 +4204,7 @@ export class ComputerUseController {
     }
   }
 
-  /** Closed P5c2b boundary: consumes only, without AllowSetForegroundWindow/start/dispatch. */
+  /** Consumes only; transitionForegroundHandoff separately burns this Main-owned token. */
   consumeForegroundHandoff(
     input: Readonly<{
       sessionId: string;
@@ -4228,7 +4230,79 @@ export class ComputerUseController {
     )
       throw new Error('Computer Use foreground handoff activation refused');
     this.assertHandoffCurrent(record, intent);
-    return Object.freeze({ ...intent, state: 'consumed' });
+    const consumed = Object.freeze({ ...intent, state: 'consumed' as const });
+    this.consumedHandoffs.add(consumed);
+    return consumed;
+  }
+
+  /** Main-only, test-gated transition. The original action is never replayed. */
+  async transitionForegroundHandoff(intent: ConsumedComputerUseForegroundHandoff): Promise<void> {
+    if (!this.consumedHandoffs.delete(intent))
+      throw new Error('Computer Use foreground handoff missing or already used');
+    const record = this.requireSession(intent.sessionId);
+    const assertCurrent = () => this.assertHandoffCurrent(record, intent);
+    try {
+      assertCurrent();
+      if (this.deps.native.allowWindowsForegroundHandoff?.(record.native, assertCurrent) !== true)
+        throw new Error('Computer Use foreground handoff permission refused');
+      assertCurrent();
+      const focused = await this.deps.native.startSession({
+        profile: record.profile,
+        windowId: intent.windowId,
+        sessionId: intent.sessionId,
+        taskId: intent.taskId,
+        turnId: intent.turnId,
+        cancelEpoch: intent.cancelEpoch,
+        classifierRoute: record.classifierRoute,
+        foregroundHandoffId: intent.id,
+        assertTargetCurrent: assertCurrent,
+      });
+      assertCurrent();
+      if (
+        focused.inputSession?.kind !== 'foreground' ||
+        focused.sessionId !== intent.sessionId ||
+        focused.windowId !== intent.windowId ||
+        focused.appIdentityDigest !== intent.appIdentityDigest ||
+        focused.windowIdentityDigest !== intent.windowIdentityDigest ||
+        focused.cancelEpoch !== intent.cancelEpoch ||
+        focused.profileRevision !== record.native.profileRevision
+      )
+        throw new Error('Computer Use foreground handoff binding changed');
+      record.native = focused;
+      record.observation = null;
+      record.planGrant = null;
+      this.revalidateNativeAttestation(
+        record,
+        focused.policyLanguage,
+        focused.maximumMode,
+        focused.screenBounds,
+      );
+      if (!(await this.repositionEmergencyStop(intent.sessionId, focused.screenBounds))) {
+        await this.stop(intent.sessionId, 'emergency_stop');
+        throw new Error('Computer Use Stop overlay could not follow the native target');
+      }
+      this.assertSessionLive(record);
+      const fresh = await this.acceptNativeObservation(
+        record,
+        await this.deps.native.observe(focused, {
+          requestId: randomUUID(),
+          cancelEpoch: focused.cancelEpoch,
+        }),
+      );
+      this.assertSessionLive(record);
+      record.observation = stripComputerUseObservationPayload(fresh);
+      delete record.foregroundHandoff;
+      record.status = this.status(record, 'paused', null, fresh.revision);
+      this.emit(record.status);
+    } catch (error) {
+      record.observation = null;
+      record.planGrant = null;
+      if (!record.controller.signal.aborted) {
+        record.status = this.status(record, 'paused', null);
+        this.emit(record.status);
+      }
+      throw error;
+    }
   }
 
   async act(

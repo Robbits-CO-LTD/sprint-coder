@@ -122,7 +122,7 @@ function instrumentedHost(): string {
     '    if (cancellation.thread == nullptr) return false;\n    Sc940ResumeMeasurementScope measurement(*work);',
   );
   const ticketInvalidation = 'InvalidateWindowsTicket(input.session_key);';
-  if (resume.split(ticketInvalidation).length !== 4)
+  if (resume.split(ticketInvalidation).length !== 5)
     throw new Error('Resume ticket boundaries changed');
   resume = resume.replaceAll(ticketInvalidation, 'Sc940ResumeInvalidateTicket(input.session_key);');
   resume = replaceOnce(
@@ -4564,7 +4564,7 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('!Sc940ResumeFileIdentity(work, &held)')).toHaveLength(3);
     expect(generated.split('    Sc940ResumeMeasurementScope measurement(*work);')).toHaveLength(2);
     expect(generated.split('    Sc940ResumeContextGate(work);')).toHaveLength(2);
-    expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(4);
+    expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(5);
     expect(program).toContain('GetThreadId(control.new_start_thread) != thread');
     expect(program).toContain('run.Error(2, "session_start_canceled")');
     expect(program).toContain('resume_does_not_publish_while_held');

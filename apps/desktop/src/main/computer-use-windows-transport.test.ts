@@ -1315,6 +1315,7 @@ describe('Computer Use Windows helper transport', () => {
   const startIdentity = { pid: 42, processStartTime: '133000000000000001' };
   function identityStartTarget(
     control: {
+      handoff?: boolean;
       v2?: boolean;
       identity?: Record<string, unknown>;
       check?: Record<string, unknown>;
@@ -1407,6 +1408,8 @@ describe('Computer Use Windows helper transport', () => {
         if (control.holdStart) helper.holdOnly('start_session');
       },
       {
+        windowsBackgroundInputForTesting: control.handoff === true,
+        windowsForegroundHandoffForTesting: control.handoff === true,
         windowsStartIdentity: { enabled: control.enabled !== false },
         effectiveEligibilityMode: () => (control.v2 ? 'v2-denylist' : 'v1-allowlist'),
         ...(control.termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
@@ -1447,6 +1450,83 @@ describe('Computer Use Windows helper transport', () => {
     );
     return { ...target, rows, order, requests, quarantines };
   }
+
+  it.each(['success', 'focus failure', 'stale before write', 'without permit'])(
+    'P5c2b identity-bound handoff records K-4: %s',
+    async (path) => {
+      let current = true;
+      const permit = vi.fn(() => true);
+      const base = responders();
+      const target = identityStartTarget({
+        handoff: true,
+        termination: true,
+        adapt: (addon) => ({ ...addon, allowWindowsHelperForeground: permit }),
+        write: () => {
+          if (path === 'stale before write') current = false;
+          return true;
+        },
+        response: (metadata) => {
+          const handoff = metadata['foregroundHandoffId'] !== undefined;
+          const [, result] = base['start_session']!(metadata);
+          return [
+            'probe_result',
+            {
+              ...(result as object),
+              ...startIdentity,
+              inputSession: handoff
+                ? { kind: 'foreground', backgroundCapabilityVersion: null }
+                : { kind: 'background', backgroundCapabilityVersion: 1 },
+              interactionEpoch: 1,
+              startResult: {
+                ...startIdentity,
+                attemptCount: handoff ? 1 : 0,
+                foregroundResult: handoff
+                  ? path === 'focus failure'
+                    ? 'unconfirmed'
+                    : 'confirmed'
+                  : 'not_attempted',
+              },
+            },
+          ];
+        },
+      });
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      current = true;
+      const consume = vi.fn();
+      if (path !== 'without permit')
+        expect(target.host.allowWindowsForegroundHandoff!(session, consume)).toBe(true);
+      const input = {
+        profile,
+        windowId: session.windowId,
+        sessionId: session.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        foregroundHandoffId: '12345678-1234-1234-1234-123456789abc',
+        assertTargetCurrent: () => {
+          if (!current) throw new Error('stale handoff');
+        },
+      };
+      const transition = target.host.startSession(input);
+      if (path === 'success')
+        await expect(transition).resolves.toMatchObject({ inputSession: { kind: 'foreground' } });
+      else await expect(transition).rejects.toThrow();
+      await expect(target.host.startSession(input)).rejects.toThrow();
+      const sent = target.requests.filter((r) => r['foregroundHandoffId'] !== undefined);
+      expect(sent).toHaveLength(['success', 'focus failure'].includes(path) ? 1 : 0);
+      expect(permit).toHaveBeenCalledTimes(path === 'without permit' ? 0 : 1);
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(target.quarantines).toHaveLength(0);
+      if (path === 'focus failure')
+        expect(target.rows).toEqual([
+          expect.objectContaining({
+            kind: 'foreground',
+            inputPath: 'foreground',
+            state: 'effect_unconfirmed',
+          }),
+        ]);
+    },
+  );
 
   it.each(['v1', 'v2'] as const)(
     'PR5b Host %s binds new and existing starts before foreground',

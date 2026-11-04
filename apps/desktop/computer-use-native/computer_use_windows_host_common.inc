@@ -242,6 +242,7 @@ struct WindowsSession {
   // Native-only, single-use view evidence. Session copies keep the same binding.
   mutable std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_dispatch_evidence;
   std::shared_ptr<WindowsBackgroundMonitor> background_monitor;
+  bool foreground_handoff_consumed = false;
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<WindowsRoundTripMonitor> round_trip_monitor;
   std::uint64_t approved_started_ns = 0;
