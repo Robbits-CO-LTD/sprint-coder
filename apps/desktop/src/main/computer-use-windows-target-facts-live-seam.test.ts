@@ -404,6 +404,17 @@ void CheckStoreNotepadBinding(const TargetFacts &facts,
   bad = facts;
   bad.package_family = "Example.Editor_8wekyb3d8bbwe";
   Check(!judge(bad, parts, key, key, true), "store_notepad_mismatched_facts_rejected");
+  // The literal family is pinned on its own: the facts and the parts agreeing on another family of
+  // the same publisher, or on a case variant of Notepad's, is still refused.
+  if (parts.has_value()) {
+    for (const char *other : {"Microsoft.Other_8wekyb3d8bbwe", "microsoft.windowsnotepad_8wekyb3d8bbwe"}) {
+      auto agreed = facts;
+      agreed.package_family = other;
+      auto agreed_parts = *parts;
+      agreed_parts.family = other;
+      Check(!judge(agreed, agreed_parts, key, key, true), "store_notepad_other_family_rejected");
+    }
+  }
   auto dev = package;
   dev.development_mode = true;
   Check(!judge(facts, WindowsPackageIdentityFor(dev), key, key, true),
@@ -1616,6 +1627,13 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         );
         console.log(executed.stdout);
         expect(executed.stdout).toContain('OK');
+        // The installed Store Notepad is measured only where it is installed: the CI windows-2022
+        // image has none, so there the real-package checks are a counted SKIP, never a pass.
+        if (executed.stdout.includes('SKIP store_notepad_not_installed'))
+          console.warn(
+            'STORE_NOTEPAD_NOT_RUN installed Store Notepad not present; real-package checks skipped',
+          );
+        else expect(executed.stdout).not.toContain('FAIL store_notepad');
       } finally {
         rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
       }
