@@ -53,6 +53,8 @@ WindowsExplorerTrace windows_explorer_trace_for_test;
 // Acceptance-test fault injection: the watcher thread cannot be created, or the body throws.
 enum class WindowsExplorerFault { kNone, kWatcherThread, kBody };
 WindowsExplorerFault windows_explorer_fault_for_test = WindowsExplorerFault::kNone;
+// Acceptance-test identity override: the identity must still match; only elevation is ignored.
+bool windows_explorer_ignore_elevation_for_test = false;
 #endif
 
 struct WindowsExplorerShellView {
@@ -136,8 +138,12 @@ std::optional<bool> WindowsExplorerIniNamesShellClass(const std::wstring &path) 
   } else {
     if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFE &&
         static_cast<unsigned char>(bytes[1]) == 0xFF) return std::nullopt;  // UTF-16BE: unknown.
-    // ANSI or UTF-8: the section and key names are ASCII, so bytes are compared as they are.
-    for (const char byte : bytes) text.push_back(static_cast<wchar_t>(static_cast<unsigned char>(byte)));
+    // ANSI or UTF-8: the section and key names are ASCII, so bytes are compared as they are. A
+    // UTF-8 byte order mark is removed so it cannot hide a section name on the first line.
+    const std::size_t skip = bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF &&
+        static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF ? 3 : 0;
+    for (std::size_t index = skip; index < bytes.size(); ++index)
+      text.push_back(static_cast<wchar_t>(static_cast<unsigned char>(bytes[index])));
   }
   const auto trim = [](std::wstring_view value) {
     while (!value.empty() && (value.front() == L' ' || value.front() == L'\t')) value.remove_prefix(1);
@@ -148,7 +154,8 @@ std::optional<bool> WindowsExplorerIniNamesShellClass(const std::wstring &path) 
   bool in_class_info = false;
   std::wstring_view rest(text);
   while (!rest.empty()) {
-    const std::size_t end = rest.find(L'\n');
+    // CR, LF and CRLF all end a line (an empty line between CR and LF is skipped).
+    const std::size_t end = rest.find_first_of(L"\r\n");
     const std::wstring_view line = trim(rest.substr(0, end));
     rest = end == std::wstring_view::npos ? std::wstring_view{} : rest.substr(end + 1);
     if (line.empty() || line.front() == L';') continue;
@@ -185,8 +192,9 @@ bool WindowsExplorerPlainFolder(const std::wstring &path, WindowsExplorerRefusal
   if (GetDriveTypeW(path.substr(0, 3).c_str()) != DRIVE_FIXED)
     return refuse(WindowsExplorerRefusal::kNotFixedDrive);
   // Check every component: a namespace junction anywhere in the path is not a plain folder.
+  // The drive root (end == 3, "X:\") is a component too: its attributes and its desktop.ini count.
   for (std::size_t end = 3; end <= path.size(); ++end) {
-    if (end != path.size() && path[end] != L'\\') continue;
+    if (end != 3 && end != path.size() && path[end] != L'\\') continue;
     const std::wstring prefix = path.substr(0, end);
     const std::size_t leaf = prefix.find_last_of(L'\\');
     const auto name = prefix.substr(leaf == std::wstring::npos ? 0 : leaf + 1);
@@ -416,8 +424,13 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   // A Stop after enqueue or a cancelled epoch ends the request before any identity work.
   if (!WindowsValidationStillCurrent(epoch, serial)) return refuse(WindowsExplorerRefusal::kNotCurrent);
   WindowsSessionIdentityResult identity;
-  if (!ReadWindowsSessionIdentityOnLane(*session, serial, &identity) ||
-      !identity.identity_matches || identity.elevated)
+  if (!ReadWindowsSessionIdentityOnLane(*session, serial, &identity))
+    return refuse(WindowsExplorerRefusal::kIdentity);
+#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+  // Acceptance-test only: lets the transport seam reach the deadline on an elevated runner.
+  if (windows_explorer_ignore_elevation_for_test) identity.elevated = false;
+#endif
+  if (!identity.identity_matches || identity.elevated)
     return refuse(WindowsExplorerRefusal::kIdentity);
   WindowsExplorerDeadline deadline(epoch, serial);
   const auto current = [&] { return deadline.Current(); };

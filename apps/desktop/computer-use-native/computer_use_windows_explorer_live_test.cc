@@ -148,11 +148,23 @@ struct OpenedExplorer {
     explorer_cleanup_confirmed = false;
     shared = true;
   }
+  // Ours only while the new HWNDs on the target are exactly {window} and it has one entry.
+  bool OnlyOurs(const ExplorerSnapshot &now) const {
+    const auto fresh = NewWindows(now);
+    return fresh.size() == 1 && fresh.front() == window && Exclusive(now);
+  }
+  void RefuseUnlessOurs(const ExplorerSnapshot &now) {
+    const auto fresh = NewWindows(now);
+    Ambiguous(fresh.size() == 1 && fresh.front() == window ? "explorer_tab_shared"
+                                                           : "explorer_window_ambiguous");
+  }
+  static constexpr ULONGLONG kSettleMs = 500;
   ~OpenedExplorer() {
     // Close nothing that cannot be told apart from the user's windows.
     if (!launched || shared) return;
     // Search by a new HWND on the target even when Open timed out before finding its entry.
     const ULONGLONG deadline = GetTickCount64() + 10000;
+    ULONGLONG adopted = 0;  // When a window first seen here was adopted; it must settle, too.
     bool quit = false;
     do {
       auto now = ExplorerEntries();
@@ -160,11 +172,12 @@ struct OpenedExplorer {
         if (window == nullptr) {
           const auto fresh = NewWindows(now);
           if (fresh.size() > 1) { Ambiguous("explorer_window_ambiguous"); return; }
-          if (fresh.size() == 1) window = fresh.front();
+          if (fresh.size() == 1) { window = fresh.front(); adopted = GetTickCount64(); }
         }
         if (window != nullptr && quit && !now.HasWindow(window)) return;
-        if (window != nullptr && !quit) {
-          if (!Exclusive(now)) { Ambiguous("explorer_tab_shared"); return; }
+        if (window != nullptr && !quit && (adopted == 0 || GetTickCount64() - adopted >= kSettleMs)) {
+          // A user window opened meanwhile on the same path makes ours ambiguous: close nothing.
+          if (!OnlyOurs(now)) { RefuseUnlessOurs(now); return; }
           for (auto &entry : now.entries) {
             // Only the entry with our HWND and our path, from the snapshot just checked.
             if (entry.window != window || entry.path != target_path) continue;
@@ -206,8 +219,13 @@ struct OpenedExplorer {
       const auto fresh = NewWindows(after);
       if (fresh.size() > 1) { Ambiguous("explorer_window_ambiguous"); return nullptr; }
       if (fresh.size() == 1) {
+        // Record it only if, after a short settle, it is still the only new window on the target.
         window = fresh.front();
-        if (!Exclusive(after)) { Ambiguous("explorer_tab_shared"); return nullptr; }
+        const ULONGLONG settled = GetTickCount64() + kSettleMs;
+        while (GetTickCount64() < settled) PumpExplorerMessages();
+        ExplorerSnapshot again;
+        while (!(again = ExplorerEntries()).valid && GetTickCount64() < deadline) PumpExplorerMessages();
+        if (!again.valid || !OnlyOurs(again)) { RefuseUnlessOurs(again); return nullptr; }
         return window;
       }
       PumpExplorerMessages();
@@ -392,6 +410,14 @@ int wmain(int argc, wchar_t **argv) {
     return Fail(32, "clsid2_fixture");
   if (int failed = ExpectFolder(clsid2 + L"\\Sub", Refusal::kAncestorShellClass, "clsid2_child", 32))
     return failed;
+  // A UTF-8 byte order mark and CR-only line ends do not hide the section or the key.
+  const std::wstring bom_cr = scratch + L"\\BomCr";
+  if (!add_folder(bom_cr) || !add_folder(bom_cr + L"\\Sub") ||
+      !WriteBytes(bom_cr + L"\\desktop.ini",
+          "\xEF\xBB\xBF[.ShellClassInfo]\rIconResource=x\rCLSID={21EC2020-3AEA-1069-A2DD-08002B30309D}\r"))
+    return Fail(36, "bom_cr_fixture");
+  if (int failed = ExpectFolder(bom_cr + L"\\Sub", Refusal::kAncestorShellClass, "bom_cr_child", 36))
+    return failed;
   // An ancestor that only localizes its name (as C:\Users does) stays a plain ancestor.
   const std::wstring localized = scratch + L"\\Localized";
   if (!add_folder(localized) || !add_folder(localized + L"\\Sub") ||
@@ -459,24 +485,40 @@ int wmain(int argc, wchar_t **argv) {
     };
     std::string text;
     bool probe_result = false;
-    // Positive: the dispatch reaches ReadWindowsExplorerShellView and the point is in the view.
-    if (!dispatch(inside, &probe_result, &text) || !probe_result ||
-        text.find("\"kind\":\"filesystem_folder\"") == std::string::npos ||
-        text.find("\"pointOwnerMatches\":true") == std::string::npos ||
-        windows_explorer_trace_for_test.request != Refusal::kNone ||
-        windows_explorer_trace_for_test.view != Refusal::kNone ||
-        windows_explorer_trace_for_test.point != Refusal::kNone) {
-      std::cout << "TRACE request=" << static_cast<int>(windows_explorer_trace_for_test.request)
-                << " view=" << static_cast<int>(windows_explorer_trace_for_test.view)
-                << " point=" << static_cast<int>(windows_explorer_trace_for_test.point) << std::endl;
-      return Fail(41, "dispatch_positive");
+    // An elevated explorer.exe (a CI runner as an administrator without UAC) fails the session
+    // identity by design, so the dispatch cases cannot reach the view there: NOT_RUN, not FAIL.
+    const bool explorer_elevated = IsProcessElevated(parent_pid);
+    if (explorer_elevated) {
+      if (!dispatch(inside, &probe_result, &text) || probe_result ||
+          windows_explorer_trace_for_test.request != Refusal::kIdentity)
+        return FailReason(41, "dispatch_elevated_identity", windows_explorer_trace_for_test.request,
+                          Refusal::kIdentity);
+      std::cout << "NOT_RUN explorer_elevated_dispatch" << std::endl;
+    } else {
+      // Positive: the dispatch reaches ReadWindowsExplorerShellView and the point is in the view.
+      if (!dispatch(inside, &probe_result, &text) || !probe_result ||
+          text.find("\"kind\":\"filesystem_folder\"") == std::string::npos ||
+          text.find("\"pointOwnerMatches\":true") == std::string::npos ||
+          windows_explorer_trace_for_test.request != Refusal::kNone ||
+          windows_explorer_trace_for_test.view != Refusal::kNone ||
+          windows_explorer_trace_for_test.point != Refusal::kNone) {
+        std::cout << "TRACE request=" << static_cast<int>(windows_explorer_trace_for_test.request)
+                  << " view=" << static_cast<int>(windows_explorer_trace_for_test.view)
+                  << " point=" << static_cast<int>(windows_explorer_trace_for_test.point) << std::endl;
+        return Fail(41, "dispatch_positive");
+      }
     }
     // M1: the title/tab strip and the navigation pane belong to explorer.exe but not to the view.
+    // Checked directly (no session identity), and through the dispatch where it can run.
     for (const auto &[point, what] : {std::pair{title, "title_point"}, std::pair{navigation, "navigation_point"}}) {
       if (point.x <= window_rect.left + 4 || !in_window(point)) {
         std::cout << "NOTE " << what << " outside the window" << std::endl;
         continue;
       }
+      if (const auto reason = WindowsExplorerPointRefusal(parent, view.view, parent_pid, point);
+          reason != Refusal::kPointOutsideView)
+        return FailReason(42, what, reason, Refusal::kPointOutsideView);
+      if (explorer_elevated) continue;
       if (!dispatch(point, &probe_result, &text) || !probe_result ||
           text.find("\"pointOwnerMatches\":false") == std::string::npos ||
           text.find("\"kind\":\"filesystem_folder\"") == std::string::npos)

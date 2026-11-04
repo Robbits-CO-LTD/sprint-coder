@@ -112,18 +112,25 @@ int wmain() {
   session.approval_route_v2 = true;
 #if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
   {
-    if (!elevated) {
-      // L3: a body that throws after the deadline started is refused, and cancellation is paired.
-      windows_explorer_fault_for_test = WindowsExplorerFault::kBody;
-      expect(metadata("bound", "100", 2), 1, Refusal::kException, "body_exception");
-      Require(FAILED(CoDisableCallCancellation(nullptr)), "body_exception_cancellation_pairing");
-      // A watcher that cannot be created leaves the measurement disabled.
-      windows_explorer_fault_for_test = WindowsExplorerFault::kWatcherThread;
-      expect(metadata("bound", "100", 2), 1, Refusal::kNotCurrent, "watcher_failure");
-      Require(FAILED(CoDisableCallCancellation(nullptr)), "watcher_cancellation_pairing");
-      windows_explorer_fault_for_test = WindowsExplorerFault::kNone;
-      expect(metadata("bound", "100", 2), 1, passing, "bound_control_after_faults");
-    }
+    // The acceptance-only override ignores elevation so these run on an elevated runner too. It
+    // never ignores an identity mismatch.
+    windows_explorer_ignore_elevation_for_test = true;
+    expect(metadata("bound", "100", 2), 1, Refusal::kNotVerifiedExplorer, "override_control");
+    const std::string start = session.process_start;
+    session.process_start = "0";
+    expect(metadata("bound", "100", 2), 1, Refusal::kIdentity, "override_keeps_identity");
+    session.process_start = start;
+    // L3: a body that throws after the deadline started is refused, and cancellation is paired.
+    windows_explorer_fault_for_test = WindowsExplorerFault::kBody;
+    expect(metadata("bound", "100", 2), 1, Refusal::kException, "body_exception");
+    Require(FAILED(CoDisableCallCancellation(nullptr)), "body_exception_cancellation_pairing");
+    // A watcher that cannot be created leaves the measurement disabled.
+    windows_explorer_fault_for_test = WindowsExplorerFault::kWatcherThread;
+    expect(metadata("bound", "100", 2), 1, Refusal::kNotCurrent, "watcher_failure");
+    Require(FAILED(CoDisableCallCancellation(nullptr)), "watcher_cancellation_pairing");
+    windows_explorer_fault_for_test = WindowsExplorerFault::kNone;
+    windows_explorer_ignore_elevation_for_test = false;
+    expect(metadata("bound", "100", 2), 1, passing, "bound_control_after_faults");
   }
 #endif
   frame.header.session_id.bytes[0] = 22;

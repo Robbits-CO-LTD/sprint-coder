@@ -1985,6 +1985,13 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         }
         expect(cleanupConfirmed).toBe(true);
         expect(result.stdout).toContain('OK Explorer view and foreign child');
+        // Every other case passed; only the dispatch cases could not run against an elevated
+        // explorer.exe (whose identity check refused them with kIdentity, as asserted natively).
+        if (result.stdout.includes('NOT_RUN explorer_elevated_dispatch')) {
+          context.skip(
+            'NOT_RUN explorer_elevated_dispatch: explorer.exe is elevated on this runner',
+          );
+        }
       } finally {
         if (cleanupConfirmed) {
           rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
@@ -2144,6 +2151,33 @@ describe('Windows target facts seam source', () => {
     expect(explorer).toContain('IsEqualCLSID(folder_class, CLSID_ShellFSFolder)');
     expect(explorer).toContain('GetDriveTypeW(path.substr(0, 3).c_str()) != DRIVE_FIXED');
     expect(explorer).toContain('P5 REQUIREMENT (M2');
+    expect(explorer).toContain(
+      "if (end != 3 && end != path.size() && path[end] != L'\\\\') continue;",
+    );
+    expect(explorer).toContain('rest.find_first_of(L"\\r\\n")');
+    // Test-only overrides and faults exist only behind the acceptance-test macro, never in a product.
+    for (const name of [
+      'windows_explorer_ignore_elevation_for_test',
+      'windows_explorer_fault_for_test',
+      'WindowsExplorerFault',
+    ]) {
+      let from = explorer.indexOf(name);
+      expect(from, name).toBeGreaterThan(0);
+      while (from >= 0) {
+        const opened = explorer.lastIndexOf(
+          '#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)',
+          from,
+        );
+        const closed = explorer.lastIndexOf('#endif', from);
+        expect(opened, `${name} at ${from}`).toBeGreaterThan(closed);
+        from = explorer.indexOf(name, from + name.length);
+      }
+    }
+    // M4: a window is recorded and closed only while it is the one new window on the target.
+    expect(live).toContain('if (!again.valid || !OnlyOurs(again))');
+    expect(live).toContain('if (!OnlyOurs(now)) { RefuseUnlessOurs(now); return; }');
+    expect(live).toContain('GetTickCount64() - adopted >= kSettleMs');
+    expect(live).toContain('NOT_RUN explorer_elevated_dispatch');
     // Refusal reasons stay off the wire: the response names only the kind and the point answer.
     expect(explorer).toContain('*response = "{\\"shellView\\":');
     const response = explorer.slice(explorer.indexOf('*response = "{\\"shellView\\":'));
