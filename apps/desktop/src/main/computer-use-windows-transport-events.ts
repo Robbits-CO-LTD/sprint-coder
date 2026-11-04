@@ -107,6 +107,12 @@ export class WindowsInteractionEvents {
     current.pendingTrip = roundTripId;
     return true;
   }
+  completeTrip(sessionId: string, id: string): void {
+    const current = this.sessions.get(sessionId);
+    if (!current || current.revoked || current.roundTripId !== id)
+      throw new Error('Unbound round trip completion');
+    current.tripEnded = true;
+  }
   /**
    * Settles a `begin`: only an accepted acknowledgement records the id; a refusal or a failed call
    * rolls it back, so a later trip can begin and the previous trip's events stay bound.
@@ -122,7 +128,6 @@ export class WindowsInteractionEvents {
     if (accepted) {
       current.usedTrips.add(roundTripId);
       current.roundTripId = roundTripId;
-      current.tripSequence = 0;
       current.tripEnded = false;
     }
     return this.replay(
@@ -182,7 +187,11 @@ export class WindowsInteractionEvents {
     this.held.delete(sessionId);
     this.overflowed.delete(sessionId);
   }
-  receive(event: WindowsInteractionEvent, generation: number): boolean {
+  receive(
+    event: WindowsInteractionEvent,
+    generation: number,
+    onOrderingFault?: WindowsInteractionListener,
+  ): boolean {
     const current = this.sessions.get(event.sessionId);
     if (
       !current ||
@@ -198,8 +207,13 @@ export class WindowsInteractionEvents {
       current.interactionEpoch = event.interactionEpoch;
       current.revoked = true;
     } else {
-      if (event.roundTripId !== current.roundTripId || event.sequence <= current.tripSequence)
+      if (event.roundTripId !== current.roundTripId) return false;
+      if (event.sequence <= current.tripSequence) {
+        // Report to Main's lifetime owner without accepting or advancing transport authority.
+        onOrderingFault?.(event);
         return false;
+      }
+      // Main must still see gaps and early end notifications; its lifetime owner fails closed.
       if (current.tripEnded && event.state === 'active') return false;
       current.tripSequence = event.sequence;
       current.revoked = event.state === 'failed';
@@ -217,9 +231,13 @@ export class WindowsInteractionEvents {
     if (kept.length === 0) this.held.delete(sessionId);
     else this.held.set(sessionId, kept);
     if (!deliver) return [];
-    return queue
-      .filter((held) => selects(held.event) && this.receive(held.event, held.generation))
-      .map((held) => held.event);
+    const events: WindowsInteractionEvent[] = [];
+    for (const held of queue) {
+      if (!selects(held.event)) continue;
+      if (this.receive(held.event, held.generation, (event) => events.push(event)))
+        events.push(held.event);
+    }
+    return events;
   }
   private matches(a: WindowsInteractionBinding, b: WindowsInteractionBinding): boolean {
     return (

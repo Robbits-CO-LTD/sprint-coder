@@ -169,6 +169,7 @@ export function createWindowsComputerUseNativeAddon(
   return Object.freeze({
     subscribeWindowsInteraction: (listener) => client.subscribeWindowsInteraction(listener),
     approvalRoundTrip: (input) => client.approvalRoundTrip(input),
+    completeApprovalRoundTrip: (sessionId, id) => client.completeApprovalRoundTrip(sessionId, id),
     probe: () => probe,
     dispatchLedgerSupported: true,
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
@@ -530,6 +531,8 @@ class WindowsComputerUseHelperClient {
         throw new Error('Unbound round trip acknowledgement');
       accepted = 'accepted' in result && result.accepted === true;
       if (wire.kind === 'begin' && !accepted) throw new Error('Round trip begin refused');
+      if (wire.kind === 'end' && accepted)
+        this.completeApprovalRoundTrip(wire.sessionId, wire.roundTripId);
       return result;
     } finally {
       // The trip id is recorded only after native accepted it; a refusal or throw rolls it back.
@@ -538,6 +541,9 @@ class WindowsComputerUseHelperClient {
           this.interactionEvents.settleBegin(wire.sessionId, wire.roundTripId, accepted),
         );
     }
+  }
+  completeApprovalRoundTrip(sessionId: string, id: string): void {
+    this.interactionEvents.completeTrip(sessionId, id);
   }
   /**
    * Each listener is isolated: one that throws cannot reach resolveFrame's protocol-failure path
@@ -1950,7 +1956,11 @@ class WindowsComputerUseHelperClient {
         frame.sessionId.hex !== frameIdFromText(`session:${event.sessionId}`).hex
       )
         return;
-      if (!this.interactionEvents.receive(event, this.helperGeneration)) {
+      if (
+        !this.interactionEvents.receive(event, this.helperGeneration, (fault) =>
+          this.deliverInteraction([fault]),
+        )
+      ) {
         // It may precede, in the same read, the start response or begin_result it depends on.
         const start = this.starts.get(event.sessionId);
         const startPending = start !== undefined && start.attempts.size !== 0 && !start.stopped;

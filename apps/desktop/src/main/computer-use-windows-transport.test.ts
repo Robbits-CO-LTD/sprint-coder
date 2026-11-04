@@ -897,11 +897,12 @@ describe('Computer Use Windows helper transport', () => {
     send({});
     send({ sequence: 1 });
     send({});
-    expect(received).toHaveBeenCalledTimes(1);
+    // Ordering faults reach Main's round-trip owner rather than being silently discarded.
+    expect(received).toHaveBeenCalledTimes(3);
     send({ sequence: 3, state: 'failed', failureReason: 'expired', failureLatched: true });
     send({ sequence: 4, state: 'ended' });
-    expect(received).toHaveBeenCalledTimes(2);
-    expect(received.mock.calls[1]![0].failureReason).toBe('expired');
+    expect(received).toHaveBeenCalledTimes(4);
+    expect(received.mock.calls[3]![0].failureReason).toBe('expired');
     await expect(startSession(host, session.sessionId, 'turn-1')).rejects.toThrow(
       'native_interaction_revoked',
     );
@@ -11287,6 +11288,118 @@ int main() {
     expect(sockets[0]!.destroyed).toBe(false);
   });
 
+  it.each(['approved', 'missing id', 'end first'] as const)(
+    'P5b host and transport round trip: %s',
+    async (path) => {
+      const seen: Array<Readonly<Record<string, unknown>>> = [];
+      const base = ticketedTable(seen);
+      const reply = (metadata: Readonly<Record<string, unknown>>): HelperResponse => {
+        seen.push({ operation: metadata['kind'], ...metadata });
+        const {
+          durationMs: _duration,
+          mainPid: _pid,
+          mainProcessStartTime: _start,
+          mainImageIdentity: _image,
+          operation: _operation,
+          reason: _reason,
+          ...bound
+        } = metadata;
+        const begin = metadata['kind'] === 'begin';
+        return [
+          begin ? 'approval_round_trip_begin_result' : 'approval_round_trip_end_result',
+          {
+            ...bound,
+            kind: begin ? 'begin_result' : 'end_result',
+            accepted: true,
+            failureReason: 'none',
+            failureLatched: false,
+          },
+        ];
+      };
+      const target = createTarget(
+        {
+          ...base,
+          approval_round_trip_begin: reply,
+          approval_round_trip_end: reply,
+          cancel: (metadata) => [
+            'dispatch_result',
+            {
+              result: 'canceled',
+              drained: true,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: path === 'approved' ? 1 : 0,
+            },
+          ],
+          close_session: (metadata) => [
+            'probe_result',
+            {
+              result: 'closed',
+              drained: true,
+              sessionId: metadata['sessionId'],
+              cancelEpoch: metadata['cancelEpoch'],
+              inputAttemptCount: path === 'approved' ? 1 : 0,
+            },
+          ],
+          start_session: (metadata) => {
+            seen.push({ operation: 'start', ...metadata });
+            return base['start_session']!(metadata);
+          },
+        },
+        undefined,
+        {
+          windowsApprovalRoundTripForTesting: {
+            mainPid: 42,
+            mainProcessStartTime: '123',
+            mainImageIdentity: digest('a'),
+          },
+        },
+        (addon) => ({ ...addon, captureWindowsGeneration: () => ({ helperGeneration: 1 }) }),
+      );
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      await target.host.beginApprovalRoundTrip!({
+        session,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        roundTripId: 'card-1',
+        durationMs: 60_000,
+      });
+      if (path === 'end first')
+        await target.host.endApprovalRoundTrip!(session.sessionId, 'stopped');
+      const returned = target.host.startSession({
+        profile,
+        windowId: '100',
+        sessionId: session.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        ...(path === 'missing id' ? {} : { roundTripId: 'card-1' }),
+      });
+      if (path !== 'approved') {
+        await expect(returned).rejects.toThrow();
+        expect(seen.filter((row) => row['operation'] === 'dispatch')).toHaveLength(0);
+      } else {
+        const focused = await returned;
+        await expect(dispatchThrough(target, focused)).resolves.toMatchObject({
+          result: 'completed',
+        });
+        expect(seen.map((row) => row['operation'])).toEqual([
+          'start_session',
+          'approval_round_trip_begin',
+          'start_session',
+          'preflight',
+          'approval_round_trip_end',
+          'dispatch',
+        ]);
+        expect(seen[2]).toMatchObject({ roundTripId: 'card-1' });
+        expect(seen[3]).toMatchObject({ roundTripId: 'card-1' });
+        expect(seen[4]).toMatchObject({ roundTripId: 'card-1', reason: 'approved' });
+      }
+      await target.host.cancel(session, 1);
+      await target.host.close(session);
+    },
+  );
+
   it('maps the helper ticket refusal and a denied preflight to typed rejections', async () => {
     const refusedSeen: Array<Readonly<Record<string, unknown>>> = [];
     const refused = createTarget(
@@ -11658,11 +11771,33 @@ int main() {
     ).rejects.toThrow('native_approval_ceiling_mismatch');
   });
 
-  it.each(['full_access_app', 'supervised', 'background'] as const)(
+  it.each(['full_access_app', 'supervised', 'background', 'P5b two cards'] as const)(
     'P4c connects the Windows host approval gate and distinguishes pre-input failure from unknown effect (%s)',
     async (mode) => {
       const background = mode === 'background';
-      const maximumMode = background ? 'full_access_app' : mode;
+      const twoCards = mode === 'P5b two cards';
+      const maximumMode = background || twoCards ? 'full_access_app' : mode;
+      const tripCalls: Array<[unknown, unknown]> = [];
+      const tripReply: Responder = (wire) => {
+        tripCalls.push([wire['kind'], wire['roundTripId']]);
+        const begin = wire['kind'] === 'begin';
+        return [
+          begin ? 'approval_round_trip_begin_result' : 'approval_round_trip_end_result',
+          {
+            version: 1,
+            kind: begin ? 'begin_result' : 'end_result',
+            sessionId: wire['sessionId'],
+            taskId: wire['taskId'],
+            turnId: wire['turnId'],
+            helperGeneration: wire['helperGeneration'],
+            cancelEpoch: wire['cancelEpoch'],
+            roundTripId: wire['roundTripId'],
+            accepted: true,
+            failureReason: 'none',
+            failureLatched: false,
+          },
+        ];
+      };
       const written: WindowsLedgerRow[] = [];
       const removed: WindowsLedgerRow[] = [];
       const isolated: WindowsTargetQuarantine[] = [];
@@ -11683,6 +11818,8 @@ int main() {
       const base = responders();
       const table: Record<string, Responder> = {
         ...base,
+        approval_round_trip_begin: tripReply,
+        approval_round_trip_end: tripReply,
         start_session: (input) => {
           const [type, result] = base['start_session']!(input);
           return [
@@ -11780,6 +11917,15 @@ int main() {
         undefined,
         {
           windowsBackgroundInputForTesting: background,
+          ...(twoCards
+            ? {
+                windowsApprovalRoundTripForTesting: {
+                  mainPid: 42,
+                  mainProcessStartTime: '123',
+                  mainImageIdentity: digest('a'),
+                },
+              }
+            : {}),
           ...(background
             ? {
                 windowsLedger: {
@@ -11813,7 +11959,7 @@ int main() {
             }),
           ),
         },
-        undefined,
+        (addon) => ({ ...addon, captureWindowsGeneration: () => ({ helperGeneration: 1 }) }),
         undefined,
         eligibility,
         viewers,
@@ -11840,9 +11986,43 @@ int main() {
           : ({ type: 'click', x: 0.5, y: 0.5, button: 'left' } as const),
         signal: new AbortController().signal,
       };
+      const beginAndReturn = async (roundTripId: string) => {
+        await target.host.beginApprovalRoundTrip!({
+          session,
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          roundTripId,
+          durationMs: 60_000,
+        });
+        await target.host.startSession({
+          profile,
+          windowId: '100',
+          sessionId: session.sessionId,
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          cancelEpoch: 0,
+          classifierRoute: 'v2',
+          roundTripId,
+        });
+      };
+      if (twoCards) await beginAndReturn('V1-card');
       expect(await target.host.dispatch(input)).toMatchObject({
         approvalOffer: { kind: 'approval_required', effect: 'supervised_action' },
       });
+      if (twoCards) {
+        expect(tripCalls).toEqual([['begin', 'V1-card']]);
+        expect(target.helper().served).not.toContain('dispatch');
+        await beginAndReturn('native-card');
+        expect(await target.host.approvalApprove!(input)).toEqual({ kind: 'approved' });
+        expect(tripCalls).toEqual([
+          ['begin', 'V1-card'],
+          ['begin', 'native-card'],
+          ['end', 'native-card'],
+        ]);
+        expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'completed' });
+        await target.host.close(session);
+        return;
+      }
       failPreflight = true;
       expect(await target.host.dispatch({ ...input, requestId: 'preflight-failed' })).toMatchObject(
         {

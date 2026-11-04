@@ -442,6 +442,17 @@ export async function startComputerUseWindowsQuarantineSession(
 }
 
 export interface ComputerUseNativeHost {
+  beginApprovalRoundTrip?(input: {
+    session: ComputerUseNativeSession;
+    taskId: string;
+    turnId: string;
+    roundTripId: string;
+    durationMs: number;
+  }): Promise<void>;
+  endApprovalRoundTrip?(
+    sessionId: string,
+    reason: 'rejected' | 'expired' | 'stopped',
+  ): Promise<void>;
   subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
   /** Main-only K-5 receiver. The caller must consume the card's exact trusted activation. */
   approveWindowsQuarantineResume?(
@@ -505,6 +516,7 @@ export interface ComputerUseNativeHost {
       turnId: string;
       cancelEpoch: number;
       resume?: boolean;
+      roundTripId?: string;
       /**
        * The classifier route this session is bound to (ADR v2 D7 / classifier C3). Chosen by Main
        * alone when the session is created and repeated on every later start of the same session;
@@ -4490,6 +4502,7 @@ export class ComputerUseController {
       throw new Error('Computer Use approval decision is not allowed');
     if (decision === 'allow_plan' && !pending.approval.eligibleForPlan)
       throw new Error('Computer Use approval cannot create a plan grant');
+    if (decision === 'deny') await this.endApprovalRoundTrip(record, 'rejected');
     const next = computerUseApprovalSchema.parse({
       ...pending.approval,
       state: 'resolved',
@@ -4542,6 +4555,7 @@ export class ComputerUseController {
               relaxHighImpact,
             ),
           true,
+          pending.approval.id,
         );
       } catch {
         approved = false;
@@ -4551,6 +4565,7 @@ export class ComputerUseController {
         approved &&= this.now() < Date.parse(pending.approval.expiresAt);
     }
     await this.cleanupAbandonedRefocus(record, focusedSession);
+    if (!approved) await this.endApprovalRoundTrip(record, 'rejected');
     if (record.controller.signal.aborted || this.sessions.get(record.status.sessionId) !== record) {
       pending.resolve({ decision: 'deny', reason: 'computer_session_ended' });
       return record.status;
@@ -4598,6 +4613,7 @@ export class ComputerUseController {
       fresh: ComputerUseNativeObservation,
     ) => boolean,
     requireFreshObservation: boolean,
+    roundTripId?: string,
   ): Promise<ComputerUseNativeObservation> {
     this.assertSessionLive(record);
     if (requireFreshObservation && !this.observationIsFresh(record))
@@ -4612,6 +4628,9 @@ export class ComputerUseController {
         turnId: record.turnId,
         cancelEpoch: record.native.cancelEpoch,
         classifierRoute: record.classifierRoute,
+        ...(this.deps.native.beginApprovalRoundTrip === undefined || roundTripId === undefined
+          ? {}
+          : { roundTripId }),
       });
       ctx.focusedSession = focusedSession;
       if (
@@ -4652,7 +4671,8 @@ export class ComputerUseController {
         cancelEpoch: record.native.cancelEpoch,
       }),
     );
-    if (approvedSession.inputSession?.kind === 'background') this.assertSessionLive(record);
+    if (approvedSession.inputSession?.kind === 'background' || this.hasApprovalRoundTrip(record))
+      this.assertSessionLive(record);
     if (
       this.sessions.get(record.status.sessionId) !== record ||
       (approvedSession.inputSession?.kind === 'background' && record.native !== approvedSession)
@@ -4680,6 +4700,12 @@ export class ComputerUseController {
   }
 
   private cancelPendingApprovals(sessionId: string, reason: string): void {
+    void this.deps.native
+      .endApprovalRoundTrip?.(
+        sessionId,
+        reason === 'computer_session_ended' ? 'stopped' : 'rejected',
+      )
+      .catch(() => undefined);
     for (const [id, pending] of this.pendingApprovals) {
       if (pending.approval.sessionId !== sessionId) continue;
       this.pendingApprovals.delete(id);
@@ -5216,7 +5242,48 @@ export class ComputerUseController {
     return { decision: 'deny', reason: 'computer_action_requires_approval' };
   }
 
-  private awaitApproval(
+  private hasApprovalRoundTrip(record: SessionRecord): boolean {
+    return (
+      record.native.inputSession?.kind !== 'background' &&
+      this.deps.native.beginApprovalRoundTrip !== undefined
+    );
+  }
+
+  private async beginApprovalRoundTrip(
+    record: SessionRecord,
+    id: string,
+    durationMs: number,
+  ): Promise<boolean> {
+    if (!this.hasApprovalRoundTrip(record)) return true;
+    try {
+      await this.deps.native.beginApprovalRoundTrip!({
+        session: record.native,
+        taskId: record.status.taskId,
+        turnId: record.turnId,
+        roundTripId: id,
+        durationMs,
+      });
+      this.assertSessionLive(record);
+      return true;
+    } catch {
+      this.revokeInteraction(record);
+      return false;
+    }
+  }
+
+  private async endApprovalRoundTrip(
+    record: SessionRecord,
+    reason: 'rejected' | 'expired' | 'stopped',
+  ): Promise<void> {
+    if (!this.hasApprovalRoundTrip(record)) return;
+    try {
+      await this.deps.native.endApprovalRoundTrip?.(record.status.sessionId, reason);
+    } catch {
+      this.revokeInteraction(record);
+    }
+  }
+
+  private async awaitApproval(
     record: SessionRecord,
     callId: string,
     action: ComputerUseAction,
@@ -5226,6 +5293,9 @@ export class ComputerUseController {
     if (record.interactionRevoked)
       return Promise.resolve({ decision: 'deny', reason: 'native_interaction_revoked' });
     const approvalId = randomUUID();
+    if (!(await this.beginApprovalRoundTrip(record, approvalId, 60_000)))
+      return { decision: 'deny', reason: 'native_interaction_revoked' };
+    const lifetimeMs = this.hasApprovalRoundTrip(record) ? 60_000 : 60 * 60 * 1_000;
     // One reading of the clock: a card's lifetime must not depend on how often the clock advances.
     const createdAtMs = this.now();
     const targetId = 'targetId' in action ? action.targetId : null;
@@ -5274,7 +5344,7 @@ export class ComputerUseController {
       revision: 0,
       challenge,
       createdAt: new Date(createdAtMs).toISOString(),
-      expiresAt: new Date(createdAtMs + 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(createdAtMs + lifetimeMs).toISOString(),
     });
     record.status = this.status(
       record,
@@ -5286,32 +5356,34 @@ export class ComputerUseController {
     );
     this.emit(record.status);
     return new Promise((resolve) => {
-      const timer = setTimeout(
-        () => {
-          const current = this.pendingApprovals.get(approvalId);
-          if (current === undefined) return;
-          this.pendingApprovals.delete(approvalId);
-          record.status = this.status(
-            record,
-            'paused',
-            null,
-            record.observation?.revision ?? record.status.observationRevision,
-            record.status.round,
-            null,
-          );
-          this.emit(record.status);
-          this.deps.publishApproval?.(
-            computerUseApprovalSchema.parse({
-              ...current.approval,
-              state: 'expired',
-              decision: null,
-              revision: current.approval.revision + 1,
-            }),
-          );
-          resolve({ decision: 'deny', reason: 'computer_approval_expired' });
-        },
-        60 * 60 * 1_000,
-      );
+      const timer = setTimeout(() => {
+        const current = this.pendingApprovals.get(approvalId);
+        if (current === undefined) return;
+        if (this.hasApprovalRoundTrip(record)) {
+          void this.endApprovalRoundTrip(record, 'expired');
+          this.revokeInteraction(record);
+          return;
+        }
+        this.pendingApprovals.delete(approvalId);
+        record.status = this.status(
+          record,
+          'paused',
+          null,
+          record.observation?.revision ?? record.status.observationRevision,
+          record.status.round,
+          null,
+        );
+        this.emit(record.status);
+        this.deps.publishApproval?.(
+          computerUseApprovalSchema.parse({
+            ...current.approval,
+            state: 'expired',
+            decision: null,
+            revision: current.approval.revision + 1,
+          }),
+        );
+        resolve({ decision: 'deny', reason: 'computer_approval_expired' });
+      }, lifetimeMs);
       timer.unref?.();
       this.pendingApprovals.set(approvalId, { approval, action, resolve, timer });
       this.deps.publishApproval?.(approval);
@@ -5745,7 +5817,7 @@ export class ComputerUseController {
    * `deny`, never makes a plan grant, and lives for min(remainingMs, 60 s); the V1 card keeps its
    * own 60 minutes. Native's expiry is the authority; Main's clock may only shorten it.
    */
-  private awaitNativeApproval(
+  private async awaitNativeApproval(
     record: SessionRecord,
     callId: string,
     action: ComputerUseAction,
@@ -5756,6 +5828,7 @@ export class ComputerUseController {
     paste?: ArtifactPasteCall,
   ): Promise<NativeApprovalOutcome> {
     const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
+    if (!(await this.beginApprovalRoundTrip(record, approvalId, lifetimeMs))) return 'revoked';
     // One reading of the clock, so expiresAt - createdAt is exactly the lifetime.
     const createdAtMs = this.now();
     const approval = computerUseApprovalSchema.parse({
@@ -5807,6 +5880,11 @@ export class ComputerUseController {
       const timer = setTimeout(() => {
         const current = this.pendingApprovals.get(approvalId);
         if (current === undefined) return;
+        if (this.hasApprovalRoundTrip(record)) {
+          void this.endApprovalRoundTrip(record, 'expired');
+          this.revokeInteraction(record);
+          return;
+        }
         this.pendingApprovals.delete(approvalId);
         record.status = this.status(
           record,
@@ -5947,6 +6025,7 @@ export class ComputerUseController {
     const refuse = async (
       outcome: Exclude<NativeApprovalOutcome, 'approved'>,
     ): Promise<ComputerUseActionResult> => {
+      await this.endApprovalRoundTrip(record, outcome === 'expired' ? 'expired' : 'rejected');
       await this.discardNativeApproval(record, offer.approvalGeneration);
       recordOutcome(outcome);
       pause();
@@ -5981,6 +6060,7 @@ export class ComputerUseController {
         (previous, current) =>
           nativeApprovalObservationEquivalent(previous, current, action, offer.effect, this.now()),
         false,
+        approvalId,
       );
     } catch {
       await this.cleanupAbandonedRefocus(record, ctx.focusedSession);

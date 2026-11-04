@@ -1,5 +1,5 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -11,6 +11,27 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 type Build = Readonly<{
@@ -90,7 +111,9 @@ it('runs the production observation publisher with target-only read substitution
 describe.skipIf(process.platform !== 'win32')(
   'Windows background observation component matrix',
   () => {
-    it('preserves foreground focus and refuses incomplete background observations', ({ skip }) => {
+    it('preserves foreground focus and refuses incomplete background observations', async ({
+      skip,
+    }) => {
       const build = findBuild();
       if (!build) {
         if (process.env.CI) throw new Error('MSVC required');
@@ -148,7 +171,7 @@ describe.skipIf(process.platform !== 'win32')(
           'windowsapp.lib',
           'uuid.lib',
         ]);
-        const compiled = spawnSync(command.file, command.args, {
+        const compiled = await runAsync(command.file, command.args, {
           encoding: 'utf8',
           windowsVerbatimArguments: command.verbatim,
           timeout: 500000,
@@ -156,7 +179,7 @@ describe.skipIf(process.platform !== 'win32')(
         });
         expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
 
-        const result = spawnSync(realpathSync.native(binary), [], {
+        const result = await runAsync(realpathSync.native(binary), [], {
           encoding: 'utf8',
           timeout: 120000,
         });

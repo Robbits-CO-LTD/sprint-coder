@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ApprovalRoundTrips } from './computer-use-approval-round-trip';
 import type { WindowsStopListener } from './computer-use-windows-stop-delivery';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -302,6 +303,8 @@ function createFixture(
     helperGeneration?: () => number | null;
     subscribeWindowsStop?: ComputerUseNativeHost['subscribeWindowsStop'];
     subscribeWindowsInteraction?: ComputerUseNativeHost['subscribeWindowsInteraction'];
+    beginApprovalRoundTrip?: ComputerUseNativeHost['beginApprovalRoundTrip'];
+    endApprovalRoundTrip?: ComputerUseNativeHost['endApprovalRoundTrip'];
     onNativeStart?: (sessionId: string) => void;
     disarmEmergencyStop?: ComputerUseControllerDeps['disarmEmergencyStop'];
     nativeApproval?: {
@@ -378,6 +381,10 @@ function createFixture(
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
+    ...(options.beginApprovalRoundTrip
+      ? { beginApprovalRoundTrip: options.beginApprovalRoundTrip }
+      : {}),
+    ...(options.endApprovalRoundTrip ? { endApprovalRoundTrip: options.endApprovalRoundTrip } : {}),
     ...(options.subscribeWindowsInteraction === undefined
       ? {}
       : {
@@ -1302,6 +1309,122 @@ describe('ComputerUseController', () => {
       helperGeneration: () => 1,
       windowsBackgroundInputForTesting: true,
     };
+
+    it.each([
+      'expiry',
+      'other',
+      'gap',
+      'reversed',
+      'end first',
+      'Stop',
+      'deny',
+      'return race',
+    ] as const)('P5b connected controller card closes on %s', async (fault) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      try {
+        let receive!: Parameters<
+          NonNullable<ComputerUseNativeHost['subscribeWindowsInteraction']>
+        >[0];
+        let bound!: Parameters<ApprovalRoundTrips['begin']>[0];
+        const send = vi.fn(
+          async (wire: Parameters<ApprovalRoundTrips['begin']>[0] | { kind: string }) => ({
+            version: 1,
+            roundTripId: bound.roundTripId,
+            sessionId: bound.sessionId,
+            taskId: bound.taskId,
+            turnId: bound.turnId,
+            helperGeneration: 1,
+            cancelEpoch: 0,
+            kind: wire.kind === 'begin' ? 'begin_result' : 'end_result',
+            accepted: true,
+            failureReason: 'none',
+            failureLatched: false,
+          }),
+        );
+        const trips = new ApprovalRoundTrips(send, (event) => receive(event));
+        const { fixture, acting, sessionId } = await offered(
+          {
+            ...backgroundOptions,
+            windowsBackgroundInputForTesting: false,
+            authorizationRequired: true,
+            observationOverridesForRevision: (revision) => {
+              if (fault === 'return race' && revision === 2)
+                trips.receive({
+                  ...bound,
+                  kind: 'event',
+                  sequence: 1,
+                  state: 'failed',
+                  foreground: 'other',
+                  failureReason: 'third_window',
+                  failureLatched: true,
+                });
+              return {};
+            },
+            subscribeWindowsInteraction: (listener) => {
+              receive = listener;
+              return () => {};
+            },
+            beginApprovalRoundTrip: async (input) => {
+              bound = {
+                version: 1,
+                kind: 'begin',
+                roundTripId: input.roundTripId,
+                sessionId: input.session.sessionId,
+                taskId: input.taskId,
+                turnId: input.turnId,
+                helperGeneration: 1,
+                cancelEpoch: input.session.cancelEpoch,
+                durationMs: input.durationMs,
+                mainPid: 42,
+                mainProcessStartTime: '123',
+                mainImageIdentity: 'a'.repeat(64),
+              };
+              await trips.begin(bound);
+            },
+            endApprovalRoundTrip: (id, reason) => trips.cancel(id, reason),
+          },
+          'supervised',
+        );
+        const settled = expect(acting).rejects.toThrow();
+        await vi.advanceTimersByTimeAsync(1);
+        const card = pendingCard(fixture);
+        expect(Date.parse(card.expiresAt) - Date.parse(card.createdAt)).toBe(60_000);
+        const event = {
+          ...bound,
+          kind: 'event' as const,
+          sequence: 1,
+          state: 'active' as const,
+          foreground: 'sprint_coder' as const,
+          failureReason: 'none' as const,
+          failureLatched: false,
+        };
+        if (fault === 'expiry') await vi.advanceTimersByTimeAsync(60_000);
+        if (fault === 'other') trips.receive({ ...event, foreground: 'other' });
+        if (fault === 'gap') trips.receive({ ...event, sequence: 2 });
+        if (fault === 'reversed') {
+          trips.receive(event);
+          trips.receive(event);
+        }
+        if (fault === 'end first') trips.receive({ ...event, state: 'ended' });
+        if (fault === 'Stop') await fixture.controller.stop(sessionId);
+        if (fault === 'deny') await clickCard(fixture, 'deny');
+        if (fault === 'return race') await clickCard(fixture);
+        await settled;
+        expect(fixture.controller.getStatus(sessionId)?.pendingApproval ?? null).toBeNull();
+        if (fault !== 'Stop') expect(fixture.controller.getStatus(sessionId)?.state).toBe('paused');
+        expect(
+          fixture.approvals.some(
+            (row) =>
+              row.id === card.id &&
+              row.state === (fault === 'return race' ? 'resolved' : 'canceled'),
+          ),
+        ).toBe(true);
+        expect(fixture.dispatchCount()).toBe(0);
+        if (fault !== 'Stop') await fixture.controller.stop(sessionId);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it.each(['V1', 'native', 'two cards', 'foreground'] as const)(
       'P5a approval return: %s reobserves before dispatch and never reuses a card',
