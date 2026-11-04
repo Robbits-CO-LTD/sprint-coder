@@ -126,7 +126,20 @@ function componentSource(): string {
     .replaceAll('GetWindowThreadProcessId(', 'ComponentWindowOwner(')
     .replaceAll('IsWindow(', 'ComponentWindow(');
   const prefix = source.slice(0, identityBegin) + identity + source.slice(identityEnd, begin);
-  return (prefix + shared + source.slice(end))
+  let component = prefix + shared + source.slice(end);
+  // Only the measured judgement is synthetic. Keep admission, session adoption, rejudge and
+  // not-web binding as production code, so a lost file-key handoff fails the Store case.
+  for (const call of [
+    'JudgeWindowsV2Target(work.pid, work.window, context, &judged);',
+    'JudgeWindowsV2Target(pid, window, context, &judged);',
+  ]) {
+    component = replaceOne(
+      component,
+      call,
+      call.replace('JudgeWindowsV2Target', 'ComponentStoreJudgement'),
+    );
+  }
+  return component
     .replaceAll('CloseHandle(', 'ComponentCloseHandle(')
     .replaceAll('DuplicateHandle(', 'ComponentDuplicateHandle(')
     .replaceAll('CancelSynchronousIo(', 'ComponentCancelSynchronousIo(');
@@ -136,6 +149,9 @@ it('limits component substitutions to the shared measurement and retains real el
   const built = componentSource();
   expect(built).toContain('WindowsExecutableIdentityMatches(executable.identity');
   expect(built).toContain('IsSupportedWindowsV1Target(executable.identity)');
+  expect(built).toContain('/*session_recorded=*/true, judged.not_web_package);');
+  expect(built).toContain('/*session_recorded=*/false, judged.not_web_package)');
+  expect(built).toContain('session.not_web_file = measured.not_web_file;');
 });
 
 it('registers cancellation only for measurement and refuses occupied sessions before I/O', () => {
@@ -184,6 +200,8 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
         '/DNOMINMAX',
         '/D_WIN32_WINNT=0x0A00',
         '/DSPRINT_CODER_ELIGIBILITY_V2=1',
+        '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+        '/DSPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB=1',
         `/FI${provenance}`,
         `/I${nativeDirectory}`,
         file,
@@ -223,8 +241,9 @@ describe.skipIf(process.platform !== 'win32')('Windows shared new-start componen
       });
       expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
       expect(result.stdout).toContain(
-        'PASS: 66 component cases, controlled focus only, no OS input',
+        'PASS: 67 component cases, controlled focus only, no OS input',
       );
+      expect(result.stdout).toContain('CASE:store-notepad-start-rejudge-changed-key');
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }

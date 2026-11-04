@@ -19,6 +19,8 @@ struct LockedWindowsExecutable;
 struct WindowsStartInput;
 struct WindowsNewStartMeasurement;
 struct WindowsTargetFactsContext;
+struct WindowsV2Judgement;
+void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement*);
 HANDLE ComponentOpenProcess(DWORD access, BOOL inherit, DWORD pid);
 bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output);
 BOOL ComponentCloseHandle(HANDLE handle);
@@ -80,6 +82,7 @@ struct Case {
   bool measurement_failure = false, allocation_failure = false, com_failure = false;
   bool latch_during_read = false;
   bool occupied = false;
+  bool store_notepad = false, changed_store_key = false;
   std::uint64_t global_epoch = 0, closed_epoch = 0, input_epoch = 0;
   std::optional<std::uint64_t> adopt_epoch;
 };
@@ -148,7 +151,35 @@ bool ComponentOpenExecutable(HANDLE process, LockedWindowsExecutable* output) {
 WindowsTargetFactsContext ComponentContext(std::uint32_t pid) {
   contexts.fetch_add(1); WindowsTargetFactsContext value; value.lineage_root_pid = pid; return value;
 }
-bool ComponentAdmit(const WindowsStartInput&, WindowsNewStartMeasurement* measured) {
+void ComponentStoreJudgement(DWORD, HWND, const WindowsTargetFactsContext&, WindowsV2Judgement* out) {
+  using namespace sprint_coder::computer_use;
+  Check(current.store_notepad, "controlled Store measurement only");
+  Check(ComponentOpenExecutable(GetCurrentProcess(), &out->executable), "Store held image");
+  out->verdict = {TargetVerdictKind::kEligible, "observe_only"};
+  out->app_identity = std::string(64, 'a');
+  Check(ReadProcessStartIdentity(GetCurrentProcess(), &out->process_start), "Store creation time");
+  out->measured.file_identity = out->executable.identity.file_identity;
+  out->held_key = WindowsFileKeyOf(*out->measured.file_identity);
+  if (current.changed_store_key) out->held_key->file_id[0] ^= 1;
+  auto& facts = out->measured.facts;
+  facts.platform = TargetPlatform::kWin32;
+  facts.running_image_matches = true; facts.packaged = true;
+  facts.package_family = "Microsoft.WindowsNotepad_8wekyb3d8bbwe";
+  facts.package_signature_kind = "store"; facts.package_development_mode = false;
+  facts.image_root = "windows_apps"; facts.image_volume = "fixed"; facts.pe_subsystem = "gui";
+  out->not_web_package = WindowsPackageIdentityParts{*facts.package_family,
+      "8wekyb3d8bbwe", "notepad\\notepad.exe", {}};
+}
+bool ComponentAdmit(const WindowsStartInput& input, WindowsNewStartMeasurement* measured) {
+  if (current.store_notepad) {
+    LockedWindowsExecutable locked;
+    Check(ComponentOpenExecutable(GetCurrentProcess(), &locked), "Store start locked image");
+    WindowsTargetFactsContext context; context.lineage_root_pid = GetCurrentProcessId();
+    return AdmitWindowsV2StartInContext(input.pid, input.window, locked, context,
+        sprint_coder::computer_use::DenyRulesetVersion(sprint_coder::computer_use::TargetPlatform::kWin32),
+        1, 1, true, input.app_identity, input.executable_digest, input.signer_digest,
+        &measured->maximum_mode, &measured->not_web_file);
+  }
   measured->maximum_mode = current.supervised_ceiling ? "supervised" : "observe_only"; return true;
 }
 bool ComponentBackgroundGate() { return current.background_gate; }
@@ -373,7 +404,17 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     const auto epoch = std::max(config.input_epoch, config.adopt_epoch.value_or(config.global_epoch));
     Check(session.eligibility_basis == input.eligibility_basis && session.cancel_epoch == epoch && cancellation_epoch.load() == epoch, "basis and epoch");
     Check(session.maximum_mode == (config.v2 ? "observe_only" : "full_access_app") && session.policy_language == "en", "mode and language");
-    Check(!session.not_web_file, "no invented not-web key");
+    if (config.store_notepad) {
+      Check(session.not_web_file.has_value(), "Store start records not_web_file");
+      const auto recorded = session.not_web_file;
+      std::string rejudge_reason;
+      Check(JudgeWindowsV2Input(session, &rejudge_reason), "Store first rejudge matches session");
+      Check(session.v2_input_not_web == std::optional<bool>(true), "Store first rejudge is not-web");
+      current.changed_store_key = true;
+      Check(JudgeWindowsV2Input(session, &rejudge_reason), "Store key-only rejudge completes");
+      Check(session.v2_input_not_web == std::optional<bool>(false), "Store changed key is not not-web");
+      Check(session.not_web_file == recorded, "Store rejudge cannot replace recorded start key");
+    } else Check(!session.not_web_file, "no invented not-web key");
     std::string process_start;
     Check(ReadJsonString(response, "processStartTime", &process_start) && process_start == created &&
           process_start == session.process_start, "bound process creation time");
@@ -474,6 +515,8 @@ int wmain() {
     Run("BG08-v1-new-start-never-autofocus", c, false, "focus_required", 1);
     c.background_supported = true;
     Run("BG-v1-background-start", c, true, "", 2);
+    c = {}; c.v2 = true; c.store_notepad = true;
+    Run("store-notepad-start-rejudge-changed-key", c, true, "", 1);
     CoUninitialize();
     std::cout << "PASS: " << case_count << " component cases, controlled focus only, no OS input\n"; return 0;
   } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << "\n"; return 1; }

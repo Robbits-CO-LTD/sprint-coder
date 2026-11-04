@@ -16,6 +16,7 @@ import {
   type WindowsExplorerOperation,
 } from './computer-use-explorer-effect';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
+import type { WindowsCloseCallbacks } from './computer-use-native-types';
 const digest = (digit: string): string => digit.repeat(64);
 function binding(
   addon: NonNullable<ComputerUseNativeBinding['addon']>,
@@ -414,6 +415,72 @@ it('explorer_executable_open_stays_blocked', async () => {
     expect(windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
   }
 });
+it.each([
+  'hta',
+  'jse',
+  'vbe',
+  'wsh',
+  'ws',
+  'reg',
+  'msp',
+  'mst',
+  'application',
+  'appinstaller',
+  'msix',
+  'appx',
+  'diagcab',
+  'settingcontent-ms',
+  'library-ms',
+  'search-ms',
+  'searchconnector-ms',
+  'chm',
+  'inf',
+  'jar',
+  'xbap',
+  'website',
+  'unknown',
+  '',
+])('does not classify .%s as a document', (extension) => {
+  const effect = classifyWindowsExplorerOperation({
+    verb: 'open',
+    item: {
+      path: 'C:\\Folder\\item' + (extension ? '.' + extension : ''),
+      kind: 'file',
+      surface: 'file_list',
+    },
+  });
+  expect(['unknown', 'executable_open']).toContain(effect);
+});
+it.each([
+  'txt',
+  'md',
+  'log',
+  'csv',
+  'json',
+  'xml',
+  'pdf',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'bmp',
+  'webp',
+  'docx',
+  'xlsx',
+  'pptx',
+  'rtf',
+  'TXT',
+])('classifies allowed documents .%s but keeps them blocked', async (extension) => {
+  const { host, session } = await explorerScenario();
+  const operation = {
+    verb: 'open',
+    item: { path: 'C:\\Folder\\item.' + extension, kind: 'file', surface: 'file_list' },
+  };
+  expect(classifyWindowsExplorerOperation(operation)).toBe('document_open');
+  expect(
+    windowsExplorerExceptionAllowedForTesting({ ...inputFor(host, session.sessionId), operation }),
+  ).toBe(false);
+});
 it('rejects caller Explorer facts for a session bound to Target.exe', async () => {
   const { host, session } = await withFacts({
     ...facts,
@@ -518,6 +585,52 @@ it('revokes retained Explorer evidence when a Stop enters quarantine', async () 
   ).toBe(false);
 });
 
+it('rejects the old cancel epoch after ledger receipt completion without replacing the session', async () => {
+  let ledger!: WindowsCloseCallbacks;
+  let forgetCompletedStart!: (sessionId: string) => boolean;
+  const scenario = await explorerScenario(
+    {
+      windowsCompletedStartForTesting: (forget) => {
+        forgetCompletedStart = forget;
+      },
+      windowsLedger: {
+        write: () => true,
+        update: () => true,
+        delete: () => true,
+        restoreQuarantines: () => true,
+      },
+    },
+    {
+      configureCloseLedger: (callbacks: WindowsCloseCallbacks) => {
+        ledger = callbacks;
+      },
+      cancel: (input: { sessionId: string; cancelEpoch: number }) => ({
+        result: 'canceled',
+        drained: true,
+        ...input,
+        inputAttemptCount: 0,
+      }),
+    },
+  );
+  const old = inputFor(scenario.host, scenario.session.sessionId);
+  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(true);
+  expect(forgetCompletedStart(scenario.session.sessionId)).toBe(true);
+  await scenario.host.cancel(scenario.session, 1);
+  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+  expect(readWindowsExplorerApproval(scenario.host, scenario.session.sessionId)).toBeUndefined();
+  ledger.received(1, scenario.session.sessionId);
+  const completed = vi.fn();
+  await expect(ledger.verified(1, scenario.session.sessionId, completed)).resolves.toEqual({
+    status: 'confirmed',
+  });
+  expect(completed).toHaveBeenCalledTimes(1);
+  expect(ledger.blocked(1)).toBe(false);
+  const fresh = inputFor(scenario.host, scenario.session.sessionId);
+  expect(fresh.approval).toBeDefined();
+  expect(windowsExplorerExceptionAllowedForTesting(fresh)).toBe(true);
+  expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+  expect(scenario.startSession).toHaveBeenCalledTimes(1);
+});
 it.each([false, true])(
   'rejects old capability after quarantine release and id reuse (cancel=%s)',
   async (cancelFirst) => {

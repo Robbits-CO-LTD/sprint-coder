@@ -48,6 +48,31 @@ import {
 
 const roots: string[] = [];
 
+function checkNativeTestDefinition(definition: string, owner: string, guards: readonly string[]) {
+  const native = join(__dirname, '../../computer-use-native');
+  const scan = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!/fixture|harness|^build$|^node_modules$/u.test(entry.name)) scan(path);
+      } else if (
+        /\.(?:h|cc|inc|mm)$/u.test(entry.name) &&
+        !/(?:_test\.cc$|harness|fixture)/u.test(entry.name)
+      ) {
+        let source = readFileSync(path, 'utf8');
+        if (path === join(native, owner)) {
+          for (const guard of guards) {
+            expect(source.split(guard), path).toHaveLength(2);
+            source = source.replace(guard, '');
+          }
+        }
+        expect(source, path).not.toContain(definition);
+      }
+    }
+  };
+  scan(native);
+}
+
 it('keeps Store Notepad not-web binding acceptance-test-only and bound at start and rejudge', () => {
   const facts = readFileSync(
     join(__dirname, '../../computer-use-native/computer_use_windows_target_facts.h'),
@@ -69,6 +94,9 @@ it('keeps Store Notepad not-web binding acceptance-test-only and bound at start 
   expect(targets).toContain('/*session_recorded=*/false, judged.not_web_package)');
   const root = join(__dirname, '../../../..');
   const definition = 'SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB';
+  checkNativeTestDefinition(definition, 'computer_use_windows_target_facts.h', [
+    `#if defined(${definition})`,
+  ]);
   const scan = (directory: string, recursive: boolean) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
@@ -114,7 +142,31 @@ it('limits the IL-only PE32 conversion to a verified native 64-bit process', () 
   expect(source).toContain('process_machine == IMAGE_FILE_MACHINE_UNKNOWN');
 });
 
+it('restricts IL-only held facts to protected image roots before reading signatures', () => {
+  const source = readWindowsHostSource();
+  expect(source).toContain('info.il_only_anchor = true;');
+  expect(source).toContain('held->il_only_anchor = kernel->il_only_anchor;');
+  const heldFacts = source.slice(source.indexOf('void MeasureWindowsTargetHeldFacts('));
+  const guard = heldFacts.indexOf('if (held.il_only_anchor &&');
+  expect(guard).toBeGreaterThan(heldFacts.indexOf('facts.image_root = std::move(placement.root);'));
+  expect(guard).toBeLessThan(heldFacts.indexOf('VerifyWindowsTargetSignature('));
+  expect(heldFacts.slice(guard, heldFacts.indexOf('VerifyWindowsTargetSignature('))).toContain(
+    'facts.running_image_matches = false;',
+  );
+  expect(heldFacts.slice(guard, heldFacts.indexOf('VerifyWindowsTargetSignature('))).toMatch(
+    /windows_directory[\s\S]*program_files[\s\S]*windows_apps/u,
+  );
+});
+
 it('keeps the IL-only test switch out of production build inputs', () => {
+  checkNativeTestDefinition(
+    'SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR',
+    'computer_use_windows_host_target_facts.inc',
+    [
+      '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && (defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE))',
+      '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
+    ],
+  );
   const root = join(__dirname, '../../../..');
   const files = ['apps/desktop/computer-use-native/binding.gyp'];
   for (const directory of ['', 'apps/desktop/scripts', 'scripts', '.github/workflows']) {
@@ -135,6 +187,11 @@ it('keeps the IL-only test switch out of production build inputs', () => {
 });
 
 it('keeps the Explorer exception closed and its test macro out of production inputs', () => {
+  checkNativeTestDefinition(
+    'SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION',
+    'computer_use_windows_target_facts.h',
+    ['#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)'],
+  );
   const native = join(__dirname, '../../computer-use-native');
   const facts = readFileSync(join(native, 'computer_use_windows_target_facts.h'), 'utf8');
   expect(facts).toContain('#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)');
@@ -155,12 +212,20 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   expect(controller.match(/windowsExplorerExceptionAllowedForTesting\(/gu)).toHaveLength(1);
   expect(controller.match(/evaluateWindowsExplorerException\(/gu)).toHaveLength(3);
   for (const file of readdirSync(__dirname)) {
-    if (!file.endsWith('.ts') || file.endsWith('.test.ts') || file === 'computer-use-controller.ts')
-      continue;
-    expect(readFileSync(join(__dirname, file), 'utf8'), file).not.toContain(
-      'windowsExplorerExceptionAllowed',
-    );
+    if (!file.endsWith('.ts') || file.endsWith('.test.ts')) continue;
+    const text = readFileSync(join(__dirname, file), 'utf8');
+    if (file !== 'computer-use-controller.ts')
+      expect(text, file).not.toContain('windowsExplorerExceptionAllowed');
+    // The test-only start option is declared and read in the host alone; no production file,
+    // the controller included, passes it.
+    if (file !== 'computer-use-native-host.ts')
+      expect(text, file).not.toContain('windowsCompletedStartForTesting');
   }
+  expect(
+    readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8').match(
+      /windowsCompletedStartForTesting/gu,
+    )?.length,
+  ).toBe(2);
   expect(readWindowsHostSource().match(/WindowsExplorerFileWindowRestriction\(/gu)).toHaveLength(1);
   expect(readWindowsHostSource()).toContain('shell_view_is_filesystem_folder = std::nullopt');
   expect(readWindowsHostSource()).toContain(
