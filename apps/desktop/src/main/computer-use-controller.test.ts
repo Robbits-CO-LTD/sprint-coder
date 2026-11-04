@@ -1397,6 +1397,98 @@ describe('ComputerUseController', () => {
       };
     }
 
+    it('P6 publishes only gated display facts and consumes a trusted handoff once', async () => {
+      const { fixture, input, activation } = await handoffFixture({ handoffAllowed: true });
+      const display = fixture.controller.getStatus(input.sessionId)!.inputDisplay;
+      expect(display).toEqual({
+        sessionKind: 'background',
+        handoff: {
+          id: input.intentId,
+          operation: 'click',
+          expiresAt: expect.any(String),
+        },
+      });
+      expect(fixture.controller.getStatus(input.sessionId)!.resumable).toBe(false);
+      const pending = fixture.controller.getStatus(input.sessionId)!;
+      await expect(
+        fixture.controller.start({
+          resumeSessionId: pending.sessionId,
+          taskId: pending.taskId,
+          profileId: pending.profileId,
+          windowId: pending.windowId,
+          mode: pending.mode,
+          connectionId: pending.connectionId,
+          modelId: pending.modelId,
+          providerEgressConsent: true,
+          providerEgressConsentBinding: {
+            connectionId: pending.connectionId,
+            modelId: pending.modelId,
+          },
+          remember: false,
+          maxRounds: pending.maxRounds,
+          expectedPolicyEpoch: pending.policyEpoch,
+          expectedWindowRevision: 0,
+          expectedProfileRevision: pending.profileRevision,
+        }),
+      ).rejects.toThrow('not resumable');
+      expect(activation).not.toHaveBeenCalled();
+      const trusted = vi.fn(() => true);
+      const request = {
+        sessionId: input.sessionId,
+        intentId: input.intentId,
+        decision: 'continue' as const,
+      };
+      const status = await fixture.controller.resolveForegroundHandoff(request, trusted);
+      expect(trusted).toHaveBeenCalledExactlyOnceWith(input.intentId);
+      expect(status.inputDisplay).toEqual({ sessionKind: 'foreground', handoff: null });
+      expect(status.resumable).toBeUndefined();
+      expect(fixture.dispatchCount()).toBe(0);
+      await expect(fixture.controller.resolveForegroundHandoff(request, trusted)).rejects.toThrow();
+      expect(trusted).toHaveBeenCalledTimes(1);
+      await fixture.controller.stop(input.sessionId);
+    });
+
+    it.each(['deny', 'untrusted', 'expire', 'stop'] as const)(
+      'P6 %s removes handoff without foreground transition',
+      async (reason) => {
+        const { fixture, input, expire } = await handoffFixture({ handoffAllowed: true });
+        if (reason === 'expire') expire();
+        if (reason === 'stop') await fixture.controller.stop(input.sessionId);
+        const trusted = vi.fn(() => reason !== 'untrusted');
+        const result = fixture.controller.resolveForegroundHandoff(
+          {
+            sessionId: input.sessionId,
+            intentId: input.intentId,
+            decision: reason === 'deny' ? 'deny' : 'continue',
+          },
+          trusted,
+        );
+        if (reason === 'deny')
+          await expect(result).resolves.toMatchObject({ inputDisplay: { handoff: null } });
+        else await expect(result).rejects.toThrow();
+        expect(fixture.controller.pendingForegroundHandoff(input.sessionId)).toBeNull();
+        expect(fixture.nativeLog).not.toContain('allowWindowsForegroundHandoff');
+        expect(fixture.dispatchCount()).toBe(0);
+        if (reason !== 'stop') await fixture.controller.stop(input.sessionId);
+      },
+    );
+
+    it('P6 does not publish route or handoff with the gate closed', async () => {
+      const fixture = createFixture();
+      const status = await start(fixture);
+      expect(status.inputDisplay).toBeUndefined();
+      expect(fixture.controller.getStatus(status.sessionId)!.inputDisplay).toBeUndefined();
+      const trusted = vi.fn(() => true);
+      await expect(
+        fixture.controller.resolveForegroundHandoff(
+          { sessionId: status.sessionId, intentId: 'not-published', decision: 'continue' },
+          trusted,
+        ),
+      ).rejects.toThrow();
+      expect(trusted).not.toHaveBeenCalled();
+      await fixture.controller.stop(status.sessionId);
+    });
+
     it('P5c2b-T2 generation capability rejects reconstruction from the same number', () => {
       let generation: number | null = 1;
       const fixture = createFixture({ helperGeneration: () => generation });

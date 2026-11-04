@@ -47,6 +47,7 @@ import {
   commandResultSchema,
   computerAppProfileSchema,
   computerUseApprovalResolveInputSchema,
+  computerUseForegroundHandoffResolveInputSchema,
   computerUseAvailabilitySchema,
   computerAppGrantRequestSchema,
   computerAppGrantResolveInputSchema,
@@ -556,6 +557,15 @@ const api: SprintCoderApi = {
       ),
     stop: (input) =>
       invoke(IPC_CHANNELS.computerUseStop, computerUseStopInputSchema, z.undefined(), input),
+    resolveForegroundHandoff: (input) =>
+      trustedComputerUseActivation.consume('foreground-handoff')
+        ? invoke(
+            IPC_CHANNELS.computerUseForegroundHandoffResolve,
+            computerUseForegroundHandoffResolveInputSchema,
+            computerUseSessionStatusSchema,
+            input,
+          )
+        : Promise.reject(new Error('Computer Use handoff requires a trusted click')),
     resolveApproval: (input) =>
       trustedComputerUseActivation.consume('approval')
         ? invoke(

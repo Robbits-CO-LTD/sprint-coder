@@ -18,6 +18,8 @@ import {
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   computerUseApprovalSchema,
+  computerUseForegroundHandoffResolveInputSchema,
+  computerUseInputDisplaySchema,
   type ComputerUseWindowCandidate,
   type ComputerUseAction,
   type ComputerUseApproval,
@@ -67,6 +69,7 @@ import {
 } from '../computer-use-activation';
 import {
   appGrantActivationIntent,
+  foregroundHandoffActivationIntent,
   approvalActivationIntent,
   quickStartActivationIntent,
   startActivationIntent,
@@ -303,6 +306,7 @@ function captureComputerUseHandlers(): {
     turnEnded: vi.fn(),
     taskClosed: vi.fn(),
     resolveApproval: vi.fn(async () => undefined),
+    resolveForegroundHandoff: vi.fn(),
     getStatus: vi.fn(() => null),
     policyEpochChanged: vi.fn(),
     dispose: vi.fn(async () => undefined),
@@ -358,6 +362,86 @@ function captureComputerUseHandlers(): {
 }
 
 describe('Computer Use Main IPC integration', () => {
+  it.each(['continue', 'deny'] as const)(
+    'P6 IPC binds trusted activation to the exact %s intent',
+    async (decision) => {
+      const f = captureComputerUseHandlers();
+      const input = { sessionId: 'session-1', intentId: 'handoff-1', decision };
+      const event = {};
+      const handler = f.handlers.get(IPC_CHANNELS.computerUseForegroundHandoffResolve)!;
+      f.controller['resolveForegroundHandoff']!.mockImplementation(async (value, consume) => {
+        expect(value).toEqual(input);
+        if (!consume(input.intentId)) throw new Error('activation refused');
+        return { state: 'paused' };
+      });
+      expect(f.activation.consume).not.toHaveBeenCalled();
+      await expect(handler(input, event, {})).rejects.toThrow('activation refused');
+      f.activation.consume.mockReturnValue({
+        intent: foregroundHandoffActivationIntent({ ...input, intentId: 'other' }),
+      });
+      await expect(handler(input, event, {})).rejects.toThrow('activation refused');
+      f.activation.consume.mockReturnValue({ intent: foregroundHandoffActivationIntent(input) });
+      await expect(handler(input, event, {})).resolves.toEqual({ state: 'paused' });
+      expect(f.activation.consume).toHaveBeenLastCalledWith(event, 'foreground-handoff');
+      expect(f.schemas.get(IPC_CHANNELS.computerUseForegroundHandoffResolve)).toEqual({
+        input: computerUseForegroundHandoffResolveInputSchema,
+        output: computerUseSessionStatusSchema,
+      });
+    },
+  );
+
+  it('P6 contracts reject unknown authority and identity fields at both IPC boundaries', () => {
+    const request = { sessionId: 'session-1', intentId: 'handoff-1', decision: 'continue' };
+    expect(computerUseForegroundHandoffResolveInputSchema.safeParse(request).success).toBe(true);
+    for (const extra of [
+      { pid: 12 },
+      { hwnd: '12' },
+      { path: 'C:/target.exe' },
+      { trustedActivation: true },
+      { action: { type: 'click' } },
+      { decision: 'allow_once' },
+      { intentId: '' },
+      { sessionId: '' },
+    ])
+      expect(
+        computerUseForegroundHandoffResolveInputSchema.safeParse({ ...request, ...extra }).success,
+      ).toBe(false);
+    for (const key of Object.keys(request)) {
+      const missing = { ...request };
+      Reflect.deleteProperty(missing, key);
+      expect(computerUseForegroundHandoffResolveInputSchema.safeParse(missing).success).toBe(false);
+    }
+    const display = {
+      sessionKind: 'background',
+      handoff: {
+        id: 'handoff-1',
+        operation: 'click',
+        expiresAt: '2026-11-04T00:01:00.000Z',
+      },
+    };
+    expect(computerUseInputDisplaySchema.safeParse(display).success).toBe(true);
+    for (const extra of [
+      { pid: 12 },
+      { hwnd: '12' },
+      { path: 'C:/target.exe' },
+      { sessionKind: 'unknown' },
+      { sessionKind: 'foreground' },
+    ])
+      expect(computerUseInputDisplaySchema.safeParse({ ...display, ...extra }).success).toBe(false);
+    for (const extra of [
+      { helperGeneration: 1 },
+      { actionDigest: 'a'.repeat(64) },
+      { operation: 'unknown' },
+      { expiresAt: 'invalid' },
+    ])
+      expect(
+        computerUseInputDisplaySchema.safeParse({
+          ...display,
+          handoff: { ...display.handoff, ...extra },
+        }).success,
+      ).toBe(false);
+  });
+
   it('T15-9 (N19): an excerpt reaches the Renderer on the status channel and nowhere else', async () => {
     const fixture = captureComputerUseHandlers();
     const sent: Array<{ channel: string; payload: unknown }> = [];

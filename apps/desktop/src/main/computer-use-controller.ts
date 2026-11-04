@@ -33,6 +33,8 @@ import {
   computerAppGrantViewSchema,
   computerAppProfileSchema,
   computerUseActionSchema,
+  type ComputerUseForegroundHandoffResolveInput,
+  type ComputerUseInputDisplay,
   computerUseActionResultSchema,
   computerUseApprovalSchema,
   computerUseAvailabilitySchema,
@@ -721,7 +723,7 @@ export type ComputerUseAuthorization =
   ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
 
 export type ComputerUseControllerDeps = Readonly<{
-  /** P5c2a Main-only injection. No production/IPC wiring until native transition is complete. */
+  /** Main-only test gate. P6 IPC never enables this; production remains closed until P8. */
   foregroundHandoffForTesting?: Readonly<{
     consumeTrustedActivation: (intentId: string) => boolean;
     monotonicNow?: () => number;
@@ -934,7 +936,10 @@ export type ConsumedComputerUseForegroundHandoff = ComputerUseForegroundHandoffI
 type SessionRecord = {
   handoffHelperGeneration?: WindowsGenerationToken | null;
   /** Presence keeps input closed even after expiry, refusal or consumption. */
-  foregroundHandoff?: { intent: ComputerUseForegroundHandoffIntent | null };
+  foregroundHandoff?: {
+    intent: ComputerUseForegroundHandoffIntent | null;
+    action: ComputerUseAction;
+  };
   interactionRevoked?: true;
   requestedStopReason?: ComputerUseStopReason;
   status: ComputerUseSessionStatus;
@@ -3624,7 +3629,8 @@ export class ComputerUseController {
       this.startInProgress ||
       record.status.state !== 'paused' ||
       // A revoked session holds no authority to resume; only Stop ends it (then a fresh start).
-      record.interactionRevoked
+      record.interactionRevoked ||
+      record.foregroundHandoff !== undefined
     )
       throw new Error('Computer Use session is not resumable');
     if (
@@ -4155,7 +4161,7 @@ export class ComputerUseController {
       to: 'foreground_input',
       deadline: this.handoffNow() + 60_000,
     });
-    record.foregroundHandoff = { intent };
+    record.foregroundHandoff = { intent, action: computerUseActionSchema.parse(action) };
     record.planGrant = null;
     record.status = this.status(record, 'paused', null);
     this.emit(record.status);
@@ -4213,6 +4219,7 @@ export class ComputerUseController {
       turnId: string;
       action: ComputerUseAction;
     }>,
+    consumeTrustedActivation = this.deps.foregroundHandoffForTesting?.consumeTrustedActivation,
   ): ConsumedComputerUseForegroundHandoff {
     const record = this.requireSession(input.sessionId);
     const intent = record.foregroundHandoff?.intent;
@@ -4226,13 +4233,75 @@ export class ComputerUseController {
       input.turnId !== intent.turnId ||
       computerUseActionDigest(computerUseActionSchema.parse(input.action)) !==
         intent.actionDigest ||
-      this.deps.foregroundHandoffForTesting?.consumeTrustedActivation(intent.id) !== true
+      consumeTrustedActivation?.(intent.id) !== true
     )
       throw new Error('Computer Use foreground handoff activation refused');
     this.assertHandoffCurrent(record, intent);
     const consumed = Object.freeze({ ...intent, state: 'consumed' as const });
     this.consumedHandoffs.add(consumed);
     return consumed;
+  }
+
+  async resolveForegroundHandoff(
+    input: ComputerUseForegroundHandoffResolveInput,
+    consumeTrustedActivation: (intentId: string) => boolean,
+  ): Promise<ComputerUseSessionStatus> {
+    const record = this.requireSession(input.sessionId);
+    const intent = this.pendingForegroundHandoff(input.sessionId);
+    const action = record.foregroundHandoff?.action;
+    if (!intent || !action || intent.id !== input.intentId)
+      throw new Error('Computer Use foreground handoff unavailable');
+    try {
+      if (input.decision === 'deny') {
+        record.foregroundHandoff!.intent = null;
+        if (!consumeTrustedActivation(intent.id))
+          throw new Error('Computer Use foreground handoff activation refused');
+      } else {
+        const consumed = this.consumeForegroundHandoff(
+          {
+            sessionId: input.sessionId,
+            intentId: input.intentId,
+            taskId: intent.taskId,
+            turnId: intent.turnId,
+            action,
+          },
+          consumeTrustedActivation,
+        );
+        await this.transitionForegroundHandoff(consumed);
+      }
+    } finally {
+      this.emit(record.status);
+    }
+    return record.status;
+  }
+
+  private inputDisplay(record: SessionRecord): ComputerUseInputDisplay | undefined {
+    if (
+      !this.deps.foregroundHandoffForTesting ||
+      record.native.platform !== 'win32' ||
+      !record.native.inputSession
+    )
+      return undefined;
+    const intent = this.pendingForegroundHandoff(record.status.sessionId);
+    const action = record.foregroundHandoff?.action;
+    const operation = action?.type;
+    return {
+      sessionKind: record.native.inputSession.kind,
+      handoff:
+        intent &&
+        (operation === 'click' ||
+          operation === 'type' ||
+          operation === 'key' ||
+          operation === 'scroll')
+          ? {
+              id: intent.id,
+              operation,
+              expiresAt: new Date(
+                this.now() + Math.max(0, intent.deadline - this.handoffNow()),
+              ).toISOString(),
+            }
+          : null,
+    };
   }
 
   /** Main-only, test-gated transition. The original action is never replayed. */
@@ -4949,9 +5018,14 @@ export class ComputerUseController {
   }
 
   getStatus(sessionId: string): ComputerUseSessionStatus | null {
-    return (
-      this.sessions.get(sessionId)?.status ?? this.startingSessions.get(sessionId)?.status ?? null
-    );
+    const record = this.sessions.get(sessionId);
+    if (record)
+      return computerUseSessionStatusSchema.parse({
+        ...record.status,
+        resumable: record.interactionRevoked || record.foregroundHandoff ? false : undefined,
+        inputDisplay: this.inputDisplay(record),
+      });
+    return this.startingSessions.get(sessionId)?.status ?? null;
   }
 
   subscribe(listener: (status: ComputerUseSessionStatus) => void): () => void {
@@ -7145,7 +7219,17 @@ export class ComputerUseController {
 
   private emit(status: ComputerUseSessionStatus): void {
     const statusRevision = (this.statusRevisionBySession.get(status.sessionId) ?? 0) + 1;
-    const parsed = computerUseSessionStatusSchema.parse({ ...status, statusRevision });
+    const current = this.sessions.get(status.sessionId);
+    const parsed = computerUseSessionStatusSchema.parse({
+      ...status,
+      statusRevision,
+      ...(current
+        ? {
+            inputDisplay: this.inputDisplay(current),
+            resumable: current.interactionRevoked || current.foregroundHandoff ? false : undefined,
+          }
+        : {}),
+    });
     this.statusRevisionBySession.set(status.sessionId, statusRevision);
     const record = this.sessions.get(status.sessionId);
     if (record !== undefined) record.status = parsed;
