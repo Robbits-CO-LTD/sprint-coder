@@ -17,10 +17,11 @@ std::wstring m2_folder = L"C:\\synthetic-folder";
 bool m2_foreign_owner = false, m2_identity = true, m2_verified = true, m2_throw = false;
 bool m2_cancel_during_view = false, m2_stop_during_view = false;
 bool m2_change_after_cursor = false, m2_change_during_interlock = false;
+bool m2_binding_ok = true;
 bool M2MayInput(const WindowsSession &) { return true; }
 bool M2Flight() { return false; }
 bool M2Binding(const WindowsSession &, const std::string &, std::string *kind, RECT *bounds,
-               std::string *) { *kind = m2_kind; *bounds = RECT{10, 20, 111, 121}; return true; }
+               std::string *) { *kind = m2_kind; *bounds = RECT{10, 20, 111, 121}; return m2_binding_ok; }
 sprint_coder::computer_use::InterlockEvaluation M2Interlock(const WindowsSession &,
     const std::string &, const std::string &, WindowsClickBasis *) {
   if (m2_change_during_interlock) m2_folder = L"C:\\changed-folder";
@@ -139,6 +140,7 @@ int wmain() {
   const std::string measure = R"({"sessionId":"synthetic-session","windowId":"100","cancelEpoch":2,"x":60,"y":70})";
   const std::string action = R"({"x":0.5,"y":0.5,"deltaX":1,"deltaY":1,"key":"Enter","text":"a"})";
   const auto reset = [&] {
+    m2_binding_ok = true;
     session.explorer_dispatch_evidence.reset();
     session.pid = 42; session.cancel_epoch = 2; session.approval_route_v2 = true;
     session.approval_revoked = false; session.active_window = session.window;
@@ -203,15 +205,21 @@ int wmain() {
             windows_absolute_pixel(m2_sent[0].mi.dy, GetSystemMetrics(SM_CYVIRTUALSCREEN)) == 70;
   };
   if constexpr (!gate) {
-    reset(); Require(dispatch() && m2_inputs == 2, "gate_off_click_unchanged");
-    Require(m2_measurements == 0, "gate_off_never_measures");
-    Require(m2_send_calls == 1 && plain_flags({MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP}),
-        "gate_off_click_events_unchanged");
-    reset(); m2_kind = "scroll";
-    Require(dispatch() && m2_inputs == 3 && m2_send_calls == 2 && plain_flags({MOUSEEVENTF_HWHEEL}),
-        "gate_off_scroll_unchanged");
-    reset(); m2_kind = "invoke";
-    Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "gate_off_semantic_unchanged");
+    std::shared_ptr<const WindowsExplorerDispatchEvidence> evidence;
+    Require(!BeginWindowsExplorerDispatch(session, "click", &evidence), "gate_off_begin_closed");
+    Require(!RecheckWindowsExplorerDispatch(session, evidence, POINT{}), "gate_off_recheck_closed");
+    for (const auto *path : {L"C:\\Windows\\explorer.exe", L"C:\\synthetic-app.exe"}) {
+      session.canonical_path = path;
+      reset(); Require(dispatch() && m2_inputs == 2, "gate_off_click_unchanged");
+      Require(m2_measurements == 0, "gate_off_never_measures");
+      Require(m2_send_calls == 1 && plain_flags({MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP}),
+          "gate_off_click_events_unchanged");
+      reset(); m2_kind = "scroll";
+      Require(dispatch() && m2_inputs == 3 && m2_send_calls == 2 && plain_flags({MOUSEEVENTF_HWHEEL}),
+          "gate_off_scroll_unchanged");
+      reset(); m2_kind = "invoke";
+      Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "gate_off_semantic_unchanged");
+    }
   } else {
 #if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
     {
@@ -239,6 +247,18 @@ int wmain() {
       std::cout << "OK absolute_move_matches_windows_pixel_mapping\n";
     }
 #endif
+    {
+      reset();
+      const WindowsSession before_refusal = session;
+      m2_binding_ok = false;
+      blocked("binding_refusal_emits_nothing");
+      Require(!session.explorer_dispatch_evidence, "binding_refusal_consumes_evidence");
+      m2_binding_ok = true;
+      blocked("binding_refusal_second_dispatch_emits_nothing");
+      std::string result, reason; bool accepted = false;
+      Require(!DispatchWindowsAction(before_refusal, action, &result, &reason, &accepted) &&
+          !accepted && m2_inputs == 0, "binding_refusal_copy_cannot_replay");
+    }
     for (const std::string kind : {"click", "scroll"}) {
       reset(); m2_kind = kind;
       // One cursor placement and ONE SendInput: [absolute move to the POINT, button or wheels].

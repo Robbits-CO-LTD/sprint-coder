@@ -36,6 +36,101 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   };
   const header = read('computer_use_native_eligibility.h');
 
+  it('WindowsV2FinalDeclaration requires the exact final build declaration', () => {
+    const predicate = (
+      from_build: boolean,
+      v2: boolean,
+      ruleset: number,
+      classifier: number,
+      lexicon: number,
+      ticket_required: boolean,
+      interlock_enforced: boolean,
+    ) =>
+      from_build &&
+      v2 &&
+      ruleset === 4 &&
+      classifier === 2 &&
+      lexicon === 3 &&
+      ticket_required &&
+      interlock_enforced;
+    // Pin the complete C++ body to the evaluator, including conjunctions and exact equality.
+    const body = /constexpr bool WindowsV2FinalDeclaration\([^}]+\{([^}]+)\}/u.exec(header)?.[1];
+    expect(body?.replace(/\s+/gu, ' ').trim()).toBe(
+      'return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 && ticket_required && interlock_enforced;',
+    );
+    expect(header).toContain(
+      '#if defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)\nconstexpr bool kNativeEligibilityFromBuild = true;\n#else\nconstexpr bool kNativeEligibilityFromBuild = false;\n#endif',
+    );
+    expect(header).toMatch(
+      /constexpr bool kNativeEligibilityWindowsV2Final = WindowsV2FinalDeclaration\(\s*kNativeEligibilityFromBuild, kNativeEligibilityIsV2, kNativeEligibilityRulesetVersion,\s*kNativeEligibilityClassifierVersion, kNativeEligibilityLexiconVersion,\s*kNativeEligibilityTicketRequired, kNativeEligibilityInterlockEnforced\);/u,
+    );
+    expect(predicate(true, true, 4, 2, 3, true, true)).toBe(true);
+    expect(predicate(false, true, 4, 2, 3, true, true)).toBe(false);
+    expect(predicate(true, false, 4, 2, 3, true, true)).toBe(false);
+    expect(predicate(true, true, 4, 2, 3, false, true)).toBe(false);
+    expect(predicate(true, true, 4, 2, 3, true, false)).toBe(false);
+    for (const [ruleset, classifier, lexicon] of [
+      [3, 2, 3],
+      [5, 2, 3],
+      [4, 1, 3],
+      [4, 3, 3],
+      [4, 2, 2],
+      [4, 2, 4],
+    ] as const)
+      expect(predicate(true, true, ruleset, classifier, lexicon, true, true)).toBe(false);
+    for (const platform of ['darwin', 'win32'] as const) {
+      for (const mode of ['v1', 'v2'] as const) {
+        const declaration = table.versions[platform][mode];
+        expect(
+          predicate(
+            true,
+            mode === 'v2',
+            declaration.rulesetVersion,
+            declaration.classifierVersion,
+            declaration.lexiconVersion,
+            table.ticketRequired[platform],
+            platform === 'win32' && mode === 'v2',
+          ),
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('all four native gates have only the guarded test branch or the final declaration', () => {
+    for (const [file, name, guard] of [
+      [
+        'computer_use_windows_target_facts.h',
+        'kWindowsExplorerException',
+        '#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)',
+      ],
+      [
+        'computer_use_windows_target_facts.h',
+        'kWindowsStoreNotepadNotWeb',
+        '#if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)',
+      ],
+      [
+        'computer_use_windows_host_target_facts.inc',
+        'kWindowsIlOnlyImageAnchor',
+        '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
+      ],
+    ] as const) {
+      const source = read(file);
+      const qualified = file.endsWith('.inc') ? 'sprint_coder::computer_use::' : '';
+      const test = `inline constexpr bool ${name} = true || ${qualified}kNativeEligibilityWindowsV2Final;`;
+      const production = `inline constexpr bool ${name} = ${qualified}kNativeEligibilityWindowsV2Final;`;
+      const normalized = source.replace(/\s+/gu, ' ');
+      expect(normalized).toContain(`${test} #else ${production} #endif`);
+      expect(normalized.match(new RegExp(`constexpr bool ${name} =`, 'gu'))).toHaveLength(2);
+      const guarded = source.slice(source.indexOf(guard));
+      expect(guarded.replace(/\s+/gu, ' ')).toContain(`${test} #else ${production} #endif`);
+      expect(source.slice(0, source.indexOf(`inline constexpr bool ${name}`))).toContain('#error');
+    }
+    const common = read('computer_use_windows_host_common.inc');
+    expect(common.match(/constexpr bool kWindowsApprovalHandlersEnabled\s*=[^;]+;/gu)).toEqual([
+      'constexpr bool kWindowsApprovalHandlersEnabled =\n    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;',
+    ]);
+  });
+
   it('keeps eligibility.json, the portable header and the contracts in step', () => {
     for (const platform of ['darwin', 'win32'] as const)
       for (const mode of ['v1-allowlist', 'v2-denylist'] as const) {

@@ -107,6 +107,22 @@ function findCompiler(): Compiler | null {
 
 const compiler = findCompiler();
 
+// Use the input.inc declarations verbatim so production parameter changes reach the stubs.
+// Explorer is disabled; these stubs never record an input.
+function explorerStub(name: string, body: string): string {
+  const declaration = new RegExp(
+    '(std::shared_ptr<const WindowsExplorerDispatchEvidence>|bool) ' + name + '\\([^;{}]+\\);',
+    'u',
+  ).exec(source)?.[0];
+  if (!declaration) throw new Error('Explorer seam declaration changed: ' + name);
+  return declaration.slice(0, -1) + ' { ' + body + ' }';
+}
+const explorerSessionMember =
+  /mutable std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_dispatch_evidence;/u.exec(
+    source,
+  )?.[0];
+if (!explorerSessionMember) throw new Error('Explorer seam session member changed');
+
 const preamble = String.raw`
 #include <algorithm>
 #include <array>
@@ -129,6 +145,7 @@ const preamble = String.raw`
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_approval_handlers.h"
 #include "computer_use_windows_approval_round_trip.h"
@@ -144,7 +161,12 @@ using DWORD = unsigned long;
 #ifndef BCRYPT_USE_SYSTEM_PREFERRED_RNG
 #define BCRYPT_USE_SYSTEM_PREFERRED_RNG 0x00000002
 #endif
+using UINT = unsigned;
+struct INPUT;
+struct POINT {};
 struct RECT { LONG left = 0, top = 0, right = 0, bottom = 0; };
+
+namespace sprint_coder::computer_use { constexpr bool kWindowsExplorerException = false; }
 
 namespace {
 struct WindowsTargetFactsContext;
@@ -222,7 +244,9 @@ std::string Sha256String(std::string_view message) {
 }
 
 // The parts of a Windows session that the ticket code reads (same member names as the helper).
+struct WindowsExplorerDispatchEvidence;
 struct WindowsSession {
+  ${explorerSessionMember}
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
       std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -872,6 +896,10 @@ function assembled(): string {
   };
   return [
     preamble,
+    explorerStub('ConsumeWindowsExplorerDispatchEvidence', 'return evidence;'),
+    explorerStub('BeginWindowsExplorerDispatch', 'return false;'),
+    explorerStub('RecheckWindowsExplorerDispatch', 'return false;'),
+    explorerStub('SendWindowsExplorerPointInput', 'return false;'),
     between('// BEGIN windows worker slot launches', '// END windows worker slot launches'),
     between('struct WindowsTargetListState {', 'struct WindowsStartRegistry {'),
     between(

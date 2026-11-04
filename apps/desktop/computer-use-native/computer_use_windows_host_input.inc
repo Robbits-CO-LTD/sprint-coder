@@ -533,8 +533,8 @@ bool WindowsActionPoint(const RECT &bounds, const std::string &metadata,
 }
 // END windows action point
 
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-// The existing acceptance-only gate stays closed in product builds until P5a-Wiring/P5b.
+std::shared_ptr<const WindowsExplorerDispatchEvidence> ConsumeWindowsExplorerDispatchEvidence(
+    std::shared_ptr<const WindowsExplorerDispatchEvidence> evidence);
 bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::string &kind,
     std::shared_ptr<const WindowsExplorerDispatchEvidence> *evidence);
 bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
@@ -543,13 +543,14 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
     const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, const RECT &bounds,
     std::uint64_t expected_epoch, POINT point, DWORD input_tick, bool wheel,
     const INPUT *actions, UINT action_count, bool *accepted);
-#endif
 
 bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
                            std::string *reason, bool *accepted,
                            sprint_coder::computer_use::NativeApprovalEffect approved_effect =
                                sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
+  auto explorer_evidence = ConsumeWindowsExplorerDispatchEvidence(
+      std::exchange(session.explorer_dispatch_evidence, nullptr));
   *accepted = false;
   if (!WindowsRoundTripMayInput(session)) { *reason = "approval_round_trip_rejected"; return false; }
   struct RoundTripInputFinished {
@@ -562,13 +563,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT bounds{};
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
     return false;
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-  std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_evidence;
-  if (!BeginWindowsExplorerDispatch(session, kind, &explorer_evidence)) {
-    *reason = "stale_target";
-    return false;
+  if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+    if (!BeginWindowsExplorerDispatch(session, kind, &explorer_evidence)) {
+      *reason = "stale_target";
+      return false;
+    }
   }
-#endif
   // The v2 interlocks again, right before any input (#500 S5-c-2 PR-5): the screen can have changed
   // since the preflight (the ticket lives seconds), and the click facts (the last input time) are read
   // again by the evaluation. A refusal is made before the first input API attempt, SetCursorPos or
@@ -662,12 +662,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, click_point)) {
-      *reason = "stale_target";
-      return false;
+    if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, click_point)) {
+        *reason = "stale_target";
+        return false;
+      }
     }
-#endif
     bool cursor_set = false;
     if (session.approved_deadline_ns != 0)
       cursor_set = SetWindowsApprovedCursor(session, screen_x, screen_y);
@@ -679,14 +679,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
     // The last input time once the cursor is at the POINT: any input after it stops the click.
     DWORD explorer_input_tick = 0;
-    if (explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
+    if (sprint_coder::computer_use::kWindowsExplorerException &&
+        explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
       *reason = "stale_target";
       return false;
     }
-#endif
     std::string current_visual_signature;
     if (RejectWindowsRisk(ClassifyWindowsPoint({screen_x, screen_y},
                                                session.pid,
@@ -715,8 +714,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
     events[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
     events[1] = events[0];
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    if (explorer_evidence) {
+    if (sprint_coder::computer_use::kWindowsExplorerException && explorer_evidence) {
       // Re-measured at the POINT, then the move to it and the press in one array (see the helper).
       dispatched = SendWindowsExplorerPointInput(session, explorer_evidence, bounds, expected_epoch,
                                                  click_point, explorer_input_tick, false, events, 2,
@@ -724,16 +722,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
                    RevalidateWindowsTarget(session, bounds, expected_epoch);
       if (!*accepted) *reason = "stale_target";
     } else {
-#endif
-    const UINT sent =
-        SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
-    if (sent > 0)
-      *accepted = true;
-    dispatched =
-        sent == 2 && RevalidateWindowsTarget(session, bounds, expected_epoch);
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+      const UINT sent =
+          SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
+      if (sent > 0)
+        *accepted = true;
+      dispatched =
+          sent == 2 && RevalidateWindowsTarget(session, bounds, expected_epoch);
     }
-#endif
   } else if (kind == "scroll") {
     double delta_y_value = 0;
     double delta_x_value = 0;
@@ -775,12 +770,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
-      *reason = "stale_target";
-      return false;
+    if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
+        *reason = "stale_target";
+        return false;
+      }
     }
-#endif
     bool cursor_set = false;
     if (session.approved_deadline_ns != 0)
       cursor_set = SetWindowsApprovedCursor(session, point.x, point.y);
@@ -792,13 +787,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
     DWORD explorer_input_tick = 0;
-    if (explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
+    if (sprint_coder::computer_use::kWindowsExplorerException &&
+        explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
       *reason = "stale_target";
       return false;
     }
-#endif
     std::string current_visual_signature;
     if (RejectWindowsRisk(
             ClassifyWindowsPoint(point, session.pid, &current_visual_signature),
@@ -818,8 +812,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
       return false;
     }
     dispatched = true;
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    if (explorer_evidence) {
+    if (sprint_coder::computer_use::kWindowsExplorerException && explorer_evidence) {
       // One array: the move to the POINT and both wheels. No wheel waits on a later check, so a
       // scroll is either refused with nothing sent or sent whole (a short send is unconfirmed).
       INPUT wheels[2]{};
@@ -840,34 +833,31 @@ bool DispatchWindowsAction(const WindowsSession &session,
                    RevalidateWindowsTarget(session, bounds, expected_epoch);
       if (!*accepted) *reason = "stale_target";
     } else {
-#endif
-    if (delta_y != 0) {
-      INPUT vertical{};
-      vertical.type = INPUT_MOUSE;
-      vertical.mi.mouseData = static_cast<DWORD>(delta_y * WHEEL_DELTA);
-      vertical.mi.dwFlags = MOUSEEVENTF_WHEEL;
-      const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
-                                                1, &vertical);
-      if (sent > 0)
-        *accepted = true;
-      dispatched =
-          sent == 1 && RevalidateWindowsTarget(session, bounds, expected_epoch);
+      if (delta_y != 0) {
+        INPUT vertical{};
+        vertical.type = INPUT_MOUSE;
+        vertical.mi.mouseData = static_cast<DWORD>(delta_y * WHEEL_DELTA);
+        vertical.mi.dwFlags = MOUSEEVENTF_WHEEL;
+        const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
+                                                  1, &vertical);
+        if (sent > 0)
+          *accepted = true;
+        dispatched =
+            sent == 1 && RevalidateWindowsTarget(session, bounds, expected_epoch);
+      }
+      if (dispatched && delta_x != 0) {
+        INPUT horizontal{};
+        horizontal.type = INPUT_MOUSE;
+        horizontal.mi.mouseData = static_cast<DWORD>(delta_x * WHEEL_DELTA);
+        horizontal.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+        const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
+                                                  1, &horizontal);
+        if (sent > 0)
+          *accepted = true;
+        dispatched =
+            sent == 1 && RevalidateWindowsTarget(session, bounds, expected_epoch);
+      }
     }
-    if (dispatched && delta_x != 0) {
-      INPUT horizontal{};
-      horizontal.type = INPUT_MOUSE;
-      horizontal.mi.mouseData = static_cast<DWORD>(delta_x * WHEEL_DELTA);
-      horizontal.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-      const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
-                                                1, &horizontal);
-      if (sent > 0)
-        *accepted = true;
-      dispatched =
-          sent == 1 && RevalidateWindowsTarget(session, bounds, expected_epoch);
-    }
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    }
-#endif
   } else if (kind == "key") {
     std::string key;
     const WORD virtual_key =

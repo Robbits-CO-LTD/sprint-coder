@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
+import { eligibilityDeclaration } from '../../../../build-computer-use-eligibility.mjs';
 
 const native = (name: string): string =>
   readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
@@ -15,7 +16,17 @@ describe('Windows private approval handlers', () => {
     expect(host).toContain('HandleWindowsApproval');
     expect(host).toContain('windows_helper_generation');
     expect(host).toContain('\\"approval\\":false');
-    expect(host).toContain('constexpr bool kWindowsApprovalHandlersEnabled = false;');
+    expect(host.match(/constexpr bool kWindowsApprovalHandlersEnabled\s*=[^;]+;/gu)).toEqual([
+      'constexpr bool kWindowsApprovalHandlersEnabled =\n    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;',
+    ]);
+    // A3 pins the complete final-declaration predicate and its wiring. Its necessary ruleset
+    // condition must remain false for both declarations currently emitted by the build.
+    const header = native('computer_use_native_eligibility.h');
+    expect(header).toContain(
+      'return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 &&',
+    );
+    for (const mode of ['v1-allowlist', 'v2-denylist'] as const)
+      expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 4).toBe(false);
   });
 
   it('keeps measurement, lifetime and Stop checks in the private owner', () => {

@@ -44,7 +44,8 @@ std::atomic<std::uint64_t> cancellation_epoch{0};
 std::atomic<bool> parent_process_dead{false};
 // Received once from the authenticated connection. Missing generation never authorizes approval.
 std::uint64_t windows_helper_generation = 0;
-constexpr bool kWindowsApprovalHandlersEnabled = false;
+constexpr bool kWindowsApprovalHandlersEnabled =
+    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;
 std::uint64_t MonotonicNowNs();
 
 // BEGIN windows worker slot launches

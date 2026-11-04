@@ -12,6 +12,7 @@
 // Every reader here fails closed: bytes it cannot read give std::nullopt (the core then answers
 // unresolvable), never a value that would admit.
 
+#include "computer_use_native_eligibility.h"
 #include "computer_use_target_eligibility.h"
 
 #include <array>
@@ -34,9 +35,9 @@ namespace sprint_coder::computer_use {
 #endif
 // Derived only after the checks above, so test-only hooks elsewhere never name the switch itself.
 #define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1
-inline constexpr bool kWindowsExplorerException = true;
+inline constexpr bool kWindowsExplorerException = true || kNativeEligibilityWindowsV2Final;
 #else
-inline constexpr bool kWindowsExplorerException = false;
+inline constexpr bool kWindowsExplorerException = kNativeEligibilityWindowsV2Final;
 #endif
 
 // P3 preparation only: these facts come from the held, matched running image. The canonical
@@ -1128,9 +1129,9 @@ inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notep
     defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)
 #error Store Notepad not-web is restricted to acceptance test builds
 #endif
-inline constexpr bool kWindowsStoreNotepadNotWeb = true;
+inline constexpr bool kWindowsStoreNotepadNotWeb = true || kNativeEligibilityWindowsV2Final;
 #else
-inline constexpr bool kWindowsStoreNotepadNotWeb = false;
+inline constexpr bool kWindowsStoreNotepadNotWeb = kNativeEligibilityWindowsV2Final;
 #endif
 
 // `package` comes only from the verified identity of the same held running image. A family name
