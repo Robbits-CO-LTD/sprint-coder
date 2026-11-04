@@ -2026,6 +2026,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         WindowsReadLastInputTick: 'M2LastInput',
         SystemParametersInfoW: 'M2Spi',
         GetGUIThreadInfo: 'M2GuiThread',
+        GetSystemMetrics: 'M2Metrics',
         SendInputForBoundTarget: 'M2Send',
       })) {
         guard = guard.replaceAll(`${name}(`, `${replacement}(`);

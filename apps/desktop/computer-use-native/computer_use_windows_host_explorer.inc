@@ -574,14 +574,25 @@ bool WindowsExplorerNormalizeAxis(LONG coordinate, int origin, int extent, LONG 
   return true;
 }
 
-bool WindowsExplorerAbsoluteMove(POINT point, INPUT *move) {
+// The virtual desktop's origin and size, which the normalized move is relative to.
+struct WindowsExplorerVirtualScreen {
+  int left = 0, top = 0, width = 0, height = 0;
+  bool operator==(const WindowsExplorerVirtualScreen &) const = default;
+};
+
+WindowsExplorerVirtualScreen ReadWindowsExplorerVirtualScreen() {
+  return WindowsExplorerVirtualScreen{
+      GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+      GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+}
+
+bool WindowsExplorerAbsoluteMove(POINT point, const WindowsExplorerVirtualScreen &screen,
+                                 INPUT *move) {
   *move = INPUT{};
   move->type = INPUT_MOUSE;
   move->mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-  return WindowsExplorerNormalizeAxis(point.x, GetSystemMetrics(SM_XVIRTUALSCREEN),
-                                      GetSystemMetrics(SM_CXVIRTUALSCREEN), &move->mi.dx) &&
-         WindowsExplorerNormalizeAxis(point.y, GetSystemMetrics(SM_YVIRTUALSCREEN),
-                                      GetSystemMetrics(SM_CYVIRTUALSCREEN), &move->mi.dy);
+  return WindowsExplorerNormalizeAxis(point.x, screen.left, screen.width, &move->mi.dx) &&
+         WindowsExplorerNormalizeAxis(point.y, screen.top, screen.height, &move->mi.dy);
 }
 
 // With "scroll inactive windows when hovering" off the wheel goes to the keyboard focus, not to the
@@ -608,7 +619,11 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
     const INPUT *actions, UINT action_count, bool *accepted) {
   if (!evidence || action_count == 0 || action_count > 2) return false;
   INPUT events[3]{};
-  if (!WindowsExplorerAbsoluteMove(point, &events[0])) return false;
+  // The desktop as it was when the re-measure started. The move itself is fixed only after the last
+  // check: a monitor added or a resolution changed during the re-measure would map the same value to
+  // another pixel while the bounds, point, cursor and last input time all still agree.
+  const WindowsExplorerVirtualScreen measured_screen = ReadWindowsExplorerVirtualScreen();
+  if (!WindowsExplorerAbsoluteMove(point, measured_screen, &events[0])) return false;
   for (UINT index = 0; index < action_count; ++index) events[index + 1] = actions[index];
   if (!RecheckWindowsExplorerDispatch(session, evidence, point)) return false;
   if (wheel && !WindowsExplorerWheelReachesView(session.window, evidence->view)) return false;
@@ -616,6 +631,9 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
   DWORD now_tick = 0;
   if (!GetCursorPos(&cursor) || cursor.x != point.x || cursor.y != point.y ||
       !WindowsReadLastInputTick(&now_tick) || now_tick != input_tick) return false;
+  const WindowsExplorerVirtualScreen sending_screen = ReadWindowsExplorerVirtualScreen();
+  if (!(sending_screen == measured_screen) ||
+      !WindowsExplorerAbsoluteMove(point, sending_screen, &events[0])) return false;
   const UINT count = action_count + 1;
   const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch, count, events);
   if (sent > 0) *accepted = true;

@@ -10,6 +10,8 @@ HWND m2_focus = reinterpret_cast<HWND>(200);
 bool m2_spi_ok = true, m2_tick_ok = true, m2_short_send = false;
 bool m2_cursor_moves_during_recheck = false, m2_input_during_recheck = false;
 bool m2_change_in_send = false;
+bool m2_screen_width_changes_during_recheck = false, m2_screen_origin_changes_during_recheck = false;
+int m2_screen_width_delta = 0, m2_screen_left_delta = 0;
 HWND m2_view = reinterpret_cast<HWND>(200), m2_owner = reinterpret_cast<HWND>(201);
 std::wstring m2_folder = L"C:\\synthetic-folder";
 bool m2_foreign_owner = false, m2_identity = true, m2_verified = true, m2_throw = false;
@@ -53,6 +55,13 @@ BOOL M2Spi(UINT action, UINT, PVOID value, UINT) {
   *static_cast<UINT *>(value) = m2_routing; return TRUE;
 }
 BOOL M2GuiThread(DWORD, GUITHREADINFO *info) { info->hwndFocus = m2_focus; return TRUE; }
+// The virtual desktop as the dispatch guard reads it: the real one, unless a monitor is "added".
+int M2Metrics(int index) {
+  const int value = GetSystemMetrics(index);
+  if (index == SM_CXVIRTUALSCREEN) return value + m2_screen_width_delta;
+  if (index == SM_XVIRTUALSCREEN) return value + m2_screen_left_delta;
+  return value;
+}
 bool M2Unicode(const WindowsSession &, const RECT &, std::uint64_t, std::uint32_t, bool *accepted) {
   ++m2_inputs; *accepted = true; return true;
 }
@@ -82,6 +91,11 @@ WindowsExplorerShellView M2RecheckView(HWND, const std::function<bool()> &) {
   // A person moves the mouse or presses a key while the last re-measure runs (hundreds of ms).
   if (m2_rechecks == 2 && m2_cursor_moves_during_recheck) ++m2_cursor_point.x;
   if (m2_rechecks == 2 && m2_input_during_recheck) ++m2_last_input;
+  // A monitor is added to the right (wider) or to the left (origin moves) during the re-measure.
+  if (m2_rechecks == 2 && m2_screen_width_changes_during_recheck) m2_screen_width_delta = 1920;
+  if (m2_rechecks == 2 && m2_screen_origin_changes_during_recheck) {
+    m2_screen_left_delta = -1920; m2_screen_width_delta = 1920;
+  }
   return M2View();
 }
 WindowsExplorerRefusal M2Point(HWND, HWND, DWORD, POINT point, HWND *owner) {
@@ -136,6 +150,8 @@ int wmain() {
     m2_focus = reinterpret_cast<HWND>(200); m2_recheck_point = POINT{};
     m2_spi_ok = m2_tick_ok = true; m2_short_send = m2_change_in_send = false;
     m2_cursor_moves_during_recheck = m2_input_during_recheck = false;
+    m2_screen_width_changes_during_recheck = m2_screen_origin_changes_during_recheck = false;
+    m2_screen_width_delta = m2_screen_left_delta = 0;
     m2_view = reinterpret_cast<HWND>(200); m2_owner = reinterpret_cast<HWND>(201);
     m2_folder = L"C:\\synthetic-folder";
     m2_foreign_owner = m2_throw = m2_cancel_during_view = m2_stop_during_view = false;
@@ -286,6 +302,10 @@ int wmain() {
       refused_before_send("cursor_moved_during_recheck_emits_nothing");
       reset(); m2_kind = kind; m2_input_during_recheck = true;
       refused_before_send("human_input_during_recheck_emits_nothing");
+      reset(); m2_kind = kind; m2_screen_width_changes_during_recheck = true;
+      refused_before_send("virtual_screen_width_change_during_recheck_emits_nothing");
+      reset(); m2_kind = kind; m2_screen_origin_changes_during_recheck = true;
+      refused_before_send("virtual_screen_origin_change_during_recheck_emits_nothing");
       reset(); m2_kind = kind; m2_tick_ok = false;
       Require(!dispatch() && m2_send_calls == 0, "unreadable_last_input_emits_nothing");
       reset(); m2_kind = kind; m2_change_in_send = true;

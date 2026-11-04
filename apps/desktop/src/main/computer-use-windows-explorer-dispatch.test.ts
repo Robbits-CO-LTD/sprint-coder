@@ -34,15 +34,36 @@ describe('Explorer dispatch M2 source boundaries', () => {
     expect(explorer).toContain('(value * extent) / 65536 != offset');
     expect(explorer).not.toMatch(/65535\.0|extent - 1\)/u);
     // After the last re-measure: the cursor is at the POINT and no input came, then one array.
+    // The virtual desktop is read before the re-measure and again after the last check; the move
+    // is fixed from the second read only when both agree, right before SendInput.
     const order = [
+      'const WindowsExplorerVirtualScreen measured_screen = ReadWindowsExplorerVirtualScreen();',
       'RecheckWindowsExplorerDispatch(session, evidence, point)',
       'WindowsExplorerWheelReachesView(session.window, evidence->view)',
       'cursor.x != point.x || cursor.y != point.y',
       'now_tick != input_tick',
+      'const WindowsExplorerVirtualScreen sending_screen = ReadWindowsExplorerVirtualScreen();',
+      '!(sending_screen == measured_screen)',
+      'WindowsExplorerAbsoluteMove(point, sending_screen, &events[0])',
       'SendInputForBoundTarget(session, bounds, expected_epoch, count, events)',
     ].map((needle) => guard.indexOf(needle));
     for (const at of order) expect(at).toBeGreaterThan(0);
     expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(guard.split('ReadWindowsExplorerVirtualScreen()').length).toBe(3);
+    // The four metrics are read only through ReadWindowsExplorerVirtualScreen.
+    const metrics = explorer.slice(
+      explorer.indexOf('WindowsExplorerVirtualScreen ReadWindowsExplorerVirtualScreen()'),
+      explorer.indexOf('bool WindowsExplorerAbsoluteMove('),
+    );
+    for (const index of [
+      'SM_XVIRTUALSCREEN',
+      'SM_YVIRTUALSCREEN',
+      'SM_CXVIRTUALSCREEN',
+      'SM_CYVIRTUALSCREEN',
+    ]) {
+      expect(metrics).toContain(`GetSystemMetrics(${index})`);
+      expect(explorer.split(`GetSystemMetrics(${index})`).length).toBe(2);
+    }
     for (const [kind, point] of [
       ['click', 'click_point'],
       ['scroll', 'point'],
