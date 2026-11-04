@@ -1899,8 +1899,9 @@ describe.skipIf(!onWindows || (build === null && !ci))(
       driver: string,
       binary: string,
       gate: boolean,
+      source = host,
     ): Promise<void> => {
-      writeFileSync(join(scratch, 'explorer-host.cc'), host);
+      writeFileSync(join(scratch, 'explorer-host.cc'), source);
       const provenance = join(scratch, 'provenance.h');
       writeFileSync(
         provenance,
@@ -1955,6 +1956,82 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         throw error;
       });
     };
+    it('checks Explorer M2 dispatch with gate on and off without injecting OS input', async () => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-dispatch-'));
+      const driver = 'computer_use_windows_explorer_dispatch_test.cc';
+      const include = (seam: string) => `#define ${seam}\n#include "${driver}"\n#undef ${seam}\n`;
+      let source = host;
+      // Replace only dependencies of the real dispatch, keeping its branches and API ordering.
+      const from = source.indexOf('bool DispatchWindowsAction(');
+      const to = source.indexOf('std::string ProbeJson(', from);
+      expect(from).toBeGreaterThan(0);
+      expect(to).toBeGreaterThan(from);
+      let dispatch = source.slice(from, to);
+      for (const [name, replacement] of Object.entries({
+        WindowsRoundTripMayInput: 'M2MayInput',
+        WindowsSemanticInputInFlight: 'M2Flight',
+        ValidateWindowsDispatchBinding: 'M2Binding',
+        WindowsInterlockRefusal: 'M2Interlock',
+        RevalidateWindowsTarget: 'M2Revalidate',
+        RevalidateVisualPatch: 'M2Patch',
+        ClassifyWindowsPoint: 'M2Risk',
+        ClassifyWindowsFocusedElement: 'M2FocusedRisk',
+        WindowsFocusedElementSignature: 'M2Focus',
+        WindowsInputMovedSinceEvaluation: 'M2Moved',
+        SetCursorPos: 'M2Cursor',
+        SetWindowsApprovedCursor: 'M2ApprovedCursor',
+        SendInputForBoundTarget: 'M2Send',
+        SendUnicodeScalar: 'M2Unicode',
+        DispatchWindowsSemanticAction: 'M2Semantic',
+      })) {
+        dispatch = dispatch.replaceAll(`${name}(`, `${replacement}(`);
+      }
+      expect(dispatch).not.toMatch(
+        /\b(?:SendInputForBoundTarget|SetCursorPos|SetWindowsApprovedCursor|DispatchWindowsSemanticAction|SendUnicodeScalar)\s*\(/u,
+      );
+      source =
+        source.slice(0, from) +
+        include('SPRINT_CODER_EXPLORER_DISPATCH_DEPENDENCIES') +
+        dispatch +
+        source.slice(to);
+      const measurementFrom = source.indexOf('bool MeasureWindowsExplorerViewUnguarded(');
+      const measurementTo = source.indexOf(
+        '// END windows explorer dispatch guard',
+        measurementFrom,
+      );
+      expect(measurementFrom).toBeGreaterThan(0);
+      expect(measurementTo).toBeGreaterThan(measurementFrom);
+      let measurement = source.slice(measurementFrom, measurementTo);
+      for (const [name, replacement] of Object.entries({
+        ReadWindowsSessionIdentityOnLane: 'M2Identity',
+        WindowsExplorerVerifiedWindow: 'M2Verified',
+        GetWindowThreadProcessId: 'M2WindowOwner',
+        ReadWindowsExplorerShellView: 'M2ReadView',
+        WindowsExplorerPointRefusal: 'M2Point',
+      })) {
+        measurement = measurement.replaceAll(`${name}(`, `${replacement}(`);
+      }
+      source =
+        source.slice(0, measurementFrom) +
+        include('SPRINT_CODER_EXPLORER_MEASUREMENT_DEPENDENCIES') +
+        measurement +
+        source.slice(measurementTo);
+      try {
+        for (const gate of [false, true]) {
+          const binary = join(scratch, `dispatch-${gate}.exe`);
+          await buildExplorerHostDriver(scratch, driver, binary, gate, source);
+          const result = await promisify(execFile)(binary, [], {
+            encoding: 'utf8',
+            timeout: 30_000,
+          });
+          expect(result.stdout).not.toContain('FAIL ');
+          expect(result.stdout).toContain('OK Explorer dispatch M2');
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 300_000);
     it('rejects measurement on the native transport with gate off or stale binding', async () => {
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-wire-'));

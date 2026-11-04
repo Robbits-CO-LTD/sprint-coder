@@ -533,6 +533,14 @@ bool WindowsActionPoint(const RECT &bounds, const std::string &metadata,
 }
 // END windows action point
 
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+// The existing acceptance-only gate stays closed in product builds until P5a-Wiring/P5b.
+bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::string &kind,
+    std::shared_ptr<const WindowsExplorerDispatchEvidence> *evidence);
+bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
+    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point);
+#endif
+
 bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
                            std::string *reason, bool *accepted,
@@ -550,6 +558,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT bounds{};
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
     return false;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+  std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_evidence;
+  if (!BeginWindowsExplorerDispatch(session, kind, &explorer_evidence)) {
+    *reason = "stale_target";
+    return false;
+  }
+#endif
   // The v2 interlocks again, right before any input (#500 S5-c-2 PR-5): the screen can have changed
   // since the preflight (the ticket lives seconds), and the click facts (the last input time) are read
   // again by the evaluation. A refusal is made before the first input API attempt, SetCursorPos or
@@ -643,6 +658,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, click_point)) {
+      *reason = "stale_target";
+      return false;
+    }
+#endif
     bool cursor_set = false;
     if (session.approved_deadline_ns != 0)
       cursor_set = SetWindowsApprovedCursor(session, screen_x, screen_y);
@@ -682,6 +703,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
     events[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
     events[1] = events[0];
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, click_point)) {
+      *reason = "stale_target";
+      return false;
+    }
+#endif
     const UINT sent =
         SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
     if (sent > 0)
@@ -729,6 +756,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
+      *reason = "stale_target";
+      return false;
+    }
+#endif
     bool cursor_set = false;
     if (session.approved_deadline_ns != 0)
       cursor_set = SetWindowsApprovedCursor(session, point.x, point.y);
@@ -764,6 +797,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       vertical.type = INPUT_MOUSE;
       vertical.mi.mouseData = static_cast<DWORD>(delta_y * WHEEL_DELTA);
       vertical.mi.dwFlags = MOUSEEVENTF_WHEEL;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
+        *reason = "stale_target";
+        return false;
+      }
+#endif
       const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
                                                 1, &vertical);
       if (sent > 0)
@@ -776,6 +815,12 @@ bool DispatchWindowsAction(const WindowsSession &session,
       horizontal.type = INPUT_MOUSE;
       horizontal.mi.mouseData = static_cast<DWORD>(delta_x * WHEEL_DELTA);
       horizontal.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
+        *reason = "stale_target";
+        return false;
+      }
+#endif
       const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
                                                 1, &horizontal);
       if (sent > 0)
