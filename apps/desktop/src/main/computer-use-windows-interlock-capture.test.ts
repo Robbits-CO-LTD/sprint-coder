@@ -255,7 +255,7 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     );
     expect(
       squashed(host).match(
-        /std::to_string\( ?sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
+        /std::to_string\(session\.approval_route_v2 \? sprint_coder::computer_use::kNativeEligibilityClassifierVersion : sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
       ),
     ).toHaveLength(1);
     const eligibility = JSON.parse(read('eligibility.json')) as {

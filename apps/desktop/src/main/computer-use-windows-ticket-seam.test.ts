@@ -5,6 +5,8 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseNativePreflightReceipt } from './computer-use-native-host';
+import type { ComputerUseNativeSession } from './computer-use-controller';
 
 // Behavioural seam for the Windows helper's ordinary ticket (S5-a). The production functions that
 // issue, bind and consume the ticket are cut out of computer_use_windows_host.cc and compiled with
@@ -152,6 +154,9 @@ const preamble = String.raw`
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
+#define SPRINT_CODER_ELIGIBILITY_V2 1
+#define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION 2
+#include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 
 using HANDLE = void *;
@@ -251,6 +256,7 @@ struct WindowsSession {
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
       std::make_shared<std::atomic<std::uint64_t>>(0);
   std::string session_id;
+  bool approval_route_v2 = false;
   std::uint32_t pid = 0;
   std::string app_identity;
   std::string window_identity;
@@ -408,6 +414,18 @@ bool HasDecision(const char *decision) {
 }
 
 int main() {
+  // Both routes use the real producer; Main parses these exact emitted bytes below.
+  for (bool v2 : {false, true}) {
+    Reset();
+    sessions.at(kSessionKey).approval_route_v2 = v2;
+    Preflight(Meta());
+    Check(HasDecision("ordinary"), "route_preflight_ordinary");
+    std::cout << "PREFLIGHT_" << (v2 ? 2 : 1) << ":" << g_sent.back().payload << '\n';
+    g_validate_ok = false;
+    Preflight(Meta());
+    Check(HasDecision("denied"), "route_preflight_denied");
+    std::cout << "DENIED_" << (v2 ? 2 : 1) << ":" << g_sent.back().payload << '\n';
+  }
   // 1. A good preflight issues a 64-hex ticket and the matching dispatch consumes it exactly once.
   Reset();
   std::string ticket = Preflight(Meta());
@@ -956,6 +974,39 @@ describe.skipIf(compiler === null && process.env['CI'] === undefined)(
         const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 20_000 });
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain('OK');
+        const session: ComputerUseNativeSession = {
+          sessionId: 'session-1',
+          platform: 'win32',
+          appIdentityDigest: 'a'.repeat(64),
+          windowIdentityDigest: 'b'.repeat(64),
+          windowId: 'window-1',
+          profileRevision: 1,
+          cancelEpoch: 3,
+          policyLanguage: 'en',
+          maximumMode: 'supervised',
+          screenBounds: { x: 10, y: 20, width: 100, height: 200 },
+        };
+        for (const version of [1, 2]) {
+          for (const [prefix, kind] of [
+            ['PREFLIGHT', 'ticket'],
+            ['DENIED', 'refused'],
+          ]) {
+            const line = run.stdout
+              .split(/\r?\n/u)
+              .find((value) => value.startsWith(`${prefix}_${version}:`));
+            expect(line).toBeDefined();
+            const receipt: unknown = JSON.parse(line!.slice(line!.indexOf(':') + 1));
+            expect(
+              parseNativePreflightReceipt(receipt, {
+                session,
+                requestId: 'request-1',
+                observationRevision: 7,
+                cancelEpoch: 3,
+                expectedClassifierVersion: version,
+              }),
+            ).toMatchObject({ kind });
+          }
+        }
         // The frame id the helper derives for a request is the one Main puts on a dispatch frame.
         const derived = /DERIVED_ID:([0-9a-f]{32})/u.exec(run.stdout)?.[1];
         expect(derived).toBe(
