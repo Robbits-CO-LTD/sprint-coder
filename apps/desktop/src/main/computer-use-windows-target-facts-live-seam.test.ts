@@ -1150,9 +1150,9 @@ int wmain(int argc, wchar_t **argv) {
   // control, PE32+ IL-only (Framework64 InstallUtil). PR-2 expected the loader's PE32 -> PE32+
   // conversion to show in the kernel's record; on Windows 11 26200 it does not: every compared
   // value equals the header (machine included), and the recorded entry point is the preferred
-  // ImageBase + AddressOfEntryPoint, outside every MEM_IMAGE region. So the running image cannot be
-  // held from the kernel's record and the target is unresolvable: no IL-only image is admitted by
-  // this path, and none is admitted by skipping a header field (the skip was removed). A runner
+  // ImageBase + AddressOfEntryPoint, outside every MEM_IMAGE region on that runner. Placement can
+  // differ; the disabled anchor now rejects the held file's ILONLY flag regardless of MEM_IMAGE.
+  // No IL-only image is admitted by skipping a header field (the skip was removed). A runner
   // whose kernel record differs from the header fails here, so the exclusion list is looked at again.
   {
     struct SectionImageInformation {
@@ -1316,7 +1316,38 @@ const source = `${seamPrefix}\n${program}`;
 
 // Diagnostics exist only in the generated test translation unit, never in production.
 const ilAnchorSeamPrefix = (() => {
-  let instrumented = seamPrefix;
+  // Force the formerly unguarded native branch independently of ASLR/loader placement.
+  const kernelStart = seamPrefix.indexOf(
+    'std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo',
+  );
+  const kernelEnd = seamPrefix.indexOf(
+    'std::optional<std::wstring> WindowsTargetKernelImageName',
+    kernelStart,
+  );
+  if (kernelStart < 0 || kernelEnd < 0) throw new Error('IL anchor kernel markers changed');
+  const forcedMapping = String.raw`
+bool g_force_il_mem_image = false;
+SIZE_T IlAnchorVirtualQueryEx(HANDLE process, LPCVOID address,
+                            PMEMORY_BASIC_INFORMATION region, SIZE_T size) {
+  if (!g_force_il_mem_image) return VirtualQueryEx(process, address, region, size);
+  *region = {};
+  region->Type = MEM_IMAGE;
+  region->AllocationBase = const_cast<LPVOID>(address);
+  return sizeof(*region);
+}
+std::optional<std::wstring> IlAnchorMappedFileName(HANDLE process, LPVOID base) {
+  if (g_force_il_mem_image) return std::wstring(L"forced-il-only-image");
+  return WindowsTargetMappedFileName(process, base);
+}
+`;
+  let instrumented =
+    seamPrefix.slice(0, kernelStart) +
+    forcedMapping +
+    seamPrefix
+      .slice(kernelStart, kernelEnd)
+      .replaceAll('VirtualQueryEx(', 'IlAnchorVirtualQueryEx(')
+      .replaceAll('WindowsTargetMappedFileName(', 'IlAnchorMappedFileName(') +
+    seamPrefix.slice(kernelEnd);
   for (const [start, end, label] of [
     [
       'WindowsTargetIlOnlyImageMapping(HANDLE',
@@ -1487,6 +1518,20 @@ int wmain(int argc, wchar_t **argv) {
   const auto initial = WindowsTargetKernelImageInfo(child.hProcess);
   if constexpr (!kExpectedIlOnlyImageAnchor) {
     Check(!initial.has_value(), "disabled_il_only_stays_unresolvable");
+    g_force_il_mem_image = true;
+    std::array<wchar_t, 32768> self{};
+    Check(GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size())) != 0,
+          "native_control_path_read");
+    ScopedKernelHandle native_file(CreateFileW(self.data(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    // A native held-file control proves this child's kernel query and the forced branch work.
+    Check(WindowsTargetKernelImageInfo(child.hProcess, native_file.value).has_value(),
+          "forced_mem_image_native_control_resolves");
+    Check(!WindowsTargetKernelImageInfo(child.hProcess).has_value(),
+          "disabled_il_only_mem_image_stays_unresolvable");
+    Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+          "disabled_il_only_mem_image_held_stays_unresolvable");
+    g_force_il_mem_image = false;
   } else {
     const auto check_hold = [&](const char *phase, bool running) {
       DWORD exit_code = 0;
