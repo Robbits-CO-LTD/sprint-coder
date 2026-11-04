@@ -32,6 +32,8 @@ namespace sprint_coder::computer_use {
     defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)
 #error Explorer exception test seam must not enter a product build
 #endif
+// Derived only after the checks above, so test-only hooks elsewhere never name the switch itself.
+#define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1
 inline constexpr bool kWindowsExplorerException = true;
 #else
 inline constexpr bool kWindowsExplorerException = false;

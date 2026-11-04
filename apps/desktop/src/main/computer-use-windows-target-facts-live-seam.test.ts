@@ -1856,6 +1856,150 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Explorer exception native preparation',
   () => {
+    // Both Explorer tests compile the complete production host (explorer-host.cc) with their driver.
+    const buildExplorerHostDriver = async (
+      scratch: string,
+      driver: string,
+      binary: string,
+      gate: boolean,
+    ): Promise<void> => {
+      writeFileSync(join(scratch, 'explorer-host.cc'), host);
+      const provenance = join(scratch, 'provenance.h');
+      writeFileSync(
+        provenance,
+        '#define SPRINT_CODER_SOURCE_COMMIT "0000000000000000000000000000000000000000"\n',
+      );
+      const command = build!.wrap([
+        '/nologo',
+        '/std:c++20',
+        '/EHsc',
+        '/W4',
+        '/utf-8',
+        '/DNOMINMAX',
+        '/DUNICODE',
+        '/D_UNICODE',
+        '/DWIN32_LEAN_AND_MEAN',
+        '/D_WIN32_WINNT=0x0A00',
+        '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+        ...(gate ? ['/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION'] : []),
+        `/FI${provenance}`,
+        `/I${nativeDirectory}`,
+        `/I${scratch}`,
+        join(nativeDirectory, driver),
+        `/Fo:${binary}.obj`,
+        `/Fe:${binary}`,
+        '/link',
+        'ole32.lib',
+        'oleaut32.lib',
+        'uiautomationcore.lib',
+        'user32.lib',
+        'dwmapi.lib',
+        'd3d11.lib',
+        'dxgi.lib',
+        'windowscodecs.lib',
+        'bcrypt.lib',
+        'advapi32.lib',
+        'userenv.lib',
+        'crypt32.lib',
+        'wintrust.lib',
+        'shell32.lib',
+        'runtimeobject.lib',
+        'windowsapp.lib',
+        'uuid.lib',
+      ]);
+      await promisify(execFile)(command.file, command.args, {
+        encoding: 'utf8',
+        windowsVerbatimArguments: command.verbatim,
+        timeout: 120_000,
+        env: { ...process.env, VSLANG: '1033' },
+      }).catch((error: unknown) => {
+        if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string')
+          console.log(error.stdout);
+        throw error;
+      });
+    };
+    it('rejects measurement on the native transport with gate off or stale binding', async () => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-wire-'));
+      try {
+        for (const gate of [false, true]) {
+          const binary = join(scratch, `transport-${gate}.exe`);
+          await buildExplorerHostDriver(
+            scratch,
+            'computer_use_windows_explorer_transport_test.cc',
+            binary,
+            gate,
+          );
+          const result = await promisify(execFile)(binary, [], {
+            encoding: 'utf8',
+            timeout: 15_000,
+          }).catch((error: unknown) => {
+            if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string')
+              console.log(error.stdout);
+            throw error;
+          });
+          expect(result.stdout).not.toContain('FAIL ');
+          expect(result.stdout).toContain('OK Explorer transport');
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 300_000);
+    it('measures live Explorer views and refuses foreign-process child windows', async (context) => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-view-'));
+      let cleanupConfirmed = true;
+      try {
+        const binary = join(scratch, 'explorer-view-test.exe');
+        await buildExplorerHostDriver(
+          scratch,
+          'computer_use_windows_explorer_live_test.cc',
+          binary,
+          true,
+        );
+        cleanupConfirmed = false;
+        const result = await promisify(execFile)(binary, [scratch], {
+          encoding: 'utf8',
+          timeout: 120_000,
+        }).catch((error: unknown) => {
+          if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string') {
+            console.log(error.stdout);
+            cleanupConfirmed = error.stdout.includes('OK explorer_cleanup');
+          }
+          throw error;
+        });
+        cleanupConfirmed = result.stdout.includes('OK explorer_cleanup');
+        console.log(result.stdout);
+        expect(result.stdout).not.toContain('FAIL ');
+        if (result.stdout.includes('NOT_RUN explorer_tab_shared')) {
+          context.skip('NOT_RUN explorer_tab_shared: existing tabs are left open');
+        }
+        if (result.stdout.includes('NOT_RUN explorer_window_ambiguous')) {
+          context.skip('NOT_RUN explorer_window_ambiguous: no window was closed');
+        }
+        if (result.stdout.includes('NOT_RUN explorer_target_preexisting')) {
+          context.skip('NOT_RUN explorer_target_preexisting: existing namespace is left open');
+        }
+        if (result.stdout.includes('NOT_RUN explorer_window_covered')) {
+          context.skip('NOT_RUN explorer_window_covered: another window covers the view');
+        }
+        expect(cleanupConfirmed).toBe(true);
+        expect(result.stdout).toContain('OK Explorer view and foreign child');
+        // Every other case passed; only the dispatch cases could not run against an elevated
+        // explorer.exe (whose identity check refused them with kIdentity, as asserted natively).
+        if (result.stdout.includes('NOT_RUN explorer_elevated_dispatch')) {
+          context.skip(
+            'NOT_RUN explorer_elevated_dispatch: explorer.exe is elevated on this runner',
+          );
+        }
+      } finally {
+        if (cleanupConfirmed) {
+          rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+        } else {
+          console.warn('NOT_RUN explorer_cleanup_unconfirmed: scratch retained');
+        }
+      }
+    }, 300_000);
     it('checks held-image facts, file-window restriction, and acceptance-only compilation', async () => {
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-'));
@@ -1961,6 +2105,88 @@ int main() {
 );
 
 describe('Windows target facts seam source', () => {
+  it('owns Explorer automation entries and never closes a shared tab window', () => {
+    const live = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_explorer_live_test.cc'),
+      'utf8',
+    );
+    expect(live).toContain('browser->get_Document(document.Receive())');
+    expect(live).toContain('view.Get()->get_Folder(folder.Receive())');
+    expect(live).toContain('folder2.Get()->get_Self(item.Receive())');
+    expect(live).toContain('item.Get()->get_Path(&path)');
+    expect(live).toContain('GetLongPathNameW');
+    expect(live).toContain('MsgWaitForMultipleObjects');
+    expect(live).not.toContain('Sleep(25)');
+    expect(live).not.toContain('entry.identity');
+    expect(live).toContain('OK explorer_cleanup');
+    expect(live).toContain('before.ContainsPath(target_path)');
+    // Ours is exactly one HWND absent before the launch, showing the target (M4): a namespace path
+    // such as Control Panel is not unique, so the path alone never selects a window to close.
+    expect(live).toContain('entry.path != target_path || before.HasWindow(entry.window)');
+    expect(live).toContain('before.HasWindow(window)');
+    expect(live).toContain('NOT_RUN explorer_tab_shared');
+    expect(live).toContain('Ambiguous("explorer_window_ambiguous")');
+    expect(live).toContain('if (fresh.size() > 1)');
+    expect(live).toContain('if (!launched || shared) return;');
+    expect(live).toContain('entry.browser.Get()->Quit()');
+    expect(live).toContain('entry.window != window || entry.path != target_path');
+    expect(live).toContain('quit && !now.HasWindow(window)');
+    expect(live).not.toContain('now.ContainsPath(target_path)');
+    expect(live).toContain('explorer_cleanup_confirmed = false');
+    // The positive case goes through the production dispatch, and the refusals name their reason.
+    expect(live).toContain('#include "explorer-host.cc"');
+    expect(live).toContain('HandlePipeRequest(server.value');
+    expect(live).toContain('Refusal::kNotShellFsFolder, what');
+    expect(live).toContain('Refusal::kPointOutsideView');
+    expect(live).toContain('Refusal::kPointForeignOwner');
+    expect(live).toContain('Refusal::kActiveTabUnbound');
+    expect(live).toContain('Refusal::kAncestorShellClass');
+    const explorer = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_explorer.inc'),
+      'utf8',
+    );
+    expect(explorer).toContain('hit != view && !IsChild(view, hit)');
+    expect(explorer).toContain('IsWindowVisible(hit)');
+    expect(explorer).toContain('WindowsExplorerActiveView(window, view_window)');
+    expect(explorer).toContain('IsEqualCLSID(folder_class, CLSID_ShellFSFolder)');
+    expect(explorer).toContain('GetDriveTypeW(path.substr(0, 3).c_str()) != DRIVE_FIXED');
+    expect(explorer).toContain('P5 REQUIREMENT (M2');
+    expect(explorer).toContain(
+      "if (end != 3 && end != path.size() && path[end] != L'\\\\') continue;",
+    );
+    expect(explorer).toContain('rest.find_first_of(L"\\r\\n")');
+    // Test-only overrides and faults exist only behind the acceptance-test macro, never in a product.
+    for (const name of [
+      'windows_explorer_ignore_elevation_for_test',
+      'windows_explorer_fault_for_test',
+      'WindowsExplorerFault',
+    ]) {
+      let from = explorer.indexOf(name);
+      expect(from, name).toBeGreaterThan(0);
+      while (from >= 0) {
+        const opened = explorer.lastIndexOf(
+          '#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)',
+          from,
+        );
+        const closed = explorer.lastIndexOf('#endif', from);
+        expect(opened, `${name} at ${from}`).toBeGreaterThan(closed);
+        from = explorer.indexOf(name, from + name.length);
+      }
+    }
+    // M4: a window is recorded and closed only while it is the one new window on the target.
+    expect(live).toContain('if (!again.valid || !OnlyOurs(again))');
+    expect(live).toContain('if (!OnlyOurs(now)) { RefuseUnlessOurs(now); return; }');
+    expect(live).toContain('GetTickCount64() - adopted >= kSettleMs');
+    expect(live).toContain('NOT_RUN explorer_elevated_dispatch');
+    // Refusal reasons stay off the wire: the response names only the kind and the point answer.
+    expect(explorer).toContain('*response = "{\\"shellView\\":');
+    const response = explorer.slice(explorer.indexOf('*response = "{\\"shellView\\":'));
+    expect(response.slice(0, response.indexOf(';'))).not.toMatch(/trace|Refusal/u);
+    expect(live).toContain('CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)');
+    expect(live).not.toContain('WM_CLOSE');
+    expect(live).toContain('HWND parent = opened.Open(scratch)');
+    expect(live).toContain('FAIL ');
+  });
   it('cuts the facts block, and only the v2 targets block calls it or the core', () => {
     const block = cut('// BEGIN windows target facts', '// END windows target facts');
     expect(block).toContain('WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(');

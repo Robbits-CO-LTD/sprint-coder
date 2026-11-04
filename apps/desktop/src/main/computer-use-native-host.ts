@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
@@ -93,7 +93,7 @@ const windowsExplorerApprovalBrand: unique symbol = Symbol('windows-explorer-app
 export type WindowsExplorerApproval = Readonly<{
   [windowsExplorerApprovalBrand]: true;
 }>;
-// P5 supplies the measured shell view. Missing evidence remains closed.
+// Only identity is retained; the shell view is measured at each capability use.
 const explorerFactsSchema = z.object({
   platform: z.literal('win32'),
   imageRoot: z.literal('windows_directory'),
@@ -105,10 +105,21 @@ const explorerFactsSchema = z.object({
   signerMicrosoftRoot: z.literal(true),
   packaged: z.literal(false),
   windowClass: z.string(),
-  shellView: z.object({ kind: z.literal('filesystem_folder'), path: z.string() }).strict(),
 });
-export type WindowsExplorerFacts = Readonly<z.infer<typeof explorerFactsSchema>>;
-type ExplorerEvidence = Readonly<{ facts: WindowsExplorerFacts; current: () => boolean }>;
+const explorerViewSchema = z
+  .object({
+    shellView: z.object({ kind: z.literal('filesystem_folder'), path: z.string() }).strict(),
+    pointOwnerMatches: z.literal(true),
+  })
+  .strict();
+export type WindowsExplorerFacts = Readonly<
+  z.infer<typeof explorerFactsSchema> & z.infer<typeof explorerViewSchema>
+>;
+type ExplorerEvidence = Readonly<{
+  facts: Readonly<z.infer<typeof explorerFactsSchema>>;
+  current: () => boolean;
+  measure: (point: Readonly<{ x: number; y: number }>) => Promise<unknown>;
+}>;
 const explorerApprovalReaders = new WeakMap<
   ComputerUseNativeHost,
   (sessionId: string) => ExplorerEvidence | undefined
@@ -130,15 +141,21 @@ export function readWindowsExplorerApproval(
   return approval;
 }
 
-export function readCurrentWindowsExplorerFacts(
+export async function readCurrentWindowsExplorerFacts(
   approval: WindowsExplorerApproval | undefined,
   host: ComputerUseNativeHost,
   sessionId: string,
-): WindowsExplorerFacts | undefined {
+  point: Readonly<{ x: number; y: number }>,
+): Promise<WindowsExplorerFacts | undefined> {
   const evidence = approval === undefined ? undefined : explorerApprovals.get(approval);
-  return evidence?.host === host && evidence.sessionId === sessionId && evidence.current()
-    ? evidence.facts
-    : undefined;
+  if (evidence?.host !== host || evidence.sessionId !== sessionId || !evidence.current())
+    return undefined;
+  try {
+    const view = explorerViewSchema.safeParse(await evidence.measure(point));
+    return view.success && evidence.current() ? { ...evidence.facts, ...view.data } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -371,7 +388,7 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
-  const explorerSessionFacts = new WeakMap<InternalNativeSession, WindowsExplorerFacts>();
+  const explorerSessionFacts = new WeakMap<InternalNativeSession, ExplorerEvidence['facts']>();
   const interactionRevoked = new Set<string>();
   const interactionListeners = new Set<WindowsInteractionListener>();
   if (platform === 'win32')
@@ -2601,10 +2618,7 @@ export function createComputerUseNativeHost(
     const explorerFacts = explorerFactsSchema.safeParse(selectedRecord['facts']);
     const explorerBoundFacts =
       explorerFacts.success && selectedRecord['appIdentityDigest'] === input.profile.identityDigest
-        ? Object.freeze({
-            ...explorerFacts.data,
-            shellView: Object.freeze({ ...explorerFacts.data.shellView }),
-          })
+        ? Object.freeze({ ...explorerFacts.data })
         : undefined;
     const expectedMaximumMode = bindComputerUseMaximumMode(
       nativeMaximumMode(input.profile.identity),
@@ -3751,6 +3765,18 @@ export function createComputerUseNativeHost(
     // Session object and epoch prevent reuse after quarantine clears or the id is reopened.
     return {
       facts,
+      // P5 REQUIREMENT (M2): this measures Main's point at the time of the request. The dispatch
+      // must re-check the point owner and view natively, with WindowsActionPoint's POINT, before
+      // its first input API; this answer never authorizes an input by itself.
+      measure: async (point) =>
+        addon?.measureExplorerView?.({
+          sessionId,
+          windowId: session.windowId,
+          cancelEpoch: epoch,
+          requestId: randomUUID(),
+          x: point.x,
+          y: point.y,
+        }),
       current: () =>
         sessions.get(sessionId) === session &&
         session.windowIdentityDigest === windowDigest &&

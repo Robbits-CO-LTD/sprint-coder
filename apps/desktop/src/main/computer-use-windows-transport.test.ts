@@ -694,6 +694,31 @@ function headerEnumTypes(): Record<string, number> {
 }
 
 describe('Computer Use Windows helper transport', () => {
+  it.each(['unsupported_operation', 'explorer_view_unreadable'])(
+    'propagates Explorer measurement refusal (%s) with session and epoch intact',
+    async (code) => {
+      const measure = vi.fn<Responder>(() => ['error', { code }]);
+      const { addon } = createTarget({ ...responders(), measure_explorer_view: measure });
+      for (const [sessionId, cancelEpoch] of [
+        ['missing', 0],
+        ['bound', 1],
+      ] as const) {
+        await expect(
+          addon.measureExplorerView!({
+            sessionId,
+            cancelEpoch,
+            windowId: '100',
+            requestId: `${sessionId}-measure`,
+            x: 20,
+            y: 30,
+          }),
+        ).rejects.toThrow(code);
+        expect(measure).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sessionId, cancelEpoch, x: 20, y: 30 }),
+        );
+      }
+    },
+  );
   beforeEach(() => {
     vi.mocked(spawn).mockClear();
     vi.mocked(mkdtemp).mockClear();

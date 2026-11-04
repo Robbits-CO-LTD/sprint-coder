@@ -361,6 +361,10 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
 }
 // END artifact read
 
+// Defined in computer_use_windows_host_explorer.inc, which the host includes after this file.
+bool MeasureWindowsExplorerView(const Frame &request, const std::string &metadata,
+                                std::string *response);
+
 bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const Frame &request, bool *handshaken,
                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt,
@@ -443,6 +447,18 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       ScrubString(&payload);
       if (!sent) return false;
       break;
+    }
+    if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+      if (operation == "measure_explorer_view") {
+        // P5 requirement (M2): this answer is not an input authorization. Dispatch must re-check the
+        // point owner and view natively with WindowsActionPoint's POINT before the first input API.
+        // Every refusal is the same explorer_view_unreadable on the wire.
+        std::string response;
+        const bool measured = MeasureWindowsExplorerView(request, metadata, &response);
+        if (!Respond(pipe, request, measured ? MessageType::kProbeResult : MessageType::kError,
+                     measured ? response : ErrorPayload("explorer_view_unreadable"))) return false;
+        break;
+      }
     }
     std::string response;
     std::string reason;

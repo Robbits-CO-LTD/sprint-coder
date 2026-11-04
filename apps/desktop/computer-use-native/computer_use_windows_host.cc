@@ -17,6 +17,8 @@
 #include <sddl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <exdisp.h>
+#include <shlguid.h>
 #include <softpub.h>
 #include <tlhelp32.h>
 #include <userenv.h>
@@ -122,6 +124,8 @@ namespace {
 #include "computer_use_windows_host_input.inc"
 #include "computer_use_windows_host_preflight.inc"
 #include "computer_use_windows_host_pipe.inc"
+// After the pipe: seams cut the preflight and pipe fragments between markers that would enclose it.
+#include "computer_use_windows_host_explorer.inc"
 bool ParseUnsigned(std::wstring_view value, DWORD *output) {
   if (value.empty() || value.size() > 10)
     return false;

@@ -269,6 +269,16 @@ export function createWindowsComputerUseNativeAddon(
     },
     // #785 T15-4w: the read of one node's value for `copy`. A probe operation of its own, under its own
     // request key, so its answer (which carries the value) is never confused with a dispatch's.
+    measureExplorerView: (input) => {
+      const value = record(input);
+      return client.call(
+        'probe',
+        'measure_explorer_view',
+        value,
+        stringField(value, 'sessionId'),
+        `measureExplorerView:${stringField(value, 'requestId')}`,
+      );
+    },
     readNodeValue: (input) => {
       const value = record(input);
       return client.call(
