@@ -33,20 +33,41 @@ afterEach(() => {
   load.mockClear();
 });
 describe('Windows Main addon pre-load provenance', () => {
-  it.each(['valid', 'tampered', 'missing', 'no-entry', 'changed-manifest', 'no-pin'] as const)(
-    '%s',
+  it.each([
+    'valid',
+    'tampered',
+    'missing',
+    'no-entry',
+    'changed-manifest',
+    'no-pin',
+    'undefined-pin',
+    'coherent-tampering',
+  ] as const)(
+    'validates the compiled provenance pin before allowing Windows Main addon loading: %s',
     (scenario) => {
       const root = mkdtempSync(join(tmpdir(), 'sc-main-addon-'));
       try {
         const candidate = { ...manifest };
+        if (scenario === 'coherent-tampering')
+          candidate.windowsMainAddon = {
+            ...manifest.windowsMainAddon!,
+            sha256: createHash('sha256').update('changed').digest('hex'),
+          };
         if (scenario === 'no-entry') delete candidate.windowsMainAddon;
         if (scenario === 'changed-manifest') candidate.sourceCommit = 'c'.repeat(40);
         writeFileSync(join(root, 'computer-use-native.manifest.json'), JSON.stringify(candidate));
         if (scenario !== 'missing')
-          writeFileSync(join(root, addonName), scenario === 'tampered' ? 'changed' : 'addon');
+          writeFileSync(
+            join(root, addonName),
+            scenario === 'tampered' || scenario === 'coherent-tampering' ? 'changed' : 'addon',
+          );
         vi.stubGlobal(
           '__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__',
-          scenario === 'no-pin' ? null : computerUseNativeCompiledPin(manifest),
+          scenario === 'undefined-pin'
+            ? undefined
+            : scenario === 'no-pin'
+              ? null
+              : computerUseNativeCompiledPin(manifest),
         );
         const attempt = () =>
           loadWindowsMainAddon(join(root, 'sprint-coder-computer-use-host.exe'));
@@ -54,7 +75,15 @@ describe('Windows Main addon pre-load provenance', () => {
           expect(attempt().readMainIdentity).toBeTypeOf('function');
           expect(load).toHaveBeenCalledExactlyOnceWith(join(root, addonName));
         } else {
-          expect(attempt).toThrow();
+          expect(attempt).toThrow(
+            scenario === 'no-pin' || scenario === 'undefined-pin'
+              ? 'Computer Use native compile pin is unavailable'
+              : scenario === 'missing'
+                ? 'ENOENT'
+                : scenario === 'tampered'
+                  ? 'Windows Main addon digest mismatch'
+                  : 'Windows Main addon provenance mismatch',
+          );
           expect(load).not.toHaveBeenCalled();
         }
       } finally {

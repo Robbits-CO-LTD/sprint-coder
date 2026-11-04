@@ -23,12 +23,14 @@ export function loadWindowsMainAddon(helperPath: string): WindowsMainAddon {
       readFileSync(join(directory, 'computer-use-native.manifest.json'), 'utf8'),
     ) as unknown,
   );
-  if (typeof __SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__ !== 'undefined') {
-    const pin = parseComputerUseNativeCompiledPin(__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__);
-    if (pin.manifestDigest !== computerUseNativeManifestDigest(manifest))
-      throw new Error('Windows Main addon provenance mismatch');
-  }
+  if (typeof __SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__ === 'undefined')
+    throw new Error('Computer Use native compile pin is unavailable');
+  const pin = parseComputerUseNativeCompiledPin(__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__);
+  if (pin.manifestDigest !== computerUseNativeManifestDigest(manifest))
+    throw new Error('Windows Main addon provenance mismatch');
   const path = verifyWindowsMainAddonDigest(directory, manifest);
+  // Residual TOCTOU: the file can change between digest verification and require.
+  // Closing this gap requires a native loading boundary; the gate and pin do not eliminate it.
   const value: unknown = createRequire(__filename)(path);
   if (
     typeof value !== 'object' ||

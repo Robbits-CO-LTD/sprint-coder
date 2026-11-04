@@ -639,7 +639,8 @@ jobs:
           $appRoot = Join-Path $desktopRoot 'out\Sprint Coder-win32-x64'
           $app = Join-Path $appRoot 'Sprint Coder.exe'
           $helper = Join-Path $appRoot 'resources\sprint-coder-computer-use-host.exe'
-          foreach ($path in @($installer, $app, $helper)) {
+          $mainAddon = Join-Path $appRoot 'resources\sprint_coder_computer_use_windows_main.node'
+          foreach ($path in @($installer, $app, $helper, $mainAddon)) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Required signed Windows gate artifact is missing: $path"
             }
@@ -653,7 +654,7 @@ jobs:
           }
           $expectedThumbprint = $env:EXPECTED_WINDOWS_SIGNER_THUMBPRINT.Replace(' ', '').ToUpperInvariant()
           $expectedSubject = [string]$env:EXPECTED_WINDOWS_SIGNER_SUBJECT
-          foreach ($path in @($installer, $app, $helper)) {
+          foreach ($path in @($installer, $app, $helper, $mainAddon)) {
             $signature = Get-AuthenticodeSignature -LiteralPath $path
             $thumbprint = [string]$signature.SignerCertificate.Thumbprint
             $subject = [string]$signature.SignerCertificate.Subject

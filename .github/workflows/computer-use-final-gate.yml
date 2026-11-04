@@ -320,15 +320,20 @@ jobs:
           $manifest = @(
             Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'computer-use-native.manifest.json'
           )
-          if ($app.Count -ne 1 -or $helper.Count -ne 1 -or $manifest.Count -ne 1) {
-            throw 'Portable package must contain exactly one app, Computer Use helper, and native manifest.'
+          $mainAddon = @(
+            Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint_coder_computer_use_windows_main.node'
+          )
+          if ($app.Count -ne 1 -or $helper.Count -ne 1 -or $mainAddon.Count -ne 1 -or $manifest.Count -ne 1) {
+            throw 'Portable package must contain exactly one app, Computer Use helper, Main addon, and native manifest.'
           }
 
           $appSignature = Get-AuthenticodeSignature -LiteralPath $app[0].FullName
           $helperSignature = Get-AuthenticodeSignature -LiteralPath $helper[0].FullName
-          if ($appSignature.Status -ne 'Valid' -or $helperSignature.Status -ne 'Valid') {
-            throw 'Packaged app and Computer Use helper must both have valid Authenticode signatures.'
+          $mainAddonSignature = Get-AuthenticodeSignature -LiteralPath $mainAddon[0].FullName
+          if ($mainAddonSignature.Status -ne 'Valid' -or $appSignature.Status -ne 'Valid' -or $helperSignature.Status -ne 'Valid') {
+            throw 'Packaged app, Main addon and Computer Use helper must all have valid Authenticode signatures.'
           }
+          $mainAddonThumbprint = $mainAddonSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
           $appThumbprint = $appSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
           $helperThumbprint = $helperSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
           $installerThumbprint = $installerSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
@@ -338,6 +343,7 @@ jobs:
           if (
             $appThumbprint -notmatch '^[0-9A-F]{40}$' -or
             $appThumbprint -ne $helperThumbprint -or
+            $appThumbprint -ne $mainAddonThumbprint -or
             $appThumbprint -ne $installerThumbprint -or
             $appThumbprint -ne $expectedSignerThumbprint -or
             $appSubject -notlike "*$expectedSignerSubject*" -or
@@ -368,9 +374,6 @@ jobs:
           if (($manifestKeys -join '|') -ne ($expectedManifestKeys -join '|')) {
             throw 'Windows Computer Use native manifest has unexpected keys.'
           }
-          $mainAddon = @(
-            Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint_coder_computer_use_windows_main.node'
-          )
           $mainAddonEntry = $nativeManifest.windowsMainAddon
           if (
             $mainAddon.Count -ne 1 -or

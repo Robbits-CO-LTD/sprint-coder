@@ -16,6 +16,14 @@ const signedWindowsRelease = readFileSync(
 );
 
 describe('release signing and notarization', () => {
+  it('checks the Main addon with the configured release signer', () => {
+    expect(workflow).toContain(
+      "$mainAddon = Join-Path $appRoot 'resources\\sprint_coder_computer_use_windows_main.node'",
+    );
+    expect(
+      workflow.match(/foreach \(\$path in @\(\$installer, \$app, \$helper, \$mainAddon\)\)/gu),
+    ).toHaveLength(2);
+  });
   it('parallelizes validation while keeping signed builds and draft publication behind every gate', () => {
     expect(workflow).toContain(
       'needs: [metadata, validate-quality, validate-package-tests, validate-desktop-tests]',
