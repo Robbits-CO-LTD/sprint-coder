@@ -838,6 +838,102 @@
         "kind": "upper",
         "maximumMode": "observe_only"
       }
+    },
+    {
+      "name": "whale browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "whale.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "zen browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "zen.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "duckduckgo browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "duckduckgo.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "Yandex browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "browser.exe",
+        "imageRelativePath": "yandex\\yandexbrowser\\application\\browser.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "nested Yandex browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "BROWSER.EXE",
+        "imageRelativePath": "vendor\\YANDEX\\application\\browser.exe"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "observe_only"
+      }
+    },
+    {
+      "name": "unrelated mybrowser browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "mybrowser.exe"
+      },
+      "expect": {
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
+      }
+    },
+    {
+      "name": "unrelated browser with another signer browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "browser.exe",
+        "imageRelativePath": "contoso\\browser.exe",
+        "signerOrganization": "another publisher"
+      },
+      "expect": {
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
+      }
+    },
+    {
+      "name": "Yandex-like folder browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "browser.exe",
+        "imageRelativePath": "myyandex\\browser.exe"
+      },
+      "expect": {
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
+      }
+    },
+    {
+      "name": "Yandex folder unrelated exe browser ceiling (ruleset 4)",
+      "set": {
+        "imageLeaf": "editor.exe",
+        "imageRelativePath": "yandex\\editor.exe"
+      },
+      "expect": {
+        "kind": "eligible",
+        "maximumMode": "full_access_app"
+      }
     }
   ]
 }

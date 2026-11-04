@@ -60,6 +60,14 @@ inline constexpr std::string_view kBrowserExecutables[] = {
     if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
   for (const std::string_view name : kBrowserExecutables)
     if (leaf == name) return true;
+  if (leaf == "browser.exe") {
+    std::string normalized(path);
+    for (char &character : normalized) {
+      if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+      if (character == '/') character = '\\';
+    }
+    return normalized.find("\\yandex\\") != std::string::npos;
+  }
   return false;
 }
 

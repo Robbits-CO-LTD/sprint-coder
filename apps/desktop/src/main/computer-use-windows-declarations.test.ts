@@ -162,7 +162,7 @@ describe('Windows document viewer declarations', () => {
       computerUseApprovalPathEnabled({
         platform: 'win32',
         methodsExported: true,
-        attestedClassifierVersion: 2,
+        attestedClassifierVersion: 3,
         effectiveMode: 'v2-denylist',
         route: 'v2',
       }),

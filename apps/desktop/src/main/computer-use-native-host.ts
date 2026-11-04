@@ -1372,7 +1372,7 @@ export function createComputerUseNativeHost(
   // start takes the binding back only when it is the last one and no session came of it.
   const classifierBindings = new Map<
     string,
-    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 2; starts: Set<symbol> }>
+    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 3; starts: Set<symbol> }>
   >();
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
@@ -2078,12 +2078,12 @@ export function createComputerUseNativeHost(
     }
   };
 
-  // A session bound to a route whose expected classifier is not 2 (every panel session, and an
+  // A session bound to a route whose expected classifier is not 3 (every panel session, and an
   // agent session of a build that did not attest 2) is refused the approval calls here as well as
   // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session with no
   // binding at all (started without a route, closed, or whose start failed) is refused too (C5-1).
   const approvalRouteAllowed = (sessionId: string): boolean =>
-    classifierBindings.get(sessionId)?.expectedVersion === 2;
+    classifierBindings.get(sessionId)?.expectedVersion === 3;
 
   // The "approval path is open" test (C5-1): platform, the exported surface, the attested classifier
   // version, and the session's mode and route (computerUseApprovalPathEnabled has the table). It is
@@ -2092,7 +2092,7 @@ export function createComputerUseNativeHost(
   const approvalRouteOf = (sessionId: string): ComputerUseApprovalRoute => {
     const binding = classifierBindings.get(sessionId);
     if (binding === undefined) return 'unbound';
-    return binding.expectedVersion === 2 ? 'v2' : 'v1';
+    return binding.expectedVersion === 3 ? 'v2' : 'v1';
   };
   // The loader verifies package provenance and all three declarations. The transport rechecks
   // the live helper handshake; session readiness additionally binds its generation and Stop state.
@@ -2200,7 +2200,7 @@ export function createComputerUseNativeHost(
   };
 
   // The route the native is told for a session (C4): the one Main will accept receipts for, which
-  // is v2 only when the build attested classifier 2. The native keeps it for the life of the
+  // is v2 only when the build attested classifier 3. The native keeps it for the life of the
   // session. A session that was never bound sends nothing. The Windows host reads it only for
   // the approval gate (route v2 binding, N8-5), so it is sent only to a helper whose approval
   // evidence was verified; an ordinary Windows helper never receives the key (C4-0).
@@ -3313,13 +3313,13 @@ export function createComputerUseNativeHost(
         throw new ComputerUseNativeUnavailableError('native_classifier_route_forbidden');
       // Bound before the first await, so two starts of one new session cannot both pass the check
       // above with different routes. The route asks; the attest decides: v2 is expected only from
-      // a build that attested classifier 2.
+      // a build that attested classifier 3.
       // A binding is made only by the start that creates the session: an existing session that
       // was started without a route stays unbound (and is sent none), whatever a later start asks.
       if (binding === undefined && owner.route !== undefined && !sessions.has(input.sessionId)) {
         binding = {
           route: owner.route,
-          expectedVersion: owner.route === 'v2' && options.classifierV2Attested === true ? 2 : 1,
+          expectedVersion: owner.route === 'v2' && options.classifierV2Attested === true ? 3 : 1,
           starts: new Set<symbol>(),
         };
         classifierBindings.set(input.sessionId, binding);
@@ -3348,7 +3348,7 @@ export function createComputerUseNativeHost(
         startEntered = true;
         const started = await startNative(
           input,
-          binding === undefined ? undefined : binding.expectedVersion === 2 ? 'v2' : 'v1',
+          binding === undefined ? undefined : binding.expectedVersion === 3 ? 'v2' : 'v1',
           owner,
           assertTargetCurrent,
         );
@@ -3500,7 +3500,7 @@ export function createComputerUseNativeHost(
             result: 'rejected',
             reasonCode: 'native_session_missing',
           });
-        // A session bound to a route that does not expect classifier 2 never gets an approval.
+        // A session bound to a route that does not expect classifier 3 never gets an approval.
         if (!approvalRouteAllowed(input.session.sessionId))
           return Object.freeze({
             kind: 'refused',
@@ -4045,7 +4045,7 @@ type NativePreflightOutcome =
  * the classifier version in the handshake, these are Main's fixed expectations.
  */
 export const NATIVE_PREFLIGHT_CLASSIFIER_VERSION = 1;
-export const NATIVE_APPROVAL_CLASSIFIER_VERSION = 2;
+export const NATIVE_APPROVAL_CLASSIFIER_VERSION = 3;
 
 /** `effect` strings of a version 2 approval offer; the native `NativeApprovalEffect` minus kInvalid. */
 export const NATIVE_APPROVAL_EFFECTS = [
@@ -4124,9 +4124,9 @@ export function parseNativePreflightReceipt(
     cancelEpoch: number;
     /**
      * The classifier version the session's route expects (classifier C3). Bound: every receipt
-     * must carry exactly this version, and an approval offer additionally needs classifier 2, so
+     * must carry exactly this version, and an approval offer additionally needs classifier 3, so
      * a v1-bound session can never be offered one. Unbound (no route given at start): the
-     * pre-C3 rule, classifier 2 for an offer and 1 for the rest. Main always binds a route.
+     * pre-C3 rule, classifier 3 for an offer and 1 for the rest. Main always binds a route.
      */
     expectedClassifierVersion?: number;
     /** Supplied only after the Windows connection's capability and session route are checked.
@@ -4150,7 +4150,7 @@ export function parseNativePreflightReceipt(
       input.session.platform !== 'win32' ||
       input.windowsApproval?.route !== 'v2' ||
       input.windowsApproval.receiptVersion !== 3 ||
-      input.expectedClassifierVersion !== 2 ||
+      input.expectedClassifierVersion !== 3 ||
       !offersApproval ||
       typeof record['inputAttemptCount'] !== 'number' ||
       !Number.isSafeInteger(record['inputAttemptCount']) ||

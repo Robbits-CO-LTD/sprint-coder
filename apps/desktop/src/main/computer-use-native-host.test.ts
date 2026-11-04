@@ -1412,7 +1412,7 @@ describe('Computer Use native Main adapter', () => {
       reasonCode: null,
       deniedResult: null,
       ticket: null,
-      classifierVersion: 2,
+      classifierVersion: 3,
       approvalGeneration: 1,
       remainingMs: 60_000,
       effect: 'supervised_action',
@@ -1532,9 +1532,10 @@ describe('Computer Use native Main adapter', () => {
       { remainingMs: Number.NaN },
       { approvalGeneration: undefined },
       { remainingMs: undefined },
-      // single_use_approval is accepted only at classifier version 2.
+      // single_use_approval is accepted only at classifier version 3.
       { classifierVersion: 1 },
-      { classifierVersion: 3 },
+      { classifierVersion: 2 },
+      { classifierVersion: 4 },
       { ticket },
       { reasonCode: 'native_x' },
       { deniedResult: 'paused' },
@@ -1566,14 +1567,14 @@ describe('Computer Use native Main adapter', () => {
       { decision: 'ordinary', approvalGeneration: 1 },
       { decision: 'ordinary', remainingMs: 1000 },
       { decision: 'ordinary', effect: 'supervised_action' },
-      { decision: 'ordinary', classifierVersion: 2 },
+      { decision: 'ordinary', classifierVersion: 3 },
       { decision: 'replay', ticket: null, effect: 'supervised_action' },
       {
         decision: 'blocked',
         reasonCode: 'native_x',
         deniedResult: 'rejected',
         ticket: null,
-        classifierVersion: 2,
+        classifierVersion: 3,
       },
     ] as Array<Record<string, unknown>>) {
       const before = dispatchCalls();
@@ -1619,7 +1620,7 @@ describe('Computer Use native Main adapter', () => {
         ticket: null,
         reasonCode: null,
         deniedResult: null,
-        classifierVersion: 2,
+        classifierVersion: 3,
       },
       {
         decision: 'single_use_approval',
@@ -1650,7 +1651,7 @@ describe('Computer Use native Main adapter', () => {
       { sessionId: 'other' },
       { cancelEpoch: 9 },
       { observationRevision: 99 },
-      { classifierVersion: 2 },
+      { classifierVersion: 3 },
       { extra: true },
     ];
     for (const overrides of malformed) {

@@ -63,7 +63,7 @@ function row(kind: 'eligible' | 'upper' = 'eligible'): Selectable {
 }
 
 function envelope(targets: ComputerWindowsNativeTargetList['targets'] = [row()]) {
-  return { generation: 4_503_599_627_370_000, rulesetVersion: 3, truncated: true, targets };
+  return { generation: 4_503_599_627_370_000, rulesetVersion: 4, truncated: true, targets };
 }
 
 function nativeFixture() {
@@ -84,7 +84,7 @@ function nativeFixture() {
       // Injected inactive v2 binding. Production manifest admission stays closed until PR-6.
       eligibility: {
         mode: 'v2-denylist',
-        rulesetVersion: 3,
+        rulesetVersion: 4,
         classifierVersion: 1,
         lexiconVersion: 1,
         ticketRequired: true,
@@ -436,8 +436,8 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
   const value = { ...envelope(), targets: [target] };
   const eligibility = {
     mode: 'v2-denylist',
-    classifierVersion: 2,
-    rulesetVersion: 3,
+    classifierVersion: 3,
+    rulesetVersion: 4,
     lexiconVersion: 3,
     ticketRequired: true,
     interlockEnforced: true,

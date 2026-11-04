@@ -36,7 +36,7 @@ struct Fixture {
     facts.payload_digest = std::string(64, 'c');
     facts.observation_revision = facts.ticket_generation = 1;
     sample.measured = {true, false, NativeApprovalEffect::kSupervisedAction,
-                       std::string(64, 'd'), 2, 2, 3};
+                       std::string(64, 'd'), 3, 2, 3};
     sample.display = {NativeApprovalEffect::kSupervisedAction, "invoke", std::nullopt,
                       std::nullopt, false};
     sample.risk.classified = sample.metadata_complete = true;

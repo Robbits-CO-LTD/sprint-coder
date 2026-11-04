@@ -51,6 +51,7 @@ const RULESET_LEDGER: Readonly<Record<string, Readonly<Record<number, string>>>>
   win32: {
     2: '06a9ae9573a2a192bb80a00a713736576bcdcade21eb199d12efb26952a4fb4f',
     3: '6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584',
+    4: '36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45',
   },
 };
 

@@ -4,7 +4,7 @@ import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake'
 
 const eligibility = {
   mode: 'v2-denylist',
-  classifierVersion: 2,
+  classifierVersion: 3,
   rulesetVersion: 2,
   lexiconVersion: 3,
   ticketRequired: true,
@@ -78,7 +78,7 @@ describe('Windows approval evidence', () => {
     const input = {
       platform: 'win32',
       methodsExported: true,
-      attestedClassifierVersion: 2,
+      attestedClassifierVersion: 3,
       effectiveMode: 'v2-denylist',
       route: 'v2',
       windowsApprovalReady: true,

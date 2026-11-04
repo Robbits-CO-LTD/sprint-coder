@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "platforms": {
     "win32": {
-      "rulesetVersion": 3,
+      "rulesetVersion": 4,
       "eligibleMaximumMode": "full_access_app",
       "upperMaximumMode": "observe_only"
     }
@@ -960,8 +960,29 @@
             "librewolf.exe",
             "floorp.exe",
             "iexplore.exe",
-            "arc.exe"
+            "arc.exe",
+            "whale.exe",
+            "zen.exe",
+            "duckduckgo.exe"
           ]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Yandex browser.exe only within a Yandex directory, matching the browser identity table.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["browser.exe"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "glob",
+          "values": ["yandex\\*", "*\\yandex\\*"]
         }
       ]
     }

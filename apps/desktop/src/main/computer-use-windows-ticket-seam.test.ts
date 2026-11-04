@@ -177,7 +177,7 @@ const preamble = String.raw`
 #include "computer_use_windows_page.h"
 #include "computer_use_preflight_classifier.h"
 #define SPRINT_CODER_ELIGIBILITY_V2 1
-#define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION 2
+#define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION 3
 #include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 
@@ -444,11 +444,11 @@ int main() {
     sessions.at(kSessionKey).approval_route_v2 = v2;
     Preflight(Meta());
     Check(HasDecision("ordinary"), "route_preflight_ordinary");
-    std::cout << "PREFLIGHT_" << (v2 ? 2 : 1) << ":" << g_sent.back().payload << '\n';
+    std::cout << "PREFLIGHT_" << (v2 ? 3 : 1) << ":" << g_sent.back().payload << '\n';
     g_validate_ok = false;
     Preflight(Meta());
     Check(HasDecision("denied"), "route_preflight_denied");
-    std::cout << "DENIED_" << (v2 ? 2 : 1) << ":" << g_sent.back().payload << '\n';
+    std::cout << "DENIED_" << (v2 ? 3 : 1) << ":" << g_sent.back().payload << '\n';
   }
   // 1. A good preflight issues a 64-hex ticket and the matching dispatch consumes it exactly once.
   Reset();
@@ -1011,7 +1011,7 @@ describe.skipIf(compiler === null && process.env['CI'] === undefined)(
           maximumMode: 'supervised',
           screenBounds: { x: 10, y: 20, width: 100, height: 200 },
         };
-        for (const version of [1, 2]) {
+        for (const version of [1, 3]) {
           for (const [prefix, kind] of [
             ['PREFLIGHT', 'ticket'],
             ['DENIED', 'refused'],

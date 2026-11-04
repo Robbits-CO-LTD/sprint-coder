@@ -50,10 +50,10 @@ export const DENY_RULESET = {
   schemaVersion: 1,
   platforms: {
     win32: {
-      rulesetVersion: 3,
+      rulesetVersion: 4,
       eligibleMaximumMode: 'full_access_app',
       upperMaximumMode: 'observe_only',
-      contentSha256: '6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584',
+      contentSha256: '36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45',
     },
   },
   signals: [
@@ -848,7 +848,25 @@ export const DENY_RULESET = {
             'floorp.exe',
             'iexplore.exe',
             'arc.exe',
+            'whale.exe',
+            'zen.exe',
+            'duckduckgo.exe',
           ],
+        },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageLeaf', match: 'equals', negate: false, values: ['browser.exe'] },
+        {
+          signal: 'imageRelativePath',
+          match: 'glob',
+          negate: false,
+          values: ['yandex\\*', '*\\yandex\\*'],
         },
       ],
     },

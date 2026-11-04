@@ -59,14 +59,19 @@
 
 namespace sprint_coder::computer_use {
 
-// Candidate versions. They are NOT attested anywhere yet; the change that turns the classifier on
-// raises the attested versions (eligibility.json) to these numbers.
-constexpr std::uint32_t kEffectClassifierVersion = 2;
+// Classifier 3 adds the Windows chain bound. The effect-policy ruleset is separate from
+// the target deny ruleset (eligibility.json); its table remains at version 2.
+constexpr std::uint32_t kEffectClassifierVersion = 3;
 constexpr std::uint32_t kEffectRulesetVersion = 2;
 constexpr std::uint32_t kEffectLexiconVersion = 3;
 
 // Bounds the caller must respect; anything larger is a takeover rather than a slow scan.
-constexpr std::size_t kEffectMaxChainNodes = 9;
+enum class EffectPlatform : std::uint8_t { kMacOS, kWindows };
+constexpr std::size_t kEffectMaxChainNodesMacOS = 9;
+constexpr std::size_t kEffectMaxChainNodesWindows = 16;
+constexpr std::size_t EffectMaxChainNodes(EffectPlatform platform) {
+  return platform == EffectPlatform::kWindows ? kEffectMaxChainNodesWindows : kEffectMaxChainNodesMacOS;
+}
 constexpr std::size_t kEffectMaxLabelBytes = 512;
 constexpr std::size_t kEffectMaxNeighborLabels = 16;
 
@@ -109,6 +114,7 @@ struct NodeFacts {
 };
 
 struct EffectFacts {
+  EffectPlatform platform = EffectPlatform::kMacOS;
   // The target leaf's metadata could be read.
   bool metadata_complete = false;
   // The bounded walk reached the window root (a truncated walk proves nothing).
@@ -140,7 +146,7 @@ struct EffectFacts {
   // The extension of the item the action would open, when it is known.
   bool extension_known = false;
   std::string extension;
-  // [0] is the target, then its ancestors up to kEffectMaxChainNodes.
+  // [0] is the target, then its ancestors up to the platform-specific EffectMaxChainNodes bound.
   std::vector<NodeFacts> chain;
   // Labels near the target in the same window (a web form's field caption often sits in a sibling
   // element). At most kEffectMaxNeighborLabels, each at most kEffectMaxLabelBytes.
@@ -329,7 +335,7 @@ inline constexpr std::uint64_t kEffectTablesDigest = ComputeEffectTablesDigest()
 // The reviewed value. Editing a table or raising a version without updating this pin is a compile
 // error in every translation unit that includes the header, and so is reading the CJK terms with a
 // wrong character set: the build fails closed instead of matching nothing.
-inline constexpr std::uint64_t kEffectTablesDigestPinned = 0x21d3b29e52a45895ULL;
+inline constexpr std::uint64_t kEffectTablesDigestPinned = 0xb53e05fbe73f4b42ULL;
 static_assert(kEffectTablesDigest == kEffectTablesDigestPinned,
               "The effect classifier tables changed: review them, bump the lexicon / ruleset "
               "version, and update kEffectTablesDigestPinned.");
@@ -774,7 +780,7 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 }
 
 [[nodiscard]] inline bool WithinBounds(const EffectFacts &facts) {
-  if (facts.chain.size() > kEffectMaxChainNodes ||
+  if (facts.chain.size() > EffectMaxChainNodes(facts.platform) ||
       facts.neighbor_labels.size() > kEffectMaxNeighborLabels ||
       facts.extension.size() > kEffectMaxLabelBytes)
     return false;

@@ -84,7 +84,7 @@ IsValidNativeApprovalIntent(const NativeApprovalIntentBinding &binding) {
       binding.effect == NativeApprovalEffect::kFileManagerOpen ||
       binding.effect == NativeApprovalEffect::kHighImpactConfirmation ||
       binding.effect == NativeApprovalEffect::kSupervisedAction;
-  return effect && binding.classifier_version == 2 &&
+  return effect && binding.classifier_version == 3 &&
          binding.ruleset_version > 0 && binding.lexicon_version > 0 &&
          binding.approval_generation > 0 && binding.observation_revision > 0 &&
          binding.ticket_generation > 0 &&

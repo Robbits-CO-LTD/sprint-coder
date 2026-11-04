@@ -8,7 +8,7 @@ const native = (name: string): string =>
   readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
 
 describe('Windows private approval handlers', () => {
-  it('routes all three messages without enabling the production capability', () => {
+  it('routes all three messages only with the final production declaration', () => {
     const host = readWindowsHostSource();
     for (const message of ['ApprovalApprove', 'ApprovalDiscard', 'DispatchApproved']) {
       expect(host.includes(`case MessageType::k${message}:`), message).toBe(true);
@@ -19,14 +19,15 @@ describe('Windows private approval handlers', () => {
     expect(host.match(/constexpr bool kWindowsApprovalHandlersEnabled\s*=[^;]+;/gu)).toEqual([
       'constexpr bool kWindowsApprovalHandlersEnabled =\n    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;',
     ]);
-    // A3 pins the complete final-declaration predicate and its wiring. Its necessary ruleset
-    // condition must remain false for both declarations currently emitted by the build.
+    // The final v2 declaration matches; the legacy v1 declaration stays closed.
     const header = native('computer_use_native_eligibility.h');
     expect(header).toContain(
-      'return from_build && v2 && ruleset == 3 && classifier == 2 && lexicon == 3 &&',
+      'return from_build && v2 && ruleset == 4 && classifier == 3 && lexicon == 3 &&',
     );
     for (const mode of ['v1-allowlist', 'v2-denylist'] as const)
-      expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 4).toBe(false);
+      expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 4).toBe(
+        mode === 'v2-denylist',
+      );
   });
 
   it('keeps measurement, lifetime and Stop checks in the private owner', () => {

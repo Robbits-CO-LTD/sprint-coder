@@ -1352,7 +1352,7 @@ describe('Computer Use Windows helper transport', () => {
         ? {
             mode: 'v2-denylist' as const,
             rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
-            classifierVersion: control.approval ? 2 : 1,
+            classifierVersion: control.approval ? 3 : 1,
             lexiconVersion: control.approval ? 3 : 1,
             ticketRequired: true,
             ...(control.approval ? { interlockEnforced: true as const } : {}),
@@ -1635,7 +1635,7 @@ describe('Computer Use Windows helper transport', () => {
                 'preflight_result',
                 {
                   receiptVersion: 3,
-                  classifierVersion: 2,
+                  classifierVersion: 3,
                   decision: 'single_use_approval',
                   reasonCode: null,
                   deniedResult: null,
@@ -4291,7 +4291,7 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   it('discards a discovery result when Stop quarantines input while the request is pending', async () => {
-    const value = { generation: 123, rulesetVersion: 3, truncated: false, targets: [] };
+    const value = { generation: 123, rulesetVersion: 4, truncated: false, targets: [] };
     const target = createTarget({ ...responders(), list_targets: () => ['probe_result', value] });
     const trusted = binding(target.addon);
     // Inject only the inactive discovery binding; existing session/Stop receipts use the real host.
@@ -4302,7 +4302,7 @@ describe('Computer Use Windows helper transport', () => {
           ...trusted.manifest,
           eligibility: {
             mode: 'v2-denylist',
-            rulesetVersion: 3,
+            rulesetVersion: 4,
             classifierVersion: 1,
             lexiconVersion: 1,
             ticketRequired: true,
@@ -4350,7 +4350,7 @@ describe('Computer Use Windows helper transport', () => {
               JSON.stringify(
                 failure === 'error'
                   ? { code: 'target_measurement_unavailable' }
-                  : { generation: 1, rulesetVersion: 3, truncated: false, targets: [] },
+                  : { generation: 1, rulesetVersion: 4, truncated: false, targets: [] },
               ),
             ),
             binary: failure === 'binary' ? Buffer.from([1]) : Buffer.alloc(0),
@@ -12391,7 +12391,7 @@ int main() {
   it('sends the connection generation and distinct approval frames', async () => {
     const eligibility = {
       mode: 'v2-denylist',
-      classifierVersion: 2,
+      classifierVersion: 3,
       rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       lexiconVersion: 3,
       ticketRequired: true,
@@ -12532,7 +12532,7 @@ int main() {
       const isolated: WindowsTargetQuarantine[] = [];
       const eligibility = {
         mode: 'v2-denylist',
-        classifierVersion: 2,
+        classifierVersion: 3,
         rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
         lexiconVersion: 3,
         ticketRequired: true,
@@ -12585,7 +12585,7 @@ int main() {
                 'preflight_result',
                 {
                   receiptVersion: 3,
-                  classifierVersion: 2,
+                  classifierVersion: 3,
                   decision: 'single_use_approval',
                   reasonCode: null,
                   deniedResult: null,
@@ -12993,7 +12993,7 @@ int main() {
     async (scenario) => {
       const eligibility = {
         mode: 'v2-denylist',
-        classifierVersion: 2,
+        classifierVersion: 3,
         rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
         lexiconVersion: 3,
         ticketRequired: true,

@@ -5519,14 +5519,14 @@ ShadowCfRef CopyShadowTarget(ShadowReader& reader) {
 }
 
 // The target and its parents up to the window (or the application element), at most
-// kShadowMaxCaptureNodes nodes. The walk reached the root only by arriving at a window or the
+// kShadowMaxCaptureNodesMacOS nodes. The walk reached the root only by arriving at a window or the
 // application element: a parent that is missing or could not be read leaves the chain cut short.
 void CaptureShadowChain(ShadowReader& reader, AXUIElementRef target,
                         sprint_coder::computer_use::ShadowAxCapture* capture) {
   CFRetain(target);
   ShadowCfRef current{target};
   for (std::size_t depth = 0;
-       current.Get() != nullptr && depth < sprint_coder::computer_use::kShadowMaxCaptureNodes;
+       current.Get() != nullptr && depth < sprint_coder::computer_use::kShadowMaxCaptureNodesMacOS;
        ++depth) {
     capture->chain.push_back(ReadShadowNode(reader, current.Element(), false));
     const std::string role = capture->chain.back().role;

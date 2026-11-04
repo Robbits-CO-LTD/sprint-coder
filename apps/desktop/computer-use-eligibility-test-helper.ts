@@ -5,7 +5,7 @@ export const expectedEligibilityVersionTable = {
   },
   win32: {
     v1: { rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 },
-    v2: { rulesetVersion: 3, classifierVersion: 2, lexiconVersion: 3 },
+    v2: { rulesetVersion: 4, classifierVersion: 3, lexiconVersion: 3 },
   },
 };
 

@@ -431,7 +431,10 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
   });
 
   it('keeps the bounds of the core: nodes, label bytes and neighbours', () => {
-    expect(shadowHeader).toContain('kShadowMaxCaptureNodes = kEffectMaxChainNodes + 1');
+    expect(shadowHeader).toContain('kShadowMaxCaptureNodesMacOS = kEffectMaxChainNodesMacOS + 1');
+    expect(shadowHeader).toContain(
+      'kShadowMaxCaptureNodesWindows = kEffectMaxChainNodesWindows + 1',
+    );
     expect(shadowHeader).toContain('kEffectMaxLabelBytes');
     expect(shadowHeader).toContain('kEffectMaxNeighborLabels');
     const section = shadowSection();

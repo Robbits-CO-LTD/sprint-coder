@@ -210,8 +210,8 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
           ? [
               'FROM_BUILD=1',
               'V2=1',
-              'RULESET_VERSION=3',
-              'CLASSIFIER_VERSION=2',
+              'RULESET_VERSION=4',
+              'CLASSIFIER_VERSION=3',
               'LEXICON_VERSION=3',
               'TICKET_REQUIRED=1',
               'INTERLOCK_ENFORCED=1',
