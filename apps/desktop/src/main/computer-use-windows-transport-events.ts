@@ -107,6 +107,12 @@ export class WindowsInteractionEvents {
     current.pendingTrip = roundTripId;
     return true;
   }
+  completeTrip(sessionId: string, id: string): void {
+    const current = this.sessions.get(sessionId);
+    if (!current || current.revoked || current.roundTripId !== id)
+      throw new Error('Unbound round trip completion');
+    current.tripEnded = true;
+  }
   /**
    * Settles a `begin`: only an accepted acknowledgement records the id; a refusal or a failed call
    * rolls it back, so a later trip can begin and the previous trip's events stay bound.
@@ -122,7 +128,6 @@ export class WindowsInteractionEvents {
     if (accepted) {
       current.usedTrips.add(roundTripId);
       current.roundTripId = roundTripId;
-      current.tripSequence = 0;
       current.tripEnded = false;
     }
     return this.replay(
@@ -198,8 +203,8 @@ export class WindowsInteractionEvents {
       current.interactionEpoch = event.interactionEpoch;
       current.revoked = true;
     } else {
-      if (event.roundTripId !== current.roundTripId || event.sequence <= current.tripSequence)
-        return false;
+      if (event.roundTripId !== current.roundTripId) return false;
+      // Main must see gaps and reversed notifications too; its lifetime owner fails closed.
       if (current.tripEnded && event.state === 'active') return false;
       current.tripSequence = event.sequence;
       current.revoked = event.state === 'failed';

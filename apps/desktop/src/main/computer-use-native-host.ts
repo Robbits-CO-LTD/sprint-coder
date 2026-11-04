@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  ApprovalRoundTrips,
+  type ApprovalRoundTripIdentity,
+} from './computer-use-approval-round-trip';
 import { z } from 'zod';
 import type { WindowsInteractionListener } from './computer-use-windows-transport-events';
 import { queueWindowsInputQuarantine } from './computer-use-windows-input-quarantine';
@@ -301,6 +305,7 @@ export type ComputerUseNativeHostOptions = Readonly<{
   windowsLedger?: WindowsDispatchLedgerStorage;
   /** Test injection only; never sourced from environment, Renderer, or model input. */
   windowsBackgroundInputForTesting?: boolean;
+  windowsApprovalRoundTripForTesting?: ApprovalRoundTripIdentity;
   /** Isolate session lifetime tests from the completed start's separate Stop owner. */
   windowsCompletedStartForTesting?: (forget: (sessionId: string) => boolean) => void;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
@@ -406,14 +411,25 @@ export function createComputerUseNativeHost(
   const explorerSessionFacts = new WeakMap<InternalNativeSession, ExplorerEvidence['facts']>();
   const interactionRevoked = new Set<string>();
   const interactionListeners = new Set<WindowsInteractionListener>();
+  const publishInteraction: WindowsInteractionListener = (event) => {
+    if (event.kind === 'background_event' || event.state === 'failed')
+      interactionRevoked.add(event.sessionId);
+    for (const listener of interactionListeners) listener(event);
+  };
+  const roundTrips =
+    platform === 'win32' && options.windowsApprovalRoundTripForTesting
+      ? new ApprovalRoundTrips(async (wire) => {
+          if (!addon?.approvalRoundTrip) throw new Error('Round trip unavailable');
+          return addon.approvalRoundTrip(wire);
+        }, publishInteraction)
+      : undefined;
   if (platform === 'win32')
     // The helper is the binding authority (start/begin acknowledgement, generation, epochs, order)
     // and passes each revocation once. Latched here even before `sessions` holds the session, so
     // an event of a start still in flight is never dropped by one layer and kept by another.
     addon?.subscribeWindowsInteraction?.((event) => {
-      if (event.kind === 'background_event' || event.state === 'failed')
-        interactionRevoked.add(event.sessionId);
-      for (const listener of interactionListeners) listener(event);
+      if (event.kind === 'event' && roundTrips) roundTrips.receive(event);
+      else publishInteraction(event);
     });
   const ledger = platform === 'win32' ? options.windowsLedger : undefined;
   const startIdentityEnabled =
@@ -2986,6 +3002,36 @@ export function createComputerUseNativeHost(
           },
         }
       : {}),
+    ...(roundTrips === undefined
+      ? {}
+      : {
+          beginApprovalRoundTrip: async (
+            input: Parameters<NonNullable<ComputerUseNativeHost['beginApprovalRoundTrip']>>[0],
+          ) => {
+            if (input.session.inputSession?.kind === 'background') return;
+            const generation = addon?.captureWindowsGeneration?.();
+            if (
+              !generation ||
+              !sessions.has(input.session.sessionId) ||
+              interactionRevoked.has(input.session.sessionId)
+            )
+              throw new Error('Round trip session unavailable');
+            await roundTrips.begin({
+              ...options.windowsApprovalRoundTripForTesting!,
+              version: 1,
+              kind: 'begin',
+              roundTripId: input.roundTripId,
+              sessionId: input.session.sessionId,
+              taskId: input.taskId,
+              turnId: input.turnId,
+              helperGeneration: generation.helperGeneration,
+              cancelEpoch: input.session.cancelEpoch,
+              durationMs: Math.min(input.durationMs, 60_000),
+            });
+          },
+          endApprovalRoundTrip: (sessionId: string, reason: 'rejected' | 'expired' | 'stopped') =>
+            roundTrips.cancel(sessionId, reason),
+        }),
     ...(terminationEnabled ? { subscribeWindowsStop: stopDelivery.subscribe } : {}),
     ...(terminationEnabled
       ? {
@@ -3134,6 +3180,7 @@ export function createComputerUseNativeHost(
         classifierRoute,
         assertTargetCurrent: assertCallerTarget,
         windowsGeneration,
+        roundTripId,
         ...baseInput
       } = startInput;
       const assertTargetCurrent =
@@ -3149,6 +3196,7 @@ export function createComputerUseNativeHost(
             };
       const input = {
         ...baseInput,
+        ...roundTrips?.returning(startInput.sessionId, roundTripId),
         ...(windowsGeneration === undefined
           ? {}
           : {
@@ -3373,91 +3421,101 @@ export function createComputerUseNativeHost(
       : {}),
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
-      if (interactionRevoked.has(input.session.sessionId))
-        return { kind: 'refused', result: 'rejected', reasonCode: 'native_interaction_revoked' };
-      const internal = sessions.get(input.session.sessionId);
-      if (ledger !== undefined && internal !== undefined) {
-        await retryLedger();
-        if (ledgerBlocked(internal.raw['pid'], internal.raw.processStartTime))
-          return { kind: 'refused', result: 'rejected', reasonCode: 'native_unavailable' };
-      }
-      // approvalApprove has no input capability: every failure below is a typed pre-input result.
-      if (internal === undefined)
-        return Object.freeze({
-          kind: 'refused',
-          result: 'rejected',
-          reasonCode: 'native_session_missing',
-        });
-      // A session bound to a route that does not expect classifier 2 never gets an approval.
-      if (!approvalRouteAllowed(input.session.sessionId))
-        return Object.freeze({
-          kind: 'refused',
-          result: 'rejected',
-          reasonCode: 'native_approval_route_forbidden',
-        });
-      const request = {
-        ...internal.raw,
-        ...input.action,
-        requestId: input.requestId,
-        observationRevision: input.observationRevision,
-        cancelEpoch: input.cancelEpoch,
-        actionDigest: computerUseActionDigest(input.action),
-        approvalGeneration: input.approvalGeneration,
-      };
-      let receipt: unknown;
+      let exchanged = false;
       try {
-        if (!approvalPathEnabled(input.session.sessionId))
-          throw new ComputerUseNativeUnavailableError('native_approval_closed');
-        receipt = await invoke('approvalApprove', request);
-      } catch {
-        // approvalApprove has no input capability: a throw or a closed path is a pre-input failure.
+        if (interactionRevoked.has(input.session.sessionId))
+          return { kind: 'refused', result: 'rejected', reasonCode: 'native_interaction_revoked' };
+        const internal = sessions.get(input.session.sessionId);
+        if (ledger !== undefined && internal !== undefined) {
+          await retryLedger();
+          if (ledgerBlocked(internal.raw['pid'], internal.raw.processStartTime))
+            return { kind: 'refused', result: 'rejected', reasonCode: 'native_unavailable' };
+        }
+        // approvalApprove has no input capability: every failure below is a typed pre-input result.
+        if (internal === undefined)
+          return Object.freeze({
+            kind: 'refused',
+            result: 'rejected',
+            reasonCode: 'native_session_missing',
+          });
+        // A session bound to a route that does not expect classifier 2 never gets an approval.
+        if (!approvalRouteAllowed(input.session.sessionId))
+          return Object.freeze({
+            kind: 'refused',
+            result: 'rejected',
+            reasonCode: 'native_approval_route_forbidden',
+          });
+        const request = {
+          ...internal.raw,
+          ...roundTrips?.exchange(input.session.sessionId),
+          ...input.action,
+          requestId: input.requestId,
+          observationRevision: input.observationRevision,
+          cancelEpoch: input.cancelEpoch,
+          actionDigest: computerUseActionDigest(input.action),
+          approvalGeneration: input.approvalGeneration,
+        };
+        let receipt: unknown;
+        try {
+          if (!approvalPathEnabled(input.session.sessionId))
+            throw new ComputerUseNativeUnavailableError('native_approval_closed');
+          receipt = await invoke('approvalApprove', request);
+        } catch {
+          // approvalApprove has no input capability: a throw or a closed path is a pre-input failure.
+          return Object.freeze({
+            kind: 'refused',
+            result: 'rejected',
+            reasonCode: 'native_approval_approve_failed',
+          });
+        }
+        const outcome = parseNativeApprovalApproveReceipt(receipt, {
+          sessionId: input.session.sessionId,
+          requestId: input.requestId,
+          cancelEpoch: input.cancelEpoch,
+          observationRevision: input.observationRevision,
+          approvalGeneration: input.approvalGeneration,
+        });
+        if (outcome.kind === 'invalid')
+          return Object.freeze({
+            kind: 'invalid',
+            result: outcome.result,
+            reasonCode: outcome.reasonCode,
+          });
+        // Unlike preflight (which throws on a regressed count), this is a typed rejection: approvalApprove
+        // has no input capability, so nothing can have been input. A regressed receipt does not update
+        // inputAttemptsBySession, so every later receipt still compares against the old count, regresses
+        // too, and throws before any input.
+        try {
+          inputReceipt(
+            {
+              sessionId: input.session.sessionId,
+              cancelEpoch: input.cancelEpoch,
+              inputAttemptCount: outcome.inputAttemptCount,
+            },
+            input.session.sessionId,
+            input.cancelEpoch,
+          );
+        } catch {
+          // A count that went backwards is an untrustworthy receipt, but approvalApprove cannot input.
+          return Object.freeze({
+            kind: 'invalid',
+            result: 'rejected',
+            reasonCode: 'native_approval_receipt_invalid',
+          });
+        }
+        if (outcome.kind === 'approved') {
+          await roundTrips?.exchanged(input.session.sessionId);
+          exchanged = true;
+          return Object.freeze({ kind: 'approved' });
+        }
         return Object.freeze({
           kind: 'refused',
-          result: 'rejected',
-          reasonCode: 'native_approval_approve_failed',
-        });
-      }
-      const outcome = parseNativeApprovalApproveReceipt(receipt, {
-        sessionId: input.session.sessionId,
-        requestId: input.requestId,
-        cancelEpoch: input.cancelEpoch,
-        observationRevision: input.observationRevision,
-        approvalGeneration: input.approvalGeneration,
-      });
-      if (outcome.kind === 'invalid')
-        return Object.freeze({
-          kind: 'invalid',
           result: outcome.result,
           reasonCode: outcome.reasonCode,
         });
-      // Unlike preflight (which throws on a regressed count), this is a typed rejection: approvalApprove
-      // has no input capability, so nothing can have been input. A regressed receipt does not update
-      // inputAttemptsBySession, so every later receipt still compares against the old count, regresses
-      // too, and throws before any input.
-      try {
-        inputReceipt(
-          {
-            sessionId: input.session.sessionId,
-            cancelEpoch: input.cancelEpoch,
-            inputAttemptCount: outcome.inputAttemptCount,
-          },
-          input.session.sessionId,
-          input.cancelEpoch,
-        );
-      } catch {
-        // A count that went backwards is an untrustworthy receipt, but approvalApprove cannot input.
-        return Object.freeze({
-          kind: 'invalid',
-          result: 'rejected',
-          reasonCode: 'native_approval_receipt_invalid',
-        });
+      } finally {
+        if (!exchanged) await roundTrips?.cancel(input.session.sessionId, 'rejected');
       }
-      if (outcome.kind === 'approved') return Object.freeze({ kind: 'approved' });
-      return Object.freeze({
-        kind: 'refused',
-        result: outcome.result,
-        reasonCode: outcome.reasonCode,
-      });
     },
 
     approvalDiscard: async (input): Promise<void> => {
@@ -3546,6 +3604,7 @@ export function createComputerUseNativeHost(
       const actionDigest = computerUseActionDigest(input.action);
       const dispatchRequest = {
         ...internal.raw,
+        ...roundTrips?.exchange(input.session.sessionId),
         ...input.action,
         requestId: input.requestId,
         observationRevision: input.observationRevision,
@@ -3561,75 +3620,87 @@ export function createComputerUseNativeHost(
       // (a stale helper then fails closed on the unknown message type).
       let ticket: string | null = null;
       const generationToken = terminationEnabled ? addon?.captureWindowsGeneration?.() : undefined;
-      if (hasMethod(addon, 'preflight')) {
-        let receipt: unknown;
-        try {
-          receipt = await invoke('preflight', dispatchRequest);
-        } catch (error) {
-          // Preflight has no input capability, so whatever went wrong happened before any input:
-          // a coded pre-dispatch failure keeps its mapping, anything else is a typed rejection.
-          return (
-            classifyComputerUseNativeDispatchFailure(error) ??
-            Object.freeze({ result: 'rejected', reasonCode: 'native_preflight_failed' })
-          );
-        }
-        let outcome: NativePreflightOutcome;
-        try {
-          const expected = classifierBindings.get(input.session.sessionId)?.expectedVersion;
-          outcome = parseNativePreflightReceipt(receipt, {
-            ...input,
-            ...(expected === undefined ? {} : { expectedClassifierVersion: expected }),
-            ...(platform === 'win32' && approvalPathEnabled(input.session.sessionId)
-              ? {
-                  windowsApproval: {
-                    route: approvalRouteOf(input.session.sessionId),
-                    receiptVersion: 3,
-                  },
-                }
-              : {}),
-          });
-        } catch (error) {
-          // A receipt that cannot be trusted was produced before any input. It is a typed
-          // pre-input rejection, never an exception the controller would book as unknown_effect.
-          const typed = nativePreflightInvalidResult(error);
-          if (typed !== null) return typed;
-          throw error;
-        }
-        // The preflight count must also be a non-regressing, session-bound receipt.
-        const preflightReceipt = inputReceipt(
-          outcome.record,
-          input.session.sessionId,
-          input.cancelEpoch,
-        );
-        if (outcome.kind === 'ticket') {
-          // Defence in depth: Main judged this target high-impact and the approval path is open, yet
-          // native called it ordinary. The vocabularies differ, so no input is made. The ordinary
-          // ticket is never used; it expires in the native slot or is replaced by the next preflight.
-          if (input.mainHighImpact === true && approvalPathEnabled(input.session.sessionId))
-            return Object.freeze({
-              result: 'paused',
-              reasonCode: 'hard_boundary',
-              inputReceipt: preflightReceipt,
+      let settled = false;
+      try {
+        if (hasMethod(addon, 'preflight')) {
+          let receipt: unknown;
+          try {
+            receipt = await invoke('preflight', dispatchRequest);
+          } catch (error) {
+            // Preflight has no input capability, so whatever went wrong happened before any input:
+            // a coded pre-dispatch failure keeps its mapping, anything else is a typed rejection.
+            return (
+              classifyComputerUseNativeDispatchFailure(error) ??
+              Object.freeze({ result: 'rejected', reasonCode: 'native_preflight_failed' })
+            );
+          }
+          let outcome: NativePreflightOutcome;
+          try {
+            const expected = classifierBindings.get(input.session.sessionId)?.expectedVersion;
+            outcome = parseNativePreflightReceipt(receipt, {
+              ...input,
+              ...(expected === undefined ? {} : { expectedClassifierVersion: expected }),
+              ...(platform === 'win32' && approvalPathEnabled(input.session.sessionId)
+                ? {
+                    windowsApproval: {
+                      route: approvalRouteOf(input.session.sessionId),
+                      receiptVersion: 3,
+                    },
+                  }
+                : {}),
             });
-          ticket = outcome.ticket;
+          } catch (error) {
+            // A receipt that cannot be trusted was produced before any input. It is a typed
+            // pre-input rejection, never an exception the controller would book as unknown_effect.
+            const typed = nativePreflightInvalidResult(error);
+            if (typed !== null) return typed;
+            throw error;
+          }
+          // The preflight count must also be a non-regressing, session-bound receipt.
+          const preflightReceipt = inputReceipt(
+            outcome.record,
+            input.session.sessionId,
+            input.cancelEpoch,
+          );
+          if (outcome.kind === 'ticket') {
+            // Defence in depth: Main judged this target high-impact and the approval path is open, yet
+            // native called it ordinary. The vocabularies differ, so no input is made. The ordinary
+            // ticket is never used; it expires in the native slot or is replaced by the next preflight.
+            if (input.mainHighImpact === true && approvalPathEnabled(input.session.sessionId))
+              return Object.freeze({
+                result: 'paused',
+                reasonCode: 'hard_boundary',
+                inputReceipt: preflightReceipt,
+              });
+            ticket = outcome.ticket;
+            await roundTrips?.exchanged(input.session.sessionId);
+            settled = true;
+          }
+          if (outcome.kind === 'refused') {
+            // Same public-shape check as a dispatch result, so the contract owns the reason format.
+            if (
+              !computerUseActionResultSchema
+                .partial()
+                .safeParse({ result: outcome.result, reasonCode: outcome.reasonCode }).success
+            )
+              return nativePreflightInvalidResult(null)!;
+            if (outcome.approvalOffer !== undefined) {
+              const id = roundTrips?.offered(input.session.sessionId);
+              if (id !== undefined) addon?.completeApprovalRoundTrip?.(input.session.sessionId, id);
+              settled = true;
+            } else await roundTrips?.cancel(input.session.sessionId, 'rejected');
+            return Object.freeze({
+              result: outcome.result,
+              reasonCode: outcome.reasonCode,
+              inputReceipt: preflightReceipt,
+              ...(outcome.approvalOffer === undefined
+                ? {}
+                : { approvalOffer: outcome.approvalOffer }),
+            });
+          }
         }
-        if (outcome.kind === 'refused') {
-          // Same public-shape check as a dispatch result, so the contract owns the reason format.
-          if (
-            !computerUseActionResultSchema
-              .partial()
-              .safeParse({ result: outcome.result, reasonCode: outcome.reasonCode }).success
-          )
-            return nativePreflightInvalidResult(null)!;
-          return Object.freeze({
-            result: outcome.result,
-            reasonCode: outcome.reasonCode,
-            inputReceipt: preflightReceipt,
-            ...(outcome.approvalOffer === undefined
-              ? {}
-              : { approvalOffer: outcome.approvalOffer }),
-          });
-        }
+      } finally {
+        if (!settled) await roundTrips?.cancel(input.session.sessionId, 'rejected');
       }
       let value: unknown;
       const callbacks = dispatchLedger(input, internal);

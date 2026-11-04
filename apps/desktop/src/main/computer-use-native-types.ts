@@ -90,6 +90,7 @@ export type ComputerUseNativeProbe = Readonly<{
 export type ComputerUseNativeAddon = Readonly<{
   subscribeWindowsInteraction?(listener: WindowsInteractionListener): () => void;
   approvalRoundTrip?(input: unknown): Promise<unknown>;
+  completeApprovalRoundTrip?(sessionId: string, roundTripId: string): void;
   probe(): unknown;
   handshake?(input: unknown): unknown;
   pickApplication?(input: unknown): unknown;
