@@ -1979,6 +1979,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         ClassifyWindowsFocusedElement: 'M2FocusedRisk',
         WindowsFocusedElementSignature: 'M2Focus',
         WindowsInputMovedSinceEvaluation: 'M2Moved',
+        WindowsReadLastInputTick: 'M2LastInput',
         SetCursorPos: 'M2Cursor',
         SetWindowsApprovedCursor: 'M2ApprovedCursor',
         SendInputForBoundTarget: 'M2Send',
@@ -1996,26 +1997,45 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         dispatch +
         source.slice(to);
       const measurementFrom = source.indexOf('bool MeasureWindowsExplorerViewUnguarded(');
-      const measurementTo = source.indexOf(
-        '// END windows explorer dispatch guard',
-        measurementFrom,
-      );
+      const guardFrom = source.indexOf('// BEGIN windows explorer dispatch guard', measurementFrom);
+      const measurementTo = source.indexOf('// END windows explorer dispatch guard', guardFrom);
       expect(measurementFrom).toBeGreaterThan(0);
-      expect(measurementTo).toBeGreaterThan(measurementFrom);
-      let measurement = source.slice(measurementFrom, measurementTo);
-      for (const [name, replacement] of Object.entries({
+      expect(guardFrom).toBeGreaterThan(measurementFrom);
+      expect(measurementTo).toBeGreaterThan(guardFrom);
+      const shared = {
         ReadWindowsSessionIdentityOnLane: 'M2Identity',
         WindowsExplorerVerifiedWindow: 'M2Verified',
         GetWindowThreadProcessId: 'M2WindowOwner',
+      };
+      let measurement = source.slice(measurementFrom, guardFrom);
+      for (const [name, replacement] of Object.entries({
+        ...shared,
         ReadWindowsExplorerShellView: 'M2ReadView',
         WindowsExplorerPointRefusal: 'M2Point',
       })) {
         measurement = measurement.replaceAll(`${name}(`, `${replacement}(`);
       }
+      // The dispatch guard: its re-measures are counted apart from the measurement, and the cursor,
+      // last input time, wheel routing, focus and SendInput are recorders.
+      let guard = source.slice(guardFrom, measurementTo);
+      for (const [name, replacement] of Object.entries({
+        ...shared,
+        ReadWindowsExplorerShellView: 'M2RecheckView',
+        WindowsExplorerPointRefusal: 'M2RecheckPoint',
+        GetCursorPos: 'M2CursorPos',
+        WindowsReadLastInputTick: 'M2LastInput',
+        SystemParametersInfoW: 'M2Spi',
+        GetGUIThreadInfo: 'M2GuiThread',
+        SendInputForBoundTarget: 'M2Send',
+      })) {
+        guard = guard.replaceAll(`${name}(`, `${replacement}(`);
+      }
+      expect(guard).not.toMatch(/\b(?:SendInputForBoundTarget|SendInput|SetCursorPos)\s*\(/u);
       source =
         source.slice(0, measurementFrom) +
         include('SPRINT_CODER_EXPLORER_MEASUREMENT_DEPENDENCIES') +
         measurement +
+        guard +
         source.slice(measurementTo);
       try {
         for (const gate of [false, true]) {
@@ -2024,6 +2044,11 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           const result = await promisify(execFile)(binary, [], {
             encoding: 'utf8',
             timeout: 30_000,
+          }).catch((error: unknown) => {
+            // Name the failed case (the driver prints "FAIL <case>" before it throws).
+            if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string')
+              console.log(error.stdout);
+            throw error;
           });
           expect(result.stdout).not.toContain('FAIL ');
           expect(result.stdout).toContain('OK Explorer dispatch M2');

@@ -555,4 +555,68 @@ bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
     return false;
   }
 }
+
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+// Button and wheel events carry no coordinates: they land wherever the cursor is when the input
+// stream reaches them. An Explorer session therefore sends an absolute move to the re-measured
+// POINT in the SAME SendInput array as its button or wheel events, which the OS never interleaves
+// with a person's input. False when the point cannot be expressed exactly on the virtual desktop.
+bool WindowsExplorerAbsoluteMove(POINT point, INPUT *move) {
+  const int left = GetSystemMetrics(SM_XVIRTUALSCREEN), top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+  const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+  if (width < 2 || height < 2 || point.x < left || point.y < top ||
+      point.x - left >= width || point.y - top >= height) return false;
+  const auto normalize = [](LONG offset, int extent) {
+    return static_cast<LONG>(std::lround(static_cast<double>(offset) * 65535.0 / (extent - 1)));
+  };
+  const auto pixel = [](LONG normalized, int extent) {
+    return static_cast<LONG>(std::lround(static_cast<double>(normalized) * (extent - 1) / 65535.0));
+  };
+  *move = INPUT{};
+  move->type = INPUT_MOUSE;
+  move->mi.dx = normalize(point.x - left, width);
+  move->mi.dy = normalize(point.y - top, height);
+  move->mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+  return pixel(move->mi.dx, width) == point.x - left && pixel(move->mi.dy, height) == point.y - top;
+}
+
+// With "scroll inactive windows when hovering" off the wheel goes to the keyboard focus, not to the
+// window under the cursor. Scroll is sent only when the wheel reaches the window under the cursor,
+// or when the keyboard focus of the Explorer thread is inside the measured view.
+bool WindowsExplorerWheelReachesView(HWND window, HWND view) {
+  UINT routing = MOUSEWHEEL_ROUTING_FOCUS;
+  if (!SystemParametersInfoW(SPI_GETMOUSEWHEELROUTING, 0, &routing, 0)) return false;
+  if (routing == MOUSEWHEEL_ROUTING_MOUSE_POS) return true;
+  DWORD owner = 0;
+  const DWORD thread = GetWindowThreadProcessId(window, &owner);
+  GUITHREADINFO info{};
+  info.cbSize = sizeof(info);
+  if (thread == 0 || !GetGUIThreadInfo(thread, &info) || info.hwndFocus == nullptr) return false;
+  return info.hwndFocus == view || IsChild(view, info.hwndFocus) != FALSE;
+}
+
+// The last step before an Explorer click or scroll: re-measure at the action POINT, then, after that
+// re-measure, require the cursor to still be at the POINT and no input (a person's included) since
+// `input_tick`, and send [absolute move, actions...] as one array. Nothing is sent on any failure.
+bool SendWindowsExplorerPointInput(const WindowsSession &session,
+    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, const RECT &bounds,
+    std::uint64_t expected_epoch, POINT point, DWORD input_tick, bool wheel,
+    const INPUT *actions, UINT action_count, bool *accepted) {
+  if (!evidence || action_count == 0 || action_count > 2) return false;
+  INPUT events[3]{};
+  if (!WindowsExplorerAbsoluteMove(point, &events[0])) return false;
+  for (UINT index = 0; index < action_count; ++index) events[index + 1] = actions[index];
+  if (!RecheckWindowsExplorerDispatch(session, evidence, point)) return false;
+  if (wheel && !WindowsExplorerWheelReachesView(session.window, evidence->view)) return false;
+  POINT cursor{};
+  DWORD now_tick = 0;
+  if (!GetCursorPos(&cursor) || cursor.x != point.x || cursor.y != point.y ||
+      !WindowsReadLastInputTick(&now_tick) || now_tick != input_tick) return false;
+  const UINT count = action_count + 1;
+  const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch, count, events);
+  if (sent > 0) *accepted = true;
+  return sent == count;
+}
+#endif
 // END windows explorer dispatch guard

@@ -1,8 +1,15 @@
 // Included at two seams of the complete host; only external measurements and input APIs are fake.
 #if defined(SPRINT_CODER_EXPLORER_DISPATCH_DEPENDENCIES)
 std::string m2_kind = "click";
-unsigned m2_inputs = 0, m2_measurements = 0;
-POINT m2_measured_point{}, m2_cursor_point{};
+unsigned m2_inputs = 0, m2_measurements = 0, m2_rechecks = 0, m2_send_calls = 0;
+POINT m2_measured_point{}, m2_recheck_point{}, m2_cursor_point{};
+std::vector<INPUT> m2_sent;
+DWORD m2_last_input = 1000;
+UINT m2_routing = MOUSEWHEEL_ROUTING_MOUSE_POS;
+HWND m2_focus = reinterpret_cast<HWND>(200);
+bool m2_spi_ok = true, m2_tick_ok = true, m2_short_send = false;
+bool m2_cursor_moves_during_recheck = false, m2_input_during_recheck = false;
+bool m2_change_in_send = false;
 HWND m2_view = reinterpret_cast<HWND>(200), m2_owner = reinterpret_cast<HWND>(201);
 std::wstring m2_folder = L"C:\\synthetic-folder";
 bool m2_foreign_owner = false, m2_identity = true, m2_verified = true, m2_throw = false;
@@ -33,9 +40,19 @@ BOOL M2Cursor(int x, int y) {
   return TRUE;
 }
 bool M2ApprovedCursor(const WindowsSession &, int x, int y) { return M2Cursor(x, y) != FALSE; }
-UINT M2Send(const WindowsSession &, const RECT &, std::uint64_t, UINT count, LPINPUT) {
-  ++m2_inputs; return count;
+UINT M2Send(const WindowsSession &, const RECT &, std::uint64_t, UINT count, LPINPUT events) {
+  ++m2_inputs; ++m2_send_calls;
+  m2_sent.assign(events, events + count);
+  if (m2_change_in_send) m2_folder = L"C:\\changed-folder";
+  return m2_short_send ? count - 1 : count;
 }
+bool M2LastInput(DWORD *tick) { *tick = m2_last_input; return m2_tick_ok; }
+BOOL M2CursorPos(POINT *point) { *point = m2_cursor_point; return TRUE; }
+BOOL M2Spi(UINT action, UINT, PVOID value, UINT) {
+  if (!m2_spi_ok || action != SPI_GETMOUSEWHEELROUTING) return FALSE;
+  *static_cast<UINT *>(value) = m2_routing; return TRUE;
+}
+BOOL M2GuiThread(DWORD, GUITHREADINFO *info) { info->hwndFocus = m2_focus; return TRUE; }
 bool M2Unicode(const WindowsSession &, const RECT &, std::uint64_t, std::uint32_t, bool *accepted) {
   ++m2_inputs; *accepted = true; return true;
 }
@@ -50,16 +67,32 @@ bool M2Identity(const WindowsSession &, std::uint64_t, WindowsSessionIdentityRes
 }
 bool M2Verified(DWORD, HWND) { return m2_verified; }
 DWORD M2WindowOwner(HWND, DWORD *pid) { *pid = 42; return 1; }
-WindowsExplorerShellView M2ReadView(HWND, const std::function<bool()> &) {
-  ++m2_measurements;
+WindowsExplorerShellView M2View() {
   if (m2_throw) throw std::bad_alloc();
   if (m2_cancel_during_view) cancellation_epoch.fetch_add(1);
   if (m2_stop_during_view) WindowsTargetListControl().stop_serial.fetch_add(1);
   return WindowsExplorerShellView{m2_folder, m2_view};
 }
+WindowsExplorerShellView M2ReadView(HWND, const std::function<bool()> &) {
+  ++m2_measurements; return M2View();
+}
+// The re-measure inside dispatch, counted apart from the measurement the evidence came from.
+WindowsExplorerShellView M2RecheckView(HWND, const std::function<bool()> &) {
+  ++m2_rechecks;
+  // A person moves the mouse or presses a key while the last re-measure runs (hundreds of ms).
+  if (m2_rechecks == 2 && m2_cursor_moves_during_recheck) ++m2_cursor_point.x;
+  if (m2_rechecks == 2 && m2_input_during_recheck) ++m2_last_input;
+  return M2View();
+}
 WindowsExplorerRefusal M2Point(HWND, HWND, DWORD, POINT point, HWND *owner) {
   m2_measured_point = point; *owner = m2_owner;
   return m2_foreign_owner ? WindowsExplorerRefusal::kPointForeignOwner : WindowsExplorerRefusal::kNone;
+}
+WindowsExplorerRefusal M2RecheckPoint(HWND window, HWND view, DWORD pid, POINT point, HWND *owner) {
+  const POINT measured = m2_measured_point;
+  const auto refusal = M2Point(window, view, pid, point, owner);
+  m2_recheck_point = point; m2_measured_point = measured;
+  return refusal;
 }
 #else
 #define wmain ProductionHostMain
@@ -98,7 +131,11 @@ int wmain() {
     session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kForeground;
     session.approved_deadline_ns = 0;
     cancellation_epoch.store(2); WindowsTargetListControl().stop_serial.store(0);
-    m2_inputs = m2_measurements = 0; m2_kind = "click";
+    m2_inputs = m2_measurements = m2_rechecks = m2_send_calls = 0; m2_kind = "click";
+    m2_sent.clear(); m2_last_input = 1000; m2_routing = MOUSEWHEEL_ROUTING_MOUSE_POS;
+    m2_focus = reinterpret_cast<HWND>(200); m2_recheck_point = POINT{};
+    m2_spi_ok = m2_tick_ok = true; m2_short_send = m2_change_in_send = false;
+    m2_cursor_moves_during_recheck = m2_input_during_recheck = false;
     m2_view = reinterpret_cast<HWND>(200); m2_owner = reinterpret_cast<HWND>(201);
     m2_folder = L"C:\\synthetic-folder";
     m2_foreign_owner = m2_throw = m2_cancel_during_view = m2_stop_during_view = false;
@@ -119,18 +156,63 @@ int wmain() {
     Require(!dispatch() && m2_inputs == 0, name);
     std::cout << "OK " << name << '\n';
   };
+  // Refused after the cursor was placed and before any SendInput: no button or wheel event at all.
+  const auto refused_before_send = [&](const char *name) {
+    std::string result, reason; bool accepted = false;
+    Require(!DispatchWindowsAction(session, action, &result, &reason, &accepted) && !accepted &&
+        reason == "stale_target" && m2_send_calls == 0 && m2_inputs == 1 && m2_sent.empty(), name);
+    std::cout << "OK " << name << '\n';
+  };
+  const auto plain_flags = [&](std::initializer_list<DWORD> flags) {
+    if (m2_sent.size() != flags.size()) return false;
+    std::size_t index = 0;
+    for (const DWORD flag : flags)
+      if (m2_sent[index].type != INPUT_MOUSE || m2_sent[index++].mi.dwFlags != flag) return false;
+    return true;
+  };
+  // The first event moves to exactly (60, 70) on the virtual desktop, in the same array as the rest.
+  const auto moves_to_action_point = [&] {
+    if (m2_sent.empty() || m2_sent[0].type != INPUT_MOUSE ||
+        m2_sent[0].mi.dwFlags != (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
+      return false;
+    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    const auto pixel = [](LONG value, int extent) {
+      return static_cast<LONG>(std::lround(static_cast<double>(value) * (extent - 1) / 65535.0));
+    };
+    return GetSystemMetrics(SM_XVIRTUALSCREEN) + pixel(m2_sent[0].mi.dx, width) == 60 &&
+        GetSystemMetrics(SM_YVIRTUALSCREEN) + pixel(m2_sent[0].mi.dy, height) == 70;
+  };
   if constexpr (!gate) {
     reset(); Require(dispatch() && m2_inputs == 2, "gate_off_click_unchanged");
     Require(m2_measurements == 0, "gate_off_never_measures");
+    Require(m2_send_calls == 1 && plain_flags({MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP}),
+        "gate_off_click_events_unchanged");
+    reset(); m2_kind = "scroll";
+    Require(dispatch() && m2_inputs == 3 && m2_send_calls == 2 && plain_flags({MOUSEEVENTF_HWHEEL}),
+        "gate_off_scroll_unchanged");
     reset(); m2_kind = "invoke";
     Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "gate_off_semantic_unchanged");
   } else {
     for (const std::string kind : {"click", "scroll"}) {
       reset(); m2_kind = kind;
-      Require(dispatch() && m2_inputs == (kind == "click" ? 2u : 3u), "positive_dispatch");
+      // One cursor placement and ONE SendInput: [absolute move to the POINT, button or wheels].
+      Require(dispatch() && m2_inputs == 2 && m2_send_calls == 1, "positive_dispatch");
       Require(m2_measured_point.x == 60 && m2_measured_point.y == 70 &&
           m2_cursor_point.x == m2_measured_point.x && m2_cursor_point.y == m2_measured_point.y,
+          "explorer_dispatch_measures_action_point");
+      // 1 measurement (the evidence) + 2 re-measures in dispatch: before the cursor and right
+      // before the SendInput, both at the very POINT WindowsActionPoint produced.
+      Require(m2_measurements == 1 && m2_rechecks == 2 &&
+          m2_recheck_point.x == 60 && m2_recheck_point.y == 70,
           "explorer_dispatch_rechecks_same_action_point");
+      Require(m2_sent.size() == 3 && moves_to_action_point(), "explorer_move_and_input_atomic");
+      Require(kind == "click"
+          ? m2_sent[1].mi.dwFlags == MOUSEEVENTF_LEFTDOWN && m2_sent[2].mi.dwFlags == MOUSEEVENTF_LEFTUP
+          : m2_sent[1].mi.dwFlags == MOUSEEVENTF_WHEEL && m2_sent[2].mi.dwFlags == MOUSEEVENTF_HWHEEL &&
+            m2_sent[1].mi.mouseData == WHEEL_DELTA && m2_sent[2].mi.mouseData == WHEEL_DELTA,
+          "explorer_actions_follow_move");
+      std::cout << "OK explorer_move_and_input_atomic\n";
       Require(!session.explorer_dispatch_evidence, "single_use_evidence");
       m2_inputs = 0; blocked("replay_emits_nothing");
       reset(); m2_kind = kind;
@@ -171,6 +253,33 @@ int wmain() {
           "different_action_point_emits_nothing");
       reset(); m2_kind = kind; m2_change_after_cursor = true;
       Require(!dispatch() && m2_inputs == 1, "view_change_after_cursor_prevents_send_input");
+      reset(); m2_kind = kind; m2_cursor_moves_during_recheck = true;
+      refused_before_send("cursor_moved_during_recheck_emits_nothing");
+      reset(); m2_kind = kind; m2_input_during_recheck = true;
+      refused_before_send("human_input_during_recheck_emits_nothing");
+      reset(); m2_kind = kind; m2_tick_ok = false;
+      Require(!dispatch() && m2_send_calls == 0, "unreadable_last_input_emits_nothing");
+      reset(); m2_kind = kind; m2_change_in_send = true;
+      Require(dispatch() && m2_send_calls == 1 && m2_rechecks == 2,
+          "state_change_after_send_sends_no_later_input");
+      {
+        reset(); m2_kind = kind; m2_short_send = true;
+        std::string result, reason; bool accepted = false;
+        Require(!DispatchWindowsAction(session, action, &result, &reason, &accepted) && accepted &&
+            reason == "input_not_confirmed", "short_send_is_unconfirmed");
+      }
+      // Wheel routing: with "scroll inactive windows" off the wheel goes to the keyboard focus.
+      reset(); m2_kind = kind; m2_routing = MOUSEWHEEL_ROUTING_FOCUS;
+      m2_focus = reinterpret_cast<HWND>(205);
+      if (kind == "scroll") refused_before_send("focus_routed_wheel_outside_view_emits_nothing");
+      else Require(dispatch(), "click_ignores_wheel_routing");
+      reset(); m2_kind = kind; m2_routing = MOUSEWHEEL_ROUTING_HYBRID;
+      m2_focus = reinterpret_cast<HWND>(205);
+      if (kind == "scroll") refused_before_send("hybrid_routed_wheel_outside_view_emits_nothing");
+      reset(); m2_kind = kind; m2_spi_ok = false;
+      if (kind == "scroll") refused_before_send("unreadable_wheel_routing_emits_nothing");
+      reset(); m2_kind = kind; m2_routing = MOUSEWHEEL_ROUTING_FOCUS;
+      Require(dispatch() && m2_send_calls == 1, "focus_routed_wheel_inside_view_sends");
       reset(); m2_kind = kind; session.approved_deadline_ns = UINT64_MAX;
       Require(dispatch(), "approved_cursor_guard_positive");
       reset(); m2_kind = kind; session.approved_deadline_ns = UINT64_MAX; m2_foreign_owner = true;
@@ -197,6 +306,14 @@ int wmain() {
     reset(); session.canonical_path = L"C:\\synthetic-app.exe";
     session.explorer_dispatch_evidence.reset(); m2_kind = "invoke"; m2_measurements = 0;
     Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "non_explorer_unchanged");
+    reset(); session.explorer_dispatch_evidence.reset(); m2_kind = "click";
+    m2_measurements = 0; m2_send_calls = 0; m2_inputs = 0; m2_sent.clear();
+    Require(dispatch() && m2_inputs == 2 && m2_rechecks == 0 &&
+        plain_flags({MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP}), "non_explorer_click_unchanged");
+    reset(); session.explorer_dispatch_evidence.reset(); m2_kind = "scroll";
+    m2_send_calls = 0; m2_inputs = 0; m2_sent.clear();
+    Require(dispatch() && m2_inputs == 3 && m2_send_calls == 2 && m2_rechecks == 0 &&
+        plain_flags({MOUSEEVENTF_HWHEEL}), "non_explorer_scroll_unchanged");
   }
   sessions.clear(); CoUninitialize();
   std::cout << "OK Explorer dispatch M2\n";

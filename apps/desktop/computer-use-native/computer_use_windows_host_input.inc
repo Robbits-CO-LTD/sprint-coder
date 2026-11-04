@@ -539,6 +539,10 @@ bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::stri
     std::shared_ptr<const WindowsExplorerDispatchEvidence> *evidence);
 bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
     const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point);
+bool SendWindowsExplorerPointInput(const WindowsSession &session,
+    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, const RECT &bounds,
+    std::uint64_t expected_epoch, POINT point, DWORD input_tick, bool wheel,
+    const INPUT *actions, UINT action_count, bool *accepted);
 #endif
 
 bool DispatchWindowsAction(const WindowsSession &session,
@@ -675,6 +679,14 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    // The last input time once the cursor is at the POINT: any input after it stops the click.
+    DWORD explorer_input_tick = 0;
+    if (explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
+      *reason = "stale_target";
+      return false;
+    }
+#endif
     std::string current_visual_signature;
     if (RejectWindowsRisk(ClassifyWindowsPoint({screen_x, screen_y},
                                                session.pid,
@@ -704,10 +716,14 @@ bool DispatchWindowsAction(const WindowsSession &session,
     events[1] = events[0];
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
 #if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-    if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, click_point)) {
-      *reason = "stale_target";
-      return false;
-    }
+    if (explorer_evidence) {
+      // Re-measured at the POINT, then the move to it and the press in one array (see the helper).
+      dispatched = SendWindowsExplorerPointInput(session, explorer_evidence, bounds, expected_epoch,
+                                                 click_point, explorer_input_tick, false, events, 2,
+                                                 accepted) &&
+                   RevalidateWindowsTarget(session, bounds, expected_epoch);
+      if (!*accepted) *reason = "stale_target";
+    } else {
 #endif
     const UINT sent =
         SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
@@ -715,6 +731,9 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *accepted = true;
     dispatched =
         sent == 2 && RevalidateWindowsTarget(session, bounds, expected_epoch);
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    }
+#endif
   } else if (kind == "scroll") {
     double delta_y_value = 0;
     double delta_x_value = 0;
@@ -773,6 +792,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "input_unavailable";
       return false;
     }
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    DWORD explorer_input_tick = 0;
+    if (explorer_evidence && !WindowsReadLastInputTick(&explorer_input_tick)) {
+      *reason = "stale_target";
+      return false;
+    }
+#endif
     std::string current_visual_signature;
     if (RejectWindowsRisk(
             ClassifyWindowsPoint(point, session.pid, &current_visual_signature),
@@ -792,17 +818,34 @@ bool DispatchWindowsAction(const WindowsSession &session,
       return false;
     }
     dispatched = true;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    if (explorer_evidence) {
+      // One array: the move to the POINT and both wheels. No wheel waits on a later check, so a
+      // scroll is either refused with nothing sent or sent whole (a short send is unconfirmed).
+      INPUT wheels[2]{};
+      UINT wheel_count = 0;
+      if (delta_y != 0) {
+        wheels[wheel_count].type = INPUT_MOUSE;
+        wheels[wheel_count].mi.mouseData = static_cast<DWORD>(delta_y * WHEEL_DELTA);
+        wheels[wheel_count++].mi.dwFlags = MOUSEEVENTF_WHEEL;
+      }
+      if (delta_x != 0) {
+        wheels[wheel_count].type = INPUT_MOUSE;
+        wheels[wheel_count].mi.mouseData = static_cast<DWORD>(delta_x * WHEEL_DELTA);
+        wheels[wheel_count++].mi.dwFlags = MOUSEEVENTF_HWHEEL;
+      }
+      dispatched = SendWindowsExplorerPointInput(session, explorer_evidence, bounds, expected_epoch,
+                                                 point, explorer_input_tick, true, wheels,
+                                                 wheel_count, accepted) &&
+                   RevalidateWindowsTarget(session, bounds, expected_epoch);
+      if (!*accepted) *reason = "stale_target";
+    } else {
+#endif
     if (delta_y != 0) {
       INPUT vertical{};
       vertical.type = INPUT_MOUSE;
       vertical.mi.mouseData = static_cast<DWORD>(delta_y * WHEEL_DELTA);
       vertical.mi.dwFlags = MOUSEEVENTF_WHEEL;
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
-        *reason = "stale_target";
-        return false;
-      }
-#endif
       const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
                                                 1, &vertical);
       if (sent > 0)
@@ -815,12 +858,6 @@ bool DispatchWindowsAction(const WindowsSession &session,
       horizontal.type = INPUT_MOUSE;
       horizontal.mi.mouseData = static_cast<DWORD>(delta_x * WHEEL_DELTA);
       horizontal.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
-      if (!RecheckWindowsExplorerDispatch(session, explorer_evidence, point)) {
-        *reason = "stale_target";
-        return false;
-      }
-#endif
       const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch,
                                                 1, &horizontal);
       if (sent > 0)
@@ -828,6 +865,9 @@ bool DispatchWindowsAction(const WindowsSession &session,
       dispatched =
           sent == 1 && RevalidateWindowsTarget(session, bounds, expected_epoch);
     }
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+    }
+#endif
   } else if (kind == "key") {
     std::string key;
     const WORD virtual_key =
