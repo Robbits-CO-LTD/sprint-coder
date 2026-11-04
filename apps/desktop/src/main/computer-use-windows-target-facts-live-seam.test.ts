@@ -1508,6 +1508,43 @@ int wmain(int argc, wchar_t **argv) {
       WindowsTargetFactsMeasurement measured;
       MeasureWindowsTargetHeldFacts(held, context, &measured);
       Check(held.il_only_anchor, "hold_records_il_only_anchor");
+      // Hold the real image handle, but control placement prefixes to exercise the production
+      // held-facts boundary without writing into protected OS directories. Not ACL acceptance.
+      {
+        const auto real_path = held.canonical_path;
+        const bool real_matches = held.matches;
+        held.matches = true;
+        auto placement = context;
+        if (held.volume) placement.rename_probe = WindowsTargetRenameProbe{true, *held.volume};
+        placement.roots = std::vector<WindowsImageRootPrefix>{
+            {"windows_apps", "C:\\Synthetic\\Program Files\\WindowsApps"},
+            {"program_files", "C:\\Synthetic\\Program Files"},
+            {"local_programs", "C:\\Synthetic\\Local\\Programs"}};
+        struct PlacementCase { const wchar_t *path; const char *root; bool package; bool allowed; };
+        const PlacementCase cases[] = {
+            {L"C:\\Synthetic\\Program Files\\App\\image.exe", "program_files", false, true},
+            {L"C:\\Synthetic\\Program Files\\WindowsApps\\App\\image.exe", "windows_apps", false, true},
+            {L"C:\\Synthetic\\Program Files-extra\\image.exe", "other", false, false},
+            {L"C:\\Synthetic\\Program Files\\WindowsApps-extra\\image.exe", "program_files", false, true},
+            {L"C:\\Synthetic\\Local\\Programs\\image.exe", "local_programs", false, false},
+            {L"C:\\Synthetic\\ExternalPackage\\image.exe", "windows_apps", true, false},
+            {L"C:\\Synthetic\\ExternalPackage-extra\\image.exe", "other", true, false},
+            {L"C:\\Synthetic\\Local\\Programs\\image.exe", "local_programs", true, false},
+        };
+        for (const auto &test : cases) {
+          held.canonical_path = test.path;
+          WindowsTargetFactsMeasurement placed;
+          placed.facts.packaged = test.package;
+          if (test.package) placed.package_install_root = "C:\\Synthetic\\ExternalPackage";
+          MeasureWindowsTargetHeldFacts(held, placement, &placed);
+          Check(placed.facts.image_root == std::optional<std::string>(test.root), "il_only_placement_root");
+          Check(placed.facts.running_image_matches == std::optional<bool>(test.allowed),
+                "il_only_placement_anchor");
+          if (!test.allowed) Check(!placed.facts.signature.has_value(), "placement_refused_before_signature");
+        }
+        held.canonical_path = real_path;
+        held.matches = real_matches;
+      }
       if (protected_tool) {
         Check(measured.facts.image_root == std::optional<std::string>("windows_directory"),
               "framework_tool_in_protected_root");

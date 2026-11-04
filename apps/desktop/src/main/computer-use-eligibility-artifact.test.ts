@@ -10,7 +10,7 @@ import {
   COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV,
 } from './computer-use-eligibility';
 import { parseNativeHandshake } from './computer-use-native-handshake';
-import { windowsV2EligibilityProblems } from '../../scripts/verify-windows-v2-eligibility.mjs';
+import { windowsV2EligibilityProblems } from '../../scripts/verify-windows-v2-eligibility';
 
 // D7-3: Main's three-way check against what a build declares and attests. The synthetic cases run
 // everywhere; the report case runs in CI right after a real build, with the manifest and the

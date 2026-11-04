@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './computer-use-acceptance-mode';
@@ -48,18 +48,37 @@ import {
 
 const roots: string[] = [];
 
-function checkNativeTestDefinition(definition: string, owner: string, guards: readonly string[]) {
-  const native = join(__dirname, '../../computer-use-native');
+function checkNativeTestDefinition(
+  definition: string,
+  owner: string,
+  guards: readonly string[],
+  native = join(__dirname, '../../computer-use-native'),
+) {
+  const excluded = new Set([
+    'build',
+    'node_modules',
+    'fixtures',
+    'computer_use_target_eligibility_harness.cc',
+    'computer_use_windows_association_fixture.h',
+    'computer_use_windows_approval_host_test.cc',
+    'computer_use_windows_background_executor_test.cc',
+    'computer_use_windows_background_monitor_test.cc',
+    'computer_use_windows_background_observe_test.cc',
+    'computer_use_windows_discovery_launch_test.cc',
+    'computer_use_windows_existing_start_test.cc',
+    'computer_use_windows_hung_helper_test.cc',
+    'computer_use_windows_new_start_test.cc',
+    'computer_use_windows_target_identity_test.cc',
+    'computer_use_windows_v1_start_live_test.cc',
+  ]);
   const scan = (directory: string) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
+      if (excluded.has(relative(native, path).replaceAll('\\', '/'))) continue;
       if (entry.isDirectory()) {
-        if (!/fixture|harness|^build$|^node_modules$/u.test(entry.name)) scan(path);
-      } else if (
-        /\.(?:h|cc|inc|mm)$/u.test(entry.name) &&
-        !/(?:_test\.cc$|harness|fixture)/u.test(entry.name)
-      ) {
-        let source = readFileSync(path, 'utf8');
+        scan(path);
+      } else if (/\.(?:h|cc|inc|mm)$/u.test(entry.name)) {
+        let source = readFileSync(path, 'utf8').replace(/\\\r?\n/gu, '');
         if (path === join(native, owner)) {
           for (const guard of guards) {
             expect(source.split(guard), path).toHaveLength(2);
@@ -72,6 +91,40 @@ function checkNativeTestDefinition(definition: string, owner: string, guards: re
   };
   scan(native);
 }
+
+it.each(['continued', 'harness-name', 'fixture-directory', 'unknown-test'])(
+  'detects native test definitions hidden by %s',
+  (variant) => {
+    const root = mkdtempSync(join(tmpdir(), 'sc-native-scan-'));
+    roots.push(root);
+    const definition = 'SPRINT_CODER_TEST_SYNTHETIC';
+    const directory = variant === 'fixture-directory' ? join(root, 'fixture-production') : root;
+    mkdirSync(directory, { recursive: true });
+    const name =
+      variant === 'harness-name'
+        ? 'production_harness.h'
+        : variant === 'unknown-test'
+          ? 'unknown_test.cc'
+          : 'production.inc';
+    writeFileSync(
+      join(directory, name),
+      variant === 'continued'
+        ? '#define SPRINT_CODER_TEST_\\\r\nSYNTHETIC 1\n'
+        : `#define ${definition} 1\n`,
+    );
+    expect(() => checkNativeTestDefinition(definition, 'owner.h', [], root)).toThrow();
+  },
+);
+
+it('normalizes continued owner guards before matching the exact allowed occurrences', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sc-native-scan-'));
+  roots.push(root);
+  const definition = 'SPRINT_CODER_TEST_SYNTHETIC';
+  writeFileSync(join(root, 'owner.h'), '#if defined(SPRINT_CODER_TEST_\\\nSYNTHETIC)\n#endif\n');
+  expect(() =>
+    checkNativeTestDefinition(definition, 'owner.h', [`#if defined(${definition})`], root),
+  ).not.toThrow();
+});
 
 it('keeps Store Notepad not-web binding acceptance-test-only and bound at start and rejudge', () => {
   const facts = readFileSync(
