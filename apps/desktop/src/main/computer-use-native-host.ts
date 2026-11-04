@@ -409,6 +409,7 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  const foregroundHandoffs = new Map<string, () => boolean>();
   const explorerSessionFacts = new WeakMap<InternalNativeSession, ExplorerEvidence['facts']>();
   const interactionRevoked = new Set<string>();
   const interactionListeners = new Set<WindowsInteractionListener>();
@@ -3028,7 +3029,10 @@ export function createComputerUseNativeHost(
             if (!available()) return false;
             try {
               consumeHandoff();
-              return available() && addon?.allowWindowsHelperForeground?.(generation!) === true;
+              if (!available() || addon?.allowWindowsHelperForeground?.(generation!) !== true)
+                return false;
+              foregroundHandoffs.set(session.sessionId, available);
+              return true;
             } catch {
               return false;
             }
@@ -3216,13 +3220,35 @@ export function createComputerUseNativeHost(
         assertTargetCurrent: assertCallerTarget,
         windowsGeneration,
         roundTripId,
+        foregroundHandoffId,
         ...baseInput
       } = startInput;
+      const handoffCurrent = foregroundHandoffs.get(startInput.sessionId);
+      if (foregroundHandoffId !== undefined) {
+        foregroundHandoffs.delete(startInput.sessionId);
+        if (
+          options.windowsForegroundHandoffForTesting !== true ||
+          !startIdentityEnabled ||
+          !handoffCurrent?.() ||
+          !assertCallerTarget ||
+          !/^[a-f0-9-]{36}$/u.test(foregroundHandoffId) ||
+          roundTripId !== undefined ||
+          startInput.resume === true
+        )
+          throw new ComputerUseNativeUnavailableError('native_foreground_handoff_rejected');
+      }
+      const assertHandoff = () => {
+        assertCallerTarget?.();
+        if (foregroundHandoffId !== undefined && !handoffCurrent?.())
+          throw new ComputerUseNativeUnavailableError('native_foreground_handoff_rejected');
+      };
       const assertTargetCurrent =
         windowsGeneration === undefined
-          ? assertCallerTarget
+          ? foregroundHandoffId === undefined
+            ? assertCallerTarget
+            : assertHandoff
           : () => {
-              assertCallerTarget?.();
+              assertHandoff();
               if (
                 !targetGenerationCurrent(windowsGeneration) ||
                 !/^[a-f0-9]{64}$/u.test(baseInput.expectedWindowIdentityDigest ?? '')
@@ -3231,6 +3257,7 @@ export function createComputerUseNativeHost(
             };
       const input = {
         ...baseInput,
+        ...(foregroundHandoffId === undefined ? {} : { foregroundHandoffId }),
         ...roundTrips?.returning(startInput.sessionId, roundTripId),
         ...(windowsGeneration === undefined
           ? {}
@@ -3548,8 +3575,21 @@ export function createComputerUseNativeHost(
           result: outcome.result,
           reasonCode: outcome.reasonCode,
         });
+      } catch {
+        return Object.freeze({
+          kind: 'refused',
+          result: 'rejected',
+          reasonCode: 'native_approval_approve_failed',
+        });
       } finally {
-        if (!exchanged) await roundTrips?.cancel(input.session.sessionId, 'rejected');
+        if (!exchanged) {
+          try {
+            await roundTrips?.cancel(input.session.sessionId, 'rejected');
+          } catch {
+            // Cleanup cannot replace a pre-input refusal with an exception.
+            interactionRevoked.add(input.session.sessionId);
+          }
+        }
       }
     },
 
@@ -3708,7 +3748,12 @@ export function createComputerUseNativeHost(
                 inputReceipt: preflightReceipt,
               });
             ticket = outcome.ticket;
-            await roundTrips?.exchanged(input.session.sessionId);
+            try {
+              await roundTrips?.exchanged(input.session.sessionId);
+            } catch {
+              interactionRevoked.add(input.session.sessionId);
+              return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+            }
             settled = true;
           }
           if (outcome.kind === 'refused') {
@@ -3720,10 +3765,18 @@ export function createComputerUseNativeHost(
             )
               return nativePreflightInvalidResult(null)!;
             if (outcome.approvalOffer !== undefined) {
-              const id = roundTrips?.offered(input.session.sessionId);
-              if (id !== undefined) addon?.completeApprovalRoundTrip?.(input.session.sessionId, id);
+              if (interactionRevoked.has(input.session.sessionId))
+                return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+              try {
+                const id = roundTrips?.offered(input.session.sessionId);
+                if (id !== undefined)
+                  addon?.completeApprovalRoundTrip?.(input.session.sessionId, id);
+              } catch {
+                interactionRevoked.add(input.session.sessionId);
+                return { result: 'rejected', reasonCode: 'native_interaction_revoked' };
+              }
               settled = true;
-            } else await roundTrips?.cancel(input.session.sessionId, 'rejected');
+            }
             return Object.freeze({
               result: outcome.result,
               reasonCode: outcome.reasonCode,
@@ -3735,7 +3788,14 @@ export function createComputerUseNativeHost(
           }
         }
       } finally {
-        if (!settled) await roundTrips?.cancel(input.session.sessionId, 'rejected');
+        if (!settled) {
+          try {
+            await roundTrips?.cancel(input.session.sessionId, 'rejected');
+          } catch {
+            // Preflight cannot input; preserve its typed result even if End fails.
+            interactionRevoked.add(input.session.sessionId);
+          }
+        }
       }
       let value: unknown;
       const callbacks = dispatchLedger(input, internal);
@@ -4460,6 +4520,8 @@ function parseNativeSession(
   // startResult is per-start evidence; a stored copy would be re-sent by a later existing start.
   const { startResult, ...response } = raw;
   void startResult;
+  const { foregroundHandoffId, ...retainedBindings } = requestBindings;
+  void foregroundHandoffId;
   return Object.freeze({
     sessionId,
     platform,
@@ -4476,7 +4538,7 @@ function parseNativeSession(
     // Main's already-verified geometry/path bindings so an explicit resume can re-submit them,
     // while authority-bearing response facts (especially policyLanguage) always win.
     raw: Object.freeze({
-      ...requestBindings,
+      ...retainedBindings,
       ...response,
       ...processIdentity,
       policyLanguage,

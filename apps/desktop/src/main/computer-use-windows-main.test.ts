@@ -1,10 +1,44 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { allowWindowsHelperForeground, readWindowsMainIdentity } from './computer-use-windows-main';
 
+vi.mock('node:fs', async (original) => {
+  const actual = await original<typeof NodeFs>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
+
 describe('P5c1 Windows Main addon boundary (OS calls stubbed)', () => {
+  it('P5c2b-W hashes once but validates PID and creation time every time', async () => {
+    vi.resetModules();
+    const read = vi.mocked(readFileSync);
+    read.mockClear();
+    const { readWindowsMainIdentity: identity } = await import('./computer-use-windows-main');
+    const facts = {
+      mainPid: process.pid,
+      mainProcessStartTime: '123',
+      imagePath: process.execPath,
+    };
+    const readMainIdentity = vi.fn(() => facts);
+    const addon = { readMainIdentity, createHelperPermit: vi.fn() };
+    try {
+      const first = identity(addon);
+      expect(identity(addon)).toEqual(first);
+      facts.mainPid = 0;
+      expect(() => identity(addon)).toThrow();
+      facts.mainPid = process.pid;
+      facts.mainProcessStartTime = '0';
+      expect(() => identity(addon)).toThrow();
+      facts.mainProcessStartTime = '456';
+      expect(identity(addon).mainProcessStartTime).toBe('456');
+      expect(readMainIdentity).toHaveBeenCalledTimes(5);
+      expect(read.mock.calls.filter(([path]) => path === process.execPath)).toHaveLength(1);
+    } finally {
+      read.mockClear();
+    }
+  });
   it.each([undefined, 0, -1, 1.5, 0xffff_ffff, NaN, 43])(
     'rejects unknown/invalid helper PID or a different requested PID: %s',
     (pid) => {

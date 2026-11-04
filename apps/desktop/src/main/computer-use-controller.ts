@@ -33,6 +33,8 @@ import {
   computerAppGrantViewSchema,
   computerAppProfileSchema,
   computerUseActionSchema,
+  type ComputerUseForegroundHandoffResolveInput,
+  type ComputerUseInputDisplay,
   computerUseActionResultSchema,
   computerUseApprovalSchema,
   computerUseAvailabilitySchema,
@@ -522,6 +524,7 @@ export interface ComputerUseNativeHost {
       cancelEpoch: number;
       resume?: boolean;
       roundTripId?: string;
+      foregroundHandoffId?: string;
       /**
        * The classifier route this session is bound to (ADR v2 D7 / classifier C3). Chosen by Main
        * alone when the session is created and repeated on every later start of the same session;
@@ -720,6 +723,11 @@ export type ComputerUseAuthorization =
   ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
 
 export type ComputerUseControllerDeps = Readonly<{
+  /** Main-only test gate. P6 IPC never enables this; production remains closed until P8. */
+  foregroundHandoffForTesting?: Readonly<{
+    consumeTrustedActivation: (intentId: string) => boolean;
+    monotonicNow?: () => number;
+  }>;
   runtimeCapture?: ComputerUseRuntimeCapture;
   persistence: ComputerUseControllerPersistence;
   native: ComputerUseNativeHost;
@@ -906,7 +914,32 @@ type StartingSession = {
   failure: unknown;
 };
 
+export type ComputerUseForegroundHandoffIntent = Readonly<{
+  id: string;
+  sessionId: string;
+  taskId: string;
+  turnId: string;
+  helperGeneration: number;
+  cancelEpoch: number;
+  appIdentityDigest: string;
+  windowIdentityDigest: string;
+  windowId: string;
+  actionDigest: string;
+  from: 'background_semantic';
+  to: 'foreground_input';
+  deadline: number;
+}>;
+/** Metadata only: neither an approval nor an execution ticket. P5c2b owns native revalidation. */
+export type ConsumedComputerUseForegroundHandoff = ComputerUseForegroundHandoffIntent &
+  Readonly<{ state: 'consumed' }>;
+
 type SessionRecord = {
+  handoffHelperGeneration?: WindowsGenerationToken | null;
+  /** Presence keeps input closed even after expiry, refusal or consumption. */
+  foregroundHandoff?: {
+    intent: ComputerUseForegroundHandoffIntent | null;
+    action: ComputerUseAction;
+  };
   interactionRevoked?: true;
   requestedStopReason?: ComputerUseStopReason;
   status: ComputerUseSessionStatus;
@@ -1080,6 +1113,7 @@ function computerAppGrantVersionUnreadable(
 }
 
 export class ComputerUseController {
+  private readonly consumedHandoffs = new WeakSet<ConsumedComputerUseForegroundHandoff>();
   private readonly broker: MainToolBroker;
   private readonly registry: ComputerUseToolRegistry;
   private readonly sessions = new Map<string, SessionRecord>();
@@ -3595,7 +3629,8 @@ export class ComputerUseController {
       this.startInProgress ||
       record.status.state !== 'paused' ||
       // A revoked session holds no authority to resume; only Stop ends it (then a fresh start).
-      record.interactionRevoked
+      record.interactionRevoked ||
+      record.foregroundHandoff !== undefined
     )
       throw new Error('Computer Use session is not resumable');
     if (
@@ -4010,6 +4045,9 @@ export class ComputerUseController {
         classifierRoute,
         native,
         approvalHelperGeneration,
+        ...(this.deps.foregroundHandoffForTesting && native.inputSession?.kind === 'background'
+          ? { handoffHelperGeneration: this.deps.native.captureWindowsGeneration?.() ?? null }
+          : {}),
         screenBounds: native.screenBounds,
         controller,
         turnId,
@@ -4091,12 +4129,261 @@ export class ComputerUseController {
     }
   }
 
+  private handoffNow(): number {
+    return this.deps.foregroundHandoffForTesting?.monotonicNow?.() ?? performance.now();
+  }
+
+  private awaitForegroundHandoff(record: SessionRecord, action: ComputerUseAction): boolean {
+    if (
+      !this.deps.foregroundHandoffForTesting ||
+      record.native.platform !== 'win32' ||
+      record.native.inputSession?.kind !== 'background' ||
+      computerUseActionRoute(action) !== 'visual'
+    )
+      return false;
+    this.assertSessionLive(record);
+    const generation = record.handoffHelperGeneration;
+    if (!generation || this.deps.native.isWindowsGenerationCurrent?.(generation) !== true)
+      throw new Error('Computer Use handoff helper unavailable');
+    // This branch precedes every native dispatch. Semantic absence/unknown effects cannot enter it.
+    const intent: ComputerUseForegroundHandoffIntent = Object.freeze({
+      id: randomUUID(),
+      sessionId: record.native.sessionId,
+      taskId: record.status.taskId,
+      turnId: record.turnId,
+      helperGeneration: generation.helperGeneration,
+      cancelEpoch: record.native.cancelEpoch,
+      appIdentityDigest: record.native.appIdentityDigest,
+      windowIdentityDigest: record.native.windowIdentityDigest,
+      windowId: record.native.windowId,
+      actionDigest: computerUseActionDigest(action),
+      from: 'background_semantic',
+      to: 'foreground_input',
+      deadline: this.handoffNow() + 60_000,
+    });
+    record.foregroundHandoff = { intent, action: computerUseActionSchema.parse(action) };
+    record.planGrant = null;
+    record.status = this.status(record, 'paused', null);
+    this.emit(record.status);
+    return true;
+  }
+
+  private assertHandoffCurrent(
+    record: SessionRecord,
+    intent: ComputerUseForegroundHandoffIntent,
+  ): void {
+    this.assertSessionLive(record);
+    if (
+      !this.deps.foregroundHandoffForTesting ||
+      this.handoffNow() >= intent.deadline ||
+      record.artifactGeneration !== (this.artifactGenerations.get(intent.taskId) ?? 0) ||
+      record.status.state !== 'paused' ||
+      record.native.inputSession?.kind !== 'background' ||
+      record.status.taskId !== intent.taskId ||
+      record.turnId !== intent.turnId ||
+      record.native.sessionId !== intent.sessionId ||
+      !record.handoffHelperGeneration ||
+      record.handoffHelperGeneration.helperGeneration !== intent.helperGeneration ||
+      // The real client compares the token by identity, so pass the captured token itself.
+      this.deps.native.isWindowsGenerationCurrent?.(record.handoffHelperGeneration) !== true ||
+      record.native.cancelEpoch !== intent.cancelEpoch ||
+      record.native.appIdentityDigest !== intent.appIdentityDigest ||
+      record.native.windowIdentityDigest !== intent.windowIdentityDigest ||
+      record.native.windowId !== intent.windowId ||
+      record.observation?.windowIdentityDigest !== intent.windowIdentityDigest ||
+      record.observation?.appIdentityDigest !== intent.appIdentityDigest
+    )
+      throw new Error('Computer Use foreground handoff expired or binding changed');
+  }
+
+  /** Main-only inspection; never publishes a card or exposes identity over IPC. */
+  pendingForegroundHandoff(sessionId: string): ComputerUseForegroundHandoffIntent | null {
+    const record = this.sessions.get(sessionId);
+    const intent = record?.foregroundHandoff?.intent;
+    if (!record || !intent) return null;
+    try {
+      this.assertHandoffCurrent(record, intent);
+      return intent;
+    } catch {
+      record.foregroundHandoff!.intent = null;
+      return null;
+    }
+  }
+
+  /** Consumes only; transitionForegroundHandoff separately burns this Main-owned token. */
+  consumeForegroundHandoff(
+    input: Readonly<{
+      sessionId: string;
+      intentId: string;
+      taskId: string;
+      turnId: string;
+      action: ComputerUseAction;
+    }>,
+    consumeTrustedActivation = this.deps.foregroundHandoffForTesting?.consumeTrustedActivation,
+  ): ConsumedComputerUseForegroundHandoff {
+    const record = this.requireSession(input.sessionId);
+    const intent = record.foregroundHandoff?.intent;
+    // Burn before validation/callback: rejected clicks and synchronous re-entry cannot retry.
+    if (record.foregroundHandoff) record.foregroundHandoff.intent = null;
+    if (!intent) throw new Error('Computer Use foreground handoff missing or already consumed');
+    this.assertHandoffCurrent(record, intent);
+    if (
+      input.intentId !== intent.id ||
+      input.taskId !== intent.taskId ||
+      input.turnId !== intent.turnId ||
+      computerUseActionDigest(computerUseActionSchema.parse(input.action)) !==
+        intent.actionDigest ||
+      consumeTrustedActivation?.(intent.id) !== true
+    )
+      throw new Error('Computer Use foreground handoff activation refused');
+    this.assertHandoffCurrent(record, intent);
+    const consumed = Object.freeze({ ...intent, state: 'consumed' as const });
+    this.consumedHandoffs.add(consumed);
+    return consumed;
+  }
+
+  async resolveForegroundHandoff(
+    input: ComputerUseForegroundHandoffResolveInput,
+    consumeTrustedActivation: (intentId: string) => boolean,
+  ): Promise<ComputerUseSessionStatus> {
+    const record = this.requireSession(input.sessionId);
+    const intent = this.pendingForegroundHandoff(input.sessionId);
+    const action = record.foregroundHandoff?.action;
+    if (!intent || !action || intent.id !== input.intentId)
+      throw new Error('Computer Use foreground handoff unavailable');
+    try {
+      if (input.decision === 'deny') {
+        record.foregroundHandoff!.intent = null;
+        if (!consumeTrustedActivation(intent.id))
+          throw new Error('Computer Use foreground handoff activation refused');
+      } else {
+        const consumed = this.consumeForegroundHandoff(
+          {
+            sessionId: input.sessionId,
+            intentId: input.intentId,
+            taskId: intent.taskId,
+            turnId: intent.turnId,
+            action,
+          },
+          consumeTrustedActivation,
+        );
+        await this.transitionForegroundHandoff(consumed);
+      }
+    } finally {
+      this.emit(record.status);
+    }
+    return record.status;
+  }
+
+  private inputDisplay(record: SessionRecord): ComputerUseInputDisplay | undefined {
+    if (
+      !this.deps.foregroundHandoffForTesting ||
+      record.native.platform !== 'win32' ||
+      !record.native.inputSession
+    )
+      return undefined;
+    const intent = this.pendingForegroundHandoff(record.status.sessionId);
+    const action = record.foregroundHandoff?.action;
+    const operation = action?.type;
+    return {
+      sessionKind: record.native.inputSession.kind,
+      handoff:
+        intent &&
+        (operation === 'click' ||
+          operation === 'type' ||
+          operation === 'key' ||
+          operation === 'scroll')
+          ? {
+              id: intent.id,
+              operation,
+              expiresAt: new Date(
+                this.now() + Math.max(0, intent.deadline - this.handoffNow()),
+              ).toISOString(),
+            }
+          : null,
+    };
+  }
+
+  /** Main-only, test-gated transition. The original action is never replayed. */
+  async transitionForegroundHandoff(intent: ConsumedComputerUseForegroundHandoff): Promise<void> {
+    if (!this.consumedHandoffs.delete(intent))
+      throw new Error('Computer Use foreground handoff missing or already used');
+    const record = this.requireSession(intent.sessionId);
+    const assertCurrent = () => this.assertHandoffCurrent(record, intent);
+    try {
+      assertCurrent();
+      if (this.deps.native.allowWindowsForegroundHandoff?.(record.native, assertCurrent) !== true)
+        throw new Error('Computer Use foreground handoff permission refused');
+      assertCurrent();
+      const focused = await this.deps.native.startSession({
+        profile: record.profile,
+        windowId: intent.windowId,
+        sessionId: intent.sessionId,
+        taskId: intent.taskId,
+        turnId: intent.turnId,
+        cancelEpoch: intent.cancelEpoch,
+        classifierRoute: record.classifierRoute,
+        foregroundHandoffId: intent.id,
+        assertTargetCurrent: assertCurrent,
+      });
+      assertCurrent();
+      if (
+        focused.inputSession?.kind !== 'foreground' ||
+        focused.sessionId !== intent.sessionId ||
+        focused.windowId !== intent.windowId ||
+        focused.appIdentityDigest !== intent.appIdentityDigest ||
+        focused.windowIdentityDigest !== intent.windowIdentityDigest ||
+        focused.cancelEpoch !== intent.cancelEpoch ||
+        focused.profileRevision !== record.native.profileRevision
+      )
+        throw new Error('Computer Use foreground handoff binding changed');
+      record.native = focused;
+      record.observation = null;
+      record.planGrant = null;
+      this.revalidateNativeAttestation(
+        record,
+        focused.policyLanguage,
+        focused.maximumMode,
+        focused.screenBounds,
+      );
+      if (!(await this.repositionEmergencyStop(intent.sessionId, focused.screenBounds))) {
+        await this.stop(intent.sessionId, 'emergency_stop');
+        throw new Error('Computer Use Stop overlay could not follow the native target');
+      }
+      this.assertSessionLive(record);
+      const fresh = await this.acceptNativeObservation(
+        record,
+        await this.deps.native.observe(focused, {
+          requestId: randomUUID(),
+          cancelEpoch: focused.cancelEpoch,
+        }),
+      );
+      this.assertSessionLive(record);
+      record.observation = stripComputerUseObservationPayload(fresh);
+      delete record.foregroundHandoff;
+      record.status = this.status(record, 'paused', null, fresh.revision);
+      this.emit(record.status);
+    } catch (error) {
+      record.observation = null;
+      record.planGrant = null;
+      if (!record.controller.signal.aborted) {
+        record.status = this.status(record, 'paused', null);
+        this.emit(record.status);
+      }
+      throw error;
+    }
+  }
+
   async act(
     sessionId: string,
     action: ComputerUseAction,
     requestId: string = randomUUID(),
   ): Promise<ComputerUseActionResult> {
     const record = this.requireSession(sessionId);
+    if (record.foregroundHandoff) {
+      record.foregroundHandoff.intent = null;
+      throw new Error('Computer Use foreground handoff requires a new native transition');
+    }
     const parsed = computerUseActionSchema.parse(action);
     if (this.currentPolicyEpoch(record.status.taskId) !== record.status.policyEpoch) {
       void this.stop(sessionId, 'policy_changed');
@@ -4321,6 +4608,7 @@ export class ComputerUseController {
   }
 
   private async completeStop(record: SessionRecord, reason: ComputerUseStopReason): Promise<void> {
+    if (record.foregroundHandoff) record.foregroundHandoff.intent = null;
     record.requestedStopReason = reason;
     const sessionId = record.status.sessionId;
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
@@ -4705,6 +4993,8 @@ export class ComputerUseController {
   }
 
   private cancelPendingApprovals(sessionId: string, reason: string): void {
+    const handoff = this.sessions.get(sessionId)?.foregroundHandoff;
+    if (handoff) handoff.intent = null;
     void this.deps.native
       .endApprovalRoundTrip?.(
         sessionId,
@@ -4728,9 +5018,14 @@ export class ComputerUseController {
   }
 
   getStatus(sessionId: string): ComputerUseSessionStatus | null {
-    return (
-      this.sessions.get(sessionId)?.status ?? this.startingSessions.get(sessionId)?.status ?? null
-    );
+    const record = this.sessions.get(sessionId);
+    if (record)
+      return computerUseSessionStatusSchema.parse({
+        ...record.status,
+        resumable: record.interactionRevoked || record.foregroundHandoff ? false : undefined,
+        inputDisplay: this.inputDisplay(record),
+      });
+    return this.startingSessions.get(sessionId)?.status ?? null;
   }
 
   subscribe(listener: (status: ComputerUseSessionStatus) => void): () => void {
@@ -4779,6 +5074,9 @@ export class ComputerUseController {
    * conversation, and archiving is not the user changing their mind.
    */
   taskClosed(taskId: string): void {
+    for (const record of this.sessions.values())
+      if (record.status.taskId === taskId && record.foregroundHandoff)
+        record.foregroundHandoff.intent = null;
     for (const stopping of this.stopStartingWhere(
       (starting) => starting.taskId === taskId,
       'task_changed',
@@ -5120,6 +5418,10 @@ export class ComputerUseController {
       return { decision: 'deny', reason: 'computer_session_missing' };
     const record = this.sessions.get(sessionId);
     if (record === undefined) return { decision: 'deny', reason: 'computer_session_missing' };
+    if (record.foregroundHandoff) {
+      record.foregroundHandoff.intent = null;
+      return { decision: 'deny', reason: 'foreground_handoff_pending' };
+    }
     if (record.interactionRevoked)
       return { decision: 'deny', reason: 'native_interaction_revoked' };
     const action =
@@ -5447,6 +5749,10 @@ export class ComputerUseController {
     if (context.taskId !== record.status.taskId || context.turnId !== record.turnId)
       throw new Error('Computer Use context binding changed');
     this.assertSessionLive(record);
+    if (record.foregroundHandoff) {
+      record.foregroundHandoff.intent = null;
+      throw new Error('Computer Use foreground handoff is closed');
+    }
     if (record.observation === null) throw new Error('Computer Use requires a fresh observation');
     const observation = computerUseObservationSchema.parse(record.observation);
     if (!this.observationIsFresh(record))
@@ -5535,6 +5841,16 @@ export class ComputerUseController {
     this.emit(record.status);
     if (computerUseActionRoute(action) === 'visual' && !this.visualActionInsideWindow(action))
       throw new Error('Computer Use visual action is outside the target window');
+    if (this.awaitForegroundHandoff(record, action)) {
+      this.planGrantAuthorizedCalls.delete(`${sessionId}\0${requestId}`);
+      return this.completeNonNativeAction(
+        record,
+        action,
+        requestId,
+        'paused',
+        'awaiting_foreground_handoff',
+      );
+    }
     const actionDigest = computerUseActionDigest(action);
     const route = computerUseActionRoute(action);
     const observationDigest = computerUseObservationAuditDigest(observation);
@@ -6903,7 +7219,17 @@ export class ComputerUseController {
 
   private emit(status: ComputerUseSessionStatus): void {
     const statusRevision = (this.statusRevisionBySession.get(status.sessionId) ?? 0) + 1;
-    const parsed = computerUseSessionStatusSchema.parse({ ...status, statusRevision });
+    const current = this.sessions.get(status.sessionId);
+    const parsed = computerUseSessionStatusSchema.parse({
+      ...status,
+      statusRevision,
+      ...(current
+        ? {
+            inputDisplay: this.inputDisplay(current),
+            resumable: current.interactionRevoked || current.foregroundHandoff ? false : undefined,
+          }
+        : {}),
+    });
     this.statusRevisionBySession.set(status.sessionId, statusRevision);
     const record = this.sessions.get(status.sessionId);
     if (record !== undefined) record.status = parsed;

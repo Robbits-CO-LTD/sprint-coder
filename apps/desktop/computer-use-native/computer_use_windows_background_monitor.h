@@ -87,6 +87,15 @@ public:
     std::lock_guard lock(mutex_);
     PauseLocked();
   }
+  // Atomically retire background authority before shutting down its monitor threads.
+  bool RetireForForeground(std::uint64_t expected_epoch) {
+    std::lock_guard lock(mutex_);
+    CheckHealthLocked(ObserveLocked(BackgroundMonitorNow()));
+    const bool admitted = registered_ && !state_.paused && !state_.unknown_effect &&
+        active_claim_ == 0 && expected_epoch == state_.epoch;
+    PauseLocked();
+    return admitted;
+  }
   BackgroundMonitorSnapshot Snapshot() const {
     std::lock_guard lock(mutex_);
     return state_;

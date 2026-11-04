@@ -17,6 +17,7 @@ export type ComputerUseActivationPermit = Readonly<{
     | 'window'
     | 'start'
     | 'approval'
+    | 'foreground-handoff'
     // Answering the in-conversation application approval card (ADR v2 §6.1).
     | 'app-grant'
     | 'permission-settings'

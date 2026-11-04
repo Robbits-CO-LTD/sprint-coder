@@ -2,6 +2,7 @@ export type ComputerUseUiActivationKind =
   | 'application'
   | 'start'
   | 'approval'
+  | 'foreground-handoff'
   // Answering the in-conversation application approval card (ADR v2 §6.1). Its own kind, so a click
   // on any other Computer Use control can never be spent as "grant this application".
   | 'app-grant'
@@ -29,6 +30,7 @@ export const COMPUTER_USE_UI_ACTIVATION_KINDS = [
   'application',
   'start',
   'approval',
+  'foreground-handoff',
   'app-grant',
   'permission-settings',
   'app-grant-revoke',

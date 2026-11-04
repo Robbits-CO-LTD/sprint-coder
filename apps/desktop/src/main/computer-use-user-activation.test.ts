@@ -17,6 +17,29 @@ afterEach(() => {
 });
 
 describe('ComputerUseUserActivationGate', () => {
+  it.each(['Enter', ' '])('P6 handoff requires fresh %j after Tab and rejects held keys', (key) => {
+    const { contents, gate, event } = fixture(() => 100);
+    try {
+      for (const input of [
+        { key, isAutoRepeat: true },
+        { key: 'Tab', isAutoRepeat: false },
+        { key, isAutoRepeat: false, isComposing: true },
+      ]) {
+        contents.emit('before-input-event', {}, { type: 'keyDown', ...input });
+        expect(gate.bindIntent(event, 'foreground-handoff', 'intent')).toBe(false);
+        expect(gate.consume(event, 'foreground-handoff')).toBeNull();
+      }
+      contents.emit('before-input-event', {}, { type: 'keyDown', key, isAutoRepeat: false });
+      expect(gate.bindIntent(event, 'foreground-handoff', 'intent')).toBe(true);
+      expect(gate.consume(event, 'foreground-handoff')).toMatchObject({
+        intent: 'intent',
+        inputKind: 'keyboard',
+      });
+      expect(gate.consume(event, 'foreground-handoff')).toBeNull();
+    } finally {
+      gate.dispose();
+    }
+  });
   it.each(['Enter', ' '])(
     'requires a fresh %j key after explicit Tab navigation, not a held key',
     (key) => {

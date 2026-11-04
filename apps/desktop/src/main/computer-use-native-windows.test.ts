@@ -34,6 +34,23 @@ const trip = {
 } as const;
 
 describe('P3d interaction authority', () => {
+  it('P5c2b-W delivers only the previous ended without ending the current card', () => {
+    const delivery = new WindowsInteractionEvents();
+    delivery.bind(binding);
+    delivery.begin(binding, 'trip-1');
+    delivery.settleBegin(binding.sessionId, 'trip-1', true);
+    expect(delivery.receive(trip, 2)).toBe(true);
+    delivery.completeTrip(binding.sessionId, 'trip-1');
+    delivery.begin(binding, 'trip-2');
+    delivery.settleBegin(binding.sessionId, 'trip-2', true);
+    expect(delivery.receive({ ...trip, sequence: 2 }, 2)).toBe(false);
+    const ended = { ...trip, sequence: 2, state: 'ended' } as const;
+    expect(delivery.receive({ ...ended, turnId: 'foreign' }, 2)).toBe(false);
+    expect(delivery.receive(ended, 2)).toBe(true);
+    expect(delivery.receive({ ...ended, sequence: 3 }, 2)).toBe(false);
+    expect(delivery.receive({ ...trip, roundTripId: 'trip-2', sequence: 3 }, 2)).toBe(true);
+    expect(delivery.blocked(binding.sessionId)).toBe(false);
+  });
   it('BG03_lost_event_cannot_bypass_epoch: ignores an event older than the start authority', () => {
     const delivery = new WindowsInteractionEvents();
     delivery.bind(binding, 5);

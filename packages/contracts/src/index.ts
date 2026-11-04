@@ -5862,9 +5862,41 @@ export const COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export const computerUseForegroundHandoffDisplaySchema = z
+  .object({
+    id: computerUseIdSchema,
+    operation: z.enum(['click', 'type', 'key', 'scroll']),
+    expiresAt: timestampSchema,
+  })
+  .strict();
+
+export const computerUseInputDisplaySchema = z
+  .object({
+    sessionKind: z.enum(['background', 'foreground']),
+    handoff: computerUseForegroundHandoffDisplaySchema.nullable(),
+  })
+  .strict()
+  .refine(
+    (display) => display.handoff === null || display.sessionKind === 'background',
+    'Only background sessions can request a foreground handoff',
+  );
+export type ComputerUseInputDisplay = z.infer<typeof computerUseInputDisplaySchema>;
+
+export const computerUseForegroundHandoffResolveInputSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    intentId: computerUseIdSchema,
+    decision: z.enum(['continue', 'deny']),
+  })
+  .strict();
+export type ComputerUseForegroundHandoffResolveInput = z.infer<
+  typeof computerUseForegroundHandoffResolveInputSchema
+>;
+
 export const computerUseSessionStatusSchema = z
   .object({
     sessionId: computerUseIdSchema,
+    inputDisplay: computerUseInputDisplaySchema.optional(),
     taskId: computerUseIdSchema,
     profileId: computerUseIdSchema,
     windowId: computerUseIdSchema,
@@ -6919,6 +6951,9 @@ export type ComputerUseApi = {
   getStatus(input: ComputerUseSessionStatusInput): Promise<ComputerUseSessionStatus | null>;
   stop(input: ComputerUseStopInput): Promise<void>;
   resolveApproval(input: ComputerUseApprovalResolveInput): Promise<ComputerUseSessionStatus>;
+  resolveForegroundHandoff?(
+    input: ComputerUseForegroundHandoffResolveInput,
+  ): Promise<ComputerUseSessionStatus>;
   subscribeStatus(
     sessionId: string,
     listener: (status: ComputerUseSessionStatus) => void,
@@ -7437,6 +7472,7 @@ export const IPC_CHANNELS = {
   computerUseStatusGet: 'sprint-coder:computer-use:status:get',
   computerUseStop: 'sprint-coder:computer-use:stop',
   computerUseApprovalResolve: 'sprint-coder:computer-use:approval:resolve',
+  computerUseForegroundHandoffResolve: 'sprint-coder:computer-use:foreground-handoff:resolve',
   /** One-way trusted Renderer activation intent, bound by Main before privileged invokes. */
   computerUseActivationIntent: 'sprint-coder:computer-use:activation-intent',
   /** Push Computer Use status; callers replay the latest transient snapshot after subscribing. */

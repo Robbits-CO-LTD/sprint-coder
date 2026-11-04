@@ -56,6 +56,8 @@ export class WindowsInteractionEvents {
       usedTrips: Set<string>;
       tripSequence: number;
       tripEnded: boolean;
+      endedNotified: boolean;
+      previousTrip?: { binding: WindowsInteractionBinding; id: string } | undefined;
       revoked: boolean;
     }
   >();
@@ -83,6 +85,7 @@ export class WindowsInteractionEvents {
         usedTrips: new Set(),
         tripSequence: 0,
         tripEnded: false,
+        endedNotified: false,
         revoked: false,
       });
     if (this.overflowed.delete(binding.sessionId)) {
@@ -126,9 +129,14 @@ export class WindowsInteractionEvents {
     if (current?.pendingTrip !== roundTripId) return [];
     current.pendingTrip = undefined;
     if (accepted) {
+      current.previousTrip =
+        current.roundTripId !== undefined && !current.endedNotified
+          ? { binding: current.binding, id: current.roundTripId }
+          : undefined;
       current.usedTrips.add(roundTripId);
       current.roundTripId = roundTripId;
       current.tripEnded = false;
+      current.endedNotified = false;
     }
     return this.replay(
       sessionId,
@@ -207,7 +215,27 @@ export class WindowsInteractionEvents {
       current.interactionEpoch = event.interactionEpoch;
       current.revoked = true;
     } else {
-      if (event.roundTripId !== current.roundTripId) return false;
+      if (event.roundTripId !== current.roundTripId) {
+        const previous = current.previousTrip;
+        if (
+          !previous ||
+          event.roundTripId !== previous.id ||
+          !this.matches(previous.binding, event) ||
+          event.state !== 'ended' ||
+          event.failureLatched ||
+          event.failureReason !== 'none' ||
+          event.foreground === 'other'
+        )
+          return false;
+        if (event.sequence !== current.tripSequence + 1) {
+          current.revoked = true;
+          onOrderingFault?.(event);
+          return false;
+        }
+        current.tripSequence = event.sequence;
+        current.previousTrip = undefined;
+        return true;
+      }
       if (event.sequence <= current.tripSequence) {
         // Report to Main's lifetime owner without accepting or advancing transport authority.
         onOrderingFault?.(event);
@@ -217,7 +245,10 @@ export class WindowsInteractionEvents {
       if (current.tripEnded && event.state === 'active') return false;
       current.tripSequence = event.sequence;
       current.revoked = event.state === 'failed';
-      if (event.state === 'ended') current.tripEnded = true;
+      if (event.state === 'ended') {
+        current.tripEnded = true;
+        current.endedNotified = true;
+      }
     }
     return true;
   }

@@ -72,6 +72,7 @@ import { isComputerUseUiActivationKind } from '../computer-use-activation';
 import { pathComparisonKey } from '../path-comparison';
 import {
   approvalActivationIntent,
+  foregroundHandoffActivationIntent,
   quickStartActivationIntent,
   startActivationIntent,
 } from '../computer-use-activation-intent';
@@ -99,6 +100,7 @@ import {
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
   computerUseApprovalResolveInputSchema,
+  computerUseForegroundHandoffResolveInputSchema,
   computerUseAvailabilitySchema,
   computerUseGrantListResultSchema,
   computerUseGrantPurgeResultSchema,
@@ -2664,6 +2666,19 @@ export class IpcRouter {
         await this.computerUseController.stop(input.sessionId, input.reason);
         return undefined;
       },
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseForegroundHandoffResolve,
+      computerUseForegroundHandoffResolveInputSchema,
+      computerUseSessionStatusSchema,
+      (input, event) =>
+        this.computerUseController.resolveForegroundHandoff(input, (intentId) => {
+          const activation = this.computerUseActivationGate.consume(event, 'foreground-handoff');
+          return (
+            intentId === input.intentId &&
+            activation?.intent === foregroundHandoffActivationIntent(input)
+          );
+        }),
     );
     this.handle(
       IPC_CHANNELS.computerUseApprovalResolve,

@@ -69,6 +69,7 @@ bool ComponentBackgroundMonitor(WindowsSession& session, DWORD pid, HWND window,
 }
 using Basis = sprint_coder::computer_use::EligibilityBasis;
 struct Case {
+  bool handoff = false, stale_handoff_epoch = false, stale_handoff_generation = false, used_handoff = false;
   bool background_gate = false, background_supported = false, background_session = false;
   bool cloaked = false, other_desktop = false, other_virtual_desktop = false, unreadable = false;
   bool bound_start = false, bad_start = false, identity_read_failure = false;
@@ -183,6 +184,7 @@ bool ComponentClientBounds(HWND, RECT* output) {
   *output = {current.bad_before_geometry ? 5 : 0, 0, 100, 80}; return true;
 }
 bool ComponentTargetFacts(std::uint32_t, HWND, RECT* output) {
+  if (current.handoff && current.focus_failure) return false;
   *output = {current.changed_after_geometry ? 5 : 0, 0, 100, 80}; return true;
 }
 bool ComponentScreenBounds(HWND, RECT* output) { *output = {0, 0, 800, 600}; return true; }
@@ -258,6 +260,17 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   LockedWindowsExecutable executable;Check(process.value&&OpenLockedProcessExecutable(process.value,&executable),"own source handles");
   Track(process.value);Track(executable.file);source_process=process.value;source_file=executable.file;
   WindowsSession session;session.session_id=name;session.pid=input.pid;session.window=input.window;session.active_window=input.window;
+  if (config.handoff) {
+    input.foreground_handoff = true;
+    windows_helper_generation = 7;
+    input.approval_helper_generation = config.stale_handoff_generation ? 6 : 7;
+    session.approval_helper_generation = 7;
+    session.foreground_handoff_consumed = config.used_handoff;
+    input.handoff_interaction_epoch = config.stale_handoff_epoch ? 2 : 1;
+    session.background_monitor = std::make_shared<WindowsBackgroundMonitor>(input.pid, input.window, 1);
+    session.background_monitor->state.Registered(true);
+    session.has_observation = true;
+  }
   if (config.background_session) session.input_session.kind = sprint_coder::computer_use::InputSessionKind::kBackground;
   session.app_identity=input.app_identity;session.window_identity=identity;session.active_window_identity=identity;session.process_start=created;
   session.canonical_path=input.canonical_path;session.executable_volume_serial=executable.identity.file_identity.volume_serial;session.executable_file_id=executable.identity.file_identity.file_id;
@@ -286,7 +299,14 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
       Sleep(1);
     }
   });
-  std::string response,failure;const bool succeeded=StartWindowsExistingSession(input,&response,&failure);
+  std::string response,failure;
+  if (config.handoff) {
+    Check(!StartWindowsNewSession(input, &response, &failure) && failure == "session_input_invalid",
+          "new start never accepts handoff exception");
+    Check(input_calls.load() == 0, "new start handoff issues no input or focus");
+    response.clear(); failure.clear();
+  }
+  const bool succeeded=StartWindowsExistingSession(input,&response,&failure);
   if (held_case) stop_reader.join();
   Check(!WindowsTargetListWorkerRunning().load(), "synchronous measurement releases slot");
   Check(WindowsTargetListControl().new_start_thread == nullptr, "consumer cancellation unregistered");
@@ -300,6 +320,13 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
   Check(ticket_states[input.session_key].generation==10+ticket_calls,"ticket count");
   Check(sessions.size()==1,"existing lifetime remains until explicit close");
   const auto& remaining=sessions.at(input.session_key);
+  if (config.handoff) {
+    Check(remaining.foreground_handoff_consumed, "handoff cannot be reused");
+    if (expected) Check(!remaining.background_monitor && !remaining.has_observation,
+                        "foreground starts without monitor or old observation");
+    if (config.focus_failure) Check(remaining.background_monitor &&
+        remaining.background_monitor->state.Claim(1) == 0, "failed focus cannot claim background input");
+  }
   Check(remaining.eligibility_basis==input.eligibility_basis&&remaining.cancel_epoch==config.session_epoch,"basis and session epoch retained");
   Check(remaining.input_api_attempts->load()==input_calls.load(),"all attempted focus units counted");
   if (config.bound_start) {
@@ -319,8 +346,8 @@ void Run(const char* name, Case config, bool expected, const char* reason, unsig
     Check(ReadJsonString(response,"processStartTime",&process_start)&&process_start==created&&
           process_start==remaining.process_start,"bound process creation time");
     std::uint64_t epoch=99;Check(ReadJsonUint64(response,"cancelEpoch",&epoch)&&epoch==config.session_epoch,"receipt epoch");
-    const bool background = config.background_session ||
-        (config.background_gate && config.background_supported && config.resume && config.bound_start);
+    const bool background = !config.handoff && (config.background_session ||
+        (config.background_gate && config.background_supported && config.resume && config.bound_start));
     std::uint64_t interaction_epoch = 0;
     Check(ReadJsonUint64(response, "interactionEpoch", &interaction_epoch) == background,
           "interaction epoch only for background");
@@ -414,6 +441,19 @@ int wmain() {
     c = {}; c.v2 = true; c.bound_start = true; c.move_focus = true; c.background_gate = true;
     c.background_supported = true; c.background_session = true;
     Run("BG-background-reobserve-start", c, true, "", 2);
+    {
+      auto h = c; h.handoff = true; h.expected_focus_calls = 1;
+      Run("handoff-success-new-observation", h, true, "", 3);
+      h.focus_failure = true; Run("handoff-focus-failure-input-closed", h, false, "focus_required", 2); h.focus_failure = false;
+      h.stale_handoff_epoch = true; h.expected_focus_calls = 0;
+      Run("handoff-stale-interaction-epoch", h, false, "session_start_canceled", 2); h.stale_handoff_epoch = false;
+      h.stale_handoff_generation = true;
+      Run("handoff-stale-helper", h, false, "session_refocus_stale", 2); h.stale_handoff_generation = false;
+      h.used_handoff = true;
+      Run("handoff-reuse-refused", h, false, "session_refocus_stale", 2); h.used_handoff = false;
+      h.stop_identity = true;
+      Run("handoff-Stop-before-focus", h, false, "session_start_canceled", 2);
+    }
     c.resume = true; Run("BG-background-human-resume", c, true, "", 2);
     c.cloaked = true; Run("BG-resume-cloaked", c, false, "session_target_rejected", 1); c.cloaked = false;
     c.other_desktop = true; Run("BG-resume-other-desktop", c, false, "session_target_rejected", 1); c.other_desktop = false;

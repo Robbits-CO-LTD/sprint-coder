@@ -414,8 +414,19 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
       reinterpret_cast<HWND>(static_cast<UINT_PTR>(window_value));
   const bool v2_basis =
       eligibility_basis == sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+  const bool handoff = metadata.find("\"foregroundHandoffId\"") != std::string::npos;
+  std::string handoff_id;
+  if (handoff && (!WindowsBackgroundStartGate() ||
+      !sessions.contains(FrameIdKey(request.header.session_id)) || explicit_resume ||
+      metadata.find("\"roundTripId\"") != std::string::npos ||
+      !ReadJsonString(metadata, "foregroundHandoffId", &handoff_id) || handoff_id.size() != 36)) {
+    *reason = "session_input_invalid"; return false;
+  }
   if (sessions.contains(FrameIdKey(request.header.session_id))) {
     WindowsStartInput input;
+    input.foreground_handoff = handoff;
+    if (handoff && (!ReadJsonUint64(metadata, "interactionEpoch", &input.handoff_interaction_epoch) ||
+        input.handoff_interaction_epoch == 0)) { *reason = "session_input_invalid"; return false; }
     std::string approval_route;
     input.approval_route_v2 = ReadJsonString(metadata, "classifierRoute", &approval_route) && approval_route == "v2";
     ReadJsonUint64(metadata, "helperGeneration", &input.approval_helper_generation);

@@ -715,6 +715,7 @@ bool HandleWindowsApprovalRoundTrip(HANDLE pipe, const Frame &request, const std
     std::string process_start, image;
     ULONG client_pid = 0;
     if (!ReadJsonUint64(metadata, "durationMs", &duration) ||
+        duration == 0 || duration > kApprovalRoundTripMaxDurationMs ||
         !ReadJsonUint64(metadata, "mainPid", &pid) || pid == 0 || pid > MAXDWORD ||
         !GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid != pid ||
         !ReadJsonString(metadata, "mainProcessStartTime", &process_start) ||
@@ -765,7 +766,8 @@ bool HandleWindowsApprovalRoundTrip(HANDLE pipe, const Frame &request, const std
         // this boundary after Begin; already-issued input prevents admission.
         if (WindowsSemanticOperations().active == nullptr &&
             WindowsValidationStillCurrent(session->cancel_epoch, WindowsValidationFrameStopSerial())) {
-          accepted = session->round_trip->Begin(binding, received_ms, duration, remaining,
+          // The offer's remaining time was measured before the Main/helper round trip.
+          accepted = session->round_trip->Begin(binding, received_ms, (std::min)(duration, remaining), remaining,
               session->observation_revision, ticket_states[key].generation, monitoring);
           if (accepted) InvalidateWindowsTicket(key);
         }

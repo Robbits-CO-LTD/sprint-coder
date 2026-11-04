@@ -597,6 +597,17 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
             onStop={stop}
             onResume={resume}
             onApproval={resolveApproval}
+            onHandoff={async (input) => {
+              const api = window.sprintCoder?.computerUse;
+              if (!api?.resolveForegroundHandoff) throw new Error('引渡しは利用できません');
+              const next = await api.resolveForegroundHandoff(input);
+              setSession((current) =>
+                current?.sessionId === next.sessionId &&
+                current.statusRevision <= next.statusRevision
+                  ? next
+                  : current,
+              );
+            }}
           />
         )}
         {terminalNotice === null ? null : (
@@ -770,6 +781,7 @@ function sessionView(
   const window = windows.get(status.windowId);
   return {
     sessionId: status.sessionId,
+    ...(status.inputDisplay === undefined ? {} : { inputDisplay: status.inputDisplay }),
     appName: profile?.label ?? '登録済みアプリ',
     windowLabel: window?.title ?? '対象ウィンドウ',
     mode: status.mode,

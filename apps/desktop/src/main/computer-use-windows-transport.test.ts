@@ -1,3 +1,4 @@
+import { ApprovalRoundTrips } from './computer-use-approval-round-trip';
 import type { ComputerUseDiscoveryResult } from './computer-use-discovery-scope';
 import { readWindowsMainIdentity } from './computer-use-windows-main';
 import * as windowsMain from './computer-use-windows-main';
@@ -7,12 +8,22 @@ import type {
   WindowsStopDeliveryEvent,
   WindowsOwnerStopNotification,
 } from './computer-use-windows-stop-delivery';
-import type { ComputerAppProfileRecord } from './persistence';
+import type { ComputerAppProfileRecord, ComputerActionAuditRecord } from './persistence';
 import {
   ComputerUseController,
   type ComputerUseControllerPersistence,
+  type ComputerUseControllerDeps,
 } from './computer-use-controller';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
+import {
+  computerAppGrantIdentityFrom,
+  computerAppNativeIdentityDigest,
+} from './computer-use-grant-identity';
+import {
+  computerUseApprovalSchema,
+  computerUseApprovalRoundTripWireSchema,
+} from '@sprint-coder/contracts';
 import { computerUseNativeDiscoveryResultSchema } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -611,6 +622,9 @@ function controllerFor(
   host: ReturnType<typeof createComputerUseNativeHost>,
   profiles: ComputerAppProfileRecord[] = [profile],
   publishDiscoveryResult?: (result: ComputerUseDiscoveryResult) => void,
+  overrides: Omit<Partial<ComputerUseControllerDeps>, 'persistence'> & {
+    persistence?: Partial<ComputerUseControllerPersistence>;
+  } = {},
 ) {
   const unused = (): never => {
     throw new Error('Unexpected persistence call');
@@ -630,12 +644,13 @@ function controllerFor(
     getPermissionPolicy: () => ({ policyEpoch: 0 }),
   };
   return new ComputerUseController({
-    persistence,
     native: host,
     ...(publishDiscoveryResult === undefined ? {} : { publishDiscoveryResult }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
     repositionEmergencyStop: () => true,
+    ...overrides,
+    persistence: { ...persistence, ...overrides.persistence },
   });
 }
 
@@ -1315,6 +1330,10 @@ describe('Computer Use Windows helper transport', () => {
   const startIdentity = { pid: 42, processStartTime: '133000000000000001' };
   function identityStartTarget(
     control: {
+      handoff?: boolean;
+      observe?: Responder;
+      approval?: boolean;
+      responses?: Record<string, Responder>;
       v2?: boolean;
       identity?: Record<string, unknown>;
       check?: Record<string, unknown>;
@@ -1328,15 +1347,17 @@ describe('Computer Use Windows helper transport', () => {
       adapt?: (addon: ComputerUseNativeAddon) => ComputerUseNativeAddon;
     } = {},
   ) {
-    const eligibility = control.v2
-      ? {
-          mode: 'v2-denylist' as const,
-          rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
-          classifierVersion: 1,
-          lexiconVersion: 1,
-          ticketRequired: true,
-        }
-      : undefined;
+    const eligibility =
+      control.v2 || control.approval
+        ? {
+            mode: 'v2-denylist' as const,
+            rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+            classifierVersion: control.approval ? 2 : 1,
+            lexiconVersion: control.approval ? 3 : 1,
+            ticketRequired: true,
+            ...(control.approval ? { interlockEnforced: true as const } : {}),
+          }
+        : undefined;
     const order: string[] = [];
     const rows: WindowsLedgerRow[] = [];
     const quarantines: WindowsTargetQuarantine[] = [];
@@ -1345,6 +1366,7 @@ describe('Computer Use Windows helper transport', () => {
     const target = createTarget(
       {
         ...base,
+        ...(control.observe === undefined ? {} : { observe: control.observe }),
         stop_pending_start: (metadata) => [
           'probe_result',
           {
@@ -1364,9 +1386,13 @@ describe('Computer Use Windows helper transport', () => {
             napiVersion: 10,
             sourceCommit,
             ...(eligibility === undefined ? {} : { eligibility }),
+            ...(control.approval
+              ? { windowsDocumentViewers: { version: 1, digest: 'a'.repeat(16) } }
+              : {}),
             capabilities: {
               cancellableWindowDiscovery: true,
               identityBoundStart: control.capability ?? true,
+              ...(control.approval ? { approval: true, approvalWire: 3 } : {}),
             },
           },
         ],
@@ -1402,13 +1428,18 @@ describe('Computer Use Windows helper transport', () => {
             },
           ];
         },
+        ...control.responses,
       },
       (helper) => {
         if (control.holdStart) helper.holdOnly('start_session');
       },
       {
+        windowsBackgroundInputForTesting: control.handoff === true,
+        windowsForegroundHandoffForTesting: control.handoff === true,
         windowsStartIdentity: { enabled: control.enabled !== false },
-        effectiveEligibilityMode: () => (control.v2 ? 'v2-denylist' : 'v1-allowlist'),
+        effectiveEligibilityMode: () =>
+          control.v2 || control.approval ? 'v2-denylist' : 'v1-allowlist',
+        classifierV2Attested: control.approval === true,
         ...(control.termination ? { windowsKillStopTermination: { enabled: true as const } } : {}),
         windowsLedger: {
           write: async (row) => {
@@ -1444,9 +1475,536 @@ describe('Computer Use Windows helper transport', () => {
       control.adapt ?? ((addon) => addon),
       control.capability ?? true,
       eligibility,
+      control.approval ? { version: 1, digest: 'a'.repeat(16) } : undefined,
     );
     return { ...target, rows, order, requests, quarantines };
   }
+
+  it.each([
+    'success',
+    'focus failure',
+    'Stop',
+    'generation',
+    'interaction epoch',
+    'two cards',
+  ] as const)('P5c2b-T2 controller to Windows transport handoff acceptance: %s', async (path) => {
+    // Keep the broker's setImmediate delivery live; only deadlines use the controlled clock.
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const order: string[] = [];
+    const permit = vi.fn(() => {
+      order.push('permit');
+      return true;
+    });
+    const createHelperPermit = vi.fn(() => permit);
+    const load = vi.spyOn(windowsMain, 'loadWindowsMainAddon').mockReturnValue({
+      createHelperPermit,
+      readMainIdentity: () => ({
+        mainPid: process.pid,
+        mainProcessStartTime: '123',
+        imagePath: process.execPath,
+      }),
+    });
+    const statuses: Parameters<NonNullable<ComputerUseControllerDeps['publishStatus']>>[0][] = [];
+    const audits = new Map<string, ComputerActionAuditRecord>();
+    const activation = vi.fn(() => {
+      order.push('activation');
+      return true;
+    });
+    const cards: ReturnType<typeof computerUseApprovalSchema.parse>[] = [];
+    const twoCards = path === 'two cards';
+    const grantIdentity = computerAppGrantIdentityFrom(profile.identity)!;
+    const appDigest = computerAppNativeIdentityDigest(profile.identity, grantIdentity)!;
+    const acceptedProfile = {
+      ...profile,
+      identityDigest: appDigest,
+      identity: { ...profile.identity, identityDigest: appDigest, policyLanguage: 'en' },
+    };
+    const grants = createComputerAppGrantFixtureStore();
+    const grant = grants.api.createComputerAppGrant({
+      identity: grantIdentity,
+      displayName: 'Target',
+      maxMode: 'full_access_app',
+      denyRulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+      providerEgress: { connectionId: profile.connectionId, modelId: profile.modelId },
+    });
+    let inputAttempts = 0;
+    const exchanges: Readonly<Record<string, unknown>>[] = [];
+    const tree = projectComputerUseAccessibilityTree(
+      JSON.stringify({
+        role: 'AXButton',
+        title: 'Save',
+        identifier: 'button',
+        children: [],
+      }),
+    );
+    const written: WindowsLedgerRow[] = [];
+    let revision = 0;
+    let foregroundCalls = 0;
+    const observations: Record<string, unknown>[] = [];
+    const base = responders();
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    );
+    const target = identityStartTarget({
+      handoff: true,
+      approval: twoCards,
+      identity: { ...startIdentity, appIdentityDigest: appDigest },
+      termination: true,
+      write: (row) => {
+        order.push('ledger');
+        written.push(row);
+        return true;
+      },
+      observe: (wire) => {
+        order.push('observe');
+        observations.push(wire);
+        return [
+          'observe_result',
+          {
+            sessionId: wire['sessionId'],
+            appIdentityDigest: appDigest,
+            windowIdentityDigest,
+            profileRevision: 1,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+            screenBounds: bounds,
+            revision: ++revision,
+            observedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 20_000).toISOString(),
+            clientWidth: 800,
+            clientHeight: 600,
+            images: [
+              {
+                mimeType: 'image/png',
+                digest: createHash('sha256').update(png).digest('hex'),
+                byteLength: png.byteLength,
+                width: 1,
+                height: 1,
+                base64: png.toString('base64'),
+              },
+            ],
+            treeDigest: twoCards ? tree.digest : null,
+            treeByteLength: twoCards ? tree.byteLength : 0,
+            treeDepth: twoCards ? tree.depth : 0,
+            treeNodeCount: twoCards ? tree.nodeCount : 0,
+            ...(twoCards ? { accessibilityTree: tree.serialized } : {}),
+            focusedElementSignature: null,
+          },
+        ];
+      },
+      response: (wire) => {
+        const handoff = wire['foregroundHandoffId'] !== undefined;
+        // The helper/Win32 boundary is simulated; this is not a C++ or live-OS test.
+        if (handoff) {
+          foregroundCalls += 1;
+          order.push('foreground');
+          if (path === 'focus failure')
+            return [
+              'error',
+              {
+                code: 'FOCUS_REQUIRED',
+                accepted: false,
+                startResult: { ...startIdentity, attemptCount: 1, foregroundResult: 'unconfirmed' },
+              },
+            ];
+        }
+        return [
+          'probe_result',
+          {
+            ...(base['start_session']!(wire)[1] as object),
+            ...startIdentity,
+            appIdentityDigest: appDigest,
+            inputSession: handoff
+              ? { kind: 'foreground', backgroundCapabilityVersion: null }
+              : { kind: 'background', backgroundCapabilityVersion: 1 },
+            interactionEpoch: 1,
+            startResult: {
+              ...startIdentity,
+              attemptCount: handoff ? 1 : 0,
+              foregroundResult: handoff ? 'confirmed' : 'not_attempted',
+            },
+          },
+        ];
+      },
+      ...(twoCards
+        ? {
+            responses: {
+              preflight: (wire): HelperResponse => [
+                'preflight_result',
+                {
+                  receiptVersion: 3,
+                  classifierVersion: 2,
+                  decision: 'single_use_approval',
+                  reasonCode: null,
+                  deniedResult: null,
+                  ticket: null,
+                  sessionId: wire['sessionId'],
+                  requestId: wire['requestId'],
+                  cancelEpoch: wire['cancelEpoch'],
+                  observationRevision: wire['observationRevision'],
+                  inputAttemptCount: 0,
+                  approvalGeneration: 1,
+                  remainingMs: 60_000,
+                  effect: 'supervised_action',
+                  display: {
+                    effect: 'supervised_action',
+                    operation: 'invoke',
+                    targetLabel: null,
+                    extension: null,
+                    externalApplication: 'not_applicable',
+                    unsignedWarning: 'none',
+                  },
+                },
+              ],
+              approval_approve: (wire): HelperResponse => {
+                exchanges.push(wire);
+                return [
+                  'approval_approve_result',
+                  {
+                    ok: true,
+                    reasonCode: null,
+                    deniedResult: null,
+                    sessionId: wire['sessionId'],
+                    requestId: wire['requestId'],
+                    cancelEpoch: wire['cancelEpoch'],
+                    observationRevision: wire['observationRevision'],
+                    approvalGeneration: wire['approvalGeneration'],
+                    inputAttemptCount: 0,
+                  },
+                ];
+              },
+              approval_discard: (): HelperResponse => [
+                'approval_discard_result',
+                { discarded: true },
+              ],
+              dispatch_approved: (wire): HelperResponse => {
+                inputAttempts += 1;
+                return [
+                  'dispatch_approved_result',
+                  {
+                    result: 'completed',
+                    reasonCode: null,
+                    sessionId: wire['sessionId'],
+                    cancelEpoch: wire['cancelEpoch'],
+                    inputAttemptCount: inputAttempts,
+                  },
+                ];
+              },
+              close_session: (wire): HelperResponse => [
+                'probe_result',
+                {
+                  result: 'closed',
+                  drained: true,
+                  sessionId: wire['sessionId'],
+                  cancelEpoch: wire['cancelEpoch'],
+                  inputAttemptCount: inputAttempts,
+                },
+              ],
+            },
+          }
+        : {}),
+    });
+    const controller = controllerFor(target.host, [acceptedProfile], undefined, {
+      authorize: async ({ capability }) => ({
+        decision: twoCards && capability === 'computer.control' ? 'approval_required' : 'allow',
+        reason: 'test_authorized',
+      }),
+      effectiveEligibilityMode: () => (twoCards ? 'v2-denylist' : 'v1-allowlist'),
+      foregroundHandoffForTesting: { consumeTrustedActivation: activation },
+      publishStatus: (status) => statuses.push(status),
+      publishApproval: (card) => cards.push(computerUseApprovalSchema.parse(card)),
+      persistence: {
+        ...grants.api,
+        recordComputerActionAudit: (input) => {
+          const record: ComputerActionAuditRecord = {
+            ...input,
+            id: input.id ?? `audit-${audits.size}`,
+            state: input.state ?? 'pending',
+            reasonCode: input.reasonCode ?? null,
+            approvalId: input.approvalId ?? null,
+            approvalParentRequestId: input.approvalParentRequestId ?? null,
+            approvalEffect: input.approvalEffect ?? null,
+            approvalOutcome: null,
+            createdAt: input.createdAt ?? new Date().toISOString(),
+            updatedAt: input.createdAt ?? new Date().toISOString(),
+          };
+          audits.set(record.id, record);
+          return record;
+        },
+        completeComputerActionAudit: (input) => {
+          const record = audits.get(input.auditId)!;
+          Object.assign(record, input);
+          return record;
+        },
+        listComputerActionAudits: () => [...audits.values()],
+        recordComputerActionApprovalOutcome: (input) => {
+          const record = audits.get(input.auditId)!;
+          Object.assign(record, { approvalOutcome: input.outcome });
+          return record;
+        },
+      },
+    });
+    try {
+      const [candidate] = await controller.listWindows(profile.id);
+      const status = await controller.start({
+        taskId: 'task-1',
+        profileId: profile.id,
+        windowId: candidate!.windowId,
+        mode: twoCards ? 'supervised' : profile.mode,
+        connectionId: profile.connectionId,
+        modelId: profile.modelId,
+        providerEgressConsent: true,
+        providerEgressConsentBinding: {
+          connectionId: profile.connectionId,
+          modelId: profile.modelId,
+        },
+        remember: false,
+        expectedPolicyEpoch: 0,
+        expectedWindowRevision: 1,
+        expectedProfileRevision: 1,
+        ...(twoCards
+          ? {
+              agent: {
+                goal: 'Fixture acceptance',
+                question: null,
+                grantScope: 'grant' as const,
+                grantId: grant.id,
+                grantIdentityDigest: grantIdentity.grantIdentityDigest,
+                providerEgress: { connectionId: profile.connectionId, modelId: profile.modelId },
+              },
+            }
+          : {}),
+      });
+      await controller.observe(status.sessionId);
+      if (twoCards) {
+        const acting = controller.act(status.sessionId, {
+          type: 'invoke',
+          targetId: 'button',
+          name: 'activate',
+          arguments: {},
+        });
+        const pending = () => cards.filter((card) => card.state === 'pending').at(-1)!;
+        await vi.waitFor(() => expect(pending()).toBeDefined());
+        const first = pending();
+        const approve = (card: typeof first) =>
+          controller.resolveApproval({
+            approvalId: card.id,
+            expectedRevision: card.revision,
+            challenge: card.challenge,
+            decision: 'allow_once',
+          });
+        await approve(first);
+        await vi.waitFor(() => expect(pending().id).not.toBe(first.id));
+        const second = pending();
+        expect(inputAttempts).toBe(0);
+        expect(exchanges).toHaveLength(0);
+        expect(controller.pendingForegroundHandoff(status.sessionId)).toBeNull();
+        await expect(approve(first)).rejects.toThrow();
+        await approve(second);
+        await expect(acting).resolves.toMatchObject({ result: 'completed' });
+        await expect(approve(second)).rejects.toThrow();
+        expect(revision).toBe(3);
+        expect(exchanges).toHaveLength(1);
+        expect(exchanges[0]).toMatchObject({ observationRevision: 3 });
+        expect(inputAttempts).toBe(1);
+        expect(foregroundCalls).toBe(0);
+        expect(createHelperPermit).not.toHaveBeenCalled();
+        expect(permit).not.toHaveBeenCalled();
+        expect(activation).not.toHaveBeenCalled();
+        expect(controller.pendingForegroundHandoff(status.sessionId)).toBeNull();
+        expect(
+          target.requests.filter((wire) => wire['operation'] === 'start_session'),
+        ).toHaveLength(1);
+        expect(target.helper().served).not.toContain('approval_round_trip_begin');
+        await controller.stop(status.sessionId);
+        return;
+      }
+      const action = { type: 'click', x: 0.2, y: 0.2, button: 'left' } as const;
+      await expect(controller.act(status.sessionId, action)).resolves.toMatchObject({
+        result: 'paused',
+        reasonCode: 'awaiting_foreground_handoff',
+      });
+      const intent = controller.pendingForegroundHandoff(status.sessionId)!;
+      expect(intent).not.toBeNull();
+      expect(permit).not.toHaveBeenCalled();
+      expect(foregroundCalls).toBe(0);
+      const input = {
+        sessionId: status.sessionId,
+        intentId: intent.id,
+        taskId: intent.taskId,
+        turnId: intent.turnId,
+        action,
+      };
+      order.length = 0;
+      const consumed = controller.consumeForegroundHandoff(input);
+      expect(activation).toHaveBeenCalledExactlyOnceWith(intent.id);
+      expect(() => controller.consumeForegroundHandoff(input)).toThrow();
+      const before = revision;
+      const delayed = ['Stop', 'generation', 'interaction epoch'].includes(path);
+      if (delayed) target.helper().holdOnly('start_session');
+      const transition = controller.transitionForegroundHandoff(consumed);
+      const result = transition.then(
+        () => 'completed',
+        () => 'rejected',
+      );
+      if (delayed) {
+        await vi.advanceTimersByTimeAsync(1);
+        const socket = sockets.at(-1)!;
+        const frame = socket.writes
+          .map(decodeComputerUseNativeFrame)
+          .reverse()
+          .find((f) => JSON.parse(f.metadata.toString())['foregroundHandoffId'] === intent.id)!;
+        expect(frame).toBeDefined();
+        if (path === 'Stop') await controller.stop(status.sessionId);
+        if (path === 'generation') {
+          const token = target.addon.captureWindowsGeneration!()!;
+          children.at(-1)!.kill();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(target.addon.isWindowsGenerationCurrent!(token)).toBe(false);
+        }
+        if (path === 'interaction epoch') {
+          socket.emit(
+            'data',
+            encodeComputerUseNativeFrame({
+              ...frame,
+              messageType: 'background_interaction_event',
+              metadata: Buffer.from(
+                JSON.stringify({
+                  version: 1,
+                  kind: 'background_event',
+                  sessionId: status.sessionId,
+                  taskId: intent.taskId,
+                  turnId: intent.turnId,
+                  helperGeneration: 1,
+                  cancelEpoch: 0,
+                  interactionEpoch: 2,
+                  sequence: 2,
+                  state: 'takeover',
+                }),
+              ),
+              binary: Buffer.alloc(0),
+            }),
+          );
+        }
+        target.helper().release('start_session');
+      }
+      expect(await result).toBe(path === 'success' ? 'completed' : 'rejected');
+      expect(createHelperPermit).toHaveBeenCalledExactlyOnceWith(4242);
+      expect(permit).toHaveBeenCalledExactlyOnceWith(4242);
+      await expect(controller.transitionForegroundHandoff(consumed)).rejects.toThrow();
+      await expect(controller.transitionForegroundHandoff({ ...consumed })).rejects.toThrow();
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(target.helper().served).not.toContain('dispatch_approved');
+      expect(
+        sockets
+          .flatMap((socket) => socket.writes.map(decodeComputerUseNativeFrame))
+          .filter(
+            (frame) =>
+              frame.messageType === 'dispatch' || frame.messageType === 'dispatch_approved',
+          ),
+      ).toHaveLength(0);
+      expect(target.quarantines).toHaveLength(0);
+      expect(written.at(-1)).toMatchObject({ kind: 'foreground', inputPath: 'foreground' });
+      if (path === 'success') {
+        expect(order).toEqual(['activation', 'permit', 'ledger', 'foreground', 'observe']);
+        expect(revision).toBe(before + 1);
+        expect(observations.at(-1)).toMatchObject({ inputSession: { kind: 'foreground' } });
+        expect(foregroundCalls).toBe(1);
+        expect(target.rows).toHaveLength(0);
+      } else {
+        expect(revision).toBe(before);
+        expect(statuses.at(-1)?.state).toBe(
+          path === 'Stop' || path === 'generation' ? 'stopped' : 'paused',
+        );
+        if (path === 'focus failure')
+          expect(target.rows).toEqual([
+            expect.objectContaining({ kind: 'foreground', state: 'effect_unconfirmed' }),
+          ]);
+      }
+      await controller.stop(status.sessionId);
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it.each(['success', 'focus failure', 'stale before write', 'without permit'])(
+    'P5c2b identity-bound handoff records K-4: %s',
+    async (path) => {
+      let current = true;
+      const permit = vi.fn(() => true);
+      const base = responders();
+      const target = identityStartTarget({
+        handoff: true,
+        termination: true,
+        adapt: (addon) => ({ ...addon, allowWindowsHelperForeground: permit }),
+        write: () => {
+          if (path === 'stale before write') current = false;
+          return true;
+        },
+        response: (metadata) => {
+          const handoff = metadata['foregroundHandoffId'] !== undefined;
+          const [, result] = base['start_session']!(metadata);
+          return [
+            'probe_result',
+            {
+              ...(result as object),
+              ...startIdentity,
+              inputSession: handoff
+                ? { kind: 'foreground', backgroundCapabilityVersion: null }
+                : { kind: 'background', backgroundCapabilityVersion: 1 },
+              interactionEpoch: 1,
+              startResult: {
+                ...startIdentity,
+                attemptCount: handoff ? 1 : 0,
+                foregroundResult: handoff
+                  ? path === 'focus failure'
+                    ? 'unconfirmed'
+                    : 'confirmed'
+                  : 'not_attempted',
+              },
+            },
+          ];
+        },
+      });
+      const session = await startSession(target.host, 'session-1', 'turn-1');
+      current = true;
+      const consume = vi.fn();
+      if (path !== 'without permit')
+        expect(target.host.allowWindowsForegroundHandoff!(session, consume)).toBe(true);
+      const input = {
+        profile,
+        windowId: session.windowId,
+        sessionId: session.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        foregroundHandoffId: '12345678-1234-1234-1234-123456789abc',
+        assertTargetCurrent: () => {
+          if (!current) throw new Error('stale handoff');
+        },
+      };
+      const transition = target.host.startSession(input);
+      if (path === 'success')
+        await expect(transition).resolves.toMatchObject({ inputSession: { kind: 'foreground' } });
+      else await expect(transition).rejects.toThrow();
+      await expect(target.host.startSession(input)).rejects.toThrow();
+      const sent = target.requests.filter((r) => r['foregroundHandoffId'] !== undefined);
+      expect(sent).toHaveLength(['success', 'focus failure'].includes(path) ? 1 : 0);
+      expect(permit).toHaveBeenCalledTimes(path === 'without permit' ? 0 : 1);
+      expect(target.helper().served).not.toContain('dispatch');
+      expect(target.quarantines).toHaveLength(0);
+      if (path === 'focus failure')
+        expect(target.rows).toEqual([
+          expect.objectContaining({
+            kind: 'foreground',
+            inputPath: 'foreground',
+            state: 'effect_unconfirmed',
+          }),
+        ]);
+    },
+  );
 
   it.each(['v1', 'v2'] as const)(
     'PR5b Host %s binds new and existing starts before foreground',
@@ -11922,11 +12480,31 @@ int main() {
     ).rejects.toThrow('native_approval_ceiling_mismatch');
   });
 
-  it.each(['full_access_app', 'supervised', 'background', 'P5b two cards'] as const)(
+  it.each([
+    'full_access_app',
+    'supervised',
+    'background',
+    'P5b two cards',
+    'N9 dispatch End lost',
+    'N9 dispatch End refused',
+    'N9 dispatch revoked',
+    'N9 preflight transport failure',
+    'N9 preflight refused',
+    'N9 preflight cancel once',
+    'N9 preflight unavailable',
+    'N9 preflight completion throw',
+    'N9 approve End lost',
+    'N9 approve cancel failure',
+    'N9 approve completion throw',
+    'P5c2b-W failed preflight',
+    'P5c2b-W completion revoked',
+  ] as const)(
     'P4c connects the Windows host approval gate and distinguishes pre-input failure from unknown effect (%s)',
     async (mode) => {
       const background = mode === 'background';
-      const twoCards = mode === 'P5b two cards';
+      const race = mode === 'P5c2b-W failed preflight' || mode === 'P5c2b-W completion revoked';
+      const rejectionCase = mode.startsWith('N9 ');
+      const twoCards = mode === 'P5b two cards' || race || rejectionCase;
       const maximumMode = background || twoCards ? 'full_access_app' : mode;
       const tripCalls: Array<[unknown, unknown]> = [];
       const tripReply: Responder = (wire) => {
@@ -12016,7 +12594,7 @@ int main() {
                   requestId: i['requestId'],
                   cancelEpoch: i['cancelEpoch'],
                   observationRevision: i['observationRevision'],
-                  inputAttemptCount: 0,
+                  inputAttemptCount: attempts,
                   approvalGeneration: 1,
                   remainingMs: 60000,
                   effect: 'supervised_action',
@@ -12110,7 +12688,60 @@ int main() {
             }),
           ),
         },
-        (addon) => ({ ...addon, captureWindowsGeneration: () => ({ helperGeneration: 1 }) }),
+        (addon) => ({
+          ...addon,
+          captureWindowsGeneration: () => ({ helperGeneration: 1 }),
+          ...(rejectionCase
+            ? {
+                approvalRoundTrip: async (input: unknown) => {
+                  const wire = computerUseApprovalRoundTripWireSchema.parse(input);
+                  if (wire.kind === 'end' && mode !== 'N9 preflight cancel once')
+                    if (mode === 'N9 dispatch End refused')
+                      return { ...wire, kind: 'end_result', accepted: false };
+                    else throw new Error('End response lost');
+                  return addon.approvalRoundTrip!(wire);
+                },
+                preflight: async (request: unknown) => {
+                  if (mode === 'N9 preflight transport failure')
+                    throw new Error('transport timeout');
+                  const value = await addon.preflight!(request);
+                  if (mode.startsWith('N9 dispatch') || mode.startsWith('N9 preflight')) {
+                    const ordinary: Record<string, unknown> = {
+                      ...(value as Record<string, unknown>),
+                      receiptVersion: 2,
+                      decision: 'ordinary',
+                      ticket: 'ab'.repeat(32),
+                    };
+                    for (const key of ['approvalGeneration', 'remainingMs', 'effect', 'display'])
+                      delete ordinary[key];
+                    if (mode.startsWith('N9 preflight'))
+                      Object.assign(ordinary, {
+                        decision: 'denied',
+                        ticket: null,
+                        reasonCode: 'native_target_refused',
+                        deniedResult: 'rejected',
+                      });
+                    return ordinary;
+                  }
+                  return value;
+                },
+                ...(mode === 'N9 approve cancel failure'
+                  ? {
+                      approvalApprove: () => {
+                        throw new Error('transport disconnected');
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
+          ...(mode === 'P5c2b-W completion revoked'
+            ? {
+                completeApprovalRoundTrip: () => {
+                  throw new Error('Unbound round trip completion');
+                },
+              }
+            : {}),
+        }),
         undefined,
         eligibility,
         viewers,
@@ -12157,6 +12788,100 @@ int main() {
         });
       };
       if (twoCards) await beginAndReturn('V1-card');
+      if (rejectionCase) {
+        const cancel = vi.spyOn(ApprovalRoundTrips.prototype, 'cancel');
+        const exchanged =
+          mode === 'N9 dispatch revoked'
+            ? vi
+                .spyOn(ApprovalRoundTrips.prototype, 'exchanged')
+                .mockRejectedValueOnce(new Error('Round trip revoked during end'))
+            : undefined;
+        if (mode === 'N9 approve completion throw')
+          cancel.mockImplementationOnce(() => {
+            throw new Error('Unbound round trip completion');
+          });
+        if (mode === 'N9 preflight completion throw')
+          cancel.mockImplementationOnce(() => {
+            throw new Error('Unbound round trip completion');
+          });
+        if (mode === 'N9 preflight unavailable')
+          cancel.mockRejectedValueOnce(new Error('Round trip unavailable'));
+        try {
+          const approving = mode.startsWith('N9 approve');
+          if (mode === 'N9 approve completion throw') failApprove = true;
+          const result = approving
+            ? await target.host.approvalApprove!(input)
+            : await target.host.dispatch(input);
+          expect(result).toMatchObject({
+            ...(approving ? { kind: 'refused' } : {}),
+            result: 'rejected',
+            reasonCode: approving
+              ? 'native_approval_approve_failed'
+              : mode.startsWith('N9 dispatch')
+                ? 'native_interaction_revoked'
+                : mode === 'N9 preflight transport failure'
+                  ? 'native_preflight_failed'
+                  : 'native_target_refused',
+          });
+          expect(cancel).toHaveBeenCalledTimes(1);
+          expect(target.helper().served).not.toContain('dispatch');
+          expect(target.helper().served).not.toContain('dispatch_approved');
+          expect(attempts).toBe(0);
+        } finally {
+          cancel.mockRestore();
+          exchanged?.mockRestore();
+          await target.host.close(session);
+        }
+        return;
+      }
+      if (race) {
+        target.helper().holdOnly('preflight');
+        const pending = target.host.dispatch(input);
+        const assertion = expect(pending).resolves.toMatchObject({
+          result: 'rejected',
+          reasonCode: 'native_interaction_revoked',
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(
+          JSON.parse(
+            decodeComputerUseNativeFrame(sockets.at(-1)!.writes.at(-1)!).metadata.toString(),
+          ).operation,
+        ).toBe('preflight');
+        if (mode === 'P5c2b-W failed preflight') {
+          const socket = sockets.at(-1)!;
+          const frame = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+          socket.emit(
+            'data',
+            encodeComputerUseNativeFrame({
+              ...frame,
+              messageType: 'approval_round_trip_event',
+              metadata: Buffer.from(
+                JSON.stringify({
+                  version: 1,
+                  kind: 'event',
+                  sessionId: session.sessionId,
+                  taskId: 'task-1',
+                  turnId: 'turn-1',
+                  helperGeneration: 1,
+                  cancelEpoch: 0,
+                  roundTripId: 'V1-card',
+                  sequence: 1,
+                  state: 'failed',
+                  foreground: 'other',
+                  failureReason: 'third_window',
+                  failureLatched: true,
+                }),
+              ),
+            }),
+          );
+        }
+        target.helper().release('preflight');
+        await assertion;
+        expect(target.helper().served).not.toContain('dispatch');
+        expect(target.helper().served).not.toContain('dispatch_approved');
+        await target.host.close(session);
+        return;
+      }
       expect(await target.host.dispatch(input)).toMatchObject({
         approvalOffer: { kind: 'approval_required', effect: 'supervised_action' },
       });
@@ -12164,6 +12889,37 @@ int main() {
         expect(tripCalls).toEqual([['begin', 'V1-card']]);
         expect(target.helper().served).not.toContain('dispatch');
         await beginAndReturn('native-card');
+        const socket = sockets.at(-1)!;
+        const frame = decodeComputerUseNativeFrame(socket.writes.at(-1)!);
+        for (const [roundTripId, sequence, state] of [
+          ['V1-card', 1, 'ended'],
+          ['native-card', 2, 'active'],
+        ] as const) {
+          socket.emit(
+            'data',
+            encodeComputerUseNativeFrame({
+              ...frame,
+              messageType: 'approval_round_trip_event',
+              metadata: Buffer.from(
+                JSON.stringify({
+                  version: 1,
+                  kind: 'event',
+                  sessionId: session.sessionId,
+                  taskId: 'task-1',
+                  turnId: 'turn-1',
+                  helperGeneration: 1,
+                  cancelEpoch: 0,
+                  roundTripId,
+                  sequence,
+                  state,
+                  foreground: 'target',
+                  failureReason: 'none',
+                  failureLatched: false,
+                }),
+              ),
+            }),
+          );
+        }
         expect(await target.host.approvalApprove!(input)).toEqual({ kind: 'approved' });
         expect(tripCalls).toEqual([
           ['begin', 'V1-card'],
@@ -12171,6 +12927,11 @@ int main() {
           ['end', 'native-card'],
         ]);
         expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'completed' });
+        expect(
+          await target.host.dispatch({ ...input, requestId: 'next-native-offer' }),
+        ).toMatchObject({
+          approvalOffer: { kind: 'approval_required' },
+        });
         await target.host.close(session);
         return;
       }

@@ -264,7 +264,7 @@ describe
         });
         expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
         expect(result.stdout).toContain(
-          'PASS: 60 component cases, controlled focus only, no OS input',
+          'PASS: 66 component cases, controlled focus only, no OS input',
         );
       } finally {
         rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

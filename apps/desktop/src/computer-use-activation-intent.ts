@@ -3,6 +3,7 @@ import type {
   ComputerUseApprovalDecision,
   ComputerUseMode,
   ComputerUseStartInput,
+  ComputerUseForegroundHandoffResolveInput,
 } from '@sprint-coder/contracts';
 
 export type ComputerUseStartActivationIntent = Readonly<{
@@ -102,4 +103,15 @@ export function appGrantActivationIntent(
   input: Omit<ComputerAppGrantActivationIntent, 'operation'>,
 ): string {
   return serializeComputerUseActivationIntent({ operation: 'app-grant', ...input });
+}
+
+export function foregroundHandoffActivationIntent(
+  input: ComputerUseForegroundHandoffResolveInput,
+): string {
+  return JSON.stringify({
+    operation: 'foreground-handoff',
+    sessionId: input.sessionId,
+    intentId: input.intentId,
+    decision: input.decision,
+  });
 }

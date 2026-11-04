@@ -8,6 +8,8 @@ import {
   type ComputerUseApprovalDecision,
   type ComputerUseApproval,
   type ComputerUseWindowsApprovalDisplay,
+  type ComputerUseInputDisplay,
+  type ComputerUseForegroundHandoffResolveInput,
   type ComputerUseMode,
   type ComputerUseOsPermission,
   type ComputerUsePolicyLanguage,
@@ -15,6 +17,7 @@ import {
 import { Eye, ShieldAlert, Square, X } from './icons';
 import {
   quickStartActivationIntent,
+  foregroundHandoffActivationIntent,
   serializeComputerUseActivationIntent,
 } from '../../computer-use-activation-intent';
 
@@ -81,6 +84,7 @@ export type ComputerUseStartView = Readonly<{
 }>;
 
 export type ComputerUseSessionView = Readonly<{
+  inputDisplay?: ComputerUseInputDisplay;
   sessionId: string;
   appName: string;
   windowLabel: string;
@@ -1262,6 +1266,7 @@ export function ComputerUseSessionRail({
   onStop,
   onResume = () => undefined,
   onApproval,
+  onHandoff,
 }: {
   session: ComputerUseSessionView;
   approval: ComputerUseApprovalView | null;
@@ -1273,6 +1278,7 @@ export function ComputerUseSessionRail({
   onStop: () => void;
   onResume?: () => void;
   onApproval: (decision: 'allow_once' | 'allow_plan' | 'deny') => void;
+  onHandoff?: (input: ComputerUseForegroundHandoffResolveInput) => Promise<void>;
 }) {
   const localStopButtonRef = useRef<HTMLButtonElement>(null);
   const activeStopButtonRef = stopButtonRef ?? localStopButtonRef;
@@ -1391,6 +1397,17 @@ export function ComputerUseSessionRail({
           </button>
         ) : null}
       </div>
+      {session.inputDisplay === undefined ? null : (
+        <>
+          <p role="status">
+            操作の経路：
+            {session.inputDisplay.sessionKind === 'background'
+              ? '背景（対象を前面にせず操作する）'
+              : '前面（対象を前面にして操作する）'}
+          </p>
+          <ComputerUseHandoffCard session={session} stopping={stopping} onHandoff={onHandoff} />
+        </>
+      )}
       {approval === null ? null : (
         <ComputerUseApprovalCard
           approval={approval}
@@ -1399,6 +1416,7 @@ export function ComputerUseSessionRail({
           actionsDisabled={approvalDisabled}
           expired={approvalExpired}
           stopping={stopping}
+          inputSessionKind={session.inputDisplay?.sessionKind}
         />
       )}
       {error === null || error === undefined ? null : (
@@ -1407,6 +1425,102 @@ export function ComputerUseSessionRail({
         </p>
       )}
     </aside>
+  );
+}
+
+function ComputerUseHandoffCard({
+  session,
+  stopping,
+  onHandoff,
+}: {
+  session: ComputerUseSessionView;
+  stopping: boolean;
+  onHandoff: ((input: ComputerUseForegroundHandoffResolveInput) => Promise<void>) | undefined;
+}) {
+  const [openedId, setOpenedId] = useState<string | null>(null);
+  const [dismissedId, setDismissedId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now);
+  const handoff = session.inputDisplay?.handoff;
+  useEffect(() => {
+    if (!handoff) return;
+    const timer = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.max(0, Date.parse(handoff.expiresAt) - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [handoff]);
+  const visible =
+    handoff &&
+    handoff.id !== dismissedId &&
+    !stopping &&
+    session.state === 'paused' &&
+    session.inputDisplay?.sessionKind === 'background' &&
+    Date.parse(handoff.expiresAt) > now;
+  const resolve = (decision: 'continue' | 'deny') => {
+    if (!visible || !onHandoff || busy || Date.parse(handoff.expiresAt) <= Date.now()) return;
+    setBusy(true);
+    setError(null);
+    void onHandoff({ sessionId: session.sessionId, intentId: handoff.id, decision })
+      .then(() => setDismissedId(handoff.id))
+      .catch(() => {
+        setDismissedId(handoff.id);
+        setError('引渡しを完了できませんでした。対象の状態を確認し、停止してください。');
+      })
+      .finally(() => setBusy(false));
+  };
+  return (
+    <>
+      {visible ? (
+        openedId !== handoff.id ? (
+          <button
+            type="button"
+            onClick={() => {
+              setOpenedId(handoff.id);
+              setError(null);
+            }}
+          >
+            前面への引渡しを確認
+          </button>
+        ) : (
+          <ComputerUseApprovalCard
+            approval={{
+              id: handoff.id,
+              actionLabel: `前面への引渡し：${WINDOWS_OPERATION_LABELS[handoff.operation]}`,
+              targetLabel: `${session.appName} · ${session.windowLabel}`,
+              impactLabel:
+                '別アプリでの入力が中断し、カーソルが動く可能性があります。前面化が遅れて効くと、入力中のキーが対象に届く可能性があります。引渡し後は前面での連続操作になります。操作の承認は別途必要です。',
+              escapedPreview: null,
+              allowedDecisions: ['allow_once', 'deny'],
+              activationIntents: {
+                allow_once: foregroundHandoffActivationIntent({
+                  sessionId: session.sessionId,
+                  intentId: handoff.id,
+                  decision: 'continue',
+                }),
+                deny: foregroundHandoffActivationIntent({
+                  sessionId: session.sessionId,
+                  intentId: handoff.id,
+                  decision: 'deny',
+                }),
+              },
+            }}
+            activationKind="foreground-handoff"
+            titleId="computer-use-handoff-title"
+            allowOnceLabel={busy ? '引渡しを確認中…' : '対象を前面にして操作を続ける'}
+            busy={busy}
+            actionsDisabled={!onHandoff}
+            onApproval={(decision) => resolve(decision === 'deny' ? 'deny' : 'continue')}
+          />
+        )
+      ) : null}
+      {error === null ? null : (
+        <p className="computer-use-error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -1465,11 +1579,13 @@ export function ComputerUseApprovalCard({
   actionsDisabled = false,
   expired = false,
   stopping = false,
+  inputSessionKind,
 }: {
   approval: ComputerUseApprovalView;
   sectionRef?: Ref<HTMLElement>;
   onApproval: (decision: ComputerUseApprovalDecision) => void;
-  activationKind?: 'approval' | 'start';
+  activationKind?: 'approval' | 'start' | 'foreground-handoff';
+  inputSessionKind?: 'background' | 'foreground' | undefined;
   titleId?: string;
   allowOnceLabel?: string;
   busy?: boolean;
@@ -1489,6 +1605,16 @@ export function ComputerUseApprovalCard({
       <div>
         <span className="computer-use-eyebrow">ACTION CHECK</span>
         <h3 id={titleId}>{approval.actionLabel}</h3>
+        {inputSessionKind === undefined ? null : (
+          <p>
+            {inputSessionKind === 'background'
+              ? '背景：対象を前面にせず、この操作だけを確認します'
+              : '前面：対象を前面にして、この操作だけを確認します'}
+          </p>
+        )}
+        {activationKind === 'foreground-handoff' ? (
+          <p>Tab / Shift+Tab またはクリックで選び、Enter / Space / クリックで決定してください。</p>
+        ) : null}
         <dl>
           <div>
             <dt>対象</dt>
