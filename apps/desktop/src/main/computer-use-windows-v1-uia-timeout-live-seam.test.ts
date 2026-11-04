@@ -757,9 +757,10 @@ LRESULT CALLBACK ProviderProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   return DefWindowProcW(window, message, w, l);
 }
 
-// Each accessibility/text window message takes 15 ms; one UIA call can send several messages.
+// A UIA call can send many window messages: do not accumulate sleeps up to the
+// 270 ms empty-answer cutoff (even Sleep(1) depends on the OS timer resolution).
+// Whole-walk slowness is injected between calls below.
 LRESULT CALLBACK DeepProc(HWND window, UINT message, WPARAM w, LPARAM l) {
-  if (message == WM_GETOBJECT || message == WM_GETTEXT || message == WM_GETTEXTLENGTH) Sleep(15);
   if (message == WM_DESTROY && GetParent(window) == nullptr) {
     PostQuitMessage(0);
     return 0;
@@ -1271,7 +1272,9 @@ int RunDriver(bool ci) {
     SeamCheck(over(inside, GetAncestor(deepest, GA_ROOT)), "the_point_is_over_the_deep_window");
     std::string signature;
     const auto start = std::chrono::steady_clock::now();
+    seam_deep_observation.store(true);
     const WindowsUiaRisk risk = ClassifyWindowsPoint(inside, static_cast<std::uint32_t>(pid), &signature);
+    seam_deep_observation.store(false);
     const long long ms = Millis(start);
     std::string reason;
     const bool rejected = RejectWindowsRisk(risk, &reason);
@@ -1284,9 +1287,22 @@ int RunDriver(bool ci) {
     std::string tree;
     std::size_t nodes = 0;
     const auto start = std::chrono::steady_clock::now();
+    seam_deep_observation.store(true);
     const bool read = ReadUiaObservation(static_cast<std::uint32_t>(pid), GetAncestor(deepest, GA_ROOT), &tree, &nodes);
+    seam_deep_observation.store(false);
     const long long ms = Millis(start);
     std::cout << "deep_observation ms=" << ms << " read=" << read << " nodes=" << nodes << std::endl;
+    // Output nodes are adopted only on success; path.Nodes() retains partial worker progress.
+    const char *stop = path.Stop() == WindowsV1UiaStop::kNone ? "none" :
+        path.Stop() == WindowsV1UiaStop::kTimeout ? "call_timeout" :
+        path.Stop() == WindowsV1UiaStop::kBudget ? "observe_budget" : "canceled";
+    std::cout << "deep_observation_diagnostic stop=" << stop
+              << " stage=" << (path.Nodes() == 0 ? "before_tree" : "tree_or_cleanup")
+              << " visited=" << path.Nodes()
+              << " remaining_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(windows_v1_uia_lane->deadline - std::chrono::steady_clock::now()).count()
+              << " budget_ms=" << kWindowsV1UiaObserveBudget.count()
+              << " contact_ms=" << kWindowsV1UiaSlowContact.count()
+              << " empty_read_ms=" << kWindowsV1UiaSlowRead.count() << std::endl;
     SeamCheck(read && nodes >= 5 && !tree.empty(), "a_slow_live_observation_is_preserved");
     SeamCheck(ms > 500, "slow_observation_exercises_more_than_a_short_whole_tree_budget");
     SeamCheck(path.Stop() == WindowsV1UiaStop::kNone, "slow_observation_has_no_spurious_stop");
@@ -1370,6 +1386,50 @@ int main(int argc, char **argv) {
 
 const onWindows = process.platform === 'win32';
 
+// Instrument only the temporary translation unit; production sources and thresholds stay intact.
+function diagnosticHostSource(): string {
+  const traced = host.replace(
+    /(WindowsV1Uia(?:Read|Call|Contact)\((\w+), \[&\] \{ return )(\w+->(\w+)\([^;]+\))(; \}\))/gu,
+    (_match, prefix: string, output: string, call: string, method: string, suffix: string) =>
+      `${prefix}SeamUiaTrace("${method}", ${output}, [&] { return ${call}; })${suffix}`,
+  );
+  expect(traced).toContain('SeamUiaTrace("GetNextSiblingElement"');
+  expect(traced).toContain('SeamUiaTrace("GetFirstChildElement"');
+  expect(traced).toContain('SeamUiaTrace("get_CurrentIsPassword"');
+  const marker = 'template <class Value, class Call>\nHRESULT WindowsV1UiaTimed';
+  expect(traced).toContain(marker);
+  const instrumented = traced.replace(
+    marker,
+    String.raw`
+std::atomic<bool> seam_deep_observation{false};
+template <class Value, class Call>
+HRESULT SeamUiaTrace(const char *operation, const Value &output, Call &&call) {
+  const bool trace = seam_deep_observation.load();
+  const auto started = std::chrono::steady_clock::now();
+  const HRESULT result = call();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  if (trace && (FAILED(result) || elapsed >= kWindowsV1UiaSlowRead))
+    std::cout << "deep_observation_call operation=" << operation
+              << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+              << " empty=" << WindowsV1UiaEmpty(output)
+              << " hresult=" << static_cast<long>(result) << std::endl;
+  return result;
+}
+` + marker,
+  );
+  const entry = '  const auto start = std::chrono::steady_clock::now();\n  WindowsUiaReadContact';
+  expect(instrumented).toContain(entry);
+  return (
+    '#include <iostream>\n' +
+    instrumented.replace(
+      entry,
+      // Five nodes need at least 35 calls. 20 ms between calls guarantees >500 ms
+      // overall without charging synthetic delay to an individual provider response.
+      '  if (seam_deep_observation.load()) Sleep(20);\n' + entry,
+    )
+  );
+}
+
 type Context = { scratch: string; source: string; binary: string; compiler: BuildCommand | null };
 let context: Context | null = null;
 
@@ -1417,6 +1477,7 @@ describe('V1 lane UI Automation against windows that do not answer, live, across
     expect(context, 'a Windows build context').not.toBeNull();
     const build = context!;
     expect(build.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+    writeFileSync(join(build.scratch, 'computer_use_windows_host.cc'), diagnosticHostSource());
     writeFileSync(build.source, program);
     const compiler = build.compiler!;
     const built = await run(compiler.file, compiler.args, {
