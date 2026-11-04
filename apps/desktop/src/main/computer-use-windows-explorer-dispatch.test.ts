@@ -117,40 +117,96 @@ describe('Explorer dispatch M2 source boundaries', () => {
   it('retains native evidence only on the bound session and clears failed measurements', () => {
     expect(explorer).toContain('session->explorer_dispatch_evidence.reset();');
     expect(explorer).toContain('session->explorer_dispatch_evidence =');
-    expect(explorer).toContain('std::exchange(session.explorer_dispatch_evidence, nullptr)');
+    expect(dispatch).toContain('std::exchange(session.explorer_dispatch_evidence, nullptr)');
   });
 
-  it('production_gates_remain_closed_before_ruleset4', () => {
-    const facts = native('computer_use_windows_target_facts.h');
-    expect(facts).toContain('constexpr bool kWindowsExplorerException = false;');
-    // Calls are compiled only with the existing acceptance-only Explorer definition.
-    for (const call of [
-      'BeginWindowsExplorerDispatch(session,',
-      'RecheckWindowsExplorerDispatch(session,',
-      'SendWindowsExplorerPointInput(session,',
-      'WindowsReadLastInputTick(&explorer_input_tick)',
-    ]) {
-      let at = dispatch.indexOf(call);
-      expect(at).toBeGreaterThan(0);
-      while (at >= 0) {
-        expect(
-          dispatch.lastIndexOf('#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)', at),
-        ).toBeGreaterThan(dispatch.lastIndexOf('#endif', at));
-        at = dispatch.indexOf(call, at + call.length);
-      }
-    }
-    // The coordinate-carrying send exists only in the acceptance-test build.
+  it('production dispatch uses the declaration gate, never the test hook switch', () => {
+    expect(input).not.toContain('SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS');
+    expect(dispatch).toMatch(
+      /if constexpr \(sprint_coder::computer_use::kWindowsExplorerException\) \{\s*if \(!BeginWindowsExplorerDispatch/u,
+    );
+    expect(
+      dispatch.match(
+        /if constexpr \(sprint_coder::computer_use::kWindowsExplorerException\) \{\s*if \(!RecheckWindowsExplorerDispatch/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      dispatch.match(
+        /if \(sprint_coder::computer_use::kWindowsExplorerException && explorer_evidence\) \{/gu,
+      ),
+    ).toHaveLength(2);
+    expect(
+      dispatch.match(
+        /if \(sprint_coder::computer_use::kWindowsExplorerException &&\s*explorer_evidence && !WindowsReadLastInputTick/gu,
+      ),
+    ).toHaveLength(2);
+    const guard = explorer.slice(explorer.indexOf('// BEGIN windows explorer dispatch guard'));
+    expect(guard).not.toContain('#if');
     for (const definition of [
       'bool WindowsExplorerNormalizeAxis(',
+      'bool BeginWindowsExplorerDispatch(',
+      'bool RecheckWindowsExplorerDispatch(',
       'bool WindowsExplorerAbsoluteMove(',
       'bool WindowsExplorerWheelReachesView(',
       'bool SendWindowsExplorerPointInput(',
+    ])
+      expect(guard).toContain(definition);
+    // Fault/elevation overrides remain behind the derived, product-forbidden test switch.
+    const stack: string[] = [];
+    for (const line of explorer.split('\n')) {
+      if (line.startsWith('#if')) stack.push(line);
+      else if (line.startsWith('#endif')) stack.pop();
+      if (/windows_explorer_(?:fault|ignore_elevation)_for_test/u.test(line))
+        expect(stack).toContain('#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)');
+    }
+  });
+
+  it('gate_off_begin_and_recheck_fail_closed', () => {
+    for (const name of ['BeginWindowsExplorerDispatch', 'RecheckWindowsExplorerDispatch']) {
+      const body = explorer.slice(explorer.indexOf('bool ' + name + '('));
+      expect(body.slice(0, body.indexOf('return false;') + 'return false;'.length)).toMatch(
+        /\{\s*if constexpr \(!sprint_coder::computer_use::kWindowsExplorerException\) return false;$/u,
+      );
+    }
+  });
+
+  it('gate_off_pipe_cleanup_never_looks_up_a_session', () => {
+    const pipe = native('computer_use_windows_host_pipe.inc');
+    const handler = pipe.slice(pipe.indexOf('bool HandlePipeRequest('));
+    expect(handler).toMatch(
+      /if constexpr \(sprint_coder::computer_use::kWindowsExplorerException\) \{\s*if \(type == MessageType::kDispatch \|\| type == MessageType::kDispatchApproved\)\s*finish_explorer_dispatch.session = FindWindowsSession\(request\);/u,
+    );
+  });
+
+  it('consumes_shared_evidence_before_every_dispatch_refusal', () => {
+    const consume = dispatch.indexOf('std::exchange(session.explorer_dispatch_evidence, nullptr)');
+    expect(consume).toBeGreaterThan(0);
+    expect(consume).toBeLessThan(dispatch.indexOf('*accepted = false;'));
+    for (const refusal of [
+      'WindowsRoundTripMayInput(',
+      'WindowsSemanticInputInFlight(',
+      'ValidateWindowsDispatchBinding(',
+    ])
+      expect(consume).toBeLessThan(dispatch.indexOf(refusal));
+    expect(explorer).toContain('if (std::exchange(evidence->consumed, true)) return nullptr;');
+    const begin = explorer.slice(
+      explorer.indexOf('bool BeginWindowsExplorerDispatch('),
+      explorer.indexOf('bool RecheckWindowsExplorerDispatch('),
+    );
+    expect(begin).not.toContain('session.explorer_dispatch_evidence');
+    const pipe = native('computer_use_windows_host_pipe.inc');
+    const handler = pipe.slice(pipe.indexOf('bool HandlePipeRequest('));
+    const cleanup = handler.indexOf('} finish_explorer_dispatch;');
+    expect(cleanup).toBeGreaterThan(0);
+    for (const boundary of [
+      'if (!IsBoundedUtf8(',
+      'if (!*handshaken',
+      'if (!admission_error.empty()',
+      'ReplayCachedResponse(',
+      'ConsumeWindowsDispatchTicket(',
+      'HandleWindowsApproval(',
     ]) {
-      const at = explorer.indexOf(definition);
-      expect(at).toBeGreaterThan(0);
-      expect(
-        explorer.lastIndexOf('#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)', at),
-      ).toBeGreaterThan(explorer.lastIndexOf('#endif', at));
+      expect(handler.indexOf(boundary)).toBeGreaterThan(cleanup);
     }
   });
 });

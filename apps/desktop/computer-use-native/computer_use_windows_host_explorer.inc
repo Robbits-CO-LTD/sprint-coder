@@ -504,14 +504,18 @@ bool MeasureWindowsExplorerView(const Frame &request, const std::string &metadat
 }
 
 // BEGIN windows explorer dispatch guard
+// Consume even a refused dispatch, including all approved-session copies sharing the evidence.
+std::shared_ptr<const WindowsExplorerDispatchEvidence> ConsumeWindowsExplorerDispatchEvidence(
+    std::shared_ptr<const WindowsExplorerDispatchEvidence> evidence) {
+  if (evidence) {
+    if (std::exchange(evidence->consumed, true)) return nullptr;
+  }
+  return evidence;
+}
+
 bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::string &kind,
     std::shared_ptr<const WindowsExplorerDispatchEvidence> *evidence) {
-  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) return true;
-  *evidence = std::exchange(session.explorer_dispatch_evidence, nullptr);
-  if (*evidence) {
-    if ((*evidence)->consumed) return false;
-    (*evidence)->consumed = true;
-  }
+  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) return false;
   // A native-bound path is used only to require a guard, never as proof of eligibility.
   const auto leaf = session.canonical_path.substr(session.canonical_path.find_last_of(L"\\/") + 1);
   if (!*evidence && !WindowsExplorerAsciiEqual(leaf, L"explorer.exe")) return true;
@@ -522,7 +526,7 @@ bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::stri
 
 bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
     const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point) {
-  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) return true;
+  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) return false;
   if (!evidence) return true;  // Begin already rejected an Explorer session without evidence.
   try {
     if (!session.approval_route_v2 || session.approval_revoked ||
@@ -556,7 +560,6 @@ bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
   }
 }
 
-#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
 // Button and wheel events carry no coordinates: they land wherever the cursor is when the input
 // stream reaches them. An Explorer session therefore sends an absolute move to the re-measured
 // POINT in the SAME SendInput array as its button or wheel events, which the OS never interleaves
@@ -639,5 +642,4 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
   if (sent > 0) *accepted = true;
   return sent == count;
 }
-#endif
 // END windows explorer dispatch guard

@@ -133,6 +133,25 @@ int wmain() {
     expect(metadata("bound", "100", 2), 1, passing, "bound_control_after_faults");
   }
 #endif
+  if constexpr (gate) {
+    const auto evidence = std::make_shared<WindowsExplorerDispatchEvidence>();
+    session.explorer_dispatch_evidence = evidence;
+    frame.header.message_type = static_cast<std::uint16_t>(MessageType::kDispatch);
+    const std::string dispatch_metadata = R"({"sessionId":"bound","cancelEpoch":2,"kind":"click"})";
+    frame.metadata.assign(dispatch_metadata.begin(), dispatch_metadata.end());
+    Require(HandlePipeRequest(server.value, BackendProbe{}, frame, &handshaken, 1),
+        "ticketless_dispatch_response");
+    Frame reply;
+    Require(ReadFrame(client.value, &reply), "ticketless_dispatch_read");
+    Require(reply.header.message_type == static_cast<std::uint16_t>(MessageType::kError),
+        "ticketless_dispatch_rejected");
+    const std::string text(reply.metadata.begin(), reply.metadata.end());
+    Require(text.find("ticket_invalid") != std::string::npos, "ticketless_dispatch_reason");
+    Require(!session.explorer_dispatch_evidence && evidence->consumed,
+        "ticketless_dispatch_consumes_shared_evidence");
+    frame.header.message_type = static_cast<std::uint16_t>(MessageType::kProbe);
+    ++frame.header.request_id.bytes[0];
+  }
   frame.header.session_id.bytes[0] = 22;
   expect(metadata("bound", "100", 2), 1, Refusal::kNoSession, "different_session");
   ReleaseWindowsSessionResources(&session);

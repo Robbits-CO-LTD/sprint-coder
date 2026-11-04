@@ -792,7 +792,7 @@ bool HandleWindowsApprovalRoundTrip(HANDLE pipe, const Frame &request, const std
 
 // The gate, the lane's measurement (a UI Automation read on a bounded worker) and the three private
 // message handlers. Behaviour seams that compile the ordinary preflight on any platform cut this
-// block and stand in a closed gate (kWindowsApprovalHandlersEnabled is false in every build).
+// block and stand behind kWindowsApprovalHandlersEnabled (only the final build declaration opens it).
 // N8-2c keeps this gate closed. The authenticated generation is nevertheless mandatory, including
 // fixture builds; a missing generation cannot become a wildcard when N8-3 connects Main.
 bool WindowsApprovalGate(const WindowsSession &session) {

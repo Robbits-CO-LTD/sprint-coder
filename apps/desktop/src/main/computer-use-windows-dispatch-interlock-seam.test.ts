@@ -79,6 +79,22 @@ const headTo = host.indexOf(headMarker, headFrom);
 const head =
   headFrom >= 0 && headTo > headFrom ? host.slice(headFrom, headTo + headMarker.length) : '';
 
+// Use the input.inc declarations verbatim so production parameter changes reach the stubs.
+// Explorer is disabled; these stubs never record an input.
+function explorerStub(name: string, body: string): string {
+  const declaration = new RegExp(
+    '(std::shared_ptr<const WindowsExplorerDispatchEvidence>|bool) ' + name + '\\([^;{}]+\\);',
+    'u',
+  ).exec(host)?.[0];
+  if (!declaration) throw new Error('Explorer seam declaration changed: ' + name);
+  return declaration.slice(0, -1) + ' { ' + body + ' }';
+}
+const explorerSessionMember =
+  /mutable std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_dispatch_evidence;/u.exec(
+    host,
+  )?.[0];
+if (!explorerSessionMember) throw new Error('Explorer seam session member changed');
+
 const program = String.raw`
 #include <cstdint>
 #include <iostream>
@@ -86,9 +102,12 @@ const program = String.raw`
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
 
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_approval_round_trip.h"
+
+namespace sprint_coder::computer_use { constexpr bool kWindowsExplorerException = false; }
 
 namespace {
 
@@ -98,7 +117,9 @@ using sprint_coder::computer_use::InterlockOutcome;
 using sprint_coder::computer_use::InterlockReason;
 
 struct RECT { long left = 0; long top = 0; long right = 0; long bottom = 0; };
+struct WindowsExplorerDispatchEvidence;
 struct WindowsSession {
+  ${explorerSessionMember}
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::uint64_t cancel_epoch = 0;
   std::uint32_t pid = 4242;
@@ -112,6 +133,9 @@ struct WindowsSession {
   unsigned long approved_click_input_tick = 0;
 };
 struct WindowsClickBasis { bool tracked = false; bool opens = false; bool input_read = false; unsigned long input_tick = 0; };
+
+${explorerStub('ConsumeWindowsExplorerDispatchEvidence', 'return evidence;')}
+${explorerStub('BeginWindowsExplorerDispatch', 'return false;')}
 
 // This seam exercises ordinary dispatch; an unexpected round trip fails closed.
 bool WindowsRoundTripMayInput(const WindowsSession &session) { return !session.round_trip; }

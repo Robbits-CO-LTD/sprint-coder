@@ -61,6 +61,22 @@ constexpr bool kNativeEligibilityTicketRequired =
     SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED == 1;
 constexpr bool kNativeEligibilityInterlockEnforced =
     SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 1;
+// Only the exact final declaration can enable the Windows production routes.
+constexpr bool WindowsV2FinalDeclaration(bool from_build, bool v2, std::uint32_t ruleset,
+    std::uint32_t classifier, std::uint32_t lexicon, bool ticket_required, bool interlock_enforced) {
+  return from_build && v2 && ruleset == 4 && classifier == 2 && lexicon == 3 &&
+      ticket_required && interlock_enforced;
+}
+#if defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
+constexpr bool kNativeEligibilityFromBuild = true;
+#else
+constexpr bool kNativeEligibilityFromBuild = false;
+#endif
+constexpr bool kNativeEligibilityWindowsV2Final = WindowsV2FinalDeclaration(
+    kNativeEligibilityFromBuild, kNativeEligibilityIsV2, kNativeEligibilityRulesetVersion,
+    kNativeEligibilityClassifierVersion, kNativeEligibilityLexiconVersion,
+    kNativeEligibilityTicketRequired, kNativeEligibilityInterlockEnforced);
+
 static_assert(SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 0 ||
                   SPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED == 1,
               "The interlock claim is a boolean.");
