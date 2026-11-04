@@ -290,6 +290,7 @@ struct WindowsSession {
       std::make_shared<std::atomic<std::uint64_t>>(0);
   std::string session_id;
   std::uint64_t cancel_epoch = 0;
+  mutable bool page_observation_invalidated = false;
 };
 bool semanticInputInFlight = false;
 bool StopWindowsSemanticInput(const WindowsSession& session, std::uint64_t* attempts) {
