@@ -223,8 +223,8 @@ describe('background executor native entry', () => {
     const monitor = native('computer_use_windows_background_monitor.h');
     expect(monitor).toContain('return ::GetTickCount();');
     expect(monitor).not.toContain('#include <windows.h>');
-    expect(monitor).toContain('claim_tick_ = tick_clock_();');
-    expect(monitor).toContain('static_cast<std::int32_t>(event_tick - claim_tick_) > 0');
+    expect(monitor).toContain('call_tick_ = tick_clock_();');
+    expect(monitor).toContain('static_cast<std::int32_t>(event_tick - call_tick_) > 0');
     expect(monitor).toContain('(grace_ && now < grace_deadline_)');
     expect(monitor).toContain('kind_counts_[kind] < permission_.limits[kind]');
     expect(monitor).not.toContain('0x8002, 0x8003');
@@ -256,6 +256,35 @@ describe('background executor native entry', () => {
     expect(fixture).toContain('i < 6');
     expect(fixture).toContain('WS_CHILD | WS_VISIBLE');
     expect(fixture).toContain('main_window, nullptr, cls.hInstance, controls[i]');
+  });
+
+  it('limits attribution to the provider call and EndCall grace with Stop-first locks', () => {
+    const executor = native('computer_use_windows_background_executor.h');
+    expect(executor.indexOf('ops.BeginCall(claim)')).toBeLessThan(executor.indexOf('ops.Call()'));
+    expect(executor.indexOf('const bool ended = ops.EndCall(claim)')).toBeLessThan(
+      executor.indexOf('ops.Readback()'),
+    );
+    expect(executor).toContain('catch (...) { ops.EndCall(claim); throw; }');
+    const semantic = native('computer_use_windows_host_uia_semantic.inc');
+    for (const boundary of ['BeginCall', 'EndCall']) {
+      const body =
+        semantic.slice(semantic.indexOf('bool ' + boundary + '(')).split('\n  }')[0] ?? '';
+      expect(body.indexOf('stop_mutex')).toBeLessThan(body.indexOf('state.' + boundary));
+    }
+    const tests = native('computer_use_windows_background_monitor_test.cc');
+    for (const name of [
+      'ATTR_before_begin_call_pauses',
+      'ATTR_call_and_end_grace_but_not_expired_before_finish',
+      'ATTR_generation_before_or_at_begin_call_pauses',
+      'ATTR_invalid_call_boundary_order_or_claim_pauses',
+      'ATTR_finish_without_end_call_pauses_and_revokes_permission',
+      'ATTR_finish_without_begin_call_pauses_and_revokes_permission',
+      'ATTR_finish_does_not_restart_end_call_grace',
+    ])
+      expect(tests).toContain(name);
+    expect(native('computer_use_windows_background_executor_test.cc')).toContain(
+      'ATTR_executor_call_window_readback_window_and_exception',
+    );
   });
 
   it('connects the bounded monitor matrix and WinEvent metadata without widening the public gate', () => {

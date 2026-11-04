@@ -131,7 +131,13 @@ template <class Operations> Outcome RunBackgroundExecutor(Operations &ops) {
     if (preparation == Preparation::kNoop) return Outcome::kCompleted;
     claim = ops.Claim();
     if (claim == 0) return Outcome::kRejected;
-    confirmed = ops.Call() && ops.Readback() && ops.Window();
+    if (ops.BeginCall(claim)) {
+      bool called = false;
+      try { called = ops.Call(); }
+      catch (...) { ops.EndCall(claim); throw; }
+      const bool ended = ops.EndCall(claim);
+      confirmed = called && ended && ops.Readback() && ops.Window();
+    }
   } catch (...) {
     if (claim == 0) return Outcome::kRejected;
   }
