@@ -6745,10 +6745,15 @@ export const computerUseNativeManifestSchema = z
       context.addIssue({ code: 'custom', message: 'Document viewers are Windows-only' });
     if (new Set(manifest.capabilities).size !== manifest.capabilities.length)
       context.addIssue({ code: 'custom', message: 'Native capabilities must be unique' });
-    if (manifest.platform === 'win32' && manifest.eligibility?.mode === 'v2-denylist')
+    if (
+      manifest.platform === 'win32' &&
+      manifest.eligibility?.mode === 'v2-denylist' &&
+      (manifest.eligibility.interlockEnforced !== true ||
+        manifest.eligibility.ticketRequired !== true)
+    )
       context.addIssue({
         code: 'custom',
-        message: 'Windows Computer Use has no deny-list eligibility until S5',
+        message: 'Windows V2 Computer Use requires interlock enforcement and tickets',
       });
     if (manifest.platform === 'win32' && manifest.architecture !== 'x64')
       context.addIssue({ code: 'custom', message: 'Windows Computer Use is x64-only' });

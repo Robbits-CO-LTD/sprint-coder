@@ -94,9 +94,14 @@ describe('Computer Use eligibility contract (D7-1)', () => {
       ).toBe(false);
     });
 
-    it('refuses a Windows manifest that claims v2 until S5', () => {
+    it('requires interlock enforcement for a Windows v2 manifest', () => {
       expect(computerUseNativeManifestSchema.safeParse(manifest(V1, 'win32')).success).toBe(true);
       expect(computerUseNativeManifestSchema.safeParse(manifest(V2, 'win32')).success).toBe(false);
+      expect(
+        computerUseNativeManifestSchema.safeParse(
+          manifest({ ...V2, interlockEnforced: true }, 'win32'),
+        ).success,
+      ).toBe(true);
     });
 
     it('keeps the manifest digest of a manifest without eligibility byte-for-byte', () => {

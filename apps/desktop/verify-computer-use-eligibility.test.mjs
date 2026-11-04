@@ -15,6 +15,7 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
     ['darwin', 'v1'],
     ['darwin', 'v2'],
     ['win32', 'v1'],
+    ['win32', 'v2'],
   ];
 
   it.each(cases)(
@@ -36,9 +37,10 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
     expect(declare('v1', 'darwin').ticketRequired).toBe(true);
     expect(declare('v2', 'darwin').ticketRequired).toBe(true);
     expect(declare('v1', 'win32').ticketRequired).toBe(true);
+    expect(declare('v2', 'win32').ticketRequired).toBe(true);
   });
 
-  it.each(cases)(
+  it.each(cases.filter(([platform, expected]) => platform !== 'win32' || expected !== 'v2'))(
     'keeps legacy %s %s claims accepted without interlockEnforced',
     (platform, expectedMode) => {
       const { interlockEnforced: _claim, ...legacy } = declare(expectedMode, platform);
@@ -153,7 +155,7 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
       ).toContain('attested eligibility.' + key + ' is');
   });
 
-  it('refuses a Windows deny-list request outright', () => {
+  it('rejects a Windows v1 artifact for a valid Windows v2 request', () => {
     const v1 = declare('v1', 'win32');
     expect(
       eligibilityProblems({
@@ -162,7 +164,26 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
         manifest: v1,
         attested: v1,
       }).join('\n'),
-    ).toMatch(/not valid for win32/u);
+    ).toContain('manifest eligibility.mode is "v1-allowlist", expected "v2-denylist"');
+  });
+
+  it('requires the interlock claim on both sides of a Windows v2 artifact', () => {
+    const v2 = declare('v2', 'win32');
+    const { interlockEnforced: _claim, ...legacy } = v2;
+    void _claim;
+    for (const side of ['manifest', 'attested']) {
+      for (const value of [legacy, { ...v2, interlockEnforced: false }]) {
+        expect(
+          eligibilityProblems({
+            platform: 'win32',
+            expectedMode: 'v2',
+            manifest: v2,
+            attested: v2,
+            [side]: value,
+          }),
+        ).toContain(`${side} eligibility.interlockEnforced differs from the build declaration`);
+      }
+    }
   });
 
   describe('command line', () => {

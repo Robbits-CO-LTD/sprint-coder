@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readFileSync } from 'node:fs';
@@ -237,7 +237,9 @@ describe('the declared versions keep the approval path closed (C5-1 tripwire)', 
   };
 
   it('declares classifier version 1 (raising it is C5-2, after the #777 measurement)', () => {
-    expect(table.versions, 'C5-2 raises this, not another change').toEqual(versionOneTable);
+    expect(table.versions, 'only the Windows V2 declaration advances').toEqual(
+      expectedEligibilityVersionTable,
+    );
   });
 
   it.each(['v1-allowlist', 'v2-denylist'] as const)(

@@ -54,6 +54,61 @@ const receipt = {
 };
 
 describe('Windows approval wire contract', () => {
+  it('binds ordinary and refusal producer versions to the session route and build attestation', () => {
+    const source = readFileSync(
+      new URL('../../computer-use-native/computer_use_windows_host_preflight.inc', import.meta.url),
+      'utf8',
+    );
+    const producer = source.slice(
+      source.indexOf('std::string WindowsPreflightReceipt('),
+      source.indexOf('// The wire request id'),
+    );
+    expect(producer).toMatch(
+      /session\.approval_route_v2\s*\? sprint_coder::computer_use::kNativeEligibilityClassifierVersion\s*: sprint_coder::computer_use::kNativePreflightClassifierVersion/u,
+    );
+  });
+
+  it.each([1, 2])(
+    'accepts ordinary and refused classifier %i receipts without relaxing version checks',
+    (classifierVersion) => {
+      const ordinary = {
+        decision: 'ordinary',
+        reasonCode: null,
+        deniedResult: null,
+        ticket: 'c'.repeat(64),
+        classifierVersion,
+        inputAttemptCount: 0,
+        requestId: context.requestId,
+        sessionId: session.sessionId,
+        cancelEpoch: context.cancelEpoch,
+        observationRevision: context.observationRevision,
+      };
+      const bound = { ...context, expectedClassifierVersion: classifierVersion };
+      expect(parseNativePreflightReceipt(ordinary, bound)).toMatchObject({
+        kind: 'ticket',
+        ticket: ordinary.ticket,
+      });
+      expect(
+        parseNativePreflightReceipt(
+          {
+            ...ordinary,
+            decision: 'denied',
+            reasonCode: 'native_stale_target',
+            deniedResult: 'rejected',
+            ticket: null,
+          },
+          bound,
+        ),
+      ).toMatchObject({ kind: 'refused', result: 'rejected' });
+      expect(() =>
+        parseNativePreflightReceipt(ordinary, {
+          ...bound,
+          expectedClassifierVersion: classifierVersion === 1 ? 2 : 1,
+        }),
+      ).toThrow('native_preflight_invalid');
+    },
+  );
+
   it('parses the exact C++ producer golden receipt', () => {
     const source = readFileSync(
       new URL('../../computer-use-native/computer_use_protocol_fuzz.cc', import.meta.url),

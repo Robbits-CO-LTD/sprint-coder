@@ -182,6 +182,9 @@ function buildComputerUseNative(platform: ForgePlatform, architecture: string): 
       `--target=${platform}`,
       `--arch=${architecture}`,
       `--source-commit=${sourceCommit}`,
+      ...(process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY'] === undefined
+        ? []
+        : [`--eligibility=${process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY']}`]),
     ],
     {
       cwd: resolve(__dirname, '..', '..'),

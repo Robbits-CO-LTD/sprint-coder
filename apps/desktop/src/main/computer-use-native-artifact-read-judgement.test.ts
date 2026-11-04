@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -58,7 +58,7 @@ describe('artifact read judgement (#785 T15-4p)', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 
   it('writes out every refusal condition and the per-platform allow list (fail closed)', () => {

@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -187,7 +187,7 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(counter).not.toMatch(/label|title|name\s*=\s*node|metadata|text/iu);
   });
 
-  it('leaves INV-3 alone: the function bodies that decide eligibility, the win32 refusal of v2 and the versions are pinned (#500 S5-c-2 PR-5)', () => {
+  it('leaves INV-3 alone: the function bodies that decide eligibility and the declared versions are pinned (#500 S5-c-2 PR-5)', () => {
     const squashed = (text: string): string => text.replace(/\s+/gu, ' ').trim();
     const functionBody = (signature: string): string => {
       const from = host.indexOf(signature);
@@ -249,27 +249,19 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(blocked).toContain(
       'if (_wcsicmp(leaf.c_str(), candidate.data()) == 0) return true; return false; }',
     );
-    // The build refuses eligibility v2 for win32 (no deny-list there yet): a Windows helper cannot be
-    // built with the interlocks' approval path, or with a wider eligibility.
-    const build = squashed(
-      readFileSync(join(__dirname, '../../../../build-computer-use-eligibility.mjs'), 'utf8'),
-    );
-    expect(build).toContain(
-      "if (mode === MODES.v2 && target === 'win32') throw new Error( 'Computer Use native --eligibility=v2 is unsupported on Windows until S5 (no deny-list there yet)', );",
-    );
     // The classifier version the preflight receipt attests, and the versions of the eligibility.
     expect(read('computer_use_preflight_classifier.h')).toContain(
       'constexpr std::uint32_t kNativePreflightClassifierVersion = 1;',
     );
     expect(
       squashed(host).match(
-        /std::to_string\( ?sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
+        /std::to_string\(session\.approval_route_v2 \? sprint_coder::computer_use::kNativeEligibilityClassifierVersion : sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
       ),
     ).toHaveLength(1);
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 
   it('takes the rule set from its caller, answers an exception or a missing source as no verdict, and changes nothing', () => {
@@ -396,6 +388,6 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 });

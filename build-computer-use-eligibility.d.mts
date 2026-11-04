@@ -5,6 +5,7 @@ export type ComputerUseEligibilityBuildDeclaration = {
   classifierVersion: number;
   lexiconVersion: number;
   ticketRequired: boolean;
+  interlockEnforced: boolean;
 };
 export function parseEligibilityMode(
   argv: readonly string[],

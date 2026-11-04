@@ -1070,12 +1070,20 @@ export function computerUseProviderModelIsEligible(input: {
 }
 
 export function createComputerUseControllerForIpc(
-  deps: Omit<ConstructorParameters<typeof ComputerUseController>[0], 'publishDiscoveryResult'>,
+  deps: Omit<
+    ConstructorParameters<typeof ComputerUseController>[0],
+    'publishDiscoveryResult' | 'windowsTargetDiscoveryEnabled'
+  >,
   persistence: Pick<PersistenceClient, 'recordComputerUseDiscoveryResult'>,
   publish: (event: TurnEvent) => void,
+  platform: NodeJS.Platform = process.platform,
 ): ComputerUseController {
   return new ComputerUseController({
     ...deps,
+    windowsTargetDiscoveryEnabled: () =>
+      platform === 'win32' &&
+      deps.effectiveEligibilityMode?.() === 'v2-denylist' &&
+      deps.agentDrivenEnabled?.() === true,
     publishDiscoveryResult: (result) => {
       if (result.taskId === null) return;
       // The public tool error drops the proof (providerWorkspaceToolFailure keeps only a code),

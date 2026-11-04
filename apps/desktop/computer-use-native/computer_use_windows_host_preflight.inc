@@ -334,7 +334,9 @@ std::string WindowsPreflightReceipt(const WindowsSession &session,
                  : (refused ? "\"" + std::string(refusal_result) + "\"" : std::string("null"))) +
          ",\"ticket\":" + (ordinary ? "\"" + ticket + "\"" : "null") +
          ",\"classifierVersion\":" +
-         std::to_string(sprint_coder::computer_use::kNativePreflightClassifierVersion) +
+         std::to_string(session.approval_route_v2
+                            ? sprint_coder::computer_use::kNativeEligibilityClassifierVersion
+                            : sprint_coder::computer_use::kNativePreflightClassifierVersion) +
          ",\"inputAttemptCount\":" +
          std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
          ",\"requestId\":\"" + JsonEscape(request_id) + "\",\"sessionId\":\"" +

@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from './computer-use-eligibility-test-helper';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -718,7 +718,7 @@ describe('Computer Use external final gate', () => {
     it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
       // A distributed package is the v1 allow-list at the table's v1 numbers. Both natives claim a
       // ticket requirement (macOS: N2b-4 PR 5, Windows: S5-a).
-      expect(eligibilityTable.versions).toEqual(versionOneTable);
+      expect(eligibilityTable.versions).toEqual(expectedEligibilityVersionTable);
       expect(eligibilityTable.ticketRequired).toEqual({ darwin: true, win32: true });
       for (const key of [
         'classifierVersion',

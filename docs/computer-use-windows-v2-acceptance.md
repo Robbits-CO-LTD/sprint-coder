@@ -12,7 +12,8 @@ The goal is for the real AI inside Sprint Coder to complete these journeys on Wi
 P1 (IL-only anchor), P2 (packaged Win32 Notepad) and P4 (three-way attestation verification
 preparation) are merged. P3 (limited Explorer exception) is PR #1088, pending merge in this
 snapshot. P5 (ruleset 3 → 4 and production V2 enablement) is **未実装 (not implemented)**.
-Windows production V2 is still refused. Preparation code or a flag alone is not enablement.
+The basic V2 build slice now permits an explicit Windows V2 build at ruleset/classifier/lexicon
+3/2/3. It does not complete P5's extra cases or prove on-device acceptance.
 These are supplied planning statuses, not a live PR-status check or evidence of V2 acceptance.
 
 In every table below, “after P5” means **P5 の後**: the relevant production path must be connected
@@ -24,6 +25,48 @@ unsettled. This draft follows the approved N13a scope: packaged Win32 and the li
 file-window exception are planned cases after P5. It does not authorize general shell access.
 
 ## 2. Prerequisites and preparation
+
+### Basic V2 local build (Issue #988, slice 2/3)
+
+From an x64 MSVC Developer PowerShell with Node.js 22 and the repository dependencies installed:
+
+```powershell
+$env:SPRINT_CODER_COMPUTER_USE_ELIGIBILITY = 'v2'
+$env:SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD = 'windows-unsigned-acceptance'
+npm run make:windows --workspace @sprint-coder/desktop
+./apps/desktop/scripts/verify-unsigned-windows-release.ps1 -RequireUnsignedComputerUseHelper
+node apps/desktop/scripts/verify-computer-use-acceptance-build.mjs --expect present --out apps/desktop/out
+```
+
+Forge forwards the explicit eligibility selection to the native build before Vite embeds the
+manifest's pin. Without that environment variable, builds remain V1. The standalone native build
+uses `node build-computer-use-native.mjs --eligibility=v2`; it does not read the environment override
+and does not produce a complete package. Release workflows remain unchanged. The existing unsigned
+acceptance restrictions in [simplified acceptance §1](computer-use-simple-acceptance.md#1-produce-the-windows-acceptance-package)
+still apply; do not set `SPRINT_CODER_RELEASE=1` for this local acceptance build.
+
+Before launching the resulting package from the same PowerShell, set:
+
+```powershell
+$env:SPRINT_CODER_COMPUTER_USE_DESKTOP_V1 = '1'
+$env:SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2 = '1'
+Remove-Item Env:SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST -ErrorAction SilentlyContinue
+```
+
+Restart Sprint Coder with these values inherited. The saved Computer Use setting remains available,
+but the agent-driven V2 tools require both exact environment opt-ins above. Open a disposable target,
+then approve that application in the conversation. Calculator and ordinary applications under
+Program Files are candidates only when their measured identity, integrity level and deny-list facts
+pass. Explorer, the Store Notepad not-web exception and IL-only support remain disabled. Browsers
+retain the observe-only ceiling; elevated, shell, credential and remote-control targets retain their
+existing refusals. Installation location alone never grants permission.
+
+The remaining runtime checks are the package/signature (or compiled acceptance waiver), artifact
+digest and Main pin, matching manifest/helper handshake, three-way interlock attestation, approval
+wire and document-viewer table agreement, followed by per-target approval and native revalidation.
+No runtime default was changed. Slice 3 must verify the actual packaged Main pin and helper, input
+delivery only to the approved target, Stop during an action, and continued refusal of excluded
+targets. Native build, harness and real-device results are **NOT_RUN** in this implementation slice.
 
 Use Windows x64 in an interactive session, at the same integrity level as the target, with
 disposable local fixtures and no personal data. Test Windows 10 build 18362 or later and Windows 11

@@ -49,6 +49,7 @@ import {
 } from './computer-use-target-model';
 import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { ComputerUseController } from './computer-use-controller';
+import { effectiveComputerUseEligibilityMode } from './computer-use-eligibility';
 import { createComputerUseFeatureGate } from './computer-use-feature-gate';
 import {
   computerAppGrantIdentityFrom,
@@ -1383,6 +1384,9 @@ describe('Computer Use target tools end to end', () => {
       revoked?: boolean;
       revokedCapabilities?: ('computer.observe' | 'computer.control')[];
       policyEpoch?: number;
+      agentDriven?: boolean;
+      effectiveMode?: 'v1-allowlist' | 'v2-denylist';
+      platform?: NodeJS.Platform;
       /** V1's "remember" flag on the profile row. Never a grant: the row is unauthenticated. */
       remembered?: boolean;
       /** The inner planner. The default finishes the first round. */
@@ -1506,7 +1510,8 @@ describe('Computer Use target tools end to end', () => {
           ...options.discoveryNative,
         } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
         featureEnabled: () => true,
-        agentDrivenEnabled: () => true,
+        agentDrivenEnabled: () => options.agentDriven ?? true,
+        effectiveEligibilityMode: () => options.effectiveMode ?? 'v1-allowlist',
         providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
         currentPolicyEpoch: () => policyEpoch,
         repositionEmergencyStop: () => true,
@@ -1522,6 +1527,7 @@ describe('Computer Use target tools end to end', () => {
           }),
       },
       (event) => (router as unknown as { publish(event: TurnEvent): void }).publish(event),
+      options.platform,
     );
     Object.assign(router, { permissionBroker, computerUseController: controller });
     const harness = new ManagedCodingHarness({
@@ -1558,6 +1564,46 @@ describe('Computer Use target tools end to end', () => {
   }
 
   const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+
+  it('rechecks the agent flag independently of effective V2 in the production factory', async () => {
+    const options = {
+      platform: 'win32' as const,
+      agentDriven: true,
+      effectiveMode: 'v2-denylist' as const,
+    };
+    const { controller } = endToEnd(options);
+    try {
+      expect(controller['deps'].windowsTargetDiscoveryEnabled?.()).toBe(true);
+      options.agentDriven = false;
+      expect(controller['deps'].windowsTargetDiscoveryEnabled?.()).toBe(false);
+    } finally {
+      await controller.dispose();
+    }
+  });
+
+  it.each([
+    ['win32', 'v2-denylist', true, false, true],
+    ['darwin', 'v2-denylist', true, false, false],
+    ['linux', 'v2-denylist', true, false, false],
+    ['win32', 'v1-allowlist', true, false, false],
+    ['win32', 'v2-denylist', false, false, false],
+    ['win32', 'v2-denylist', true, true, false],
+  ] as const)(
+    'wires Windows discovery through the production factory (%s, %s, agent=%s, forceV1=%s)',
+    async (platform, compiled, agentDriven, forceV1, expected) => {
+      const effectiveMode = effectiveComputerUseEligibilityMode({
+        compiled,
+        agentDrivenV2: agentDriven,
+        environment: forceV1 ? { SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST: '1' } : {},
+      });
+      const { controller } = endToEnd({ agentDriven, effectiveMode, platform });
+      try {
+        expect(controller['deps'].windowsTargetDiscoveryEnabled?.()).toBe(expected);
+      } finally {
+        await controller.dispose();
+      }
+    },
+  );
 
   it.each(['turn-1', null])(
     'PR11 routes one late E4 result through production IPC wiring to its original owner (turn=%s)',

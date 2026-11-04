@@ -1,5 +1,5 @@
 import {
-  versionOneTable,
+  expectedEligibilityVersionTable,
   type EligibilityVersionTable,
 } from '../../computer-use-eligibility-test-helper';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
@@ -251,7 +251,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: EligibilityVersionTable;
     };
-    expect(eligibility.versions).toEqual(versionOneTable);
+    expect(eligibility.versions).toEqual(expectedEligibilityVersionTable);
   });
 });
 
