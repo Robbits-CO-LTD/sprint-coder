@@ -1,6 +1,14 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -79,6 +87,51 @@ it('keeps Store Notepad not-web binding acceptance-test-only and bound at start 
   scan(join(root, 'apps/desktop'), false);
   scan(join(root, 'apps/desktop/scripts'), true);
   scan(join(root, 'apps/desktop/computer-use-native'), false);
+});
+
+it('keeps the IL-only image anchor disabled until P5', () => {
+  const source = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_windows_host_target_facts.inc'),
+    'utf8',
+  );
+  expect(source).toContain('inline constexpr bool kWindowsIlOnlyImageAnchor = false;');
+  expect(source).toContain(
+    '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
+  );
+  expect(source).toContain(
+    '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && (defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE))\n#error',
+  );
+  expect(source).toContain('if (!WindowsHeldImageIsIlOnly(bytes)) return std::nullopt;');
+  expect(source).toContain('if constexpr (!kWindowsIlOnlyImageAnchor)');
+});
+
+it('limits the IL-only PE32 conversion to a verified native 64-bit process', () => {
+  const source = readWindowsHostSource();
+  expect(source).toContain('WindowsTargetIsNative64Bit(process)');
+  expect(source).toContain('native64 == std::optional<bool>(true)');
+  expect(source).toContain('file.magic == 0x10b && file.machine == 0x14c && mapped.magic == 0x20b');
+  expect(source).toContain('(*clr_flags & 1) != 0 && (*clr_flags & 2) == 0');
+  expect(source).toContain('process_machine == IMAGE_FILE_MACHINE_UNKNOWN');
+});
+
+it('keeps the IL-only test switch out of production build inputs', () => {
+  const root = join(__dirname, '../../../..');
+  const files = ['apps/desktop/computer-use-native/binding.gyp'];
+  for (const directory of ['', 'apps/desktop/scripts', 'scripts', '.github/workflows']) {
+    if (directory === 'scripts' && !existsSync(join(root, directory))) continue;
+    for (const name of readdirSync(join(root, directory))) {
+      if (
+        directory === '.github/workflows'
+          ? /\.ya?ml$/u.test(name)
+          : /^build-computer-use-.*\.mjs$/u.test(name)
+      )
+        files.push(join(directory, name));
+    }
+  }
+  for (const file of files)
+    expect(readFileSync(join(root, file), 'utf8'), file).not.toContain(
+      'SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR',
+    );
 });
 
 it('measures validation identity on the consumer with cancellable I/O and fresh Stop guards', () => {

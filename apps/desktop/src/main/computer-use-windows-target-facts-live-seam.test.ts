@@ -1298,7 +1298,7 @@ int wmain(int argc, wchar_t **argv) {
 }
 `;
 
-const source = [
+const seamPrefix = [
   preamble,
   cut(
     '// The package catalog the v2 target facts read SignatureKind from',
@@ -1311,8 +1311,330 @@ const source = [
   cut('bool ReadProcessPath(HANDLE process, std::wstring *output) {', 'bool ReadFileDigest('),
   cut('// BEGIN windows target facts', '// END windows target facts'),
   '} // namespace',
-  program,
 ].join('\n');
+const source = `${seamPrefix}\n${program}`;
+
+// Diagnostics exist only in the generated test translation unit, never in production.
+const ilAnchorSeamPrefix = (() => {
+  let instrumented = seamPrefix;
+  for (const [start, end, label] of [
+    [
+      'WindowsTargetIlOnlyImageMapping(HANDLE',
+      'std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo',
+      'mapping',
+    ],
+    [
+      'std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo',
+      'std::optional<std::wstring> WindowsTargetKernelImageName',
+      'kernel',
+    ],
+    [
+      'bool HoldWindowsTargetRunningImage(',
+      'std::optional<std::string> WindowsTargetVolumeKind',
+      'hold',
+    ],
+  ] as const) {
+    const from = instrumented.indexOf(start);
+    const to = instrumented.indexOf(end, from);
+    if (from < 0 || to < 0) throw new Error(`IL anchor diagnostic markers changed: ${label}`);
+    const block = instrumented.slice(from, to);
+    let rejection = 0;
+    const traced = block.replace(
+      /return (std::nullopt|false);/gu,
+      (_, value: string) =>
+        `{ std::cout << "diagnostic=${label} reject=${++rejection} last_error_hint=" << GetLastError() << "\\n"; return ${value}; }`,
+    );
+    instrumented = instrumented.slice(0, from) + traced + instrumented.slice(to);
+  }
+  const holdResult = '  held->matches = anchored && !header_disagrees && again.has_value() &&';
+  const mappedResult =
+    '  if (!mapped_header || !WindowsIlOnlyHeadersMatch(*header, *mapped_header, clr_flags, native64) || !within_budget())';
+  if (!instrumented.includes(mappedResult))
+    throw new Error('IL anchor header diagnostic marker changed');
+  instrumented = instrumented.replace(
+    mappedResult,
+    String.raw`
+  std::cout << "diagnostic=mapped_header readable=" << mapped_header.has_value()
+            << " native64_known=" << native64.has_value() << " native64=" << native64.value_or(false)
+            << " clr_flags_known=" << clr_flags.has_value() << " clr_flags=" << clr_flags.value_or(0)
+            << " elapsed_ms=" << (GetTickCount64() - started) << "\n";
+  if (mapped_header) {
+    const auto print_header = [](const char *kind, const WindowsIlOnlyImageHeader &h) {
+      std::cout << "diagnostic=header kind=" << kind << " magic=" << h.magic
+                << " machine=" << h.machine << " entry_rva=" << h.entry_rva
+                << " image_size=" << h.image_size << " timestamp=" << h.timestamp
+                << " checksum=" << h.check_sum << "\n";
+    };
+    print_header("file", *header);
+    print_header("mapped", *mapped_header);
+  }
+` + mappedResult,
+  );
+  if (!instrumented.includes(holdResult))
+    throw new Error('IL anchor hold diagnostic marker changed');
+  return instrumented.replace(
+    holdResult,
+    String.raw`
+  std::cout << "diagnostic=hold anchored=" << anchored
+            << " header_disagrees=" << header_disagrees << " remeasured=" << again.has_value()
+            << " remeasured_name_agrees=" << (again && SameWindowsTargetName(again->mapped_name, kernel->mapped_name))
+            << " recorded_agrees=" << recorded_agrees << " module_available=" << module_list.has_value()
+            << " module_list_agrees=" << module_list_agrees << " unchanged=" << held->unchanged << "\n";
+` + holdResult,
+  );
+})();
+
+const ilAnchorProgram = String.raw`
+int failures = 0;
+void Check(bool ok, const char *name) {
+  if (!ok) { ++failures; std::cout << "FAIL " << name << "\n"; }
+}
+void CheckIlOnlyHeader() {
+  for (const bool wide : {false, true}) {
+    std::vector<std::uint8_t> bytes(1024);
+    const auto put = [&](std::size_t at, std::uint32_t value, std::size_t width = 4) {
+      for (std::size_t i = 0; i < width; ++i) bytes[at + i] = (value >> (i * 8)) & 255;
+    };
+    put(0, 0x5a4d, 2); put(0x3c, 0x80); put(0x80, 0x4550);
+    put(0x84, wide ? 0x8664 : 0x14c, 2); put(0x86, 1, 2);
+    const std::size_t optional = 0x98;
+    const std::size_t optional_size = wide ? 240 : 224;
+    put(0x94, optional_size, 2); put(optional, wide ? 0x20b : 0x10b, 2);
+    put(optional + (wide ? 108 : 92), 16);
+    const std::size_t directory = optional + (wide ? 112 : 96) + 14 * 8;
+    put(directory, 0x2000); put(directory + 4, 72);
+    const std::size_t section = optional + optional_size;
+    put(section + 8, 512); put(section + 12, 0x2000);
+    put(section + 16, 512); put(section + 20, 512);
+    put(512, 72); put(528, 1);
+    Check(WindowsHeldImageIsIlOnly(bytes), "clr_il_only_accepted");
+    Check(WindowsHeldImageClrFlags(bytes) == std::optional<std::uint32_t>(1), "clr_flags_read");
+    put(optional + 56, 0x8000);
+    put(optional + (wide ? 24 : 28), 0x400000);
+    if (wide) put(optional + 28, 1);
+    const auto header = WindowsReadIlOnlyImageHeader(bytes);
+    Check(header && header->image_base == (wide ? 0x100400000ULL : 0x400000ULL),
+          "mapped_header_uses_its_own_optional_layout");
+    put(528, 3);
+    Check(WindowsHeldImageClrFlags(bytes) == std::optional<std::uint32_t>(3), "clr_required_flag_preserved");
+    put(528, 0x20001);
+    Check(WindowsHeldImageIsIlOnly(bytes), "clr_32bitpreferred_il_only_accepted");
+    put(528, 0);
+    Check(!WindowsHeldImageIsIlOnly(bytes), "clr_mixed_mode_rejected");
+    put(528, 1); put(directory, 0);
+    Check(!WindowsHeldImageIsIlOnly(bytes), "native_without_clr_rejected");
+    put(directory, 0x2000); put(directory + 4, 16);
+    Check(!WindowsHeldImageIsIlOnly(bytes), "short_clr_directory_rejected");
+    put(directory + 4, 72);
+    bytes.resize(530);
+    Check(!WindowsHeldImageIsIlOnly(bytes), "unreadable_clr_flags_rejected");
+  }
+}
+void CheckConvertedHeader() {
+  WindowsIlOnlyImageHeader file{0x10b, 0x14c, 0x2000, 0x8000, 123, 456, 0x400000};
+  auto mapped = file;
+  mapped.magic = 0x20b;
+  const auto match = [&](const WindowsIlOnlyImageHeader &disk, const WindowsIlOnlyImageHeader &memory,
+                         std::optional<std::uint32_t> flags, std::optional<bool> native64) {
+    return WindowsIlOnlyHeadersMatch(disk, memory, flags, native64);
+  };
+  Check(match(file, mapped, 1, true), "native64_il_only_pe32_conversion_accepted");
+  Check(!match(file, mapped, 1, false), "wow64_conversion_rejected");
+  Check(!match(file, mapped, 1, std::nullopt), "unknown_architecture_conversion_rejected");
+  Check(!match(file, mapped, 0, true), "mixed_mode_conversion_rejected");
+  Check(!match(file, mapped, std::nullopt, true), "missing_clr_conversion_rejected");
+  Check(!match(file, mapped, 3, true), "32bitrequired_conversion_rejected");
+  Check(!match(file, mapped, 0x20001, false), "32bitpreferred_wow64_conversion_rejected");
+  auto wrong = mapped; wrong.machine = 0x8664;
+  Check(!match(file, wrong, 1, true), "conversion_machine_mismatch_rejected");
+  auto wrong_file = file; wrong_file.machine = 0x8664;
+  Check(!match(wrong_file, wrong, 1, true), "non_i386_conversion_rejected");
+  wrong = mapped; wrong.magic = 0x107;
+  Check(!match(file, wrong, 1, true), "other_magic_conversion_rejected");
+  Check(!match(mapped, file, 1, true), "reverse_conversion_rejected");
+  for (auto field : {&WindowsIlOnlyImageHeader::entry_rva, &WindowsIlOnlyImageHeader::image_size,
+                     &WindowsIlOnlyImageHeader::timestamp, &WindowsIlOnlyImageHeader::check_sum}) {
+    wrong = mapped; ++(wrong.*field);
+    Check(!match(file, wrong, 1, true), "conversion_other_field_mismatch_rejected");
+  }
+  Check(match(file, file, std::nullopt, std::nullopt), "equal_magic_needs_no_conversion");
+}
+int wmain(int argc, wchar_t **argv) {
+  if (argc != 2) return 2;
+  CheckIlOnlyHeader();
+  CheckConvertedHeader();
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION child{};
+  std::wstring command = L"\"" + std::wstring(argv[1]) + L"\"";
+  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                      CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child))
+    return 3;
+  struct Cleanup {
+    PROCESS_INFORMATION &child;
+    ~Cleanup() {
+      TerminateProcess(child.hProcess, 0);
+      WaitForSingleObject(child.hProcess, 5000);
+      CloseHandle(child.hThread);
+      CloseHandle(child.hProcess);
+    }
+  } cleanup{child};
+  ScopedKernelHandle file(CreateFileW(argv[1], GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  const auto initial = WindowsTargetKernelImageInfo(child.hProcess);
+  if constexpr (!kExpectedIlOnlyImageAnchor) {
+    Check(!initial.has_value(), "disabled_il_only_stays_unresolvable");
+  } else {
+    const auto check_hold = [&](const char *phase, bool running) {
+      DWORD exit_code = 0;
+      const bool exit_read = GetExitCodeProcess(child.hProcess, &exit_code) != FALSE;
+      std::cout << "phase=" << phase << " exit_code_read=" << exit_read
+                << " exit_code=" << exit_code << "\n";
+      Check(exit_read && exit_code == STILL_ACTIVE, "il_only_child_still_active");
+      std::wstring recorded;
+      WindowsTargetHeldImage held;
+      const bool path_read = ReadProcessPath(child.hProcess, &recorded);
+      const bool hold_read = path_read && HoldWindowsTargetRunningImage(child.hProcess, recorded, &held);
+      std::cout << "phase=" << phase << " path_read=" << path_read
+                << " hold_read=" << hold_read << " held_matches=" << held.matches << "\n";
+      Check(hold_read, "il_only_hold_read");
+      Check(running ? held.matches : !held.matches,
+            running ? "resumed_il_only_hold_matches" : "suspended_il_only_hold_refuses_module_list");
+      Check(held.unchanged, "hold_image_unchanged");
+      const auto kernel = WindowsTargetKernelImageInfo(child.hProcess);
+      Check(kernel.has_value(), "hold_kernel_available");
+      if (kernel)
+        Check(!WindowsHeldImageDisagreesWithKernel(file.value, *kernel), "hold_kernel_header_matches");
+      const auto module = WindowsTargetModuleListImageName(child.hProcess);
+      const DWORD module_error = GetLastError();
+      std::cout << "phase=" << phase << " kernel_available=" << kernel.has_value()
+                << " module_available=" << module.has_value()
+                << " module_error_hint=" << module_error << "\n";
+      Check(running ? module.has_value() : !module.has_value(), "hold_module_availability_by_phase");
+      if (kernel && module)
+        Check(SameWindowsTargetName(kernel->mapped_name, *module), "hold_module_matches");
+    };
+    check_hold("suspended", false);
+    Check(ResumeThread(child.hThread) != static_cast<DWORD>(-1), "il_only_resumed");
+    // Match the independent experiment's CLR startup interval and observe premature exit.
+    const DWORD resumed_wait = WaitForSingleObject(child.hProcess, 1500);
+    std::cout << "phase=resumed initial_wait=" << resumed_wait << "\n";
+    Check(resumed_wait == WAIT_TIMEOUT, "il_only_alive_after_clr_startup_wait");
+    check_hold("resumed", true);
+    Check(initial.has_value(), "enabled_il_only_finds_main_mapping");
+    if (initial.has_value()) {
+      std::vector<std::uint8_t> bytes(64 * 1024);
+      DWORD read = 0;
+      OVERLAPPED at{};
+      Check(ReadFile(file.value, bytes.data(), static_cast<DWORD>(bytes.size()), &read, &at),
+            "held_header_read_for_transfer_check");
+      bytes.resize(read);
+      const auto header = WindowsReadIlOnlyImageHeader(bytes);
+      Check(header.has_value(), "held_header_parsed_for_transfer_check");
+      if (header) {
+        const auto transfer = header->image_base + header->entry_rva;
+        Check(WindowsTargetIlOnlyImageMapping(child.hProcess,
+                  reinterpret_cast<LPVOID>(transfer), file.value).has_value(),
+              "matching_transfer_relation_resolves");
+        Check(!WindowsTargetIlOnlyImageMapping(child.hProcess,
+                  reinterpret_cast<LPVOID>(transfer + 1), file.value).has_value(),
+              "mismatched_transfer_relation_is_unresolvable");
+      }
+      Check(!WindowsHeldImageDisagreesWithKernel(file.value, *initial),
+            "enabled_il_only_kernel_header_matches_held_file");
+      const auto held = WindowsTargetKernelImageInfo(child.hProcess, file.value);
+      Check(held.has_value() && held->entry_rva == initial->entry_rva &&
+                SameWindowsTargetName(held->mapped_name, initial->mapped_name),
+            "enabled_il_only_remeasures_with_held_file");
+      // Map the same section a second time in the child; uniqueness is by allocation, not region.
+      ScopedKernelHandle section(CreateFileMappingW(file.value, nullptr, PAGE_READONLY | SEC_IMAGE,
+                                                     0, 0, nullptr));
+      using MapFn = LONG (WINAPI *)(HANDLE, HANDLE, PVOID *, ULONG_PTR, SIZE_T,
+                                   LARGE_INTEGER *, SIZE_T *, ULONG, ULONG, ULONG);
+      using UnmapFn = LONG (WINAPI *)(HANDLE, PVOID);
+      const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+      const auto map = reinterpret_cast<MapFn>(GetProcAddress(ntdll, "NtMapViewOfSection"));
+      const auto unmap = reinterpret_cast<UnmapFn>(GetProcAddress(ntdll, "NtUnmapViewOfSection"));
+      PVOID duplicate = nullptr;
+      SIZE_T size = 0;
+      const bool mapped = section.value != nullptr && map != nullptr && unmap != nullptr &&
+          map(section.value, child.hProcess, &duplicate, 0, 0, nullptr, &size, 2, 0,
+              PAGE_READONLY) >= 0;
+      Check(mapped, "second_same_name_mapping_created");
+      if (mapped) {
+        Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+              "second_same_name_mapping_is_unresolvable");
+        Check(unmap(child.hProcess, duplicate) >= 0, "second_mapping_removed");
+      }
+      Check(WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+            "single_mapping_recovers_after_unmap");
+      // Locate the known mapping through the same kernel-name comparison, never through the PEB.
+      std::uintptr_t cursor = 0;
+      PVOID base = nullptr;
+      for (unsigned count = 0; count < 65536; ++count) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQueryEx(child.hProcess, reinterpret_cast<PVOID>(cursor), &region,
+                           sizeof(region)) != sizeof(region)) break;
+        if (region.Type == MEM_IMAGE) {
+          const auto name = WindowsTargetMappedFileName(child.hProcess, region.AllocationBase);
+          if (name.has_value() && SameWindowsTargetName(*name, initial->mapped_name)) {
+            base = region.AllocationBase;
+            break;
+          }
+        }
+        const auto next = reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize;
+        if (next <= cursor) break;
+        cursor = next;
+      }
+      Check(base != nullptr, "main_mapping_available_for_header_mutation");
+      if (base != nullptr) {
+        IMAGE_DOS_HEADER dos{};
+        SIZE_T read = 0;
+        Check(ReadProcessMemory(child.hProcess, base, &dos, sizeof(dos), &read) &&
+                  read == sizeof(dos), "mapped_dos_header_read");
+        const auto pe = reinterpret_cast<std::uintptr_t>(base) + dos.e_lfanew;
+        // magic, machine, entry RVA, SizeOfImage, TimeDateStamp and CheckSum independently.
+        const std::size_t offsets[] = {24, 4, 24 + 16, 24 + 56, 8, 24 + 64};
+        for (const auto offset : offsets) {
+          auto address = reinterpret_cast<PVOID>(pe + offset);
+          BYTE original = 0;
+          DWORD protection = 0;
+          const bool writable = ReadProcessMemory(child.hProcess, address, &original, 1, &read) &&
+              read == 1 && VirtualProtectEx(child.hProcess, address, 1, PAGE_READWRITE, &protection);
+          Check(writable, "header_field_writable");
+          if (!writable) continue;
+          const BYTE changed = original ^ 1;
+          SIZE_T written = 0;
+          Check(WriteProcessMemory(child.hProcess, address, &changed, 1, &written) && written == 1,
+                "header_field_changed");
+          Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+                "mismatched_mapped_header_is_unresolvable");
+          Check(WriteProcessMemory(child.hProcess, address, &original, 1, &written) && written == 1,
+                "header_field_restored");
+          DWORD ignored = 0;
+          Check(VirtualProtectEx(child.hProcess, address, 1, protection, &ignored),
+                "header_protection_restored");
+          Check(WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+                "matching_header_recovers");
+        }
+        DWORD protection = 0;
+        Check(VirtualProtectEx(child.hProcess, base, 4096, PAGE_NOACCESS, &protection),
+              "header_made_unreadable");
+        Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+              "unreadable_header_is_unresolvable");
+        DWORD ignored = 0;
+        Check(VirtualProtectEx(child.hProcess, base, 4096, protection, &ignored),
+              "readable_header_restored");
+        Check(unmap != nullptr && unmap(child.hProcess, base) >= 0, "main_mapping_removed");
+        Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+              "zero_matching_mappings_is_unresolvable");
+      }
+    }
+  }
+  std::cout << (failures == 0 ? "OK\n" : "FAILED\n");
+  return failures == 0 ? 0 : 1;
+}
+`;
 
 const storeNotepadUnitSource = [
   includes,
@@ -1363,6 +1685,96 @@ int main() {
 const build = findBuild();
 const ci = process.env['CI'] !== undefined;
 const onWindows = process.platform === 'win32';
+const csc = 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe';
+
+describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
+  'IL-only anchor live',
+  () => {
+    it('checks disabled and enabled builds for anycpu, x64 and anycpu32bitpreferred', async () => {
+      expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-il-anchor-'));
+      try {
+        const managedSource = join(scratch, 'wait.cs');
+        writeFileSync(
+          managedSource,
+          'class Wait { static void Main() { System.Threading.Thread.Sleep(60000); } }',
+        );
+        const seam = join(scratch, 'anchor.cc');
+        for (const variant of [
+          { name: 'disabled', acceptance: 1, flag: false, enabled: false },
+          { name: 'enabled', acceptance: 1, flag: true, enabled: true },
+          { name: 'acceptance-zero', acceptance: 0, flag: true, enabled: false },
+          { name: 'acceptance-absent', acceptance: undefined, flag: true, enabled: false },
+        ]) {
+          writeFileSync(
+            seam,
+            `${ilAnchorSeamPrefix}\nconstexpr bool kExpectedIlOnlyImageAnchor = ${variant.enabled};\n${ilAnchorProgram}`,
+          );
+          const binary = join(scratch, `anchor-${variant.name}.exe`);
+          const command = build!.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/permissive-',
+            '/utf-8',
+            '/DUNICODE',
+            '/D_UNICODE',
+            '/DNOMINMAX',
+            '/DWIN32_LEAN_AND_MEAN',
+            '/D_WIN32_WINNT=0x0A00',
+            ...(variant.acceptance === undefined
+              ? []
+              : [`/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=${variant.acceptance}`]),
+            ...(variant.flag ? ['/DSPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR=1'] : []),
+            `/I${nativeDirectory}`,
+            seam,
+            `/Fe:${binary}`,
+            `/Fo:${binary}.obj`,
+            '/link',
+            '/DEBUG:NONE',
+            'advapi32.lib',
+            'crypt32.lib',
+            'ole32.lib',
+            'shell32.lib',
+            'user32.lib',
+            'windowsapp.lib',
+            'wintrust.lib',
+          ]);
+          await promisify(execFile)(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 120_000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+          for (const platform of ['anycpu', 'x64', 'anycpu32bitpreferred']) {
+            const executable = join(scratch, `${platform}.exe`);
+            await promisify(execFile)(csc, [
+              '/nologo',
+              '/target:winexe',
+              `/platform:${platform}`,
+              `/out:${executable}`,
+              managedSource,
+            ]);
+            const result = await promisify(execFile)(binary, [executable], {
+              encoding: 'utf8',
+              timeout: 30_000,
+            }).catch((error: unknown) => {
+              if (error instanceof Error && 'stdout' in error)
+                throw new Error(`${variant.name}/${platform}: ${String(error.stdout)}`, {
+                  cause: error,
+                });
+              throw error;
+            });
+            expect(result.stdout, `${platform}, variant=${variant.name}`).toContain('OK');
+          }
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+      }
+    }, 600_000);
+  },
+);
 
 describe('Windows target facts seam source', () => {
   it('cuts the facts block, and only the v2 targets block calls it or the core', () => {
