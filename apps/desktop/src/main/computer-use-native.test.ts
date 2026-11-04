@@ -133,8 +133,9 @@ it('keeps Store Notepad not-web binding acceptance-test-only and bound at start 
     join(__dirname, '../../computer-use-native/computer_use_windows_target_facts.h'),
     'utf8',
   );
-  expect(facts).toContain(
-    'inline constexpr bool kWindowsStoreNotepadNotWeb = kNativeEligibilityWindowsV2Final;',
+  expect(facts).toContain('inline constexpr bool kWindowsStoreNotepadNotWebReady = false;');
+  expect(facts).toMatch(
+    /inline constexpr bool kWindowsStoreNotepadNotWeb =\s*kNativeEligibilityWindowsV2Final && kWindowsStoreNotepadNotWebReady;/u,
   );
   expect(facts).toContain('#if defined(SPRINT_CODER_TEST_WINDOWS_STORE_NOTEPAD_NOT_WEB)');
   expect(facts).toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1');
@@ -180,8 +181,9 @@ it('keeps the IL-only image anchor disabled until P5', () => {
     'utf8',
   );
   expect(source).toMatch(
-    /inline constexpr bool kWindowsIlOnlyImageAnchor =\s*sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;/u,
+    /inline constexpr bool kWindowsIlOnlyImageAnchor =\s*sprint_coder::computer_use::kNativeEligibilityWindowsV2Final &&\s*kWindowsIlOnlyImageAnchorReady;/u,
   );
+  expect(source).toContain('inline constexpr bool kWindowsIlOnlyImageAnchorReady = false;');
   expect(source).toContain(
     '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
   );
@@ -258,7 +260,7 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   const guarded = facts.slice(
     facts.indexOf('#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)'),
     facts.indexOf(
-      'inline constexpr bool kWindowsExplorerException = kNativeEligibilityWindowsV2Final;',
+      'inline constexpr bool kWindowsExplorerException =\n    kNativeEligibilityWindowsV2Final',
     ),
   );
   expect(guarded.indexOf('#error')).toBeLessThan(
@@ -274,8 +276,9 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   expect(facts).toContain('defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)');
   expect(facts).toContain('defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)');
   expect(facts).toMatch(/#error[^\n]*Explorer/u);
-  expect(facts).toContain(
-    'inline constexpr bool kWindowsExplorerException = kNativeEligibilityWindowsV2Final;',
+  expect(facts).toContain('inline constexpr bool kWindowsExplorerPreSendHookReady = false;');
+  expect(facts).toMatch(
+    /inline constexpr bool kWindowsExplorerException =\s*kNativeEligibilityWindowsV2Final && kWindowsExplorerPreSendHookReady;/u,
   );
   const controller = readFileSync(join(__dirname, 'computer-use-controller.ts'), 'utf8');
   expect(controller).toContain('const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;');

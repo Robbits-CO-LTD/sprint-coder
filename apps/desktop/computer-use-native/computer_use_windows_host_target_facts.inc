@@ -601,12 +601,15 @@ struct WindowsTargetKernelImage {
 #if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && (defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE))
 #error IL-only image anchor test switch must not be used in production builds
 #endif
+// The final declaration alone does not enable the IL-only anchor.
+inline constexpr bool kWindowsIlOnlyImageAnchorReady = false;
 #if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1
 inline constexpr bool kWindowsIlOnlyImageAnchor =
     true || sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;
 #else
 inline constexpr bool kWindowsIlOnlyImageAnchor =
-    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;
+    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final &&
+    kWindowsIlOnlyImageAnchorReady;
 #endif
 
 struct WindowsIlOnlyImageHeader {
