@@ -37,3 +37,40 @@ describe('Windows page origin metadata (N11-B)', () => {
     );
   });
 });
+
+describe('Windows page recheck (N11-C)', () => {
+  it('binds the observation to tickets and approval remeasurement without extending the wire', () => {
+    const input = native('computer_use_windows_host_input.inc');
+    const preflight = native('computer_use_windows_host_preflight.inc');
+    const observe = native('computer_use_windows_host_pipe.inc');
+    expect(input).toContain('WindowsPageBinding(session.observed_page)');
+    expect(input).toContain('if (!RecheckWindowsPage(session))');
+    expect(preflight).toContain('input.identity.window_identity.value += ":" + WindowsPageBinding');
+    expect(preflight.match(/if \(!RecheckWindowsPage\(session\)\)/gu)).toHaveLength(2);
+    expect(preflight).toContain('InvalidateWindowsPage(session)');
+    const common = native('computer_use_windows_host_common.inc');
+    expect(common).toContain('approval->second.Invalidate()');
+    expect(common).toContain('InvalidateWindowsTicket(key)');
+    expect(observe).toContain('WindowsPageAllowsInput(session.observed_page, current_page)');
+    expect(observe).toContain('std::swap(session.observed_page, observed_page)');
+  });
+
+  it('covers page changes, card return, confirmation changes and unreadable origins in native components', () => {
+    const harness = native('computer_use_protocol_fuzz.cc');
+    for (const name of [
+      'tab_switch_invalidates_pending_action',
+      'same_origin_other_tab_rejects_old_approval',
+      'approval_return_rechecks_sensitive_surface',
+      'confirmation_change_invalidates_approval',
+      'unreadable_origin_never_reuses_previous_origin',
+      'same_origin_navigation_invalidates_page',
+      'native-window-page-check-is-neutral',
+    ])
+      expect(harness).toContain(name);
+    expect(harness).toContain('if (!CheckWindowsPageRecheck()) return 1;');
+    const reader = native('computer_use_windows_shadow_reader.h');
+    expect(reader).toContain('PageDocumentStillCurrent(root, document)');
+    expect(reader).toContain('const bool within = OriginWithinBudget()');
+    expect(native('computer_use_origin_classify.h')).toContain('kOriginClassificationVersion = 1');
+  });
+});

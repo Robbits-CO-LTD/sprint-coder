@@ -116,6 +116,13 @@ const explorerSessionMember =
   )?.[0];
 if (!explorerSessionMember) throw new Error('Explorer seam session member changed');
 
+// Compile the real page eligibility prefix, before any UIA measurement.
+const pageFrom = host.indexOf(
+  'sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity) {',
+);
+const pageTo = host.indexOf('  const auto epoch = session.cancel_epoch;', pageFrom);
+const pagePrefix = host.slice(pageFrom, pageTo) + '  return unavailable;\n}';
+
 const program = String.raw`
 #include <cstdint>
 #include <iostream>
@@ -127,6 +134,9 @@ const program = String.raw`
 
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_approval_round_trip.h"
+#include "computer_use_windows_page.h"
+#include "computer_use_windows_artifact_read.h"
+#include <cwchar>
 
 namespace sprint_coder::computer_use { constexpr bool kWindowsExplorerException = false; }
 
@@ -137,10 +147,17 @@ using sprint_coder::computer_use::InterlockNoVerdict;
 using sprint_coder::computer_use::InterlockOutcome;
 using sprint_coder::computer_use::InterlockReason;
 
+using HWND = int;
 struct RECT { long left = 0; long top = 0; long right = 0; long bottom = 0; };
 struct WindowsExplorerDispatchEvidence;
 struct WindowsSession {
   ${explorerSessionMember}
+  sprint_coder::computer_use::WindowsPageEvidence observed_page;
+  mutable bool page_observation_invalidated = false;
+  HWND active_window = 1;
+  std::string active_window_identity = "window-1";
+  std::wstring canonical_path = L"C:\\Apps\\slack.exe";
+  std::string maximum_mode = "full_access_app";
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::uint64_t cancel_epoch = 0;
   std::uint32_t pid = 4242;
@@ -164,6 +181,16 @@ bool WindowsRoundTripMayInput(const WindowsSession &session) { return !session.r
 std::vector<std::string> g_calls;
 std::string g_kind = "click";
 bool g_binding_ok = true;
+std::wstring g_class = L"Chrome_WidgetWin_1";
+int GetClassNameW(HWND, wchar_t *out, int) { std::wcscpy(out, g_class.c_str()); return static_cast<int>(g_class.size()); }
+std::string Utf8FromWide(const std::wstring &value) { return std::string(value.begin(), value.end()); }
+${pagePrefix}
+bool g_page_ok = true;
+bool RecheckWindowsPage(const WindowsSession &session) {
+  g_calls.push_back("page");
+  const auto current = ReadWindowsPage(session, session.active_window, session.active_window_identity);
+  return g_page_ok && sprint_coder::computer_use::WindowsPageAllowsInput(session.observed_page, current);
+}
 bool g_semantic_in_flight = false;
 bool WindowsSemanticInputInFlight() { return g_semantic_in_flight; }
 InterlockEvaluation g_answer;
@@ -236,6 +263,29 @@ int main() {
   g_semantic_in_flight = true;
   { const Outcome out = Run(); Check(!out.ran_on && !out.accepted && out.reason == "semantic_input_in_flight" && out.calls.empty(), "in_flight_refused_before_binding_cursor_or_input"); }
   g_semantic_in_flight = false;
+  {
+    const Outcome out = Run();
+    Check(out.ran_on && out.calls == std::vector<std::string>({"validate", "page", "interlock:click", "v1-guards"}),
+          "electron_window_reaches_existing_interlock");
+    WindowsSession session;
+    session.observed_page.web = true;
+    Check(ReadWindowsPage(session, 1, "window-1").web, "same_window_preserves_web_on_read_gap");
+    Check(!ReadWindowsPage(session, 2, "window-2").web, "other_window_does_not_inherit_web");
+    Check(!ReadWindowsPage(session, 1, "reused-window").web, "other_identity_does_not_inherit_web");
+    session.observed_page.web = false;
+    g_class.clear();
+    Check(!ReadWindowsPage(session, 1, "window-1").web, "unreadable_class_is_not_a_page");
+    g_class = L"Chrome_WidgetWin_1";
+    session.canonical_path = L"C:\\Apps\\chrome.exe";
+    Check(ReadWindowsPage(session, 1, "window-1").web, "chrome_page_is_bound");
+    session.canonical_path = L"C:\\Apps\\msedge.exe";
+    session.maximum_mode = "observe_only";
+    Check(ReadWindowsPage(session, 1, "window-1").web, "capped_browser_stays_closed");
+  }
+  g_page_ok = false;
+  { const Outcome out = Run(); Check(!out.ran_on && !out.accepted && out.reason == "native_target_unclassified" &&
+      out.calls == std::vector<std::string>({"validate", "page"}), "page_refusal_skips_interlock_and_input"); }
+  g_page_ok = true;
   struct Row { InterlockOutcome outcome; InterlockReason reason; const char *code; };
   const Row rows[] = {
       {InterlockOutcome::kBlocked, InterlockReason::kShellSurface, "shell_surface_blocked"},
@@ -250,14 +300,14 @@ int main() {
     const Outcome outcome = Run();
     Check(!outcome.ran_on && !outcome.accepted && outcome.reason == row.code, "refusal_code_and_not_accepted");
     // The binding first, the interlocks second, and nothing after a refusal (no V1 guards, no input).
-    Check(outcome.calls == std::vector<std::string>({"validate", "interlock:click"}), "refusal_order_and_nothing_after");
+    Check(outcome.calls == std::vector<std::string>({"validate", "page", "interlock:click"}), "refusal_order_and_nothing_after");
   }
   for (const InterlockNoVerdict none : {InterlockNoVerdict::kBudget, InterlockNoVerdict::kIncomplete, InterlockNoVerdict::kCanceled}) {
     g_answer = InterlockEvaluation{};
     g_answer.no_verdict = none;
     const Outcome outcome = Run();
     Check(outcome.ran_on && outcome.reason.empty(), "no_verdict_goes_on_to_v1");
-    Check(outcome.calls == std::vector<std::string>({"validate", "interlock:click", "v1-guards"}), "no_verdict_order");
+    Check(outcome.calls == std::vector<std::string>({"validate", "page", "interlock:click", "v1-guards"}), "no_verdict_order");
   }
   // The focus recheck, for a key or a text, after the interlocks and before any input: the signature
   // is the observed one (go on), another one (stop, no input), or unreadable (stop).
@@ -269,7 +319,7 @@ int main() {
     g_focus_changes_during_interlock = false;
     {
       const Outcome outcome = Run();
-      Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", std::string("interlock:") + kind, "focus", "v1-guards"}),
+      Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", "page", std::string("interlock:") + kind, "focus", "v1-guards"}),
             "focus_unchanged_goes_on");
     }
     g_focus_changes_during_interlock = true;
@@ -277,7 +327,7 @@ int main() {
     {
       const Outcome outcome = Run();
       Check(!outcome.ran_on && !outcome.accepted && outcome.reason == "focused_target_changed" &&
-                outcome.calls == std::vector<std::string>({"validate", std::string("interlock:") + kind, "focus"}),
+                outcome.calls == std::vector<std::string>({"validate", "page", std::string("interlock:") + kind, "focus"}),
             "focus_moved_during_the_interlocks_sends_nothing");
     }
     g_focus_changes_during_interlock = false;
@@ -293,7 +343,7 @@ int main() {
   g_focus_changes_during_interlock = true;
   {
     const Outcome outcome = Run();
-    Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", "interlock:click", "v1-guards"}),
+    Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", "page", "interlock:click", "v1-guards"}),
           "click_does_not_recheck_the_focus");
   }
   g_focus_changes_during_interlock = false;
@@ -318,12 +368,12 @@ int main() {
   {
     const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 0);
     Check(!out.ran_on && !out.accepted && out.reason == "native_approval_unavailable" &&
-              out.calls == std::vector<std::string>({"validate"}),
+              out.calls == std::vector<std::string>({"validate", "page"}),
           "approved_without_claim_refused_after_binding_only");
   }
   {
     const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 7);
-    Check(out.ran_on && out.calls == std::vector<std::string>({"validate", "v1-guards"}),
+    Check(out.ran_on && out.calls == std::vector<std::string>({"validate", "page", "v1-guards"}),
           "approved_claim_skips_the_ordinary_interlock");
   }
   std::cout << (g_failures == 0 ? "OK\n" : "FAILED\n");

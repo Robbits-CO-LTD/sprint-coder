@@ -20,6 +20,7 @@
 
 #include "computer_use_windows_shadow.h"
 #include "computer_use_origin_classify.h"
+#include "computer_use_windows_page.h"
 
 #include <cstddef>
 #include <array>
@@ -150,6 +151,48 @@ public:
   // S5-c-3 PR-5: also read who provides each element of the chain (its process and framework).
   // Only a v2 session's interlock asks for it; every other capture makes the calls it made before.
   void ReadChainIdentity(bool read) { read_chain_identity_ = read; }
+
+  // A page read is independent of focus and of the action target. Only a unique top-level
+  // Document of the bound window qualifies; page content is not traversed.
+  [[nodiscard]] WindowsPageEvidence ReadPage() {
+    WindowsPageEvidence page;
+    BeginOrigin();
+    Element root = 0;
+    bool failed = false;
+    ShadowUiaCapture window;
+    if (ShadowSettle(Root(&root), &failed)) CaptureWindow(true, root, &window);
+    page.web = window.window_class_read && window.process_path_read &&
+        window.window_class == "Chrome_WidgetWin_1" &&
+        windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(window.process_path)) == "chrome.exe";
+    if (page.web && window.process_path_read && window.window_class == "Chrome_WidgetWin_1" &&
+        windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(window.process_path)) == "chrome.exe") {
+      int count = 0;
+      Element document = 0;
+      std::string url, identity, repeated_url, repeated_identity;
+      if (ScanPageDocuments(root, 0, &count, &document) && count == 1 &&
+          ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &url), &failed) &&
+          ShadowSettle(ControlSignature(document, &identity), &failed) &&
+          ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &repeated_url), &failed) &&
+          ShadowSettle(ControlSignature(document, &repeated_identity), &failed) &&
+          !url.empty() && !identity.empty() && url == repeated_url && identity == repeated_identity &&
+          PageDocumentStillCurrent(root, document)) {
+        const auto classified = ClassifyPageOrigin(url);
+        page.origin = classified.state;
+        page.normalized_origin = classified.normalized_origin;
+        page.document_identity = std::move(identity);
+        page.location_digest = Sha256Hex(url);
+        page.complete = !page.normalized_origin.empty();
+      }
+    }
+    const bool within = OriginWithinBudget();
+    EndOrigin();
+    if (!within || failed || window.read_failed || gate_.Stopped()) {
+      const bool web = page.web;
+      page = {};
+      page.web = web;
+    }
+    return page;
+  }
 
   // The action was canceled (or stopped being valid) during the capture: the caller records a
   // skipped capture rather than a classification.
@@ -465,6 +508,40 @@ private:
       child = next;
     }
     return step == ShadowReadResult::kAbsent && !origin_stopped_;
+  }
+
+  bool ScanPageDocuments(Element element, std::size_t depth, int *count, Element *document) {
+    using namespace windows_shadow_reader_detail;
+    if (depth > kSearchMaxDepth || origin_stopped_) return false;
+    bool failed = false;
+    std::string type;
+    if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
+                      &failed) || type.empty()) return false;
+    if (type == "Document") {
+      *document = element;
+      return ++*count == 1;
+    }
+    Element child = 0;
+    auto step = FirstChild(element, &child);
+    while (step == ShadowReadResult::kOk) {
+      Element parent = 0;
+      bool same = false;
+      if (!ShadowSettle(Parent(child, &parent), &failed) ||
+          !ShadowSettle(Same(parent, element, &same), &failed) || !same ||
+          !ScanPageDocuments(child, depth + 1, count, document)) return false;
+      Element next = 0;
+      step = NextSibling(child, &next);
+      child = next;
+    }
+    return step == ShadowReadResult::kAbsent && !origin_stopped_;
+  }
+
+  bool PageDocumentStillCurrent(Element root, Element expected) {
+    int count = 0;
+    Element current = 0;
+    bool same = false, failed = false;
+    return ScanPageDocuments(root, 0, &count, &current) && count == 1 &&
+        ShadowSettle(Same(current, expected, &same), &failed) && same;
   }
 
   // Separate from the legacy URL/surface path: this state grants nothing. A Chrome class alone

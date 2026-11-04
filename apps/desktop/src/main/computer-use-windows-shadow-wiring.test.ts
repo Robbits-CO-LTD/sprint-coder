@@ -42,6 +42,11 @@ const approvalMeasurement = between(
   'sprint_coder::computer_use::WindowsApprovalSample MeasureWindowsApprovalOnLane(',
   'sprint_coder::computer_use::WindowsApprovalEnvironment WindowsApprovalEnvironmentFor(',
 );
+const pageMeasurement = between(
+  host,
+  'sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity) {',
+  'bool RecheckWindowsPage(const WindowsSession &session) {',
+);
 
 describe('Windows shadow scheduler decides nothing and reads nothing itself', () => {
   it('is portable: no platform header, no thread of its own, no ring of its own', () => {
@@ -172,7 +177,9 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
   it('includes the scheduler and the source, and uses the reader only through the scheduler', () => {
     expect(host).toContain('#include "computer_use_windows_uia_source.h"');
     expect(host).toContain('#include "computer_use_windows_shadow_scheduler.h"');
-    const text = code(host.replace(approvalMeasurement, ''));
+    const text = code(host.replace(approvalMeasurement, '').replace(pageMeasurement, ''));
+    expect(pageMeasurement).toContain('RunWindowsOpenMeasurement<WindowsPageEvidence>');
+    expect(pageMeasurement).toContain('reader.ReadPage()');
     for (const name of [
       'WindowsShadowReader',
       'WindowsShadowClassify',
@@ -324,7 +331,8 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     // replay, a failed binding, the gated approval refusal (#991 N8-2c), the two spellings of an
     // interlock refusal, the V1 answer, plus P2c's background binding refusal. The added call
     // rejects a stale background target before V1/shadow; it does not rewrite the V1 answer.
-    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(7);
+    // N11-C adds a page recheck refusal, using the existing takeover receipt.
+    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(8);
     expect(text).toMatch(
       /if \(!ValidateWindowsBackgroundActionBindingWithinFrame\(session, metadata\)\) \{\s*return Respond\(pipe, request, MessageType::kPreflightResult,\s*WindowsPreflightReceipt\(session, request_id, cancel_epoch, observation_revision,\s*"denied", "native_stale_target", ""\)\);\s*\}\s*if \(!ValidateWindowsDispatchBinding\(/u,
     );

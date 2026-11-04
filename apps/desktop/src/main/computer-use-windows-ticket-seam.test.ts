@@ -174,6 +174,7 @@ const preamble = String.raw`
 #include "computer_use_windows_approval_round_trip.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
+#include "computer_use_windows_page.h"
 #include "computer_use_preflight_classifier.h"
 #define SPRINT_CODER_ELIGIBILITY_V2 1
 #define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION 2
@@ -272,6 +273,8 @@ std::string Sha256String(std::string_view message) {
 // The parts of a Windows session that the ticket code reads (same member names as the helper).
 struct WindowsExplorerDispatchEvidence;
 struct WindowsSession {
+  sprint_coder::computer_use::WindowsPageEvidence observed_page;
+  mutable bool page_observation_invalidated = false;
   ${explorerSessionMember}
   std::shared_ptr<sprint_coder::computer_use::WindowsApprovalRoundTrip> round_trip;
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
@@ -872,6 +875,7 @@ InterlockEvaluation WindowsInterlockRefusal(const WindowsSession &, const std::s
 // (kWindowsApprovalHandlersEnabled = false), so the ordinary preflight below never leaves it; the
 // stand-ins fail closed if it ever did.
 bool WindowsApprovalGate(const WindowsSession &) { return false; }
+bool RecheckWindowsPage(const WindowsSession &session) { return !session.observed_page.web; }
 bool ReadWindowsApprovalReference(const WindowsSession &, const std::string &, std::uint64_t,
                                   sprint_coder::computer_use::WindowsApprovalReference *, bool) {
   return false;

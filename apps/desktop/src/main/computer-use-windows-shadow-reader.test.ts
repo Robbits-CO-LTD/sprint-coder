@@ -46,6 +46,7 @@ describe('Windows shadow reader is portable and decides nothing', () => {
   it('has no platform header, clock, thread, I/O or approval vocabulary', () => {
     const allowedIncludes = new Set([
       '"computer_use_origin_classify.h"',
+      '"computer_use_windows_page.h"',
       '"computer_use_windows_shadow.h"',
       '<cstddef>',
       '<array>',
@@ -1289,6 +1290,14 @@ describe('Windows UI Automation source only reads', () => {
     expect(approval).toContain('reader.ReadTargetFrame(');
     expect(approval).toContain('MeasureWindowsApprovalSample(');
     expect(approval).not.toMatch(/SendInput\(|SetCursorPos\(|InvokeWindowsSemanticInput\(/u);
+    const page = between(
+      host,
+      'sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSession &session, HWND window, const std::string &window_identity) {',
+      'bool RecheckWindowsPage(const WindowsSession &session) {',
+    );
+    expect(page).toContain('RunWindowsOpenMeasurement<WindowsPageEvidence>');
+    expect(page).toContain('reader.ReadPage()');
+    expect(page).not.toMatch(/SendInput\(|SetCursorPos\(|InvokeWindowsSemanticInput\(/u);
     // Outside this measured entry the scheduler still owns the reader, classifier and gate.
     for (const name of [
       'WindowsShadowReader',
@@ -1296,7 +1305,7 @@ describe('Windows UI Automation source only reads', () => {
       'BuildWindowsShadowFacts',
       'ShadowGate',
     ])
-      expect(code(host.replace(approval, '')), name).not.toContain(name);
+      expect(code(host.replace(approval, '').replace(page, '')), name).not.toContain(name);
     // The version stays where the V1 preflight puts it, and the win32 v2 refusal is untouched.
     expect(host).toContain('kNativePreflightClassifierVersion');
     expect(host).not.toMatch(
