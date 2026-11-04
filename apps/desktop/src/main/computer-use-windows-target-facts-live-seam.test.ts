@@ -1856,6 +1856,146 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Explorer exception native preparation',
   () => {
+    it('rejects measurement on the native transport with gate off or stale binding', async () => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-wire-'));
+      try {
+        writeFileSync(join(scratch, 'explorer-host.cc'), host);
+        const provenance = join(scratch, 'provenance.h');
+        writeFileSync(
+          provenance,
+          '#define SPRINT_CODER_SOURCE_COMMIT "0000000000000000000000000000000000000000"\n',
+        );
+        for (const gate of [false, true]) {
+          const binary = join(scratch, `transport-${gate}.exe`);
+          const command = build!.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/W4',
+            '/utf-8',
+            '/DNOMINMAX',
+            '/DUNICODE',
+            '/D_UNICODE',
+            '/DWIN32_LEAN_AND_MEAN',
+            '/D_WIN32_WINNT=0x0A00',
+            '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+            ...(gate ? ['/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION'] : []),
+            `/FI${provenance}`,
+            `/I${nativeDirectory}`,
+            `/I${scratch}`,
+            join(nativeDirectory, 'computer_use_windows_explorer_transport_test.cc'),
+            `/Fo:${binary}.obj`,
+            `/Fe:${binary}`,
+            '/link',
+            'ole32.lib',
+            'oleaut32.lib',
+            'uiautomationcore.lib',
+            'user32.lib',
+            'dwmapi.lib',
+            'd3d11.lib',
+            'dxgi.lib',
+            'windowscodecs.lib',
+            'bcrypt.lib',
+            'advapi32.lib',
+            'userenv.lib',
+            'crypt32.lib',
+            'wintrust.lib',
+            'shell32.lib',
+            'runtimeobject.lib',
+            'windowsapp.lib',
+            'uuid.lib',
+          ]);
+          await promisify(execFile)(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 120_000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+          const result = await promisify(execFile)(binary, [], {
+            encoding: 'utf8',
+            timeout: 15_000,
+          });
+          expect(result.stdout).toContain('OK Explorer transport');
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 300_000);
+    it('measures live Explorer views and refuses foreign-process child windows', async (context) => {
+      expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-view-'));
+      let cleanupConfirmed = true;
+      try {
+        const source = readFileSync(
+          join(nativeDirectory, 'computer_use_windows_host_explorer.inc'),
+          'utf8',
+        );
+        writeFileSync(
+          join(scratch, 'explorer-measurement.inc'),
+          source.slice(0, source.indexOf('// CoCancelCall')),
+        );
+        const binary = join(scratch, 'explorer-view-test.exe');
+        const command = build!.wrap([
+          '/nologo',
+          '/std:c++20',
+          '/EHsc',
+          '/W4',
+          '/utf-8',
+          '/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION',
+          '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+          '/DUNICODE',
+          '/D_UNICODE',
+          '/DNOMINMAX',
+          '/D_WIN32_WINNT=0x0A00',
+          `/I${nativeDirectory}`,
+          `/I${scratch}`,
+          join(nativeDirectory, 'computer_use_windows_explorer_live_test.cc'),
+          `/Fo:${join(scratch, 'explorer-view-test.obj')}`,
+          `/Fe:${binary}`,
+          '/link',
+          'user32.lib',
+          'ole32.lib',
+          'oleaut32.lib',
+          'shell32.lib',
+          'uuid.lib',
+        ]);
+        await promisify(execFile)(command.file, command.args, {
+          encoding: 'utf8',
+          windowsVerbatimArguments: command.verbatim,
+          timeout: 120_000,
+          env: { ...process.env, VSLANG: '1033' },
+        });
+        cleanupConfirmed = false;
+        const result = await promisify(execFile)(binary, [scratch], {
+          encoding: 'utf8',
+          timeout: 120_000,
+        }).catch((error: unknown) => {
+          if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string') {
+            console.log(error.stdout);
+            cleanupConfirmed = error.stdout.includes('OK explorer_cleanup');
+          }
+          throw error;
+        });
+        cleanupConfirmed = result.stdout.includes('OK explorer_cleanup');
+        console.log(result.stdout);
+        expect(result.stdout).not.toContain('FAIL ');
+        if (result.stdout.includes('NOT_RUN explorer_tab_shared')) {
+          context.skip('NOT_RUN explorer_tab_shared: existing tabs are left open');
+        }
+        if (result.stdout.includes('NOT_RUN explorer_target_preexisting')) {
+          context.skip('NOT_RUN explorer_target_preexisting: existing namespace is left open');
+        }
+        expect(cleanupConfirmed).toBe(true);
+        expect(result.stdout).toContain('OK Explorer view and foreign child');
+      } finally {
+        if (cleanupConfirmed) {
+          rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+        } else {
+          console.warn('NOT_RUN explorer_cleanup_unconfirmed: scratch retained');
+        }
+      }
+    }, 300_000);
     it('checks held-image facts, file-window restriction, and acceptance-only compilation', async () => {
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-'));
@@ -1961,6 +2101,33 @@ int main() {
 );
 
 describe('Windows target facts seam source', () => {
+  it('owns Explorer automation entries and never closes a shared tab window', () => {
+    const live = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_explorer_live_test.cc'),
+      'utf8',
+    );
+    expect(live).toContain('browser->get_Document(document.Receive())');
+    expect(live).toContain('view.Get()->get_Folder(folder.Receive())');
+    expect(live).toContain('folder2.Get()->get_Self(item.Receive())');
+    expect(live).toContain('item.Get()->get_Path(&path)');
+    expect(live).toContain('GetLongPathNameW');
+    expect(live).toContain('MsgWaitForMultipleObjects');
+    expect(live).not.toContain('Sleep(25)');
+    expect(live).not.toContain('entry.identity');
+    expect(live).toContain('OK explorer_cleanup');
+    expect(live).toContain('before.ContainsPath(entry.path)');
+    expect(live).toContain('entry.path == target_path');
+    expect(live).toContain('before.HasWindow(window)');
+    expect(live).toContain('NOT_RUN explorer_tab_shared');
+    expect(live).toContain('entry.browser.Get()->Quit()');
+    expect(live).toContain('entry.path != target_path || before.ContainsPath(entry.path)');
+    expect(live).toContain('quit && !now.ContainsPath(target_path)');
+    expect(live).toContain('explorer_cleanup_confirmed = false');
+    expect(live).toContain('CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)');
+    expect(live).not.toContain('WM_CLOSE');
+    expect(live).toContain('HWND parent = opened.Open(scratch)');
+    expect(live).toContain('FAIL ');
+  });
   it('cuts the facts block, and only the v2 targets block calls it or the core', () => {
     const block = cut('// BEGIN windows target facts', '// END windows target facts');
     expect(block).toContain('WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(');

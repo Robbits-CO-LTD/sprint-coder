@@ -468,6 +468,12 @@ bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
   return true;
 }
 
+bool WindowsExplorerVerifiedWindow(DWORD pid, HWND window) {
+  const auto measured = MeasureWindowsTargetFacts(pid, window, WindowsV2FactsContext());
+  return sprint_coder::computer_use::WindowsTargetIsVerifiedExplorer(measured.facts) &&
+         measured.facts.window_class == std::optional<std::string>("CabinetWClass");
+}
+
 // P3 preparation, not connected to classification until P5. A class only excludes windows of an
 // already verified Explorer; it cannot establish an executable identity or an eligibility route.
 [[nodiscard]] bool WindowsExplorerFileWindowRestriction(

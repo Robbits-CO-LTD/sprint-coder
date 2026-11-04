@@ -203,7 +203,7 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   const controller = readFileSync(join(__dirname, 'computer-use-controller.ts'), 'utf8');
   expect(controller).toContain('const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;');
   expect(controller).toMatch(
-    /export function windowsExplorerExceptionAllowed\(\s*input: WindowsExplorerExceptionInput,?\s*\): boolean \{\s*return WINDOWS_EXPLORER_EXCEPTION_ENABLED && evaluateWindowsExplorerException\(input\);\s*\}/u,
+    /export async function windowsExplorerExceptionAllowed\(\s*input: WindowsExplorerExceptionInput,?\s*\): Promise<boolean> \{\s*return WINDOWS_EXPLORER_EXCEPTION_ENABLED && \(await evaluateWindowsExplorerException\(input\)\);\s*\}/u,
   );
   expect(controller.match(/WINDOWS_EXPLORER_EXCEPTION_ENABLED/gu)).toHaveLength(2);
   expect(controller.match(/windowsExplorerExceptionAllowed\(/gu)).toHaveLength(1);

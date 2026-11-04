@@ -444,6 +444,15 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       if (!sent) return false;
       break;
     }
+    if constexpr (sprint_coder::computer_use::kWindowsExplorerException) {
+      if (operation == "measure_explorer_view") {
+        std::string response;
+        const bool measured = MeasureWindowsExplorerView(request, metadata, &response);
+        if (!Respond(pipe, request, measured ? MessageType::kProbeResult : MessageType::kError,
+                     measured ? response : ErrorPayload("explorer_view_unreadable"))) return false;
+        break;
+      }
+    }
     std::string response;
     std::string reason;
     bool succeeded = false;

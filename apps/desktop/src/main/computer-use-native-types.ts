@@ -156,6 +156,7 @@ export type ComputerUseNativeAddon = Readonly<{
    * exposes it; artifact capabilities require a ready Windows handshake and an artifactRead attest.
    */
   readNodeValue?(input: unknown): unknown;
+  measureExplorerView?(input: unknown): unknown;
   cancel?(input: unknown): unknown;
   close?(input: unknown): unknown;
 }>;

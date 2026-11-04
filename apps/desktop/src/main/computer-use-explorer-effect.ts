@@ -4,8 +4,32 @@ import { win32 } from 'node:path';
 // observed item and input point; missing or ambiguous measurements remain closed.
 export type WindowsExplorerOperation = Readonly<{
   verb: string;
+  point?: Readonly<{ x: number; y: number }>;
   item?: Readonly<{ path: string; kind: string; surface: string }>;
 }>;
+export function windowsExplorerItemInView(path: string, folder: string): boolean {
+  if (
+    !/^[a-z]:\\[^:*?"<>|]*$/iu.test(folder) ||
+    folder
+      .split('\\')
+      .slice(1)
+      .some(
+        (part, index, parts) =>
+          (!part && index !== parts.length - 1) ||
+          part === '.' ||
+          part === '..' ||
+          /[. ]$/u.test(part),
+      )
+  )
+    return false;
+  const relative = win32.relative(folder.toLowerCase(), path.toLowerCase());
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith('..\\') &&
+    !win32.isAbsolute(relative)
+  );
+}
 export function classifyWindowsExplorerOperation(
   operation: WindowsExplorerOperation,
 ): 'ordinary' | 'document_open' | 'executable_open' | 'command_surface' | 'unknown' {

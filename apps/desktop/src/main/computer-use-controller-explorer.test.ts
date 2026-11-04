@@ -175,6 +175,7 @@ const explorerScenario = async (
         maximumMode: 'full_access_app',
       },
     ],
+    measureExplorerView: () => ({ shellView: measuredFacts.shellView, pointOwnerMatches: true }),
     startSession,
     observe: () => ({}),
     preflight,
@@ -280,7 +281,8 @@ const facts = {
 } satisfies Partial<TargetFacts> & { shellView: { kind: string; path: string } };
 const operation: WindowsExplorerOperation = {
   verb: 'open',
-  item: { path: 'C:\\Folder', kind: 'folder', surface: 'file_list' },
+  point: { x: 400, y: 300 },
+  item: { path: 'C:\\Folder\\Child', kind: 'folder', surface: 'file_list' },
 };
 const inputFor = (host: ComputerUseNativeHost, sessionId: string) => ({
   host,
@@ -294,15 +296,21 @@ it('explorer_exception_requires_verified_v2_approval', async () => {
   const { host, session } = await explorerScenario();
   const input = inputFor(host, session.sessionId);
   expect(input.approval).toBeDefined();
-  expect(windowsExplorerExceptionAllowed(input)).toBe(false);
-  expect(windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
-  expect(windowsExplorerExceptionAllowedForTesting({ ...input, approval: undefined })).toBe(false);
-  expect(windowsExplorerExceptionAllowedForTesting({ ...input, sessionId: 'other' })).toBe(false);
-  expect(windowsExplorerExceptionAllowedForTesting({ ...input, host: { ...host } })).toBe(false);
+  expect(await windowsExplorerExceptionAllowed(input)).toBe(false);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+  expect(await windowsExplorerExceptionAllowedForTesting({ ...input, approval: undefined })).toBe(
+    false,
+  );
+  expect(await windowsExplorerExceptionAllowedForTesting({ ...input, sessionId: 'other' })).toBe(
+    false,
+  );
+  expect(await windowsExplorerExceptionAllowedForTesting({ ...input, host: { ...host } })).toBe(
+    false,
+  );
   for (const key of Object.keys(facts)) {
     const scenario = await withFacts({ ...facts, [key]: null });
     expect(
-      windowsExplorerExceptionAllowedForTesting(
+      await windowsExplorerExceptionAllowedForTesting(
         inputFor(scenario.host, scenario.session.sessionId),
       ),
       key,
@@ -320,7 +328,7 @@ it('explorer_exception_requires_verified_v2_approval', async () => {
   ]) {
     const scenario = await withFacts({ ...facts, ...changed });
     expect(
-      windowsExplorerExceptionAllowedForTesting(
+      await windowsExplorerExceptionAllowedForTesting(
         inputFor(scenario.host, scenario.session.sessionId),
       ),
     ).toBe(false);
@@ -336,7 +344,7 @@ it('explorer_non_file_window_stays_denied', async () => {
     null,
   ]) {
     const { host, session } = await withFacts({ ...facts, windowClass });
-    expect(windowsExplorerExceptionAllowedForTesting(inputFor(host, session.sessionId))).toBe(
+    expect(await windowsExplorerExceptionAllowedForTesting(inputFor(host, session.sessionId))).toBe(
       false,
     );
   }
@@ -347,7 +355,7 @@ it('explorer_non_file_window_stays_denied', async () => {
     { kind: 'filesystem_folder', path: '::{00000000-0000-0000-0000-000000000000}' },
   ]) {
     const { host, session } = await withFacts({ ...facts, shellView });
-    expect(windowsExplorerExceptionAllowedForTesting(inputFor(host, session.sessionId))).toBe(
+    expect(await windowsExplorerExceptionAllowedForTesting(inputFor(host, session.sessionId))).toBe(
       false,
     );
   }
@@ -389,22 +397,23 @@ it('explorer_executable_open_stays_blocked', async () => {
       };
       // A measured folder without an extension is ordinary; a file without one is unknown.
       if (!extension && kind === 'folder') continue;
-      expect(windowsExplorerExceptionAllowedForTesting({ ...input, operation }), extension).toBe(
-        false,
-      );
+      expect(
+        await windowsExplorerExceptionAllowedForTesting({ ...input, operation }),
+        extension,
+      ).toBe(false);
     }
   }
   for (const surface of ['address_bar', 'search_box']) {
     const operation = { verb: 'type', item: { path: 'C:\\Folder', kind: 'folder', surface } };
     expect(classifyWindowsExplorerOperation(operation)).toBe('command_surface');
-    expect(windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
   }
   for (const operation of [
     { verb: 'open' },
     { verb: 'unknown', item: input.operation.item! },
     { verb: 'open', item: { path: 'shell:AppsFolder', kind: 'folder', surface: 'file_list' } },
   ])
-    expect(windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
   // A real directory named as a shell junction opens as that namespace, not as a folder.
   for (const path of [
     'C:\\Folder\\x.{21EC2020-3AEA-1069-A2DD-08002B30309D}',
@@ -412,7 +421,7 @@ it('explorer_executable_open_stays_blocked', async () => {
   ]) {
     const operation = { verb: 'open', item: { path, kind: 'folder', surface: 'file_list' } };
     expect(classifyWindowsExplorerOperation(operation), path).toBe('unknown');
-    expect(windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting({ ...input, operation })).toBe(false);
   }
 });
 it.each([
@@ -489,7 +498,7 @@ it('rejects caller Explorer facts for a session bound to Target.exe', async () =
     imageLeaf: 'Target.exe',
   });
   const input = { ...inputFor(host, session.sessionId), facts, effect: 'ordinary' };
-  expect(windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
 });
 it('rejects document_open until P5', async () => {
   const { host, session } = await explorerScenario();
@@ -499,7 +508,10 @@ it('rejects document_open until P5', async () => {
   };
   expect(classifyWindowsExplorerOperation(operation)).toBe('document_open');
   expect(
-    windowsExplorerExceptionAllowedForTesting({ ...inputFor(host, session.sessionId), operation }),
+    await windowsExplorerExceptionAllowedForTesting({
+      ...inputFor(host, session.sessionId),
+      operation,
+    }),
   ).toBe(false);
 });
 it('requires every Host approval gate and rechecks issued capabilities', async () => {
@@ -539,7 +551,7 @@ it('requires every Host approval gate and rechecks issued capabilities', async (
   expect(readWindowsExplorerApproval(host, 'missing')).toBeUndefined();
   ready = false;
   expect(
-    windowsExplorerExceptionAllowedForTesting({
+    await windowsExplorerExceptionAllowedForTesting({
       host,
       sessionId: session.sessionId,
       approval,
@@ -576,7 +588,7 @@ it('revokes retained Explorer evidence when a Stop enters quarantine', async () 
   await expect(host.close(session)).rejects.toThrow();
   expect(readWindowsExplorerApproval(host, session.sessionId)).toBeUndefined();
   expect(
-    windowsExplorerExceptionAllowedForTesting({
+    await windowsExplorerExceptionAllowedForTesting({
       host,
       sessionId: session.sessionId,
       approval,
@@ -654,13 +666,13 @@ it.each([false, true])(
       },
     );
     const old = inputFor(scenario.host, scenario.session.sessionId);
-    expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(true);
+    expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(true);
     if (cancelFirst) {
       await scenario.host.cancel(scenario.session, 1);
-      expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+      expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
     }
     await scenario.host.close(scenario.session);
-    expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
     await expect(scenario.host.startSession(scenario.startInput)).rejects.toThrow(
       'native_session_closed',
     );
@@ -674,11 +686,11 @@ it.each([false, true])(
     }
     await scenario.host.startSession(scenario.startInput);
     expect(
-      windowsExplorerExceptionAllowedForTesting(
+      await windowsExplorerExceptionAllowedForTesting(
         inputFor(scenario.host, scenario.session.sessionId),
       ),
     ).toBe(true);
-    expect(windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting(old)).toBe(false);
   },
 );
 it.each(['background_event', 'failed'] as const)(
@@ -695,7 +707,7 @@ it.each(['background_event', 'failed'] as const)(
       },
     );
     const input = inputFor(host, session.sessionId);
-    expect(windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+    expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
     const common = {
       version: 1 as const,
       sessionId: session.sessionId,
@@ -717,15 +729,68 @@ it.each(['background_event', 'failed'] as const)(
         failureReason: 'stopped',
         failureLatched: true,
       });
-    expect(windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+    expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
     expect(readWindowsExplorerApproval(host, session.sessionId)).toBeUndefined();
   },
 );
-it('keeps measured facts immutable when the native row object changes', async () => {
+it('keeps identity immutable but remeasures the view on every use', async () => {
   const measured = { ...facts, shellView: { ...facts.shellView } };
   const { host, session } = await withFacts(measured);
   const input = inputFor(host, session.sessionId);
   measured.imageLeaf = 'Target.exe';
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+  measured.shellView.kind = 'namespace';
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+  measured.shellView.kind = 'filesystem_folder';
   measured.shellView.path = 'shell:AppsFolder';
-  expect(windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+});
+
+it('rejects an item outside the current Explorer folder', async () => {
+  const { host, session } = await explorerScenario();
+  expect(
+    await windowsExplorerExceptionAllowedForTesting({
+      ...inputFor(host, session.sessionId),
+      operation: {
+        ...operation,
+        item: { path: 'C:\\Outside', kind: 'folder', surface: 'file_list' },
+      },
+    }),
+  ).toBe(false);
+});
+
+it('requires the input point owner and never measures through the production gate', async () => {
+  const measureExplorerView = vi.fn(() => ({
+    shellView: facts.shellView,
+    pointOwnerMatches: false,
+  }));
+  const { host, session } = await explorerScenario({}, { measureExplorerView });
+  const input = inputFor(host, session.sessionId);
+  expect(await windowsExplorerExceptionAllowed(input)).toBe(false);
+  expect(measureExplorerView).not.toHaveBeenCalled();
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+  expect(measureExplorerView).toHaveBeenCalledTimes(1);
+  expect(measureExplorerView).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sessionId: session.sessionId,
+      windowId: '100',
+      cancelEpoch: 0,
+      x: 400,
+      y: 300,
+    }),
+  );
+});
+
+it('rejects measurement failure and evidence revoked while measurement is pending', async () => {
+  const measureExplorerView = vi
+    .fn<() => Promise<unknown>>()
+    .mockRejectedValue(new Error('unreadable'));
+  const { host, session } = await explorerScenario({}, { measureExplorerView });
+  const input = inputFor(host, session.sessionId);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+  measureExplorerView.mockImplementation(async () => {
+    await host.close(session);
+    return { shellView: facts.shellView, pointOwnerMatches: true };
+  });
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
 });

@@ -4,6 +4,7 @@ import {
 } from './computer-use-native-host';
 import {
   classifyWindowsExplorerOperation,
+  windowsExplorerItemInView,
   type WindowsExplorerOperation,
 } from './computer-use-explorer-effect';
 import {
@@ -7437,26 +7438,43 @@ type WindowsExplorerExceptionInput = Readonly<{
   operation: WindowsExplorerOperation;
 }>;
 
-// P5 must verify the window under the input point belongs to the verified explorer.exe PID;
-// preview handlers can own child windows in another process.
-export function windowsExplorerExceptionAllowed(input: WindowsExplorerExceptionInput): boolean {
-  return WINDOWS_EXPLORER_EXCEPTION_ENABLED && evaluateWindowsExplorerException(input);
-}
-export function windowsExplorerExceptionAllowedForTesting(
+export async function windowsExplorerExceptionAllowed(
   input: WindowsExplorerExceptionInput,
-): boolean {
+): Promise<boolean> {
+  return WINDOWS_EXPLORER_EXCEPTION_ENABLED && (await evaluateWindowsExplorerException(input));
+}
+export async function windowsExplorerExceptionAllowedForTesting(
+  input: WindowsExplorerExceptionInput,
+): Promise<boolean> {
   return evaluateWindowsExplorerException(input);
 }
-function evaluateWindowsExplorerException(input: WindowsExplorerExceptionInput): boolean {
-  const facts = readCurrentWindowsExplorerFacts(input.approval, input.host, input.sessionId);
-  if (facts === undefined || classifyWindowsExplorerOperation(input.operation) !== 'ordinary')
+async function evaluateWindowsExplorerException(
+  input: WindowsExplorerExceptionInput,
+): Promise<boolean> {
+  const point = input.operation.point;
+  if (
+    !point ||
+    !Number.isSafeInteger(point.x) ||
+    !Number.isSafeInteger(point.y) ||
+    classifyWindowsExplorerOperation(input.operation) !== 'ordinary'
+  )
     return false;
+  const facts = await readCurrentWindowsExplorerFacts(
+    input.approval,
+    input.host,
+    input.sessionId,
+    point,
+  );
+  if (facts === undefined) return false;
   // CabinetWClass is necessary, not sufficient: namespace views share this class.
   return (
     facts.imageRelativePath.toLowerCase() === 'explorer.exe' &&
     facts.imageLeaf.toLowerCase() === 'explorer.exe' &&
     facts.windowClass === 'CabinetWClass' &&
     facts.shellView.kind === 'filesystem_folder' &&
+    facts.pointOwnerMatches &&
+    input.operation.item !== undefined &&
+    windowsExplorerItemInView(input.operation.item.path, facts.shellView.path) &&
     /^[a-z]:\\[^:*?"<>|]+$/iu.test(facts.shellView.path) &&
     !facts.shellView.path.split('\\').some((part) => part === '.' || part === '..')
   );
