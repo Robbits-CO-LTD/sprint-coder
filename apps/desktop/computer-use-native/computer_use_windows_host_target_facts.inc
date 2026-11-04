@@ -579,6 +579,7 @@ std::optional<std::wstring> WindowsTargetMappedFileName(HANDLE process, LPVOID a
 // file at that address but cannot change what the kernel captured at creation.
 struct WindowsTargetKernelImage {
   std::wstring mapped_name;
+  bool il_only_anchor = false;
   // The entry point as a file RVA (TransferAddress - the mapping's allocation base, both from the
   // kernel: TransferAddress from SECTION_IMAGE_INFORMATION and the base from VirtualQueryEx's VAD,
   // not from the PEB), and the header values the kernel captured from the real image at creation.
@@ -870,6 +871,7 @@ std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE proc
     } else {
       const auto mapping = WindowsTargetIlOnlyImageMapping(process, image.transfer_address, held_file);
       if (!mapping) return std::nullopt;
+      info.il_only_anchor = true;
       info.mapped_name = mapping->name;
       info.entry_rva = mapping->entry_rva;
     }
@@ -965,6 +967,7 @@ struct WindowsTargetHeldImage {
   std::wstring canonical_path;
   WindowsFileIdentity identity;
   bool matches = false;
+  bool il_only_anchor = false;
   // Whether the held file was neither written nor had its metadata changed since the process was
   // created (WindowsImageUnchangedSinceCreation); part of `matches`, kept apart for the seam.
   bool unchanged = false;
@@ -1030,6 +1033,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   const std::optional<WindowsTargetKernelImage> kernel = WindowsTargetKernelImageInfo(process);
   if (!kernel.has_value())
     return false;
+  held->il_only_anchor = kernel->il_only_anchor;
   const std::wstring global = L"\\\\?\\GLOBALROOT" + kernel->mapped_name;
   held->file.value =
       CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -1985,6 +1989,16 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
         target_eligibility_detail::AsciiLower(*facts.image_leaf) == kWindowsTargetFixtureLeaf;
   }
   facts.image_volume = WindowsTargetVolumeKind(held.file.value);
+  // An adjacent .exe.config can select an AppDomainManager that loads arbitrary assemblies.
+  // The IL-only anchor is usable only under protected roots, even in an opt-in test build.
+  // Use the held file's placement, including a verified package's install root, not its name.
+  if (held.il_only_anchor &&
+      facts.image_root != std::optional<std::string>("windows_directory") &&
+      facts.image_root != std::optional<std::string>("program_files") &&
+      facts.image_root != std::optional<std::string>("windows_apps")) {
+    facts.running_image_matches = false;
+    return;
+  }
   // A held file not known to be local already records running_image_matches = false, so its bytes
   // are not read for the signature, the resources or the subsystem: those facts stay unmeasured,
   // which makes the verdict unresolvable (incomplete facts are judged before any rule), and a

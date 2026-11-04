@@ -33,6 +33,13 @@ export function classifyWindowsExplorerOperation(
   // Only selecting or opening a measured folder is ordinary in this preparation.
   if (item.kind === 'folder' && (operation.verb === 'select' || operation.verb === 'open'))
     return 'ordinary';
-  if (item.kind === 'file' && extension && operation.verb === 'open') return 'document_open';
+  if (
+    item.kind === 'file' &&
+    operation.verb === 'open' &&
+    /^\.(?:txt|md|log|csv|json|xml|pdf|png|jpg|jpeg|gif|bmp|webp|docx|xlsx|pptx|rtf)$/u.test(
+      extension,
+    )
+  )
+    return 'document_open';
   return 'unknown';
 }

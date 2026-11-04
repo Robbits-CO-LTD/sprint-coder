@@ -281,6 +281,8 @@ type ComputerUseNativeBounds = Readonly<{
 export type ComputerUseNativeHostOptions = Readonly<{
   /** Opt-in storage and startup restoration. Product activation remains PR10b. */
   windowsLedger?: WindowsDispatchLedgerStorage;
+  /** Isolate session lifetime tests from the completed start's separate Stop owner. */
+  windowsCompletedStartForTesting?: (forget: (sessionId: string) => boolean) => void;
   windowsLedgerDiagnostic?: (diagnostic: WindowsStopDiagnostic) => void;
   /** Main-only PR5b policy. Product activation is coordinated with PR10. */
   windowsStartIdentity?: Readonly<{ enabled: boolean }>;
@@ -3726,6 +3728,18 @@ export function createComputerUseNativeHost(
     },
   };
   const frozenHost = Object.freeze({ ...host, restoreWindowsLedger });
+  options.windowsCompletedStartForTesting?.((sessionId) => {
+    const owner = startOwners.get(sessionId);
+    if (
+      !sessions.has(sessionId) ||
+      owner === undefined ||
+      owner.stopped ||
+      owner.attempts.size !== 0 ||
+      owner.discoveries.size !== 0
+    )
+      return false;
+    return startOwners.delete(sessionId);
+  });
   explorerApprovalReaders.set(frozenHost, (sessionId) => {
     const session = sessions.get(sessionId);
     if (session === undefined) return undefined;

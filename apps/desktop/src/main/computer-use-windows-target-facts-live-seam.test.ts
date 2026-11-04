@@ -1385,6 +1385,7 @@ const ilAnchorSeamPrefix = (() => {
 })();
 
 const ilAnchorProgram = String.raw`
+using namespace sprint_coder::computer_use;
 int failures = 0;
 void Check(bool ok, const char *name) {
   if (!ok) { ++failures; std::cout << "FAIL " << name << "\n"; }
@@ -1460,7 +1461,9 @@ void CheckConvertedHeader() {
   Check(match(file, file, std::nullopt, std::nullopt), "equal_magic_needs_no_conversion");
 }
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 2) return 2;
+  if (argc != 3) return 2;
+  const bool protected_tool = std::wstring_view(argv[2]) == L"protected";
+  const bool anycpu = std::wstring_view(argv[2]) == L"anycpu";
   CheckIlOnlyHeader();
   CheckConvertedHeader();
   STARTUPINFOW startup{};
@@ -1501,6 +1504,30 @@ int wmain(int argc, wchar_t **argv) {
       Check(running ? held.matches : !held.matches,
             running ? "resumed_il_only_hold_matches" : "suspended_il_only_hold_refuses_module_list");
       Check(held.unchanged, "hold_image_unchanged");
+      const auto context = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "");
+      WindowsTargetFactsMeasurement measured;
+      MeasureWindowsTargetHeldFacts(held, context, &measured);
+      Check(held.il_only_anchor, "hold_records_il_only_anchor");
+      if (protected_tool) {
+        Check(measured.facts.image_root == std::optional<std::string>("windows_directory"),
+              "framework_tool_in_protected_root");
+        // A suspended tool cannot pass the module-list check. Isolate placement from that check
+        // using the real held file and real roots; this does not assert full target eligibility.
+        held.matches = true;
+        auto placement_context = context;
+        if (held.volume) placement_context.rename_probe = WindowsTargetRenameProbe{true, *held.volume};
+        MeasureWindowsTargetHeldFacts(held, placement_context, &measured);
+        Check(measured.facts.running_image_matches == std::optional<bool>(true),
+              "protected_il_only_anchor_is_usable");
+      } else {
+        Check(measured.facts.image_root != std::optional<std::string>("windows_directory") &&
+              measured.facts.image_root != std::optional<std::string>("program_files") &&
+              measured.facts.image_root != std::optional<std::string>("windows_apps"),
+              "scratch_is_outside_protected_roots");
+        Check(measured.facts.running_image_matches == std::optional<bool>(false) &&
+              ClassifyTargetExplained(measured.facts).verdict.kind == TargetVerdictKind::kUnresolvable,
+              "unprotected_il_only_stays_unresolvable");
+      }
       const auto kernel = WindowsTargetKernelImageInfo(child.hProcess);
       Check(kernel.has_value(), "hold_kernel_available");
       if (kernel)
@@ -1515,6 +1542,10 @@ int wmain(int argc, wchar_t **argv) {
         Check(SameWindowsTargetName(kernel->mapped_name, *module), "hold_module_matches");
     };
     check_hold("suspended", false);
+    if (protected_tool) {
+      std::cout << (failures == 0 ? "OK\n" : "FAILED\n");
+      return failures == 0 ? 0 : 1;
+    }
     Check(ResumeThread(child.hThread) != static_cast<DWORD>(-1), "il_only_resumed");
     // Match the independent experiment's CLR startup interval and observe premature exit.
     const DWORD resumed_wait = WaitForSingleObject(child.hProcess, 1500);
@@ -1588,31 +1619,66 @@ int wmain(int argc, wchar_t **argv) {
       }
       Check(base != nullptr, "main_mapping_available_for_header_mutation");
       if (base != nullptr) {
+        const auto mapped_header = WindowsReadMappedIlOnlyHeader(child.hProcess, base);
+        Check(mapped_header.has_value(), "resumed_mapped_header_read");
+        if (anycpu) {
+          Check(header && header->magic == 0x10b, "resumed_anycpu_file_magic_is_pe32");
+          Check(mapped_header && mapped_header->magic == 0x20b,
+                "resumed_anycpu_memory_magic_is_pe32plus");
+        }
         IMAGE_DOS_HEADER dos{};
         SIZE_T read = 0;
         Check(ReadProcessMemory(child.hProcess, base, &dos, sizeof(dos), &read) &&
                   read == sizeof(dos), "mapped_dos_header_read");
         const auto pe = reinterpret_cast<std::uintptr_t>(base) + dos.e_lfanew;
+        // Compare two valid magics against the observed header. For resumed AnyCPU the
+        // on-disk PE32 is itself an allowed match, so it cannot be the baseline for this test.
+        if (mapped_header) {
+          auto address = reinterpret_cast<PVOID>(pe + 24);
+          const std::uint16_t original = static_cast<std::uint16_t>(mapped_header->magic);
+          const std::uint16_t changed = original == 0x10b ? 0x20b : 0x10b;
+          DWORD protection = 0;
+          SIZE_T written = 0;
+          Check(VirtualProtectEx(child.hProcess, address, sizeof(changed), PAGE_READWRITE, &protection),
+                "valid_magic_writable");
+          Check(WriteProcessMemory(child.hProcess, address, &changed, sizeof(changed), &written) &&
+                    written == sizeof(changed), "different_valid_magic_written");
+          const auto mutated = WindowsReadMappedIlOnlyHeader(child.hProcess, base);
+          Check(mutated && mutated->magic == changed, "different_valid_magic_parsed");
+          Check(mutated && !WindowsIlOnlyHeadersMatch(*mapped_header, *mutated, 1,
+                    WindowsTargetIsNative64Bit(child.hProcess)),
+                "different_valid_magic_rejected_by_header_comparison");
+          Check(WriteProcessMemory(child.hProcess, address, &original, sizeof(original), &written) &&
+                    written == sizeof(original), "valid_magic_restored");
+          DWORD ignored = 0;
+          Check(VirtualProtectEx(child.hProcess, address, sizeof(original), protection, &ignored),
+                "valid_magic_protection_restored");
+          Check(WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
+                "original_valid_magic_recovers");
+        }
         // magic, machine, entry RVA, SizeOfImage, TimeDateStamp and CheckSum independently.
         const std::size_t offsets[] = {24, 4, 24 + 16, 24 + 56, 8, 24 + 64};
         for (const auto offset : offsets) {
           auto address = reinterpret_cast<PVOID>(pe + offset);
-          BYTE original = 0;
+          std::uint16_t original = 0;
+          const SIZE_T width = offset == 24 ? sizeof(original) : 1;
           DWORD protection = 0;
-          const bool writable = ReadProcessMemory(child.hProcess, address, &original, 1, &read) &&
-              read == 1 && VirtualProtectEx(child.hProcess, address, 1, PAGE_READWRITE, &protection);
+          const bool writable = ReadProcessMemory(child.hProcess, address, &original, width, &read) &&
+              read == width && VirtualProtectEx(child.hProcess, address, width, PAGE_READWRITE, &protection);
           Check(writable, "header_field_writable");
           if (!writable) continue;
-          const BYTE changed = original ^ 1;
+          // Retain the pre-existing invalid-magic rejection as well as the valid-magic
+          // comparison above; AnyCPU permits the disk's PE32 magic after CLR conversion.
+          const std::uint16_t changed = offset == 24 ? 0x107 : original ^ 1;
           SIZE_T written = 0;
-          Check(WriteProcessMemory(child.hProcess, address, &changed, 1, &written) && written == 1,
+          Check(WriteProcessMemory(child.hProcess, address, &changed, width, &written) && written == width,
                 "header_field_changed");
           Check(!WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
                 "mismatched_mapped_header_is_unresolvable");
-          Check(WriteProcessMemory(child.hProcess, address, &original, 1, &written) && written == 1,
+          Check(WriteProcessMemory(child.hProcess, address, &original, width, &written) && written == width,
                 "header_field_restored");
           DWORD ignored = 0;
-          Check(VirtualProtectEx(child.hProcess, address, 1, protection, &ignored),
+          Check(VirtualProtectEx(child.hProcess, address, width, protection, &ignored),
                 "header_protection_restored");
           Check(WindowsTargetKernelImageInfo(child.hProcess, file.value).has_value(),
                 "matching_header_recovers");
@@ -1756,7 +1822,7 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
               `/out:${executable}`,
               managedSource,
             ]);
-            const result = await promisify(execFile)(binary, [executable], {
+            const result = await promisify(execFile)(binary, [executable, platform], {
               encoding: 'utf8',
               timeout: 30_000,
             }).catch((error: unknown) => {
@@ -1767,6 +1833,17 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
               throw error;
             });
             expect(result.stdout, `${platform}, variant=${variant.name}`).toContain('OK');
+          }
+          for (const tool of [
+            'C:/Windows/Microsoft.NET/Framework/v4.0.30319/AddInUtil.exe',
+            'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/InstallUtil.exe',
+          ]) {
+            expect(existsSync(tool), tool).toBe(true);
+            const result = await promisify(execFile)(binary, [tool, 'protected'], {
+              encoding: 'utf8',
+              timeout: 30_000,
+            });
+            expect(result.stdout, `${tool}, variant=${variant.name}`).toContain('OK');
           }
         }
       } finally {
