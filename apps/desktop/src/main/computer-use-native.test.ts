@@ -195,6 +195,20 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   const native = join(__dirname, '../../computer-use-native');
   const facts = readFileSync(join(native, 'computer_use_windows_target_facts.h'), 'utf8');
   expect(facts).toContain('#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)');
+  // The test-only hooks use a macro derived inside the guarded block, after the #error checks.
+  const guarded = facts.slice(
+    facts.indexOf('#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)'),
+    facts.indexOf('inline constexpr bool kWindowsExplorerException = false;'),
+  );
+  expect(guarded.indexOf('#error')).toBeLessThan(
+    guarded.indexOf('#define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1'),
+  );
+  expect(guarded.indexOf('#define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1')).toBeGreaterThan(0);
+  checkNativeTestDefinition(
+    '#define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS',
+    'computer_use_windows_target_facts.h',
+    ['#define SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS 1'],
+  );
   expect(facts).toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD != 1');
   expect(facts).toContain('defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)');
   expect(facts).toContain('defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE)');

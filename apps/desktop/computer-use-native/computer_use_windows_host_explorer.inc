@@ -49,7 +49,7 @@ struct WindowsExplorerTrace {
 };
 // Written only by the pipe consumer. A test seam, never serialized.
 WindowsExplorerTrace windows_explorer_trace_for_test;
-#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
 // Acceptance-test fault injection: the watcher thread cannot be created, or the body throws.
 enum class WindowsExplorerFault { kNone, kWatcherThread, kBody };
 WindowsExplorerFault windows_explorer_fault_for_test = WindowsExplorerFault::kNone;
@@ -346,7 +346,7 @@ public:
     // A watcher that cannot start leaves the measurement disabled (never current), and the
     // cancellation enabled above is disabled here because the destructor will not see it.
     try {
-#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
       if (windows_explorer_fault_for_test == WindowsExplorerFault::kWatcherThread)
         throw std::bad_alloc();  // std::thread reports its failure by an exception, too.
 #endif
@@ -426,7 +426,7 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   WindowsSessionIdentityResult identity;
   if (!ReadWindowsSessionIdentityOnLane(*session, serial, &identity))
     return refuse(WindowsExplorerRefusal::kIdentity);
-#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
   // Acceptance-test only: lets the transport seam reach the deadline on an elevated runner.
   if (windows_explorer_ignore_elevation_for_test) identity.elevated = false;
 #endif
@@ -434,7 +434,7 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
     return refuse(WindowsExplorerRefusal::kIdentity);
   WindowsExplorerDeadline deadline(epoch, serial);
   const auto current = [&] { return deadline.Current(); };
-#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
   if (windows_explorer_fault_for_test == WindowsExplorerFault::kBody)
     throw std::bad_alloc();
 #endif

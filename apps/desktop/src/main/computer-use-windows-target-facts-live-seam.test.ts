@@ -2165,7 +2165,7 @@ describe('Windows target facts seam source', () => {
       expect(from, name).toBeGreaterThan(0);
       while (from >= 0) {
         const opened = explorer.lastIndexOf(
-          '#if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)',
+          '#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)',
           from,
         );
         const closed = explorer.lastIndexOf('#endif', from);
