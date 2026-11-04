@@ -1,12 +1,55 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// Run by the parent in an MSVC developer shell. Every OS/N-API call below is a stub;
-// this compiles the addon's actual PID parsing and permit callback, never sends OS input.
-describe.skipIf(process.platform !== 'win32')('P5c1 native helper permit component', () => {
+const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+type Build = Readonly<{
+  wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
+}>;
+
+// The same MSVC lookup as the other Windows component tests: cl.exe on PATH, else vcvars64.
+function findBuild(): Build | null {
+  if (process.platform !== 'win32') return null;
+  if (spawnSync('cl.exe', ['/?'], { stdio: 'ignore' }).status === 0)
+    return { wrap: (args) => ({ file: 'cl.exe', args, verbatim: false }) };
+  if (!existsSync(vswhere)) return null;
+  const found = spawnSync(
+    vswhere,
+    [
+      '-latest',
+      '-products',
+      '*',
+      '-requires',
+      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+      '-property',
+      'installationPath',
+    ],
+    { encoding: 'utf8' },
+  );
+  const root = found.stdout.trim();
+  const vcvars = join(root, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
+  if (found.status !== 0 || root === '' || !existsSync(vcvars)) return null;
+  return {
+    wrap: (args) => ({
+      file: 'cmd.exe',
+      args: [
+        '/d',
+        '/s',
+        '/c',
+        `"call "${vcvars}" >nul && cl.exe ${args.map((argument) => `"${argument}"`).join(' ')}"`,
+      ],
+      verbatim: true,
+    }),
+  };
+}
+
+const build = findBuild();
+
+// Every OS/N-API call below is a stub; this compiles the addon's actual PID parsing and permit
+// callback, never sends OS input.
+describe.skipIf(build === null)('P5c1 native helper permit component', () => {
   it('rejects unknown/foreign/dead helper and reuse, and propagates OS refusal', () => {
     const source = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_windows_main.cc'),
@@ -74,10 +117,12 @@ int main() {
       const cpp = join(directory, 'permit.cc');
       const exe = join(directory, 'permit.exe');
       writeFileSync(cpp, '#include <initializer_list>\n' + program);
-      const built = spawnSync('cl.exe', ['/nologo', '/std:c++20', '/EHsc', cpp, `/Fe:${exe}`], {
+      const command = build!.wrap(['/nologo', '/std:c++20', '/EHsc', cpp, `/Fe:${exe}`]);
+      const built = spawnSync(command.file, command.args, {
         cwd: directory,
         encoding: 'utf8',
         windowsHide: true,
+        windowsVerbatimArguments: command.verbatim,
       });
       expect(built.status, `${built.error ?? ''}\n${built.stdout}\n${built.stderr}`).toBe(0);
       const ran = spawnSync(exe, [], { encoding: 'utf8', windowsHide: true });
