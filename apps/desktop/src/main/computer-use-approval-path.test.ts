@@ -467,14 +467,15 @@ describe('the production wiring is where the host and the controller are built (
   it('hands the host the attest and the effective mode, and the controller the effective mode', () => {
     const index = main('index.ts');
     expect(index).toContain(
-      "import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';",
+      "import { computerUseNativeHostEligibilityOptions } from './computer-use-eligibility-wiring';",
     );
     expect(index).toMatch(
-      /classifierV2Attested: computerUseEligibilityWiring\.classifierV2Attested\(\s*computerUseBinding\.probe\.available === true,?\s*\)/u,
+      /\.\.\.computerUseNativeHostEligibilityOptions\(\s*computerUseBinding\.probe\.available === true,?\s*\)/u,
     );
-    expect(index).toContain(
-      'effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,',
-    );
+    // The shared options hand the host both the attest and the effective mode from the wiring.
+    const wiringSource = main('computer-use-eligibility-wiring.ts');
+    expect(wiringSource).toContain('classifierV2Attested: wiring.classifierV2Attested(gateOpen),');
+    expect(wiringSource).toContain('effectiveEligibilityMode: wiring.effectiveEligibilityMode,');
     const ipc = main('ipc.ts');
     expect(ipc).toContain(
       'effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,',

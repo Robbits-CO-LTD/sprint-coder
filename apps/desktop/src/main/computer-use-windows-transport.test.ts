@@ -61,6 +61,10 @@ import {
   windowsHelperEnvironment,
 } from './computer-use-native-windows';
 import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
+import {
+  computerUseNativeHostEligibilityOptions,
+  createComputerUseEligibilityWiring,
+} from './computer-use-eligibility-wiring';
 
 /**
  * These tests drive the real `createWindowsComputerUseNativeAddon` transport — its pending map,
@@ -11316,6 +11320,7 @@ int main() {
       rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       lexiconVersion: 3,
       ticketRequired: true,
+      interlockEnforced: true,
     } as const;
     const viewers = { version: 1, digest: 'a'.repeat(16) };
     const seen: Record<string, Record<string, unknown>> = {};
@@ -11409,6 +11414,7 @@ int main() {
         rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
         lexiconVersion: 3,
         ticketRequired: true,
+        interlockEnforced: true,
       } as const;
       const viewers = { version: 1, digest: 'a'.repeat(16) };
       let failApprove = false;
@@ -11504,9 +11510,14 @@ int main() {
         table,
         undefined,
         {
-          classifierV2Attested: true,
-          windowsApprovalInterlockForTesting: true,
-          effectiveEligibilityMode: () => (gateOpen ? 'v2-denylist' : 'v1-allowlist'),
+          ...computerUseNativeHostEligibilityOptions(
+            true,
+            createComputerUseEligibilityWiring({
+              compiled: () => eligibility,
+              agentDrivenV2: () => gateOpen,
+              environment: () => ({}),
+            }),
+          ),
         },
         undefined,
         undefined,
@@ -11569,6 +11580,90 @@ int main() {
       await target.host.close(session);
       expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
       expect(await target.host.dispatchApproved!(input)).toMatchObject({ result: 'rejected' });
+    },
+  );
+
+  it.each([
+    'matching',
+    'interlock',
+    'wire',
+    'viewers',
+    'v1',
+    'veto',
+    'generation',
+    'stop',
+  ] as const)(
+    'uses production host options and live approval evidence without a test enable flag (%s)',
+    async (scenario) => {
+      const eligibility = {
+        mode: 'v2-denylist',
+        classifierVersion: 2,
+        rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
+        lexiconVersion: 3,
+        ticketRequired: true,
+        interlockEnforced: scenario !== 'interlock',
+      } as const;
+      const viewers = { version: 1, digest: 'a'.repeat(16) };
+      const base = responders();
+      const target = createTarget(
+        {
+          ...base,
+          handshake: (input) => [
+            'handshake_result',
+            {
+              ...(base['handshake']!(input)[1] as object),
+              eligibility,
+              ...(scenario === 'viewers' ? {} : { windowsDocumentViewers: viewers }),
+              capabilities: {
+                cancellableWindowDiscovery: true,
+                ...(scenario === 'wire' ? {} : { approval: true, approvalWire: 3 }),
+              },
+            },
+          ],
+        },
+        undefined,
+        {
+          ...computerUseNativeHostEligibilityOptions(
+            true,
+            createComputerUseEligibilityWiring({
+              compiled: () => eligibility,
+              agentDrivenV2: () => scenario !== 'v1',
+              environment: () => ({}),
+            }),
+          ),
+          ...(scenario === 'veto' ? { windowsApprovalInterlockForTesting: false } : {}),
+        },
+        undefined,
+        undefined,
+        eligibility,
+        viewers,
+      );
+      const session = await target.host.startSession({
+        profile,
+        windowId: '100',
+        sessionId: 'evidence-session',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        classifierRoute: scenario === 'v1' ? 'v1' : 'v2',
+      });
+      const initiallyOpen = ['matching', 'generation', 'stop'].includes(scenario);
+      expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(initiallyOpen);
+      if (scenario === 'generation') {
+        sockets[0]!.destroy();
+        expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
+        await vi.advanceTimersByTimeAsync(0);
+        await discoverRows(target.addon);
+        expect(children).toHaveLength(2);
+        expect(target.addon.windowsApprovalAvailable?.()).toBe(true);
+        expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
+      } else {
+        await target.host.cancel(session, 1);
+        expect(target.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
+        await target.host.close(session);
+      }
+      expect(target.helper().served).not.toContain('approval_approve');
+      expect(target.helper().served).not.toContain('dispatch_approved');
     },
   );
 

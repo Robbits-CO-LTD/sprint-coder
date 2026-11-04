@@ -440,6 +440,7 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
     rulesetVersion: 3,
     lexiconVersion: 3,
     ticketRequired: true,
+    interlockEnforced: true,
   };
   const viewers = { version: 1, digest: 'a'.repeat(16) };
   const declaration = { eligibility, windowsDocumentViewers: viewers };
@@ -452,6 +453,13 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
     capabilities: { approval: true, approvalWire: 3 },
   };
   const variants: unknown[][] = [[declaration, declaration, handshake]];
+  for (const side of [0, 1, 2])
+    for (const interlockEnforced of [undefined, false])
+      variants.push(
+        [declaration, declaration, handshake].map((entry, index) =>
+          index === side ? { ...entry, eligibility: { ...eligibility, interlockEnforced } } : entry,
+        ),
+      );
   for (const side of [0, 1, 2])
     for (const changed of [
       undefined,
@@ -490,7 +498,7 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
         },
       },
       'win32',
-      { ...fixture.options, classifierV2Attested: true, windowsApprovalInterlockForTesting: true },
+      { ...fixture.options, classifierV2Attested: true },
     );
     const list = await host.listTargets!();
     const maximumMode = index === 0 ? 'supervised' : 'observe_only';

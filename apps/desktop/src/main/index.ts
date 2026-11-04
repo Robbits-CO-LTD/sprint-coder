@@ -36,7 +36,7 @@ import {
   computerUseRequestedAtStartup,
   createComputerUseFeatureGate,
 } from './computer-use-feature-gate';
-import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
+import { computerUseNativeHostEligibilityOptions } from './computer-use-eligibility-wiring';
 import {
   createComputerUseNativeHost,
   type ComputerUseNativeHostOptions,
@@ -189,12 +189,7 @@ if (squirrelStartup || !hasLock) {
       });
       const computerUseNativeHostOptions: ComputerUseNativeHostOptions = {
         ...windowsKillStop.options,
-        // The approval path rests on the build's attest and the session's route (C5-1). While every
-        // version is 1 the attest is classifier 1: no session is bound to v2 and nothing opens.
-        classifierV2Attested: computerUseEligibilityWiring.classifierV2Attested(
-          computerUseBinding.probe.available === true,
-        ),
-        effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
+        ...computerUseNativeHostEligibilityOptions(computerUseBinding.probe.available === true),
         ...(process.platform === 'win32'
           ? {
               windowsPhysicalBoundsToDip: (bounds) => {
