@@ -30,6 +30,26 @@ const rename = cut(
 );
 
 describe('Windows target facts premises (#988 N7-3)', () => {
+  it('disabled_il_only_gate_precedes_both_kernel_mapping_paths', () => {
+    const kernel = cut(
+      'std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(',
+      'std::optional<std::wstring> WindowsTargetKernelImageName(',
+    );
+    const gate = kernel.indexOf(
+      'if (!WindowsTargetImageAllowsDisabledIlOnlyAnchor(process, held_file)) return std::nullopt;',
+    );
+    expect(gate).toBeGreaterThan(kernel.indexOf('if constexpr (!kWindowsIlOnlyImageAnchor)'));
+    expect(gate).toBeLessThan(kernel.indexOf('VirtualQueryEx('));
+    const fileGate = cut(
+      'bool WindowsTargetImageAllowsDisabledIlOnlyAnchor(',
+      'std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(',
+    );
+    expect(fileGate).toContain('QueryFullProcessImageNameW(process, PROCESS_NAME_NATIVE,');
+    expect(fileGate).toContain('WindowsNativeImageIsRemote(*utf8)');
+    expect(fileGate).toContain('const auto flags = WindowsHeldImageClrFlags(bytes);');
+    expect(fileGate).toContain('return flags && (*flags & 1) == 0;');
+  });
+
   it('remote_or_unknown_never_yields_allowing_facts', () => {
     expect(remote).toContain('if (query == nullptr)\n    return std::nullopt;');
     expect(remote).toContain(

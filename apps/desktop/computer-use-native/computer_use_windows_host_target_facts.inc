@@ -825,8 +825,56 @@ WindowsTargetIlOnlyImageMapping(HANDLE process, LPVOID transfer, HANDLE held_fil
   return WindowsIlOnlyImageMapping{kernel_name, header->entry_rva};
 }
 
+// TransferAddress can land in MEM_IMAGE even for IL-only executables. The disabled
+// gate must inspect the kernel-named file, not infer its CLR kind from address placement.
+bool WindowsTargetImageAllowsDisabledIlOnlyAnchor(HANDLE process, HANDLE held_file) {
+  ScopedKernelHandle opened;
+  if (held_file == nullptr) {
+    std::vector<wchar_t> name(32'768, L'\0');
+    DWORD length = static_cast<DWORD>(name.size());
+    if (!QueryFullProcessImageNameW(process, PROCESS_NAME_NATIVE, name.data(), &length) ||
+        length == 0 || length >= name.size())
+      return false;
+    const std::wstring kernel_name(name.data(), length);
+    const auto utf8 = WindowsTargetUtf8(kernel_name);
+    if (!utf8 || sprint_coder::computer_use::WindowsNativeImageIsRemote(*utf8)) return false;
+    const std::wstring global = L"\\\\?\\GLOBALROOT" + kernel_name;
+    opened.value = CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (opened.value == INVALID_HANDLE_VALUE) { opened.value = nullptr; return false; }
+    held_file = opened.value;
+  }
+  std::vector<std::uint8_t> bytes(64 * 1024);
+  OVERLAPPED at{};
+  DWORD read = 0;
+  if (!ReadFile(held_file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, &at)) return false;
+  bytes.resize(read);
+  using namespace sprint_coder::computer_use::windows_target_facts_detail;
+  if (!sprint_coder::computer_use::ParsePeImageSummary(bytes)) return false;
+  const auto pe = ReadLe(bytes, 0x3c, 4);
+  if (!pe) return false;
+  const auto optional = OffsetWithin(*pe, 24, bytes.size());
+  if (!optional) return false;
+  const bool wide = ReadLe(bytes, *optional, 2) == std::optional<std::uint32_t>(0x20b);
+  const auto optional_size = ReadLe(bytes, *pe + 20, 2);
+  if (!optional_size || *optional_size < (wide ? 112u : 96u)) return false;
+  const auto count = ReadLe(bytes, *optional + (wide ? 108 : 92), 4);
+  if (!count) return false;
+  if (*count < 15) return true;
+  if (*optional_size < (wide ? 112u : 96u) + 15 * 8) return false;
+  const auto clr_rva = ReadLe(bytes, *optional + (wide ? 112 : 96) + 14 * 8, 4);
+  if (!clr_rva) return false;
+  if (*clr_rva == 0) return true;
+  // A present but unreadable CLR directory cannot establish that ILONLY is off.
+  const auto flags = WindowsHeldImageClrFlags(bytes);
+  return flags && (*flags & 1) == 0;
+}
+
 std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process,
                                                                    HANDLE held_file = nullptr) {
+  if constexpr (!kWindowsIlOnlyImageAnchor) {
+    if (!WindowsTargetImageAllowsDisabledIlOnlyAnchor(process, held_file)) return std::nullopt;
+  }
   using NtQueryInformationProcessFn =
       LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   static const NtQueryInformationProcessFn query = []() {
@@ -929,11 +977,10 @@ bool WindowsHeldImageDisagreesWithKernel(HANDLE file, const WindowsTargetKernelI
   // conversion shows in SECTION_IMAGE_INFORMATION. It does not: for a PE32 AnyCPU image (AddInUtil,
   // EdmGen, dfsvc, and a csc /platform:anycpu build), a 32BITPREFERRED one and a PE32+ IL-only one
   // (Framework64 InstallUtil, csc /platform:x64), suspended and running, every header value the kernel
-  // records equals the file's (machine 0x14c stays 0x14c), and its TransferAddress is the image's
-  // preferred ImageBase + AddressOfEntryPoint, which lies in no MEM_IMAGE region of the process, so
-  // WindowsTargetKernelImageInfo answers nothing by default (until P5 enables its alternative
-  // mapping measurement). Keeping the skip would only relax the check for an image whose kernel
-  // record differs from its header, which no measured image does.
+  // records equals the file's (machine 0x14c stays 0x14c). TransferAddress was outside MEM_IMAGE
+  // in those measurements, but that placement is not guaranteed. The disabled gate now checks
+  // the file's CLR flags independently of placement. Keeping the skip would only relax the check
+  // for an image whose kernel record differs from its header, which no measured image does.
   if (summary->entry_rva != kernel.entry_rva || summary->machine != kernel.machine ||
       summary->check_sum != kernel.check_sum)
     return true;
