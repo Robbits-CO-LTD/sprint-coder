@@ -8,6 +8,7 @@ const eligibility = {
   rulesetVersion: 2,
   lexiconVersion: 3,
   ticketRequired: true,
+  interlockEnforced: true,
 } as const;
 const viewers = { version: 1, digest: 'a'.repeat(16) };
 const declaration = { eligibility, windowsDocumentViewers: viewers };
@@ -31,6 +32,13 @@ describe('Windows approval evidence', () => {
         expect(windowsApprovalEvidenceMatches(inputs[0], inputs[1], inputs[2])).toBe(false);
       }
     }
+    for (const side of [0, 1, 2])
+      for (const interlockEnforced of [undefined, false]) {
+        const inputs = [declaration, declaration, handshake].map((item, index) =>
+          index === side ? { ...item, eligibility: { ...eligibility, interlockEnforced } } : item,
+        );
+        expect(windowsApprovalEvidenceMatches(inputs[0], inputs[1], inputs[2])).toBe(false);
+      }
     for (const changed of [
       { version: 2, digest: viewers.digest },
       { version: 1, digest: 'b'.repeat(16) },
