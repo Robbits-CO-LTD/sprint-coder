@@ -927,6 +927,15 @@ describe('Computer Use external final gate', () => {
     expect(workflow).toContain('runs-on: [self-hosted, windows, x64, computer-use-final-gate]');
     expect(workflow).toContain('runs-on: [self-hosted, macOS, computer-use-final-gate]');
     expect(workflow).toContain('Get-AuthenticodeSignature');
+    expect(workflow).toContain(
+      '$mainAddonSignature = Get-AuthenticodeSignature -LiteralPath $mainAddon[0].FullName',
+    );
+    expect(workflow).toContain("$mainAddonSignature.Status -ne 'Valid'");
+    expect(workflow).toContain('$appThumbprint -ne $mainAddonThumbprint -or');
+    expect(workflow.indexOf('$mainAddon.Count -ne 1')).toBeLessThan(
+      workflow.indexOf('$mainAddonSignature ='),
+    );
+
     expect(workflow).toContain('/usr/bin/xcrun stapler validate');
     expect(workflow).toContain('/usr/bin/codesign --verify --deep --strict');
     expect(workflow).toContain('/usr/bin/lipo -archs');

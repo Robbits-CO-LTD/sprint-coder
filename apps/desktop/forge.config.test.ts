@@ -24,6 +24,8 @@ import {
 } from './computer-use-acceptance-build';
 import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './src/main/computer-use-acceptance-mode';
 import config, {
+  signAndSealWindowsComputerUse,
+  verifyWindowsMainAddonSignature,
   assertComputerUseAcceptanceBuildAllowed,
   assertPackagedComputerUseAcceptanceConsistency,
   assertNativePackagingHost,
@@ -234,7 +236,9 @@ describe('native package target', () => {
         join(resources, 'computer-use-native.manifest.json'),
         JSON.stringify(incompleteManifest),
       );
-      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow();
+      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
+        'capabilities',
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -395,7 +399,7 @@ describe('macOS sandbox runner sealing', () => {
           arch: 'x64',
           outputPaths: [root],
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow('ENOENT');
       expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
       writeFileSync(runner, 'tampered-after-package');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
@@ -704,6 +708,77 @@ describe('Computer Use acceptance-only build mode', () => {
 });
 
 describe('Windows Main addon package provenance', () => {
+  it.each([
+    { Status: 'NotSigned', Thumbprint: 'a'.repeat(40) },
+    { Status: 'HashMismatch', Thumbprint: 'a'.repeat(40) },
+    { Status: 'Valid', Thumbprint: 'b'.repeat(40) },
+    { Status: 'Valid' },
+  ])('rejects invalid or different addon signer: %j', (addon) => {
+    expect(() =>
+      verifyWindowsMainAddonSignature({ Status: 'Valid', Thumbprint: 'A'.repeat(40) }, addon),
+    ).toThrow('Signed Windows Main addon failed Authenticode verification or signer mismatch');
+  });
+  it('accepts Valid addon and helper signatures from the same signer', () => {
+    expect(() =>
+      verifyWindowsMainAddonSignature(
+        { Status: 'Valid', Thumbprint: 'A'.repeat(40) },
+        { Status: 'Valid', Thumbprint: 'a'.repeat(40) },
+      ),
+    ).not.toThrow();
+  });
+  it('seals signed bytes before deriving the compiled pin', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sc-sign-seal-'));
+    try {
+      const addon = 'sprint_coder_computer_use_windows_main.node';
+      const helper = 'sprint-coder-computer-use-host.exe';
+      const manifestPath = join(root, 'computer-use-native.manifest.json');
+      const sha = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
+      const manifest = computerUseNativeManifestSchema.parse({
+        version: 1,
+        sourceCommit: 'a'.repeat(40),
+        platform: 'win32',
+        architecture: 'x64',
+        protocolVersion: 1,
+        apiVersion: 3,
+        nativeVersion: 'fixture',
+        moduleDigest: sha('helper'),
+        binaryDigest: sha('helper'),
+        signerDigest: null,
+        capabilities: ['observe'],
+        windowsMainAddon: { kind: 'windows-main-addon', file: addon, sha256: sha('addon') },
+      });
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      writeFileSync(join(root, addon), 'addon');
+      writeFileSync(join(root, helper), 'helper');
+      await signAndSealWindowsComputerUse(root, async (files) => {
+        expect(files).toEqual([join(root, helper), join(root, addon)]);
+        await Promise.resolve();
+        for (const file of files) appendFileSync(file, '-signed');
+      });
+      const signed = computerUseNativeManifestSchema.parse(
+        JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+      );
+      expect(signed.windowsMainAddon?.sha256).toBe(sha('addon-signed'));
+      expect(signed.moduleDigest).toBe(sha('helper-signed'));
+      expect(signed.binaryDigest).toBe(sha('helper-signed'));
+      const expected = {
+        ...manifest,
+        moduleDigest: sha('helper-signed'),
+        binaryDigest: sha('helper-signed'),
+        windowsMainAddon: { ...manifest.windowsMainAddon!, sha256: sha('addon-signed') },
+      };
+      expect(computerUseNativeCompiledPin(signed)).toEqual(computerUseNativeCompiledPin(expected));
+      expect(computerUseNativeCompiledPin(signed).manifestDigest).not.toBe(
+        computerUseNativeCompiledPin(manifest).manifestDigest,
+      );
+      if (process.platform === 'win32' && process.arch === 'x64')
+        expect(computerUseNativePinForBuild(manifestPath)).toEqual(
+          computerUseNativeCompiledPin(expected),
+        );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('packages the addon resource and excludes it from a second signing pass', () => {
     const name = 'sprint_coder_computer_use_windows_main.node';
     expect(isComputerUseNativeArtifactPath(`C:/resources/${name}`)).toBe(true);
@@ -765,7 +840,17 @@ describe('Windows Main addon package provenance', () => {
         const verify = () =>
           verifyPackagedComputerUseNativeBundle(join(root, 'out'), 'win32', 'x64');
         if (scenario === 'valid') expect(verify).not.toThrow();
-        else expect(verify).toThrow();
+        else
+          expect(verify).toThrow(
+            {
+              tampered: 'Windows Main addon digest mismatch',
+              missing: 'ENOENT',
+              duplicate: 'Packaged Windows Main addon must occur exactly once',
+              'asar-duplicate':
+                'Packaged Computer Use native artifact verification failed for win32',
+              'no-entry': 'Windows Main addon provenance unavailable',
+            }[scenario],
+          );
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

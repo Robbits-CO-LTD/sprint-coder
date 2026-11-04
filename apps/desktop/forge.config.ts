@@ -200,6 +200,38 @@ function buildComputerUseNative(platform: ForgePlatform, architecture: string): 
   );
 }
 
+export async function signAndSealWindowsComputerUse(
+  resourcesPath: string,
+  signer?: (files: string[]) => Promise<void>,
+): Promise<void> {
+  const mainAddonPath = join(resourcesPath, WINDOWS_MAIN_ADDON);
+  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+  if (signer !== undefined) {
+    await signer([join(resourcesPath, 'sprint-coder-computer-use-host.exe'), mainAddonPath]);
+    const manifest = computerUseNativeManifestSchema.parse(
+      JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+    );
+    if (manifest.windowsMainAddon === undefined)
+      throw new Error('Windows Main addon provenance unavailable');
+    writeFileSync(
+      manifestPath,
+      `${JSON.stringify(
+        {
+          ...manifest,
+          windowsMainAddon: {
+            ...manifest.windowsMainAddon,
+            sha256: createHash('sha256').update(readFileSync(mainAddonPath)).digest('hex'),
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+  }
+  refreshPackagedComputerUseArtifactDigest(resourcesPath, 'win32');
+}
+
 async function prepareComputerUseNativeForViteBuild(
   platform: ForgePlatform,
   architecture: string,
@@ -213,28 +245,14 @@ async function prepareComputerUseNativeForViteBuild(
   );
   if (platform === 'win32') {
     verifyComputerUseNativeBuild(platform, architecture);
-    if (windowsSign !== undefined) {
-      const mainAddonPath = join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, WINDOWS_MAIN_ADDON);
-      await signWindowsFiles({ files: [artifactPath, mainAddonPath], ...windowsSign });
-      const manifest = computerUseNativeManifestSchema.parse(
-        JSON.parse(readFileSync(COMPUTER_USE_NATIVE_MANIFEST_PATH, 'utf8')) as unknown,
-      );
-      writeFileSync(
-        COMPUTER_USE_NATIVE_MANIFEST_PATH,
-        `${JSON.stringify(
-          {
-            ...manifest,
-            windowsMainAddon: {
-              ...manifest.windowsMainAddon,
-              sha256: createHash('sha256').update(readFileSync(mainAddonPath)).digest('hex'),
-            },
+    await signAndSealWindowsComputerUse(
+      COMPUTER_USE_NATIVE_RESOURCE_ROOT,
+      windowsSign === undefined
+        ? undefined
+        : async (files) => {
+            await signWindowsFiles({ files, ...windowsSign });
           },
-          null,
-          2,
-        )}\n`,
-      );
-    }
-    refreshPackagedComputerUseArtifactDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'win32');
+    );
     refreshPackagedComputerUseWindowsSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
   } else {
     execFileSync(
@@ -463,11 +481,10 @@ export function refreshPackagedComputerUseArtifactDigest(
   return digest;
 }
 
-export function refreshPackagedComputerUseWindowsSignerDigest(
-  resourcesPath: string,
-): string | null {
-  const artifactPath = join(resourcesPath, 'sprint-coder-computer-use-host.exe');
-  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+function readWindowsAuthenticodeSignature(artifactPath: string): {
+  Status?: unknown;
+  Thumbprint?: unknown;
+} {
   const signatureJson = execFileSync(
     'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     [
@@ -483,7 +500,32 @@ export function refreshPackagedComputerUseWindowsSignerDigest(
       windowsHide: true,
     },
   ).trim();
-  const signature = JSON.parse(signatureJson) as { Status?: unknown; Thumbprint?: unknown };
+  return JSON.parse(signatureJson) as { Status?: unknown; Thumbprint?: unknown };
+}
+
+export function verifyWindowsMainAddonSignature(
+  helper: { Status?: unknown; Thumbprint?: unknown },
+  addon: { Status?: unknown; Thumbprint?: unknown },
+): void {
+  if (
+    helper.Status !== 'Valid' ||
+    addon.Status !== 'Valid' ||
+    typeof helper.Thumbprint !== 'string' ||
+    !/^[0-9a-f]{40}$/iu.test(helper.Thumbprint) ||
+    typeof addon.Thumbprint !== 'string' ||
+    addon.Thumbprint.toUpperCase() !== helper.Thumbprint.toUpperCase()
+  )
+    throw new Error(
+      'Signed Windows Main addon failed Authenticode verification or signer mismatch',
+    );
+}
+
+export function refreshPackagedComputerUseWindowsSignerDigest(
+  resourcesPath: string,
+): string | null {
+  const artifactPath = join(resourcesPath, 'sprint-coder-computer-use-host.exe');
+  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+  const signature = readWindowsAuthenticodeSignature(artifactPath);
   const signerDigest =
     signature.Status === 'Valid' &&
     typeof signature.Thumbprint === 'string' &&
@@ -492,6 +534,11 @@ export function refreshPackagedComputerUseWindowsSignerDigest(
       : null;
   if (windowsSign !== undefined && signerDigest === null)
     throw new Error('Signed Windows Computer Use helper failed Authenticode verification');
+  if (windowsSign !== undefined)
+    verifyWindowsMainAddonSignature(
+      signature,
+      readWindowsAuthenticodeSignature(join(resourcesPath, WINDOWS_MAIN_ADDON)),
+    );
   const manifest = computerUseNativeManifestSchema.parse(
     JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
   );
