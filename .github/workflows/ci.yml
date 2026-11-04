@@ -230,6 +230,7 @@ jobs:
           $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
           $include = 'apps/desktop/computer-use-native'
           $header = Join-Path $include 'build/Release/computer_use_build_eligibility.h'
+          $header = (Resolve-Path $header).Path
           $expectedV2 = '${{ matrix.eligibility == 'v2' && '1' || '0' }}'
           $declaration = @("/FI$header", "/DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=$expectedV2")
           $target = Join-Path $env:RUNNER_TEMP 'computer-use-target-eligibility-harness.exe'

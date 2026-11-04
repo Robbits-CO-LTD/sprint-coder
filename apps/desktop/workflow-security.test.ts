@@ -361,6 +361,11 @@ describe('workflow security boundaries', () => {
     expect(loaderTests).toContain('src/main/computer-use-windows-ticket-seam.test.ts');
     // The macOS harness sees the generated header of the mode that was just built.
     expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
+    const windowsHarness = stepBlock(gate, 'Run protocol harness and attempt Windows ASan');
+    expect(windowsHarness).toContain('$header = (Resolve-Path $header).Path');
+    expect(windowsHarness.indexOf('$header = (Resolve-Path $header).Path')).toBeLessThan(
+      windowsHarness.indexOf('$declaration ='),
+    );
     // The harness is told which mode its matrix row built, and asserts it.
     expect(gate).toContain(
       "-DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }}",
