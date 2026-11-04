@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <string_view>
+#include "computer_use_windows_background_monitor.h"
 
 #ifndef SPRINT_CODER_BACKGROUND_EXECUTOR_TEST
 #define SPRINT_CODER_BACKGROUND_EXECUTOR_TEST 0
@@ -12,6 +13,17 @@
 namespace windows_background_executor_detail {
 enum class Preparation { kReady, kNoop, kHandoff, kRejected };
 enum class Outcome { kCompleted, kAwaitingForegroundHandoff, kRejected, kUnknownEffect };
+
+inline auto ClaimPermission(std::string_view kind, std::uintptr_t resolved_hwnd) {
+  using namespace sprint_coder::computer_use;
+  const auto pattern = kind == "invoke" ? BackgroundPattern::kInvoke :
+      kind == "set_text" ? BackgroundPattern::kValue :
+      kind == "toggle" ? BackgroundPattern::kToggle :
+      kind == "select" ? BackgroundPattern::kSelectionItem :
+      kind == "expand_collapse" ? BackgroundPattern::kExpandCollapse :
+      kind == "semantic_scroll" ? BackgroundPattern::kScroll : BackgroundPattern::kNone;
+  return BackgroundPatternPermission(pattern, resolved_hwnd);
+}
 
 struct ScrollRequest {
   bool horizontal = false, absolute = false, increment = false, large = false;

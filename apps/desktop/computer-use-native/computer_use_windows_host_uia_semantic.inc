@@ -40,6 +40,9 @@ bool WindowsSemanticInputInFlight() {
 }
 bool StopWindowsSemanticInput(const WindowsSession &session, std::uint64_t *attempts) {
   std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+  if (session.background_monitor) session.background_monitor->state.Pause();
+#endif
   const auto &active = WindowsSemanticOperations().active;
   if (active != nullptr && active->session_id == session.session_id) {
     auto expected = WindowsV1UiaStop::kNone;
@@ -57,6 +60,9 @@ void DrainWindowsSemanticInputForExit() {
       std::lock_guard lock(WindowsTargetListControl().stop_mutex);
       const auto &active = WindowsSemanticOperations().active;
       if (active == nullptr) return;
+#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
+      if (active->background_monitor) active->background_monitor->state.Pause();
+#endif
       auto expected = WindowsV1UiaStop::kNone;
       active->abandoned.compare_exchange_strong(expected, WindowsV1UiaStop::kCanceled);
       active->ready.notify_all();
@@ -972,10 +978,7 @@ bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **
 }
 
 #if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
-// Test gate only. The monitor's Target hook pauses on every target WinEvent during the claim,
-// including the ones this call raises itself, so a real device reaches unknown_effect, never
-// completed: BG01 completed is fake-only. Real-device BG01 is BLOCKED until
-// "N9 P4a-attr claim-scoped own-call WinEvent attribution" lands (monitor.inc, Target hook).
+// Test gate only. N9 P4a-attr correlation does not confirm effects; readback remains mandatory.
 struct WindowsBackgroundPatternOperations {
   using Preparation = windows_background_executor_detail::Preparation;
   template <class T> using ComRef = sprint_coder::computer_use::windows_uia_source_detail::ComRef<T>;
@@ -995,6 +998,12 @@ struct WindowsBackgroundPatternOperations {
   std::wstring text;
   BstrHolder text_value;
   bool desired = false;
+  UIA_HWND hwnd = nullptr;
+  bool window_handoff = false;
+
+  bool ElementWindowValid() const {
+    return WindowsBackgroundElementWindowValid(static_cast<HWND>(hwnd), work.pid, work.window);
+  }
 
 #if SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   // Keep the freshly hashed executable read-locked across the subsequent claim and UIA call.
@@ -1019,6 +1028,10 @@ struct WindowsBackgroundPatternOperations {
     return SUCCEEDED(result) && pattern ? Preparation::kReady : Preparation::kRejected;
   }
   Preparation Prepare() {
+    // Resolve before claiming: virtual/shared top-level HWNDs need foreground handoff.
+    // UIA supplies no trustworthy MSAA object/child pair, so only dedicated child HWNDs qualify.
+    if (!WindowsV1UiaRead(hwnd, [&] { return target->get_CurrentNativeWindowHandle(&hwnd); }) ||
+        !ElementWindowValid()) return Preparation::kHandoff;
     BOOL enabled = FALSE;
     if (!WindowsV1UiaRead(enabled, [&] { return target->get_CurrentIsEnabled(&enabled); }))
       return Preparation::kRejected;
@@ -1144,6 +1157,10 @@ struct WindowsBackgroundPatternOperations {
     return true;
   }
   std::uint64_t Claim() {
+    // Recheck outside locks in case the prepared HWND disappeared during Guard.
+    if (!ElementWindowValid()) { window_handoff = true; return 0; }
+    const auto permission = windows_background_executor_detail::ClaimPermission(
+        work.kind, reinterpret_cast<std::uintptr_t>(hwnd));
     auto *pending = windows_semantic_operation;
     std::lock_guard lock(WindowsTargetListControl().stop_mutex);
     if (!pending || WindowsSemanticOperations().active.get() != pending ||
@@ -1156,7 +1173,7 @@ struct WindowsBackgroundPatternOperations {
         (pending->approved_deadline_ns != 0 &&
          (MonotonicNowNs() < pending->approved_started_ns ||
           MonotonicNowNs() >= pending->approved_deadline_ns))) return 0;
-    const auto claim = pending->background_monitor->state.Claim(pending->background_epoch);
+    const auto claim = pending->background_monitor->state.Claim(pending->background_epoch, permission);
     if (!claim) return 0;
     pending->ever_claimed = pending->input_in_flight = true;
     pending->attempts->fetch_add(1, std::memory_order_acq_rel);
@@ -1248,7 +1265,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
     const auto outcome = windows_background_executor_detail::RunBackgroundExecutor(operations);
     using Outcome = windows_background_executor_detail::Outcome;
     if (outcome == Outcome::kCompleted) return true;
-    *reason = outcome == Outcome::kAwaitingForegroundHandoff ? "awaiting_foreground_handoff" :
+    *reason = (outcome == Outcome::kAwaitingForegroundHandoff || operations.window_handoff) ? "awaiting_foreground_handoff" :
         outcome == Outcome::kUnknownEffect ? "input_not_confirmed" : "stale_target";
     return false;
   }

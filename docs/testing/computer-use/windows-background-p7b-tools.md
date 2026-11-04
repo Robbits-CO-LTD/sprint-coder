@@ -82,9 +82,41 @@ node --require "C:/Users/yusei/.claude/skills/issue-graph-flow-codex/scripts/san
 ハッシュ不一致・console・network・昇格・自己子孫・別 class・未測定値の負例を native でも実行する。
 この結果も実機 BG 受入の代わりにはならない。
 
-既存の P4a-attr 残件: monitor の Target WinEvent は自分の UIA 呼出しが起こしたイベントも
-停止理由にする。該当する操作は `unknown_effect` になり得るため、経路の開通を BG-1 の
-実機合格と扱わない。この build では監視を緩めず、発生した場合は BLOCKED と証拠を残す。
+### P4a-attr 段 A の照合と残余リスク
+
+claim 内と成功した Finish 後の **150ms 未満**だけ、検証済みの子 HWND と pattern ごとの
+WinEvent 種類が一致する通知を免除する。合計 **16 件**と下表の種類別上限は claim と猶予で共有する。
+期限ちょうど・最初の上限超過は pause。猶予中の次 claim は 0 で拒否し、期限以降に取得できる。
+Stop、helper 終了、監視失敗・再登録では許可を破棄し、新しい monitor にも引き継がない。
+
+| pattern        | 許可する WinEvent と種類別上限（同じ子 HWND に限る）                                            |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| Invoke         | OBJECT_INVOKED: 1、OBJECT_STATECHANGE: 2                                                        |
+| Value          | OBJECT_VALUECHANGE: 2、OBJECT_NAMECHANGE: 2                                                     |
+| Toggle         | OBJECT_STATECHANGE: 2                                                                           |
+| SelectionItem  | OBJECT_STATECHANGE: 2、OBJECT_SELECTION / SELECTIONADD / SELECTIONREMOVE / SELECTIONWITHIN: 各1 |
+| ExpandCollapse | OBJECT_STATECHANGE: 2                                                                           |
+| Scroll         | OBJECT_VALUECHANGE: 2                                                                           |
+
+claim の鍵の中で GetTickCount を記録し、通知の dwmsEventTime との差を符号付き32ビットで比較する。
+差が正の場合だけ免除候補にする。claim 前に生成され後で届いた通知、同じ tick の通知は pause。
+同じ tick（約16ms）の順序は決められないため、自分の呼出しの通知でも拒否する。
+
+HWND が無い、無効、別 PID、top-level 自身、対象 top-level の子孫でない場合は Prepare で
+前面への引渡し待ちにする。Claim 前の再確認で無効になった場合も同じ理由で拒否する。
+fixture.cc の6 control は WS_CHILD と main_window を指定して作成され、この条件に適合する。
+現在の UIA 経路は MSAA の object/child を確定できず HWND までの照合となる。
+前面化、capture、MOVESIZE、CREATE / DESTROY、SHOW / HIDE、SYSTEM_SCROLLINGSTART / END、
+別 HWND は免除しない。SCROLLING hook は監視に残し、登録失敗でも pause する。
+免除は効果の確認ではなく、executor の読戻し・窓検証を維持する。
+
+**別 UIA client が同じ要素へ同じ種類の操作を同じ許可区間内の時刻に行う場合は識別できない。**
+claim と同じ tick 自体は拒否するが、claim より後の許可された tick で自分と他 client の通知が
+重なる場合は見分けられない。同じ HWND 内の子識別不能も残る。ADR §2.5 の表示・隔離で扱う。
+免除区間は provider 呼出しの前後だけでなく claim 全体＋猶予のまま。許可表・種類別上限・150ms は
+実測前の暫定値である。P7b で各 pattern の実通知と読戻し、BG-3 の別 client、BG-6/8 の停止を測る。
+特に BG-1 の正例が同一 tick 拒否により通らない場合は、条件を緩めず親へ相談する。
+段 A の合成 native 試験は OS 入力を送らない。native 実行と実機 BG-1 は親工程で確認し、未実施を PASS としない。
 
 ## ビルドと道具の自己試験（親工程）
 

@@ -1,3 +1,11 @@
+// A shared top-level host cannot identify a single UIA control's effects.
+bool WindowsBackgroundElementWindowValid(HWND hwnd, DWORD target_pid, HWND target_window) {
+  DWORD pid = 0;
+  return hwnd != nullptr && IsWindow(hwnd) && hwnd != target_window &&
+      GetWindowThreadProcessId(hwnd, &pid) != 0 && pid == target_pid &&
+      GetAncestor(hwnd, GA_ROOT) != hwnd && IsChild(target_window, hwnd);
+}
+
 // Native monitoring closes claims independently of Main event delivery (P3d).
 struct WindowsBackgroundMonitor {
   using Owner = sprint_coder::computer_use::BackgroundInputOwner;
@@ -70,13 +78,11 @@ struct WindowsBackgroundMonitor {
   static void CALLBACK Foreground(HWINEVENTHOOK, DWORD, HWND candidate, LONG, LONG, DWORD, DWORD) {
     if (current != nullptr) current->state.Foreground(current->Belongs(candidate));
   }
-  static void CALLBACK Target(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+  static void CALLBACK Target(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG object, LONG child, DWORD, DWORD event_tick) {
     // Registration filters the process, including destroyed HWNDs and non-window UIA objects.
-    // No own-call proof exists in P3a; a call in progress alone must not suppress these events.
-    // P4a keeps this fail-closed: the WinEvent our own background pattern call raises also pauses
-    // here, so the claim ends as unknown_effect on a real device. BG01 completed is fake-only and
-    // real-device BG01 is BLOCKED until "N9 P4a-attr claim-scoped own-call WinEvent attribution".
-    if (current != nullptr) current->state.TargetEvent(Owner::kTarget);
+    // N9 P4a-attr: bounded generation/delivery correlation, never confirmation of the effect.
+    if (current != nullptr) current->state.TargetEvent(Owner::kTarget, event,
+        reinterpret_cast<std::uintptr_t>(hwnd), object, child, event_tick);
   }
 
   static LRESULT CALLBACK RawWindow(HWND hwnd, UINT message, WPARAM word, LPARAM data) {
@@ -193,12 +199,14 @@ struct WindowsBackgroundMonitor {
             nullptr, Target, pid, 0, WINEVENT_OUTOFCONTEXT);
         const auto capture = SetWinEventHook(EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTUREEND,
             nullptr, Target, pid, 0, WINEVENT_OUTOFCONTEXT);
-        const bool success = foreground && mouse && objects && movement && capture;
+        const auto scrolling = SetWinEventHook(EVENT_SYSTEM_SCROLLINGSTART, EVENT_SYSTEM_SCROLLINGEND,
+            nullptr, Target, pid, 0, WINEVENT_OUTOFCONTEXT);
+        const bool success = foreground && mouse && objects && movement && capture && scrolling;
         state.Foreground(Belongs(GetForegroundWindow()));
         Initialized(success);
         if (success) RunPump(stop, Pump::kHook);
         state.Pause();
-        for (auto hook : {foreground, objects, movement, capture})
+        for (auto hook : {foreground, objects, movement, capture, scrolling})
           if (hook != nullptr) UnhookWinEvent(hook);
         if (mouse != nullptr) UnhookWindowsHookEx(mouse);
         current = nullptr;

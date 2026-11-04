@@ -1,5 +1,5 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,32 @@ import { describe, expect, it } from 'vitest';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const native = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
+type Run = Readonly<{ status: number | null; stdout: string; stderr: string }>;
+// Compiles run asynchronously: a spawnSync longer than 60s blocks the vitest worker RPC.
+function run(
+  file: string,
+  args: string[],
+  options: { verbatim?: boolean; timeout: number; env?: NodeJS.ProcessEnv },
+): Promise<Run> {
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args,
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: options.verbatim ?? false,
+        timeout: options.timeout,
+        maxBuffer: 64 * 1024 * 1024,
+        ...(options.env ? { env: options.env } : {}),
+      },
+      (error, stdout, stderr) => {
+        const code = error && typeof error.code === 'number' ? error.code : error ? null : 0;
+        resolve({ status: code, stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
+  });
+}
 type Build = Readonly<{
   wrap: (arguments_: string[]) => { file: string; args: string[]; verbatim: boolean };
 }>;
@@ -111,7 +137,8 @@ describe('background executor native entry', () => {
       'BG05_unissued_action_requires_handoff',
       'BG05_guard_failure_never_falls_back',
       'BG01_call_pattern_one_timed_provider_call',
-      'BG01_real_device_completed_blocked_until_own_call_attribution',
+      'BG01_attributed_event_or_other_hwnd_takeover',
+      'BG01_attribution_does_not_replace_readback',
     ]) {
       expect(tests).toContain(name);
     }
@@ -162,11 +189,117 @@ describe('background executor native entry', () => {
     }
   });
 
-  it('records that real-device BG01 completed is blocked until own-call attribution', () => {
-    const follow = 'N9 P4a-attr claim-scoped own-call WinEvent attribution';
-    expect(native('computer_use_windows_host_background_monitor.inc')).toContain(follow);
-    expect(native('computer_use_windows_host_uia_semantic.inc')).toContain(follow);
-    expect(native('computer_use_windows_background_executor_test.h')).toContain(follow);
+  it('binds attribution to the resolved element outside locks and preserves Stop ordering', () => {
+    const semantic = native('computer_use_windows_host_uia_semantic.inc');
+    const claim = semantic.slice(
+      semantic.indexOf('std::uint64_t Claim()'),
+      semantic.indexOf('bool Call()'),
+    );
+    const prepare = semantic.slice(
+      semantic.indexOf('Preparation Prepare()'),
+      semantic.indexOf('bool ReadScroll('),
+    );
+    expect(prepare).toContain('target->get_CurrentNativeWindowHandle(&hwnd)');
+    expect(prepare).toContain('!ElementWindowValid()) return Preparation::kHandoff;');
+    expect(claim.indexOf('!ElementWindowValid()')).toBeLessThan(claim.indexOf('stop_mutex'));
+    expect(claim).toContain('window_handoff = true; return 0;');
+    expect(semantic).toContain(
+      'outcome == Outcome::kAwaitingForegroundHandoff || operations.window_handoff',
+    );
+    expect(claim).toContain('work.kind, reinterpret_cast<std::uintptr_t>(hwnd)');
+    expect(claim).toContain('state.Claim(pending->background_epoch, permission)');
+    const stop = semantic.slice(
+      semantic.indexOf('bool StopWindowsSemanticInput'),
+      semantic.indexOf('bool AwaitWindowsSemanticValidation'),
+    );
+    expect(stop).toContain('session.background_monitor->state.Pause()');
+    expect(stop).toContain('active->background_monitor->state.Pause()');
+    expect(native('computer_use_windows_background_executor_test.cc')).toContain(
+      'BG01_scroll_attributed_event_or_other_hwnd_takeover',
+    );
+  });
+
+  it('pins generation time, grace exclusion, dedicated child HWNDs and per-kind fail-closed limits', () => {
+    const monitor = native('computer_use_windows_background_monitor.h');
+    expect(monitor).toContain('return ::GetTickCount();');
+    expect(monitor).not.toContain('#include <windows.h>');
+    expect(monitor).toContain('claim_tick_ = tick_clock_();');
+    expect(monitor).toContain('static_cast<std::int32_t>(event_tick - claim_tick_) > 0');
+    expect(monitor).toContain('(grace_ && now < grace_deadline_)');
+    expect(monitor).toContain('kind_counts_[kind] < permission_.limits[kind]');
+    expect(monitor).not.toContain('0x8002, 0x8003');
+    expect(monitor).not.toContain('0x12, 0x13');
+    const host = native('computer_use_windows_host_background_monitor.inc');
+    expect(host).toContain('object, child, event_tick);');
+    for (const guard of [
+      'IsWindow(hwnd)',
+      'pid == target_pid',
+      'hwnd != target_window',
+      'GetAncestor(hwnd, GA_ROOT) != hwnd',
+      'IsChild(target_window, hwnd)',
+    ])
+      expect(host).toContain(guard);
+    expect(host).toContain('foreground && mouse && objects && movement && capture && scrolling');
+    const tests = native('computer_use_windows_background_monitor_test.cc');
+    for (const name of [
+      'ATTR_generation_before_or_same_tick_delivered_after_claim',
+      'ATTR_generation_tick_wrap',
+      'ATTR_grace_refuses_claim_until_deadline',
+      'ATTR_each_kind_first_excess_pauses',
+      'ATTR_total_first_excess_pauses',
+      'ATTR_show_hide_scrolling_never_exempt',
+      'ATTR_element_hwnd_requires_live_same_pid_descendant_not_root',
+      'ATTR_scrolling_hook_registration_failure_pauses',
+    ])
+      expect(tests).toContain(name);
+    const fixture = native('fixtures/background-input/fixture.cc');
+    expect(fixture).toContain('i < 6');
+    expect(fixture).toContain('WS_CHILD | WS_VISIBLE');
+    expect(fixture).toContain('main_window, nullptr, cls.hInstance, controls[i]');
+  });
+
+  it('connects the bounded monitor matrix and WinEvent metadata without widening the public gate', () => {
+    const monitor = native('computer_use_windows_background_monitor.h');
+    expect(monitor).toContain('kBackgroundEventGraceMs = 150');
+    expect(monitor).toContain('kBackgroundEventLimit = 16');
+    expect(monitor).toContain('observed < grace_deadline_');
+    expect(monitor).toContain('exempted_ < kBackgroundEventLimit');
+    const host = native('computer_use_windows_host_background_monitor.inc');
+    expect(host).toContain('state.TargetEvent(Owner::kTarget, event,');
+    expect(host).toContain('reinterpret_cast<std::uintptr_t>(hwnd), object, child');
+    expect(host).toContain('EVENT_SYSTEM_SCROLLINGSTART, EVENT_SYSTEM_SCROLLINGEND');
+    expect(host).toContain('movement, capture, scrolling}');
+    const tests = native('computer_use_windows_background_monitor_test.cc');
+    for (const name of [
+      'ATTR_arrival_before_during_after_finish_grace_and_next_claim',
+      'ATTR_each_pattern_expected_event',
+      'ATTR_wrong_hwnd_kind_object_child_owner_time_or_missing_hwnd',
+      'ATTR_known_child_matches',
+      'ATTR_limit_shared_by_claim_and_grace',
+      'ATTR_foreground_capture_movesize_popup_never_exempt',
+      'ATTR_stop_exit_reregister_health_revoke_permission',
+      'ATTR_fresh_monitor_does_not_inherit_grace',
+      'ATTR_callback_passes_metadata',
+      'ATTR_native_stop_revokes_grace',
+      'ATTR_old_finish_cannot_end_next_claim',
+      'ATTR_next_claim_gets_fresh_count',
+      'ATTR_old_finish_cannot_extend_grace',
+      'ATTR_unattributed_next_claim_discards_old_permission',
+      'ATTR_stop_before_or_after_claim_linearization',
+    ])
+      expect(tests).toContain(name);
+  });
+
+  it('opens every executor guard, including the Stop pauses, in the P7b acceptance build too', () => {
+    for (const name of [
+      'computer_use_windows_host_uia_semantic.inc',
+      'computer_use_windows_host_input.inc',
+    ]) {
+      const guards = native(name).match(/^#if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST\b.*$/gmu) ?? [];
+      expect(guards.length, name).toBeGreaterThan(0);
+      for (const guard of guards)
+        expect(guard, name).toContain('|| SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE');
+    }
   });
 
   it('does not expose foreground APIs to the background pattern adapter', () => {
@@ -186,7 +319,9 @@ describe.skipIf(process.platform !== 'win32')('background executor test build', 
   describe.each(['test', 'background-acceptance', 'production'] as const)(
     'native build %s',
     (variant) => {
-      it('compiles the host translation unit and checks the fixture predicate', ({ skip }) => {
+      it('compiles the host translation unit and checks the fixture predicate', async ({
+        skip,
+      }) => {
         const build = findBuild();
         if (!build) {
           if (process.env.CI) throw new Error('MSVC required');
@@ -236,9 +371,8 @@ describe.skipIf(process.platform !== 'win32')('background executor test build', 
             host,
             `/Fo:${object}`,
           ]);
-          const compiled = spawnSync(command.file, command.args, {
-            encoding: 'utf8',
-            windowsVerbatimArguments: command.verbatim,
+          const compiled = await run(command.file, command.args, {
+            verbatim: command.verbatim,
             timeout: 500000,
             env: { ...process.env, VSLANG: '1033' },
           });
@@ -321,15 +455,13 @@ int main() {
             `/Fo:${join(root, 'predicate.obj')}`,
             `/Fe:${predicateBinary}`,
           ]);
-          const predicateBuild = spawnSync(predicateCommand.file, predicateCommand.args, {
-            encoding: 'utf8',
-            windowsVerbatimArguments: predicateCommand.verbatim,
-            windowsHide: true,
+          const predicateBuild = await run(predicateCommand.file, predicateCommand.args, {
+            verbatim: predicateCommand.verbatim,
             timeout: 120000,
             env: { ...process.env, VSLANG: '1033' },
           });
           expect(predicateBuild.status, predicateBuild.stdout + predicateBuild.stderr).toBe(0);
-          const checked = spawnSync(predicateBinary, [], { windowsHide: true, timeout: 10000 });
+          const checked = await run(predicateBinary, [], { timeout: 10000 });
           expect(checked.status).toBe(0);
         } finally {
           rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
