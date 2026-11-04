@@ -1,9 +1,30 @@
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // The dispatch's own interlock check (#500 S5-c-2 PR-5). The head of the REAL DispatchWindowsAction
 // (from its first line to the point where V1's per-action work starts) is compiled against inert
@@ -318,20 +339,20 @@ const build = findBuild(source, binary);
 describe.skipIf(build === null && process.env['CI'] === undefined)(
   'dispatch interlock check, the real head of DispatchWindowsAction (#500 S5-c-2 PR-5)',
   () => {
-    it('refuses with the verdict code before anything else, goes on without a verdict, and asks nothing when the binding fails', () => {
+    it('refuses with the verdict code before anything else, goes on without a verdict, and asks nothing when the binding fails', async () => {
       try {
         expect(build, 'a C++ compiler is required to run this seam in CI').not.toBeNull();
         expect(head.length).toBeGreaterThan(200);
         writeFileSync(source, program.replace('//@@HEAD@@', head));
         const compiler = build!;
-        const built = spawnSync(compiler.file, compiler.args, {
+        const built = await runAsync(compiler.file, compiler.args, {
           encoding: 'utf8',
           windowsVerbatimArguments: compiler.verbatim,
           timeout: 120_000,
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 20_000 });
+        const run = await runAsync(binary, [], { encoding: 'utf8', timeout: 20_000 });
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain('OK');
       } finally {

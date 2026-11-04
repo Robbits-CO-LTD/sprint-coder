@@ -1,8 +1,29 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync, type ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
+// Keep the worker responsive to Vitest RPC while native builds and matrices run.
+function runAsync(file: string, args: string[], options: ExecFileOptionsWithStringEncoding) {
+  return new Promise<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    signal: NodeJS.Signals | null;
+    error: Error | undefined;
+  }>((resolve) => {
+    execFile(file, args, options, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+        signal: error?.signal ?? null,
+        error: error && typeof error.code !== 'number' ? error : undefined,
+      });
+    });
+  });
+}
 
 // A LIVE seam for the Windows read of one node's value (#785 T15-4w). The portable read
 // (computer_use_windows_artifact_read.h) runs against the real UI Automation source: windows the
@@ -306,13 +327,13 @@ const onWindows = process.platform === 'win32';
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows read of one node value, live (#785 T15-4w)',
   () => {
-    it('reads an Edit and the fixture Edit, and refuses a password, a button, a browser class and a console', () => {
+    it('reads an Edit and the fixture Edit, and refuses a password, a button, a browser class and a console', async () => {
       expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-artifact-read-'));
       try {
         const run = (args: string[]) => {
           const command = build!.wrap(args);
-          return spawnSync(command.file, command.args, {
+          return runAsync(command.file, command.args, {
             encoding: 'utf8',
             windowsVerbatimArguments: command.verbatim,
             timeout: 240_000,
@@ -320,7 +341,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           });
         };
         const fixtureExecutable = join(scratch, 'fixture.exe');
-        const fixtureBuild = run([
+        const fixtureBuild = await run([
           '/nologo',
           '/std:c++20',
           '/EHsc',
@@ -355,7 +376,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         const source = join(scratch, 'seam.cc');
         const binary = join(scratch, 'seam.exe');
         writeFileSync(source, program);
-        const built = run([
+        const built = await run([
           '/nologo',
           '/std:c++20',
           '/EHsc',
@@ -380,7 +401,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           'shell32.lib',
         ]);
         expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
-        const executed = spawnSync(
+        const executed = await runAsync(
           binary,
           ci ? ['ci', fixtureExecutable] : ['local', fixtureExecutable],
           {
