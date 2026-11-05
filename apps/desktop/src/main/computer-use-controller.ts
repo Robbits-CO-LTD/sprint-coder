@@ -6274,8 +6274,11 @@ export class ComputerUseController {
       allowed &&
       !record.controller.signal.aborted &&
       this.sessions.get(record.status.sessionId) === record &&
-      record.observation?.revision === observationRevision &&
-      this.observationIsFresh(record)
+      // The approval path re-observes (an equivalent observation with the next revision) without
+      // moving status.observationRevision, so freshness is the given revision and its expiry.
+      record.observation !== null &&
+      record.observation.revision === observationRevision &&
+      Date.parse(record.observation.expiresAt) > this.now()
     );
   }
 

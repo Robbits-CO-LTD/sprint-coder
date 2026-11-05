@@ -512,6 +512,24 @@ it.each([false, true])('explorer_click_after_restart_resume_%s', async (resume) 
   expect(f.startSession).toHaveBeenCalledTimes(2);
 });
 
+it('explorer_action_allowed_after_approval_reobservation_without_status_sync', async () => {
+  const f = await actionScenario(true);
+  const before = f.record.status.observationRevision;
+  // The native approval path re-observes and keeps status.observationRevision unchanged.
+  await f.controller['refocusAndReobserve'](f.record, { focusedSession: null }, () => true, true);
+  expect(f.record.status.observationRevision).toBe(before);
+  expect(f.record.observation!.revision).not.toBe(before);
+  expect(
+    await f.controller['explorerActionAllowed'](
+      f.record,
+      folderClick,
+      f.record.observation!.revision,
+    ),
+  ).toBe(true);
+  // A stale revision (the one the status still holds) is refused.
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, before)).toBe(false);
+});
+
 it.each(['windowIdentityDigest', 'appIdentityDigest', 'pid', 'processStartTime'] as const)(
   'explorer_restart_rejects_changed_%s',
   async (field) => {
