@@ -5034,6 +5034,71 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it.each(['chrome.exe', 'msedge.exe'])(
+      'browser_control_does_not_enable_artifact_transfer (%s)',
+      async (leaf) => {
+        const facts = {
+          platform: 'win32' as const,
+          executablePath: `C:\\Program Files\\Browser\\${leaf}`,
+          executableDigest: 'b'.repeat(64),
+          signerDigest: 'a'.repeat(64),
+          packageFamilyName: null,
+        };
+        const identityDigest = computerAppNativeIdentityDigest(
+          facts,
+          computerAppGrantIdentityFrom(facts)!,
+        )!;
+        const browser: ComputerAppProfileRecord = {
+          ...profile,
+          platform: 'win32',
+          kind: 'win32-executable',
+          canonicalPath: facts.executablePath,
+          identityDigest,
+          identity: { ...facts, identityDigest },
+        };
+        const copyFixture = createFixture({
+          profileRecord: browser,
+          profileMaximumMode: 'supervised',
+          windowExecutableDigest: facts.executableDigest,
+          observationOverrides: withNode,
+          artifactRead: {},
+        });
+        const copySession = await start(copyFixture, 'supervised');
+        await copyFixture.controller.observe(copySession.sessionId);
+        expect(
+          await copyFixture.controller.act(
+            copySession.sessionId,
+            { type: 'copy', targetId: 'node-1' },
+            'browser-copy',
+          ),
+        ).toMatchObject({
+          result: 'rejected',
+          reasonCode: 'artifact_copy_refused',
+        });
+        expect(copyFixture.readInputs).toHaveLength(0);
+        expect(copyFixture.controller.copiedArtifactReferences(copySession.sessionId)).toEqual([]);
+        await copyFixture.controller.dispose();
+        const { fixture } = await pasteSession({
+          mode: 'supervised',
+          extra: {
+            profileRecord: browser,
+            profileMaximumMode: 'supervised',
+            windowExecutableDigest: facts.executableDigest,
+          },
+        });
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        expect(fixture.approvals).toEqual([]);
+        expect(fixture.dispatchCount()).toBe(0);
+        expect([...fixture.audits.values()]).toContainEqual(
+          expect.objectContaining({
+            reasonCode: 'artifact_paste_refused',
+            state: 'rejected',
+          }),
+        );
+        await fixture.controller.dispose();
+      },
+    );
+
     it('N24: a value with a line feed cannot be typed but can be set', async () => {
       const typed = await pasteSession({ text: 'a\nb' });
       await vi.waitFor(() => expect(typed.fixture.statuses.at(-1)?.state).toBe('stopped'));

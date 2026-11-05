@@ -241,11 +241,12 @@ void Check(bool ok, const char *name) {
 struct Outcome { bool ran_on; bool accepted; std::string reason; std::vector<std::string> calls; };
 Outcome Run(sprint_coder::computer_use::NativeApprovalEffect approved =
                 sprint_coder::computer_use::NativeApprovalEffect::kInvalid,
-            std::uint64_t approved_deadline_ns = 0) {
+            std::uint64_t approved_deadline_ns = 0, bool browser = false) {
   g_calls.clear();
   g_focus_now = "observed-focus";
   WindowsSession session;
   session.approved_deadline_ns = approved_deadline_ns;
+  session.observed_page.web = browser;
   std::string result;
   std::string reason;
   bool accepted = true;
@@ -391,6 +392,13 @@ int main() {
     const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 7);
     Check(out.ran_on && out.calls == std::vector<std::string>({"validate", "page", "v1-guards"}),
           "approved_claim_skips_the_ordinary_interlock");
+  }
+  g_page_ok = false;
+  {
+    const Outcome out = Run(sprint_coder::computer_use::NativeApprovalEffect::kSupervisedAction, 7, true);
+    Check(!out.ran_on && !out.accepted && out.reason == "native_target_unclassified" &&
+              out.calls == std::vector<std::string>({"validate", "page"}),
+          "approved_browser_page_change_stops_before_input");
   }
   std::cout << (g_failures == 0 ? "OK\n" : "FAILED\n");
   return g_failures == 0 ? 0 : 1;

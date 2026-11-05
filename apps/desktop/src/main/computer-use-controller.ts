@@ -1912,13 +1912,18 @@ export class ComputerUseController {
       )
     )
       throw new Error('Computer Use application cannot be granted');
-    // A row written by a newer build is kept unread (it grants nothing here); an explicit approval
-    // in this build replaces it, or the store's one-row-per-identity rule would refuse the grant.
+    // Explicit reapproval replaces an unreadable row or widens a stored ceiling;
+    // otherwise the store's one-row-per-identity rule would refuse the new grant.
     const retained = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
       derived.grantIdentityDigest,
     );
-    if (retained !== null && computerAppGrantVersionUnreadable(retained, denyRulesetVersion))
+    if (
+      retained !== null &&
+      (computerAppGrantVersionUnreadable(retained, denyRulesetVersion) ||
+        (retained.maxMode !== input.maxMode &&
+          bindComputerUseMaximumMode(retained.maxMode, input.maxMode) === retained.maxMode))
+    )
       this.deps.persistence.removeComputerAppGrant(retained.id, retained.revision);
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
@@ -2059,7 +2064,16 @@ export class ComputerUseController {
     // braces — but a future caller that forgets the filter must not be handed a granted terminal.
     const grant = this.appGrantFor(profile);
     if (this.permanentlyDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
-    if (grant !== null)
+    const scoped = taskId === null ? null : this.taskScopedGrantFor(taskId, profile);
+    // A one-time reapproval may widen an old stored ceiling for this Task only.
+    if (
+      grant !== null &&
+      !(
+        scoped !== null &&
+        bindComputerUseMaximumMode(grant.maxMode, scoped.maxMode) === grant.maxMode &&
+        grant.maxMode !== scoped.maxMode
+      )
+    )
       return Object.freeze({
         granted: true,
         scope: 'grant' as const,
@@ -2073,7 +2087,6 @@ export class ComputerUseController {
                 modelId: grant.providerEgressModelId,
               }),
       });
-    const scoped = taskId === null ? null : this.taskScopedGrantFor(taskId, profile);
     if (scoped !== null)
       return Object.freeze({
         granted: true,
@@ -2391,6 +2404,12 @@ export class ComputerUseController {
         this.targetAppTokens.set(
           appToken,
           Object.freeze({
+            maximumMode: windows
+              .filter((window) => this.computerUseWindowStartEligible(profile, window))
+              .reduce<ComputerUseMode>(
+                (ceiling, window) => bindComputerUseMaximumMode(ceiling, window.maximumMode),
+                maximumModeForProfile(profile),
+              ),
             binding: appBinding,
             profileId: profile.id,
             expiresAt,
@@ -2720,15 +2739,25 @@ export class ComputerUseController {
       state.providerEgress.connectionId === egressBinding.connectionId &&
       state.providerEgress.modelId === egressBinding.modelId;
     // Already agreed, in full: the second and later requests cost the user nothing (§7.2).
-    if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
-    const kind = state.granted ? ('provider-egress' as const) : ('app-grant' as const);
+    const listedCeiling = targetRecord?.maximumMode;
+    const mayUpgrade =
+      state.granted &&
+      state.maxMode !== null &&
+      listedCeiling !== undefined &&
+      state.maxMode !== listedCeiling &&
+      bindComputerUseMaximumMode(state.maxMode, listedCeiling) === state.maxMode;
+    if (state.granted && egressAgreed && !mayUpgrade) return { granted: true, reasonCode: null };
     const denial = this.deps.persistence.getComputerAppAccessRequest(
       identity.platform,
       identity.grantIdentityDigest,
       context.taskId,
     );
     // A refusal is final for this Task, and a different Task may ask again (§6.1).
-    if (denial?.denied === true) return this.accessRefused('access_request_denied_in_task');
+    if (denial?.denied === true) {
+      // Refusing a wider ceiling does not revoke the already agreed, narrower grant.
+      if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
+      return this.accessRefused('access_request_denied_in_task');
+    }
     if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     if (
       (this.accessRequestsByTurn.get(context.turnId) ?? 0) >= COMPUTER_ACCESS_REQUEST_TURN_LIMIT ||
@@ -2744,6 +2773,13 @@ export class ComputerUseController {
       return this.accessRefused('access_request_invalid_token');
     if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
       return this.accessRefused('access_request_invalid_token');
+    const upgrade =
+      mayUpgrade &&
+      state.granted &&
+      state.maxMode !== null &&
+      state.maxMode !== observed.facts.maximumMode &&
+      bindComputerUseMaximumMode(state.maxMode, observed.facts.maximumMode) === state.maxMode;
+    const kind = state.granted && !upgrade ? ('provider-egress' as const) : ('app-grant' as const);
     // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
     // card to withdraw, and a policy change does not abort this dispatch either. Raising now would
     // put a card bound to the old epoch on screen, so the epoch is read again on this side of the
@@ -2753,6 +2789,7 @@ export class ComputerUseController {
     // A Turn that is already gone has nobody left to click, and the card holds the single global
     // slot for two minutes. Checked before raising, and again through the listener below.
     if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
+    if (state.granted && egressAgreed && !upgrade) return { granted: true, reasonCode: null };
     if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     return await this.raiseAppGrantCard({
       ...(targetRecord.binding.windowsGeneration === undefined ? {} : { targetRecord }),
@@ -2766,7 +2803,7 @@ export class ComputerUseController {
       reason: input.reason,
       providerEgress: egressBinding,
       grantId: state.grantId,
-      grantedMaxMode: state.granted ? state.maxMode : null,
+      grantedMaxMode: state.granted && !upgrade ? state.maxMode : null,
       ...(signal === undefined ? {} : { signal }),
     });
   }
