@@ -37,7 +37,10 @@ export function createComputerAppGrantFixtureStore(
       grantIdentityDigest: string,
     ): ComputerAppGrantRecord | null;
     getComputerAppGrant(grantId: string): ComputerAppGrantRecord;
-    createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord;
+    createComputerAppGrant(
+      input: ComputerAppGrantInput,
+      replace?: Readonly<{ id: string; revision: number }>,
+    ): ComputerAppGrantRecord;
     touchComputerAppGrantUsed(
       grantId: string,
       usedAt: string,
@@ -103,7 +106,9 @@ export function createComputerAppGrantFixtureStore(
             grant.platform === platform && grant.grantIdentityDigest === grantIdentityDigest,
         ) ?? null,
       getComputerAppGrant: mustGet,
-      createComputerAppGrant: (input) => {
+      createComputerAppGrant: (input, replace) => {
+        if (replace !== undefined && mustGet(replace.id).revision !== replace.revision)
+          throw new Error('Computer Use app grant revision changed');
         sequence += 1;
         const now = new Date().toISOString();
         const record: ComputerAppGrantRecord = Object.freeze({
@@ -132,7 +137,7 @@ export function createComputerAppGrantFixtureStore(
             grant.platform === record.platform &&
             grant.grantIdentityDigest === record.grantIdentityDigest,
         );
-        if (conflicting !== undefined) {
+        if (conflicting !== undefined && conflicting.id !== replace?.id) {
           if (
             computerAppGrantMismatch(
               computerAppGrantStoredIdentity(conflicting),
@@ -143,6 +148,7 @@ export function createComputerAppGrantFixtureStore(
             throw new Error('Computer Use app grant already exists');
           grants.delete(conflicting.id);
         }
+        if (replace !== undefined) grants.delete(replace.id);
         grants.set(record.id, record);
         return record;
       },
@@ -163,7 +169,7 @@ export function createComputerAppGrantFixtureStore(
       countComputerAppGrantAccessRequest: (grantId, outcome) =>
         rewrite(grantId, (current) => ({
           ...current,
-          requestCount: current.requestCount + 1,
+          requestCount: current.requestCount + (outcome === 'requested' ? 1 : 0),
           denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
         })),
       setComputerAppGrantProviderEgress: (grantId, providerEgress) =>
@@ -193,10 +199,11 @@ export function createComputerAppGrantFixtureStore(
           displayName: input.displayName,
           // Only a card that was shown counts as a request; the refusal that answers it moves the
           // refusal columns alone. Same rule as the SQLite store — see `recordComputerAppAccessRequest`.
-          requestCount: (current?.requestCount ?? 0) + (input.outcome === 'denied' ? 0 : 1),
-          denialCount: (current?.denialCount ?? 0) + (input.outcome === 'denied' ? 1 : 0),
+          requestCount: (current?.requestCount ?? 0) + (input.outcome === 'requested' ? 1 : 0),
+          denialCount: (current?.denialCount ?? 0) + (input.outcome === 'requested' ? 0 : 1),
           // A refusal inside a Task is final for that Task; a later request cannot clear it.
           denied: (current?.denied ?? false) || input.outcome === 'denied',
+          upgradeDenied: (current?.upgradeDenied ?? false) || input.outcome === 'upgrade_denied',
           createdAt: current?.createdAt ?? now,
           updatedAt: now,
         });

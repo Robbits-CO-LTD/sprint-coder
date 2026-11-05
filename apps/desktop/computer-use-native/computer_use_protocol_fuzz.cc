@@ -3661,7 +3661,7 @@ bool CheckWindowsOriginPolicy() {
     input.request = request;
     input.identity.app_identity = {true, std::string(64, 'a')};
     input.identity.process_generation = {true, "generation"};
-    input.identity.window_identity = {true, std::string(64, 'b')};
+    input.identity.window_identity = {true, std::string(64, 'b') + ":" + WindowsPageBinding(page)};
     input.identity.geometry_present = true;
     input.identity.width = 800; input.identity.height = 600;
     input.target_frame = {true, 10, 10, 100, 20};
@@ -3685,6 +3685,35 @@ bool CheckWindowsOriginPolicy() {
           approved.Approve(FlowFacts(), ordinary, execution, 110).ok &&
           !approved.ConsumeApproved(FlowFacts(), changed, 120).ok;
     };
+    {
+      auto binding = ApprovalIntentBinding();
+      binding.authority_digest = ordinary.authority_digest;
+      binding.effect = ordinary.effect;
+      binding.classifier_version = ordinary.classifier_version;
+      binding.ruleset_version = ordinary.ruleset_version;
+      binding.lexicon_version = ordinary.lexicon_version;
+      NativeApprovalFlow approved;
+      const std::string intent(64, 'e'), execution(64, 'f');
+      int inputs = 0;
+      if (!approved.Offer(intent, binding, 100, kNativeApprovalWaitMaxNs) ||
+          !approved.Approve(FlowFacts(), ordinary, execution, 110).ok) return false;
+      if (approved.ConsumeApproved(FlowFacts(), ordinary, 120).ok) ++inputs;
+      if (approved.ConsumeApproved(FlowFacts(), ordinary, 121).ok) ++inputs;
+      if (!Check(inputs == 1 && !approved.occupied(), "approval_executes_once")) return false;
+
+      const auto original_identity = input.identity.window_identity;
+      form.Node(form.pane).signature = "document-other-tab";
+      const auto other_page = WindowsShadowReader(form.source).ReadPage();
+      capture = read();
+      input.identity.window_identity.value = std::string(64, 'b') + ":" + WindowsPageBinding(other_page);
+      if (!Check(other_page.normalized_origin == page.normalized_origin &&
+                 !WindowsPageAllowsInput(page, other_page) &&
+                 cannot_approve_or_dispatch(MeasureWindowsApproval(input)),
+                 "same_origin_other_tab_rejects_old_approval_flow")) return false;
+      form.Node(form.pane).signature = "document-1";
+      input.identity.window_identity = original_identity;
+      capture = read();
+    }
     input.ruleset.supervised_action = false;
     if (!Check(ordinary.eligible && !MeasureWindowsApproval(input).eligible,
                "ordinary_origin_requires_explicit_policy")) return false;

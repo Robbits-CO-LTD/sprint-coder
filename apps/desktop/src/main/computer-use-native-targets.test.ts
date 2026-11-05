@@ -98,43 +98,62 @@ it.each([
   ['chrome.exe', 'C:\\Program Files (x86)', 'observe_only'],
   ['msedge.exe', 'C:\\Program Files (x86)', 'supervised'],
   ['msedge.exe', 'C:\\Program Files', 'observe_only'],
-] as const)('Main independently bounds %s in %s to %s', (leaf, root, expected) => {
-  vi.stubEnv('ProgramW6432', 'C:\\Program Files');
-  vi.stubEnv('ProgramFiles(x86)', 'C:\\Program Files (x86)');
-  const target = row('upper');
-  const relative =
-    leaf === 'chrome.exe'
-      ? 'google\\chrome\\application\\chrome.exe'
-      : 'microsoft\\edge\\application\\msedge.exe';
-  const path = `${root}\\${relative}`;
-  target.facts = {
-    ...facts,
-    imageLeaf: leaf,
-    originalFilename: leaf,
-    imageRelativePath: relative,
-    signerOrganization: leaf === 'chrome.exe' ? 'google llc' : 'microsoft corporation',
-    signerMicrosoftRoot: leaf === 'msedge.exe',
-  };
-  target.maximumMode = 'supervised';
-  target.appIdentityDigest = sha256(
-    `computer-win-identity-v1-signed\n${path.toLowerCase()}\n${target.identity.signerDigest}`,
-  );
-  target.identity = {
-    ...target.identity,
-    executablePath: path,
-    identityDigest: target.appIdentityDigest,
-    maximumMode: 'supervised',
-  };
-  expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
-    kind: 'selectable',
-    maximumMode: expected,
-  });
-  vi.stubEnv('ProgramW6432', undefined);
-  vi.stubEnv('ProgramFiles(x86)', undefined);
-  expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
-    maximumMode: 'observe_only',
-  });
-});
+  ['chrome.exe', 'D:\\CanonicalApps', 'supervised'],
+  ['msedge.exe', 'D:\\CanonicalAppsX86', 'supervised'],
+] as const)(
+  'Main preserves native Known Folder ceiling for %s in %s: %s',
+  (leaf, root, expected) => {
+    vi.stubEnv('ProgramW6432', 'C:\\Program Files');
+    vi.stubEnv('ProgramFiles(x86)', 'C:\\Program Files (x86)');
+    const target = row('upper');
+    const relative =
+      leaf === 'chrome.exe'
+        ? 'google\\chrome\\application\\chrome.exe'
+        : 'microsoft\\edge\\application\\msedge.exe';
+    const path = `${root}\\${relative}`;
+    target.facts = {
+      ...facts,
+      imageLeaf: leaf,
+      originalFilename: leaf,
+      imageRelativePath: relative,
+      signerOrganization: leaf === 'chrome.exe' ? 'google llc' : 'microsoft corporation',
+      signerMicrosoftRoot: leaf === 'msedge.exe',
+    };
+    target.maximumMode = expected;
+    target.appIdentityDigest = sha256(
+      `computer-win-identity-v1-signed\n${path.toLowerCase()}\n${target.identity.signerDigest}`,
+    );
+    target.identity = {
+      ...target.identity,
+      executablePath: path,
+      identityDigest: target.appIdentityDigest,
+      maximumMode: expected,
+    };
+    expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
+      kind: 'selectable',
+      maximumMode: expected,
+    });
+    vi.stubEnv('ProgramW6432', undefined);
+    vi.stubEnv('ProgramFiles(x86)', undefined);
+    expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
+      maximumMode: expected,
+    });
+    // A valid signed identity must also agree with the measured browser-relative path.
+    const mismatchedPath = `${root}\\other\\${leaf}`;
+    target.appIdentityDigest = sha256(
+      `computer-win-identity-v1-signed\n${mismatchedPath.toLowerCase()}\n${target.identity.signerDigest}`,
+    );
+    target.identity = {
+      ...target.identity,
+      executablePath: mismatchedPath,
+      identityDigest: target.appIdentityDigest,
+    };
+    expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
+      kind: 'selectable',
+      maximumMode: 'observe_only',
+    });
+  },
+);
 
 function nativeFixture() {
   const listTargets = vi.fn<() => unknown>(() => envelope());

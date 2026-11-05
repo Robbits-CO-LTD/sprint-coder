@@ -27,10 +27,12 @@ it.runIf(msvc !== null || clang)(
     );
     expect(dispatch.match(/if \(!WindowsSemanticPageAllowsInput\(work\)\)/gu)).toHaveLength(5);
     expect(dispatch.match(/InvokeWindowsSemanticInput\(/gu)).toHaveLength(5);
+    expect(dispatch.match(/\*reason = WindowsSemanticPageRefusalReason\(\);/gu)).toHaveLength(5);
     const program = String.raw`
 #include <atomic>
 #include <functional>
 #include <iostream>
+#include <string>
 struct Page { bool web = true; };
 struct WindowsSemanticWork { Page observed_page; int window = 12, pid = 42; };
 struct Pending { std::atomic<bool> page_invalidated{false}; } pending;
@@ -38,6 +40,8 @@ Pending *windows_semantic_operation = &pending;
 bool live = true, page_matches = true, stop_during_read = false;
 int reads = 0, inputs = 0;
 bool WindowsV1UiaMayCall() { return live; }
+bool timed_out = false;
+const char *WindowsV1UiaEndedReason() { return timed_out ? "accessibility_timeout" : "semantic_action_failed"; }
 bool RecheckWindowsBoundPageOnLane(int window, int pid, Page, const std::function<bool()> &current) {
   ++reads;
   if (stop_during_read) live = false;
@@ -56,8 +60,12 @@ int main() {
       if (inputs != (allowed ? 1 : 0) ||
           reads != (mode == 2 || mode == 4 ? 0 : 1) ||
           pending.page_invalidated != (mode == 1 || mode == 3)) return 1;
+      if (!allowed && std::string(WindowsSemanticPageRefusalReason()) !=
+          (mode == 1 ? "stale_target" : "semantic_action_failed")) return 2;
     }
   }
+  live = false; timed_out = true;
+  if (std::string(WindowsSemanticPageRefusalReason()) != "accessibility_timeout") return 3;
   std::cout << "Foreground semantic page guard: PASS\n";
 }
 `;
@@ -208,6 +216,8 @@ describe('Windows page recheck (N11-C)', () => {
     for (const name of [
       'tab_switch_invalidates_pending_action',
       'same_origin_other_tab_rejects_old_approval',
+      'same_origin_other_tab_rejects_old_approval_flow',
+      'approval_executes_once',
       'approval_return_rechecks_sensitive_surface',
       'confirmation_change_invalidates_approval',
       'unreadable_origin_never_reuses_previous_origin',

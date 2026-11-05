@@ -3,6 +3,7 @@ import {
   COMPUTER_TARGET_LABEL_MAX_CHARACTERS,
   COMPUTER_TARGET_UNTRUSTED_LABEL_NOTE,
   type ComputerTargetUntrustedLabel,
+  type ComputerUseMode,
 } from '@sprint-coder/contracts';
 import { computerTargetToolKind } from '@sprint-coder/domain';
 import type { WindowsGenerationToken } from './computer-use-native-types';
@@ -126,6 +127,7 @@ export type ComputerTargetTokenBinding = ComputerTargetAppBinding &
   Readonly<{ windowIdentityDigest: string; nativeWindowId: string }>;
 
 export type ComputerTargetAppTokenRecord = Readonly<{
+  maximumMode?: ComputerUseMode;
   candidateProfile?: ComputerAppProfileRecord;
   enumeration?: symbol;
   binding: ComputerTargetAppBinding;

@@ -12483,6 +12483,7 @@ int main() {
   it.each([
     'full_access_app',
     'supervised',
+    'browser page changed after approval',
     'background',
     'P5b two cards',
     'N9 dispatch End lost',
@@ -12505,7 +12506,12 @@ int main() {
       const race = mode === 'P5c2b-W failed preflight' || mode === 'P5c2b-W completion revoked';
       const rejectionCase = mode.startsWith('N9 ');
       const twoCards = mode === 'P5b two cards' || race || rejectionCase;
-      const maximumMode = background || twoCards ? 'full_access_app' : mode;
+      const pageChanged = mode === 'browser page changed after approval';
+      const maximumMode = pageChanged
+        ? 'supervised'
+        : background || twoCards
+          ? 'full_access_app'
+          : mode;
       const tripCalls: Array<[unknown, unknown]> = [];
       const tripReply: Responder = (wire) => {
         tripCalls.push([wire['kind'], wire['roundTripId']]);
@@ -12628,6 +12634,17 @@ int main() {
         approval_discard: () => ['approval_discard_result', { discarded: true }],
         dispatch_approved: () => {
           if (failDispatch) return ['error', { code: 'INPUT_FAILED', accepted: true }];
+          if (pageChanged)
+            return [
+              'dispatch_approved_result',
+              {
+                result: 'rejected',
+                reasonCode: 'stale_target',
+                sessionId: 'approval-host',
+                cancelEpoch: 0,
+                inputAttemptCount: 0,
+              },
+            ];
           attempts = 1;
           return [
             'dispatch_approved_result',
@@ -12933,6 +12950,16 @@ int main() {
         ).toMatchObject({
           approvalOffer: { kind: 'approval_required' },
         });
+        await target.host.close(session);
+        return;
+      }
+      if (pageChanged) {
+        expect(await target.host.approvalApprove!(input)).toEqual({ kind: 'approved' });
+        expect(await target.host.dispatchApproved!(input)).toMatchObject({
+          result: 'rejected',
+          reasonCode: 'stale_target',
+        });
+        expect(attempts).toBe(0);
         await target.host.close(session);
         return;
       }

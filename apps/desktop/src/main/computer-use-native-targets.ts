@@ -219,9 +219,11 @@ export function parseWindowsComputerUseTargets(
       kind: 'selectable',
       native,
       maximumMode: bindComputerUseMaximumMode(
+        // Native's ceiling includes canonical Known Folder installation checks. Main uses
+        // that measured result, not environment variables that may name a junction or be absent.
         native.maximumMode,
         verdict.maximumMode,
-        windowsBrowserInstallAllowsControl(native) ? 'full_access_app' : 'observe_only',
+        windowsBrowserPathMatches(native) ? 'full_access_app' : 'observe_only',
         verdict.kind === 'upper' && !windowsApprovalAvailable ? 'observe_only' : 'full_access_app',
       ),
     });
@@ -229,22 +231,13 @@ export function parseWindowsComputerUseTargets(
   return { ...parsed.data, targets };
 }
 
-function windowsBrowserInstallAllowsControl(
-  native: Extract<
-    ComputerWindowsNativeTargetList['targets'][number],
-    { kind: 'eligible' | 'upper' }
-  >,
-): boolean {
+function windowsBrowserPathMatches(native: NativeSelectableTarget): boolean {
   const leaf = asciiLower(native.facts.imageLeaf ?? '');
   if (leaf !== 'chrome.exe' && leaf !== 'msedge.exe') return true;
-  // Main independently narrows the merged program_files fact. Missing local folder evidence
-  // keeps discovery observable; native still verifies canonical Known Folder paths itself.
-  const root =
-    leaf === 'chrome.exe' ? process.env['ProgramW6432'] : process.env['ProgramFiles(x86)'];
-  if (root === undefined || !/^[a-z]:\\/iu.test(root)) return false;
-  const relative =
-    leaf === 'chrome.exe'
-      ? 'Google\\Chrome\\Application\\chrome.exe'
-      : 'Microsoft\\Edge\\Application\\msedge.exe';
-  return asciiLower(native.identity.executablePath) === asciiLower(win32.join(root, relative));
+  const relative = native.facts.imageRelativePath;
+  return (
+    relative !== null &&
+    relative !== undefined &&
+    asciiLower(native.identity.executablePath).endsWith(`\\${asciiLower(relative)}`)
+  );
 }
