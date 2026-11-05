@@ -272,6 +272,7 @@ struct WindowsSession {
   HANDLE executable_file = INVALID_HANDLE_VALUE;
   std::uint64_t executable_volume_serial = 0;
   FILE_ID_128 executable_file_id{};
+  std::string il_acl_snapshot;
   std::string executable_digest;
   std::string signer_digest;
   std::string policy_language = "unknown";

@@ -38,6 +38,7 @@ struct WindowsSessionIdentityResult {
 };
 
 struct WindowsValidationWork {
+  std::string il_acl_snapshot;
   std::uint32_t pid = 0;
   std::string process_start;
   std::wstring canonical_path;
@@ -76,6 +77,10 @@ WindowsSessionIdentityResult MeasureWindowsSessionIdentity(const WindowsValidati
       std::memcmp(held_file_identity.file_id.Identifier, work.file_id.Identifier,
                   sizeof(held_file_identity.file_id.Identifier)) != 0 || !still_valid())
     return result;
+  if (!WindowsIlOnlyEnvironmentSafeForSnapshot(work.pid, work.il_acl_snapshot))
+    return result;
+  if (!WindowsIlOnlyAclInputUnchanged(work.executable.value, work.il_acl_snapshot) || !still_valid())
+    return result;
   result.identity_matches = true;
   result.elevated = IsProcessElevated(work.pid);
   return still_valid() ? result : WindowsSessionIdentityResult{};
@@ -97,6 +102,7 @@ bool ReadWindowsSessionIdentityOnLane(const WindowsSession &session, std::uint64
     ~Slot() { WindowsTargetListWorkerRunning().store(false, std::memory_order_release); }
   } slot;
   WindowsValidationWork work;
+  work.il_acl_snapshot = session.il_acl_snapshot;
   work.pid = session.pid;
   work.process_start = session.process_start;
   work.canonical_path = session.canonical_path;

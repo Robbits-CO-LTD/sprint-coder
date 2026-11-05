@@ -38,6 +38,7 @@ function cut(start: string, end: string): string {
 
 const preamble = String.raw`
 #include <windows.h>
+#include <sddl.h>
 
 #include <bcrypt.h>
 #include <shlobj.h>
@@ -1307,6 +1308,14 @@ std::optional<std::wstring> IlAnchorMappedFileName(HANDLE process, LPVOID base) 
       .replaceAll('VirtualQueryEx(', 'IlAnchorVirtualQueryEx(')
       .replaceAll('WindowsTargetMappedFileName(', 'IlAnchorMappedFileName(') +
     seamPrefix.slice(kernelEnd);
+  instrumented = instrumented.replace(
+    '#include "computer_use_windows_il_acl.h"',
+    'unsigned il_tree_walks = 0;\n' +
+      readFileSync(join(nativeDirectory, 'computer_use_windows_il_acl.h'), 'utf8').replace(
+        'WindowsIlAclTreeSnapshot(const std::wstring &root) {',
+        'WindowsIlAclTreeSnapshot(const std::wstring &root) { ++il_tree_walks;',
+      ),
+  );
   for (const [start, end, label] of [
     [
       'WindowsTargetIlOnlyImageMapping(HANDLE',
@@ -1380,6 +1389,233 @@ int failures = 0;
 void Check(bool ok, const char *name) {
   if (!ok) { ++failures; std::cout << "FAIL " << name << "\n"; }
 }
+void CheckIlAcl() {
+  const auto safe = [](const wchar_t *sddl, bool directory = false) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const bool parsed = ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr) != FALSE;
+    Check(parsed, "acl_fixture_parsed");
+    if (!parsed) return false;
+    const bool result = WindowsIlAclDescriptorSafe(descriptor, directory);
+    LocalFree(descriptor);
+    return result;
+  };
+  Check(safe(L"O:SYD:P(A;;FA;;;SY)(A;;FRFX;;;BU)"), "acl_read_only_users");
+  Check(safe(L"O:BAD:P(D;;FW;;;BU)(A;;FR;;;BU)"), "acl_deny_and_read_only");
+  Check(!safe(L"O:SYD:P(D;;FW;;;BU)(A;;FA;;;BU)"), "acl_deny_does_not_cancel_write");
+  Check(!safe(L"O:SYD:P(A;;FA;;;BU)(D;;FW;;;BU)"), "acl_reverse_deny_does_not_cancel_write");
+  for (const auto *sid : {L"BU", L"AU", L"WD", L"IU", L"CO", L"OW", L"AC", L"S-1-5-21-1-2-3-1001"}) {
+    for (const auto *right : {L"FW", L"GA", L"GW", L"SD", L"WO", L"WD", L"0x2", L"0x4", L"0x10", L"0x40", L"0x100"}) {
+      const auto dacl = std::wstring(L"O:SYD:P(A;;") + right + L";;;" + sid + L")";
+      Check(!safe(dacl.c_str()), "acl_non_privileged_mutation_refused");
+    }
+    const auto owned = std::wstring(L"O:") + sid + L"D:P(A;;FA;;;SY)";
+    Check(!safe(owned.c_str()), "acl_non_privileged_owner_refused");
+  }
+  Check(!safe(L"O:SYD:P(A;ID;FW;;;BU)"), "acl_inherited_write_refused");
+  Check(safe(L"O:SYD:P(A;ID;FRFX;;;BU)"), "acl_inherited_read_allowed");
+  Check(!safe(L"O:SYD:P(A;OICIIO;GA;;;CO)(A;;FA;;;SY)"), "acl_file_creator_inherit_only_refused");
+  Check(safe(L"O:SYD:P(A;OICIIO;GA;;;CO)(A;;FA;;;SY)", true), "acl_directory_creator_owner_allowed");
+  Check(safe(L"O:SYD:P(A;OICIIO;GA;;;CG)(A;;FA;;;SY)", true), "acl_directory_creator_group_allowed");
+  Check(!safe(L"O:SYD:P(A;OICIIO;GA;;;CO)(A;;0x2;;;BU)", true), "acl_creator_with_untrusted_creation_refused");
+  Check(!safe(L"O:SYD:P(A;;0x40;;;BU)(A;OICIIO;GA;;;CO)", true), "acl_creator_with_untrusted_delete_refused");
+  Check(!safe(L"O:SYD:P(A;OICIIO;FW;;;BU)", true), "acl_inherit_only_users_write_refused");
+  Check(!safe(L"O:SYD:P(A;IO;GA;;;BU)"), "acl_invalid_inheritance_refused");
+  Check(!safe(L"O:SYD:NO_ACCESS_CONTROL"), "acl_null_dacl_refused");
+  Check(!safe(L"O:SYD:P(OA;;FR;00112233-4455-6677-8899-aabbccddeeff;;BU)"), "acl_object_ace_unknown");
+  Check(!WindowsIlAclDescriptorSafe(nullptr), "acl_unreadable_refused");
+  Check(!WindowsIlAclObject(INVALID_HANDLE_VALUE, false), "acl_unreadable_file_refused");
+}
+
+void CheckIlTree() {
+  const auto snapshot = [](const std::wstring &unsafe, bool junction = false,
+                            bool absent = false, bool unreadable = false, bool changed = false) {
+    return WindowsIlAclTree(L"root", [&](const std::wstring &path)
+        -> std::optional<std::vector<WindowsIlAclEntry>> {
+      if (unreadable) return std::nullopt;
+      if (path == L"root") {
+        std::vector<WindowsIlAclEntry> entries{{L"LegacyApp.exe"}, {L"library.dll"},
+                                              {L"plugins", true, junction}, {L"ja-JP", true}};
+        if (!absent) { entries.push_back({L"LegacyApp.exe.config"}); entries.push_back({L"LegacyApp.exe.manifest"}); }
+        return entries;
+      }
+      return std::vector<WindowsIlAclEntry>{{L"resource.dll"}};
+    }, [&](const std::wstring &path, bool) -> std::optional<std::string> {
+      // Same production descriptor gate, with one object's owner/ACL changed at a time.
+      const wchar_t *sddl = path != unsafe ? L"O:SYD:P(A;;FA;;;SY)(A;;FRFX;;;BU)" :
+          path == L"root\\plugins" ? L"O:SYD:P(A;ID;0x1301bf;;;BU)" : L"O:SYD:P(A;;0x1301bf;;;BU)";
+      PSECURITY_DESCRIPTOR descriptor = nullptr;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return std::nullopt;
+      const bool safe = WindowsIlAclDescriptorSafe(descriptor);
+      LocalFree(descriptor);
+      if (!safe) return std::nullopt;
+      return changed && path == L"root\\library.dll" ? "different-file-id-or-acl" : "protected-file-id-and-acl";
+    });
+  };
+  const auto protected_tree = snapshot(L"");
+  Check(protected_tree.has_value(), "tree_all_protected_allowed");
+  Check(protected_tree && protected_tree->starts_with("9:"), "tree_count_in_snapshot");
+  for (const auto *name : {L"root\\LegacyApp.exe.config", L"root\\LegacyApp.exe.manifest", L"root\\library.dll",
+                           L"root\\plugins", L"root\\plugins\\resource.dll", L"root\\ja-JP\\resource.dll"})
+    Check(!snapshot(name), "tree_writable_config_manifest_dll_or_probing_refused");
+  Check(!snapshot(L"", true), "tree_junction_refused");
+  Check(!snapshot(L"", false, false, true), "tree_enumeration_failure_refused");
+  Check(snapshot(L"", false, true).has_value(), "tree_missing_sidecars_protected_parent_allowed");
+  Check(!snapshot(L"root", false, true), "tree_missing_sidecars_creatable_parent_refused");
+  Check(snapshot(L"", false, false, false, true) != protected_tree, "tree_file_id_acl_change_changes_snapshot");
+  Check(snapshot(L"", false, true) != protected_tree, "tree_removal_changes_snapshot");
+  const auto object = [](const std::wstring &, bool) { return std::optional<std::string>("safe"); };
+  for (const auto count : {4095u, 4096u}) {
+    const auto tree = WindowsIlAclTree(L"root", [&](const std::wstring &) {
+      std::vector<WindowsIlAclEntry> entries;
+      for (unsigned i = 0; i < count; ++i) entries.push_back({std::to_wstring(i)});
+      return std::optional(entries);
+    }, object);
+    Check(tree.has_value() == (count == 4095), "tree_entry_limit_includes_root");
+  }
+  for (const auto depth : {8u, 9u}) {
+    const auto tree = WindowsIlAclTree(L"r", [&](const std::wstring &path) {
+      return std::optional(path.size() < 1 + depth * 2 ? std::vector<WindowsIlAclEntry>{{L"d", true}}
+                                                      : std::vector<WindowsIlAclEntry>{});
+    }, object);
+    Check(tree.has_value() == (depth == 8), "tree_depth_limit");
+  }
+  Check(!WindowsIlAclTreeSnapshot(L"Z:\\missing-il-acl-fixture"), "tree_live_missing_directory_refused");
+}
+void CheckIlEnvironment() {
+  Check(WindowsIlImageUnderRoot(L"\\Device\\Volume\\Windows\\System32\\clr.dll",
+      L"\\device\\volume\\windows\\system32"), "module_root_case_insensitive");
+  Check(!WindowsIlImageUnderRoot(L"\\Device\\Volume\\Windows\\System32-extra\\clr.dll",
+      L"\\Device\\Volume\\Windows\\System32"), "module_root_prefix_collision_refused");
+  Check(!WindowsIlOnlyImagesSafe(nullptr), "module_unreadable_process_refused");
+  Check(WindowsIlOnlyImagesSafe(GetCurrentProcess()), "module_live_protected_images_allowed");
+  Check(!WindowsIlOnlyRegistrySafe(nullptr, false), "registry_unreadable_user_refused");
+  Check(WindowsIlOnlyRegistrySafe(GetCurrentProcess(), true), "registry_live_same_user_clean_views");
+  PSID first_user = nullptr, other_user = nullptr;
+  Check(ConvertStringSidToSidW(L"S-1-5-21-1-2-3-1001", &first_user) &&
+      ConvertStringSidToSidW(L"S-1-5-21-1-2-3-1002", &other_user), "registry_user_sid_fixtures");
+  Check(WindowsIlUserSidsMatch(first_user, first_user), "registry_same_user_allowed");
+  Check(!WindowsIlUserSidsMatch(first_user, other_user), "registry_different_user_refused");
+  Check(!WindowsIlUserSidsMatch(nullptr, first_user), "registry_unknown_user_refused");
+  LocalFree(first_user); LocalFree(other_user);
+  for (const REGSAM view : {KEY_WOW64_64KEY, KEY_WOW64_32KEY}) {
+    const auto query_fixture = [&](LSTATUS opened, LSTATUS queried, DWORD count) {
+      bool closed = false;
+      const bool safe = WindowsIlRegistryKeyEmptyWith(nullptr, view, L"Software\\Microsoft\\.NETFramework",
+          [&](HKEY, const wchar_t *path, DWORD, REGSAM access, HKEY *key) -> LSTATUS {
+            Check(std::wstring(path) == L"Software\\Microsoft\\.NETFramework" &&
+                access == (KEY_QUERY_VALUE | view), "registry_correct_path_and_view");
+            *key = reinterpret_cast<HKEY>(1); return opened;
+          }, [&](HKEY, auto, auto, auto, auto, auto, auto, DWORD *values, auto, auto, auto, auto) -> LSTATUS {
+            *values = count; return queried;
+          }, [&](HKEY) { closed = true; });
+      Check(closed == (opened == ERROR_SUCCESS), "registry_handle_closed");
+      return safe;
+    };
+    Check(query_fixture(ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, 0), "registry_missing_allowed");
+    Check(query_fixture(ERROR_SUCCESS, ERROR_SUCCESS, 0), "registry_empty_allowed");
+    Check(!query_fixture(ERROR_SUCCESS, ERROR_SUCCESS, 1), "registry_any_value_refused");
+    Check(!query_fixture(ERROR_ACCESS_DENIED, ERROR_SUCCESS, 0), "registry_open_error_refused");
+    Check(!query_fixture(ERROR_SUCCESS, ERROR_ACCESS_DENIED, 0), "registry_query_error_refused");
+  }
+  Check(!WindowsIlRegistryKeyEmpty(nullptr, 0), "registry_unreadable_refused");
+  std::array<wchar_t, MAX_PATH> temporary{}, copied{}, system_directory{};
+  Check(GetTempPathW(MAX_PATH, temporary.data()) != 0 &&
+      GetTempFileNameW(temporary.data(), L"ilm", 0, copied.data()) != 0 &&
+      GetSystemDirectoryW(system_directory.data(), MAX_PATH) != 0, "module_fixture_path");
+  const std::wstring dll = std::wstring(system_directory.data()) + L"\\version.dll";
+  Check(CopyFileW(dll.c_str(), copied.data(), FALSE), "module_fixture_copied_outside_allowed_roots");
+  {
+    ScopedKernelHandle image(CreateFileW(copied.data(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    ScopedKernelHandle section(CreateFileMappingW(image.value, nullptr, PAGE_READONLY | SEC_IMAGE, 0, 0, nullptr));
+    void *mapped = section.value ? MapViewOfFile(section.value, FILE_MAP_READ, 0, 0, 0) : nullptr;
+    Check(mapped != nullptr, "module_external_image_mapped");
+    if (mapped) {
+      // No profiler environment entry is present: the MEM_IMAGE itself must reject.
+      Check(!WindowsIlOnlyImagesSafe(GetCurrentProcess()), "module_external_image_without_environment_refused");
+      UnmapViewOfFile(mapped);
+    }
+  }
+  Check(DeleteFileW(copied.data()), "module_fixture_removed");
+  Check(WindowsIlOnlyImagesSafe(GetCurrentProcess()), "module_protected_images_after_unmap_allowed");
+  const auto safe = [](std::wstring entry) {
+    entry.append(2, L'\0');
+    return WindowsIlEnvironmentBlockSafe(std::span<const wchar_t>(entry.data(), entry.size()));
+  };
+  Check(safe(L"PATH=C:\\Windows"), "environment_normal_allowed");
+  Check(safe(L"=C:=C:\\Windows"), "environment_drive_entry_allowed");
+  Check(WindowsIlEnvironmentBlockSafe(std::array<wchar_t, 2>{0, 0}), "environment_empty_allowed");
+  for (const auto *name : {L"COR_ENABLE_PROFILING", L"COR_PROFILER", L"COR_PROFILER_PATH", L"COR_PROFILER_PATH_32",
+                           L"COR_PROFILER_PATH_64", L"COMPlus_Test", L"COMPLUS_Test", L"DOTNET_STARTUP_HOOKS",
+                           L"DOTNET_ENABLE_PROFILING", L"dotnet_startup_hooks", L"cOr_PrOfIlEr"}) {
+    Check(!safe(std::wstring(name) + L"=value"), "environment_code_injection_refused");
+    Check(!safe(std::wstring(name) + L"="), "environment_empty_dangerous_variable_refused");
+  }
+  Check(!safe(L"malformed"), "environment_malformed_refused");
+  Check(!WindowsIlEnvironmentBlockSafe(std::array<wchar_t, 2>{L'A', 0}), "environment_unterminated_refused");
+  for (const bool wide : {false, true}) {
+    std::vector<std::uint8_t> memory(0x20000);
+    const auto put = [&](std::size_t address, std::uint64_t value) {
+      std::memcpy(memory.data() + address, &value, wide ? 8 : 4);
+    };
+    put(0x1000 + (wide ? 0x20 : 0x10), 0x2000);
+    put(0x2000 + (wide ? 0x80 : 0x48), 0x3ff8);
+    const wchar_t block[] = L"PATH=C:\\Windows\0DOTNET_STARTUP_HOOKS=bad\0";
+    std::memcpy(memory.data() + 0x3ff8, block, sizeof(block));
+    const auto read = [&](std::uintptr_t address, void *out, std::size_t bytes) {
+      if (address > memory.size() || bytes > memory.size() - address) return false;
+      std::memcpy(out, memory.data() + address, bytes); return true;
+    };
+    const auto result = WindowsReadIlEnvironment(0x1000, wide, read);
+    Check(result && !WindowsIlEnvironmentBlockSafe(*result), "environment_peb32_peb64_page_crossing_refused");
+    Check(!WindowsReadIlEnvironment(0, wide, read), "environment_null_peb_refused");
+    Check(!WindowsReadIlEnvironment(0x1000, wide, [](auto, auto, auto) { return false; }), "environment_unreadable_refused");
+    std::fill(memory.begin() + 0x3ff8, memory.end(), 65);
+    Check(!WindowsReadIlEnvironment(0x1000, wide, read), "environment_read_limit_refused");
+    put(0x2000 + (wide ? 0x80 : 0x48), 0);
+    Check(!WindowsReadIlEnvironment(0x1000, wide, read), "environment_null_pointer_refused");
+  }
+
+  Check(!WindowsIlOnlyEnvironmentSafe(nullptr), "environment_live_invalid_process_refused");
+  std::array<wchar_t, 32768> self{};
+  Check(GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size())) != 0, "environment_live_fixture_path");
+  for (const bool injected : {false, true}) {
+    std::wstring environment = injected ? L"DOTNET_STARTUP_HOOKS=unused" : L"SAFE_TEST=value";
+    environment.append(2, L'\0');
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    const bool started = CreateProcessW(self.data(), nullptr, nullptr, nullptr, FALSE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, environment.data(), nullptr, &startup, &child) != FALSE;
+    Check(started, "environment_live_fixture_started");
+    if (!started) continue;
+    const bool safe = WindowsIlOnlyEnvironmentSafe(child.hProcess);
+    TerminateProcess(child.hProcess, 0); WaitForSingleObject(child.hProcess, 5000);
+    CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    Check(safe == !injected, "environment_live_peb_clean_allowed_hook_refused");
+  }
+
+}
+void CheckIlPlacement() {
+  const WindowsImageRootPrefix roots[] = {{"program_files", "C:\\Program Files"},
+      {"windows_apps", "C:\\Program Files\\WindowsApps"},
+      {"windows_directory", "C:\\Windows"}, {"local_programs", "C:\\Users\\test\\AppData\\Local\\Programs"}};
+  const auto allowed = [&](const char *path, bool package_override = false) {
+    return WindowsIlOnlyPlacementSafe(PlaceWindowsImage(path, roots).root, package_override);
+  };
+  Check(allowed("C:\\Windows\\Microsoft.NET\\app.exe"), "placement_windows_allowed");
+  Check(allowed("C:\\Program Files\\Vendor\\app.exe"), "placement_program_files_allowed");
+  Check(allowed("C:\\Program Files\\WindowsApps\\Package\\app.exe"), "placement_windows_apps_separate_from_acl");
+  Check(!allowed("C:\\Users\\test\\AppData\\Local\\Programs\\app.exe"), "placement_local_programs_refused");
+  Check(!WindowsIlOnlyPlacementSafe("windows_apps", true), "placement_external_package_override_refused");
+  Check(!allowed("D:\\ExternalPackage\\app.exe", true), "placement_external_install_root_refused");
+  Check(!allowed("C:\\Program Files-extra\\app.exe"), "placement_program_files_extra_refused");
+  Check(PlaceWindowsImage("C:\\Program Files\\WindowsApps-extra\\app.exe", roots).root != "windows_apps",
+        "placement_windows_apps_extra_not_package_root");
+  const WindowsImageRootPrefix store[] = {{"windows_apps", "C:\\Program Files\\WindowsApps"}};
+  Check(!WindowsIlOnlyPlacementSafe(PlaceWindowsImage("C:\\Program Files\\WindowsApps-extra\\app.exe", store).root, false),
+        "placement_windows_apps_extra_refused");
+}
+
 void CheckIlOnlyHeader() {
   for (const bool wide : {false, true}) {
     std::vector<std::uint8_t> bytes(1024);
@@ -1454,6 +1690,10 @@ int wmain(int argc, wchar_t **argv) {
   if (argc != 3) return 2;
   const bool protected_tool = std::wstring_view(argv[2]) == L"protected";
   const bool anycpu = std::wstring_view(argv[2]) == L"anycpu";
+  CheckIlAcl();
+  CheckIlTree();
+  CheckIlEnvironment();
+  CheckIlPlacement();
   CheckIlOnlyHeader();
   CheckConvertedHeader();
   STARTUPINFOW startup{};
@@ -1474,8 +1714,18 @@ int wmain(int argc, wchar_t **argv) {
   } cleanup{child};
   ScopedKernelHandle file(CreateFileW(argv[1], GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!protected_tool) Check(!WindowsIlAclObject(file.value, false), "live_user_owned_or_writable_acl_refused");
   const auto initial = WindowsTargetKernelImageInfo(child.hProcess);
-  if constexpr (!kExpectedIlOnlyImageAnchor) {
+  const auto protected_snapshot = WindowsIlOnlyAclSnapshot(file.value);
+  if (kExpectedIlOnlyImageAnchor && protected_tool) {
+    Check(protected_snapshot && !protected_snapshot->empty(), "live_protected_snapshot_required");
+    Check(initial.has_value(), "live_protected_anchor_required");
+    std::wstring tool;
+    Check(CanonicalWindowsPathFromHandle(file.value, &tool), "live_tool_canonical_path");
+    const auto tree = WindowsIlAclTreeSnapshot(tool.substr(0, tool.find_last_of(L"\\/")));
+    std::cout << "protected_snapshot_entries=" << (tree ? tree->substr(0, tree->find(':')) : "0") << "\n";
+  }
+  if (!kExpectedIlOnlyImageAnchor || !protected_tool) {
     Check(!initial.has_value(), "disabled_il_only_stays_unresolvable");
     g_force_il_mem_image = true;
     std::array<wchar_t, 32768> self{};
@@ -1512,43 +1762,20 @@ int wmain(int argc, wchar_t **argv) {
       WindowsTargetFactsMeasurement measured;
       MeasureWindowsTargetHeldFacts(held, context, &measured);
       Check(held.il_only_anchor, "hold_records_il_only_anchor");
-      // Hold the real image handle, but control placement prefixes to exercise the production
-      // held-facts boundary without writing into protected OS directories. Not ACL acceptance.
-      {
-        const auto real_path = held.canonical_path;
-        const bool real_matches = held.matches;
-        held.matches = true;
-        auto placement = context;
-        if (held.volume) placement.rename_probe = WindowsTargetRenameProbe{true, *held.volume};
-        placement.roots = std::vector<WindowsImageRootPrefix>{
-            {"windows_apps", "C:\\Synthetic\\Program Files\\WindowsApps"},
-            {"program_files", "C:\\Synthetic\\Program Files"},
-            {"local_programs", "C:\\Synthetic\\Local\\Programs"}};
-        struct PlacementCase { const wchar_t *path; const char *root; bool package; bool allowed; };
-        const PlacementCase cases[] = {
-            {L"C:\\Synthetic\\Program Files\\App\\image.exe", "program_files", false, true},
-            {L"C:\\Synthetic\\Program Files\\WindowsApps\\App\\image.exe", "windows_apps", false, true},
-            {L"C:\\Synthetic\\Program Files-extra\\image.exe", "other", false, false},
-            {L"C:\\Synthetic\\Program Files\\WindowsApps-extra\\image.exe", "program_files", false, true},
-            {L"C:\\Synthetic\\Local\\Programs\\image.exe", "local_programs", false, false},
-            {L"C:\\Synthetic\\ExternalPackage\\image.exe", "windows_apps", true, false},
-            {L"C:\\Synthetic\\ExternalPackage-extra\\image.exe", "other", true, false},
-            {L"C:\\Synthetic\\Local\\Programs\\image.exe", "local_programs", true, false},
-        };
-        for (const auto &test : cases) {
-          held.canonical_path = test.path;
-          WindowsTargetFactsMeasurement placed;
-          placed.facts.packaged = test.package;
-          if (test.package) placed.package_install_root = "C:\\Synthetic\\ExternalPackage";
-          MeasureWindowsTargetHeldFacts(held, placement, &placed);
-          Check(placed.facts.image_root == std::optional<std::string>(test.root), "il_only_placement_root");
-          Check(placed.facts.running_image_matches == std::optional<bool>(test.allowed),
-                "il_only_placement_anchor");
-          if (!test.allowed) Check(!placed.facts.signature.has_value(), "placement_refused_before_signature");
-        }
-        held.canonical_path = real_path;
-        held.matches = real_matches;
-      }
+      Check(!held.il_acl_snapshot.empty(), "protected_acl_snapshot_retained");
+      Check(WindowsIlOnlyAclUnchanged(held.file.value, held.il_acl_snapshot), "held_acl_rechecked");
+      const auto before_input = il_tree_walks;
+      Check(WindowsIlOnlyAclInputUnchanged(held.file.value, held.il_acl_snapshot), "input_pins_rechecked");
+      Check(il_tree_walks == before_input, "input_unchanged_skips_tree_walk");
+      AcquireSRWLockExclusive(&windows_il_acl_pins_lock);
+      for (auto &pins : windows_il_acl_pins)
+        if (pins.snapshot == held.il_acl_snapshot) --pins.root_write;
+      ReleaseSRWLockExclusive(&windows_il_acl_pins_lock);
+      Check(WindowsIlOnlyAclInputUnchanged(held.file.value, held.il_acl_snapshot), "input_changed_stamp_full_recheck");
+      Check(il_tree_walks > before_input, "input_changed_stamp_walks_tree");
+      Check(!WindowsIlOnlyAclInputUnchanged(INVALID_HANDLE_VALUE, held.il_acl_snapshot), "input_invalid_file_refused");
+      Check(!WindowsIlOnlyAclUnchanged(held.file.value, held.il_acl_snapshot + "changed"), "changed_acl_refused");
+      Check(!WindowsIlOnlyAclUnchanged(INVALID_HANDLE_VALUE, held.il_acl_snapshot), "unreadable_acl_refused");
       if (protected_tool) {
         Check(measured.facts.image_root == std::optional<std::string>("windows_directory"),
               "framework_tool_in_protected_root");
@@ -1808,6 +2035,68 @@ const ci = process.env['CI'] !== undefined;
 const onWindows = process.platform === 'win32';
 const csc = 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe';
 
+describe.skipIf(!onWindows || (build === null && !ci))(
+  'IL-only ACL, environment and placement',
+  () => {
+    it('rejects writable code trees, unsafe environment blocks and untrusted placements', async () => {
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-il-acl-'));
+      try {
+        const seam = join(scratch, 'acl.cc');
+        const binary = join(scratch, 'acl.exe');
+        writeFileSync(
+          seam,
+          seamPrefix +
+            '\n' +
+            ilAnchorProgram.slice(0, ilAnchorProgram.indexOf('void CheckIlOnlyHeader()')) +
+            '\nint main() { CheckIlAcl(); CheckIlTree(); CheckIlEnvironment(); CheckIlPlacement(); return failures ? 1 : 0; }',
+        );
+        const command = build!.wrap([
+          '/nologo',
+          '/std:c++20',
+          '/EHsc',
+          '/W4',
+          '/utf-8',
+          '/DUNICODE',
+          '/D_UNICODE',
+          '/DNOMINMAX',
+          '/DWIN32_LEAN_AND_MEAN',
+          '/D_WIN32_WINNT=0x0A00',
+          '/I' + nativeDirectory,
+          seam,
+          '/Fe:' + binary,
+          '/Fo:' + binary + '.obj',
+          '/link',
+          '/DEBUG:NONE',
+          'advapi32.lib',
+          'crypt32.lib',
+          'ole32.lib',
+          'shell32.lib',
+          'user32.lib',
+          'windowsapp.lib',
+          'wintrust.lib',
+        ]);
+        await promisify(execFile)(command.file, command.args, {
+          encoding: 'utf8',
+          windowsVerbatimArguments: command.verbatim,
+          timeout: 120_000,
+          env: { ...process.env, VSLANG: '1033' },
+        });
+        const result = await promisify(execFile)(binary, [], {
+          encoding: 'utf8',
+          timeout: 30_000,
+        }).catch((error: unknown) => {
+          if (error instanceof Error && 'stdout' in error)
+            throw new Error(String(error.stdout), { cause: error });
+          throw error;
+        });
+        expect(result.stdout).not.toContain('FAIL');
+      } finally {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
+      }
+    }, 150_000);
+  },
+);
+
 describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
   'IL-only anchor live',
   () => {
@@ -1824,6 +2113,7 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
         for (const variant of [
           { name: 'disabled', acceptance: 1, flag: false, enabled: false },
           { name: 'enabled', acceptance: 1, flag: true, enabled: true },
+          { name: 'final', acceptance: 0, flag: false, enabled: true },
           { name: 'acceptance-zero', acceptance: 0, flag: true, enabled: false },
           { name: 'acceptance-absent', acceptance: undefined, flag: true, enabled: false },
         ]) {
@@ -1844,6 +2134,17 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
             '/DNOMINMAX',
             '/DWIN32_LEAN_AND_MEAN',
             '/D_WIN32_WINNT=0x0A00',
+            ...(variant.name === 'final'
+              ? [
+                  'FROM_BUILD=1',
+                  'V2=1',
+                  'RULESET_VERSION=4',
+                  'CLASSIFIER_VERSION=3',
+                  'LEXICON_VERSION=3',
+                  'TICKET_REQUIRED=1',
+                  'INTERLOCK_ENFORCED=1',
+                ].map((value) => '/DSPRINT_CODER_ELIGIBILITY_' + value)
+              : []),
             ...(variant.acceptance === undefined
               ? []
               : [`/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=${variant.acceptance}`]),
@@ -1889,15 +2190,30 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
             });
             expect(result.stdout, `${platform}, variant=${variant.name}`).toContain('OK');
           }
-          for (const tool of [
-            'C:/Windows/Microsoft.NET/Framework/v4.0.30319/AddInUtil.exe',
-            'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/InstallUtil.exe',
-          ]) {
+          // IIS can grant writes in v4's Temporary ASP.NET Files. Prefer the
+          // installed v3.5 tree; neither choice may bypass the positive ACL gate.
+          for (const framework of ['Framework', 'Framework64']) {
+            const older = `C:/Windows/Microsoft.NET/${framework}/v3.5/AddInUtil.exe`;
+            const tool = existsSync(older)
+              ? older
+              : `C:/Windows/Microsoft.NET/${framework}/v4.0.30319/AddInUtil.exe`;
             expect(existsSync(tool), tool).toBe(true);
             const result = await promisify(execFile)(binary, [tool, 'protected'], {
               encoding: 'utf8',
               timeout: 30_000,
+            }).catch((error: unknown) => {
+              if (error instanceof Error && 'stdout' in error)
+                throw new Error(`${variant.name}/${tool}: ${String(error.stdout)}`, {
+                  cause: error,
+                });
+              throw error;
             });
+            if (variant.enabled) {
+              expect(result.stdout).toMatch(/protected_snapshot_entries=[1-9][0-9]*/u);
+              console.info(
+                `${variant.name}/${tool}: ${result.stdout.match(/protected_snapshot_entries=[0-9]+/u)?.[0]}`,
+              );
+            }
             expect(result.stdout, `${tool}, variant=${variant.name}`).toContain('OK');
           }
         }

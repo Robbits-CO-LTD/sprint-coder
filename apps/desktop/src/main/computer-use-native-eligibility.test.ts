@@ -123,7 +123,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       const test = `inline constexpr bool ${name} = true || ${qualified}kNativeEligibilityWindowsV2Final;`;
       const production = `inline constexpr bool ${name} = ${qualified}kNativeEligibilityWindowsV2Final && ${ready};`;
       expect(source.match(new RegExp(`constexpr bool ${ready} =[^;]+;`, 'gu'))).toEqual([
-        `constexpr bool ${ready} = ${ready === 'kWindowsStoreNotepadNotWebReady'};`,
+        `constexpr bool ${ready} = ${ready !== 'kWindowsExplorerPreSendHookReady'};`,
       ]);
       const normalized = source.replace(/\s+/gu, ' ');
       expect(normalized).toContain(`${test} #else ${production} #endif`);

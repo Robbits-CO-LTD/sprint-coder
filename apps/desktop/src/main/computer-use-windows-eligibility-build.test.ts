@@ -83,14 +83,14 @@ describe.skipIf(process.platform !== 'win32')(
           expect(result.status, result.output).toBe(0);
         }
         // A final declaration compiles. The approval route follows the declaration alone, while
-        // Store Notepad is ready; Explorer and the IL-only anchor still wait for their own flag.
+        // Store Notepad and ACL-gated IL-only are ready; Explorer waits for its flag.
         const checks = [
           ilOnlyAnchorDeclaration(),
           'namespace sc = sprint_coder::computer_use;',
           'static_assert(sc::kNativeEligibilityWindowsV2Final, "sc-check final declaration");',
           'static_assert(!sc::kWindowsExplorerException, "sc-check Explorer");',
           'static_assert(sc::kWindowsStoreNotepadNotWeb, "sc-check Store Notepad");',
-          'static_assert(!kWindowsIlOnlyImageAnchor, "sc-check IL-only anchor");',
+          'static_assert(kWindowsIlOnlyImageAnchor, "sc-check IL-only anchor");',
           '',
         ].join('\n');
         const final = compile(finalDeclaration, checks);
@@ -100,7 +100,8 @@ describe.skipIf(process.platform !== 'win32')(
         expect(current.status, current.output).not.toBe(0);
         expect(current.output).toContain('sc-check final declaration');
         expect(current.output).toContain('sc-check Store Notepad');
-        expect(current.output).not.toMatch(/sc-check (?:Explorer|IL-only anchor)/u);
+        expect(current.output).not.toContain('sc-check Explorer');
+        expect(current.output).toContain('sc-check IL-only anchor');
         const defaultBuild = compile(
           [],
           'static_assert(!sprint_coder::computer_use::kWindowsStoreNotepadNotWeb);',
