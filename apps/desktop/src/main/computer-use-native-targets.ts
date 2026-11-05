@@ -18,6 +18,12 @@ import {
 } from './computer-use-target-eligibility';
 import type { ComputerTargetWindowsGeneration } from './computer-use-target-model';
 import type { ComputerAppProfileRecord } from './persistence';
+import {
+  WINDOWS_EXPLORER_FINAL_VERSIONS,
+  windowsExplorerPrestartContextAllows,
+  type WindowsExplorerPrestartContext,
+} from './computer-use-explorer-prestart';
+import { classifyWindowsExplorerPrestart } from './computer-use-target-eligibility';
 
 export type WindowsComputerTargetCandidate = Readonly<{
   profile: ComputerAppProfileRecord;
@@ -143,6 +149,7 @@ export function backgroundAcceptanceTargetVerdict(
 export function parseWindowsComputerUseTargets(
   value: unknown,
   windowsApprovalAvailable = false,
+  explorerContext?: WindowsExplorerPrestartContext,
 ): ComputerUseNativeTargetList | null {
   const parsed = computerWindowsNativeTargetListSchema.safeParse(value);
   if (!parsed.success || parsed.data.rulesetVersion !== denyRulesetVersion('win32')) return null;
@@ -158,8 +165,32 @@ export function parseWindowsComputerUseTargets(
       computerAppNativeIdentityDigest(native.identity, derived) !== native.appIdentityDigest
     )
       return null;
-    const verdict =
-      computerUseBackgroundFixtureDigest() === null
+    const evidence = native.explorerPrestart;
+    if (
+      evidence !== undefined &&
+      (evidence.pid !== native.pid ||
+        evidence.listGeneration !== parsed.data.generation ||
+        evidence.rulesetVersion !== parsed.data.rulesetVersion ||
+        evidence.rulesetVersion !== WINDOWS_EXPLORER_FINAL_VERSIONS.rulesetVersion ||
+        evidence.classifierVersion !== WINDOWS_EXPLORER_FINAL_VERSIONS.classifierVersion ||
+        evidence.lexiconVersion !== WINDOWS_EXPLORER_FINAL_VERSIONS.lexiconVersion ||
+        native.windowIdentityDigest !==
+          createHash('sha256')
+            .update(
+              `computer-window-identity-v1\n${native.appIdentityDigest}\n${evidence.processStartTime}\n${native.windowId}`,
+            )
+            .digest('hex'))
+    )
+      return null;
+    const explorerAllowed =
+      evidence !== undefined &&
+      native.kind === 'upper' &&
+      native.maximumMode === 'supervised' &&
+      windowsApprovalAvailable &&
+      windowsExplorerPrestartContextAllows(explorerContext, native, parsed.data.generation);
+    const verdict = explorerAllowed
+      ? classifyWindowsExplorerPrestart(native.facts)
+      : computerUseBackgroundFixtureDigest() === null
         ? classifyTarget(native.facts)
         : backgroundAcceptanceTargetVerdict(native.facts, native.executableDigest);
     if (verdict.kind === 'denied' || verdict.kind === 'unresolvable') {

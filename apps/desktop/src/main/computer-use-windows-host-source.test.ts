@@ -74,7 +74,8 @@ afterEach(() => {
 describe('Windows host source structure', () => {
   it('returns the same decimal processStartTime field in both Windows start responses', () => {
     const source = readWindowsHostSource();
-    expect(source.split(String.raw`\"processStartTime\":\"`).length - 1).toBe(5);
+    // Five existing fields plus the window-bound Explorer prestart evidence.
+    expect(source.split(String.raw`\"processStartTime\":\"`).length - 1).toBe(6);
     expect(source.match(/JsonEscape\(session\.process_start\)/gu)).toHaveLength(2);
     expect(source).toContain('*output = std::to_string(ticks.QuadPart);');
     const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');

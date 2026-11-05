@@ -345,6 +345,18 @@ void CheckStartContract() {
   Check(ReadJsonString(bound, "windowIdentityDigest", &digest) && digest ==
       Sha256String("computer-window-identity-v1\n" + judged.app_identity + "\n" + start + "\n9"),
       "discovery creation time bound to selected window");
+  window.explorer_list_generation = 17;
+  Check(WindowsV2SelectableRow(judged, verdict, facts, window).find("explorerPrestart") ==
+      std::string::npos, "unmeasured window has no prestart evidence");
+  judged.explorer_prestart_admitted = true;
+  const auto explorer = WindowsV2SelectableRow(judged, verdict, facts, window);
+  Check((explorer.find("explorerPrestart") != std::string::npos) == kWindowsExplorerException,
+      "private Explorer evidence requires the native gate");
+  if constexpr (kWindowsExplorerException) {
+    Check(explorer.find("\"listGeneration\":17,\"pid\":7,\"processStartTime\":\"" +
+        judged.process_start + "\",\"shellView\":\"filesystem_folder\"") != std::string::npos,
+        "prestart evidence binds list process and measured view");
+  }
   judged.executable.identity.path_utf8.clear();
   Check(WindowsV2SelectableRow(judged, verdict, facts, window, true) == "{\"kind\":\"unresolvable\"}",
       "refused discovery never reveals identity");
