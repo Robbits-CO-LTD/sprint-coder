@@ -511,9 +511,16 @@ private:
     if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
                       &failed) || type.empty()) return false;
     if (type == "Document") {
+      page_document_path_ = page_scan_path_;
       *document = element;
       return ++*count == 1;
     }
+    // Browser chrome controls do not contain the top-level page. Their descendants
+    // (tab labels, toolbar buttons, omnibox suggestions) do not consume the budget.
+    if (type == "ToolBar" || type == "Tab" || type == "TabItem" || type == "Button" ||
+        type == "Edit" || type == "Text" || type == "Menu" || type == "MenuItem") return true;
+    if (depth == 0) { page_scan_path_.clear(); page_document_path_.clear(); }
+    page_scan_path_.push_back(element);
     Element child = 0;
     auto step = FirstChild(element, &child);
     while (step == ShadowReadResult::kOk) {
@@ -526,15 +533,22 @@ private:
       step = NextSibling(child, &next);
       child = next;
     }
+    page_scan_path_.pop_back();
     return step == ShadowReadResult::kAbsent && !origin_stopped_;
   }
 
   bool PageDocumentStillCurrent(Element root, Element expected) {
-    int count = 0;
-    Element current = 0;
-    bool same = false, failed = false;
-    return ScanPageDocuments(root, 0, &count, &current) && count == 1 &&
-        ShadowSettle(Same(current, expected, &same), &failed) && same;
+    // Revalidate the discovered parent chain instead of scanning all chrome twice.
+    if (page_document_path_.empty()) return false;
+    bool failed = false, same = false;
+    Element child = expected;
+    for (auto it = page_document_path_.rbegin(); it != page_document_path_.rend(); ++it) {
+      Element parent = 0;
+      if (!ShadowSettle(Parent(child, &parent), &failed) ||
+          !ShadowSettle(Same(parent, *it, &same), &failed) || !same) return false;
+      child = parent;
+    }
+    return ShadowSettle(Same(child, root, &same), &failed) && same;
   }
 
   // Separate from the legacy URL/surface path: this state grants nothing. Both page paths
@@ -564,7 +578,8 @@ private:
     if (!ShadowSettle(DocumentUrl(document, kUrlBytes, &url), &failed) || url.empty()) return;
     std::string repeated_url;
     if (!ShadowSettle(DocumentUrl(document, kUrlBytes, &repeated_url), &failed) ||
-        url != repeated_url || !PageDocumentStillCurrent(root, document)) return;
+        url != repeated_url || !capture->document_url_read || url != capture->document_url ||
+        !PageDocumentStillCurrent(root, document)) return;
     // Recheck the target's entire captured ancestry after the value read (a page may detach).
     for (std::size_t i = 0; i + 1 < chain_elements_.size(); ++i) {
       Element parent = 0;
@@ -713,6 +728,7 @@ private:
   Element target_element_ = 0;
   bool read_chain_identity_ = false;
   std::vector<Element> chain_elements_;
+  std::vector<Element> page_scan_path_, page_document_path_;
 };
 
 } // namespace sprint_coder::computer_use

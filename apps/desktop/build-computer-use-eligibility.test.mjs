@@ -58,7 +58,7 @@ describe('Computer Use native eligibility declaration', () => {
         expect(eligibilityDeclaration(mode, platform)).toEqual({
           mode,
           rulesetVersion: platform === 'win32' && mode === 'v2-denylist' ? 4 : 1,
-          classifierVersion: platform === 'win32' && mode === 'v2-denylist' ? 3 : 1,
+          classifierVersion: platform === 'win32' && mode === 'v2-denylist' ? 4 : 1,
           lexiconVersion: platform === 'win32' && mode === 'v2-denylist' ? 3 : 1,
           ticketRequired: true,
           interlockEnforced: platform === 'win32' && mode === 'v2-denylist',
@@ -161,7 +161,7 @@ describe('Computer Use native eligibility declaration', () => {
       'FROM_BUILD 1',
       'V2 1',
       'RULESET_VERSION 4',
-      'CLASSIFIER_VERSION 3',
+      'CLASSIFIER_VERSION 4',
       'LEXICON_VERSION 3',
       'TICKET_REQUIRED 1',
     ])

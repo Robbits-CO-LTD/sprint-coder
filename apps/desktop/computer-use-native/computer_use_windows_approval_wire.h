@@ -100,7 +100,7 @@ inline bool OperationAllowed(const WindowsApprovalDisplay &display) {
   std::string receipt =
       "{\"decision\":" + Quote(NativePreflightDecisionName(NativePreflightKind::kSingleUseApproval)) +
       ",\"reasonCode\":null,\"deniedResult\":null,"
-      "\"ticket\":null,\"classifierVersion\":3,\"inputAttemptCount\":" +
+      "\"ticket\":null,\"classifierVersion\":4,\"inputAttemptCount\":" +
       std::to_string(context.input_attempt_count) + ",\"requestId\":" + Quote(context.request_id) +
       ",\"sessionId\":" + Quote(context.session_id) +
       ",\"cancelEpoch\":" + std::to_string(context.cancel_epoch) +

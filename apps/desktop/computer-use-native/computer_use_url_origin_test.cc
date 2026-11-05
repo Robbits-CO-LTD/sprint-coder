@@ -93,7 +93,12 @@ int main() {
       return 1;
     }
     const auto page = ClassifyPageOrigin(entry.input);
-    if (page.state == OriginState::kOrdinary ||
+    const bool ordinary_page = (entry.normalized.starts_with("http://") ||
+                                entry.normalized.starts_with("https://")) &&
+                               entry.normalized.find('.') != std::string_view::npos;
+    const auto expected_page = result.sensitive_label ? OriginState::kSensitive :
+        ordinary_page ? OriginState::kOrdinary : OriginState::kUnknown;
+    if (page.state != expected_page ||
         NormalizeOrigin(entry.input) != page.normalized_origin) return 11;
     ShadowAxCapture capture;
     capture.web_area_url_read = true;

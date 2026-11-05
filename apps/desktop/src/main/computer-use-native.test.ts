@@ -2151,7 +2151,7 @@ describe('macOS native capture boundary', () => {
     );
     const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
     // Main's fixed approval classifier version is the one the native intent requires.
-    expect(header).toContain('binding.classifier_version == 3');
+    expect(header).toContain('binding.classifier_version == kPlatformEffectClassifierVersion');
     expect(NATIVE_APPROVAL_CLASSIFIER_VERSION).toBe(3);
     expect(host).toContain('NATIVE_APPROVAL_CLASSIFIER_VERSION = 3;');
     // `effect` strings are the native enum minus kInvalid, in snake case.
@@ -3439,7 +3439,7 @@ describe.each(['v1-allowlist', 'v2-denylist'] as const)(
         const eligibility = {
           mode,
           rulesetVersion: mode === 'v2-denylist' ? 4 : 1,
-          classifierVersion: mode === 'v2-denylist' ? 3 : 1,
+          classifierVersion: mode === 'v2-denylist' ? 4 : 1,
           lexiconVersion: mode === 'v2-denylist' ? 3 : 1,
           ticketRequired: true,
           interlockEnforced: mode === 'v2-denylist',

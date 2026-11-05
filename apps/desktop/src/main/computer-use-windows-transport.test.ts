@@ -1352,7 +1352,7 @@ describe('Computer Use Windows helper transport', () => {
         ? {
             mode: 'v2-denylist' as const,
             rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
-            classifierVersion: control.approval ? 3 : 1,
+            classifierVersion: control.approval ? 4 : 1,
             lexiconVersion: control.approval ? 3 : 1,
             ticketRequired: true,
             ...(control.approval ? { interlockEnforced: true as const } : {}),
@@ -1635,7 +1635,7 @@ describe('Computer Use Windows helper transport', () => {
                 'preflight_result',
                 {
                   receiptVersion: 3,
-                  classifierVersion: 3,
+                  classifierVersion: 4,
                   decision: 'single_use_approval',
                   reasonCode: null,
                   deniedResult: null,
@@ -12391,7 +12391,7 @@ int main() {
   it('sends the connection generation and distinct approval frames', async () => {
     const eligibility = {
       mode: 'v2-denylist',
-      classifierVersion: 3,
+      classifierVersion: 4,
       rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
       lexiconVersion: 3,
       ticketRequired: true,
@@ -12532,7 +12532,7 @@ int main() {
       const isolated: WindowsTargetQuarantine[] = [];
       const eligibility = {
         mode: 'v2-denylist',
-        classifierVersion: 3,
+        classifierVersion: 4,
         rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
         lexiconVersion: 3,
         ticketRequired: true,
@@ -12585,7 +12585,7 @@ int main() {
                 'preflight_result',
                 {
                   receiptVersion: 3,
-                  classifierVersion: 3,
+                  classifierVersion: 4,
                   decision: 'single_use_approval',
                   reasonCode: null,
                   deniedResult: null,
@@ -12993,7 +12993,7 @@ int main() {
     async (scenario) => {
       const eligibility = {
         mode: 'v2-denylist',
-        classifierVersion: 3,
+        classifierVersion: 4,
         rulesetVersion: DENY_RULESET.platforms.win32.rulesetVersion,
         lexiconVersion: 3,
         ticketRequired: true,

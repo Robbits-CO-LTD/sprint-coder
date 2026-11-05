@@ -1,4 +1,5 @@
-﻿#include "computer_use_native_binding.h"
+﻿#define SPRINT_CODER_TEST_WINDOWS_CLASSIFIER 1
+#include "computer_use_native_binding.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_native_approval_flow.h"
@@ -52,7 +53,7 @@
 namespace {
 
 // Shared golden receipt: the TS wire test reads this exact value through its strict parser.
-inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":3,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
+inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":4,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
 
 using sprint_coder::computer_use::DecodeFrame;
 using sprint_coder::computer_use::EncodeFrame;
@@ -658,7 +659,7 @@ NativeApprovalIntentBinding ApprovalIntentBinding() {
   binding.approval_generation = 7;
   binding.observation_revision = 10;
   binding.ticket_generation = 12;
-  binding.classifier_version = 3;
+  binding.classifier_version = sprint_coder::computer_use::kPlatformEffectClassifierVersion;
   binding.ruleset_version = 1;
   binding.lexicon_version = 1;
   binding.effect = NativeApprovalEffect::kFileManagerOpen;
@@ -926,7 +927,7 @@ NativeApprovalMeasurement FlowMeasured() {
   measured.eligible = true;
   measured.effect = NativeApprovalEffect::kFileManagerOpen;
   measured.authority_digest = std::string(64, 'c');
-  measured.classifier_version = 3;
+  measured.classifier_version = sprint_coder::computer_use::kPlatformEffectClassifierVersion;
   measured.ruleset_version = 1;
   measured.lexicon_version = 1;
   return measured;
@@ -950,7 +951,7 @@ bool CheckNativeApprovalFlow() {
 
   // A production native never offers: nothing is pending, so every call fails closed and nothing
   // ever begins an intent on its own.
-  if (!Check(kNativeApprovalClassifierVersion == 3 && !flow.occupied(), "flow-constants"))
+  if (!Check(kNativeApprovalClassifierVersion == sprint_coder::computer_use::kPlatformEffectClassifierVersion && !flow.occupied(), "flow-constants"))
     return false;
   {
     const auto approve = flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved);
@@ -2137,6 +2138,7 @@ bool CheckWindowsShadowCore() {
       capture.chain.push_back(UiaNode("Window"));
       capture.document_url_read = true;
       capture.document_url = "https://example.com/";
+      capture.page_origin = OriginState::kOrdinary;
       const auto built = BuildWindowsShadowFacts(capture, UiaRequest());
       const bool complete = depth <= 16;
       if (!Check(built.facts.chain_complete == complete &&
@@ -2146,6 +2148,7 @@ bool CheckWindowsShadowCore() {
                  "ruleset4-windows-page-chain-9-through-17")) return false;
       // The classifier itself rejects an oversize chain, even if a caller marked it complete.
       auto direct = built.facts;
+      direct.origin = OriginState::kOrdinary; // Isolate the chain-length boundary.
       direct.chain_complete = true;
       direct.chain.resize(depth, NodeFacts{"Group", "", ""});
       if (!Check(ClassifyEffect(direct, EffectRuleset{}).kind ==
@@ -2454,6 +2457,7 @@ bool CheckWindowsShadowCore() {
                        UiaNode("Pane", "Chrome Legacy Window"), UiaNode("Window", "Browser")};
       capture.document_url_read = true;
       capture.document_url = "https://example.com/";
+      capture.page_origin = OriginState::kOrdinary;
       return WindowsShadowClassify(capture, UiaRequest("click"), true);
     };
     const ShadowRecord plain = order("");
@@ -2733,8 +2737,7 @@ bool CheckWindowsShadowCore() {
     if (!Check(empty_path.facts.surface == SurfaceKind::kUnknown && (empty_path.gaps & kShadowGapReadFailed) != 0,
                "winshadow-empty-core-window-path-is-unread")) return false;
   }
-  // BOT #784: a known download page is a known origin, so a complete capture reaches the core's
-  // download rule instead of stopping at an unknown origin.
+  // Internal download schemes preserve their dedicated E2 rule.
   {
     for (const char *url : {"chrome://downloads/", "edge://downloads/", "brave://downloads", "about:downloads"}) {
       ShadowUiaCapture downloads = UiaBase();
@@ -2763,6 +2766,42 @@ bool CheckWindowsShadowCore() {
     other.document_url = "chrome://settings/";
     if (!Check(BuildWindowsShadowFacts(other, UiaRequest("click")).facts.origin == OriginState::kUnknown,
                "winshadow-other-browser-scheme-stays-unknown")) return false;
+  }
+  // F2/base comparison: only supported browsers' HTTP(S)/file pages change.
+  {
+    using namespace sprint_coder::computer_use;
+    for (const char *process : {"chrome.exe", "msedge.exe", "slack.exe", "Discord.exe",
+                                "Notion.exe", "msedgewebview2.exe", "firefox.exe"}) {
+      for (const char *url : {"https://docs.example", "http://docs.example", "https://login.example",
+                              "http://app.localhost", "file:///C:/page.html", "chrome://downloads/",
+                              "edge://downloads/", "devtools://devtools/bundled/", "chrome://settings/"}) {
+        auto capture = UiaBase();
+        capture.window_class = std::string_view(process) == "firefox.exe" ? "MozillaWindowClass" : "Chrome_WidgetWin_1";
+        capture.process_path = std::string("C:/Apps/") + process;
+        capture.chain = {UiaNode("Button", "Open"), UiaNode("Document", "Page"), UiaNode("Window", "App")};
+        capture.document_url_read = true;
+        capture.document_url = url;
+        capture.page_origin = ClassifyPageOrigin(url).state;
+        EffectFacts base;
+        std::uint32_t base_gaps = 0;
+        ApplyShadowOrigin(true, true, url, &base, &base_gaps);
+        if (windows_shadow_detail::IsDownloadPage(url)) {
+          base.origin = OriginState::kOrdinary;
+          base_gaps &= ~kShadowGapOrigin;
+        }
+        const bool browser = std::string_view(process) == "chrome.exe" || std::string_view(process) == "msedge.exe";
+        const bool policy = std::string_view(url).starts_with("http:") || std::string_view(url).starts_with("https:") ||
+                            std::string_view(url).starts_with("file:");
+        const auto expected = browser && policy ? capture.page_origin : base.origin;
+        const auto built = BuildWindowsShadowFacts(capture, UiaRequest("click"));
+        if (!Check(built.facts.origin == expected &&
+                       ((built.gaps & kShadowGapOrigin) != 0) == (expected == OriginState::kUnknown || expected == OriginState::kSensitive),
+                   "winshadow-f2-base-origin-policy-table")) return false;
+        if (std::string_view(url).starts_with("devtools:") &&
+            !Check(built.facts.surface == SurfaceKind::kDevToolsConsole,
+                   "winshadow-f2-preserves-devtools")) return false;
+      }
+    }
   }
   // BOT #784: a window class or process that was not read must leave a gap on every route to a
   // surface, including the ones that return early (Run, the address bar, the Task Manager).
@@ -3048,6 +3087,9 @@ public:
     const FakeUiaNode &node = nodes[element];
     if (node.parent_result != ShadowReadResult::kOk) return node.parent_result;
     if (node.parent < 0) return ShadowReadResult::kAbsent;
+    const auto &children = nodes[static_cast<std::size_t>(node.parent)].children;
+    if (std::find(children.begin(), children.end(), static_cast<int>(element)) == children.end())
+      return ShadowReadResult::kAbsent;
     *output = static_cast<Element>(node.parent);
     return ShadowReadResult::kOk;
   }
@@ -3271,8 +3313,8 @@ bool CheckWindowsPageRecheck() {
     if (!Check(!WindowsShadowReader(changed.source).RecheckPage(input_page),
                "input_page_metadata_change_or_stop_rejects")) return false;
   }
-  if (!Check(observed.web && observed.complete && observed.origin == OriginState::kUnknown &&
-             WindowsSamePage(observed, read(form)) && !WindowsPageAllowsInput(observed, observed),
+  if (!Check(observed.web && observed.complete && observed.origin == OriginState::kOrdinary &&
+             WindowsSamePage(observed, read(form)) && WindowsPageAllowsInput(observed, observed),
              "page-current-policy-remains-closed")) return false;
   form.Node(form.pane).url = "https://other.example.test/second";
   const auto switched = read(form);
@@ -3378,8 +3420,7 @@ bool CheckSupportedBrowserPageEvidence() {
     if (!Check(capture.page_origin == page.origin &&
                capture.document_url == form.Node(form.pane).url,
                "read_page_and_capture_origin_select_same_document_and_url")) return false;
-    auto facts = EffBase();
-    facts.origin = capture.page_origin;
+    const auto facts = BuildWindowsShadowFacts(capture, UiaRequest("click")).facts;
     if (!Check(ClassifyEffect(facts).reason == DecisionReason::kSensitiveOrigin,
                "edge_origin_reaches_effect_classifier")) return false;
     for (int mode = 0; mode < 9; ++mode) {
@@ -3431,6 +3472,114 @@ bool CheckSupportedBrowserPageEvidence() {
   return true;
 }
 
+bool CheckWindowsOriginPolicy() {
+  using namespace sprint_coder::computer_use;
+  for (const char *browser : {"chrome.exe", "msedge.exe"}) {
+    FakeForm form;
+    form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+    form.source.process_path = std::string("C:/Apps/") + browser;
+    form.Node(form.pane).control_type = "Document";
+    form.Node(form.pane).has_url = true;
+    form.Node(form.pane).url = "https://docs.example/page";
+    form.Node(form.pane).signature = "document-1";
+    const int toolbar = form.source.Add(form.window, "ToolBar");
+    for (int i = 0; i < 80; ++i) form.source.Add(toolbar, "Button", "Tab");
+    form.Node(form.window).children = {toolbar, form.pane};
+    for (auto &node : form.source.nodes) {
+      node.process_id = 42;
+      node.framework_result = ShadowReadResult::kOk;
+      node.framework_id = "Chrome";
+    }
+    const auto read = [&] {
+      WindowsShadowReader reader(form.source);
+      reader.ReadChainIdentity(true);
+      return reader.Capture("click", "");
+    };
+    const auto page = WindowsShadowReader(form.source).ReadPage();
+    auto capture = read();
+    auto request = UiaRequest("click");
+    request.maximum_mode = "supervised";
+    const auto built = BuildWindowsShadowFacts(capture, request);
+    if (!Check(page.complete && page.origin == OriginState::kOrdinary &&
+               built.facts.origin == OriginState::kOrdinary &&
+               ClassifyEffect(built.facts).kind == DecisionKind::kApproval,
+               "large_chrome_tree_before_document_is_complete")) return false;
+    WindowsApprovalMeasurementInput input;
+    input.capture = &capture;
+    input.request = request;
+    input.identity.app_identity = {true, std::string(64, 'a')};
+    input.identity.process_generation = {true, "generation"};
+    input.identity.window_identity = {true, std::string(64, 'b')};
+    input.identity.geometry_present = true;
+    input.identity.width = 800; input.identity.height = 600;
+    input.target_frame = {true, 10, 10, 100, 20};
+    input.strict = {true, 42, false};
+    input.route = ClassifierRoute::kV2;
+    input.attested_classifier_version = 4;
+    input.approval_gate = true;
+    const auto ordinary = MeasureWindowsApproval(input);
+    const auto cannot_approve_or_dispatch = [&](const NativeApprovalMeasurement &changed) {
+      auto binding = ApprovalIntentBinding();
+      binding.authority_digest = ordinary.authority_digest;
+      binding.effect = ordinary.effect;
+      binding.classifier_version = ordinary.classifier_version;
+      binding.ruleset_version = ordinary.ruleset_version;
+      binding.lexicon_version = ordinary.lexicon_version;
+      NativeApprovalFlow pending, approved;
+      const std::string intent(64, 'e'), execution(64, 'f');
+      return pending.Offer(intent, binding, 100, kNativeApprovalWaitMaxNs) &&
+          !pending.Approve(FlowFacts(), changed, execution, 110).ok &&
+          approved.Offer(intent, binding, 100, kNativeApprovalWaitMaxNs) &&
+          approved.Approve(FlowFacts(), ordinary, execution, 110).ok &&
+          !approved.ConsumeApproved(FlowFacts(), changed, 120).ok;
+    };
+    input.ruleset.supervised_action = false;
+    if (!Check(ordinary.eligible && !MeasureWindowsApproval(input).eligible,
+               "ordinary_origin_requires_explicit_policy")) return false;
+    input.ruleset.supervised_action = true;
+    input.request.maximum_mode = "observe_only";
+    if (!Check(!MeasureWindowsApproval(input).eligible,
+               "ordinary_origin_keeps_observe_only_closed")) return false;
+    input.request = request;
+    for (const char *url : {"https://login.example", "about:blank", "http://localhost", ""}) {
+      form.Node(form.pane).url = url;
+      capture = read();
+      if (!Check(cannot_approve_or_dispatch(MeasureWindowsApproval(input)),
+                 "sensitive_origin_cannot_be_approved")) return false;
+    }
+    form.Node(form.pane).url = "https://docs.example/page";
+    capture = read();
+    capture.chain.front().name = "Credit card number";
+    if (!Check(cannot_approve_or_dispatch(MeasureWindowsApproval(input)),
+               "ordinary_origin_card_field_cannot_be_approved")) return false;
+    capture = read();
+    for (unsigned version : {1u, 2u, 3u, 5u}) {
+      input.attested_classifier_version = version;
+      if (!Check(!MeasureWindowsApproval(input).eligible,
+                 "mixed_classifier_versions_fail_closed")) return false;
+    }
+    auto unbound = capture;
+    unbound.page_origin = OriginState::kUnknown;
+    if (!Check(BuildWindowsShadowFacts(unbound, request).facts.origin == OriginState::kUnknown,
+               "unbound_browser_origin_stays_unknown")) return false;
+    unbound = capture;
+    unbound.process_path = "C:/Apps/msedgewebview2.exe";
+    unbound.page_origin = OriginState::kSensitive;
+    if (!Check(BuildWindowsShadowFacts(unbound, request).facts.origin == OriginState::kOrdinary,
+               "page_origin_requires_bindable_browser")) return false;
+    // Trigger only after CaptureChain's URL and both page URL reads: the first scan
+    // succeeded, so this exercises PageDocumentStillCurrent, not the legacy reader.
+    form.source.url_calls = 0;
+    form.source.url_read_hook = [&] {
+      if (form.source.url_calls == 3) form.Node(form.pane).parent = form.desktop;
+    };
+    if (!Check(read().page_origin == OriginState::kUnknown && form.source.url_calls == 3,
+               "page_document_still_current_rechecks_after_capture_url")) return false;
+  }
+  std::cout << "Windows origin policy: PASS\n";
+  return true;
+}
+
 bool CheckWindowsPageOrigin() {
   const auto page = [] {
     FakeForm form;
@@ -3454,13 +3603,13 @@ bool CheckWindowsPageOrigin() {
     ignored.page_origin = OriginState::kUnknown;
     const auto before = WindowsShadowClassify(capture, UiaRequest("click"), true);
     const auto after = WindowsShadowClassify(ignored, UiaRequest("click"), true);
-    if (!Check(before.kind == after.kind && before.gaps == after.gaps,
+    if (!Check(before.kind != DecisionKind::kOrdinary && after.kind != DecisionKind::kOrdinary,
                "winorigin-metadata-never-enables-actions")) return false;
     form.Node(form.pane).url.clear();
     if (!Check(reader.Capture("click", "").page_origin == OriginState::kUnknown,
                "winorigin-empty-never-reuses-origin")) return false;
   }
-  for (const auto url : {"https://docs.example", "https://127.0.0.1.nip.io",
+  for (const auto url : {"https://127.0.0.1.nip.io",
                          "file:///C:/synthetic/a", "devtools://devtools/", "https://docs.example."}) {
     auto form = page();
     form.Node(form.pane).url = url;
@@ -3478,7 +3627,8 @@ bool CheckWindowsPageOrigin() {
     auto baseline = page();
     baseline.source.process_path = "C:\\Apps\\browser.exe"; // Skip Chrome-only metadata.
     WindowsShadowReader baseline_reader(baseline.source);
-    const auto before = baseline_reader.Capture("click", "");
+    auto before = baseline_reader.Capture("click", "");
+    before.process_path = "C:/Apps/chrome.exe"; // Compare the same browser with unbound origin.
     auto form = page();
     if (mode == 0) {
       for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
@@ -4423,7 +4573,7 @@ ApprovalMeasurementInput MeasureInput(const ShadowAxCapture &capture) {
   input.ruleset = EffectRuleset{};
   input.route = ClassifierRoute::kV2;
   input.source = HighImpactSource::kNativeFacts;
-  input.attested_classifier_version = 3;
+  input.attested_classifier_version = sprint_coder::computer_use::kPlatformEffectClassifierVersion;
   input.target_frame = ApprovalTargetFrame{true, 30, 60, 100, 24};
   return input;
 }
@@ -4784,25 +4934,25 @@ bool CheckEffectMeasurement() {
     const EffectDecision confirm = ClassifyEffect(built.facts, EffectRuleset{});
     if (!Check(confirm.kind == DecisionKind::kApproval && confirm.approval_effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-fixture-is-a-confirmation")) return false;
-    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 3);
+    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
     if (!Check(offered.offer && offered.refusal == IntentRefusal::kNone &&
                    offered.effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-offer-all-conditions")) return false;
-    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 3);
+    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
     if (!Check(!v1.offer && v1.refusal == IntentRefusal::kRouteNotV2 && v1.effect == NativeApprovalEffect::kInvalid,
                "measure-offer-needs-route-v2")) return false;
     for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kMainProjection}) {
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source, 3);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotNativeFacts, "measure-offer-needs-native-facts"))
         return false;
     }
     EffectRuleset closed;
     closed.high_impact_confirmation = false;
-    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts, 3);
+    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
     if (!Check(!disabled.offer && disabled.refusal == IntentRefusal::kNotEnabled, "measure-offer-needs-enabled-effect"))
       return false;
     // The build must attest the version the core has.
-    for (const std::uint32_t attested : {0u, 1u, 2u, 4u}) {
+    for (const std::uint32_t attested : {0u, 1u, 2u, 3u}) {
       const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, attested);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAttested, "measure-offer-needs-the-attested-version"))
         return false;
@@ -4812,11 +4962,11 @@ bool CheckEffectMeasurement() {
     supervised_decision.effect_class = EffectClass::kOrdinary;
     supervised_decision.approval_effect = NativeApprovalEffect::kSupervisedAction;
     for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kNativeFacts}) {
-      if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, source, 3).offer,
+      if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, source, sprint_coder::computer_use::kPlatformEffectClassifierVersion).offer,
                  "measure-supervised-needs-no-high-impact-claim")) return false;
     }
     {
-      const auto projected = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, HighImpactSource::kMainProjection, 3);
+      const auto projected = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, HighImpactSource::kMainProjection, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!projected.offer && projected.refusal == IntentRefusal::kNotNativeFacts, "measure-projection-never-grants"))
         return false;
     }
@@ -4824,13 +4974,13 @@ bool CheckEffectMeasurement() {
     for (const DecisionKind kind : {DecisionKind::kOrdinary, DecisionKind::kBlocked, DecisionKind::kTakeover}) {
       EffectDecision other = confirm;
       other.kind = kind;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 3);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAnApproval, "measure-offer-needs-an-approval"))
         return false;
     }
     EffectDecision no_effect = confirm;
     no_effect.approval_effect = NativeApprovalEffect::kInvalid;
-    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts, 3).refusal ==
+    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion).refusal ==
                    IntentRefusal::kNotAnApproval,
                "measure-offer-needs-an-effect")) return false;
     // A decision made by another version of the core is not trusted.
@@ -4839,7 +4989,7 @@ bool CheckEffectMeasurement() {
       if (field == 0) other.classifier_version += 1;
       if (field == 1) other.ruleset_version += 1;
       if (field == 2) other.lexicon_version += 1;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 3);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kVersionMismatch, "measure-offer-needs-current-versions"))
         return false;
     }
@@ -4863,7 +5013,7 @@ bool CheckEffectMeasurement() {
       EffectDecision download_open = confirm;
       download_open.effect_class = EffectClass::kE2DownloadOpen;
       download_open.approval_effect = NativeApprovalEffect::kDownloadOpen;
-      const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, 3);
+      const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!widened.offer && widened.refusal == IntentRefusal::kNotEnabled, "measure-ruleset-is-the-versions-own"))
         return false;
       // Any flag that is not the version's own refuses a confirmation too, whichever way it differs.
@@ -4873,19 +5023,19 @@ bool CheckEffectMeasurement() {
         if (flag == 1) other.file_manager_open = true;
         if (flag == 2) other.high_impact_confirmation = false;
         if (flag == 3) other.supervised_action = false;
-        if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, other, confirm, HighImpactSource::kNativeFacts, 3).offer,
+        if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, other, confirm, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion).offer,
                    "measure-every-ruleset-flag-is-compared")) return false;
       }
       EffectRuleset also_files;
       also_files.file_manager_open = true;
-      if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, 3).offer,
+      if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion).offer,
                  "measure-ruleset-widened-refuses-everything")) return false;
     }
     // The first release's rule set offers only the two approvals; E2 / E3 stay refused (decision 2-A).
     for (const NativeApprovalEffect effect : {NativeApprovalEffect::kDownloadOpen, NativeApprovalEffect::kFileManagerOpen}) {
       EffectDecision file = confirm;
       file.approval_effect = effect;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts, 3);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts, sprint_coder::computer_use::kPlatformEffectClassifierVersion);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotEnabled, "measure-file-effects-stay-closed"))
         return false;
     }
@@ -4896,7 +5046,7 @@ bool CheckEffectMeasurement() {
     const ShadowAxCapture capture = MeasureCapture();
     const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(capture));
     if (!Check(measured.eligible && !measured.takeover && measured.effect == NativeApprovalEffect::kHighImpactConfirmation &&
-                   measured.authority_digest.size() == 64 && measured.classifier_version == 3 &&
+                   measured.authority_digest.size() == 64 && measured.classifier_version == sprint_coder::computer_use::kPlatformEffectClassifierVersion &&
                    measured.ruleset_version == 2 && measured.lexicon_version == 3,
                "measure-eligible")) return false;
     // The same capture measures the same.
@@ -5761,7 +5911,7 @@ bool CheckEffectClassifierCore() {
   using namespace sprint_coder::computer_use::effect_detail;
 
   // Candidate versions the enabling change will attest. The attested versions are still 1.
-  if (!Check(kEffectClassifierVersion == 3 && kEffectRulesetVersion == 2 &&
+  if (!Check(kEffectClassifierVersion == sprint_coder::computer_use::kPlatformEffectClassifierVersion && kEffectRulesetVersion == 2 &&
                  kEffectLexiconVersion == 3 && kNativePreflightClassifierVersion == 1,
              "effect-versions-not-yet-attested")) return false;
 
@@ -7977,7 +8127,7 @@ bool CheckWindowsApprovalCore() {
   input.target_frame = {true, 30, 60, 100, 24};
   input.strict = {true, 4242, true};
   input.route = ClassifierRoute::kV2;
-  input.attested_classifier_version = 3;
+  input.attested_classifier_version = sprint_coder::computer_use::kPlatformEffectClassifierVersion;
   input.approval_gate = true;
   const auto measured = MeasureWindowsApproval(input);
   if (!Check(measured.eligible && measured.effect == NativeApprovalEffect::kSupervisedAction &&
@@ -8014,7 +8164,7 @@ bool CheckWindowsApprovalCore() {
   shared.identity = input.identity;
   shared.target_frame = input.target_frame;
   shared.route = input.route;
-  shared.attested_classifier_version = 3;
+  shared.attested_classifier_version = sprint_coder::computer_use::kPlatformEffectClassifierVersion;
   if (!Check(MeasureApprovalFromFacts(shared, settled.facts).authority_digest == measured.authority_digest,
              "windows-document-settled-authority")) return false;
   input.approval_gate = false;
@@ -8337,7 +8487,7 @@ bool CheckNativeApprovalOffer() {
                  NativePreflightDecisionName(NativePreflightKind::kTakeover) == "takeover",
              "offer-decision-names")) return false;
   if (!Check(kNativePreflightClassifierVersion == 1 && kNativePreflightReceiptVersion == 2 &&
-                 kNativeApprovalOfferClassifierVersion == 3 && kNativeApprovalOfferMaxMs == 60'000u,
+                 kNativeApprovalOfferClassifierVersion == sprint_coder::computer_use::kPlatformEffectClassifierVersion && kNativeApprovalOfferMaxMs == 60'000u,
              "offer-constants")) return false;
 
   // The key sets: v1 is the original ten; v2 adds one; an offer adds three more. All distinct.
@@ -9963,6 +10113,7 @@ int main() {
   if (!CheckWindowsShadowReader()) return 1;
   if (!CheckSupportedBrowserPageEvidence()) return 1;
   if (!CheckWindowsPageOrigin()) return 1;
+  if (!CheckWindowsOriginPolicy()) return 1;
   if (!CheckWindowsPageRecheck()) return 1;
   if (!CheckWindowsShadowScheduler()) return 1;
   if (!CheckEffectMeasurement()) return 1;

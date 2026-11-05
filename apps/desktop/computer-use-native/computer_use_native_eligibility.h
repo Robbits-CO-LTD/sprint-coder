@@ -64,7 +64,7 @@ constexpr bool kNativeEligibilityInterlockEnforced =
 // Only the exact final declaration can enable the Windows production routes.
 constexpr bool WindowsV2FinalDeclaration(bool from_build, bool v2, std::uint32_t ruleset,
     std::uint32_t classifier, std::uint32_t lexicon, bool ticket_required, bool interlock_enforced) {
-  return from_build && v2 && ruleset == 4 && classifier == 3 && lexicon == 3 &&
+  return from_build && v2 && ruleset == 4 && classifier == 4 && lexicon == 3 &&
       ticket_required && interlock_enforced;
 }
 #if defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)

@@ -17,6 +17,7 @@ import type { ComputerUseNativeHostOptions } from './computer-use-native-host';
  */
 export type ComputerUseEligibilityWiringInputs = Readonly<{
   compiled: () => ComputerUseEligibility | null;
+  platform?: string;
   agentDrivenV2: () => boolean;
   environment: () => Readonly<Record<string, string | undefined>>;
 }>;
@@ -33,7 +34,11 @@ export function createComputerUseEligibilityWiring(inputs: ComputerUseEligibilit
         environment: inputs.environment(),
       }),
     classifierV2Attested: (gateOpen) =>
-      computerUseClassifierV2Attested({ compiled: inputs.compiled(), gateOpen }),
+      computerUseClassifierV2Attested({
+        compiled: inputs.compiled(),
+        gateOpen,
+        platform: inputs.platform ?? process.platform,
+      }),
   };
 }
 

@@ -4,7 +4,7 @@ import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake'
 
 const eligibility = {
   mode: 'v2-denylist',
-  classifierVersion: 3,
+  classifierVersion: 4,
   rulesetVersion: 2,
   lexiconVersion: 3,
   ticketRequired: true,
@@ -78,7 +78,7 @@ describe('Windows approval evidence', () => {
     const input = {
       platform: 'win32',
       methodsExported: true,
-      attestedClassifierVersion: 3,
+      attestedClassifierVersion: 4,
       effectiveMode: 'v2-denylist',
       route: 'v2',
       windowsApprovalReady: true,
@@ -89,7 +89,12 @@ describe('Windows approval evidence', () => {
       expect(computerUseApprovalPathEnabled({ ...input, route })).toBe(false);
     expect(computerUseApprovalPathEnabled({ ...input, effectiveMode: 'v1-allowlist' })).toBe(false);
     expect(
-      computerUseApprovalPathEnabled({ ...input, platform: 'darwin', windowsApprovalReady: false }),
+      computerUseApprovalPathEnabled({
+        ...input,
+        platform: 'darwin',
+        attestedClassifierVersion: 3,
+        windowsApprovalReady: false,
+      }),
     ).toBe(true);
   });
 });

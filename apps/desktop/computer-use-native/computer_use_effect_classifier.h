@@ -59,9 +59,10 @@
 
 namespace sprint_coder::computer_use {
 
-// Classifier 3 adds the Windows chain bound. The effect-policy ruleset is separate from
+// Windows classifier 4 admits bound ordinary page origins; macOS retains classifier 3.
+// The effect-policy ruleset is separate from
 // the target deny ruleset (eligibility.json); its table remains at version 2.
-constexpr std::uint32_t kEffectClassifierVersion = 3;
+constexpr std::uint32_t kEffectClassifierVersion = kPlatformEffectClassifierVersion;
 constexpr std::uint32_t kEffectRulesetVersion = 2;
 constexpr std::uint32_t kEffectLexiconVersion = 3;
 
@@ -335,7 +336,8 @@ inline constexpr std::uint64_t kEffectTablesDigest = ComputeEffectTablesDigest()
 // The reviewed value. Editing a table or raising a version without updating this pin is a compile
 // error in every translation unit that includes the header, and so is reading the CJK terms with a
 // wrong character set: the build fails closed instead of matching nothing.
-inline constexpr std::uint64_t kEffectTablesDigestPinned = 0xb53e05fbe73f4b42ULL;
+inline constexpr std::uint64_t kEffectTablesDigestPinned =
+    kEffectClassifierVersion == 4 ? 0xe0113b16cc4036e3ULL : 0xb53e05fbe73f4b42ULL;
 static_assert(kEffectTablesDigest == kEffectTablesDigestPinned,
               "The effect classifier tables changed: review them, bump the lexicon / ruleset "
               "version, and update kEffectTablesDigestPinned.");

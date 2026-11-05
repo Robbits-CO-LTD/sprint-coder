@@ -43,6 +43,7 @@ it.runIf(msvc !== null || clang)(
       expect(ran.status, `${ran.error ?? ''}\n${ran.stdout}\n${ran.stderr}`).toBe(0);
       expect(ran.stdout).toContain('Supported browser page evidence: PASS');
       expect(ran.stdout).toContain('Windows page origin: PASS');
+      expect(ran.stdout).toContain('Windows origin policy: PASS');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -76,7 +77,7 @@ describe('Windows page origin metadata (N11-B)', () => {
     expect(reader).not.toContain('ScanDocuments(');
     expect(reader).toContain('capture.page_origin = OriginState::kUnknown');
     const shadow = native('computer_use_windows_shadow.h');
-    expect(shadow.match(/page_origin/gu)).toHaveLength(1);
+    expect(shadow).toContain('? capture.page_origin : OriginState::kUnknown');
     expect(native('computer_use_protocol_fuzz.cc')).toContain('CheckWindowsPageOrigin()');
     expect(native('computer_use_windows_uia_source.h')).toContain(
       'get_CurrentValue(value.Receive())',
@@ -124,6 +125,6 @@ describe('Windows page recheck (N11-C)', () => {
     const reader = native('computer_use_windows_shadow_reader.h');
     expect(reader).toContain('PageDocumentStillCurrent(root, document)');
     expect(reader).toContain('const bool within = OriginWithinBudget()');
-    expect(native('computer_use_origin_classify.h')).toContain('kOriginClassificationVersion = 1');
+    expect(native('computer_use_origin_classify.h')).toContain('kOriginClassificationVersion = 2');
   });
 });

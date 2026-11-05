@@ -6,10 +6,8 @@ import { readWindowsHostSource } from '../../../../computer-use-windows-host-sou
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  NATIVE_APPROVAL_CLASSIFIER_VERSION,
-  NATIVE_APPROVAL_EFFECTS,
-} from './computer-use-native-host';
+import { NATIVE_APPROVAL_EFFECTS } from './computer-use-native-host';
+import { computerUseApprovalClassifierVersion } from './computer-use-eligibility';
 
 // Source contracts for classifier v2 C4-2c-1: the split high-impact vocabulary, the approved-effect
 // judgement, and the portable parts of an approval offer. The behaviour is in the portable harness
@@ -255,8 +253,20 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
     expect([...words].sort()).toEqual([...NATIVE_APPROVAL_EFFECTS].sort());
     // The classifier version of an offer and the wait bound.
     expect(offer).toContain(
-      `kNativeApprovalOfferClassifierVersion = ${NATIVE_APPROVAL_CLASSIFIER_VERSION};`,
+      'kNativeApprovalOfferClassifierVersion = kPlatformEffectClassifierVersion;',
     );
+    const versions = read('computer_use_classifier_version.h');
+    const branches = /#if defined\(_WIN32\)[^\n]*\n([\s\S]*?)#else\r?\n([\s\S]*?)#endif/u.exec(
+      versions,
+    )!;
+    for (const [platform, branch, expected] of [
+      ['win32', branches[1]!, 4],
+      ['darwin', branches[2]!, 3],
+    ] as const) {
+      const value = Number(/kPlatformEffectClassifierVersion = (\d+);/u.exec(branch)![1]);
+      expect(value).toBe(expected);
+      expect(value).toBe(computerUseApprovalClassifierVersion(platform));
+    }
     expect(host).toContain('const NATIVE_APPROVAL_WAIT_MAX_MS = 60_000;');
     expect(offer).toContain("kNativeApprovalWaitMaxNs / 1'000'000ULL");
     expect(read('computer_use_native_approval_ticket.h')).toContain(

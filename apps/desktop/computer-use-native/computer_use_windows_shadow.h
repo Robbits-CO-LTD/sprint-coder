@@ -98,7 +98,7 @@ struct ShadowUiaCapture {
   // The URL of the page (the Document in the chain), when there is one and it could be read.
   bool document_url_read = false;
   std::string document_url;
-  // N11-B metadata only. No action, approval, diagnostic or wire payload consumes this state.
+  // N11-F2: freshly bound page evidence for Windows effect/approval classification.
   OriginState page_origin = OriginState::kUnknown;
   // The call or time budget ran out, or a property of the target failed to read.
   bool budget_exhausted = false;
@@ -401,6 +401,20 @@ namespace windows_shadow_detail {
       facts.origin = OriginState::kOrdinary;
       result.gaps &= ~kShadowGapOrigin;
     }
+  }
+  // Scope F2 to supported browsers' web/file pages. Keep legacy Electron/CEF origins
+  // and internal download/devtools surfaces so their dedicated rules remain reachable.
+  const std::string page_url = shadow_detail::Lowercase(capture.document_url);
+  const bool policy_page = page_url.starts_with("http:") || page_url.starts_with("https:") ||
+                           page_url.starts_with("file:");
+  if (target_in_page && IsPageBindableBrowser(capture) && policy_page &&
+      facts.origin == OriginState::kOrdinary) {
+    facts.origin = facts.metadata_complete &&
+                           capture.chain_reached_root && !capture.read_failed &&
+                           !capture.budget_exhausted
+                       ? capture.page_origin : OriginState::kUnknown;
+    if (facts.origin == OriginState::kOrdinary) result.gaps &= ~kShadowGapOrigin;
+    else result.gaps |= kShadowGapOrigin;
   }
   return result;
 }

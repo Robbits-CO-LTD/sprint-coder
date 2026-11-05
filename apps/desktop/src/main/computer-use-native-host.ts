@@ -53,7 +53,7 @@ import type {
   ComputerUseNativeWindow,
 } from './computer-use-controller';
 import {
-  COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION,
+  computerUseApprovalClassifierVersion,
   computerUseApprovalPathEnabled,
   type ComputerUseApprovalRoute,
 } from './computer-use-eligibility';
@@ -1372,7 +1372,7 @@ export function createComputerUseNativeHost(
   // start takes the binding back only when it is the last one and no session came of it.
   const classifierBindings = new Map<
     string,
-    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 3; starts: Set<symbol> }>
+    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 3 | 4; starts: Set<symbol> }>
   >();
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
@@ -2083,7 +2083,8 @@ export function createComputerUseNativeHost(
   // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session with no
   // binding at all (started without a route, closed, or whose start failed) is refused too (C5-1).
   const approvalRouteAllowed = (sessionId: string): boolean =>
-    classifierBindings.get(sessionId)?.expectedVersion === 3;
+    classifierBindings.get(sessionId)?.expectedVersion ===
+    computerUseApprovalClassifierVersion(platform);
 
   // The "approval path is open" test (C5-1): platform, the exported surface, the attested classifier
   // version, and the session's mode and route (computerUseApprovalPathEnabled has the table). It is
@@ -2092,7 +2093,7 @@ export function createComputerUseNativeHost(
   const approvalRouteOf = (sessionId: string): ComputerUseApprovalRoute => {
     const binding = classifierBindings.get(sessionId);
     if (binding === undefined) return 'unbound';
-    return binding.expectedVersion === 3 ? 'v2' : 'v1';
+    return binding.expectedVersion === computerUseApprovalClassifierVersion(platform) ? 'v2' : 'v1';
   };
   // The loader verifies package provenance and all three declarations. The transport rechecks
   // the live helper handshake; session readiness additionally binds its generation and Stop state.
@@ -2134,7 +2135,7 @@ export function createComputerUseNativeHost(
         hasMethod(addon, 'approvalDiscard') &&
         hasMethod(addon, 'dispatchApproved'),
       attestedClassifierVersion:
-        options.classifierV2Attested === true ? COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION : 1,
+        options.classifierV2Attested === true ? computerUseApprovalClassifierVersion(platform) : 1,
       effectiveMode:
         options.effectiveEligibilityMode?.() ?? (route === 'v2' ? 'v2-denylist' : 'v1-allowlist'),
       route,
@@ -3319,7 +3320,10 @@ export function createComputerUseNativeHost(
       if (binding === undefined && owner.route !== undefined && !sessions.has(input.sessionId)) {
         binding = {
           route: owner.route,
-          expectedVersion: owner.route === 'v2' && options.classifierV2Attested === true ? 3 : 1,
+          expectedVersion:
+            owner.route === 'v2' && options.classifierV2Attested === true
+              ? computerUseApprovalClassifierVersion(platform)
+              : 1,
           starts: new Set<symbol>(),
         };
         classifierBindings.set(input.sessionId, binding);
@@ -3348,7 +3352,11 @@ export function createComputerUseNativeHost(
         startEntered = true;
         const started = await startNative(
           input,
-          binding === undefined ? undefined : binding.expectedVersion === 3 ? 'v2' : 'v1',
+          binding === undefined
+            ? undefined
+            : binding.expectedVersion === computerUseApprovalClassifierVersion(platform)
+              ? 'v2'
+              : 'v1',
           owner,
           assertTargetCurrent,
         );
@@ -4150,7 +4158,8 @@ export function parseNativePreflightReceipt(
       input.session.platform !== 'win32' ||
       input.windowsApproval?.route !== 'v2' ||
       input.windowsApproval.receiptVersion !== 3 ||
-      input.expectedClassifierVersion !== 3 ||
+      input.expectedClassifierVersion !==
+        computerUseApprovalClassifierVersion(input.session.platform) ||
       !offersApproval ||
       typeof record['inputAttemptCount'] !== 'number' ||
       !Number.isSafeInteger(record['inputAttemptCount']) ||
@@ -4167,7 +4176,7 @@ export function parseNativePreflightReceipt(
         : NATIVE_PREFLIGHT_KEYS_V2;
   const bound = input.expectedClassifierVersion;
   const expectedClassifierVersion = offersApproval
-    ? NATIVE_APPROVAL_CLASSIFIER_VERSION
+    ? computerUseApprovalClassifierVersion(input.session.platform)
     : (bound ?? NATIVE_PREFLIGHT_CLASSIFIER_VERSION);
   if (
     keys.length !== expectedKeys.length ||

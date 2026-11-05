@@ -102,10 +102,35 @@ describe('the approval path predicate (C5-1)', () => {
     ];
     for (const [compiled, gateOpen, expected] of cases)
       expect(
-        computerUseClassifierV2Attested({ compiled, gateOpen }),
+        computerUseClassifierV2Attested({ compiled, gateOpen, platform: 'darwin' }),
         `${JSON.stringify(compiled)} ${gateOpen}`,
       ).toBe(expected);
   });
+});
+
+it('mixed_classifier_versions_fail_closed', () => {
+  for (const platform of ['win32', 'darwin']) {
+    for (const classifierVersion of [1, 2, 3, 4, 5]) {
+      const expected = classifierVersion === (platform === 'win32' ? 4 : 3);
+      expect(
+        computerUseClassifierV2Attested({
+          compiled: eligibility('v2-denylist', classifierVersion),
+          gateOpen: true,
+          platform,
+        }),
+      ).toBe(expected);
+      expect(
+        computerUseApprovalPathEnabled({
+          platform,
+          methodsExported: true,
+          attestedClassifierVersion: classifierVersion,
+          effectiveMode: 'v2-denylist',
+          route: 'v2',
+          windowsApprovalReady: true,
+        }),
+      ).toBe(expected);
+    }
+  }
 });
 
 describe('the production wiring while every version is 1 (C5-1)', () => {
@@ -115,6 +140,7 @@ describe('the production wiring while every version is 1 (C5-1)', () => {
     environment: Record<string, string | undefined> = {},
   ) =>
     createComputerUseEligibilityWiring({
+      platform: 'darwin',
       compiled: () => compiled,
       agentDrivenV2: () => agentDrivenV2,
       environment: () => environment,
@@ -251,6 +277,7 @@ describe('the declared versions keep the approval path closed (C5-1 tripwire)', 
         ticketRequired: table.ticketRequired['darwin'] === true,
       } as ComputerUseEligibility;
       const wiring = createComputerUseEligibilityWiring({
+        platform: 'darwin',
         compiled: () => compiled,
         agentDrivenV2: () => true,
         environment: () => ({}),

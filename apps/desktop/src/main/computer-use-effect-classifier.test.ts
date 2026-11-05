@@ -75,7 +75,7 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
   });
 
   it('keeps the candidate versions apart from the attested ones (no version is raised yet)', () => {
-    expect(header).toContain('kEffectClassifierVersion = 3');
+    expect(header).toContain('kEffectClassifierVersion = kPlatformEffectClassifierVersion');
     expect(header).toContain('kEffectRulesetVersion = 2');
     expect(header).toContain('kEffectLexiconVersion = 3');
     expect(read('computer_use_preflight_classifier.h')).toContain(
@@ -110,11 +110,15 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
   it('pins the digest of its versioned tables in the header, recomputed independently', () => {
     const lexicon = LEXICON_TABLES.flatMap((name) => terms(name));
     const extensions = EXTENSION_TABLES.flatMap((name) => terms(name));
-    const expected = digest([...lexicon, '|extensions|', ...extensions, '|versions|'], [3, 2, 3])
-      .toString(16)
-      .padStart(16, '0');
-    // The pin is a static_assert in the header itself, so every translation unit checks it.
-    expect(header).toContain(`kEffectTablesDigestPinned = 0x${expected}ULL`);
+    for (const version of [3, 4]) {
+      const expected = digest(
+        [...lexicon, '|extensions|', ...extensions, '|versions|'],
+        [version, 2, 3],
+      )
+        .toString(16)
+        .padStart(16, '0');
+      expect(header).toContain(`0x${expected}ULL`);
+    }
     expect(header).toContain('static_assert(kEffectTablesDigest == kEffectTablesDigestPinned');
   });
 

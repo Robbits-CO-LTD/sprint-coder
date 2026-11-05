@@ -24,7 +24,7 @@ const context = {
   requestId: 'request-1',
   observationRevision: 1,
   cancelEpoch: 0,
-  expectedClassifierVersion: 3,
+  expectedClassifierVersion: 4,
   windowsApproval: { route: 'v2', receiptVersion: 3 } as const,
 };
 const display = {
@@ -40,7 +40,7 @@ const receipt = {
   reasonCode: null,
   deniedResult: null,
   ticket: null,
-  classifierVersion: 3,
+  classifierVersion: 4,
   inputAttemptCount: 0,
   requestId: 'request-1',
   sessionId: 'session-1',
@@ -68,7 +68,7 @@ describe('Windows approval wire contract', () => {
     );
   });
 
-  it.each([1, 3])(
+  it.each([1, 4])(
     'accepts ordinary and refused classifier %i receipts without relaxing version checks',
     (classifierVersion) => {
       const ordinary = {
@@ -103,7 +103,7 @@ describe('Windows approval wire contract', () => {
       expect(() =>
         parseNativePreflightReceipt(ordinary, {
           ...bound,
-          expectedClassifierVersion: classifierVersion === 1 ? 3 : 1,
+          expectedClassifierVersion: classifierVersion === 1 ? 4 : 1,
         }),
       ).toThrow('native_preflight_invalid');
     },
@@ -153,7 +153,7 @@ describe('Windows approval wire contract', () => {
   });
   it('requires Windows, route v2, classifier 2 and declared receipt version 3', () => {
     const base = { session, requestId: 'request-1', observationRevision: 1, cancelEpoch: 0 };
-    const undeclared = { ...base, expectedClassifierVersion: 3 };
+    const undeclared = { ...base, expectedClassifierVersion: 4 };
     const unbound = { ...base, windowsApproval: context.windowsApproval };
     for (const input of [
       { ...context, session: { ...session, platform: 'darwin' as const } },
@@ -168,7 +168,11 @@ describe('Windows approval wire contract', () => {
   it.each([undefined, context.windowsApproval])(
     'rejects a Windows v2 offer with approval capability %j',
     (windowsApproval) => {
-      const value: Record<string, unknown> = { ...receipt, receiptVersion: 2 };
+      const value: Record<string, unknown> = {
+        ...receipt,
+        classifierVersion: 3,
+        receiptVersion: 2,
+      };
       delete value['display'];
       expect(() =>
         parseNativePreflightReceipt(value, {
@@ -176,14 +180,14 @@ describe('Windows approval wire contract', () => {
           requestId: context.requestId,
           observationRevision: context.observationRevision,
           cancelEpoch: context.cancelEpoch,
-          expectedClassifierVersion: context.expectedClassifierVersion,
+          expectedClassifierVersion: 3,
           ...(windowsApproval === undefined ? {} : { windowsApproval }),
         }),
       ).toThrow('native_preflight_invalid');
     },
   );
   it('preserves a macOS v2 offer without display information', () => {
-    const value: Record<string, unknown> = { ...receipt, receiptVersion: 2 };
+    const value: Record<string, unknown> = { ...receipt, classifierVersion: 3, receiptVersion: 2 };
     delete value['display'];
     expect(
       parseNativePreflightReceipt(value, {
@@ -191,7 +195,7 @@ describe('Windows approval wire contract', () => {
         requestId: context.requestId,
         observationRevision: context.observationRevision,
         cancelEpoch: context.cancelEpoch,
-        expectedClassifierVersion: context.expectedClassifierVersion,
+        expectedClassifierVersion: 3,
       }),
     ).toMatchObject({
       kind: 'refused',
