@@ -1,7 +1,7 @@
 import { win32 } from 'node:path';
 
-// Main measurement input, never an operation's self-declared effect. P5 binds this to the
-// observed item and input point; missing or ambiguous measurements remain closed.
+// Operation intent is untrusted. The exception evaluator replaces item with the native
+// point measurement after checking agreement; a model path is never measurement evidence.
 export type WindowsExplorerOperation = Readonly<{
   verb: string;
   point?: Readonly<{ x: number; y: number }>;
@@ -10,7 +10,7 @@ export type WindowsExplorerOperation = Readonly<{
 // Case-insensitive only for ASCII letters. NTFS folds case with its own upcase table, which is not
 // JavaScript's Unicode folding (toLowerCase maps U+212A KELVIN SIGN to "k", for example), so any
 // non-ASCII character must match exactly. A non-ASCII case difference is refused, never over-matched.
-function sameWindowsPathAscii(left: string, right: string): boolean {
+export function sameWindowsPathAscii(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index++) {
     let a = left.charCodeAt(index);

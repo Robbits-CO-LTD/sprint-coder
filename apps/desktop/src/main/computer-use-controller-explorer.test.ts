@@ -176,7 +176,11 @@ const explorerScenario = async (
         maximumMode: 'full_access_app',
       },
     ],
-    measureExplorerView: () => ({ shellView: measuredFacts.shellView, pointOwnerMatches: true }),
+    measureExplorerView: () => ({
+      shellView: measuredFacts.shellView,
+      pointOwnerMatches: true,
+      item: measuredItem,
+    }),
     startSession,
     observe: () => ({}),
     preflight,
@@ -279,6 +283,12 @@ const facts = {
   windowClass: 'CabinetWClass',
   shellView: { kind: 'filesystem_folder', path: 'C:\\Folder' },
 } satisfies Partial<TargetFacts> & { shellView: { kind: string; path: string } };
+const measuredItem = {
+  path: 'C:\\Folder\\Child',
+  kind: 'folder',
+  surface: 'file_list',
+  pidlDigest: 'a'.repeat(64),
+};
 const operation: WindowsExplorerOperation = {
   verb: 'open',
   point: { x: 400, y: 300 },
@@ -292,6 +302,80 @@ const inputFor = (host: ComputerUseNativeHost, sessionId: string) => ({
 });
 const withFacts = (measured: Record<string, unknown>) =>
   explorerScenario({}, {}, {}, 'v2', 'win32', undefined, measured);
+it('explorer_item_is_measured_at_action_point', async () => {
+  const measureExplorerView = vi.fn(() => ({
+    shellView: facts.shellView,
+    pointOwnerMatches: true,
+    item: { ...measuredItem, path: 'c:\\folder\\child' },
+  }));
+  const { host, session } = await explorerScenario({}, { measureExplorerView });
+  const input = inputFor(host, session.sessionId);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+  expect(measureExplorerView).toHaveBeenLastCalledWith(expect.objectContaining(operation.point!));
+  expect(
+    await windowsExplorerExceptionAllowedForTesting({
+      ...input,
+      operation: { ...operation, item: { ...measuredItem, path: 'C:\\Folder\\Other' } },
+    }),
+  ).toBe(false);
+});
+it.each([
+  undefined,
+  { kind: 'unknown' },
+  { ...measuredItem, kind: 'file' },
+  { ...measuredItem, path: 'C:\\Folder\\shortcut.lnk' },
+  { ...measuredItem, path: 'shell:AppsFolder' },
+  { ...measuredItem, path: 'C:\\Folder\\nested\\Child' },
+  { ...measuredItem, pidlDigest: '' },
+  { ...measuredItem, surface: 'address_bar' },
+])('never uses the model path as a measured item (%j)', async (item) => {
+  const { host, session } = await explorerScenario(
+    {},
+    {
+      measureExplorerView: () => ({ shellView: facts.shellView, pointOwnerMatches: true, item }),
+    },
+  );
+  expect(await windowsExplorerExceptionAllowedForTesting(inputFor(host, session.sessionId))).toBe(
+    false,
+  );
+});
+it.each(['C:\\Folder\\shortcut.lnk', 'shell:AppsFolder', 'C:\\Folder\\nested\\Child'])(
+  'rejects measured classification/containment even with matching model path (%s)',
+  async (path) => {
+    const item = { ...measuredItem, path };
+    const measureExplorerView = vi.fn(() => ({
+      shellView: facts.shellView,
+      pointOwnerMatches: true,
+      item,
+    }));
+    const { host, session } = await explorerScenario(
+      {},
+      {
+        measureExplorerView,
+      },
+    );
+    expect(
+      await windowsExplorerExceptionAllowedForTesting({
+        ...inputFor(host, session.sessionId),
+        operation: { ...operation, item },
+      }),
+    ).toBe(false);
+    expect(measureExplorerView).toHaveBeenCalledOnce();
+  },
+);
+it('remeasures the item on every use and refuses a replacement path', async () => {
+  let item = measuredItem;
+  const { host, session } = await explorerScenario(
+    {},
+    {
+      measureExplorerView: () => ({ shellView: facts.shellView, pointOwnerMatches: true, item }),
+    },
+  );
+  const input = inputFor(host, session.sessionId);
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(true);
+  item = { ...measuredItem, path: 'C:\\Folder\\Replacement', pidlDigest: 'b'.repeat(64) };
+  expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
+});
 it('explorer_exception_requires_verified_v2_approval', async () => {
   const { host, session } = await explorerScenario();
   const input = inputFor(host, session.sessionId);
@@ -793,7 +877,7 @@ it('rejects measurement failure and evidence revoked while measurement is pendin
   expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
   measureExplorerView.mockImplementation(async () => {
     await host.close(session);
-    return { shellView: facts.shellView, pointOwnerMatches: true };
+    return { shellView: facts.shellView, pointOwnerMatches: true, item: measuredItem };
   });
   expect(await windowsExplorerExceptionAllowedForTesting(input)).toBe(false);
 });

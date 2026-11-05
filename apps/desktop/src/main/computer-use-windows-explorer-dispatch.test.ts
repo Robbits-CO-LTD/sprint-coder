@@ -8,6 +8,48 @@ const input = native('computer_use_windows_host_input.inc');
 const explorer = native('computer_use_windows_host_explorer.inc');
 const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
+describe('Explorer point item measurement boundaries', () => {
+  it('rejects zero, overlapping and duplicate-name matches instead of guessing', () => {
+    const item = explorer.slice(
+      explorer.indexOf('std::optional<WindowsExplorerItem> ReadWindowsExplorerItem('),
+      explorer.indexOf('WindowsExplorerShellView ReadWindowsExplorerShellView('),
+    );
+    expect(item).toContain(
+      '!hit_name || !WindowsExplorerUniqueCachedName(cached_names, *hit_name, current)',
+    );
+    expect(item).toContain('if (hit_name) return std::nullopt;');
+    expect(explorer).not.toContain('GetItemPosition(');
+    expect(explorer).not.toContain('GetVisibleItem(');
+    expect(explorer).not.toContain('WindowsExplorerUniqueVisiblePidl');
+    expect(explorer.match(/!WindowsExplorerUnambiguousFolder\(path, current\)/gu)).toHaveLength(1);
+    expect(item).not.toContain('WindowsExplorerUnambiguousFolder(candidate, current)');
+    expect(item).toContain(
+      'hits != 1 || !WindowsExplorerUniqueCachedName(cached_names, *hit_name, current)',
+    );
+    expect(explorer).toContain('FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM');
+    expect(explorer).toContain('FIND_FIRST_EX_LARGE_FETCH');
+    expect(item).toContain('static_cast<SHGDNF>(SHGDN_NORMAL)');
+    expect(item).toContain('*hit_name != name.value');
+    expect(item).toContain('"pidl_display_name"');
+    expect(item).toContain('ElementFromPoint(point, at_point.Receive())');
+    expect(item).toContain('CompareElements(hit.Get(), at_point.Get(), &same)');
+    expect(item).toContain('folder.Get()->ParseDisplayName(');
+    expect(item).not.toContain('folder_view->Item(');
+    expect(item).toContain('FindAllBuildCache(');
+    expect(item).toContain('runtime_id(item.Get()) != initial_id');
+    expect(item.indexOf('auto result = WindowsExplorerItemFromPidl')).toBeLessThan(
+      item.indexOf('windows_explorer_item_stage_for_test = "uia_final_hit"'),
+    );
+    expect(item).not.toMatch(/JsonStringField|metadata/u);
+  });
+  it('explorer_item_replacement_invalidates_evidence', () => {
+    expect(explorer).toContain('shell_view.item != evidence->item');
+    const harness = native('computer_use_windows_explorer_dispatch_test.cc');
+    expect(harness).toContain('blocked("explorer_item_replacement_invalidates_evidence")');
+    expect(harness).toContain("m2_item_digest.assign(64, 'b')");
+  });
+});
+
 describe('Explorer W2 prestart source boundaries', () => {
   const targets = native('computer_use_windows_host_v2_targets.inc');
   it('item 12 keeps a consumed foreground handoff out of background reselection', () => {
@@ -66,7 +108,7 @@ describe('Explorer W2 prestart source boundaries', () => {
     expect(prestart).toContain('if (!bound()) return false;');
     expect(prestart).toContain('return bound();');
     expect(prestart).toContain('ReadWindowsExplorerShellView(window, current)');
-    expect(explorer).toContain('ReadWindowsExplorerShellView(session->window, current)');
+    expect(explorer).toContain('ReadWindowsExplorerShellView(session->window, current, &point)');
     expect(prestart).toContain('/*lane_registered=*/true');
   });
 
@@ -275,7 +317,7 @@ describe('Explorer dispatch M2 source boundaries', () => {
   });
 
   it('closes key and semantic paths before the background executor', () => {
-    expect(explorer).toContain('kind != "click" && kind != "scroll"');
+    expect(explorer).toContain('if (kind != "click") return false;');
     expect(
       dispatch.indexOf('BeginWindowsExplorerDispatch(session, kind, &explorer_evidence)'),
     ).toBeGreaterThan(0);

@@ -188,6 +188,14 @@ const explorerViewSchema = z
   .object({
     shellView: z.object({ kind: z.literal('filesystem_folder'), path: z.string() }).strict(),
     pointOwnerMatches: z.literal(true),
+    item: z
+      .object({
+        kind: z.literal('folder'),
+        surface: z.literal('file_list'),
+        path: z.string(),
+        pidlDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+      })
+      .strict(),
   })
   .strict();
 export type WindowsExplorerFacts = Readonly<

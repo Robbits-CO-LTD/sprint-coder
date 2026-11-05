@@ -3,6 +3,7 @@
 std::string m2_kind = "click";
 unsigned m2_inputs = 0, m2_measurements = 0, m2_rechecks = 0, m2_send_calls = 0;
 POINT m2_measured_point{}, m2_recheck_point{}, m2_cursor_point{};
+POINT m2_item_measured_point{}, m2_item_recheck_point{};
 std::vector<INPUT> m2_sent;
 DWORD m2_last_input = 1000;
 UINT m2_routing = MOUSEWHEEL_ROUTING_MOUSE_POS;
@@ -13,6 +14,9 @@ bool m2_change_in_send = false;
 bool m2_screen_width_changes_during_recheck = false, m2_screen_origin_changes_during_recheck = false;
 int m2_screen_width_delta = 0, m2_screen_left_delta = 0;
 HWND m2_view = reinterpret_cast<HWND>(200), m2_owner = reinterpret_cast<HWND>(201);
+std::string m2_item_digest(64, 'a');
+bool m2_item_known = true;
+std::vector<int> m2_runtime_id{1, 2, 3};
 std::wstring m2_folder = L"C:\\synthetic-folder";
 bool m2_foreign_owner = false, m2_identity = true, m2_verified = true, m2_throw = false;
 bool m2_cancel_during_view = false, m2_stop_during_view = false;
@@ -81,14 +85,17 @@ WindowsExplorerShellView M2View() {
   if (m2_throw) throw std::bad_alloc();
   if (m2_cancel_during_view) cancellation_epoch.fetch_add(1);
   if (m2_stop_during_view) WindowsTargetListControl().stop_serial.fetch_add(1);
-  return WindowsExplorerShellView{m2_folder, m2_view};
+  WindowsExplorerShellView result{m2_folder, m2_view};
+  if (m2_item_known) result.item = WindowsExplorerItem{m2_folder + L"\\child", m2_item_digest, "folder", m2_runtime_id};
+  return result;
 }
-WindowsExplorerShellView M2ReadView(HWND, const std::function<bool()> &) {
-  ++m2_measurements; return M2View();
+WindowsExplorerShellView M2ReadView(HWND, const std::function<bool()> &, const POINT *point) {
+  ++m2_measurements; m2_item_measured_point = *point; return M2View();
 }
 // The re-measure inside dispatch, counted apart from the measurement the evidence came from.
-WindowsExplorerShellView M2RecheckView(HWND, const std::function<bool()> &) {
+WindowsExplorerShellView M2RecheckView(HWND, const std::function<bool()> &, const POINT *point) {
   ++m2_rechecks;
+  m2_item_recheck_point = *point;
   // A person moves the mouse or presses a key while the last re-measure runs (hundreds of ms).
   if (m2_rechecks == 2 && m2_cursor_moves_during_recheck) ++m2_cursor_point.x;
   if (m2_rechecks == 2 && m2_input_during_recheck) ++m2_last_input;
@@ -141,6 +148,9 @@ int wmain() {
   const std::string action = R"({"x":0.5,"y":0.5,"deltaX":1,"deltaY":1,"key":"Enter","text":"a"})";
   const auto reset = [&] {
     m2_binding_ok = true;
+    m2_item_digest.assign(64, 'a');
+    m2_runtime_id = {1, 2, 3};
+    m2_item_known = true;
     session.explorer_dispatch_evidence.reset();
     session.pid = 42; session.cancel_epoch = 2; session.approval_route_v2 = true;
     session.approval_revoked = false; session.active_window = session.window;
@@ -259,13 +269,26 @@ int wmain() {
       Require(!DispatchWindowsAction(before_refusal, action, &result, &reason, &accepted) &&
           !accepted && m2_inputs == 0, "binding_refusal_copy_cannot_replay");
     }
-    for (const std::string kind : {"click", "scroll"}) {
+    reset(); m2_kind = "scroll"; blocked("explorer_scroll_denied");
+    reset(); m2_item_known = false;
+    std::string unknown_response;
+    Require(MeasureWindowsExplorerView(frame, measure, &unknown_response) &&
+        unknown_response.find("\"item\":{\"kind\":\"unknown\"}") != std::string::npos &&
+        !session.explorer_dispatch_evidence, "unknown_item_has_no_evidence");
+    blocked("unknown_item_emits_nothing");
+    reset(); m2_item_digest.assign(64, 'b');
+    blocked("explorer_item_replacement_invalidates_evidence");
+    reset(); m2_runtime_id = {1, 2, 4};
+    blocked("explorer_reordered_hit_runtime_id_invalidates_evidence");
+    for (const std::string kind : {"click"}) {
       reset(); m2_kind = kind;
       // One cursor placement and ONE SendInput: [absolute move to the POINT, button or wheels].
       Require(dispatch() && m2_inputs == 2 && m2_send_calls == 1, "positive_dispatch");
       Require(m2_measured_point.x == 60 && m2_measured_point.y == 70 &&
+          m2_item_measured_point.x == 60 && m2_item_measured_point.y == 70 &&
+          m2_item_recheck_point.x == 60 && m2_item_recheck_point.y == 70 &&
           m2_cursor_point.x == m2_measured_point.x && m2_cursor_point.y == m2_measured_point.y,
-          "explorer_dispatch_measures_action_point");
+          "explorer_item_is_measured_at_action_point");
       // 1 measurement (the evidence) + 2 re-measures in dispatch: before the cursor and right
       // before the SendInput, both at the very POINT WindowsActionPoint produced.
       Require(m2_measurements == 1 && m2_rechecks == 2 &&

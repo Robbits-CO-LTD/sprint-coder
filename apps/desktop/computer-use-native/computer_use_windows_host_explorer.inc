@@ -1,7 +1,7 @@
 // Explorer measurements run on their owning measurement lane. No COM pointer crosses a thread.
 //
 // Internal refusal reasons. They never reach the wire: the response says only "unknown",
-// pointOwnerMatches false, or the generic explorer_view_unreadable error. Tests read the reason of
+// pointOwnerMatches false, item kind "unknown", or explorer_view_unreadable. Tests read the reason of
 // the last measurement through windows_explorer_trace_for_test, which production never reads.
 enum class WindowsExplorerRefusal {
   kNone,
@@ -57,12 +57,21 @@ WindowsExplorerFault windows_explorer_fault_for_test = WindowsExplorerFault::kNo
 bool windows_explorer_ignore_elevation_for_test = false;
 #endif
 
+struct WindowsExplorerItem {
+  std::wstring path;
+  std::string pidl_digest;
+  std::string kind = "folder";
+  std::vector<int> runtime_id;
+  bool operator==(const WindowsExplorerItem &) const = default;
+};
+
 struct WindowsExplorerShellView {
   std::optional<std::wstring> folder;
   // The measured tab's SHELLDLL_DefView. Input is accepted only inside this window.
   HWND view = nullptr;
   WindowsExplorerRefusal refusal = WindowsExplorerRefusal::kNone;
   WindowsExplorerRefusal folder_refusal = WindowsExplorerRefusal::kNone;
+  std::optional<WindowsExplorerItem> item;
 };
 
 struct WindowsExplorerViewMeasurement {
@@ -79,6 +88,7 @@ struct WindowsExplorerDispatchEvidence {
   std::weak_ptr<std::atomic<std::uint64_t>> session_binding;
   // Only the pipe consumer dispatches; approved-session copies share this consumption bit.
   mutable bool consumed = false;
+  std::optional<WindowsExplorerItem> item;
 };
 
 // The window under the point must be the measured view or one of its descendants, visible, and
@@ -265,12 +275,280 @@ bool WindowsExplorerActiveView(HWND window, HWND view) {
   return search.visible == 1 && search.measured;
 }
 
+// One bounded file-system enumeration covers extension aliases and sibling customizations.
+bool WindowsExplorerUnambiguousFolder(const std::wstring &path,
+    const std::function<bool()> &current) {
+  if (!current()) return false;
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+      (attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_REPARSE_POINT)))
+    return false;
+  const auto separator = path.find_last_of(L'\\');
+  if (separator == std::wstring::npos) return false;
+  const auto parent = path.substr(0, separator + 1);
+  const auto leaf = path.substr(separator + 1);
+  WIN32_FIND_DATAW entry{};
+  struct Search { HANDLE value; ~Search() { if (value != INVALID_HANDLE_VALUE) FindClose(value); } } search{
+      FindFirstFileExW((parent + L"*").c_str(), FindExInfoBasic, &entry,
+          FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH)};
+  if (search.value == INVALID_HANDLE_VALUE) return false;
+  unsigned count = 0;
+  do {
+    if (!current()) return false;
+    const std::wstring name = entry.cFileName;
+    if (name == L"." || name == L"..") continue;
+    if (++count > 4096) return false;
+    const bool directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (directory && (entry.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM))) {
+      if (!current()) return false;
+      const DWORD ini = GetFileAttributesW((parent + name + L"\\desktop.ini").c_str());
+      if (ini != INVALID_FILE_ATTRIBUTES ||
+          (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND))
+        return false;
+    }
+    const auto dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos ||
+        CompareStringOrdinal(name.substr(0, dot).c_str(), -1, leaf.c_str(), -1, TRUE) != CSTR_EQUAL)
+      continue;
+    // Ordinary folder extensions stay visible; files and .{CLSID} junctions can alias the leaf.
+    if (!directory || (name.size() > dot + 2 && name[dot + 1] == L'{' && name.back() == L'}'))
+      return false;
+  } while (FindNextFileW(search.value, &entry));
+  return GetLastError() == ERROR_NO_MORE_FILES && current();
+}
+
+bool WindowsExplorerUniqueCachedName(const std::vector<std::wstring> &names,
+    const std::wstring &hit_name, const std::function<bool()> &current) {
+  unsigned matches = 0;
+  for (const auto &name : names) {
+    if (!current()) return false;
+    if (CompareStringOrdinal(name.c_str(), -1, hit_name.c_str(), -1, TRUE) == CSTR_EQUAL &&
+        ++matches > 1) return false;
+  }
+  return matches == 1 && current();
+}
+
+std::optional<WindowsExplorerItem> WindowsExplorerItemFromPidl(
+    PCIDLIST_ABSOLUTE parent, PCUITEMID_CHILD child, const std::wstring &folder_path,
+    SFGAOF attributes, const std::function<bool()> &current) {
+  if (!parent || !child || ILIsEmpty(child) || !ILIsEmpty(ILNext(child)) ||
+      (attributes & (SFGAO_FILESYSTEM | SFGAO_FOLDER | SFGAO_LINK)) !=
+          (SFGAO_FILESYSTEM | SFGAO_FOLDER)) return std::nullopt;
+  struct Absolute { PIDLIST_ABSOLUTE value = nullptr; ~Absolute() { CoTaskMemFree(value); } } absolute;
+  absolute.value = ILCombine(parent, child);
+  if (!absolute.value || !ILIsParent(parent, absolute.value, TRUE)) return std::nullopt;
+  std::wstring path(32768, L'\0');
+  if (!current() || !SHGetPathFromIDListEx(absolute.value, path.data(),
+      static_cast<DWORD>(path.size()), GPFIDL_DEFAULT)) return std::nullopt;
+  path.resize(wcslen(path.c_str()));
+  const auto separator = path.find_last_of(L'\\');
+  const auto expected_parent = folder_path.size() == 3 ? folder_path.substr(0, 2) : folder_path;
+  if (separator == std::wstring::npos ||
+      !WindowsExplorerAsciiEqual(path.substr(0, separator), expected_parent) ||
+      path.find_first_of(L"/:*?\"<>|", 2) != std::wstring::npos ||
+      path.empty() || path.back() == L'.' || path.back() == L' ' ||
+      (path.size() >= 4 && WindowsExplorerAsciiEqual(path.substr(path.size() - 4), L".lnk")) ||
+      !current() || !WindowsExplorerUnambiguousFolder(path, current) ||
+      !WindowsExplorerPlainFolder(path) || !current()) return std::nullopt;
+  // SHGetPathFromIDListEx supplies the shell's absolute file-system spelling; no model path
+  // participates. Keep non-ASCII case exact, as Main does, and normalize ASCII only.
+  for (auto &character : path) if (character >= L'A' && character <= L'Z') character += L'a' - L'A';
+  const auto size = ILGetSize(absolute.value);
+  if (size < 2 || size > 65536) return std::nullopt;
+  const auto *bytes = reinterpret_cast<const std::uint8_t *>(absolute.value);
+  const auto digest = Sha256Bytes(std::vector<std::uint8_t>(bytes, bytes + size));
+  if (digest.size() != 64) return std::nullopt;
+  return WindowsExplorerItem{path, digest, "folder"};
+}
+
+thread_local const char *windows_explorer_item_stage_for_test = "not_started";
+
+// UIA supplies the hit display name, never a path or kind. File-system names are unique;
+// hidden extensions can alias a file or .{CLSID} junction to the candidate's name, so the
+// bounded sibling scan refuses those aliases and hidden/system candidates. PlainFolder checks
+// ONLY the parsed candidate, not the drawn entry: a different sibling can use desktop.ini to
+// impersonate it. Therefore the same scan refuses every READONLY/SYSTEM sibling folder with
+// desktop.ini, and both cached UIA batches must contain exactly one matching ListItem name.
+// The parsed PIDL's SHGDN_NORMAL and parsing names must still equal the hit name. No full-view
+// COM membership walk is used (GetVisibleItem includes offscreen entries and exhausts 800ms).
+// The final UIA hit is rechecked; reordering between this check and SendInput belongs to P5b-B.
+std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
+    HWND window, HWND view, IFolderView *folder_view, PCIDLIST_ABSOLUTE parent,
+    const std::wstring &folder_path, POINT point, const std::function<bool()> &current) {
+  using namespace sprint_coder::computer_use::windows_uia_source_detail;
+  DWORD pid = 0;
+  if (!current() || !GetWindowThreadProcessId(window, &pid) ||
+      WindowsExplorerPointRefusal(window, view, pid, point) != WindowsExplorerRefusal::kNone)
+    return std::nullopt;
+  ComRef<IUIAutomation> automation;
+  ComRef<IUIAutomationElement> root;
+  ComRef<IUIAutomationCondition> condition;
+  ComRef<IUIAutomationElementArray> items;
+  ComRef<IUIAutomationCacheRequest> cache;
+  windows_explorer_item_stage_for_test = "uia_setup";
+  VARIANT type; VariantInit(&type); type.vt = VT_I4; type.lVal = UIA_ListItemControlTypeId;
+  if (!current() || !CreateBoundedAutomation(150, 150, automation.Receive()) ||
+      !current() || FAILED(automation.Get()->ElementFromHandle(view, root.Receive())) ||
+      !current() || FAILED(automation.Get()->CreatePropertyCondition(UIA_ControlTypePropertyId,
+          type, condition.Receive())) ||
+      FAILED(automation.Get()->CreateCacheRequest(cache.Receive()))) return std::nullopt;
+  for (const auto property : {UIA_NamePropertyId, UIA_ProcessIdPropertyId,
+      UIA_IsOffscreenPropertyId, UIA_BoundingRectanglePropertyId, UIA_RuntimeIdPropertyId})
+    if (FAILED(cache.Get()->AddProperty(property))) return std::nullopt;
+  windows_explorer_item_stage_for_test = "uia_candidate";
+  if (!current() || FAILED(root.Get()->FindAllBuildCache(TreeScope_Descendants, condition.Get(), cache.Get(), items.Receive())))
+    return std::nullopt;
+  int count = 0;
+  if (!current() || FAILED(items.Get()->get_Length(&count)) || count < 1 || count > 4096)
+    return std::nullopt;
+  std::vector<std::wstring> cached_names;
+  std::optional<std::wstring> hit_name;
+  ComRef<IUIAutomationElement> hit;
+  for (int index = 0; index < count; ++index) {
+    ComRef<IUIAutomationElement> item;
+    RECT bounds{}; BOOL offscreen = TRUE; int owner = 0;
+    BstrHolder name;
+    if (!current() || FAILED(items.Get()->GetElement(index, item.Receive())) ||
+        FAILED(item.Get()->get_CachedProcessId(&owner)) || owner != static_cast<int>(pid) ||
+        FAILED(item.Get()->get_CachedIsOffscreen(&offscreen)) ||
+        FAILED(item.Get()->get_CachedBoundingRectangle(&bounds)) ||
+        FAILED(item.Get()->get_CachedName(name.Receive()))) return std::nullopt;
+    cached_names.emplace_back(name.View());
+    if (offscreen || !PtInRect(&bounds, point)) continue;
+    if (hit_name) return std::nullopt;
+    if (name.View().empty()) return std::nullopt;
+    hit_name = std::wstring(name.View());
+    hit = std::move(item);
+  }
+  windows_explorer_item_stage_for_test = "uia_name_uniqueness";
+  if (!hit_name || !WindowsExplorerUniqueCachedName(cached_names, *hit_name, current))
+    return std::nullopt;
+  const auto runtime_id = [](IUIAutomationElement *element) -> std::vector<int> {
+    VARIANT id; VariantInit(&id);
+    const HRESULT read = element->GetCachedPropertyValue(UIA_RuntimeIdPropertyId, &id);
+    LONG first = 0, last = -1;
+    std::vector<int> values;
+    bool valid = SUCCEEDED(read) && id.vt == (VT_ARRAY | VT_I4) && id.parray &&
+        SafeArrayGetDim(id.parray) == 1 &&
+        SUCCEEDED(SafeArrayGetLBound(id.parray, 1, &first)) &&
+        SUCCEEDED(SafeArrayGetUBound(id.parray, 1, &last)) && last >= first && last - first < 64;
+    if (valid) for (LONG offset = first; offset <= last; ++offset) {
+      int value = 0;
+      if (FAILED(SafeArrayGetElement(id.parray, &offset, &value))) { valid = false; break; }
+      values.push_back(value);
+    }
+    VariantClear(&id);
+    return valid ? values : std::vector<int>{};
+  };
+  const auto initial_id = runtime_id(hit.Get());
+  if (initial_id.empty() || *hit_name == L"." || *hit_name == L".." ||
+      hit_name->find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) return std::nullopt;
+  windows_explorer_item_stage_for_test = "pidl_lookup";
+  const std::wstring candidate = folder_path + L"\\" + *hit_name;
+  const DWORD candidate_attributes = GetFileAttributesW(candidate.c_str());
+  if (candidate_attributes == INVALID_FILE_ATTRIBUTES ||
+      !(candidate_attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+      (candidate_attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_REPARSE_POINT))) {
+    windows_explorer_item_stage_for_test = "attributes_or_display_collision";
+    // This diagnostic proves the hidden-extension live case reached file classification.
+    // It cannot authorize an item and does not feed the measured path.
+    if (current()) {
+      WIN32_FIND_DATAW entry{};
+      const DWORD attributes = GetFileAttributesW(candidate.c_str());
+      if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+        windows_explorer_item_stage_for_test = "file_refused";
+      else if (attributes == INVALID_FILE_ATTRIBUTES) {
+        HANDLE search = FindFirstFileExW((candidate + L".*").c_str(), FindExInfoBasic,
+            &entry, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (search != INVALID_HANDLE_VALUE) {
+          const std::wstring name = entry.cFileName;
+          const auto dot = name.find_last_of(L'.');
+          if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && dot != std::wstring::npos &&
+              CompareStringOrdinal(name.substr(0, dot).c_str(), -1, hit_name->c_str(), -1, TRUE) == CSTR_EQUAL)
+            windows_explorer_item_stage_for_test = "file_refused";
+          FindClose(search);
+        }
+      }
+    }
+    return std::nullopt;
+  }
+  ComRef<IShellFolder> folder;
+  if (!current() || FAILED(folder_view->GetFolder(IID_PPV_ARGS(folder.Receive()))))
+    return std::nullopt;
+  struct Child { PITEMID_CHILD value = nullptr; ~Child() { CoTaskMemFree(value); } } child;
+  SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER | SFGAO_LINK;
+  ULONG eaten = 0;
+  if (!current() || FAILED(folder.Get()->ParseDisplayName(nullptr, nullptr, hit_name->data(),
+      &eaten, &child.value, &attributes)) || !child.value || ILIsEmpty(child.value) ||
+      !ILIsEmpty(ILNext(child.value))) return std::nullopt;
+  windows_explorer_item_stage_for_test = "pidl_display_name";
+  // Plain parsing names exclude localized aliases and hidden extensions.
+  for (const auto flags : {static_cast<SHGDNF>(SHGDN_NORMAL), static_cast<SHGDNF>(SHGDN_INFOLDER | SHGDN_FORPARSING)}) {
+    STRRET display{};
+    struct Text { PWSTR value = nullptr; ~Text() { CoTaskMemFree(value); } } name;
+    if (!current() || FAILED(folder.Get()->GetDisplayNameOf(child.value, flags, &display)) ||
+        FAILED(StrRetToStrW(&display, child.value, &name.value)) || !name.value ||
+        *hit_name != name.value) return std::nullopt;
+  }
+  windows_explorer_item_stage_for_test = "pidl_classification_and_sibling_scan";
+  auto result = WindowsExplorerItemFromPidl(parent, child.value, folder_path, attributes, current);
+  if (!result) return std::nullopt;
+  result->runtime_id = initial_id;
+  // Shell calls above may pump messages. Refresh all bounds and names in one batch, LAST.
+  windows_explorer_item_stage_for_test = "uia_final_hit";
+  ComRef<IUIAutomationElementArray> refreshed;
+  if (!current() || FAILED(root.Get()->FindAllBuildCache(TreeScope_Descendants, condition.Get(),
+      cache.Get(), refreshed.Receive())) || !current() ||
+      FAILED(refreshed.Get()->get_Length(&count)) || count < 1 || count > 4096) return std::nullopt;
+  cached_names.clear();
+  unsigned hits = 0;
+  for (int index = 0; index < count; ++index) {
+    ComRef<IUIAutomationElement> item;
+    RECT bounds{}; BOOL offscreen = TRUE; int owner = 0;
+    BstrHolder name;
+    if (!current() || FAILED(refreshed.Get()->GetElement(index, item.Receive())) ||
+        FAILED(item.Get()->get_CachedName(name.Receive())) ||
+        FAILED(item.Get()->get_CachedProcessId(&owner)) || owner != static_cast<int>(pid) ||
+        FAILED(item.Get()->get_CachedIsOffscreen(&offscreen)) ||
+        FAILED(item.Get()->get_CachedBoundingRectangle(&bounds))) return std::nullopt;
+    cached_names.emplace_back(name.View());
+    if (offscreen || !PtInRect(&bounds, point)) continue;
+    if (++hits != 1 || name.View() != *hit_name || runtime_id(item.Get()) != initial_id)
+      return std::nullopt;
+    hit = std::move(item);
+  }
+  if (hits != 1 || !WindowsExplorerUniqueCachedName(cached_names, *hit_name, current))
+    return std::nullopt;
+  // Bounds alone could describe an item covered by another same-process element.
+  ComRef<IUIAutomationElement> at_point;
+  ComRef<IUIAutomationTreeWalker> walker;
+  if (!current() || FAILED(automation.Get()->ElementFromPoint(point, at_point.Receive())) ||
+      !current() || FAILED(automation.Get()->get_RawViewWalker(walker.Receive()))) return std::nullopt;
+  bool reached = false;
+  for (unsigned depth = 0; depth != 32 && at_point.Get(); ++depth) {
+    BOOL same = FALSE;
+    if (!current() || FAILED(automation.Get()->CompareElements(hit.Get(), at_point.Get(), &same)))
+      return std::nullopt;
+    if (same) { reached = true; break; }
+    ComRef<IUIAutomationElement> parent_element;
+    if (!current() || FAILED(walker.Get()->GetParentElement(at_point.Get(), parent_element.Receive())))
+      return std::nullopt;
+    at_point = std::move(parent_element);
+  }
+  if (!reached) return std::nullopt;
+  if (!current()) return std::nullopt;
+  windows_explorer_item_stage_for_test = "complete";
+  return result;
+}
+
 WindowsExplorerShellView ReadWindowsExplorerShellView(
-    HWND window, const std::function<bool()> &current) {
+    HWND window, const std::function<bool()> &current, const POINT *point = nullptr) {
   using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
   WindowsExplorerShellView result;
+  if (point) windows_explorer_item_stage_for_test = "view_lookup";
   const auto refuse = [&](WindowsExplorerRefusal reason) {
     result.folder.reset();
+    result.item.reset();
     result.refusal = current() ? reason : WindowsExplorerRefusal::kCancelled;
     return result;
   };
@@ -280,6 +558,9 @@ WindowsExplorerShellView ReadWindowsExplorerShellView(
   long count = 0;
   if (!current() || FAILED(windows.Get()->get_Count(&count)) || count < 0 || count > 256)
     return refuse(WindowsExplorerRefusal::kShellWindows);
+  ComRef<IFolderView> measured_folder_view;
+  struct MeasuredParent { PIDLIST_ABSOLUTE value = nullptr;
+    ~MeasuredParent() { CoTaskMemFree(value); } } measured_parent;
   bool matched = false;
   for (long index = 0; index < count && current(); ++index) {
     VARIANT item;
@@ -344,9 +625,21 @@ WindowsExplorerShellView ReadWindowsExplorerShellView(
       return refuse(WindowsExplorerRefusal::kNotPlainFolder);
     }
     result.folder = std::wstring(path.value);
+    if (point) {
+      measured_parent.value = ILCloneFull(pidl.value);
+      if (!measured_parent.value) return refuse(WindowsExplorerRefusal::kViewUnreadable);
+      measured_folder_view = std::move(folder_view);
+    }
   }
   if (!current()) return refuse(WindowsExplorerRefusal::kCancelled);
   if (!matched) return refuse(WindowsExplorerRefusal::kViewNotFound);
+  // Finish shell-window enumeration before the final point check; no slow shell calls follow it.
+  if (point) result.item = ReadWindowsExplorerItem(window, result.view, measured_folder_view.Get(),
+      measured_parent.value, *result.folder, *point, current);
+  if (!current()) {
+    windows_explorer_item_stage_for_test = "deadline_or_cancelled";
+    return refuse(WindowsExplorerRefusal::kCancelled);
+  }
   return result;
 }
 
@@ -515,12 +808,12 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   DWORD owner = 0;
   if (!GetWindowThreadProcessId(session->window, &owner) || owner != session->pid)
     return refuse(WindowsExplorerRefusal::kWindowOwner);
-  const WindowsExplorerShellView shell_view = ReadWindowsExplorerShellView(session->window, current);
+  const POINT point{static_cast<LONG>(x), static_cast<LONG>(y)};
+  const WindowsExplorerShellView shell_view = ReadWindowsExplorerShellView(session->window, current, &point);
   trace->view = shell_view.refusal;
   trace->folder = shell_view.folder_refusal;
   WindowsExplorerViewMeasurement view;
   view.folder = shell_view.folder;
-  const POINT point{static_cast<LONG>(x), static_cast<LONG>(y)};
   HWND point_owner = nullptr;
   trace->point = shell_view.view == nullptr ? WindowsExplorerRefusal::kPointOutsideView
       : WindowsExplorerPointRefusal(session->window, shell_view.view, session->pid,
@@ -530,14 +823,19 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   *response = "{\"shellView\":" + (view.folder.has_value()
       ? "{\"kind\":\"filesystem_folder\",\"path\":\"" + JsonEscape(Utf8FromWide(*view.folder)) + "\"}"
       : std::string("{\"kind\":\"unknown\"}")) +
-      ",\"pointOwnerMatches\":" + (view.point_owner_matches ? "true}" : "false}");
+      ",\"pointOwnerMatches\":" + (view.point_owner_matches ? "true" : "false") +
+      ",\"item\":" + (shell_view.item && view.point_owner_matches
+          ? "{\"kind\":\"folder\",\"surface\":\"file_list\",\"path\":\"" +
+              JsonEscape(Utf8FromWide(shell_view.item->path)) + "\",\"pidlDigest\":\"" +
+              shell_view.item->pidl_digest + "\"}"
+          : std::string("{\"kind\":\"unknown\"}")) + "}";
   if (!current()) return refuse(WindowsExplorerRefusal::kNotCurrent);
-  if (view.point_owner_matches && view.folder.has_value() &&
+  if (view.point_owner_matches && view.folder.has_value() && shell_view.item &&
       shell_view.refusal == WindowsExplorerRefusal::kNone &&
       shell_view.folder_refusal == WindowsExplorerRefusal::kNone) {
     session->explorer_dispatch_evidence = std::make_shared<WindowsExplorerDispatchEvidence>(
         WindowsExplorerDispatchEvidence{session->window, shell_view.view, point_owner, session->pid,
-            point, view.folder, epoch, serial, session->input_api_attempts});
+            point, view.folder, epoch, serial, session->input_api_attempts, false, shell_view.item});
   }
   return true;
 }
@@ -575,7 +873,7 @@ bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::stri
   // A native-bound path is used only to require a guard, never as proof of eligibility.
   const auto leaf = session.canonical_path.substr(session.canonical_path.find_last_of(L"\\/") + 1);
   if (!*evidence && !WindowsExplorerAsciiEqual(leaf, L"explorer.exe")) return true;
-  if (kind != "click" && kind != "scroll") return false;
+  if (kind != "click") return false;
   return *evidence && session.approval_route_v2 && !session.approval_revoked &&
       (*evidence)->session_binding.lock() == session.input_api_attempts;
 }
@@ -600,11 +898,12 @@ bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
       const auto current = [&] { return deadline.Current(); };
       if (!current() || !WindowsExplorerVerifiedWindow(session.pid, session.window) || !current())
         return false;
-      const auto shell_view = ReadWindowsExplorerShellView(session.window, current);
+      const auto shell_view = ReadWindowsExplorerShellView(session.window, current, &point);
       if (!current() || shell_view.refusal != WindowsExplorerRefusal::kNone ||
           shell_view.folder_refusal != WindowsExplorerRefusal::kNone ||
           !shell_view.folder.has_value() || shell_view.view != evidence->view ||
-          shell_view.folder != evidence->folder) return false;
+          shell_view.folder != evidence->folder || !evidence->item ||
+          shell_view.item != evidence->item) return false;
       HWND point_owner = nullptr;
       if (WindowsExplorerPointRefusal(session.window, shell_view.view, session.pid, point,
               &point_owner) != WindowsExplorerRefusal::kNone ||

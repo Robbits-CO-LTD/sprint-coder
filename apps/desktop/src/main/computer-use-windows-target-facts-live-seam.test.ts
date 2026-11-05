@@ -2473,6 +2473,29 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         throw error;
       });
     };
+    it('checks measured Explorer PIDLs and rejects non-folder items', async () => {
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-item-'));
+      try {
+        const binary = join(scratch, 'item.exe');
+        await buildExplorerHostDriver(
+          scratch,
+          'computer_use_windows_explorer_item_test.cc',
+          binary,
+          true,
+        );
+        for (const args of [[scratch], [scratch, 'short-temp']]) {
+          const result = await promisify(execFile)(binary, args, {
+            encoding: 'utf8',
+            timeout: 30_000,
+          });
+          console.log(result.stdout);
+          expect(result.stdout).toContain('OK Explorer item boundary');
+          expect(result.stdout).not.toContain('FAIL ');
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 180_000);
     it('checks Explorer M2 dispatch with gate on and off without injecting OS input', async () => {
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-dispatch-'));
@@ -2642,6 +2665,20 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         }
         expect(cleanupConfirmed).toBe(true);
         expect(result.stdout).toContain('OK Explorer view and foreign child');
+        if (result.stdout.includes('NOT_RUN explorer_item_fixture_not_visible folder')) {
+          context.skip('NOT_RUN explorer_item_fixture_not_visible folder');
+        }
+        expect(result.stdout).toContain('OK explorer_item_is_measured_at_action_point');
+        expect(result.stdout).toContain('OK explorer_large_folder_deadline');
+        // Files and display-name collisions use the separate, small fixture folder.
+        for (const fixture of ['file', 'collision', 'localized']) {
+          if (result.stdout.includes(`NOT_RUN explorer_item_fixture_not_visible ${fixture}`)) {
+            context.skip(`NOT_RUN explorer_item_fixture_not_visible ${fixture}`);
+          }
+        }
+        expect(result.stdout).toContain('OK explorer_file_item_refused');
+        expect(result.stdout).toContain('OK explorer_hidden_folder_executable_collision');
+        expect(result.stdout).toContain('OK explorer_sibling_localized_collision_refused');
         // Every other case passed; only the dispatch cases could not run against an elevated
         // explorer.exe (whose identity check refused them with kIdentity, as asserted natively).
         if (result.stdout.includes('NOT_RUN explorer_elevated_dispatch')) {
