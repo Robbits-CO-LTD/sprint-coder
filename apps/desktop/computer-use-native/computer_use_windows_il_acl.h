@@ -1,5 +1,6 @@
 // IL-only images require a protected code tree and directory chain. Unknown trustees
-// may read, but only SYSTEM, Administrators and TrustedInstaller may own or write.
+// may read, but only SYSTEM, Administrators and TrustedInstaller may own or write. Loaded images
+// outside that tree also accept service SIDs (S-1-5-80-*, S-1-5-99-*), which standard users cannot hold.
 #pragma once
 
 bool WindowsIlAclTrustedSid(PSID sid) {
@@ -16,7 +17,8 @@ bool WindowsIlAclTrustedSid(PSID sid) {
   return trusted;
 }
 
-bool WindowsIlAclDescriptorSafe(PSECURITY_DESCRIPTOR descriptor, bool directory = false) {
+bool WindowsIlAclDescriptorSafe(PSECURITY_DESCRIPTOR descriptor, bool directory = false,
+                                bool (*trusted)(PSID) = WindowsIlAclTrustedSid) {
   if (!descriptor || !IsValidSecurityDescriptor(descriptor)) return false;
   PSID owner = nullptr;
   BOOL defaulted = FALSE, present = FALSE;
@@ -26,7 +28,7 @@ bool WindowsIlAclDescriptorSafe(PSECURITY_DESCRIPTOR descriptor, bool directory 
   if (!GetSecurityDescriptorControl(descriptor, &control, &revision) ||
       (control & SE_DACL_AUTO_INHERIT_REQ) != 0 ||
       !GetSecurityDescriptorOwner(descriptor, &owner, &defaulted) ||
-      !WindowsIlAclTrustedSid(owner) || defaulted ||
+      !trusted(owner) || defaulted ||
       !GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted) ||
       !present || !acl || defaulted || !IsValidAcl(acl)) return false;
   for (DWORD index = 0; index < acl->AceCount; ++index) {
@@ -59,12 +61,13 @@ bool WindowsIlAclDescriptorSafe(PSECURITY_DESCRIPTOR descriptor, bool directory 
     // writer. Every other untrusted write grant still rejects this descriptor.
     const bool creator = directory && (header->AceFlags & INHERIT_ONLY_ACE) != 0 &&
         (IsWellKnownSid(sid, WinCreatorOwnerSid) || IsWellKnownSid(sid, WinCreatorGroupSid));
-    if ((mask & ~read_only) != 0 && !WindowsIlAclTrustedSid(sid) && !creator) return false;
+    if ((mask & ~read_only) != 0 && !trusted(sid) && !creator) return false;
   }
   return true;
 }
 
-std::optional<std::string> WindowsIlAclObject(HANDLE file, bool directory) {
+std::optional<std::string> WindowsIlAclObject(HANDLE file, bool directory,
+                                             bool (*trusted)(PSID) = WindowsIlAclTrustedSid) {
   FILE_ATTRIBUTE_TAG_INFO tag{};
   WindowsFileIdentity identity;
   if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) ||
@@ -78,7 +81,7 @@ std::optional<std::string> WindowsIlAclObject(HANDLE file, bool directory) {
     return std::nullopt;
   std::vector<std::uint8_t> bytes(needed);
   if (!GetKernelObjectSecurity(file, wanted, bytes.data(), needed, &needed) ||
-      !WindowsIlAclDescriptorSafe(bytes.data(), directory)) return std::nullopt;
+      !WindowsIlAclDescriptorSafe(bytes.data(), directory, trusted)) return std::nullopt;
   // Exact descriptor bytes and IDs, length-delimited, retained only in memory.
   std::string result(reinterpret_cast<const char *>(&identity.volume_serial), sizeof(identity.volume_serial));
   result.append(reinterpret_cast<const char *>(identity.file_id.Identifier), sizeof(identity.file_id.Identifier));
