@@ -1,5 +1,6 @@
 import {
   readCurrentWindowsExplorerFacts,
+  readWindowsExplorerApproval,
   readWindowsExplorerPrestart,
   windowsExplorerPrestartMatches,
   type WindowsExplorerApproval,
@@ -730,6 +731,8 @@ export type ComputerUseAuthorization =
 export type ComputerUseControllerDeps = Readonly<{
   /** Main-only test seam; Host evidence and the compiled pin are still required. */
   windowsExplorerStartForTesting?: boolean;
+  /** Main-only operation test gate; real Host measurement evidence remains mandatory. */
+  windowsExplorerActionForTesting?: boolean;
   /** Main-only test gate. P6 IPC never enables this; production remains closed until P8. */
   foregroundHandoffForTesting?: Readonly<{
     consumeTrustedActivation: (intentId: string) => boolean;
@@ -1135,7 +1138,8 @@ export class ComputerUseController {
   }
 
   private permanentlyDenied(identity: unknown): boolean {
-    return computerUseAppIdentityIsPermanentlyDenied(identity, this.explorerStartEnabled());
+    // Build availability belongs to window admission, not permanent grant revocation.
+    return computerUseAppIdentityIsPermanentlyDenied(identity, true);
   }
 
   private computerUseWindowStartEligible(
@@ -5674,6 +5678,13 @@ export class ComputerUseController {
       return { decision: 'allow', reason: 'computer_non_input_action' };
     if (capability === 'computer.control' && record.status.mode === 'observe_only')
       return { decision: 'deny', reason: 'computer_observe_only' };
+    if (
+      capability === 'computer.control' &&
+      action?.success &&
+      computerUseExplorerIdentity(record.profile.identity) &&
+      !(await this.explorerActionAllowed(record, action.data, record.status.observationRevision))
+    )
+      return { decision: 'deny', reason: 'explorer_action_denied' };
     const paste = this.artifactPasteCalls.get(`${sessionId}\0${request.callId}`);
     const result = this.deps.authorize?.({
       capability,
@@ -6237,6 +6248,37 @@ export class ComputerUseController {
     }
   }
 
+  private async explorerActionAllowed(
+    record: SessionRecord,
+    action: ComputerUseAction,
+    observationRevision: number,
+  ): Promise<boolean> {
+    if (!computerUseExplorerIdentity(record.profile.identity)) return true;
+    // Only point clicks have native item evidence. Scroll and semantic actions must
+    // never reach the more permissive native M2 dispatch skeleton.
+    if (action.type !== 'click') return false;
+    // A click can select or open (Explorer's single-click setting or a second click).
+    // Both effects are allowed only for the native-measured folder, never a model path.
+    const input: WindowsExplorerExceptionInput = {
+      host: this.deps.native,
+      sessionId: record.native.sessionId,
+      approval: readWindowsExplorerApproval(this.deps.native, record.native.sessionId),
+      operation: { verb: 'select', point: { x: action.x, y: action.y } },
+      observationRevision,
+    };
+    const allowed =
+      this.deps.windowsExplorerActionForTesting === true
+        ? await windowsExplorerExceptionAllowedForTesting(input)
+        : await windowsExplorerExceptionAllowed(input);
+    return (
+      allowed &&
+      !record.controller.signal.aborted &&
+      this.sessions.get(record.status.sessionId) === record &&
+      record.observation?.revision === observationRevision &&
+      this.observationIsFresh(record)
+    );
+  }
+
   private async dispatchNativeAction(
     record: SessionRecord,
     action: ComputerUseAction,
@@ -6245,6 +6287,11 @@ export class ComputerUseController {
     signal: AbortSignal,
     mainHighImpact = false,
   ): Promise<ComputerUseNativeActionResult> {
+    if (
+      computerUseExplorerIdentity(record.profile.identity) &&
+      !(await this.explorerActionAllowed(record, action, observationRevision))
+    )
+      return { result: 'rejected', reasonCode: 'explorer_action_denied' };
     const atomicActions: readonly ComputerUseAction[] =
       action.type === 'type'
         ? [...action.text].map((text) => ({ type: 'type' as const, text }))
@@ -6668,6 +6715,11 @@ export class ComputerUseController {
     } catch {
       return abandon();
     }
+    if (
+      computerUseExplorerIdentity(record.profile.identity) &&
+      !(await this.explorerActionAllowed(record, action, freshStripped.revision))
+    )
+      return abandon();
     let approved: ComputerUseNativeApprovalApproveResult;
     try {
       approved = await this.deps.native.approvalApprove!({
@@ -6699,6 +6751,11 @@ export class ComputerUseController {
     } catch {
       return abandon();
     }
+    if (
+      computerUseExplorerIdentity(record.profile.identity) &&
+      !(await this.explorerActionAllowed(record, action, freshStripped.revision))
+    )
+      return abandon();
     let dispatched: ComputerUseNativeActionResult;
     try {
       dispatched = await this.deps.native.dispatchApproved!({
@@ -8113,9 +8170,11 @@ type WindowsExplorerExceptionInput = Readonly<{
   sessionId: string;
   approval: WindowsExplorerApproval | undefined;
   operation: WindowsExplorerOperation;
+  /** Agent clicks use normalized coordinates mapped natively from this observation. */
+  observationRevision?: number;
 }>;
 
-// P5 REQUIREMENT (M2, not wired here): a true answer is not an input authorization. The measured
+// P5 REQUIREMENT (M2, enforced again by native): a true answer is not an input authorization. The measured
 // point is Main's, the injected point is the helper's WindowsActionPoint, and time passes between
 // them. Before its first input API the native dispatch must re-check, with that same POINT, that the
 // window under it is inside the measured view of the verified explorer.exe and that the view is
@@ -8136,8 +8195,16 @@ async function evaluateWindowsExplorerException(
   const point = input.operation.point;
   if (
     !point ||
-    !Number.isSafeInteger(point.x) ||
-    !Number.isSafeInteger(point.y) ||
+    (input.observationRevision === undefined
+      ? !Number.isSafeInteger(point.x) || !Number.isSafeInteger(point.y)
+      : !Number.isSafeInteger(input.observationRevision) ||
+        input.observationRevision < 1 ||
+        !Number.isFinite(point.x) ||
+        !Number.isFinite(point.y) ||
+        point.x < 0 ||
+        point.x > 1 ||
+        point.y < 0 ||
+        point.y > 1) ||
     (input.operation.verb !== 'select' && input.operation.verb !== 'open')
   )
     return false;
@@ -8146,6 +8213,7 @@ async function evaluateWindowsExplorerException(
     input.host,
     input.sessionId,
     point,
+    input.observationRevision,
   );
   if (facts === undefined) return false;
   // CabinetWClass is necessary, not sufficient: namespace views share this class.
@@ -8155,10 +8223,10 @@ async function evaluateWindowsExplorerException(
     facts.windowClass === 'CabinetWClass' &&
     facts.shellView.kind === 'filesystem_folder' &&
     facts.pointOwnerMatches &&
-    input.operation.item !== undefined &&
-    sameWindowsPathAscii(input.operation.item.path, facts.item.path) &&
+    (input.operation.item === undefined ||
+      (sameWindowsPathAscii(input.operation.item.path, facts.item.path) &&
+        classifyWindowsExplorerOperation(input.operation) === 'ordinary')) &&
     classifyWindowsExplorerOperation({ ...input.operation, item: facts.item }) === 'ordinary' &&
-    classifyWindowsExplorerOperation(input.operation) === 'ordinary' &&
     windowsExplorerItemInView(facts.item.path, facts.shellView.path) &&
     /^[a-z]:\\[^:*?"<>|]+$/iu.test(facts.shellView.path) &&
     !facts.shellView.path.split('\\').some((part) => part === '.' || part === '..')

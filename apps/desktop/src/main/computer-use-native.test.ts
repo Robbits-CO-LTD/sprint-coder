@@ -311,11 +311,32 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   // Declaration, operation gate, and the start gate's default; only tests inject the override.
   expect(controller.match(/WINDOWS_EXPLORER_EXCEPTION_ENABLED/gu)).toHaveLength(3);
   expect(controller.match(/windowsExplorerStartForTesting/gu)).toHaveLength(2);
-  expect(controller.match(/windowsExplorerExceptionAllowed\(/gu)).toHaveLength(1);
-  // The test entry and the evaluation are defined once and used only by the two entries, so no
-  // production path in the controller reaches the evaluation around the constant.
-  expect(controller.match(/windowsExplorerExceptionAllowedForTesting\(/gu)).toHaveLength(1);
+  expect(controller.match(/windowsExplorerExceptionAllowed\(/gu)).toHaveLength(2);
+  expect(controller.match(/windowsExplorerExceptionAllowedForTesting\(/gu)).toHaveLength(2);
   expect(controller.match(/evaluateWindowsExplorerException\(/gu)).toHaveLength(3);
+  const actionGuard = controller.slice(
+    controller.indexOf('  private async explorerActionAllowed('),
+    controller.indexOf('  private async dispatchNativeAction('),
+  );
+  expect(actionGuard).toContain("if (action.type !== 'click') return false;");
+  expect(actionGuard).toContain(
+    'readWindowsExplorerApproval(this.deps.native, record.native.sessionId)',
+  );
+  expect(actionGuard).toContain(': await windowsExplorerExceptionAllowed(input)');
+  const dispatch = controller.slice(controller.indexOf('  private async dispatchNativeAction('));
+  expect(dispatch.indexOf('await this.explorerActionAllowed(')).toBeLessThan(
+    dispatch.indexOf('await this.deps.native.dispatch('),
+  );
+  const approval = controller.slice(controller.indexOf('  private async runNativeApproval('));
+  expect(approval.indexOf('await this.explorerActionAllowed(')).toBeLessThan(
+    approval.indexOf('await this.deps.native.approvalApprove!('),
+  );
+  expect(
+    approval.slice(
+      approval.indexOf('await this.deps.native.approvalApprove!('),
+      approval.indexOf('await this.deps.native.dispatchApproved!('),
+    ),
+  ).toContain('await this.explorerActionAllowed(');
   for (const file of readdirSync(__dirname)) {
     if (!file.endsWith('.ts') || file.endsWith('.test.ts')) continue;
     const text = readFileSync(join(__dirname, file), 'utf8');
@@ -328,6 +349,8 @@ it('keeps the Explorer exception closed and its test macro out of production inp
     // Only the controller declares/reads this dependency; production constructors never pass it.
     if (file !== 'computer-use-controller.ts')
       expect(text, file).not.toContain('windowsExplorerStartForTesting');
+    if (file !== 'computer-use-controller.ts')
+      expect(text, file).not.toContain('windowsExplorerActionForTesting');
   }
   expect(
     readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8').match(
