@@ -1,9 +1,54 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { findBuild } from './test-support/msvc-build';
 
 const native = (name: string) =>
   readFileSync(join(__dirname, '../../computer-use-native', name), 'utf8');
+
+const msvc = findBuild();
+const clang =
+  process.platform !== 'win32' &&
+  spawnSync('clang++', ['--version'], { stdio: 'ignore' }).status === 0;
+
+it.runIf(msvc !== null || clang)(
+  'runs supported browser page evidence and origin native cases',
+  () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sc-browser-page-'));
+    try {
+      const output = join(directory, 'page-tests.exe');
+      const source = join(__dirname, '../../computer-use-native/computer_use_protocol_fuzz.cc');
+      const command = msvc
+        ? msvc.wrap([
+            '/nologo',
+            '/std:c++20',
+            '/EHsc',
+            '/utf-8',
+            source,
+            `/Fe:${output}`,
+            `/Fo:${output}.obj`,
+          ])
+        : { file: 'clang++', args: ['-std=c++20', source, '-o', output], verbatim: false };
+      const built = spawnSync(command.file, command.args, {
+        cwd: directory,
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: command.verbatim,
+        timeout: 120_000,
+      });
+      expect(built.status, `${built.error ?? ''}\n${built.stdout}\n${built.stderr}`).toBe(0);
+      const ran = spawnSync(output, [], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+      expect(ran.status, `${ran.error ?? ''}\n${ran.stdout}\n${ran.stderr}`).toBe(0);
+      expect(ran.stdout).toContain('Supported browser page evidence: PASS');
+      expect(ran.stdout).toContain('Windows page origin: PASS');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  150_000,
+);
 
 describe('Windows page origin metadata (N11-B)', () => {
   it('isolates the bounded metadata walk from the legacy capture budget', () => {
@@ -23,11 +68,12 @@ describe('Windows page origin metadata (N11-B)', () => {
       expect(harness).toContain(name);
   });
 
-  it('classifies a freshly verified unique Chrome Document without enabling actions', () => {
+  it('classifies a freshly verified unique supported browser Document without enabling actions', () => {
     const reader = native('computer_use_windows_shadow_reader.h');
     expect(reader).toContain('CapturePageOrigin(root, &capture)');
     expect(reader).toContain('ClassifyPageOrigin(url).state');
-    expect(reader).toContain('ScanDocuments(');
+    expect(reader).toContain('ScanPageDocuments(');
+    expect(reader).not.toContain('ScanDocuments(');
     expect(reader).toContain('capture.page_origin = OriginState::kUnknown');
     const shadow = native('computer_use_windows_shadow.h');
     expect(shadow.match(/page_origin/gu)).toHaveLength(1);
