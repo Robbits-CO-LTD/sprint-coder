@@ -55,6 +55,7 @@ enum class WindowsExplorerFault { kNone, kWatcherThread, kBody };
 WindowsExplorerFault windows_explorer_fault_for_test = WindowsExplorerFault::kNone;
 // Acceptance-test identity override: the identity must still match; only elevation is ignored.
 bool windows_explorer_ignore_elevation_for_test = false;
+std::uint64_t windows_explorer_hit_to_check_ns_for_test = 0;
 #endif
 
 struct WindowsExplorerItem {
@@ -500,10 +501,8 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
   auto result = WindowsExplorerItemFromPidl(parent, child.value, folder_path, attributes, current);
   if (!result) return std::nullopt;
   result->runtime_id = initial_id;
-  // Shell calls above may pump messages. Refresh all bounds and names in one batch, LAST.
+  // Shell calls above may pump messages. Refresh all bounds and names before the final lightweight re-hit.
   windows_explorer_item_stage_for_test = "uia_final_hit";
-  // Age starts before the cache read, not after a potentially slow UIA tree walk.
-  result->checked_at_ns = MonotonicNowNs();
   ComRef<IUIAutomationElementArray> refreshed;
   if (!current() || FAILED(root.Get()->FindAllBuildCache(TreeScope_Descendants, condition.Get(),
       cache.Get(), refreshed.Receive())) || !current() ||
@@ -544,10 +543,40 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
     at_point = std::move(parent_element);
   }
   if (!reached) return std::nullopt;
-  // Repeat filesystem facts AFTER the final UIA hit. Include this I/O and COM
-  // cleanup in the 50ms freshness budget; earlier facts cannot authorize a send.
+  // Repeat filesystem facts before the final lightweight point re-hit.
+  // The whole measurement retains its own deadline.
   if (!current() || !WindowsExplorerUnambiguousFolder(result->path, current) ||
       !WindowsExplorerPlainFolder(result->path) || !current()) return std::nullopt;
+  // Full-view and filesystem scans are finished. Re-hit with bounded UIA calls.
+  windows_explorer_item_stage_for_test = "uia_light_hit";
+  const auto hit_started = MonotonicNowNs();
+  ComRef<IUIAutomationElement> fresh_point;
+  if (!current() || FAILED(automation.Get()->ElementFromPoint(point, fresh_point.Receive())))
+    return std::nullopt;
+  bool fresh_match = false;
+  for (unsigned depth = 0; depth != 4 && fresh_point.Get(); ++depth) {
+    ComRef<IUIAutomationElement> fresh;
+    BstrHolder name;
+    if (!current() || FAILED(fresh_point.Get()->BuildUpdatedCache(cache.Get(), fresh.Receive())) ||
+        FAILED(fresh.Get()->get_CachedName(name.Receive()))) return std::nullopt;
+    if (runtime_id(fresh.Get()) == initial_id) {
+      if (name.View() != *hit_name) return std::nullopt;
+      fresh_match = true;
+      break;
+    }
+    ComRef<IUIAutomationElement> parent_element;
+    if (!current() || FAILED(walker.Get()->GetParentElement(fresh_point.Get(), parent_element.Receive())))
+      return std::nullopt;
+    fresh_point = std::move(parent_element);
+  }
+  if (!fresh_match || !current()) return std::nullopt;
+  result->checked_at_ns = MonotonicNowNs();
+  // A slow cross-process re-hit must not hide an old point behind a new timestamp.
+  if (result->checked_at_ns < hit_started || result->checked_at_ns - hit_started > 50'000'000)
+    return std::nullopt;
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
+  windows_explorer_hit_to_check_ns_for_test = result->checked_at_ns - hit_started;
+#endif
   windows_explorer_item_stage_for_test = "complete";
   return result;
 }
@@ -983,8 +1012,9 @@ bool WindowsExplorerWheelReachesView(HWND window, HWND view) {
 }
 
 // Windows cannot atomically lock Explorer layout/filesystem state with input delivery.
-// Limit final UIA cache-read start -> pre-API check to 50ms, including filesystem reread,
-// COM cleanup and Stop-lock wait. Reordering/replacement after those reads,
+// Limit final lightweight UIA re-hit completion -> pre-API check to 50ms,
+// including COM cleanup, Stop-lock wait and round-trip checks. Reordering/replacement during
+// those non-atomic reads or after them,
 // thread preemption after the check and queued OS delivery remain races.
 // There is no upper bound on OS delivery latency; product gates remain closed.
 constexpr std::uint64_t kWindowsExplorerSendFreshnessNs = 50'000'000;
@@ -1017,6 +1047,7 @@ bool RecheckWindowsExplorerBeforeSend(const WindowsSession &session,
   const auto leaf = session.canonical_path.substr(session.canonical_path.find_last_of(L"\\/") + 1);
   if (!context) return !WindowsExplorerAsciiEqual(leaf, L"explorer.exe") &&
       !session.explorer_dispatch_evidence;
+  if (!context->used || context->used->exchange(true, std::memory_order_acq_rel)) return false;
   // Exactly one left click per chunk. Scroll, keyboard and batched double-clicks
   // cannot bypass measurement between clicks, even through a future caller.
   if (!context->evidence || count != 3 || !events ||

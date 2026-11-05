@@ -117,6 +117,8 @@ struct WindowsExplorerSendContext {
   POINT point{};
   DWORD input_tick = 0;
   RECT screen{};  // virtual desktop origin and extent, captured before measurement
+  // Copies share the one-shot claim; entering the pre-send guard consumes it even on refusal.
+  std::shared_ptr<std::atomic<bool>> used = std::make_shared<std::atomic<bool>>(false);
 };
 bool RecheckWindowsExplorerBeforeSend(const WindowsSession &session,
     const WindowsExplorerSendContext *context, UINT count, LPINPUT events,
@@ -156,8 +158,8 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
     if (!approval_lock.owns_lock()) approval_lock.lock();
     // UIA/COM and filesystem reads stay outside Stop. Lock waiting must not
     // make an old hit usable again, so freshness is also checked under the lock.
-    if (!WindowsExplorerSendStillCurrent(session, *explorer, explorer_checked_at) ||
-        !WindowsRoundTripMayInput(session) || WindowsSemanticInputInFlightLocked()) return 0;
+    if (!WindowsRoundTripMayInput(session) || WindowsSemanticInputInFlightLocked() ||
+        !WindowsExplorerSendStillCurrent(session, *explorer, explorer_checked_at)) return 0;
   }
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
   return SendInput(count, events, sizeof(INPUT));

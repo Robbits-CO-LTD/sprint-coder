@@ -566,6 +566,62 @@ int CheckMeasuredItems(HWND parent, const WindowsExplorerShellView &view,
           return Fail(66, "explorer_item_is_measured_at_action_point");
         }
         if (!current()) return Fail(66, "explorer_item_deadline");
+        // Dry-run the real pre-send guards. No cursor placement or SendInput: a
+        // cursor/foreground mismatch is reported separately from the age budget.
+        DWORD pid = 0;
+        GetWindowThreadProcessId(parent, &pid);
+        WindowsSession sending;
+        if (!BindExplorerSession(parent, pid, &sending)) return Fail(66, "send_freshness_bind");
+        struct ReleaseSending {
+          WindowsSession &session;
+          ~ReleaseSending() { ReleaseWindowsSessionResources(&session); }
+        } release_sending{sending};
+        sending.active_window = parent;
+        HWND owner = nullptr;
+        if (WindowsExplorerPointRefusal(parent, measured.view, pid, point, &owner) != Refusal::kNone)
+          return Fail(66, "send_freshness_point");
+        auto evidence = std::make_shared<WindowsExplorerDispatchEvidence>(
+            WindowsExplorerDispatchEvidence{parent, measured.view, owner, pid, point,
+                measured.folder, sending.cancel_epoch, WindowsValidationFrameStopSerial(),
+                sending.input_api_attempts, false, measured.item});
+        DWORD tick = 0;
+        if (!WindowsReadLastInputTick(&tick)) return Fail(66, "send_freshness_tick");
+        const auto screen = ReadWindowsExplorerVirtualScreen();
+        WindowsExplorerSendContext context{evidence, point, tick,
+            RECT{screen.left, screen.top, screen.width, screen.height}};
+        INPUT events[3]{};
+        if (!WindowsExplorerAbsoluteMove(point, screen, &events[0]))
+          return Fail(66, "send_freshness_move");
+        events[1].type = events[2].type = INPUT_MOUSE;
+        events[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        events[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        std::uint64_t checked_at = 0;
+        const bool rechecked = RecheckWindowsExplorerBeforeSend(sending, &context, 3, events, &checked_at);
+        bool still_current = false;
+        std::uint64_t finished = 0;
+        {
+          std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+          still_current = rechecked && WindowsRoundTripMayInput(sending) &&
+              !WindowsSemanticInputInFlightLocked() &&
+              WindowsExplorerSendStillCurrent(sending, context, checked_at);
+          finished = MonotonicNowNs();
+        }
+        std::cout << "INFO explorer_send_freshness fixture=" << (large ? "Bulk" : "small")
+                  << " hit_to_check_ms=" << (rechecked ? windows_explorer_hit_to_check_ns_for_test / 1e6 : -1.0)
+                  << " explorer_send_freshness_ms="
+                  << (checked_at && finished >= checked_at ? (finished - checked_at) / 1e6 : -1.0)
+                  << " measurement_to_check_ms="
+                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()
+                  << " rechecked=" << rechecked << " still_current=" << still_current
+                  << " input_sent=0" << std::endl;
+        if (!rechecked) {
+          if (IsProcessElevated(pid))
+            std::cout << "NOT_RUN explorer_send_freshness approval_or_elevation\n";
+          else return Fail(66, "send_freshness_recheck");
+        } else if (!checked_at || finished < checked_at ||
+            finished - checked_at > kWindowsExplorerSendFreshnessNs) {
+          return Fail(66, "send_freshness_over_50ms");
+        }
         if (large) std::cout << "OK explorer_large_folder_deadline elapsed_ms="
                   << std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - started).count() << std::endl;

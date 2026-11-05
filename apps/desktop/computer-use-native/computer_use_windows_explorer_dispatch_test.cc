@@ -25,6 +25,7 @@ bool m2_change_after_cursor = false, m2_change_during_interlock = false;
 bool m2_binding_ok = true;
 std::string m2_boundary_change;
 bool m2_stale_hit = false;
+bool m2_slow_round_trip = false;
 HWND M2Foreground() { return reinterpret_cast<HWND>(100); }
 bool M2Page(const WindowsSession &) { return true; }
 bool M2BoundaryRevalidate(const WindowsSession &, const RECT &, std::uint64_t) {
@@ -35,9 +36,13 @@ bool M2BoundaryRevalidate(const WindowsSession &, const RECT &, std::uint64_t) {
   if (m2_boundary_change == "folder") m2_folder = L"C:\\changed";
   if (m2_boundary_change == "epoch") cancellation_epoch.fetch_add(1);
   if (m2_boundary_change == "stop") WindowsTargetListControl().stop_serial.fetch_add(1);
+  if (m2_boundary_change == "tick") ++m2_last_input;
   return true;
 }
-bool M2MayInput(const WindowsSession &) { return true; }
+bool M2MayInput(const WindowsSession &) {
+  if (m2_slow_round_trip) Sleep(75);
+  return true;
+}
 bool M2Flight() { return false; }
 bool M2Binding(const WindowsSession &, const std::string &, std::string *kind, RECT *bounds,
                std::string *) { *kind = m2_kind; *bounds = RECT{10, 20, 111, 121}; return m2_binding_ok; }
@@ -64,6 +69,7 @@ BOOL M2Cursor(int x, int y) {
 bool M2ApprovedCursor(const WindowsSession &, int x, int y) { return M2Cursor(x, y) != FALSE; }
 UINT M2Send(const WindowsSession &, const RECT &, std::uint64_t, UINT count, LPINPUT events) {
   ++m2_inputs; ++m2_send_calls;
+  ++m2_last_input; // Real injected input advances LASTINPUTINFO as well.
   m2_sent.assign(events, events + count);
   if (m2_change_in_send) m2_folder = L"C:\\changed-folder";
   return m2_short_send ? count - 1 : count;
@@ -167,6 +173,7 @@ int wmain() {
   const std::string action = R"({"x":0.5,"y":0.5,"deltaX":1,"deltaY":1,"key":"Enter","text":"a"})";
   const auto reset = [&] {
     m2_binding_ok = true; m2_boundary_change.clear(); m2_stale_hit = false;
+    m2_slow_round_trip = false;
     session.approved_helper_generation = windows_helper_generation;
     session.approved_stop_serial = 0;
     m2_item_digest.assign(64, 'a');
@@ -239,7 +246,11 @@ int wmain() {
     std::shared_ptr<const WindowsExplorerDispatchEvidence> evidence;
     Require(!BeginWindowsExplorerDispatch(session, "click", &evidence), "gate_off_begin_closed");
     Require(!RecheckWindowsExplorerDispatch(session, evidence, POINT{}), "gate_off_recheck_closed");
-    for (const auto *path : {L"C:\\Windows\\explorer.exe", L"C:\\synthetic-app.exe"}) {
+    INPUT gate_off_event{};
+    Require(SendInputForBoundTarget(session, RECT{}, 2, 1, &gate_off_event) == 0 &&
+        m2_send_calls == 0,
+        "gate_off_explorer_real_send_boundary_closed");
+    for (const auto *path : {L"C:\\synthetic-app.exe"}) {
       session.canonical_path = path;
       reset(); Require(dispatch() && m2_inputs == 2, "gate_off_click_unchanged");
       Require(m2_measurements == 0, "gate_off_never_measures");
@@ -464,7 +475,7 @@ int wmain() {
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN; events[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
     return SendInputForBoundTarget(session, RECT{}, 2, 3, events, &context);
   };
-  for (const auto *change : {"item", "runtime", "view", "folder", "epoch", "stop"}) {
+  for (const auto *change : {"item", "runtime", "view", "folder", "epoch", "stop", "tick"}) {
     auto context = chunk_context();
     m2_boundary_change = change;
     Require(chunk(context) == 0 && m2_send_calls == 0,
@@ -472,14 +483,42 @@ int wmain() {
     std::cout << "OK explorer_change_after_revalidation_blocks_send " << change << '\n';
     context = chunk_context();
     Require(chunk(context) == 3 && m2_send_calls == 1, "first_click_chunk");
+    Require(m2_last_input != context.input_tick, "injected_input_advances_tick");
+    // A fresh chunk retains the original target but samples the new input tick.
+    // Do not let a stale tick or a consumed context mask the intended refusal.
+    context = WindowsExplorerSendContext{context.evidence, context.point, m2_last_input, context.screen};
     m2_boundary_change = change;
+    M2BoundaryRevalidate(session, RECT{}, 2);
+    m2_boundary_change.clear();
+    std::uint64_t checked_at = 0;
+    const bool target_current = RecheckWindowsExplorerDispatch(session, context.evidence,
+        context.point, &checked_at);
+    Require(target_current == (std::string(change) == "tick"), "chunk_refusal_target_or_tick");
+    if (target_current) Require(!WindowsExplorerSendStillCurrent(session, context, checked_at),
+        "chunk_refusal_tick");
     Require(chunk(context) == 0 && m2_send_calls == 1,
         "explorer_stop_between_click_chunks_blocks_next_send");
-    std::cout << "OK explorer_stop_between_click_chunks_blocks_next_send " << change << '\n';
+    std::cout << "OK explorer_stop_between_click_chunks_blocks_next_send " << change
+              << " rejected_by=" << (target_current ? "WindowsExplorerSendStillCurrent" : "RecheckWindowsExplorerDispatch") << '\n';
   }
   auto context = chunk_context();
+  auto copied_context = context;
+  Require(chunk(context) == 3, "context_first_send");
+  copied_context.input_tick = m2_last_input;
+  Require(chunk(copied_context) == 0 && m2_send_calls == 1, "copied_context_cannot_replay");
+  context.input_tick = m2_last_input;
+  Require(chunk(context) == 0 && m2_send_calls == 1, "context_cannot_replay");
+  context = WindowsExplorerSendContext{context.evidence, context.point, m2_last_input, context.screen};
+  const auto prior_rechecks = m2_rechecks;
+  Require(chunk(context) == 3 && m2_send_calls == 2 && m2_rechecks > prior_rechecks,
+      "fresh_chunk_remeasures_before_send");
+  context = chunk_context();
+  m2_slow_round_trip = true;
+  Require(chunk(context) == 0 && m2_send_calls == 0, "round_trip_wait_expires_freshness");
+  context = chunk_context();
   m2_change_in_send = true;
   Require(chunk(context) == 3 && m2_send_calls == 1, "single_click_open_first_chunk");
+  context = WindowsExplorerSendContext{context.evidence, context.point, m2_last_input, context.screen};
   Require(chunk(context) == 0 && m2_send_calls == 1, "single_click_navigation_blocks_second_click");
   context = chunk_context();
   m2_stale_hit = true;
@@ -503,6 +542,7 @@ int wmain() {
   Require(SendInputForBoundTarget(session, RECT{}, 2, 6, invalid, &context) == 0,
       "explorer_batched_double_click_refused");
   for (const auto flag : {MOUSEEVENTF_WHEEL, MOUSEEVENTF_RIGHTDOWN}) {
+    context = chunk_context();
     invalid[0].type = INPUT_MOUSE; invalid[0].mi.dwFlags = flag;
     Require(SendInputForBoundTarget(session, RECT{}, 2, 3, invalid, &context) == 0 &&
         m2_send_calls == 0, "explorer_non_left_click_chunk_refused");

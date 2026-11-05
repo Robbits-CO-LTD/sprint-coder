@@ -26,15 +26,33 @@ describe('Explorer production pre-send boundary', () => {
     expect(ordered).toEqual([...ordered].sort((a, b) => a - b));
     expect(send.slice(send.indexOf('if (explorer) {'))).toContain('approval_lock.lock()');
     expect(send).not.toContain('SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS');
+    const lastGuard = send.slice(send.indexOf('if (explorer) {'));
+    expect(lastGuard.indexOf('WindowsRoundTripMayInput(')).toBeLessThan(
+      lastGuard.indexOf('WindowsExplorerSendStillCurrent('),
+    );
+    expect(lastGuard.indexOf('WindowsSemanticInputInFlightLocked(')).toBeLessThan(
+      lastGuard.indexOf('WindowsExplorerSendStillCurrent('),
+    );
   });
 
-  it('rereads filesystem facts after the final UIA hit and bounds their age', () => {
+  it('re-hits the point after heavy scans and bounds its age', () => {
     const finalHit = explorer.slice(
       explorer.indexOf('if (!reached) return std::nullopt;'),
       explorer.indexOf('WindowsExplorerShellView ReadWindowsExplorerShellView('),
     );
     expect(finalHit).toContain('WindowsExplorerUnambiguousFolder(result->path, current)');
     expect(finalHit).toContain('WindowsExplorerPlainFolder(result->path)');
+    expect(finalHit.indexOf('result->checked_at_ns = MonotonicNowNs()')).toBeGreaterThan(
+      finalHit.indexOf('WindowsExplorerPlainFolder(result->path)'),
+    );
+    const lightHit = finalHit.indexOf('windows_explorer_item_stage_for_test = "uia_light_hit"');
+    expect(lightHit).toBeGreaterThan(finalHit.indexOf('WindowsExplorerPlainFolder(result->path)'));
+    const light = finalHit.slice(lightHit);
+    expect(light).toContain('ElementFromPoint(point, fresh_point.Receive())');
+    expect(light).toContain('runtime_id(fresh.Get()) == initial_id');
+    expect(light).toContain('name.View() != *hit_name');
+    expect(light).not.toContain('FindAllBuildCache');
+    expect(light).not.toContain('WindowsExplorerUnambiguousFolder');
     expect(explorer).toContain("kWindowsExplorerSendFreshnessNs = 50'000'000");
     expect(explorer).toContain('now - checked_at <= kWindowsExplorerSendFreshnessNs');
     const diagnostics = explorer.slice(
