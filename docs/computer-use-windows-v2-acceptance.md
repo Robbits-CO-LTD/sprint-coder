@@ -197,3 +197,39 @@ S8でV1を除去した後にS9bで最終文書整理を行う。
 
 参照：[agent-driven V2 ADR](../tasks/designs/adr-computer-use-agent-driven-v2.md) §9 S9a／S9b／S8、§10。
 本書はrelease公開やV1削除を許可するものではない。
+
+### Explorer P5b-B：送信直前の保護（gate は閉じたまま）
+
+`SendInputForBoundTarget` は対象・ブラウザの再検証後、各クリックの送信前に
+`RecheckWindowsExplorerBeforeSend` を呼ぶ。操作点、窓、view、親フォルダー、項目の
+PIDL digest・path・種類・RuntimeId、session binding、epoch、Stop を照合する。
+最後の UIA の当たり判定後には、属性・兄弟の列挙・PlainFolder を読み直す。
+Stop mutex の取得後にも epoch・Stop・foreground・cursor・入力時刻・画面配置を確認する。
+証拠なしの Explorer 入力、scroll、keyboard、複数クリックをまとめた配列は拒否する。
+各 chunk は絶対位置への移動と左ボタンの down/up 一組だけで、次のクリックも同じ検査を通す。
+
+全体 UIA 走査・ファイルシステム再読の後に、点の RuntimeId と名前を軽い UIA 呼出しで再確認する。その直後の打刻から送信前の最後の時刻確認までを **50 ms 以下**に制限する。
+COM の解放、Stop lock の待機、round-trip の確認時間もこの範囲に含む。
+UIA 全項目走査を含む測定全体には別の期限があり、50 ms の起点変更で無制限にはならない。
+軽い当たり再確認自体も 50 ms 超なら拒否する。再確認中の並べ替えや、先に読んだファイル属性の変更とは原子的ではない。
+各送信 context はコピーを含め一度だけ使用でき、送信直前の検査で拒否しても消費する。次の chunk は新たな context で再測定する。
+これは実測性能値ではなく、超過時に拒否する上限である。判定後の並べ替え、項目の差し替え、
+ファイル属性の変更、時刻確認後のスレッド停止、Windows の入力キュー処理とは原子的にできない。
+特に API 呼出しから Explorer が処理するまでの時間には上限を保証できず、残る race はゼロではない。
+
+single-click-to-open や先行クリックとの double click による遷移も、次の chunk では
+元の view・フォルダー・項目の一致を要求するため、変化後のクリックを継続しない。
+ただし送信成功は open の結果確認ではない。現 native click 契約には select/open の区別がなく、
+Explorer の遷移も非同期なので、この段では「測定項目へ遷移した」ことは未確認とする。
+C で操作の区別と結果観測を接続し、別フォルダーへの遷移時は Stop 相当で後続を止めること。
+送信直後に元のフォルダーが見えるだけでは open 成功とせず、再送もしない。
+
+`kWindowsExplorerPreSendHookReady`、製品の Explorer gate と版 5/4/3 は維持する。
+実画面での single/double click、50 ms の成立範囲と open 結果は後続の実機受入対象。
+live は小フォルダーと Bulk で、入力を送らず `WindowsExplorerSendStillCurrent` まで検査し、
+`hit_to_check_ms`（軽い当たり再確認の開始から打刻）、`explorer_send_freshness_ms`（打刻から送信前確認まで）と `measurement_to_check_ms`（測定全体）を出す。
+当たり再確認と打刻後の区間は、それぞれ 50 ms を超えれば拒否・失敗とする。cursor/foreground を動かさないため、`still_current=0` は
+送信条件の成立を示さない。時間の確認と、実入力を許可できる状態の確認を区別する。
+期待した項目 fixture（フォルダー・ファイル・衝突・別名）の `NOT_RUN` は Vitest 側でも未完了（skip）として扱い、PASS と合算しない。
+symlink 権限や prestart の approval/elevation の前提不足だけでは試験全体を skip しない。ただし `NOT_RUN explorer_send_freshness` と `NOT_RUN explorer_elevated_dispatch` は skip とし、Bulk・small とも `rechecked=1` を必須にする。
+拡張子表示時の衝突ケースは `stage` を記録し、単なる file 拒否を表示名衝突の検証と混同しない。

@@ -386,6 +386,11 @@ bool RecheckWindowsPageBeforeInput(const WindowsSession &session) {
   if (!page_matches) ticket_valid = false;
   return page_matches;
 }
+struct WindowsExplorerSendContext {};
+bool RecheckWindowsExplorerBeforeSend(const WindowsSession &, const WindowsExplorerSendContext *,
+    UINT, LPINPUT, std::uint64_t *) { return true; } // non-Explorer seam
+bool WindowsExplorerSendStillCurrent(const WindowsSession &, const WindowsExplorerSendContext &,
+    std::uint64_t) { return false; } // this seam must never supply Explorer evidence
 UINT SendInput(UINT count, LPINPUT, int) { ++sends; return count; }
 ${boundary}
 int main() {

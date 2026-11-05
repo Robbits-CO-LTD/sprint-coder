@@ -29,6 +29,63 @@ const nativeDirectory = join(__dirname, '../../computer-use-native');
 const fixtureDirectory = join(nativeDirectory, 'fixtures', 'win32-acceptance');
 const host = readWindowsHostSource();
 
+const incompleteExplorerChecks = (output: string): string[] =>
+  output
+    .split(/\r?\n/u)
+    .filter((line) =>
+      /^(?:NOT_RUN explorer_item_fixture_not_visible |NOT_RUN explorer_send_freshness(?: |$)|NOT_RUN explorer_elevated_dispatch(?: |$))/u.test(
+        line,
+      ),
+    );
+
+it('keeps environment NOT_RUN separate from missing Explorer item fixtures', () => {
+  expect(
+    incompleteExplorerChecks(
+      'NOT_RUN prestart_reparse_folder symlink_privilege\n' +
+        'NOT_RUN explorer_start_and_rejudge_remeasure_view approval_or_elevation\n',
+    ),
+  ).toEqual([]);
+  for (const line of [
+    'NOT_RUN explorer_send_freshness approval_or_elevation',
+    'NOT_RUN explorer_elevated_dispatch',
+  ]) {
+    expect(incompleteExplorerChecks(line)).toEqual([line]);
+  }
+  for (const fixture of ['folder', 'file', 'collision', 'localized']) {
+    const line = `NOT_RUN explorer_item_fixture_not_visible ${fixture}`;
+    expect(incompleteExplorerChecks(`OK measured\n${line}\n`)).toEqual([line]);
+  }
+});
+
+const explorerFreshnessConfirmed = (output: string, fixture: string): boolean =>
+  output
+    .split(/\r?\n/u)
+    .some(
+      (line) =>
+        line.startsWith(`INFO explorer_send_freshness fixture=${fixture} `) &&
+        / rechecked=1(?: |$)/u.test(line) &&
+        / hit_to_check_ms=\d/u.test(line),
+    );
+
+it('does not accept a freshness INFO line when revalidation failed', () => {
+  for (const fixture of ['Bulk', 'small']) {
+    const prefix = `INFO explorer_send_freshness fixture=${fixture} `;
+    expect(
+      explorerFreshnessConfirmed(
+        prefix + 'hit_to_check_ms=-1 explorer_send_freshness_ms=-1 rechecked=0',
+        fixture,
+      ),
+    ).toBe(false);
+    expect(
+      explorerFreshnessConfirmed(
+        prefix + 'hit_to_check_ms=1 explorer_send_freshness_ms=2 rechecked=1 input_sent=0',
+        fixture,
+      ),
+    ).toBe(true);
+    expect(explorerFreshnessConfirmed('', fixture)).toBe(false);
+  }
+});
+
 function cut(start: string, end: string): string {
   const from = host.indexOf(start);
   const to = host.indexOf(end, from + start.length);
@@ -2473,7 +2530,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         throw error;
       });
     };
-    it('checks measured Explorer PIDLs and rejects non-folder items', async () => {
+    it('checks measured Explorer PIDLs and rejects non-folder items', async (context) => {
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-item-'));
       try {
         const binary = join(scratch, 'item.exe');
@@ -2483,15 +2540,20 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           binary,
           true,
         );
+        const notRun: string[] = [];
         for (const args of [[scratch], [scratch, 'short-temp']]) {
           const result = await promisify(execFile)(binary, args, {
             encoding: 'utf8',
             timeout: 30_000,
           });
           console.log(result.stdout);
+          notRun.push(
+            ...result.stdout.split(/\r?\n/u).filter((line) => line.startsWith('NOT_RUN ')),
+          );
           expect(result.stdout).toContain('OK Explorer item boundary');
           expect(result.stdout).not.toContain('FAIL ');
         }
+        if (notRun.length) context.skip(notRun.join('; '));
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
@@ -2531,11 +2593,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
       expect(dispatch).not.toMatch(
         /\b(?:SendInputForBoundTarget|SetCursorPos|SetWindowsApprovedCursor|DispatchWindowsSemanticAction|SendUnicodeScalar)\s*\(/u,
       );
-      source =
-        source.slice(0, from) +
-        include('SPRINT_CODER_EXPLORER_DISPATCH_DEPENDENCIES') +
-        dispatch +
-        source.slice(to);
+      source = source.slice(0, from) + dispatch + source.slice(to);
       const measurementFrom = source.indexOf('bool MeasureWindowsExplorerViewUnguarded(');
       const guardFrom = source.indexOf('// BEGIN windows explorer dispatch guard', measurementFrom);
       const measurementTo = source.indexOf('// END windows explorer dispatch guard', guardFrom);
@@ -2567,17 +2625,37 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         SystemParametersInfoW: 'M2Spi',
         GetGUIThreadInfo: 'M2GuiThread',
         GetSystemMetrics: 'M2Metrics',
-        SendInputForBoundTarget: 'M2Send',
+        GetForegroundWindow: 'M2Foreground',
       })) {
         guard = guard.replaceAll(`${name}(`, `${replacement}(`);
       }
-      expect(guard).not.toMatch(/\b(?:SendInputForBoundTarget|SendInput|SetCursorPos)\s*\(/u);
+      expect(guard).not.toMatch(/\b(?:SendInput|SetCursorPos)\s*\(/u);
       source =
         source.slice(0, measurementFrom) +
         include('SPRINT_CODER_EXPLORER_MEASUREMENT_DEPENDENCIES') +
         measurement +
         guard +
         source.slice(measurementTo);
+      // Keep the complete production SendInput boundary. Replace only OS/dependency reads
+      // and the actual API, not Explorer guards; run this also WITHOUT the enablement macro.
+      const sendFrom = source.indexOf('UINT SendInputForBoundTarget(');
+      const sendTo = source.indexOf('bool SetWindowsApprovedCursor(', sendFrom);
+      let send = source.slice(sendFrom, sendTo);
+      for (const [name, replacement] of Object.entries({
+        RevalidateWindowsTarget: 'M2BoundaryRevalidate',
+        WindowsSemanticInputInFlight: 'M2Flight',
+        WindowsSemanticInputInFlightLocked: 'M2Flight',
+        WindowsRoundTripMayInput: 'M2MayInput',
+        RecheckWindowsPageBeforeInput: 'M2Page',
+        GetForegroundWindow: 'M2Foreground',
+        SendInput: 'M2RawSend',
+      }))
+        send = send.replaceAll(`${name}(`, `${replacement}(`);
+      source =
+        source.slice(0, sendFrom) +
+        include('SPRINT_CODER_EXPLORER_DISPATCH_DEPENDENCIES') +
+        send +
+        source.slice(sendTo);
       try {
         for (const gate of [false, true]) {
           const binary = join(scratch, `dispatch-${gate}.exe`);
@@ -2593,6 +2671,15 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           });
           expect(result.stdout).not.toContain('FAIL ');
           expect(result.stdout).toContain('OK Explorer dispatch M2');
+          expect(result.stdout).toContain('OK Explorer production pre-send guard');
+          for (const change of ['item', 'runtime', 'view', 'folder', 'epoch', 'stop', 'tick']) {
+            expect(result.stdout).toContain(
+              `OK explorer_change_after_revalidation_blocks_send ${change}`,
+            );
+            expect(result.stdout).toContain(
+              `OK explorer_stop_between_click_chunks_blocks_next_send ${change} rejected_by=${change === 'tick' ? 'WindowsExplorerSendStillCurrent' : 'RecheckWindowsExplorerDispatch'}`,
+            );
+          }
         }
       } finally {
         rmSync(scratch, { recursive: true, force: true });
@@ -2679,12 +2766,13 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         expect(result.stdout).toContain('OK explorer_file_item_refused');
         expect(result.stdout).toContain('OK explorer_hidden_folder_executable_collision');
         expect(result.stdout).toContain('OK explorer_sibling_localized_collision_refused');
-        // Every other case passed; only the dispatch cases could not run against an elevated
-        // explorer.exe (whose identity check refused them with kIdentity, as asserted natively).
-        if (result.stdout.includes('NOT_RUN explorer_elevated_dispatch')) {
-          context.skip(
-            'NOT_RUN explorer_elevated_dispatch: explorer.exe is elevated on this runner',
-          );
+        expect(result.stdout).toMatch(
+          /INFO explorer_hidden_folder_executable_collision stage=\w+/u,
+        );
+        const notRun = incompleteExplorerChecks(result.stdout);
+        if (notRun.length) context.skip(notRun.join('; '));
+        for (const fixture of ['Bulk', 'small']) {
+          expect(explorerFreshnessConfirmed(result.stdout, fixture)).toBe(true);
         }
       } finally {
         if (cleanupConfirmed) {
