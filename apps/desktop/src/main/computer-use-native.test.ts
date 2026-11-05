@@ -3443,7 +3443,7 @@ describe.each(['v1-allowlist', 'v2-denylist'] as const)(
       (scenario) => {
         const eligibility = {
           mode,
-          rulesetVersion: mode === 'v2-denylist' ? 4 : 1,
+          rulesetVersion: mode === 'v2-denylist' ? 5 : 1,
           classifierVersion: mode === 'v2-denylist' ? 4 : 1,
           lexiconVersion: mode === 'v2-denylist' ? 3 : 1,
           ticketRequired: true,

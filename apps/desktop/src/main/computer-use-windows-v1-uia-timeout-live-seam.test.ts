@@ -329,7 +329,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(semanticEnd).toBeGreaterThan(semanticStart);
     const semantic = c.slice(semanticStart, semanticEnd);
     const gate =
-      'if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); } else { action_result = InvokeWindowsSemanticInput(';
+      'if (!WindowsSemanticPageAllowsInput(work)) { *reason = WindowsV1UiaEndedReason(); } else { action_result = InvokeWindowsSemanticInput(';
     const gated = semantic.split(gate).length - 1;
     expect(gated).toBe(5);
     expect(semantic.split('action_result = InvokeWindowsSemanticInput(').length - 1).toBe(gated);

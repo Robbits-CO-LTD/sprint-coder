@@ -14,6 +14,80 @@ const clang =
   spawnSync('clang++', ['--version'], { stdio: 'ignore' }).status === 0;
 
 it.runIf(msvc !== null || clang)(
+  'foreground_semantic_rechecks_page_before_all_five_inputs',
+  () => {
+    const semantic = native('computer_use_windows_host_uia_semantic.inc');
+    const start = semantic.indexOf('bool WindowsSemanticPageAllowsInput(');
+    const end = semantic.indexOf('bool DispatchWindowsSemanticActionOnWorker(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const dispatch = semantic.slice(
+      end,
+      semantic.indexOf('bool DispatchWindowsSemanticAction(', end),
+    );
+    expect(dispatch.match(/if \(!WindowsSemanticPageAllowsInput\(work\)\)/gu)).toHaveLength(5);
+    expect(dispatch.match(/InvokeWindowsSemanticInput\(/gu)).toHaveLength(5);
+    const program = String.raw`
+#include <atomic>
+#include <functional>
+#include <iostream>
+struct Page { bool web = true; };
+struct WindowsSemanticWork { Page observed_page; int window = 12, pid = 42; };
+struct Pending { std::atomic<bool> page_invalidated{false}; } pending;
+Pending *windows_semantic_operation = &pending;
+bool live = true, page_matches = true, stop_during_read = false;
+int reads = 0, inputs = 0;
+bool WindowsV1UiaMayCall() { return live; }
+bool RecheckWindowsBoundPageOnLane(int window, int pid, Page, const std::function<bool()> &current) {
+  ++reads;
+  if (stop_during_read) live = false;
+  return window == 12 && pid == 42 && page_matches && current();
+}
+//@@GUARD@@
+int main() {
+  for (int action = 0; action < 5; ++action) {
+    for (int mode = 0; mode < 5; ++mode) {
+      WindowsSemanticWork work;
+      live = mode != 2; page_matches = mode != 1; stop_during_read = mode == 3;
+      work.observed_page.web = mode != 4;
+      pending.page_invalidated = false; reads = inputs = 0;
+      if (WindowsSemanticPageAllowsInput(work) && WindowsV1UiaMayCall()) ++inputs;
+      const bool allowed = mode == 0 || mode == 4;
+      if (inputs != (allowed ? 1 : 0) ||
+          reads != (mode == 2 || mode == 4 ? 0 : 1) ||
+          pending.page_invalidated != (mode == 1 || mode == 3)) return 1;
+    }
+  }
+  std::cout << "Foreground semantic page guard: PASS\n";
+}
+`;
+    const directory = mkdtempSync(join(tmpdir(), 'sc-semantic-page-'));
+    try {
+      const input = join(directory, 'guard.cc');
+      const output = join(directory, 'guard.exe');
+      writeFileSync(input, program.replace('//@@GUARD@@', semantic.slice(start, end)));
+      const command = msvc
+        ? msvc.wrap(['/nologo', '/std:c++20', '/EHsc', input, `/Fe:${output}`, `/Fo:${output}.obj`])
+        : { file: 'clang++', args: ['-std=c++20', input, '-o', output], verbatim: false };
+      const built = spawnSync(command.file, command.args, {
+        cwd: directory,
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: command.verbatim,
+        timeout: 120_000,
+      });
+      expect(built.status, `${built.error ?? ''}\n${built.stdout}\n${built.stderr}`).toBe(0);
+      const ran = spawnSync(output, [], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+      expect(ran.status, `${ran.error ?? ''}\n${ran.stdout}\n${ran.stderr}`).toBe(0);
+      expect(ran.stdout).toContain('Foreground semantic page guard: PASS');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  150_000,
+);
+
+it.runIf(msvc !== null || clang)(
   'runs supported browser page evidence and origin native cases',
   () => {
     const directory = mkdtempSync(join(tmpdir(), 'sc-browser-page-'));
@@ -88,6 +162,24 @@ describe('Windows page origin metadata (N11-B)', () => {
 });
 
 describe('Windows page recheck (N11-C)', () => {
+  it('supervised_browser_requires_page_read_and_recheck', () => {
+    const preflight = native('computer_use_windows_host_preflight.inc');
+    expect(preflight).toContain(
+      'if (!readable_page || session.maximum_mode == "observe_only") return unavailable;',
+    );
+    expect(preflight).toContain('auto evidence = reader.ReadPage();');
+    expect(preflight).toContain('return reader.RecheckPage(page) && current();');
+    expect(native('computer_use_protocol_fuzz.cc')).toContain(
+      'supervised_browser_incomplete_page_never_inputs',
+    );
+    const targets = native('computer_use_windows_host_v2_targets.inc');
+    expect(targets).toContain(
+      '!WindowsBrowserInstallAllowsControl(Utf8FromWide(measured.image_path),',
+    );
+    expect(targets).toContain(
+      'CanonicalWindowsTargetDirectory(WindowsTargetKnownFolder(FOLDERID_ProgramFilesX86))',
+    );
+  });
   it('skips page comparison and invalidation for observe-only sessions', () => {
     const observe = native('computer_use_windows_host_pipe.inc');
     expect(observe).toContain('session.maximum_mode != "observe_only" && session.has_observation');

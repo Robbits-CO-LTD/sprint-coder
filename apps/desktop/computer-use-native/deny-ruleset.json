@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "platforms": {
     "win32": {
-      "rulesetVersion": 4,
+      "rulesetVersion": 5,
       "eligibleMaximumMode": "full_access_app",
       "upperMaximumMode": "observe_only"
     }
@@ -316,6 +316,41 @@
         {
           "signal": "packageDevelopmentMode",
           "match": "false"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
+      ]
+    },
+    {
+      "id": "edge_application",
+      "platforms": ["win32"],
+      "note": "Only the canonical Microsoft-root-signed Edge image. Native additionally verifies the Program Files (x86) known folder.",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["program_files"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "values": ["microsoft\\edge\\application\\msedge.exe"]
+        },
+        {
+          "signal": "packaged",
+          "match": "false"
+        },
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["valid"]
+        },
+        {
+          "signal": "signerMicrosoftRoot",
+          "match": "true"
         },
         {
           "signal": "peSubsystem",
@@ -924,13 +959,12 @@
       "class": "C",
       "maximumMode": "observe_only",
       "platforms": ["win32"],
-      "note": "Decision D: browsers stay observe_only in S5-c-3.",
+      "note": "Other browser publishers retain their observe-only ceiling.",
       "when": [
         {
           "signal": "signerOrganization",
           "match": "equals",
           "values": [
-            "google llc",
             "mozilla corporation",
             "brave software, inc.",
             "opera norway as",
@@ -949,9 +983,7 @@
           "signal": "imageLeaf",
           "match": "glob",
           "values": [
-            "chrome.exe",
             "chromium.exe",
-            "msedge.exe",
             "firefox.exe",
             "brave.exe",
             "opera.exe",
@@ -983,6 +1015,159 @@
           "signal": "imageRelativePath",
           "match": "glob",
           "values": ["yandex\\*", "*\\yandex\\*"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "supervised",
+      "platforms": ["win32"],
+      "note": "Google retains a ceiling; only the canonical Chrome placement escapes observe-only.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": ["google llc"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Google applications outside the canonical Chrome placement remain observe-only.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": ["google llc"]
+        },
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "negate": true,
+          "values": ["program_files"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Google applications outside the canonical Chrome placement remain observe-only.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": ["google llc"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "negate": true,
+          "values": ["google\\chrome\\application\\chrome.exe"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "supervised",
+      "platforms": ["win32"],
+      "note": "F3b: browser control always needs per-action approval and complete F3a page evidence.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["chrome.exe"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Noncanonical browser placements retain the observe-only ceiling.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["chrome.exe"]
+        },
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "negate": true,
+          "values": ["program_files"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Noncanonical browser placements retain the observe-only ceiling.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["chrome.exe"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "negate": true,
+          "values": ["google\\chrome\\application\\chrome.exe"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "supervised",
+      "platforms": ["win32"],
+      "note": "F3b: browser control always needs per-action approval and complete F3a page evidence.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["msedge.exe"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Noncanonical browser placements retain the observe-only ceiling.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["msedge.exe"]
+        },
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "negate": true,
+          "values": ["program_files"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "maximumMode": "observe_only",
+      "platforms": ["win32"],
+      "note": "Noncanonical browser placements retain the observe-only ceiling.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["msedge.exe"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "negate": true,
+          "values": ["microsoft\\edge\\application\\msedge.exe"]
         }
       ]
     }

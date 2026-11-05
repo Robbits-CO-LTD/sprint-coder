@@ -3,6 +3,7 @@ import {
   computerUseWindowsDocumentViewersSchema,
   type ComputerUseEligibility,
 } from '@sprint-coder/contracts';
+import definition from '../../computer-use-native/eligibility.json';
 
 export const WINDOWS_APPROVAL_WIRE_VERSION = 3;
 
@@ -122,7 +123,9 @@ export function windowsApprovalEvidenceMatches(
       !declared.success ||
       attested === null ||
       pin.data.mode !== 'v2-denylist' ||
+      pin.data.rulesetVersion !== definition.versions.win32.v2.rulesetVersion ||
       pin.data.classifierVersion !== 4 ||
+      pin.data.lexiconVersion !== definition.versions.win32.v2.lexiconVersion ||
       !pin.data.ticketRequired ||
       pin.data.interlockEnforced !== true
     )

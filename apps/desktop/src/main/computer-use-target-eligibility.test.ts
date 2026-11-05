@@ -52,10 +52,79 @@ const RULESET_LEDGER: Readonly<Record<string, Readonly<Record<number, string>>>>
     2: '06a9ae9573a2a192bb80a00a713736576bcdcade21eb199d12efb26952a4fb4f',
     3: '6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584',
     4: '36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45',
+    5: '792731f7c30e27b63d030e84cc633fcd5e08466ec9960c07d9f64ac24ab3c62e',
   },
 };
 
 describe('target eligibility core golden vectors', () => {
+  const browser = (leaf: 'chrome.exe' | 'msedge.exe'): TargetFacts => ({
+    ...(golden[0]!.facts as unknown as TargetFacts),
+    imageLeaf: leaf,
+    originalFilename: leaf,
+    imageRelativePath:
+      leaf === 'chrome.exe'
+        ? 'google\\chrome\\application\\chrome.exe'
+        : 'microsoft\\edge\\application\\msedge.exe',
+    signerOrganization: leaf === 'chrome.exe' ? 'google llc' : 'microsoft corporation',
+    signerMicrosoftRoot: leaf === 'msedge.exe',
+    windowClass: 'Chrome_WidgetWin_1',
+  });
+  it('chrome_edge_are_supervised_only', () => {
+    for (const leaf of ['chrome.exe', 'msedge.exe'] as const) {
+      const facts = browser(leaf);
+      expect(classifyTarget(facts)).toEqual({ kind: 'upper', maximumMode: 'supervised' });
+      for (const patch of [
+        { tokenElevated: true },
+        { tokenAppContainer: true },
+        { originalFilename: 'electron.exe' },
+        { originalFilename: 'python.exe' },
+      ])
+        expect(classifyTarget({ ...facts, ...patch })).toEqual({ kind: 'denied' });
+      expect(classifyTarget({ ...facts, signature: null })).toEqual({ kind: 'unresolvable' });
+    }
+  });
+  it('other_google_application_keeps_ceiling', () => {
+    expect(
+      classifyTarget({
+        ...browser('chrome.exe'),
+        imageLeaf: 'googledrivefs.exe',
+        originalFilename: 'googledrivefs.exe',
+        imageRelativePath: 'google\\drive file stream\\googledrivefs.exe',
+      }),
+    ).toEqual({ kind: 'upper', maximumMode: 'observe_only' });
+  });
+  it('noncanonical_chrome_edge_keep_ceiling', () => {
+    for (const leaf of ['chrome.exe', 'msedge.exe'] as const)
+      for (const patch of [
+        { imageRoot: 'local_programs' as const },
+        { imageRelativePath: `other\\${leaf}` },
+        { imageRelativePath: `nested\\${browser(leaf).imageRelativePath}` },
+      ])
+        expect(classifyTarget({ ...browser(leaf), ...patch })).toEqual(
+          leaf === 'msedge.exe'
+            ? { kind: 'denied' }
+            : { kind: 'upper', maximumMode: 'observe_only' },
+        );
+  });
+  it('unlisted_browser_remains_observe_only', () => {
+    for (const imageLeaf of [
+      'firefox.exe',
+      'whale.exe',
+      'zen.exe',
+      'duckduckgo.exe',
+      'browser.exe',
+    ])
+      expect(
+        classifyTarget({
+          ...(golden[0]!.facts as unknown as TargetFacts),
+          imageLeaf,
+          imageRelativePath: `yandex\\${imageLeaf}`,
+        }),
+      ).toEqual({ kind: 'upper', maximumMode: 'observe_only' });
+    expect(classifyTarget({ ...browser('chrome.exe'), imageLeaf: 'electron.exe' })).toEqual({
+      kind: 'denied',
+    });
+  });
   it('separates the static C ceiling from the browser ceiling, including overlapping rules', () => {
     const base = golden[0]!.facts as unknown as TargetFacts;
     for (const patch of [

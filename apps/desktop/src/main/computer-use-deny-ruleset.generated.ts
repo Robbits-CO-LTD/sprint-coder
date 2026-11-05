@@ -50,10 +50,10 @@ export const DENY_RULESET = {
   schemaVersion: 1,
   platforms: {
     win32: {
-      rulesetVersion: 4,
+      rulesetVersion: 5,
       eligibleMaximumMode: 'full_access_app',
       upperMaximumMode: 'observe_only',
-      contentSha256: '36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45',
+      contentSha256: '792731f7c30e27b63d030e84cc633fcd5e08466ec9960c07d9f64ac24ab3c62e',
     },
   },
   signals: [
@@ -254,6 +254,23 @@ export const DENY_RULESET = {
           values: ['store', 'system'],
         },
         { signal: 'packageDevelopmentMode', match: 'false', negate: false, values: [] },
+        { signal: 'peSubsystem', match: 'equals', negate: false, values: ['gui'] },
+      ],
+    },
+    {
+      id: 'edge_application',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageRoot', match: 'equals', negate: false, values: ['program_files'] },
+        {
+          signal: 'imageRelativePath',
+          match: 'equals',
+          negate: false,
+          values: ['microsoft\\edge\\application\\msedge.exe'],
+        },
+        { signal: 'packaged', match: 'false', negate: false, values: [] },
+        { signal: 'signature', match: 'equals', negate: false, values: ['valid'] },
+        { signal: 'signerMicrosoftRoot', match: 'true', negate: false, values: [] },
         { signal: 'peSubsystem', match: 'equals', negate: false, values: ['gui'] },
       ],
     },
@@ -816,7 +833,6 @@ export const DENY_RULESET = {
           match: 'equals',
           negate: false,
           values: [
-            'google llc',
             'mozilla corporation',
             'brave software, inc.',
             'opera norway as',
@@ -836,9 +852,7 @@ export const DENY_RULESET = {
           match: 'glob',
           negate: false,
           values: [
-            'chrome.exe',
             'chromium.exe',
-            'msedge.exe',
             'firefox.exe',
             'brave.exe',
             'opera.exe',
@@ -867,6 +881,104 @@ export const DENY_RULESET = {
           match: 'glob',
           negate: false,
           values: ['yandex\\*', '*\\yandex\\*'],
+        },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'supervised',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'signerOrganization', match: 'equals', negate: false, values: ['google llc'] },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'signerOrganization', match: 'equals', negate: false, values: ['google llc'] },
+        { signal: 'imageRoot', match: 'equals', negate: true, values: ['program_files'] },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'signerOrganization', match: 'equals', negate: false, values: ['google llc'] },
+        {
+          signal: 'imageRelativePath',
+          match: 'equals',
+          negate: true,
+          values: ['google\\chrome\\application\\chrome.exe'],
+        },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'supervised',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [{ signal: 'imageLeaf', match: 'equals', negate: false, values: ['chrome.exe'] }],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageLeaf', match: 'equals', negate: false, values: ['chrome.exe'] },
+        { signal: 'imageRoot', match: 'equals', negate: true, values: ['program_files'] },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageLeaf', match: 'equals', negate: false, values: ['chrome.exe'] },
+        {
+          signal: 'imageRelativePath',
+          match: 'equals',
+          negate: true,
+          values: ['google\\chrome\\application\\chrome.exe'],
+        },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'supervised',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [{ signal: 'imageLeaf', match: 'equals', negate: false, values: ['msedge.exe'] }],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageLeaf', match: 'equals', negate: false, values: ['msedge.exe'] },
+        { signal: 'imageRoot', match: 'equals', negate: true, values: ['program_files'] },
+      ],
+    },
+    {
+      class: 'C',
+      maximumMode: 'observe_only',
+      verdict: 'upper',
+      platforms: ['win32'],
+      when: [
+        { signal: 'imageLeaf', match: 'equals', negate: false, values: ['msedge.exe'] },
+        {
+          signal: 'imageRelativePath',
+          match: 'equals',
+          negate: true,
+          values: ['microsoft\\edge\\application\\msedge.exe'],
         },
       ],
     },
