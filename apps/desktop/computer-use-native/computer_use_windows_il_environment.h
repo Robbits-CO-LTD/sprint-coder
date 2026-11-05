@@ -19,9 +19,12 @@ bool WindowsIlEnvironmentBlockSafe(std::span<const wchar_t> block) {
     if (equals == std::wstring_view::npos || equals == 0) return false;
     std::wstring name(entry.substr(0, equals));
     for (auto &c : name) if (c >= L'a' && c <= L'z') c -= L'a' - L'A';
-    if (name == L"COR_ENABLE_PROFILING" || name == L"COR_PROFILER" ||
-        name.starts_with(L"COR_PROFILER_PATH") || name.starts_with(L"COMPLUS_") ||
-        name.starts_with(L"DOTNET_")) return false;
+    if (name.starts_with(L"COR_") || name.starts_with(L"CORECLR_") ||
+        name.starts_with(L"COMPLUS_")) return false;
+    if (name.starts_with(L"DOTNET_") &&
+        (name == L"DOTNET_SHARED_STORE" || name.starts_with(L"DOTNET_ROOT") ||
+         name.find(L"PROFIL") != std::wstring::npos || name.find(L"HOOK") != std::wstring::npos ||
+         name.find(L"DEPS") != std::wstring::npos || name.find(L"PROBING") != std::wstring::npos)) return false;
     ++offset;
   }
   return offset == block.size() - 1;
@@ -131,7 +134,54 @@ std::optional<std::wstring> WindowsIlImageRoot(const std::wstring &path) {
   return std::wstring(name.data(), length);
 }
 
+inline constexpr std::size_t kWindowsIlImageAclMaxObjects = 4096;
+inline constexpr ULONGLONG kWindowsIlImageAclMaxMs = 5000;
+
+// One admission/recheck only: never retain successful ACL checks across calls.
+struct WindowsIlImageAclCache {
+  std::vector<std::wstring> files, directories;
+  ULONGLONG started = GetTickCount64();
+};
+
+bool WindowsIlImageAclInspect(const std::wstring &path, bool directory) {
+  ScopedKernelHandle held(CreateFileW((L"\\\\?\\GLOBALROOT" + path).c_str(),
+      READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (held.value == INVALID_HANDLE_VALUE || !WindowsIlAclObject(held.value, directory)) return false;
+  std::array<wchar_t, 32768> name{};
+  const DWORD length = GetFinalPathNameByHandleW(held.value, name.data(),
+      static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  return length && length < name.size() && SameWindowsTargetName(path, std::wstring(name.data(), length));
+}
+
+template <typename Inspect, typename Clock>
+bool WindowsIlImageAclSafe(const std::wstring &path, const std::wstring &root,
+                           WindowsIlImageAclCache &cache, Inspect inspect, Clock clock) {
+  const auto check = [&](const std::wstring &name, bool directory) {
+    if (clock() - cache.started >= kWindowsIlImageAclMaxMs) return false;
+    auto &known = directory ? cache.directories : cache.files;
+    if (std::any_of(known.begin(), known.end(), [&](const auto &item) {
+          return SameWindowsTargetName(item, name);
+        })) return true;
+    if (cache.files.size() + cache.directories.size() >= kWindowsIlImageAclMaxObjects ||
+        !inspect(name, directory) || clock() - cache.started >= kWindowsIlImageAclMaxMs) return false;
+    known.push_back(name);
+    return true;
+  };
+  if (!WindowsIlImageUnderRoot(path, root) || !check(path, false)) return false;
+  auto parent = path;
+  for (unsigned depth = 0; depth < 128; ++depth) {
+    const auto slash = parent.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return false;
+    parent.resize(slash);
+    if (parent.size() < root.size() || !check(parent, true)) return false;
+    if (SameWindowsTargetName(parent, root)) return true;
+  }
+  return false;
+}
+
 bool WindowsIlOnlyImagesSafe(HANDLE process) {
+  WindowsIlImageAclCache acl;
   std::array<wchar_t, 32768> image{}, windows{};
   DWORD size = static_cast<DWORD>(image.size());
   const UINT length = GetSystemWindowsDirectoryW(windows.data(), static_cast<UINT>(windows.size()));
@@ -167,17 +217,29 @@ bool WindowsIlOnlyImagesSafe(HANDLE process) {
   std::uintptr_t address = 0;
   bool found = false;
   for (unsigned queried = 0; queried < 65536; ++queried) {
+    if (GetTickCount64() - acl.started >= kWindowsIlImageAclMaxMs) return false;
     MEMORY_BASIC_INFORMATION region{};
     if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(address), &region, sizeof(region)) != sizeof(region))
-      return found && GetLastError() == ERROR_INVALID_PARAMETER;
+      return found && GetLastError() == ERROR_INVALID_PARAMETER &&
+          GetTickCount64() - acl.started < kWindowsIlImageAclMaxMs;
     if (region.Type == MEM_IMAGE) {
       std::array<wchar_t, 32768> name{};
       const DWORD count = GetMappedFileNameW(process, region.BaseAddress, name.data(), static_cast<DWORD>(name.size()));
       if (!count || count >= name.size()) return false;
-      const std::wstring path(name.data(), count);
-      if (std::none_of(roots.begin(), roots.end(), [&](const auto &root) {
-            return WindowsIlImageUnderRoot(path, root);
-          })) return false;
+      // Mapped names can retain 8.3 aliases. Normalize through a non-reparse handle,
+      // just like the roots, and fail closed if the mapped file cannot be resolved.
+      const auto path = WindowsIlImageRoot(L"\\\\?\\GLOBALROOT" + std::wstring(name.data(), count));
+      if (!path) return false;
+      const auto root = std::find_if(roots.begin(), roots.end(), [&](const auto &root) {
+            return WindowsIlImageUnderRoot(*path, root);
+          });
+      if (root == roots.end()) return false;
+      // The executable tree has its own full ACL snapshot. External images must
+      // prove file ownership/writes AND every parent through the allowed root.
+      // Re-evaluate at existing environment gates (including start/resume/rejudge),
+      // rather than extending the executable snapshot or its retained input pins.
+      if (root != roots.begin() &&
+          !WindowsIlImageAclSafe(*path, *root, acl, WindowsIlImageAclInspect, GetTickCount64)) return false;
       found = true;
     }
     const auto base = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
