@@ -169,7 +169,7 @@ export function createComputerAppGrantFixtureStore(
       countComputerAppGrantAccessRequest: (grantId, outcome) =>
         rewrite(grantId, (current) => ({
           ...current,
-          requestCount: current.requestCount + 1,
+          requestCount: current.requestCount + (outcome === 'requested' ? 1 : 0),
           denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
         })),
       setComputerAppGrantProviderEgress: (grantId, providerEgress) =>
@@ -199,10 +199,11 @@ export function createComputerAppGrantFixtureStore(
           displayName: input.displayName,
           // Only a card that was shown counts as a request; the refusal that answers it moves the
           // refusal columns alone. Same rule as the SQLite store — see `recordComputerAppAccessRequest`.
-          requestCount: (current?.requestCount ?? 0) + (input.outcome === 'denied' ? 0 : 1),
-          denialCount: (current?.denialCount ?? 0) + (input.outcome === 'denied' ? 1 : 0),
+          requestCount: (current?.requestCount ?? 0) + (input.outcome === 'requested' ? 1 : 0),
+          denialCount: (current?.denialCount ?? 0) + (input.outcome === 'requested' ? 0 : 1),
           // A refusal inside a Task is final for that Task; a later request cannot clear it.
           denied: (current?.denied ?? false) || input.outcome === 'denied',
+          upgradeDenied: (current?.upgradeDenied ?? false) || input.outcome === 'upgrade_denied',
           createdAt: current?.createdAt ?? now,
           updatedAt: now,
         });

@@ -5112,11 +5112,20 @@ export const computerAccessRequestReasonCodeSchema = z.enum([
 ]);
 export type ComputerAccessRequestReasonCode = z.infer<typeof computerAccessRequestReasonCodeSchema>;
 
+export const computerAccessUpgradeReasonCodeSchema = z.enum([
+  'access_request_pending',
+  'access_request_rate_limited',
+  'access_request_invalid_token',
+  'access_request_timed_out',
+  'access_request_withdrawn',
+  'access_request_denied',
+]);
+
 export const computerRequestAccessOutputSchema = z
   .object({
     granted: z.boolean(),
     reasonCode: computerAccessRequestReasonCodeSchema.nullable(),
-    upgradeReasonCode: computerAccessRequestReasonCodeSchema.optional(),
+    upgradeReasonCode: computerAccessUpgradeReasonCodeSchema.optional(),
   })
   .strict()
   .superRefine((output, context) => {

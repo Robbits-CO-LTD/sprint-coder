@@ -51,6 +51,7 @@ import {
   computerAppGrantRequestSchema,
   computerAppAccessRequestViewSchema,
   computerRequestAccessOutputSchema,
+  computerAccessUpgradeReasonCodeSchema,
   computerStartToolOutputSchema,
   computerUseSessionStateIsSettled,
   selectableComputerTargetSchema,
@@ -1215,9 +1216,6 @@ export class ComputerUseController {
   private readonly taskScopedGrants = new Map<string, Map<string, TaskScopedAppGrant>>();
   /** At most one unresolved card exists at a time, globally (§6.1). */
   private pendingAppGrantRequest: PendingAppGrantRequest | null = null;
-  // A declined upgrade must not deny the existing application or its next destination card.
-  // Like Task refusals, this survives taskClosed; disposal ends this controller's lifetime.
-  private readonly deniedGrantUpgrades = new Set<string>();
   /** Cards raised per Turn, for the T8 ceiling. A Turn does not outlive the process. */
   private readonly accessRequestsByTurn = new Map<string, number>();
   private readonly statusRevisionBySession = new Map<string, number>();
@@ -2686,21 +2684,25 @@ export class ComputerUseController {
         !this.availability().available ||
         retainedProfile === null ||
         outcome.reasonCode === null ||
-        ![
-          'access_request_pending',
-          'access_request_rate_limited',
-          'access_request_invalid_token',
-          'access_request_timed_out',
-          'access_request_withdrawn',
-        ].includes(outcome.reasonCode) ||
-        this.currentPolicyEpoch(context.taskId) !== context.policyEpoch ||
+        !computerAccessUpgradeReasonCodeSchema.safeParse(outcome.reasonCode).success ||
+        this.currentPolicyEpoch(context.taskId) !== context.policyEpoch
+      )
+        return outcome;
+      const state = this.appGrantState(retainedProfile, context.taskId);
+      if (
+        !state.granted ||
+        state.maxMode === null ||
         !ComputerUseController.egressAgreed(
-          this.appGrantState(retainedProfile, context.taskId),
+          state,
           this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null,
         )
       )
         return outcome;
-      return { granted: true, reasonCode: null, upgradeReasonCode: outcome.reasonCode };
+      return {
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode: computerAccessUpgradeReasonCodeSchema.parse(outcome.reasonCode),
+      };
     };
     try {
       return await scope.run(async () => {
@@ -2776,11 +2778,15 @@ export class ComputerUseController {
       state.providerEgress.modelId === egressBinding.modelId;
     // Already agreed, in full: the second and later requests cost the user nothing (§7.2).
     const listedCeiling = targetRecord?.maximumMode;
-    const upgradeDenied = this.deniedGrantUpgrades.has(
-      JSON.stringify([context.taskId, identity.platform, identity.grantIdentityDigest]),
+    // Persisted separately so refusing an upgrade still permits consent for a new destination.
+    // Key only by Task/platform/identity, not the offered ceiling, to avoid repeated upgrade cards.
+    const denial = this.deps.persistence.getComputerAppAccessRequest(
+      identity.platform,
+      identity.grantIdentityDigest,
+      context.taskId,
     );
     const mayUpgrade =
-      !upgradeDenied &&
+      denial?.upgradeDenied !== true &&
       state.granted &&
       state.maxMode !== null &&
       listedCeiling !== undefined &&
@@ -2788,14 +2794,9 @@ export class ComputerUseController {
       bindComputerUseMaximumMode(state.maxMode, listedCeiling) === state.maxMode;
     if (mayUpgrade && egressAgreed) retainProfile(profile);
     if (state.granted && egressAgreed && !mayUpgrade) return { granted: true, reasonCode: null };
-    const denial = this.deps.persistence.getComputerAppAccessRequest(
-      identity.platform,
-      identity.grantIdentityDigest,
-      context.taskId,
-    );
     // A refusal is final for this Task, and a different Task may ask again (§6.1).
     if (denial?.denied === true) {
-      // Refusing a wider ceiling does not revoke the already agreed, narrower grant.
+      // A Task refusal does not revoke an already agreed grant.
       if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
       return this.accessRefused('access_request_denied_in_task');
     }
@@ -3297,16 +3298,6 @@ export class ComputerUseController {
    * because a refusal that fails leaves the card pending and the single global slot taken.
    */
   private recordAppGrantDenial(pending: PendingAppGrantRequest): void {
-    if (pending.upgrade) {
-      this.deniedGrantUpgrades.add(
-        JSON.stringify([
-          pending.taskId,
-          pending.identity.platform,
-          pending.identity.grantIdentityDigest,
-        ]),
-      );
-      return;
-    }
     try {
       this.deps.persistence.recordComputerAppAccessRequest({
         platform: pending.identity.platform,
@@ -3314,7 +3305,7 @@ export class ComputerUseController {
         taskId: pending.taskId,
         appId: pending.identity.appId,
         displayName: pending.displayName,
-        outcome: 'denied',
+        outcome: pending.upgrade ? 'upgrade_denied' : 'denied',
       });
     } catch (error) {
       // The Task itself may be gone, which is the one case the foreign key refuses. Nothing here
@@ -5505,7 +5496,6 @@ export class ComputerUseController {
     this.targetEnumerations.clear();
     this.targetAppTokens.clear();
     this.taskScopedGrants.clear();
-    this.deniedGrantUpgrades.clear();
     this.accessRequestsByTurn.clear();
   }
 

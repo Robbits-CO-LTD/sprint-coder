@@ -1157,6 +1157,8 @@ export type ComputerAppAccessRequestRecord = Readonly<{
   requestCount: number;
   denialCount: number;
   denied: boolean;
+  /** Like denied, retained until Task deletion; does not refuse provider-egress consent. */
+  upgradeDenied: boolean;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -1167,7 +1169,7 @@ export type ComputerAppAccessRequestInput = Readonly<{
   taskId: string;
   appId: string;
   displayName: string;
-  outcome: 'requested' | 'denied';
+  outcome: 'requested' | 'denied' | 'upgrade_denied';
   now?: string;
 }>;
 
@@ -4960,6 +4962,12 @@ const migrations = [
     version: 104,
     checksum: 'computer-use-v104-candidate-audit-profile',
     sql: COMPUTER_USE_AUDIT_CANDIDATE_SQL,
+  },
+  {
+    version: 105,
+    checksum: 'computer-use-v105-grant-upgrade-denial',
+    sql: `ALTER TABLE computer_app_access_requests
+      ADD COLUMN upgrade_denied INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_denied IN (0, 1));`,
   },
 ];
 
@@ -16132,7 +16140,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): ComputerAppGrantRecord {
     return this.rewriteComputerAppGrant(grantId, (current) => ({
       ...current,
-      requestCount: current.requestCount + 1,
+      requestCount: current.requestCount + (outcome === 'requested' ? 1 : 0),
       denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
     }));
   }
@@ -16208,8 +16216,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.assertTask(input.taskId);
     const now = canonicalTimestamp(input.now ?? new Date().toISOString());
     const denied = input.outcome === 'denied' ? 1 : 0;
-    // The two outcomes count different things. `requested` means a card was shown, and that is what
-    // the per-Turn and per-Task ceilings are about; `denied` is the answer to a card that was
+    const upgradeDenied = input.outcome === 'upgrade_denied' ? 1 : 0;
+    // Requests and refusals count different things. `requested` means a card was shown, and that is
+    // what the per-Turn and per-Task ceilings are about; either denial answers a card that was
     // already counted when it went up, so it moves only the refusal columns. Counting a refusal as
     // a second request would spend two of the Task's five on one card and would tell the settings
     // screen the agent asked twice.
@@ -16217,19 +16226,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     // A refusal with no prior row inserts `request_count` 0 rather than 1: it means the card's own
     // `requested` write did not land (the Task went away and came back, an older build), and
     // inventing a request nobody can point at is worse than a counter that is one low.
-    const requested = denied === 1 ? 0 : 1;
+    const requested = input.outcome === 'requested' ? 1 : 0;
     this.db
       .prepare(
         `INSERT INTO computer_app_access_requests(
            platform, grant_identity_digest, task_id, app_id, display_name,
-           request_count, denial_count, denied, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           request_count, denial_count, denied, upgrade_denied, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(platform, grant_identity_digest, task_id) DO UPDATE SET
            app_id = excluded.app_id,
            display_name = excluded.display_name,
            request_count = computer_app_access_requests.request_count + excluded.request_count,
            denial_count = computer_app_access_requests.denial_count + excluded.denial_count,
            denied = MAX(computer_app_access_requests.denied, excluded.denied),
+           upgrade_denied = MAX(computer_app_access_requests.upgrade_denied, excluded.upgrade_denied),
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -16239,8 +16249,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         input.appId.slice(0, 256),
         input.displayName.slice(0, 256),
         requested,
+        denied + upgradeDenied,
         denied,
-        denied,
+        upgradeDenied,
         now,
         now,
       );
@@ -24668,6 +24679,7 @@ type ComputerAppAccessRequestRow = {
   request_count: number;
   denial_count: number;
   denied: number;
+  upgrade_denied: number;
   created_at: string;
   updated_at: string;
 };
@@ -24694,6 +24706,7 @@ function toComputerAppAccessRequest(
     requestCount: row.request_count,
     denialCount: row.denial_count,
     denied: row.denied === 1,
+    upgradeDenied: row.upgrade_denied === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
