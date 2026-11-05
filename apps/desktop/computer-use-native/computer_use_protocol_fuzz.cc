@@ -3349,6 +3349,88 @@ bool CheckWindowsPageRecheck() {
   return true;
 }
 
+bool CheckSupportedBrowserPageEvidence() {
+  using namespace sprint_coder::computer_use;
+  const auto fixture = [](const char *leaf) {
+    FakeForm form;
+    form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+    form.source.process_path = std::string("C:\\Apps\\") + leaf;
+    auto &document = form.Node(form.pane);
+    document.control_type = "Document";
+    document.has_url = true;
+    document.url = "https://login.example.test/page";
+    document.signature = "page-document-1";
+    return form;
+  };
+  for (const char *leaf : {"chrome.exe", "msedge.exe", "MSEDGE.EXE"}) {
+    auto form = fixture(leaf);
+    // A nested Document and deep content must not affect the top-level page scan.
+    int child = form.source.Add(form.pane, "Document");
+    form.Node(child).has_url = true;
+    form.Node(child).url = "https://different.example.test/embedded";
+    for (int i = 0; i < 30; ++i) child = form.source.Add(child, "Pane");
+    const auto page = WindowsShadowReader(form.source).ReadPage();
+    const auto capture = WindowsShadowReader(form.source).Capture("click", "");
+    if (!Check(page.web && page.complete && page.document_identity == "page-document-1" &&
+               page.location_digest == Sha256Hex(form.Node(form.pane).url) &&
+               page.origin == OriginState::kSensitive && !WindowsPageAllowsInput(page, page),
+               "supported_browser_page_evidence_is_complete")) return false;
+    if (!Check(capture.page_origin == page.origin &&
+               capture.document_url == form.Node(form.pane).url,
+               "read_page_and_capture_origin_select_same_document_and_url")) return false;
+    auto facts = EffBase();
+    facts.origin = capture.page_origin;
+    if (!Check(ClassifyEffect(facts).reason == DecisionReason::kSensitiveOrigin,
+               "edge_origin_reaches_effect_classifier")) return false;
+    for (int mode = 0; mode < 9; ++mode) {
+      auto bad = fixture(leaf);
+      if (mode == 0) bad.source.Add(bad.window, "Document");
+      if (mode == 1) bad.Node(bad.pane).parent = -1;
+      if (mode == 2) bad.Node(bad.pane).parent_result = ShadowReadResult::kFailed;
+      if (mode == 3) bad.Node(bad.pane).parent = bad.desktop;
+      if (mode == 4) bad.source.url_read_hook = [&] { bad.source.now += 31'000'000; };
+      if (mode == 5) bad.source.process_result = ShadowReadResult::kFailed;
+      if (mode == 6) bad.source.url_read_hook = [&] { bad.Node(bad.window).children.clear(); };
+      if (mode == 7) for (int i = 0; i < 150; ++i) bad.source.Add(bad.window, "Pane");
+      if (mode == 8) {
+        int parent = bad.window;
+        for (int i = 0; i < 20; ++i) parent = bad.source.Add(parent, "Pane");
+      }
+      const auto page_gap = WindowsShadowReader(bad.source).ReadPage();
+      const auto capture_gap = WindowsShadowReader(bad.source).Capture("click", "");
+      if (!Check(!page_gap.complete && capture_gap.page_origin == OriginState::kUnknown,
+                 "page_paths_fail_closed_on_ambiguity_deadline_broken_chain_or_owner")) return false;
+    }
+    for (bool capture_path : {false, true}) {
+      auto changed = fixture(leaf);
+      changed.source.url_read_hook = [&] {
+        changed.Node(changed.pane).url += "x";
+      };
+      if (!Check(capture_path
+          ? WindowsShadowReader(changed.source).Capture("click", "").page_origin == OriginState::kUnknown
+          : !WindowsShadowReader(changed.source).ReadPage().complete,
+          "page_paths_reject_changing_url")) return false;
+    }
+  }
+  for (const char *leaf : {"electron.exe", "slack.exe", "msedgewebview2.exe", "cefclient.exe",
+                           "firefox.exe", "browser.exe"}) {
+    auto form = fixture(leaf);
+    const auto page = WindowsShadowReader(form.source).ReadPage();
+    if (!Check(!page.web && !page.complete && form.source.url_calls == 0 &&
+               WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown,
+               "embedded_web_window_is_not_admitted")) return false;
+  }
+  for (const char *leaf : {"chrome.exe", "msedge.exe"}) {
+    auto form = fixture(leaf);
+    form.Node(form.window).class_name = "Chrome_RenderWidgetHostHWND";
+    if (!Check(!WindowsShadowReader(form.source).ReadPage().web &&
+               WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown,
+               "browser_child_window_is_not_admitted")) return false;
+  }
+  std::cout << "Supported browser page evidence: PASS\n";
+  return true;
+}
+
 bool CheckWindowsPageOrigin() {
   const auto page = [] {
     FakeForm form;
@@ -3444,7 +3526,7 @@ bool CheckWindowsPageOrigin() {
     if (!Check(read(form).page_origin == OriginState::kUnknown,
                "winorigin-url-read-gap")) return false;
   }
-  for (const auto path : {"C:\\Apps\\msedge.exe", "C:\\Apps\\firefox.exe",
+  for (const auto path : {"C:\\Apps\\firefox.exe",
                           "C:\\Apps\\browser.exe", "C:\\Apps\\electron.exe"}) {
     auto form = page();
     form.source.process_path = path;
@@ -9879,6 +9961,7 @@ int main() {
   if (!CheckWindowsShadowCore()) return 1;
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
+  if (!CheckSupportedBrowserPageEvidence()) return 1;
   if (!CheckWindowsPageOrigin()) return 1;
   if (!CheckWindowsPageRecheck()) return 1;
   if (!CheckWindowsShadowScheduler()) return 1;

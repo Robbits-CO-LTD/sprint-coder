@@ -286,6 +286,17 @@ int main() {
     page = ReadWindowsPage(session, 1, "window-1");
     Check(page.web && page.complete && g_page_reads == 1, "supervised_reads_page");
     Check(CompareObservedPage(session) && g_page_invalidations > 0, "supervised_still_compares_page");
+    for (const auto *leaf : {L"electron.exe", L"slack.exe", L"msedgewebview2.exe", L"cefclient.exe"}) {
+      session.canonical_path = std::wstring(L"C:\\Apps\\") + leaf;
+      g_page_reads = 0;
+      page = ReadWindowsPage(session, 1, "window-1");
+      Check(!page.web && !page.complete && g_page_reads == 0, "embedded_web_window_is_not_admitted");
+    }
+    session.canonical_path = L"C:\\Apps\\msedge.exe";
+    g_class = L"Chrome_RenderWidgetHostHWND";
+    page = ReadWindowsPage(session, 1, "window-1");
+    Check(!page.complete && g_page_reads == 0, "edge_child_window_is_not_bound");
+    g_class = L"Chrome_WidgetWin_1";
   }
   g_page_ok = false;
   { const Outcome out = Run(); Check(!out.ran_on && !out.accepted && out.reason == "native_target_unclassified" &&
