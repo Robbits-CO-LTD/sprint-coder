@@ -44,6 +44,7 @@ it.runIf(msvc !== null || clang)(
       expect(ran.stdout).toContain('Supported browser page evidence: PASS');
       expect(ran.stdout).toContain('Windows page origin: PASS');
       expect(ran.stdout).toContain('Windows origin policy: PASS');
+      expect(ran.stdout).toContain('Windows page prerequisites: PASS');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -52,6 +53,24 @@ it.runIf(msvc !== null || clang)(
 );
 
 describe('Windows page origin metadata (N11-B)', () => {
+  it('requires frame, active-tab and final uniqueness evidence before browser opening (F3a)', () => {
+    const harness = native('computer_use_protocol_fuzz.cc');
+    for (const name of [
+      'top_document_target_remains_ordinary',
+      'presentational_iframe_or_ordinary_group_target_is_unknown',
+      'sidebar_only_or_unproven_active_tab_is_incomplete',
+      'second_document_during_read_is_incomplete',
+      'document_under_previously_skipped_type_is_incomplete',
+      'selected_tab_change_during_read_is_incomplete',
+      'large_chrome_tree_fails_closed_without_budget_increase',
+    ])
+      expect(harness).toContain(name);
+    expect(harness).toContain('if (!CheckWindowsPagePrerequisites()) return 1;');
+    expect(native('computer_use_windows_uia_source.h')).toContain(
+      'UIA_SelectionItemIsSelectedPropertyId, TRUE, &value',
+    );
+  });
+
   it('isolates the bounded metadata walk from the legacy capture budget', () => {
     const reader = native('computer_use_windows_shadow_reader.h');
     expect(reader).toContain('kOriginMaxCalls = 128');

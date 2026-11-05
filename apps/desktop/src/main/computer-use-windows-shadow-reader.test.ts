@@ -140,6 +140,7 @@ describe('Windows shadow reader is portable and decides nothing', () => {
       'Same',
       'Text',
       'IsPassword',
+      'IsSelected',
       'DocumentUrl',
       'WindowProcessPath',
       'CoreWindowProcessPath',
@@ -241,6 +242,8 @@ describe('Windows UI Automation source only reads', () => {
       'get_CurrentAutomationId',
       'get_CurrentHelpText',
       'get_CurrentIsPassword',
+      // Reads selection state without supplying a default for unsupported providers.
+      'GetCurrentPropertyValueEx',
       'get_CurrentProcessId',
       // S5-c-3 PR-5: who provides an element of a v2 session's chain (read only).
       'get_CurrentFrameworkId',
@@ -488,6 +491,7 @@ describe('Windows UI Automation source only reads', () => {
       'Focused',
       'Get',
       'IsPassword',
+      'IsSelected',
       'ItemPath',
       'Keep',
       'NextSibling',

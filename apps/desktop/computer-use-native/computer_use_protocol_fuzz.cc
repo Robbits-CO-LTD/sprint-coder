@@ -2998,6 +2998,9 @@ struct FakeUiaNode {
   std::string name;
   std::string automation_id;
   std::string help_text;
+  bool selected = false;
+  ShadowReadResult selected_result = ShadowReadResult::kOk;
+  std::array<std::int64_t, 4> frame{};
   bool password = false;
   bool has_url = false;
   std::string url;
@@ -3144,6 +3147,16 @@ public:
     }
     return ShadowCheckText(*value, maximum_bytes, output);
   }
+  ShadowReadResult IsSelected(Element element, bool *selected) override {
+    Tick();
+    *selected = nodes[element].selected;
+    return nodes[element].selected_result;
+  }
+  ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) override {
+    Tick();
+    *frame = nodes[element].frame;
+    return ShadowReadResult::kOk;
+  }
   ShadowReadResult IsPassword(Element element, bool *is_password) override {
     Tick();
     const FakeUiaNode &node = nodes[element];
@@ -3255,6 +3268,16 @@ struct FakeForm {
     source.point = edit;
     source.focused = edit;
   }
+  int BindPageTab() {
+    Node(window).frame = {0, 0, 1000, 800};
+    Node(pane).frame = {0, 100, 1000, 700};
+    Node(pane).name = "Synthetic page";
+    const int strip = source.Add(window, "Tab");
+    const int tab = source.Add(strip, "TabItem", "Synthetic page");
+    Node(tab).selected = true;
+    Node(tab).frame = {10, 10, 200, 30};
+    return tab;
+  }
   FakeUiaNode &Node(int index) { return source.nodes[static_cast<std::size_t>(index)]; }
 };
 
@@ -3294,6 +3317,7 @@ bool CheckWindowsPageRecheck() {
     document.has_url = true;
     document.url = "https://docs.example.test/first";
     document.signature = "runtime-id-1";
+    form.BindPageTab();
     return form;
   };
   const auto read = [](FakeForm &form) { return WindowsShadowReader(form.source).ReadPage(); };
@@ -3402,6 +3426,7 @@ bool CheckSupportedBrowserPageEvidence() {
     document.has_url = true;
     document.url = "https://login.example.test/page";
     document.signature = "page-document-1";
+    form.BindPageTab();
     return form;
   };
   for (const char *leaf : {"chrome.exe", "msedge.exe", "MSEDGE.EXE"}) {
@@ -3482,9 +3507,9 @@ bool CheckWindowsOriginPolicy() {
     form.Node(form.pane).has_url = true;
     form.Node(form.pane).url = "https://docs.example/page";
     form.Node(form.pane).signature = "document-1";
+    form.BindPageTab();
     const int toolbar = form.source.Add(form.window, "ToolBar");
-    for (int i = 0; i < 80; ++i) form.source.Add(toolbar, "Button", "Tab");
-    form.Node(form.window).children = {toolbar, form.pane};
+    form.source.Add(toolbar, "Button", "Tab");
     for (auto &node : form.source.nodes) {
       node.process_id = 42;
       node.framework_result = ShadowReadResult::kOk;
@@ -3503,7 +3528,7 @@ bool CheckWindowsOriginPolicy() {
     if (!Check(page.complete && page.origin == OriginState::kOrdinary &&
                built.facts.origin == OriginState::kOrdinary &&
                ClassifyEffect(built.facts).kind == DecisionKind::kApproval,
-               "large_chrome_tree_before_document_is_complete")) return false;
+               "bounded_chrome_tree_with_selected_tab_is_complete")) return false;
     WindowsApprovalMeasurementInput input;
     input.capture = &capture;
     input.request = request;
@@ -3580,6 +3605,102 @@ bool CheckWindowsOriginPolicy() {
   return true;
 }
 
+bool CheckWindowsPagePrerequisites() {
+  using namespace sprint_coder::computer_use;
+  const auto fixture = [] {
+    FakeForm form;
+    form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+    form.source.process_path = "C:/Apps/msedge.exe";
+    form.Node(form.pane).control_type = "Document";
+    form.Node(form.pane).has_url = true;
+    form.Node(form.pane).url = "https://docs.example/page";
+    form.Node(form.pane).signature = "document-1";
+    form.BindPageTab();
+    return form;
+  };
+  auto baseline = fixture();
+  const auto observed = WindowsShadowReader(baseline.source).ReadPage();
+  if (!Check(observed.complete && observed.origin == OriginState::kOrdinary &&
+      WindowsShadowReader(baseline.source).Capture("click", "").page_origin == OriginState::kOrdinary &&
+      WindowsShadowReader(baseline.source).RecheckPage(observed),
+      "top_document_target_remains_ordinary")) return false;
+  for (int mode = 0; mode < 3; ++mode) {
+    auto form = fixture();
+    const int group = form.source.Add(form.pane, "Group");
+    form.Node(group).name = mode == 0 ? "presentation" : "";
+    const int target = mode == 2 ? group : form.source.Add(group, "Button", "Continue");
+    form.source.point = target;
+    if (!Check(WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown,
+        "presentational_iframe_or_ordinary_group_target_is_unknown")) return false;
+  }
+  for (int mode = 0; mode < 9; ++mode) {
+    auto form = fixture();
+    const int tab = static_cast<int>(form.source.nodes.size()) - 1;
+    if (mode == 0) form.Node(form.pane).name = "Copilot";
+    if (mode == 1) form.Node(form.pane).frame = {800, 100, 200, 700};
+    if (mode == 2) form.Node(tab).selected = false;
+    if (mode == 3) form.Node(tab).selected_result = ShadowReadResult::kFailed;
+    if (mode == 4) form.Node(tab).selected_result = ShadowReadResult::kAbsent;
+    if (mode == 5) form.Node(tab).name.clear();
+    if (mode == 6) form.Node(form.pane).frame = {0, 100, 0, 700};
+    if (mode == 7) form.Node(tab).frame = {0, 100, 50, 600};
+    if (mode == 8) {
+      const int other = form.source.Add(form.window, "TabItem", "Synthetic page");
+      form.Node(other).selected = true;
+    }
+    if (!Check(!WindowsShadowReader(form.source).ReadPage().complete &&
+        WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown &&
+        !WindowsShadowReader(form.source).RecheckPage(observed),
+        "sidebar_only_or_unproven_active_tab_is_incomplete")) return false;
+  }
+  for (const char *type : {"", "ToolBar", "Tab", "TabItem", "Button", "Edit", "Text", "Menu", "MenuItem"}) {
+    for (int path = 0; path < 3; ++path) {
+      for (bool late : {false, true}) {
+        auto form = fixture();
+        const int wrapper = *type == '\0' ? form.window : form.source.Add(form.window, type);
+        if (!Check(WindowsShadowReader(form.source).ReadPage().complete &&
+            WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kOrdinary,
+            "empty_chrome_wrapper_is_complete_before_document_insertion")) return false;
+        form.source.url_calls = 0;
+        const auto insert = [&] { form.source.Add(wrapper, "Document"); };
+        if (!late) insert();
+        else form.source.url_read_hook = [&] {
+          // Capture reads one legacy URL before its two origin URL reads.
+          const int last_read = path == 1 ? 3 : (path == 0 ? 2 : 1);
+          if (form.source.url_calls == last_read) insert();
+        };
+        const bool closed = path == 0 ? !WindowsShadowReader(form.source).ReadPage().complete :
+            path == 1 ? WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown :
+            !WindowsShadowReader(form.source).RecheckPage(observed);
+        if (!Check(closed, late ? "second_document_during_read_is_incomplete" :
+            "document_under_previously_skipped_type_is_incomplete")) return false;
+        if (late && !Check(form.source.url_calls == (path == 1 ? 3 : (path == 0 ? 2 : 1)),
+            "second_document_reaches_final_uniqueness_check")) return false;
+      }
+    }
+  }
+  for (int path = 0; path < 3; ++path) {
+    auto form = fixture();
+    const int tab = static_cast<int>(form.source.nodes.size()) - 1;
+    form.source.url_read_hook = [&] {
+      const int last_read = path == 1 ? 3 : (path == 0 ? 2 : 1);
+      if (form.source.url_calls == last_read) form.Node(tab).selected = false;
+    };
+    const bool closed = path == 0 ? !WindowsShadowReader(form.source).ReadPage().complete :
+        path == 1 ? WindowsShadowReader(form.source).Capture("click", "").page_origin == OriginState::kUnknown :
+        !WindowsShadowReader(form.source).RecheckPage(observed);
+    if (!Check(closed, "selected_tab_change_during_read_is_incomplete")) return false;
+  }
+  auto large = fixture();
+  const int toolbar = large.source.Add(large.window, "ToolBar");
+  for (int i = 0; i < 80; ++i) large.source.Add(toolbar, "Button");
+  if (!Check(!WindowsShadowReader(large.source).ReadPage().complete &&
+      WindowsShadowReader(large.source).Capture("click", "").page_origin == OriginState::kUnknown,
+      "large_chrome_tree_fails_closed_without_budget_increase")) return false;
+  std::cout << "Windows page prerequisites: PASS\n";
+  return true;
+}
+
 bool CheckWindowsPageOrigin() {
   const auto page = [] {
     FakeForm form;
@@ -3588,6 +3709,7 @@ bool CheckWindowsPageOrigin() {
     form.Node(form.pane).control_type = "Document";
     form.Node(form.pane).has_url = true;
     form.Node(form.pane).url = "https://login.example.test/path";
+    form.BindPageTab();
     return form;
   };
   const auto read = [](FakeForm &form) {
@@ -10112,6 +10234,7 @@ int main() {
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
   if (!CheckSupportedBrowserPageEvidence()) return 1;
+  if (!CheckWindowsPagePrerequisites()) return 1;
   if (!CheckWindowsPageOrigin()) return 1;
   if (!CheckWindowsOriginPolicy()) return 1;
   if (!CheckWindowsPageRecheck()) return 1;

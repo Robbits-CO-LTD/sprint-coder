@@ -1128,6 +1128,19 @@ public:
     return windows_uia_source_detail::ShadowTextFromUtf16(value.View(), false, maximum_bytes, output);
   }
 
+  ShadowReadResult IsSelected(Element element, bool *selected) override {
+    auto *target = At(element);
+    if (target == nullptr) return ShadowReadResult::kFailed;
+    VARIANT value;
+    VariantInit(&value);
+    const HRESULT result = target->GetCurrentPropertyValueEx(
+        UIA_SelectionItemIsSelectedPropertyId, TRUE, &value);
+    const bool valid = SUCCEEDED(result) && value.vt == VT_BOOL;
+    if (valid) *selected = value.boolVal != VARIANT_FALSE;
+    VariantClear(&value);
+    return valid ? ShadowReadResult::kOk : ShadowReadResult::kFailed;
+  }
+
   // The value of one element for `copy` (#785 T15-4w). TextPattern first: it can be asked for at most
   // `maximum_bytes + 1` characters, so a document of any size costs one bounded read (a Windows
   // Notepad Document has both patterns, and its ValuePattern would hand over the WHOLE text). Then

@@ -101,6 +101,11 @@ public:
     (void)signature;
     return ShadowReadResult::kAbsent;
   }
+  virtual ShadowReadResult IsSelected(Element element, bool *selected) {
+    (void)element;
+    (void)selected;
+    return ShadowReadResult::kAbsent;
+  }
   virtual ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) {
     (void)element;
     (void)frame;
@@ -356,6 +361,9 @@ private:
   ShadowReadResult IsPassword(Element element, bool *is_password) {
     return Gated([&] { return source_.IsPassword(element, is_password); });
   }
+  ShadowReadResult IsSelected(Element element, bool *selected) {
+    return Gated([&] { return source_.IsSelected(element, selected); });
+  }
   ShadowReadResult DocumentUrl(Element document, std::size_t maximum_bytes, std::string *output) {
     return Gated([&] { return source_.DocumentUrl(document, maximum_bytes, output); });
   }
@@ -505,22 +513,25 @@ private:
   // Page content is not window chrome. The gate bounds calls/time; depth bounds recursion.
   bool ScanPageDocuments(Element element, std::size_t depth, int *count, Element *document) {
     using namespace windows_shadow_reader_detail;
+    if (depth == 0) selected_tab_ = ShadowUiaSource::kNoElement;
     if (depth > kSearchMaxDepth || origin_stopped_) return false;
     bool failed = false;
     std::string type;
     if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
                       &failed) || type.empty()) return false;
     if (type == "Document") {
-      page_document_path_ = page_scan_path_;
       *document = element;
       return ++*count == 1;
     }
-    // Browser chrome controls do not contain the top-level page. Their descendants
-    // (tab labels, toolbar buttons, omnibox suggestions) do not consume the budget.
-    if (type == "ToolBar" || type == "Tab" || type == "TabItem" || type == "Button" ||
-        type == "Edit" || type == "Text" || type == "Menu" || type == "MenuItem") return true;
-    if (depth == 0) { page_scan_path_.clear(); page_document_path_.clear(); }
-    page_scan_path_.push_back(element);
+    // Side panels can live below chrome controls; no control type is pruned.
+    if (type == "TabItem") {
+      bool selected = false;
+      if (!ShadowSettle(IsSelected(element, &selected), &failed)) return false;
+      if (selected) {
+        if (selected_tab_ != ShadowUiaSource::kNoElement) return false;
+        selected_tab_ = element;
+      }
+    }
     Element child = 0;
     auto step = FirstChild(element, &child);
     while (step == ShadowReadResult::kOk) {
@@ -533,22 +544,50 @@ private:
       step = NextSibling(child, &next);
       child = next;
     }
-    page_scan_path_.pop_back();
     return step == ShadowReadResult::kAbsent && !origin_stopped_;
   }
 
-  bool PageDocumentStillCurrent(Element root, Element expected) {
-    // Revalidate the discovered parent chain instead of scanning all chrome twice.
-    if (page_document_path_.empty()) return false;
-    bool failed = false, same = false;
-    Element child = expected;
-    for (auto it = page_document_path_.rbegin(); it != page_document_path_.rend(); ++it) {
-      Element parent = 0;
-      if (!ShadowSettle(Parent(child, &parent), &failed) ||
-          !ShadowSettle(Same(parent, *it, &same), &failed) || !same) return false;
-      child = parent;
+  bool ActiveTabDocument(Element root, Element document) {
+    if (selected_tab_ == ShadowUiaSource::kNoElement) return false;
+    bool failed = false;
+    std::string tab_name, document_name;
+    std::array<std::int64_t, 4> window{}, page{}, tab{};
+    if (!ShadowSettle(Text(selected_tab_, ShadowUiaText::kName, false,
+                          kEffectMaxLabelBytes, &tab_name), &failed) || tab_name.empty() ||
+        !ShadowSettle(Text(document, ShadowUiaText::kName, false,
+                          kEffectMaxLabelBytes, &document_name), &failed) ||
+        tab_name != document_name ||
+        !ShadowSettle(TargetFrame(root, &window), &failed) ||
+        !ShadowSettle(TargetFrame(document, &page), &failed) ||
+        !ShadowSettle(TargetFrame(selected_tab_, &tab), &failed)) return false;
+    // Conservative horizontal-tab layout only. A same-title sidebar is insufficient:
+    // the page must occupy most of the window below the selected tab.
+    for (const auto &frame : {window, page, tab}) {
+      for (auto coordinate : frame)
+        if (coordinate < -1'000'000 || coordinate > 1'000'000) return false;
+      if (frame[2] <= 0 || frame[3] <= 0) return false;
     }
-    return ShadowSettle(Same(child, root, &same), &failed) && same;
+    const auto inside = [&](const auto &frame) {
+      return frame[0] >= window[0] && frame[1] >= window[1] &&
+          frame[0] + frame[2] <= window[0] + window[2] &&
+          frame[1] + frame[3] <= window[1] + window[3];
+    };
+    return inside(page) && inside(tab) && page[1] >= tab[1] + tab[3] &&
+        page[2] * 5 >= window[2] * 4 && page[3] * 2 >= window[3];
+  }
+
+  bool PageDocumentStillCurrent(Element root, Element expected) {
+    const Element expected_tab = selected_tab_;
+    if (!ActiveTabDocument(root, expected)) return false;
+    int count = 0;
+    Element current = 0;
+    bool failed = false, same = false;
+    // Recount all non-document branches within the original 128-call budget.
+    return ScanPageDocuments(root, 0, &count, &current) && count == 1 &&
+        selected_tab_ != ShadowUiaSource::kNoElement &&
+        ShadowSettle(Same(current, expected, &same), &failed) && same &&
+        ShadowSettle(Same(selected_tab_, expected_tab, &same), &failed) && same &&
+        ActiveTabDocument(root, current);
   }
 
   // Separate from the legacy URL/surface path: this state grants nothing. Both page paths
@@ -562,6 +601,8 @@ private:
     for (std::size_t i = 0; i < capture->chain.size(); ++i) {
       const auto &node = capture->chain[i];
       if (node.read_failed || node.oversize) return;
+      // No proven identifier separates a presentational iframe from an ordinary Group.
+      if (expected == ShadowUiaSource::kNoElement && node.control_type == "Group") return;
       if (node.control_type == "Document") {
         if (expected != ShadowUiaSource::kNoElement || i + 1 == capture->chain.size()) return;
         expected = chain_elements_[i];
@@ -728,7 +769,7 @@ private:
   Element target_element_ = 0;
   bool read_chain_identity_ = false;
   std::vector<Element> chain_elements_;
-  std::vector<Element> page_scan_path_, page_document_path_;
+  Element selected_tab_ = ShadowUiaSource::kNoElement;
 };
 
 } // namespace sprint_coder::computer_use
