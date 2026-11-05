@@ -5,7 +5,7 @@ import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake'
 const eligibility = {
   mode: 'v2-denylist',
   classifierVersion: 4,
-  rulesetVersion: 2,
+  rulesetVersion: 5,
   lexiconVersion: 3,
   ticketRequired: true,
   interlockEnforced: true,

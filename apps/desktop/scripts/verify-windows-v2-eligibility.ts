@@ -2,6 +2,7 @@ import { computerUseEligibilitySchema } from '@sprint-coder/contracts';
 import { readFileSync } from 'node:fs';
 import { readMainNativePin } from './read-main-native-pin';
 import { parseNativeHandshake } from '../src/main/computer-use-native-handshake';
+import definition from '../computer-use-native/eligibility.json';
 
 export function windowsV2ArtifactProblems(input: {
   expected: unknown;
@@ -33,7 +34,9 @@ export function windowsV2EligibilityProblems(input: {
   if (
     !expected.success ||
     expected.data.mode !== 'v2-denylist' ||
+    expected.data.rulesetVersion !== definition.versions.win32.v2.rulesetVersion ||
     expected.data.classifierVersion !== 4 ||
+    expected.data.lexiconVersion !== definition.versions.win32.v2.lexiconVersion ||
     !expected.data.ticketRequired ||
     expected.data.interlockEnforced !== true
   )

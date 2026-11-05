@@ -22,10 +22,10 @@ describe('Windows private approval handlers', () => {
     // The final v2 declaration matches; the legacy v1 declaration stays closed.
     const header = native('computer_use_native_eligibility.h');
     expect(header).toContain(
-      'return from_build && v2 && ruleset == 4 && classifier == 4 && lexicon == 3 &&',
+      'return from_build && v2 && ruleset == 5 && classifier == 4 && lexicon == 3 &&',
     );
     for (const mode of ['v1-allowlist', 'v2-denylist'] as const)
-      expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 4).toBe(
+      expect(eligibilityDeclaration(mode, 'win32').rulesetVersion === 5).toBe(
         mode === 'v2-denylist',
       );
   });

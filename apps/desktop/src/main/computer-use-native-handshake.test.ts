@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import {
   parseNativeHandshake,
   WINDOWS_APPROVAL_WIRE_VERSION,
+  windowsApprovalEvidenceMatches,
 } from './computer-use-native-handshake';
+import { eligibilityDeclaration } from '../../../../build-computer-use-eligibility.mjs';
 
 const handshake = {
   protocolVersion: 1,
@@ -14,6 +16,23 @@ const handshake = {
 };
 
 describe('Windows approval wire negotiation', () => {
+  it('ruleset4_helper_cannot_open_browser_control', () => {
+    const current = {
+      eligibility: eligibilityDeclaration('v2-denylist', 'win32'),
+      windowsDocumentViewers: { version: 1, digest: 'a'.repeat(16) },
+    };
+    const old = { ...current, eligibility: { ...current.eligibility, rulesetVersion: 4 } };
+    const wire = {
+      ...handshake,
+      ...current,
+      capabilities: { approval: true, approvalWire: WINDOWS_APPROVAL_WIRE_VERSION },
+    };
+    expect(windowsApprovalEvidenceMatches(current, current, wire)).toBe(true);
+    expect(windowsApprovalEvidenceMatches(current, current, { ...wire, ...old })).toBe(false);
+    expect(windowsApprovalEvidenceMatches(current, old, wire)).toBe(false);
+    expect(windowsApprovalEvidenceMatches(old, current, wire)).toBe(false);
+    expect(windowsApprovalEvidenceMatches(old, old, { ...wire, ...old })).toBe(false);
+  });
   it('pins the producer and parser to the native receipt wire version', () => {
     const native = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_windows_approval_wire.h'),

@@ -192,173 +192,233 @@ inline constexpr TargetCondition kWhen2[] = {
     {TargetSignal::kPackageDevelopmentMode, TargetMatch::kFalse, false, std::span<const std::string_view>()},
     {TargetSignal::kPeSubsystem, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues14)},
 };
-inline constexpr std::string_view kValues15[] = {"network", "removable"};
+inline constexpr std::string_view kValues15[] = {"program_files"};
+inline constexpr std::string_view kValues16[] = {"microsoft\\edge\\application\\msedge.exe"};
+inline constexpr std::string_view kValues17[] = {"valid"};
+inline constexpr std::string_view kValues18[] = {"gui"};
 inline constexpr TargetCondition kWhen3[] = {
-    {TargetSignal::kImageVolume, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues15)},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues15)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues16)},
+    {TargetSignal::kPackaged, TargetMatch::kFalse, false, std::span<const std::string_view>()},
+    {TargetSignal::kSignature, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues17)},
+    {TargetSignal::kSignerMicrosoftRoot, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kPeSubsystem, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues18)},
 };
+inline constexpr std::string_view kValues19[] = {"network", "removable"};
 inline constexpr TargetCondition kWhen4[] = {
+    {TargetSignal::kImageVolume, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues19)},
+};
+inline constexpr TargetCondition kWhen5[] = {
     {TargetSignal::kRunningImageMatches, TargetMatch::kFalse, false, std::span<const std::string_view>()},
 };
-inline constexpr std::string_view kValues16[] = {"invalid"};
-inline constexpr TargetCondition kWhen5[] = {
-    {TargetSignal::kSignature, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues16)},
-};
+inline constexpr std::string_view kValues20[] = {"invalid"};
 inline constexpr TargetCondition kWhen6[] = {
-    {TargetSignal::kTokenElevated, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kSignature, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues20)},
 };
 inline constexpr TargetCondition kWhen7[] = {
-    {TargetSignal::kTokenOtherUser, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kTokenElevated, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
 inline constexpr TargetCondition kWhen8[] = {
-    {TargetSignal::kTokenOtherSession, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kTokenOtherUser, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
 inline constexpr TargetCondition kWhen9[] = {
-    {TargetSignal::kTokenProtected, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kTokenOtherSession, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
 inline constexpr TargetCondition kWhen10[] = {
-    {TargetSignal::kTokenUiAccess, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kTokenProtected, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
 inline constexpr TargetCondition kWhen11[] = {
+    {TargetSignal::kTokenUiAccess, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+};
+inline constexpr TargetCondition kWhen12[] = {
     {TargetSignal::kTokenIntegrityAboveSelf, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
-inline constexpr std::string_view kValues17[] = {"self_install"};
-inline constexpr TargetCondition kWhen12[] = {
-    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues17)},
-};
+inline constexpr std::string_view kValues21[] = {"self_install"};
 inline constexpr TargetCondition kWhen13[] = {
-    {TargetSignal::kOwnDescendant, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues21)},
 };
 inline constexpr TargetCondition kWhen14[] = {
+    {TargetSignal::kOwnDescendant, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+};
+inline constexpr TargetCondition kWhen15[] = {
     {TargetSignal::kSignerIsSelf, TargetMatch::kTrue, false, std::span<const std::string_view>()},
     {TargetSignal::kAcceptanceFixture, TargetMatch::kFalse, false, std::span<const std::string_view>()},
 };
-inline constexpr TargetCondition kWhen15[] = {
+inline constexpr TargetCondition kWhen16[] = {
     {TargetSignal::kTokenAppContainer, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
-inline constexpr std::string_view kValues18[] = {"applicationframehost.exe", "wwahost.exe"};
-inline constexpr TargetCondition kWhen16[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues18)},
-};
-inline constexpr std::string_view kValues19[] = {"windows_directory"};
-inline constexpr std::string_view kValues20[] = {"system32\\notepad.exe"};
+inline constexpr std::string_view kValues22[] = {"applicationframehost.exe", "wwahost.exe"};
 inline constexpr TargetCondition kWhen17[] = {
-    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues19)},
-    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues20)},
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues22)},
 };
-inline constexpr std::string_view kValues21[] = {"windows.immersivecontrolpanel_"};
+inline constexpr std::string_view kValues23[] = {"windows_directory"};
+inline constexpr std::string_view kValues24[] = {"system32\\notepad.exe"};
 inline constexpr TargetCondition kWhen18[] = {
-    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues21)},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues23)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues24)},
 };
-inline constexpr std::string_view kValues22[] = {"microsoft.sechealthui_"};
+inline constexpr std::string_view kValues25[] = {"windows.immersivecontrolpanel_"};
 inline constexpr TargetCondition kWhen19[] = {
-    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues22)},
-};
-inline constexpr std::string_view kValues23[] = {"credential dialog xaml host"};
-inline constexpr TargetCondition kWhen20[] = {
-    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues23)},
-};
-inline constexpr std::string_view kValues24[] = {"agilebits inc.", "bitwarden inc.", "dashlane, inc.", "keeper security, inc.", "lastpass us lp", "dominik reichl", "droidmonkey apps, llc", "sinew software systems pvt ltd", "siber systems inc"};
-inline constexpr TargetCondition kWhen21[] = {
-    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues24)},
-};
-inline constexpr std::string_view kValues25[] = {"agilebits.", "8bitsolutionsllc.bitwardendesktop_", "keepersecurityinc."};
-inline constexpr TargetCondition kWhen22[] = {
     {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues25)},
 };
-inline constexpr std::string_view kValues26[] = {"1password*.exe", "bitwarden*.exe", "keepass*.exe", "keeper*.exe", "lastpass*.exe", "dashlane*.exe", "enpass*.exe", "roboform*.exe", "nordpass*.exe", "proton pass*.exe"};
+inline constexpr std::string_view kValues26[] = {"microsoft.sechealthui_"};
+inline constexpr TargetCondition kWhen20[] = {
+    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues26)},
+};
+inline constexpr std::string_view kValues27[] = {"credential dialog xaml host"};
+inline constexpr TargetCondition kWhen21[] = {
+    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues27)},
+};
+inline constexpr std::string_view kValues28[] = {"agilebits inc.", "bitwarden inc.", "dashlane, inc.", "keeper security, inc.", "lastpass us lp", "dominik reichl", "droidmonkey apps, llc", "sinew software systems pvt ltd", "siber systems inc"};
+inline constexpr TargetCondition kWhen22[] = {
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues28)},
+};
+inline constexpr std::string_view kValues29[] = {"agilebits.", "8bitsolutionsllc.bitwardendesktop_", "keepersecurityinc."};
 inline constexpr TargetCondition kWhen23[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues26)},
+    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues29)},
 };
-inline constexpr std::string_view kValues27[] = {"console"};
+inline constexpr std::string_view kValues30[] = {"1password*.exe", "bitwarden*.exe", "keepass*.exe", "keeper*.exe", "lastpass*.exe", "dashlane*.exe", "enpass*.exe", "roboform*.exe", "nordpass*.exe", "proton pass*.exe"};
 inline constexpr TargetCondition kWhen24[] = {
-    {TargetSignal::kPeSubsystem, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues27)},
+    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues30)},
 };
-inline constexpr std::string_view kValues28[] = {"microsoft.windowsterminal"};
+inline constexpr std::string_view kValues31[] = {"console"};
 inline constexpr TargetCondition kWhen25[] = {
-    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues28)},
+    {TargetSignal::kPeSubsystem, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues31)},
 };
-inline constexpr std::string_view kValues29[] = {"simon tatham", "vandyke software, inc.", "netsarang computer, inc.", "mobatek", "termius corporation", "eugene pankov", "martin prikryl", "bitvise limited"};
+inline constexpr std::string_view kValues32[] = {"microsoft.windowsterminal"};
 inline constexpr TargetCondition kWhen26[] = {
-    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues29)},
+    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues32)},
 };
-inline constexpr std::string_view kValues30[] = {"consolewindowclass", "pseudoconsolewindow", "cascadia_hosting_window_class", "mintty", "virtualconsoleclass", "putty"};
+inline constexpr std::string_view kValues33[] = {"simon tatham", "vandyke software, inc.", "netsarang computer, inc.", "mobatek", "termius corporation", "eugene pankov", "martin prikryl", "bitvise limited"};
 inline constexpr TargetCondition kWhen27[] = {
-    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues30)},
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues33)},
 };
-inline constexpr std::string_view kValues31[] = {"cmd.exe", "powershell*.exe", "pwsh*.exe", "wt.exe", "windowsterminal.exe", "openconsole.exe", "conhost.exe", "bash.exe", "sh.exe", "zsh.exe", "fish.exe", "nu.exe", "wsl*.exe", "ubuntu*.exe", "debian.exe", "kali.exe", "mintty.exe", "git-bash.exe", "git-cmd.exe", "alacritty.exe", "wezterm*.exe", "hyper.exe", "tabby.exe", "kitty*.exe", "conemu*.exe", "cmder.exe", "warp.exe", "putty*.exe", "securecrt*.exe", "xshell*.exe", "mobaxterm*.exe", "termius*.exe", "winscp*.exe", "bvssh*.exe", "kitty_portable*.exe"};
+inline constexpr std::string_view kValues34[] = {"consolewindowclass", "pseudoconsolewindow", "cascadia_hosting_window_class", "mintty", "virtualconsoleclass", "putty"};
 inline constexpr TargetCondition kWhen28[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues31)},
+    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues34)},
 };
-inline constexpr std::string_view kValues32[] = {"teamviewer germany gmbh", "anydesk software gmbh", "citrix systems, inc.", "vmware, inc.", "oracle america, inc.", "parsec cloud, inc.", "realvnc limited", "splashtop inc.", "logmein, inc.", "purslane ltd.", "devolutions inc.", "royal apps gmbh", "mremoteng"};
+inline constexpr std::string_view kValues35[] = {"cmd.exe", "powershell*.exe", "pwsh*.exe", "wt.exe", "windowsterminal.exe", "openconsole.exe", "conhost.exe", "bash.exe", "sh.exe", "zsh.exe", "fish.exe", "nu.exe", "wsl*.exe", "ubuntu*.exe", "debian.exe", "kali.exe", "mintty.exe", "git-bash.exe", "git-cmd.exe", "alacritty.exe", "wezterm*.exe", "hyper.exe", "tabby.exe", "kitty*.exe", "conemu*.exe", "cmder.exe", "warp.exe", "putty*.exe", "securecrt*.exe", "xshell*.exe", "mobaxterm*.exe", "termius*.exe", "winscp*.exe", "bvssh*.exe", "kitty_portable*.exe"};
 inline constexpr TargetCondition kWhen29[] = {
-    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues32)},
+    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues35)},
 };
-inline constexpr std::string_view kValues33[] = {"microsoft.remotedesktop", "microsoftcorporationii.windows365", "microsoftcorporationii.quickassist"};
+inline constexpr std::string_view kValues36[] = {"teamviewer germany gmbh", "anydesk software gmbh", "citrix systems, inc.", "vmware, inc.", "oracle america, inc.", "parsec cloud, inc.", "realvnc limited", "splashtop inc.", "logmein, inc.", "purslane ltd.", "devolutions inc.", "royal apps gmbh", "mremoteng"};
 inline constexpr TargetCondition kWhen30[] = {
-    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues33)},
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues36)},
 };
-inline constexpr std::string_view kValues34[] = {"mstsc.exe", "msrdc*.exe", "rustdesk*.exe", "teamviewer*.exe", "anydesk*.exe", "vncviewer*.exe", "tvnviewer.exe", "parsecd.exe", "vmware*.exe", "vmplayer.exe", "vmconnect.exe", "virtualbox*.exe", "quickassist.exe", "remoting_*.exe", "wfica32.exe", "cdviewer.exe", "remotedesktopmanager*.exe", "royalts*.exe", "mremoteng*.exe"};
+inline constexpr std::string_view kValues37[] = {"microsoft.remotedesktop", "microsoftcorporationii.windows365", "microsoftcorporationii.quickassist"};
 inline constexpr TargetCondition kWhen31[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues34)},
+    {TargetSignal::kPackageFamily, TargetMatch::kPrefix, false, std::span<const std::string_view>(deny_ruleset_data::kValues37)},
 };
-inline constexpr std::string_view kValues35[] = {"temp", "downloads"};
+inline constexpr std::string_view kValues38[] = {"mstsc.exe", "msrdc*.exe", "rustdesk*.exe", "teamviewer*.exe", "anydesk*.exe", "vncviewer*.exe", "tvnviewer.exe", "parsecd.exe", "vmware*.exe", "vmplayer.exe", "vmconnect.exe", "virtualbox*.exe", "quickassist.exe", "remoting_*.exe", "wfica32.exe", "cdviewer.exe", "remotedesktopmanager*.exe", "royalts*.exe", "mremoteng*.exe"};
 inline constexpr TargetCondition kWhen32[] = {
-    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues35)},
+    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues38)},
 };
+inline constexpr std::string_view kValues39[] = {"temp", "downloads"};
 inline constexpr TargetCondition kWhen33[] = {
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues39)},
+};
+inline constexpr TargetCondition kWhen34[] = {
     {TargetSignal::kRequiresAdministrator, TargetMatch::kTrue, false, std::span<const std::string_view>()},
 };
-inline constexpr std::string_view kValues36[] = {"setup*", "*install*", "*update*.exe", "unins*.exe", "msiexec.exe"};
-inline constexpr TargetCondition kWhen34[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues36)},
-};
-inline constexpr std::string_view kValues37[] = {"setup*", "*install*", "msiexec.exe"};
+inline constexpr std::string_view kValues40[] = {"setup*", "*install*", "*update*.exe", "unins*.exe", "msiexec.exe"};
 inline constexpr TargetCondition kWhen35[] = {
-    {TargetSignal::kOriginalFilename, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues37)},
-};
-inline constexpr std::string_view kValues38[] = {"msidialogcloseclass", "msidialognocloseclass", "twizardform"};
-inline constexpr TargetCondition kWhen36[] = {
-    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues38)},
-};
-inline constexpr std::string_view kValues39[] = {"python software foundation", "openjs foundation", "autohotkey foundation llc"};
-inline constexpr TargetCondition kWhen37[] = {
-    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues39)},
-};
-inline constexpr std::string_view kValues40[] = {"python*.exe", "py.exe", "pyw.exe", "node.exe", "java.exe", "javaw.exe", "jshell.exe", "electron.exe", "autohotkey*.exe", "ruby*.exe", "perl.exe", "php*.exe", "deno.exe", "bun.exe", "lua*.exe", "rscript.exe", "julia.exe", "tclsh*.exe", "wish*.exe", "wscript.exe", "cscript.exe", "mshta.exe"};
-inline constexpr TargetCondition kWhen38[] = {
     {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues40)},
 };
-inline constexpr std::string_view kValues41[] = {"python*.exe", "node.exe", "java*.exe", "electron.exe", "autohotkey*.exe"};
-inline constexpr TargetCondition kWhen39[] = {
+inline constexpr std::string_view kValues41[] = {"setup*", "*install*", "msiexec.exe"};
+inline constexpr TargetCondition kWhen36[] = {
     {TargetSignal::kOriginalFilename, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues41)},
 };
-inline constexpr TargetCondition kWhen40[] = {
-    {TargetSignal::kDescendantShell, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+inline constexpr std::string_view kValues42[] = {"msidialogcloseclass", "msidialognocloseclass", "twizardform"};
+inline constexpr TargetCondition kWhen37[] = {
+    {TargetSignal::kWindowClass, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues42)},
 };
-inline constexpr TargetCondition kWhen41[] = {
-    {TargetSignal::kDescendantPseudoConsole, TargetMatch::kTrue, false, std::span<const std::string_view>()},
-};
-inline constexpr std::string_view kValues42[] = {"unsigned"};
-inline constexpr TargetCondition kWhen42[] = {
-    {TargetSignal::kSignature, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues42)},
-};
-inline constexpr std::string_view kValues43[] = {"jetbrains s.r.o.", "anysphere, inc.", "docker inc", "docker, inc."};
-inline constexpr TargetCondition kWhen43[] = {
+inline constexpr std::string_view kValues43[] = {"python software foundation", "openjs foundation", "autohotkey foundation llc"};
+inline constexpr TargetCondition kWhen38[] = {
     {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues43)},
 };
-inline constexpr std::string_view kValues44[] = {"google llc", "mozilla corporation", "brave software, inc.", "opera norway as", "vivaldi technologies as"};
+inline constexpr std::string_view kValues44[] = {"python*.exe", "py.exe", "pyw.exe", "node.exe", "java.exe", "javaw.exe", "jshell.exe", "electron.exe", "autohotkey*.exe", "ruby*.exe", "perl.exe", "php*.exe", "deno.exe", "bun.exe", "lua*.exe", "rscript.exe", "julia.exe", "tclsh*.exe", "wish*.exe", "wscript.exe", "cscript.exe", "mshta.exe"};
+inline constexpr TargetCondition kWhen39[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues44)},
+};
+inline constexpr std::string_view kValues45[] = {"python*.exe", "node.exe", "java*.exe", "electron.exe", "autohotkey*.exe"};
+inline constexpr TargetCondition kWhen40[] = {
+    {TargetSignal::kOriginalFilename, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues45)},
+};
+inline constexpr TargetCondition kWhen41[] = {
+    {TargetSignal::kDescendantShell, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+};
+inline constexpr TargetCondition kWhen42[] = {
+    {TargetSignal::kDescendantPseudoConsole, TargetMatch::kTrue, false, std::span<const std::string_view>()},
+};
+inline constexpr std::string_view kValues46[] = {"unsigned"};
+inline constexpr TargetCondition kWhen43[] = {
+    {TargetSignal::kSignature, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues46)},
+};
+inline constexpr std::string_view kValues47[] = {"jetbrains s.r.o.", "anysphere, inc.", "docker inc", "docker, inc."};
 inline constexpr TargetCondition kWhen44[] = {
-    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues44)},
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues47)},
 };
-inline constexpr std::string_view kValues45[] = {"chrome.exe", "chromium.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "waterfox.exe", "librewolf.exe", "floorp.exe", "iexplore.exe", "arc.exe", "whale.exe", "zen.exe", "duckduckgo.exe"};
+inline constexpr std::string_view kValues48[] = {"mozilla corporation", "brave software, inc.", "opera norway as", "vivaldi technologies as"};
 inline constexpr TargetCondition kWhen45[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues45)},
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues48)},
 };
-inline constexpr std::string_view kValues46[] = {"browser.exe"};
-inline constexpr std::string_view kValues47[] = {"yandex\\*", "*\\yandex\\*"};
+inline constexpr std::string_view kValues49[] = {"chromium.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "waterfox.exe", "librewolf.exe", "floorp.exe", "iexplore.exe", "arc.exe", "whale.exe", "zen.exe", "duckduckgo.exe"};
 inline constexpr TargetCondition kWhen46[] = {
-    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues46)},
-    {TargetSignal::kImageRelativePath, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues47)},
+    {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues49)},
+};
+inline constexpr std::string_view kValues50[] = {"browser.exe"};
+inline constexpr std::string_view kValues51[] = {"yandex\\*", "*\\yandex\\*"};
+inline constexpr TargetCondition kWhen47[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues50)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues51)},
+};
+inline constexpr std::string_view kValues52[] = {"google llc"};
+inline constexpr TargetCondition kWhen48[] = {
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues52)},
+};
+inline constexpr std::string_view kValues53[] = {"google llc"};
+inline constexpr std::string_view kValues54[] = {"program_files"};
+inline constexpr TargetCondition kWhen49[] = {
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues53)},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues54)},
+};
+inline constexpr std::string_view kValues55[] = {"google llc"};
+inline constexpr std::string_view kValues56[] = {"google\\chrome\\application\\chrome.exe"};
+inline constexpr TargetCondition kWhen50[] = {
+    {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues55)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues56)},
+};
+inline constexpr std::string_view kValues57[] = {"chrome.exe"};
+inline constexpr TargetCondition kWhen51[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues57)},
+};
+inline constexpr std::string_view kValues58[] = {"chrome.exe"};
+inline constexpr std::string_view kValues59[] = {"program_files"};
+inline constexpr TargetCondition kWhen52[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues58)},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues59)},
+};
+inline constexpr std::string_view kValues60[] = {"chrome.exe"};
+inline constexpr std::string_view kValues61[] = {"google\\chrome\\application\\chrome.exe"};
+inline constexpr TargetCondition kWhen53[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues60)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues61)},
+};
+inline constexpr std::string_view kValues62[] = {"msedge.exe"};
+inline constexpr TargetCondition kWhen54[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues62)},
+};
+inline constexpr std::string_view kValues63[] = {"msedge.exe"};
+inline constexpr std::string_view kValues64[] = {"program_files"};
+inline constexpr TargetCondition kWhen55[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues63)},
+    {TargetSignal::kImageRoot, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues64)},
+};
+inline constexpr std::string_view kValues65[] = {"msedge.exe"};
+inline constexpr std::string_view kValues66[] = {"microsoft\\edge\\application\\msedge.exe"};
+inline constexpr TargetCondition kWhen56[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues65)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kEquals, true, std::span<const std::string_view>(deny_ruleset_data::kValues66)},
 };
 
 } // namespace deny_ruleset_data
@@ -415,57 +475,67 @@ inline constexpr TargetRoute kTargetRoutes[] = {
     {"windows_directory_explicit", 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen0)},
     {"general_application", 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen1)},
     {"package", 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen2)},
+    {"edge_application", 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen3)},
 };
 
 inline constexpr TargetRule kTargetRules[] = {
-    {"", "W-UR", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen3)},
     {"", "W-UR", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen4)},
     {"", "W-UR", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen5)},
-    {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen6)},
+    {"", "W-UR", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen6)},
     {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen7)},
     {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen8)},
     {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen9)},
     {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen10)},
     {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen11)},
-    {"", "W8", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen12)},
+    {"", "W7", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen12)},
     {"", "W8", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen13)},
     {"", "W8", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen14)},
-    {"", "W-PX", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen15)},
+    {"", "W8", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen15)},
     {"", "W-PX", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen16)},
-    {"", "W-SYS", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen17)},
-    {"", "W1", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen18)},
-    {"", "W2", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen19)},
+    {"", "W-PX", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen17)},
+    {"", "W-SYS", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen18)},
+    {"", "W1", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen19)},
     {"", "W2", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen20)},
-    {"", "W3", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen21)},
+    {"", "W2", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen21)},
     {"", "W3", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen22)},
     {"", "W3", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen23)},
-    {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen24)},
+    {"", "W3", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen24)},
     {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen25)},
     {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen26)},
     {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen27)},
     {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen28)},
-    {"", "W5", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen29)},
+    {"", "W4", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen29)},
     {"", "W5", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen30)},
     {"", "W5", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen31)},
-    {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen32)},
+    {"", "W5", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen32)},
     {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen33)},
     {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen34)},
     {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen35)},
     {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen36)},
-    {"", "W10", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen37)},
+    {"", "W6", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen37)},
     {"", "W10", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen38)},
     {"", "W10", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen39)},
-    {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen40)},
+    {"", "W10", TargetRuleVerdict::kDenied, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen40)},
     {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen41)},
     {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen42)},
     {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen43)},
-    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen44)},
+    {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen44)},
     {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen45)},
     {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen46)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen47)},
+    {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen48)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen49)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen50)},
+    {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen51)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen52)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen53)},
+    {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen54)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen55)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen56)},
 };
 
 inline constexpr TargetPlatformRuleset kTargetPlatformRulesets[] = {
-    {TargetPlatform::kWin32, 4u, "full_access_app", "observe_only", "36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45"},
+    {TargetPlatform::kWin32, 5u, "full_access_app", "observe_only", "792731f7c30e27b63d030e84cc633fcd5e08466ec9960c07d9f64ac24ab3c62e"},
 };
 
 [[nodiscard]] inline const std::optional<bool> *TargetBooleanFact(const TargetFacts &facts, TargetSignal signal) {

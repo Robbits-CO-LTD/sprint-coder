@@ -934,6 +934,75 @@
         "kind": "eligible",
         "maximumMode": "full_access_app"
       }
+    },
+    {
+      "name": "chrome.exe canonical supervised (ruleset 5)",
+      "set": {
+        "imageLeaf": "chrome.exe",
+        "originalFilename": "chrome.exe",
+        "imageRelativePath": "google\\chrome\\application\\chrome.exe",
+        "signerOrganization": "google llc"
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "supervised"
+      }
+    },
+    {
+      "name": "msedge.exe canonical supervised (ruleset 5)",
+      "set": {
+        "imageLeaf": "msedge.exe",
+        "originalFilename": "msedge.exe",
+        "imageRelativePath": "microsoft\\edge\\application\\msedge.exe",
+        "signerOrganization": "microsoft corporation",
+        "signerMicrosoftRoot": true
+      },
+      "expect": {
+        "kind": "upper",
+        "maximumMode": "supervised"
+      }
+    },
+    {
+      "name": "msedgewebview2.exe Microsoft root remains W-NR",
+      "set": {
+        "imageLeaf": "msedgewebview2.exe",
+        "originalFilename": "msedgewebview2.exe",
+        "imageRelativePath": "microsoft\\edgewebview\\application\\msedgewebview2.exe",
+        "signerMicrosoftRoot": true,
+        "signerOrganization": "microsoft corporation"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
+    },
+    {
+      "name": "microsoftedgeupdate.exe Microsoft root remains denied by installer rule",
+      "set": {
+        "imageLeaf": "microsoftedgeupdate.exe",
+        "originalFilename": "microsoftedgeupdate.exe",
+        "imageRelativePath": "microsoft\\edgeupdate\\microsoftedgeupdate.exe",
+        "signerMicrosoftRoot": true,
+        "signerOrganization": "microsoft corporation"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W6"
+      }
+    },
+    {
+      "name": "winword.exe Microsoft root remains W-NR",
+      "set": {
+        "imageLeaf": "winword.exe",
+        "originalFilename": "winword.exe",
+        "imageRelativePath": "microsoft office\\root\\office16\\winword.exe",
+        "signerMicrosoftRoot": true,
+        "signerOrganization": "microsoft corporation"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     }
   ]
 }

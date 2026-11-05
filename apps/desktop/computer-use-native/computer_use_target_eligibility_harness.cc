@@ -28,17 +28,17 @@ namespace {
 
 using namespace sprint_coder::computer_use;
 
-static_assert(WindowsV2FinalDeclaration(true, true, 4, 4, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(false, true, 4, 4, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, false, 4, 4, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 4, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 5, 4, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 5, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 2, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 4, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 3, false, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 3, true, false));
+static_assert(WindowsV2FinalDeclaration(true, true, 5, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(false, true, 5, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, false, 5, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 6, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 2, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 5, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 4, 2, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 4, 4, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 4, 3, false, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 4, 3, true, false));
 
 bool Check(bool condition, std::string_view code) {
   if (!condition) std::cerr << "target eligibility harness: FAIL " << code << '\n';
@@ -1144,11 +1144,27 @@ bool CheckEligibilityMode() {
   return true;
 }
 
+bool CheckBrowserInstall() {
+  const std::string pf = "C:\\Program Files", x86 = "C:\\Program Files (x86)";
+  const std::string chrome = "\\Google\\Chrome\\Application\\chrome.exe";
+  const std::string edge = "\\Microsoft\\Edge\\Application\\msedge.exe";
+  return Check(WindowsBrowserInstallAllowsControl(pf + chrome, pf, x86) &&
+               WindowsBrowserInstallAllowsControl(x86 + edge, pf, x86),
+               "chrome_edge_canonical_known_folders") &&
+      Check(!WindowsBrowserInstallAllowsControl(x86 + chrome, pf, x86) &&
+            !WindowsBrowserInstallAllowsControl(pf + edge, pf, x86) &&
+            !WindowsBrowserInstallAllowsControl(pf + chrome, "", x86) &&
+            !WindowsBrowserInstallAllowsControl(x86 + edge, pf, "") &&
+            !WindowsBrowserInstallAllowsControl(pf + "\\Other" + chrome, pf, x86) &&
+            !WindowsBrowserInstallAllowsControl(pf + "\\Google\\Chrome\\Application\\CHROME.EXE", "", x86),
+            "browser_wrong_or_unknown_known_folder_stays_closed");
+}
+
 } // namespace
 
 int main() {
   const std::vector<TargetGoldenCase> cases = TargetGoldenCases();
-  if (!CheckEligibilityMode() || !CheckGlob() || !CheckTables() || !CheckContentHash() ||
+  if (!CheckEligibilityMode() || !CheckBrowserInstall() || !CheckGlob() || !CheckTables() || !CheckContentHash() ||
       !CheckGolden(cases) || !CheckMonotonic(cases) || !CheckWindowsImagePlacement() ||
       !CheckPeSubsystem() || !CheckPeImageSummary() || !CheckManifestLevel() ||
       !CheckVersionInfo() ||

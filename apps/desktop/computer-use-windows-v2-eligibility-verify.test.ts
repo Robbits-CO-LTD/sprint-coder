@@ -36,7 +36,7 @@ if (artifactsPath !== undefined) {
 
 const eligibility = {
   mode: 'v2-denylist',
-  rulesetVersion: 4,
+  rulesetVersion: 5,
   classifierVersion: 4,
   lexiconVersion: 3,
   ticketRequired: true,
@@ -202,6 +202,9 @@ describe('Windows full V2 build eligibility verification preparation', () => {
     { interlockEnforced: false },
     { classifierVersion: 1 },
     { rulesetVersion: 0 },
+    { rulesetVersion: 4 },
+    { rulesetVersion: 6 },
+    { lexiconVersion: 2 },
   ])('rejects an unsafe expected declaration: %s', (override) => {
     expect(
       windowsV2EligibilityProblems({

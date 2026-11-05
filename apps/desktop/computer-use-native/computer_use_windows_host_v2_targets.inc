@@ -471,6 +471,15 @@ sprint_coder::computer_use::TargetVerdict
 WindowsV2VerdictFor(const WindowsTargetFactsMeasurement &measured) {
   using namespace sprint_coder::computer_use;
   TargetVerdict verdict = ClassifyTarget(measured.facts);
+  const auto leaf = target_eligibility_detail::AsciiLower(measured.facts.image_leaf.value_or(""));
+  if (verdict.kind == TargetVerdictKind::kUpper && verdict.maximum_mode == "supervised" &&
+      (leaf == "chrome.exe" || leaf == "msedge.exe") &&
+      !WindowsBrowserInstallAllowsControl(Utf8FromWide(measured.image_path),
+          CanonicalWindowsTargetDirectory(WindowsTargetKnownFolder(FOLDERID_ProgramFiles)),
+          CanonicalWindowsTargetDirectory(WindowsTargetKnownFolder(FOLDERID_ProgramFilesX86))))
+    verdict = leaf == "msedge.exe" && measured.facts.signer_microsoft_root == true
+        ? TargetVerdict{TargetVerdictKind::kDenied, {}}
+        : TargetVerdict{TargetVerdictKind::kUpper, "observe_only"};
   if (verdict.kind == TargetVerdictKind::kUpper &&
       (!kWindowsApprovalHandlersEnabled || windows_helper_generation == 0))
     verdict.maximum_mode = "observe_only";

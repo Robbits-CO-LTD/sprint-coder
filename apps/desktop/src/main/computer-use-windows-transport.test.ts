@@ -4291,7 +4291,7 @@ describe('Computer Use Windows helper transport', () => {
   });
 
   it('discards a discovery result when Stop quarantines input while the request is pending', async () => {
-    const value = { generation: 123, rulesetVersion: 4, truncated: false, targets: [] };
+    const value = { generation: 123, rulesetVersion: 5, truncated: false, targets: [] };
     const target = createTarget({ ...responders(), list_targets: () => ['probe_result', value] });
     const trusted = binding(target.addon);
     // Inject only the inactive discovery binding; existing session/Stop receipts use the real host.
@@ -4302,7 +4302,7 @@ describe('Computer Use Windows helper transport', () => {
           ...trusted.manifest,
           eligibility: {
             mode: 'v2-denylist',
-            rulesetVersion: 4,
+            rulesetVersion: 5,
             classifierVersion: 1,
             lexiconVersion: 1,
             ticketRequired: true,
@@ -4350,7 +4350,7 @@ describe('Computer Use Windows helper transport', () => {
               JSON.stringify(
                 failure === 'error'
                   ? { code: 'target_measurement_unavailable' }
-                  : { generation: 1, rulesetVersion: 4, truncated: false, targets: [] },
+                  : { generation: 1, rulesetVersion: 5, truncated: false, targets: [] },
               ),
             ),
             binary: failure === 'binary' ? Buffer.from([1]) : Buffer.alloc(0),

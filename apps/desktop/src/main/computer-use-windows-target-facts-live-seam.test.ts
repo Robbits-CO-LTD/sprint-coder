@@ -2321,7 +2321,7 @@ describe.skipIf(!onWindows || (build === null && !ci) || !existsSync(csc))(
               ? [
                   'FROM_BUILD=1',
                   'V2=1',
-                  'RULESET_VERSION=4',
+                  'RULESET_VERSION=5',
                   'CLASSIFIER_VERSION=4',
                   'LEXICON_VERSION=3',
                   'TICKET_REQUIRED=1',
@@ -2984,7 +2984,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           [
             'FROM_BUILD=1',
             'V2=1',
-            'RULESET_VERSION=4',
+            'RULESET_VERSION=5',
             'CLASSIFIER_VERSION=4',
             'LEXICON_VERSION=3',
             'TICKET_REQUIRED=1',

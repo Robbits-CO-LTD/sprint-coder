@@ -3693,6 +3693,22 @@ bool CheckWindowsOriginPolicy() {
     if (!Check(!MeasureWindowsApproval(input).eligible,
                "ordinary_origin_keeps_observe_only_closed")) return false;
     input.request = request;
+    const auto page_hosts = form.source.hosts;
+    for (int missing = 0; missing < 3; ++missing) {
+      const auto saved = form.Node(form.pane).signature;
+      if (missing == 0) form.Node(form.pane).signature.clear();
+      if (missing == 1) form.source.hosts.clear();
+      if (missing == 2) form.Node(form.pane).automation_id.clear();
+      capture = read();
+      const auto incomplete = WindowsShadowReader(form.source).ReadPage();
+      if (!Check(!incomplete.complete && !WindowsPageAllowsInput(page, incomplete) &&
+                 !WindowsShadowReader(form.source).RecheckPage(incomplete) &&
+                 (missing == 0 || cannot_approve_or_dispatch(MeasureWindowsApproval(input))),
+                 "supervised_browser_incomplete_page_never_inputs")) return false;
+      form.Node(form.pane).signature = saved;
+      form.source.hosts = page_hosts;
+      form.Node(form.pane).automation_id = "RootWebArea";
+    }
     for (const char *url : {"https://login.example", "about:blank", "http://localhost", ""}) {
       form.Node(form.pane).url = url;
       capture = read();

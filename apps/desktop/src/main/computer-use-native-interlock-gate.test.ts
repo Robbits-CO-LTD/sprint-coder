@@ -15,7 +15,7 @@ const V1: ComputerUseEligibility = {
 const V2: ComputerUseEligibility = {
   ...V1,
   mode: 'v2-denylist',
-  rulesetVersion: 4,
+  rulesetVersion: 5,
   classifierVersion: 4,
   lexiconVersion: 3,
   interlockEnforced: true,

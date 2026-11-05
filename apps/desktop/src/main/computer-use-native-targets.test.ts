@@ -90,8 +90,51 @@ function row(kind: 'eligible' | 'upper' = 'eligible'): Selectable {
 }
 
 function envelope(targets: ComputerWindowsNativeTargetList['targets'] = [row()]) {
-  return { generation: 4_503_599_627_370_000, rulesetVersion: 4, truncated: true, targets };
+  return { generation: 4_503_599_627_370_000, rulesetVersion: 5, truncated: true, targets };
 }
+
+it.each([
+  ['chrome.exe', 'C:\\Program Files', 'supervised'],
+  ['chrome.exe', 'C:\\Program Files (x86)', 'observe_only'],
+  ['msedge.exe', 'C:\\Program Files (x86)', 'supervised'],
+  ['msedge.exe', 'C:\\Program Files', 'observe_only'],
+] as const)('Main independently bounds %s in %s to %s', (leaf, root, expected) => {
+  vi.stubEnv('ProgramW6432', 'C:\\Program Files');
+  vi.stubEnv('ProgramFiles(x86)', 'C:\\Program Files (x86)');
+  const target = row('upper');
+  const relative =
+    leaf === 'chrome.exe'
+      ? 'google\\chrome\\application\\chrome.exe'
+      : 'microsoft\\edge\\application\\msedge.exe';
+  const path = `${root}\\${relative}`;
+  target.facts = {
+    ...facts,
+    imageLeaf: leaf,
+    originalFilename: leaf,
+    imageRelativePath: relative,
+    signerOrganization: leaf === 'chrome.exe' ? 'google llc' : 'microsoft corporation',
+    signerMicrosoftRoot: leaf === 'msedge.exe',
+  };
+  target.maximumMode = 'supervised';
+  target.appIdentityDigest = sha256(
+    `computer-win-identity-v1-signed\n${path.toLowerCase()}\n${target.identity.signerDigest}`,
+  );
+  target.identity = {
+    ...target.identity,
+    executablePath: path,
+    identityDigest: target.appIdentityDigest,
+    maximumMode: 'supervised',
+  };
+  expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
+    kind: 'selectable',
+    maximumMode: expected,
+  });
+  vi.stubEnv('ProgramW6432', undefined);
+  vi.stubEnv('ProgramFiles(x86)', undefined);
+  expect(parseWindowsComputerUseTargets(envelope([target]), true)?.targets[0]).toMatchObject({
+    maximumMode: 'observe_only',
+  });
+});
 
 function nativeFixture() {
   const listTargets = vi.fn<() => unknown>(() => envelope());
@@ -111,7 +154,7 @@ function nativeFixture() {
       // Injected inactive v2 binding. Production manifest admission stays closed until PR-6.
       eligibility: {
         mode: 'v2-denylist',
-        rulesetVersion: 4,
+        rulesetVersion: 5,
         classifierVersion: 1,
         lexiconVersion: 1,
         ticketRequired: true,
@@ -328,6 +371,7 @@ describe('Windows native targets independently classified in Main', () => {
   });
 
   it('rejects malformed wire, wrong versions, and a self-consistent but false native digest', () => {
+    expect(parseWindowsComputerUseTargets({ ...envelope(), rulesetVersion: 4 }, true)).toBeNull();
     expect(parseWindowsComputerUseTargets({ ...envelope(), rulesetVersion: 1 })).toBeNull();
     expect(parseWindowsComputerUseTargets({ ...envelope(), extra: true })).toBeNull();
     const native = row();
@@ -464,7 +508,7 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
   const eligibility = {
     mode: 'v2-denylist',
     classifierVersion: 4,
-    rulesetVersion: 4,
+    rulesetVersion: 5,
     lexiconVersion: 3,
     ticketRequired: true,
     interlockEnforced: true,
@@ -1127,11 +1171,11 @@ it('explorer_registration_stays_denied', async () => {
   expect(f.persistence.createComputerAppProfile).not.toHaveBeenCalled();
 });
 
-it.each([1, 4, 5])('temporary_capability_loss_does_not_delete_grant (%s)', async (version) => {
+it.each([1, 4, 5, 6])('temporary_capability_loss_does_not_delete_grant (%s)', async (version) => {
   const f = await explorerController();
   const saved = f.grant(version);
   f.replaceHelper();
-  expect(f.controller.appGrantFor(f.profile)?.id ?? null).toBe(version > 4 ? null : saved.id);
+  expect(f.controller.appGrantFor(f.profile)?.id ?? null).toBe(version > 5 ? null : saved.id);
   expect(f.controller.listAppGrants().grants).toEqual([saved]);
   expect(f.store.grants.get(saved.id)).toEqual(saved);
 });
@@ -1435,20 +1479,20 @@ it.each([false, true])(
   },
 );
 
-it.each([undefined, 1, 4, 5])(
+it.each([undefined, 1, 4, 5, 6])(
   'explorer_grant_versions_keep_their_existing_meaning (%s)',
   async (version) => {
     const f = await explorerController();
     const saved = version === undefined ? undefined : f.grant(version);
     const target = (await f.targets())[0]!;
     expect(target.mode).toBe('supervised');
-    expect(target.granted).toBe(version === 1 || version === 4);
+    expect(target.granted).toBe(version !== undefined && version <= 5);
     if (saved !== undefined) expect(f.store.grants.get(saved.id)).toEqual(saved);
-    if (version === undefined || version === 5) {
+    if (version === undefined || version === 6) {
       const pending = f.request(target);
       await f.approve(await f.card());
       expect(await pending).toEqual({ granted: true, reasonCode: null });
-      expect(f.controller.appGrantFor(f.profile)?.denyRulesetVersion).toBe(4);
+      expect(f.controller.appGrantFor(f.profile)?.denyRulesetVersion).toBe(5);
       expect(f.store.grants.size).toBe(1);
     }
   },

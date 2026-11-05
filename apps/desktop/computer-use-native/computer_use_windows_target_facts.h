@@ -273,6 +273,20 @@ PlaceWindowsImage(std::string_view canonical_path, std::span<const WindowsImageR
   return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
 }
 
+// The ruleset's program_files root combines both architectures. Narrow browser control
+// against the actual canonical known folders without changing placement for other apps.
+[[nodiscard]] inline bool WindowsBrowserInstallAllowsControl(
+    std::string_view path, std::string_view program_files, std::string_view program_files_x86) {
+  const auto leaf = target_eligibility_detail::AsciiLower(WindowsImageLeaf(path));
+  if (leaf != "chrome.exe" && leaf != "msedge.exe") return true;
+  const WindowsImageRootPrefix roots[] = {{"browser", std::string(leaf == "chrome.exe" ? program_files : program_files_x86)}};
+  const auto placement = PlaceWindowsImage(path, roots);
+  return placement.root == "browser" &&
+      target_eligibility_detail::AsciiLower(placement.relative_path) ==
+          (leaf == "chrome.exe" ? "google\\chrome\\application\\chrome.exe" :
+                                  "microsoft\\edge\\application\\msedge.exe");
+}
+
 // The fields of a PE image the facts and the kernel cross-check need. subsystem is "gui",
 // "console" or "other"; subsystem_code, machine and check_sum are the raw header values;
 // entry_rva is the optional header's AddressOfEntryPoint; has_cert_table is whether the security

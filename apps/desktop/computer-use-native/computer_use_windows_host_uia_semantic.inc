@@ -1262,6 +1262,16 @@ struct WindowsBackgroundPatternOperations {
 // END background pattern adapter
 #endif
 
+bool WindowsSemanticPageAllowsInput(const WindowsSemanticWork &work) {
+  if (!WindowsV1UiaMayCall()) return false;
+  if (!work.observed_page.web) return true;
+  // Read on the UIA worker before claiming input; Stop is rechecked by the claim afterwards.
+  if (RecheckWindowsBoundPageOnLane(work.window, work.pid, work.observed_page,
+                                  [] { return WindowsV1UiaMayCall(); })) return true;
+  windows_semantic_operation->page_invalidated.store(true, std::memory_order_release);
+  return false;
+}
+
 bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool *accepted,
                                            std::string *reason) {
   using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
@@ -1308,7 +1318,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
     if (ReadWindowsV1Pattern(target, UIA_InvokePatternId, &pattern)) {
       // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
       // (a rejection before any input), never a call that cannot be confirmed.
-      if (!WindowsV1UiaMayCall()) {
+      if (!WindowsSemanticPageAllowsInput(work)) {
         *reason = WindowsV1UiaEndedReason();
       } else {
         action_result = InvokeWindowsSemanticInput([&] { return pattern->Invoke(); }, accepted);
@@ -1333,7 +1343,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
       } else {
         // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
         // (a rejection before any input), never a call that cannot be confirmed.
-        if (!WindowsV1UiaMayCall()) {
+        if (!WindowsSemanticPageAllowsInput(work)) {
           *reason = WindowsV1UiaEndedReason();
         } else {
           action_result = InvokeWindowsSemanticInput([&] { return pattern->SetValue(value); }, accepted);
@@ -1362,7 +1372,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
     } else if (ReadWindowsV1Pattern(target, UIA_SelectionItemPatternId, &pattern)) {
       // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
       // (a rejection before any input), never a call that cannot be confirmed.
-      if (!WindowsV1UiaMayCall()) {
+      if (!WindowsSemanticPageAllowsInput(work)) {
         *reason = WindowsV1UiaEndedReason();
       } else {
         action_result = InvokeWindowsSemanticInput([&] { return pattern->Select(); }, accepted);
@@ -1391,7 +1401,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
       } else {
         // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
         // (a rejection before any input), never a call that cannot be confirmed.
-        if (!WindowsV1UiaMayCall()) {
+        if (!WindowsSemanticPageAllowsInput(work)) {
           *reason = WindowsV1UiaEndedReason();
         } else {
           action_result = InvokeWindowsSemanticInput([&] { return pattern->Toggle(); }, accepted);
@@ -1419,7 +1429,7 @@ bool DispatchWindowsSemanticActionOnWorker(const WindowsSemanticWork &work, bool
       } else {
         // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
         // (a rejection before any input), never a call that cannot be confirmed.
-        if (!WindowsV1UiaMayCall()) {
+        if (!WindowsSemanticPageAllowsInput(work)) {
           *reason = WindowsV1UiaEndedReason();
         } else {
           action_result = InvokeWindowsSemanticInput([&] { return wants_expand ? pattern->Expand() : pattern->Collapse(); }, accepted);

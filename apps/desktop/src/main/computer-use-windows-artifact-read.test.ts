@@ -44,14 +44,15 @@ describe('Windows read of one node value (#785 T15-4w): portable core', () => {
     const nativeList = /kBrowserExecutables\[\] = \{([\s\S]*?)\};/u.exec(header)![1]!;
     const nativeNames = [...nativeList.matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
     expect(nativeNames.sort()).toEqual([...mainNames].sort());
-    const browserLeaves = DENY_RULESET.rules.find(
-      (rule) =>
-        'maximumMode' in rule &&
-        rule.maximumMode === 'observe_only' &&
-        rule.when.some(
-          (condition) => condition.signal === 'imageLeaf' && condition.match === 'glob',
+    const browserLeaves = new Set(
+      DENY_RULESET.rules
+        .filter((rule) => 'maximumMode' in rule && rule.when.length === 1)
+        .flatMap((rule) =>
+          rule.when
+            .filter((condition) => condition.signal === 'imageLeaf')
+            .flatMap((condition) => condition.values),
         ),
-    )!.when[0]!.values!;
+    );
     expect([...browserLeaves].sort()).toEqual([...mainNames].sort());
   });
 
