@@ -13802,6 +13802,37 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
+    it('rolls back a grant replacement when create fails', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence, { maxMode: 'observe_only' });
+      const raw = new Database(fixture.path);
+      raw.exec(`CREATE TRIGGER fail_grant_insert BEFORE INSERT ON computer_app_grants
+        BEGIN SELECT RAISE(ABORT, 'injected create failure'); END`);
+      raw.close();
+      const input = {
+        identity,
+        displayName: 'Notes',
+        maxMode: 'supervised' as const,
+        denyRulesetVersion: 1,
+        providerEgress: null,
+      };
+      expect(() => fixture.persistence.createComputerAppGrant(input, grant)).toThrow(
+        'injected create failure',
+      );
+      expect(fixture.persistence.getComputerAppGrant(grant.id)).toEqual(grant);
+      const recovered = new Database(fixture.path);
+      recovered.exec('DROP TRIGGER fail_grant_insert');
+      recovered.close();
+      expect(() =>
+        fixture.persistence.createComputerAppGrant(input, { ...grant, revision: 99 }),
+      ).toThrow();
+      expect(fixture.persistence.getComputerAppGrant(grant.id)).toEqual(grant);
+      const upgraded = fixture.persistence.createComputerAppGrant(input, grant);
+      expect(fixture.persistence.listComputerAppGrants().grants).toEqual([upgraded]);
+      expect(upgraded.maxMode).toBe('supervised');
+      fixture.persistence.close();
+    });
+
     it('revokes a grant only against the revision the caller saw', () => {
       const fixture = createPersistence();
       const grant = createGrant(fixture.persistence);

@@ -5113,11 +5113,20 @@ export const computerAccessRequestReasonCodeSchema = z.enum([
 export type ComputerAccessRequestReasonCode = z.infer<typeof computerAccessRequestReasonCodeSchema>;
 
 export const computerRequestAccessOutputSchema = z
-  .object({ granted: z.boolean(), reasonCode: computerAccessRequestReasonCodeSchema.nullable() })
+  .object({
+    granted: z.boolean(),
+    reasonCode: computerAccessRequestReasonCodeSchema.nullable(),
+    upgradeReasonCode: computerAccessRequestReasonCodeSchema.optional(),
+  })
   .strict()
   .superRefine((output, context) => {
     if (output.granted !== (output.reasonCode === null))
       context.addIssue({ code: 'custom', message: 'A granted request carries no reason code' });
+    if (output.upgradeReasonCode !== undefined && !output.granted)
+      context.addIssue({
+        code: 'custom',
+        message: 'An upgrade fallback requires an existing grant',
+      });
   });
 export type ComputerRequestAccessOutput = z.infer<typeof computerRequestAccessOutputSchema>;
 

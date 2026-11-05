@@ -37,7 +37,10 @@ export function createComputerAppGrantFixtureStore(
       grantIdentityDigest: string,
     ): ComputerAppGrantRecord | null;
     getComputerAppGrant(grantId: string): ComputerAppGrantRecord;
-    createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord;
+    createComputerAppGrant(
+      input: ComputerAppGrantInput,
+      replace?: Readonly<{ id: string; revision: number }>,
+    ): ComputerAppGrantRecord;
     touchComputerAppGrantUsed(
       grantId: string,
       usedAt: string,
@@ -103,7 +106,9 @@ export function createComputerAppGrantFixtureStore(
             grant.platform === platform && grant.grantIdentityDigest === grantIdentityDigest,
         ) ?? null,
       getComputerAppGrant: mustGet,
-      createComputerAppGrant: (input) => {
+      createComputerAppGrant: (input, replace) => {
+        if (replace !== undefined && mustGet(replace.id).revision !== replace.revision)
+          throw new Error('Computer Use app grant revision changed');
         sequence += 1;
         const now = new Date().toISOString();
         const record: ComputerAppGrantRecord = Object.freeze({
@@ -132,7 +137,7 @@ export function createComputerAppGrantFixtureStore(
             grant.platform === record.platform &&
             grant.grantIdentityDigest === record.grantIdentityDigest,
         );
-        if (conflicting !== undefined) {
+        if (conflicting !== undefined && conflicting.id !== replace?.id) {
           if (
             computerAppGrantMismatch(
               computerAppGrantStoredIdentity(conflicting),
@@ -143,6 +148,7 @@ export function createComputerAppGrantFixtureStore(
             throw new Error('Computer Use app grant already exists');
           grants.delete(conflicting.id);
         }
+        if (replace !== undefined) grants.delete(replace.id);
         grants.set(record.id, record);
         return record;
       },

@@ -6167,7 +6167,10 @@ export interface PersistenceClient {
     grantIdentityDigest: string,
   ): ComputerAppGrantRecord | null;
   getComputerAppGrant(grantId: string): ComputerAppGrantRecord;
-  createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord;
+  createComputerAppGrant(
+    input: ComputerAppGrantInput,
+    replace?: Readonly<{ id: string; revision: number }>,
+  ): ComputerAppGrantRecord;
   touchComputerAppGrantUsed(
     grantId: string,
     usedAt: string,
@@ -16002,7 +16005,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return grant;
   }
 
-  createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord {
+  createComputerAppGrant(
+    input: ComputerAppGrantInput,
+    replace?: Readonly<{ id: string; revision: number }>,
+  ): ComputerAppGrantRecord {
+    return this.db.transaction(() => {
+      if (replace !== undefined) this.removeComputerAppGrant(replace.id, replace.revision);
+      return this.insertComputerAppGrant(input);
+    })();
+  }
+
+  private insertComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord {
     const now = new Date().toISOString();
     const record = validateComputerAppGrant({
       id: input.id ?? randomUUID(),

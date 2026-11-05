@@ -1118,6 +1118,138 @@ describe('computer_request_access', () => {
     },
   );
 
+  it.each([
+    'model_changed',
+    'pending',
+    'rate_limit',
+    'refetch',
+    'timeout',
+    'withdrawn',
+    'revoked',
+  ] as const)('browser_upgrade_retains_saved_grant (%s)', async (obstacle) => {
+    const profile = profileRecord(
+      'browser',
+      macIdentity({
+        platform: 'win32',
+        executablePath: 'C:\\Program Files\\Browser\\chrome.exe',
+        signerDigest: '9'.repeat(64),
+        packageFamilyName: null,
+        maximumMode: 'supervised',
+      }),
+    );
+    let missing = false;
+    const fixture = createFixture({
+      profiles: [profile],
+      providerBinding: {
+        connectionId: 'connection-1',
+        modelId: obstacle === 'model_changed' ? 'model-2' : 'model-1',
+      },
+      windowsFor: () =>
+        missing
+          ? []
+          : [
+              nativeWindow(profile, {
+                platform: 'win32',
+                maximumMode: 'supervised',
+                executableDigest: profile.executableDigest,
+              }),
+            ],
+    });
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const target = await listOne(fixture);
+    const request = (signal?: AbortSignal) =>
+      fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'upgrade' },
+        context,
+        signal,
+      );
+    if (obstacle === 'rate_limit')
+      fixture.controller['accessRequestsByTurn'].set(context.turnId, 2);
+    if (obstacle === 'refetch') missing = true;
+    const abort = new AbortController();
+    const outcome = request(abort.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    if (obstacle === 'model_changed') {
+      const card = fixture.pending();
+      expect(card.kind).toBe('app-grant');
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+        null,
+      );
+      expect(await outcome).toMatchObject({ granted: false });
+      const destination = request();
+      await vi.advanceTimersByTimeAsync(0);
+      const egress = fixture.pending();
+      expect(egress.kind).toBe('provider-egress');
+      expect(egress.verified.maxMode).toBe('observe_only');
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: egress.id, expectedRevision: egress.revision, decision: 'allow_always' },
+        intentFor(egress, 'allow_always'),
+      );
+      expect(await destination).toEqual({ granted: true, reasonCode: null });
+      expect(await request()).toEqual({ granted: true, reasonCode: null });
+      expect(fixture.controller.appGrantFor(profile)).toMatchObject({
+        maxMode: 'observe_only',
+        providerEgressModelId: 'model-2',
+      });
+      return;
+    }
+    if (obstacle === 'pending') {
+      expect(await request()).toEqual({
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode: 'access_request_pending',
+      });
+      abort.abort();
+    }
+    if (obstacle === 'timeout') await vi.advanceTimersByTimeAsync(120_000);
+    if (obstacle === 'withdrawn') abort.abort();
+    if (obstacle === 'revoked') {
+      const current = fixture.grants.get(grant.id)!;
+      await fixture.controller.revokeAppGrant(current.id, current.revision);
+      expect(await outcome).toMatchObject({ granted: false });
+      return;
+    }
+    expect(computerRequestAccessOutputSchema.parse(await outcome)).toEqual({
+      granted: true,
+      reasonCode: null,
+      upgradeReasonCode:
+        obstacle === 'rate_limit'
+          ? 'access_request_rate_limited'
+          : obstacle === 'refetch'
+            ? 'access_request_invalid_token'
+            : obstacle === 'timeout'
+              ? 'access_request_timed_out'
+              : 'access_request_withdrawn',
+    });
+    expect(fixture.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
+  });
+
+  it('keeps the saved grant when upgrade persistence throws', () => {
+    const fixture = createFixture();
+    const profile = fixture.profiles[0]!;
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+      maxMode: 'observe_only',
+      providerEgress: null,
+    });
+    vi.spyOn(
+      fixture.controller['deps'].persistence,
+      'createComputerAppGrant',
+    ).mockImplementationOnce(() => {
+      throw new Error('injected create failure');
+    });
+    expect(() =>
+      fixture.controller.createAppGrant(grantIdentityOf(profile), {
+        maxMode: 'supervised',
+        providerEgress: null,
+      }),
+    ).toThrow('injected create failure');
+    expect(fixture.grants.get(grant.id)).toEqual(grant);
+  });
+
   it('re-asks only the destination when the model changed (ADR v2 §6.4)', async () => {
     const fixture = createFixture({
       providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
