@@ -501,6 +501,8 @@ bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
       !SameWindowsFileIdentity(out->executable.identity.file_identity,
                                *out->measured.file_identity) ||
       !SameWindowsTargetName(out->executable.identity.path, out->measured.image_path) ||
+      !WindowsIlOnlyEnvironmentSafeForSnapshot(pid, out->measured.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(out->executable.file, out->measured.il_acl_snapshot) ||
       !ReadProcessStartIdentity(pid, &out->process_start))
     return false;
   out->package = WindowsTargetPackageIdentity(out->measured, out->executable.identity);
@@ -1139,6 +1141,7 @@ struct WindowsV2RejudgeResult {
 };
 
 struct WindowsV2RejudgeWork {
+  std::string il_acl_snapshot;
   std::uint32_t pid = 0;
   HWND window = nullptr;
   std::string maximum_mode;
@@ -1189,6 +1192,9 @@ WindowsV2RejudgeResult MeasureWindowsV2Rejudge(const WindowsV2RejudgeWork &work)
   WindowsFileIdentity held{};
   result.matches = judged.Selectable() && std::string(judged.verdict.maximum_mode) == work.maximum_mode &&
       judged.app_identity == work.app_identity && judged.process_start == work.process_start &&
+      judged.measured.il_acl_snapshot == work.il_acl_snapshot &&
+      WindowsIlOnlyEnvironmentSafeForSnapshot(work.pid, work.il_acl_snapshot) &&
+      WindowsIlOnlyAclUnchanged(work.executable.value, work.il_acl_snapshot) &&
       still_valid() && ReadWindowsFileIdentity(work.executable.value, &held) &&
       judged.measured.file_identity.has_value() &&
       SameWindowsFileIdentity(held, *judged.measured.file_identity);
@@ -1231,6 +1237,7 @@ bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> 
   work.pid = session.pid;
   work.window = session.window;
   work.maximum_mode = session.maximum_mode;
+  work.il_acl_snapshot = session.il_acl_snapshot;
   work.app_identity = session.app_identity;
   work.process_start = session.process_start;
   work.not_web_file = session.not_web_file;
@@ -1298,7 +1305,7 @@ bool AdmitWindowsV2StartInContext(
     std::string_view signer_digest, std::string *maximum_mode,
     std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file,
     const WindowsExplorerPrestartScope *explorer_scope = nullptr,
-    bool *explorer_admitted = nullptr) {
+    bool *explorer_admitted = nullptr, std::string *il_acl_snapshot = nullptr) {
   using namespace sprint_coder::computer_use;
   if constexpr (kWindowsExplorerException) {
     if (explorer_admitted) *explorer_admitted = false;
@@ -1320,6 +1327,9 @@ bool AdmitWindowsV2StartInContext(
       (signer_digest.empty() ? !judged.executable.identity.signer_digest.empty()
                              : judged.executable.identity.signer_digest != signer_digest))
     return false;
+  if (!WindowsIlOnlyEnvironmentSafeForSnapshot(pid, judged.measured.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(locked.file, judged.measured.il_acl_snapshot)) return false;
+  if (il_acl_snapshot) *il_acl_snapshot = judged.measured.il_acl_snapshot;
   *maximum_mode = std::string(judged.verdict.maximum_mode);
   if constexpr (kWindowsExplorerException) {
     if (explorer_admitted)
@@ -1461,6 +1471,7 @@ struct WindowsStartInput {
 };
 
 struct WindowsNewStartMeasurement {
+  std::string il_acl_snapshot;
   WindowsExecutableIdentity executable;
   std::string process_start;
   std::string window_identity;
@@ -1509,7 +1520,7 @@ bool MeasureWindowsNewStart(const WindowsStartInput &input,
             input.requested_generation, input.generation, /*new_session=*/true,
             input.app_identity, input.executable_digest, input.signer_digest,
             &measured->maximum_mode, &measured->not_web_file,
-            &explorer_scope, &explorer_admitted)) return false;
+            &explorer_scope, &explorer_admitted, &measured->il_acl_snapshot)) return false;
   } else if (!MeasureWindowsV1NewStartEligibility(input, *process_executable, measured)) {
     return false;
   }
@@ -1693,7 +1704,9 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     *reason = "session_identity_changed";
     return false;
   };
-  if (!identity_matches(input.window)) return false;
+  if (!identity_matches(input.window) ||
+      !WindowsIlOnlyEnvironmentSafeForSnapshot(input.pid, measured.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(process_executable.file, measured.il_acl_snapshot)) return false;
   const auto begin_focus = [&](HWND focus_window) {
     // Potentially blocking identity queries must not hold the reader's Stop lock.
     if (!CheckWindowsStartFocusIdentity(target_process.value, input.pid, input.expected_process_start,
@@ -1731,6 +1744,8 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
     *reason = "screen_geometry_unavailable";
     return false;
   }
+  if (!WindowsIlOnlyEnvironmentSafeForSnapshot(input.pid, measured.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(process_executable.file, measured.il_acl_snapshot)) return false;
   session.session_id = input.session_id;
   session.pid = input.pid;
   session.window = input.window;
@@ -1742,6 +1757,7 @@ bool StartWindowsNewSession(WindowsStartInput input, std::string *response, std:
   session.canonical_path = measured.executable.path;
   session.executable_volume_serial = measured.executable.file_identity.volume_serial;
   session.executable_file_id = measured.executable.file_identity.file_id;
+  session.il_acl_snapshot = measured.il_acl_snapshot;
   session.executable_digest = measured.executable.executable_digest;
   session.signer_digest = measured.executable.signer_digest;
   session.policy_language = measured.executable.policy_language;
@@ -1847,6 +1863,7 @@ struct WindowsExistingStartSnapshot {
   std::string signer_digest;
   std::string policy_language;
   sprint_coder::computer_use::InputSessionKind session_kind = sprint_coder::computer_use::InputSessionKind::kForeground;
+  std::string il_acl_snapshot;
 };
 
 WindowsExistingStartSnapshot WindowsExistingStartBinding(const WindowsSession &session) {
@@ -1854,12 +1871,13 @@ WindowsExistingStartSnapshot WindowsExistingStartBinding(const WindowsSession &s
           session.window_identity, session.process_start, session.maximum_mode,
           session.eligibility_basis, session.cancel_epoch,
           {session.executable_volume_serial, session.executable_file_id},
-          session.executable_digest, session.signer_digest, session.policy_language, session.input_session.kind};
+          session.executable_digest, session.signer_digest, session.policy_language, session.input_session.kind, session.il_acl_snapshot};
 }
 
 bool WindowsExistingStartBindingMatches(const WindowsExistingStartSnapshot &expected,
                                         const WindowsSession &session) {
-  return expected.session_id == session.session_id && expected.pid == session.pid &&
+  return expected.il_acl_snapshot == session.il_acl_snapshot &&
+      expected.session_id == session.session_id && expected.pid == session.pid &&
       expected.window == session.window && expected.app_identity == session.app_identity &&
       expected.window_identity == session.window_identity && expected.process_start == session.process_start &&
       expected.maximum_mode == session.maximum_mode && expected.eligibility_basis == session.eligibility_basis &&
@@ -1953,10 +1971,12 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsE
     // A completed context may be retained on a target refusal, just as in the synchronous admission.
     if (!input.context.has_value()) measured.context = context;
     std::optional<sprint_coder::computer_use::WindowsFileKey> not_web_file;
+    std::string il_acl_snapshot;
     if (!AdmitWindowsV2StartInContext(input.pid, input.window, current_executable, context,
             input.ruleset_version, 0, 0, /*new_session=*/false, input.app_identity,
             input.executable_digest, input.signer_digest, &measured.maximum_mode, &not_web_file,
-            &explorer_scope, &explorer_admitted)) return measured;
+            &explorer_scope, &explorer_admitted, &il_acl_snapshot) ||
+        il_acl_snapshot != work.expected.il_acl_snapshot) return measured;
   } else if (!MeasureWindowsV1ExistingStartEligibility(input, current_executable, &measured)) {
     return measured;
   }
@@ -1982,6 +2002,8 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartBefore(const WindowsE
       !ReadProcessStartIdentity(work.process.value, &source_start) || !still_valid() ||
       source_start != work.expected.process_start ||
       !ReadWindowsFileIdentity(work.executable.value, &held) || !still_valid() ||
+      !WindowsIlOnlyEnvironmentSafeForSnapshot(work.expected.pid, work.expected.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(work.executable.value, work.expected.il_acl_snapshot) ||
       !WindowsExecutableBindingMatches(work.expected.file_identity, work.expected.executable_digest,
           work.expected.signer_digest, work.expected.policy_language, held, current_executable.identity))
     return measured;
@@ -2008,6 +2030,8 @@ WindowsExistingStartMeasurement MeasureWindowsExistingStartAfter(const WindowsEx
       !ReadProcessStartIdentity(work.process.value, &source_start) || !still_valid() ||
       source_start != work.expected.process_start ||
       !ReadWindowsFileIdentity(work.executable.value, &held) || !still_valid() ||
+      !WindowsIlOnlyEnvironmentSafeForSnapshot(work.expected.pid, work.expected.il_acl_snapshot) ||
+      !WindowsIlOnlyAclUnchanged(work.executable.value, work.expected.il_acl_snapshot) ||
       !WindowsExecutableBindingMatches(work.expected.file_identity, work.expected.executable_digest,
           work.expected.signer_digest, work.expected.policy_language, held, work.before.executable))
     return measured;

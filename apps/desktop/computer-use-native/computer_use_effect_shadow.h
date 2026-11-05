@@ -26,7 +26,8 @@ namespace sprint_coder::computer_use {
 constexpr std::size_t kShadowLogCapacity = 64;
 // The walk reads one node more than the core accepts, so a chain that only just fits is told from
 // one that does not; a window ends the walk, and an application element (if reached) is dropped.
-constexpr std::size_t kShadowMaxCaptureNodes = kEffectMaxChainNodes + 1;
+constexpr std::size_t kShadowMaxCaptureNodesMacOS = kEffectMaxChainNodesMacOS + 1;
+constexpr std::size_t kShadowMaxCaptureNodesWindows = kEffectMaxChainNodesWindows + 1;
 
 // Why a fact set is not whole (bit set). Reported next to the decision, so a takeover can be told
 // from "the walk was cut short".
@@ -90,7 +91,7 @@ struct ShadowAxNode {
 
 struct ShadowAxCapture {
   bool target_found = false;
-  // [0] is the target, then its parents, at most kShadowMaxCaptureNodes. The walk stops after a
+  // [0] is the target, then its parents, at most kShadowMaxCaptureNodesMacOS. The walk stops after a
   // window, or at the application element.
   std::vector<ShadowAxNode> chain;
   // The walk arrived at a window or the application element. A parent that was missing or could
@@ -476,10 +477,13 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
 }
 
 [[nodiscard]] inline ShadowFacts BuildShadowFacts(const ShadowAxCapture &capture,
-                                                  const ShadowRequestInfo &request) {
+                                                  const ShadowRequestInfo &request,
+                                                  EffectPlatform platform = EffectPlatform::kMacOS) {
   using namespace shadow_detail;
   ShadowFacts result;
   EffectFacts &facts = result.facts;
+  facts.platform = platform;
+  const std::size_t max_chain_nodes = EffectMaxChainNodes(platform);
 
   ActionKind action = ActionKind::kClick;
   if (!ShadowActionForKind(request.kind, &action)) result.gaps |= kShadowGapUnsupportedAction;
@@ -505,8 +509,8 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
     nodes.pop_back();
   bool oversize = false;
   bool node_read_failed = false;
-  if (nodes.size() > kEffectMaxChainNodes) {
-    nodes.resize(kEffectMaxChainNodes);
+  if (nodes.size() > max_chain_nodes) {
+    nodes.resize(max_chain_nodes);
     chain_reached_root = false;
     result.gaps |= kShadowGapChainTruncated;
   } else if (!chain_reached_root && !nodes.empty()) {

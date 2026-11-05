@@ -81,7 +81,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     ])
       expect(sharedShadow, name).toContain(name);
     // The Windows header builds on BuildShadowFacts rather than a second copy of the rules.
-    expect(windowsShadow).toContain('BuildShadowFacts(ax, shared)');
+    expect(windowsShadow).toContain('BuildShadowFacts(ax, shared, EffectPlatform::kWindows)');
     // The byte bound is on UTF-8 and nothing is truncated: the check refuses, it never cuts.
     const check = bodyOf(sharedShadow, 'ShadowCheckText(std::string_view normalized_utf8,');
     expect(check).toContain('normalized_utf8.size() > maximum_bytes');

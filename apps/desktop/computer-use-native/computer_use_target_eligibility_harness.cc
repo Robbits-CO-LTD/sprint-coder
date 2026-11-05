@@ -28,17 +28,17 @@ namespace {
 
 using namespace sprint_coder::computer_use;
 
-static_assert(WindowsV2FinalDeclaration(true, true, 3, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(false, true, 3, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, false, 3, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 2, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 4, 2, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 1, 3, true, true));
+static_assert(WindowsV2FinalDeclaration(true, true, 4, 3, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(false, true, 4, 3, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, false, 4, 3, 3, true, true));
 static_assert(!WindowsV2FinalDeclaration(true, true, 3, 3, 3, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 2, 2, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 2, 4, true, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 2, 3, false, true));
-static_assert(!WindowsV2FinalDeclaration(true, true, 3, 2, 3, true, false));
+static_assert(!WindowsV2FinalDeclaration(true, true, 5, 3, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 2, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 4, 3, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 3, 2, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 3, 4, true, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 3, 3, false, true));
+static_assert(!WindowsV2FinalDeclaration(true, true, 4, 3, 3, true, false));
 
 bool Check(bool condition, std::string_view code) {
   if (!condition) std::cerr << "target eligibility harness: FAIL " << code << '\n';

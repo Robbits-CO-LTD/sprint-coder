@@ -56,7 +56,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
   it('WindowsV2FinalDeclaration requires the exact final build declaration', () => {
     const body = /constexpr bool WindowsV2FinalDeclaration\([^}]+\{([^}]+)\}/u.exec(header)?.[1];
     expect(body?.replace(/\s+/gu, ' ').trim()).toBe(
-      'return from_build && v2 && ruleset == 3 && classifier == 2 && lexicon == 3 && ticket_required && interlock_enforced;',
+      'return from_build && v2 && ruleset == 4 && classifier == 3 && lexicon == 3 && ticket_required && interlock_enforced;',
     );
     expect(header).toContain(
       '#if defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)\nconstexpr bool kNativeEligibilityFromBuild = true;\n#else\nconstexpr bool kNativeEligibilityFromBuild = false;\n#endif',
@@ -68,19 +68,19 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     const assertions = harness.match(/static_assert\(!?WindowsV2FinalDeclaration\([^;]+;/gu);
     expect(assertions).toHaveLength(11);
     expect(assertions).toContain(
-      'static_assert(WindowsV2FinalDeclaration(true, true, 3, 2, 3, true, true));',
+      'static_assert(WindowsV2FinalDeclaration(true, true, 4, 3, 3, true, true));',
     );
     for (const arguments_ of [
-      'false, true, 3, 2, 3, true, true',
-      'true, false, 3, 2, 3, true, true',
-      'true, true, 2, 2, 3, true, true',
-      'true, true, 4, 2, 3, true, true',
-      'true, true, 3, 1, 3, true, true',
+      'false, true, 4, 3, 3, true, true',
+      'true, false, 4, 3, 3, true, true',
       'true, true, 3, 3, 3, true, true',
-      'true, true, 3, 2, 2, true, true',
-      'true, true, 3, 2, 4, true, true',
-      'true, true, 3, 2, 3, false, true',
-      'true, true, 3, 2, 3, true, false',
+      'true, true, 5, 3, 3, true, true',
+      'true, true, 4, 2, 3, true, true',
+      'true, true, 4, 4, 3, true, true',
+      'true, true, 4, 3, 2, true, true',
+      'true, true, 4, 3, 4, true, true',
+      'true, true, 4, 3, 3, false, true',
+      'true, true, 4, 3, 3, true, false',
     ])
       expect(assertions).toContain(
         'static_assert(!WindowsV2FinalDeclaration(' + arguments_ + '));',
@@ -92,7 +92,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
           declaration.rulesetVersion,
           declaration.classifierVersion,
           declaration.lexiconVersion,
-        ]).toEqual(platform === 'win32' && mode === 'v2-denylist' ? [3, 2, 3] : [1, 1, 1]);
+        ]).toEqual(platform === 'win32' && mode === 'v2-denylist' ? [4, 3, 3] : [1, 1, 1]);
       }
     }
   });
@@ -123,7 +123,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       const test = `inline constexpr bool ${name} = true || ${qualified}kNativeEligibilityWindowsV2Final;`;
       const production = `inline constexpr bool ${name} = ${qualified}kNativeEligibilityWindowsV2Final && ${ready};`;
       expect(source.match(new RegExp(`constexpr bool ${ready} =[^;]+;`, 'gu'))).toEqual([
-        `constexpr bool ${ready} = ${ready === 'kWindowsStoreNotepadNotWebReady'};`,
+        `constexpr bool ${ready} = ${ready !== 'kWindowsExplorerPreSendHookReady'};`,
       ]);
       const normalized = source.replace(/\s+/gu, ' ');
       expect(normalized).toContain(`${test} #else ${production} #endif`);

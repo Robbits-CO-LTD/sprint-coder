@@ -409,13 +409,13 @@ describe('Computer Use native host: approval path', () => {
   });
 
   it('refuses an ordinary preflight for a target Main judged high-impact, with no input', async () => {
-    // A session bound to route v2 expects classifier 2 in every receipt.
+    // A session bound to route v2 expects classifier 3 in every receipt.
     const ordinaryAtTwo = (input: Record<string, unknown>) => ({
       decision: 'ordinary',
       reasonCode: null,
       deniedResult: null,
       ticket,
-      classifierVersion: 2,
+      classifierVersion: 3,
       inputAttemptCount: 0,
       requestId: input['requestId'],
       sessionId: input['sessionId'],
@@ -475,7 +475,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
       ...extra,
     });
   const offerReceipt = (input: Record<string, unknown>) => ({
-    ...withClassifier(2, { receiptVersion: 2 })(input),
+    ...withClassifier(3, { receiptVersion: 2 })(input),
     decision: 'single_use_approval',
     ticket: null,
     approvalGeneration: 3,
@@ -502,8 +502,8 @@ describe('Computer Use native host: classifier route (C3)', () => {
     // Golden: the same receipt on an unbound session gives the same outcome.
     const unbound = await run({ attested: true }, undefined, withClassifier(1));
     expect(unbound.result).toEqual(ok.result);
-    // A receipt that claims classifier 2 is not what this route expects, even when well formed.
-    const wrong = await run({ attested: true }, 'v1', withClassifier(2));
+    // A receipt that claims classifier 3 is not what this route expects, even when well formed.
+    const wrong = await run({ attested: true }, 'v1', withClassifier(3));
     expect(wrong.result).toMatchObject(invalid);
     expect(wrong.built.calls['dispatch']).not.toHaveBeenCalled();
     // And a v2 approval offer never reaches a v1-route session.
@@ -512,8 +512,8 @@ describe('Computer Use native host: classifier route (C3)', () => {
     expect(offer.result).not.toHaveProperty('approvalOffer');
   });
 
-  it('expects classifier 2 on a v2 route only when the build attested classifier 2', async () => {
-    const ok = await run({ attested: true }, 'v2', withClassifier(2));
+  it('expects classifier 3 on a v2 route only when the build attested classifier 3', async () => {
+    const ok = await run({ attested: true }, 'v2', withClassifier(3));
     expect(ok.result).toMatchObject({ result: 'completed' });
     const offer = await run({ attested: true }, 'v2', offerReceipt);
     expect(offer.result).toMatchObject({ approvalOffer: { approvalGeneration: 3, display: null } });
@@ -524,7 +524,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
     // Without the attest the route falls back to v1: classifier 1 only.
     const unattested = await run({ attested: false }, 'v2', withClassifier(1));
     expect(unattested.result).toMatchObject({ result: 'completed' });
-    const unattestedV2 = await run({ attested: false }, 'v2', withClassifier(2));
+    const unattestedV2 = await run({ attested: false }, 'v2', withClassifier(3));
     expect(unattestedV2.result).toMatchObject(invalid);
     expect(unattestedV2.built.calls['dispatch']).not.toHaveBeenCalled();
   });
@@ -652,7 +652,7 @@ describe('Computer Use native host: classifier route (C3)', () => {
     expect(built.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
   });
 
-  it('refuses the approval calls to a session bound to a route that does not expect classifier 2', async () => {
+  it('refuses the approval calls to a session bound to a route that does not expect classifier 3', async () => {
     // Bound to v1: even with the path open, approvalApprove and dispatchApproved are refused here,
     // before the native is called; approvalDiscard (no input capability) is still allowed.
     const v1 = build({ attested: true });

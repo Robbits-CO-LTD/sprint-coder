@@ -33,7 +33,7 @@ export function windowsV2EligibilityProblems(input: {
   if (
     !expected.success ||
     expected.data.mode !== 'v2-denylist' ||
-    expected.data.classifierVersion !== 2 ||
+    expected.data.classifierVersion !== 3 ||
     !expected.data.ticketRequired ||
     expected.data.interlockEnforced !== true
   )

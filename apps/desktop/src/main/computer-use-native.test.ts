@@ -183,7 +183,7 @@ it('keeps the IL-only image anchor disabled until P5', () => {
   expect(source).toMatch(
     /inline constexpr bool kWindowsIlOnlyImageAnchor =\s*sprint_coder::computer_use::kNativeEligibilityWindowsV2Final &&\s*kWindowsIlOnlyImageAnchorReady;/u,
   );
-  expect(source).toContain('inline constexpr bool kWindowsIlOnlyImageAnchorReady = false;');
+  expect(source).toContain('inline constexpr bool kWindowsIlOnlyImageAnchorReady = true;');
   expect(source).toContain(
     '#if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1',
   );
@@ -192,6 +192,29 @@ it('keeps the IL-only image anchor disabled until P5', () => {
   );
   expect(source).toContain('if (!WindowsHeldImageIsIlOnly(bytes)) return std::nullopt;');
   expect(source).toContain('if constexpr (!kWindowsIlOnlyImageAnchor)');
+});
+
+it('retains the IL-only ACL baseline through start, resume, rejudge and every identity validation', () => {
+  const source = readWindowsHostSource();
+  expect(source).toContain('session.il_acl_snapshot = measured.il_acl_snapshot;');
+  expect(source).toContain('work.il_acl_snapshot = session.il_acl_snapshot;');
+  expect(source).toContain('judged.measured.il_acl_snapshot == work.il_acl_snapshot');
+  expect(source).toContain('il_acl_snapshot != work.expected.il_acl_snapshot');
+  expect(source).toContain('again->il_acl_snapshot == held->il_acl_snapshot');
+  const begin = source.indexOf('WindowsSessionIdentityResult MeasureWindowsSessionIdentity(');
+  const end = source.indexOf('bool ReadWindowsSessionIdentityOnLane(', begin);
+  const validation = source.slice(begin, end);
+  expect(
+    validation.indexOf(
+      'WindowsIlOnlyAclInputUnchanged(work.executable.value, work.il_acl_snapshot)',
+    ),
+  ).toBeLessThan(validation.indexOf('result.identity_matches = true;'));
+  expect(validation).toContain(
+    'WindowsIlOnlyEnvironmentSafeForSnapshot(work.pid, work.il_acl_snapshot)',
+  );
+  expect(validation).toContain(
+    'ReadWindowsFileIdentity(work.executable.value, &held_file_identity)',
+  );
 });
 
 it('limits the IL-only PE32 conversion to a verified native 64-bit process', () => {
@@ -215,7 +238,7 @@ it('restricts IL-only held facts to protected image roots before reading signatu
     'facts.running_image_matches = false;',
   );
   expect(heldFacts.slice(guard, heldFacts.indexOf('VerifyWindowsTargetSignature('))).toMatch(
-    /windows_directory[\s\S]*program_files[\s\S]*windows_apps/u,
+    /WindowsIlOnlyPlacementSafe\(facts.image_root, windows_apps_from_package_override\)/u,
   );
 });
 
@@ -2128,9 +2151,9 @@ describe('macOS native capture boundary', () => {
     );
     const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
     // Main's fixed approval classifier version is the one the native intent requires.
-    expect(header).toContain('binding.classifier_version == 2');
-    expect(NATIVE_APPROVAL_CLASSIFIER_VERSION).toBe(2);
-    expect(host).toContain('NATIVE_APPROVAL_CLASSIFIER_VERSION = 2;');
+    expect(header).toContain('binding.classifier_version == 3');
+    expect(NATIVE_APPROVAL_CLASSIFIER_VERSION).toBe(3);
+    expect(host).toContain('NATIVE_APPROVAL_CLASSIFIER_VERSION = 3;');
     // `effect` strings are the native enum minus kInvalid, in snake case.
     const enumBody = /enum class NativeApprovalEffect[^{]*\{([^}]*)\}/u.exec(header)?.[1] ?? '';
     const native = [...enumBody.matchAll(/\bk([A-Za-z]+)\b/gu)]
@@ -3415,8 +3438,8 @@ describe.each(['v1-allowlist', 'v2-denylist'] as const)(
       (scenario) => {
         const eligibility = {
           mode,
-          rulesetVersion: mode === 'v2-denylist' ? 3 : 1,
-          classifierVersion: mode === 'v2-denylist' ? 2 : 1,
+          rulesetVersion: mode === 'v2-denylist' ? 4 : 1,
+          classifierVersion: mode === 'v2-denylist' ? 3 : 1,
           lexiconVersion: mode === 'v2-denylist' ? 3 : 1,
           ticketRequired: true,
           interlockEnforced: mode === 'v2-denylist',

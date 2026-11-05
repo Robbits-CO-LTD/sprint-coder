@@ -1,3 +1,4 @@
+import { DENY_RULESET } from './computer-use-deny-ruleset.generated';
 import { readWindowsHostSource } from '../../../../computer-use-windows-host-source.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,6 +44,15 @@ describe('Windows read of one node value (#785 T15-4w): portable core', () => {
     const nativeList = /kBrowserExecutables\[\] = \{([\s\S]*?)\};/u.exec(header)![1]!;
     const nativeNames = [...nativeList.matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
     expect(nativeNames.sort()).toEqual([...mainNames].sort());
+    const browserLeaves = DENY_RULESET.rules.find(
+      (rule) =>
+        'maximumMode' in rule &&
+        rule.maximumMode === 'observe_only' &&
+        rule.when.some(
+          (condition) => condition.signal === 'imageLeaf' && condition.match === 'glob',
+        ),
+    )!.when[0]!.values!;
+    expect([...browserLeaves].sort()).toEqual([...mainNames].sort());
   });
 
   it('is portable and reads only', () => {

@@ -350,9 +350,15 @@ inline constexpr std::string_view kValues44[] = {"google llc", "mozilla corporat
 inline constexpr TargetCondition kWhen44[] = {
     {TargetSignal::kSignerOrganization, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues44)},
 };
-inline constexpr std::string_view kValues45[] = {"chrome.exe", "chromium.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "waterfox.exe", "librewolf.exe", "floorp.exe", "iexplore.exe", "arc.exe"};
+inline constexpr std::string_view kValues45[] = {"chrome.exe", "chromium.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe", "waterfox.exe", "librewolf.exe", "floorp.exe", "iexplore.exe", "arc.exe", "whale.exe", "zen.exe", "duckduckgo.exe"};
 inline constexpr TargetCondition kWhen45[] = {
     {TargetSignal::kImageLeaf, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues45)},
+};
+inline constexpr std::string_view kValues46[] = {"browser.exe"};
+inline constexpr std::string_view kValues47[] = {"yandex\\*", "*\\yandex\\*"};
+inline constexpr TargetCondition kWhen46[] = {
+    {TargetSignal::kImageLeaf, TargetMatch::kEquals, false, std::span<const std::string_view>(deny_ruleset_data::kValues46)},
+    {TargetSignal::kImageRelativePath, TargetMatch::kGlob, false, std::span<const std::string_view>(deny_ruleset_data::kValues47)},
 };
 
 } // namespace deny_ruleset_data
@@ -455,10 +461,11 @@ inline constexpr TargetRule kTargetRules[] = {
     {"supervised", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen43)},
     {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen44)},
     {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen45)},
+    {"observe_only", "C", TargetRuleVerdict::kUpper, 1u, std::span<const TargetCondition>(deny_ruleset_data::kWhen46)},
 };
 
 inline constexpr TargetPlatformRuleset kTargetPlatformRulesets[] = {
-    {TargetPlatform::kWin32, 3u, "full_access_app", "observe_only", "6f85a55b383159ec21579cfa6d7132e517016c8f91cf2d9dec81da963fdb6584"},
+    {TargetPlatform::kWin32, 4u, "full_access_app", "observe_only", "36f4709b9aade395bb90550161249c901da206fd5a4e87a6622712583de15b45"},
 };
 
 [[nodiscard]] inline const std::optional<bool> *TargetBooleanFact(const TargetFacts &facts, TargetSignal signal) {

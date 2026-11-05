@@ -41,7 +41,7 @@ const eligibility = (
   }) as ComputerUseEligibility;
 
 describe('the approval path predicate (C5-1)', () => {
-  it('opens for exactly one combination: macOS, exported, attested 2, a session bound to v2 under the v2 deny-list', () => {
+  it('opens for exactly one combination: macOS, exported, attested 3, a session bound to v2 under the v2 deny-list', () => {
     const platforms = ['darwin', 'win32', 'linux'];
     const versions = [0, 1, 2, 3];
     const modes: ComputerUseEligibilityMode[] = ['v1-allowlist', 'v2-denylist'];
@@ -55,7 +55,7 @@ describe('the approval path predicate (C5-1)', () => {
               const expected =
                 platform === 'darwin' &&
                 methodsExported &&
-                attestedClassifierVersion === 2 &&
+                attestedClassifierVersion === 3 &&
                 route === 'v2' &&
                 effectiveMode === 'v2-denylist';
               const actual = computerUseApprovalPathEnabled({
@@ -71,7 +71,7 @@ describe('the approval path predicate (C5-1)', () => {
               ).toBe(expected);
               if (actual) open += 1;
             }
-    // Only darwin, exported, attested 2, route v2 under the deny-list. A session with no binding
+    // Only darwin, exported, attested 3, route v2 under the deny-list. A session with no binding
     // (unbound) never opens, whatever else is true.
     expect(open).toBe(1);
     expect(COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION).toBe(NATIVE_APPROVAL_CLASSIFIER_VERSION);
@@ -83,22 +83,22 @@ describe('the approval path predicate (C5-1)', () => {
         computerUseApprovalPathEnabled({
           platform: 'darwin',
           methodsExported: true,
-          attestedClassifierVersion: 2,
+          attestedClassifierVersion: 3,
           effectiveMode,
           route: 'v1',
         }),
       ).toBe(false);
   });
 
-  it('attests classifier 2 only for a gate-open v2 build compiled for classifier 2', () => {
+  it('attests classifier 3 only for a gate-open v2 build compiled for classifier 3', () => {
     const cases: Array<[ComputerUseEligibility | null, boolean, boolean]> = [
       [null, true, false],
       [eligibility('v1-allowlist', 1), true, false],
       [eligibility('v1-allowlist', 2), true, false],
       [eligibility('v2-denylist', 1), true, false],
-      [eligibility('v2-denylist', 2), true, true],
-      [eligibility('v2-denylist', 2), false, false],
-      [eligibility('v2-denylist', 3), true, false],
+      [eligibility('v2-denylist', 3), true, true],
+      [eligibility('v2-denylist', 3), false, false],
+      [eligibility('v2-denylist', 4), true, false],
     ];
     for (const [compiled, gateOpen, expected] of cases)
       expect(
@@ -138,7 +138,7 @@ describe('the production wiring while every version is 1 (C5-1)', () => {
     ).toBe('v1-allowlist');
   });
 
-  // The production gate: with versions at 1, no build attests classifier 2.
+  // The production gate: with versions at 1, no build attests classifier 3.
   const buildsAtVersionOne: Array<[string, ComputerUseEligibility | null]> = [
     ['no compiled eligibility', null],
     ['v1 allow-list', eligibility('v1-allowlist', 1)],
@@ -171,8 +171,8 @@ describe('the production wiring while every version is 1 (C5-1)', () => {
     },
   );
 
-  it('a build compiled for classifier 2 attests it, binds v2 and opens the path only for that session', async () => {
-    const wiring = wiringFor(eligibility('v2-denylist', 2), true);
+  it('a build compiled for classifier 3 attests it, binds v2 and opens the path only for that session', async () => {
+    const wiring = wiringFor(eligibility('v2-denylist', 3), true);
     expect(wiring.classifierV2Attested(true)).toBe(true);
     const built = buildHost(true, wiring.effectiveEligibilityMode);
     const agent = await startSession(built.host, 'v2', 'session-agent');
@@ -225,7 +225,7 @@ describe('a session the host has no binding for gets no approval (C5-1, fail clo
 });
 
 // The tripwire: the versions the repository declares today. While they are 1, no build attests
-// classifier 2, no session is bound to route v2 for the native, and no approval path opens, for
+// classifier 3, no session is bound to route v2 for the native, and no approval path opens, for
 // every mode the table can describe. A change of those versions is C5-2; if it lands in another
 // change, this fails and says why.
 describe('the declared versions keep the approval path closed (C5-1 tripwire)', () => {

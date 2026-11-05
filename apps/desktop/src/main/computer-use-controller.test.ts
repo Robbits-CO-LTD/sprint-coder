@@ -3084,7 +3084,7 @@ describe('ComputerUseController', () => {
     it('passes mainHighImpact to the host so an ordinary preflight stops with no input', async () => {
       // The session is bound to route v2 on an attested host, so its receipts carry classifier 2.
       const host = createPreflightHost(
-        (request) => ({ ...ordinaryReceipt(request, 0), classifierVersion: 2 }),
+        (request) => ({ ...ordinaryReceipt(request, 0), classifierVersion: 3 }),
         undefined,
         { classifierV2Attested: true },
         'v2',
@@ -5591,7 +5591,7 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
-    it.each([0, NaN, 4])(
+    it.each([0, NaN, 5])(
       'unreadable_saved_version_is_retained_without_grant (%s)',
       async (version) => {
         const fixture = createFixture();
@@ -5606,7 +5606,7 @@ describe('ComputerUseController', () => {
       },
     );
 
-    it.each([4, NaN, 0, -1, 2.5])(
+    it.each([5, NaN, 0, -1, 2.5])(
       'reapproval_replaces_a_retained_unreadable_grant (%s)',
       async (version) => {
         const fixture = createFixture();
@@ -5615,14 +5615,14 @@ describe('ComputerUseController', () => {
         fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: version });
         // The newer build's row grants nothing here; approving again in this build replaces it.
         const replaced = fixture.controller.createAppGrant(identity, input);
-        expect(replaced.denyRulesetVersion).toBe(3);
+        expect(replaced.denyRulesetVersion).toBe(4);
         expect(fixture.grants.has(grant.id)).toBe(false);
         expect(fixture.controller.appGrantFor(windowsProfile())?.id).toBe(replaced.id);
         await fixture.controller.dispose();
       },
     );
 
-    it.each([null, 0, 4, NaN])(
+    it.each([null, 0, 5, NaN])(
       'unreadable_or_mismatched_pin_fails_closed (%s)',
       async (version) => {
         const fixture = createFixture();

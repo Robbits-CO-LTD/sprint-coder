@@ -455,14 +455,14 @@ private:
   }
 
   // The target and its parents up to the window the session is bound to, at most
-  // kShadowMaxCaptureNodes nodes. The walk reached the root only by arriving at that window: a
+  // kShadowMaxCaptureNodesWindows nodes. The walk reached the root only by arriving at that window: a
   // parent that is missing or could not be read, or the cap, leaves the chain cut short.
   void CaptureChain(Element target, bool have_root, Element root, ShadowUiaCapture *capture) {
     using namespace windows_shadow_reader_detail;
     chain_elements_.clear();
     const bool web_window = windows_shadow_detail::IsWebWindowClass(*capture);
     Element current = target;
-    for (std::size_t depth = 0; depth < kShadowMaxCaptureNodes; ++depth) {
+    for (std::size_t depth = 0; depth < kShadowMaxCaptureNodesWindows; ++depth) {
       chain_elements_.push_back(current);
       capture->chain.push_back(ReadNode(current));
       if (read_chain_identity_) {
@@ -571,7 +571,7 @@ private:
   void CapturePageOrigin(Element root, ShadowUiaCapture *capture) {
     using namespace windows_shadow_reader_detail;
     if (!capture->chain_reached_root || capture->read_failed ||
-        capture->chain.size() > kEffectMaxChainNodes || !capture->process_path_read ||
+        capture->chain.size() > kEffectMaxChainNodesWindows || !capture->process_path_read ||
         !capture->window_class_read || capture->window_class != "Chrome_WidgetWin_1" ||
         windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(capture->process_path)) !=
             "chrome.exe") return;

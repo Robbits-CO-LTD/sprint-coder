@@ -139,7 +139,9 @@ describe('Explorer W2 prestart source boundaries', () => {
       expect(body).toContain(
         'if constexpr (sprint_coder::computer_use::kWindowsExplorerException)',
       );
-      expect(body).toContain('&explorer_scope, &explorer_admitted)');
+      expect(body).toContain(
+        `&explorer_scope, &explorer_admitted, &${executable === 'process_executable->' ? 'measured->' : ''}il_acl_snapshot)`,
+      );
       expect(body).toContain(
         `(IsDisallowedTargetExecutable(${executable}identity.path) && !explorer_admitted)`,
       );

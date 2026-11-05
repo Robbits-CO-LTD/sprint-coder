@@ -52,7 +52,7 @@
 namespace {
 
 // Shared golden receipt: the TS wire test reads this exact value through its strict parser.
-inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":2,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
+inline constexpr auto kWindowsApprovalWireFixture = R"receipt({"decision":"single_use_approval","reasonCode":null,"deniedResult":null,"ticket":null,"classifierVersion":3,"inputAttemptCount":0,"requestId":"request-1","sessionId":"session-1","cancelEpoch":0,"observationRevision":1,"receiptVersion":3,"approvalGeneration":1,"remainingMs":60000,"effect":"supervised_action","display":{"effect":"supervised_action","operation":"click","targetLabel":"Example","extension":null,"externalApplication":"not_applicable","unsignedWarning":"none"}})receipt";
 
 using sprint_coder::computer_use::DecodeFrame;
 using sprint_coder::computer_use::EncodeFrame;
@@ -658,7 +658,7 @@ NativeApprovalIntentBinding ApprovalIntentBinding() {
   binding.approval_generation = 7;
   binding.observation_revision = 10;
   binding.ticket_generation = 12;
-  binding.classifier_version = 2;
+  binding.classifier_version = 3;
   binding.ruleset_version = 1;
   binding.lexicon_version = 1;
   binding.effect = NativeApprovalEffect::kFileManagerOpen;
@@ -926,7 +926,7 @@ NativeApprovalMeasurement FlowMeasured() {
   measured.eligible = true;
   measured.effect = NativeApprovalEffect::kFileManagerOpen;
   measured.authority_digest = std::string(64, 'c');
-  measured.classifier_version = 2;
+  measured.classifier_version = 3;
   measured.ruleset_version = 1;
   measured.lexicon_version = 1;
   return measured;
@@ -950,7 +950,7 @@ bool CheckNativeApprovalFlow() {
 
   // A production native never offers: nothing is pending, so every call fails closed and nothing
   // ever begins an intent on its own.
-  if (!Check(kNativeApprovalClassifierVersion == 2 && !flow.occupied(), "flow-constants"))
+  if (!Check(kNativeApprovalClassifierVersion == 3 && !flow.occupied(), "flow-constants"))
     return false;
   {
     const auto approve = flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved);
@@ -1420,7 +1420,7 @@ using sprint_coder::computer_use::EffectShadowLog;
 using sprint_coder::computer_use::BuildShadowFacts;
 using sprint_coder::computer_use::ShadowClassify;
 using sprint_coder::computer_use::kShadowLogCapacity;
-using sprint_coder::computer_use::kShadowMaxCaptureNodes;
+using sprint_coder::computer_use::kShadowMaxCaptureNodesMacOS;
 using sprint_coder::computer_use::kShadowGapTargetMissing;
 using sprint_coder::computer_use::kShadowGapOversize;
 using sprint_coder::computer_use::kShadowGapChainTruncated;
@@ -1430,7 +1430,7 @@ using sprint_coder::computer_use::kShadowGapLanguage;
 using sprint_coder::computer_use::kShadowGapOrigin;
 using sprint_coder::computer_use::kShadowGapUnsupportedAction;
 using sprint_coder::computer_use::kShadowGapRoleMissing;
-using sprint_coder::computer_use::kEffectMaxChainNodes;
+using sprint_coder::computer_use::kEffectMaxChainNodesMacOS;
 using sprint_coder::computer_use::kEffectMaxLabelBytes;
 using sprint_coder::computer_use::kEffectMaxNeighborLabels;
 
@@ -1552,21 +1552,21 @@ bool CheckEffectShadow() {
 
     ShadowAxCapture deep = ShadowBase();
     deep.chain.clear();
-    for (std::size_t index = 0; index < kShadowMaxCaptureNodes; ++index)
+    for (std::size_t index = 0; index < kShadowMaxCaptureNodesMacOS; ++index)
       deep.chain.push_back(ShadowNode(index == 0 ? "AXButton" : "AXGroup", index == 0 ? "Save" : ""));
     deep.chain_reached_root = false;
     const ShadowFacts capped = BuildShadowFacts(deep, ShadowRequest());
-    if (!Check(capped.facts.chain.size() == kEffectMaxChainNodes && !capped.facts.chain_complete,
+    if (!Check(capped.facts.chain.size() == kEffectMaxChainNodesMacOS && !capped.facts.chain_complete,
                "shadow-chain-capped")) return false;
     // A walk that ended at the window with an application node on top is whole, even at the cap.
     ShadowAxCapture exact = ShadowBase();
     exact.chain.clear();
-    for (std::size_t index = 0; index + 1 < kShadowMaxCaptureNodes; ++index)
+    for (std::size_t index = 0; index + 1 < kShadowMaxCaptureNodesMacOS; ++index)
       exact.chain.push_back(ShadowNode(index == 0 ? "AXButton" : "AXGroup", index == 0 ? "Save" : ""));
     exact.chain.push_back(ShadowNode("AXApplication"));
     exact.chain_reached_root = true;
     const ShadowFacts whole = BuildShadowFacts(exact, ShadowRequest());
-    if (!Check(whole.facts.chain.size() == kEffectMaxChainNodes && whole.facts.chain_complete, "shadow-chain-at-cap"))
+    if (!Check(whole.facts.chain.size() == kEffectMaxChainNodesMacOS && whole.facts.chain_complete, "shadow-chain-at-cap"))
       return false;
 
     ShadowAxCapture oversize = ShadowBase();
@@ -1870,18 +1870,18 @@ bool CheckEffectShadowBounds() {
     // Over the node count with the window last: the window would be cut, so the chain is cut short.
     ShadowAxCapture deep = ShadowBase();
     deep.chain.clear();
-    for (std::size_t index = 0; index + 1 < kShadowMaxCaptureNodes; ++index)
+    for (std::size_t index = 0; index + 1 < kShadowMaxCaptureNodesMacOS; ++index)
       deep.chain.push_back(ShadowNode(index == 0 ? "AXButton" : "AXGroup", index == 0 ? "Save" : ""));
     deep.chain.push_back(ShadowNode("AXWindow", "Notes"));
     deep.chain_reached_root = true;
     built = BuildShadowFacts(deep, ShadowRequest());
-    if (!Check(built.facts.chain.size() == kEffectMaxChainNodes && !built.facts.chain_complete &&
+    if (!Check(built.facts.chain.size() == kEffectMaxChainNodesMacOS && !built.facts.chain_complete &&
                    (built.gaps & kShadowGapChainTruncated) != 0,
                "shadow-ten-nodes-is-cut-short")) return false;
     // Nine nodes ending at the window is whole.
     deep.chain.erase(deep.chain.begin() + 1);
     built = BuildShadowFacts(deep, ShadowRequest());
-    if (!Check(built.facts.chain.size() == kEffectMaxChainNodes && built.facts.chain_complete && built.gaps == 0,
+    if (!Check(built.facts.chain.size() == kEffectMaxChainNodesMacOS && built.facts.chain_complete && built.gaps == 0,
                "shadow-nine-nodes-to-the-window-is-whole")) return false;
     // A role over the bound is dropped and is a gap.
     ShadowAxCapture long_role = ShadowBase();
@@ -2077,7 +2077,7 @@ using sprint_coder::computer_use::WindowsShadowScheduler;
 using sprint_coder::computer_use::WindowsShadowJob;
 using sprint_coder::computer_use::WindowsShadowEnvironment;
 using sprint_coder::computer_use::WindowsShadowLauncher;
-using sprint_coder::computer_use::kShadowMaxCaptureNodes;
+using sprint_coder::computer_use::kShadowMaxCaptureNodesMacOS;
 using sprint_coder::computer_use::kEffectMaxNeighborLabels;
 using sprint_coder::computer_use::ProcessShadowLog;
 using sprint_coder::computer_use::kShadowMaxAxCalls;
@@ -2125,6 +2125,55 @@ ShadowRequestInfo UiaRequest(std::string_view kind = "invoke") {
 }
 
 bool CheckWindowsShadowCore() {
+  // Windows page chains now fit through 16 nodes; macOS still stops at nine.
+  for (std::size_t depth = 9; depth <= 17; ++depth) {
+    for (const char *process : {"chrome.exe", "slack.exe"}) {
+      ShadowUiaCapture capture = UiaBase();
+      capture.window_class = "Chrome_WidgetWin_1";
+      capture.process_path = std::string("C:/Program Files/App/") + process;
+      capture.chain = {UiaNode("Button", "Save")};
+      while (capture.chain.size() + 2 < depth) capture.chain.push_back(UiaNode("Group"));
+      capture.chain.push_back(UiaNode("Document"));
+      capture.chain.push_back(UiaNode("Window"));
+      capture.document_url_read = true;
+      capture.document_url = "https://example.com/";
+      const auto built = BuildWindowsShadowFacts(capture, UiaRequest());
+      const bool complete = depth <= 16;
+      if (!Check(built.facts.chain_complete == complete &&
+                     ((built.gaps & kShadowGapChainTruncated) == 0) == complete &&
+                     WindowsShadowClassify(capture, UiaRequest(), true).kind ==
+                         (complete ? DecisionKind::kOrdinary : DecisionKind::kTakeover),
+                 "ruleset4-windows-page-chain-9-through-17")) return false;
+      // The classifier itself rejects an oversize chain, even if a caller marked it complete.
+      auto direct = built.facts;
+      direct.chain_complete = true;
+      direct.chain.resize(depth, NodeFacts{"Group", "", ""});
+      if (!Check(ClassifyEffect(direct, EffectRuleset{}).kind ==
+                     (complete ? DecisionKind::kOrdinary : DecisionKind::kTakeover),
+                 "ruleset4-classifier-windows-chain-bound")) return false;
+      if (depth >= 10 && depth <= 16) {
+        direct.platform = sprint_coder::computer_use::EffectPlatform::kMacOS;
+        if (!Check(ClassifyEffect(direct, EffectRuleset{}).kind == DecisionKind::kTakeover,
+                   "ruleset4-electron-was-takeover-at-nine")) return false;
+      }
+    }
+    ShadowAxCapture mac = ShadowBase();
+    mac.chain = {ShadowNode("AXButton", "Save")};
+    while (mac.chain.size() + 1 < depth) mac.chain.push_back(ShadowNode("AXGroup"));
+    mac.chain.push_back(ShadowNode("AXWindow"));
+    const auto built = BuildShadowFacts(mac, ShadowRequest());
+    if (!Check(built.facts.chain_complete == (depth <= 9) &&
+                   ShadowClassify(mac, ShadowRequest(), true).kind ==
+                       (depth <= 9 ? DecisionKind::kOrdinary : DecisionKind::kTakeover),
+               "ruleset4-macos-chain-still-nine")) return false;
+  }
+  for (const char *path : {"C:/Apps/Yandex/Application/browser.exe", "C:/Apps/YANDEX/browser.EXE"})
+    if (!Check(sprint_coder::computer_use::artifact_read_detail::IsBrowserExecutable(path),
+               "ruleset4-yandex-path-is-browser")) return false;
+  for (const char *path : {"C:/Apps/browser.exe", "C:/Apps/mybrowser.exe", "C:/Apps/myyandex/browser.exe"})
+    if (!Check(!sprint_coder::computer_use::artifact_read_detail::IsBrowserExecutable(path),
+               "ruleset4-unrelated-browser-name-is-not-browser")) return false;
+
   // A complete capture is a complete fact set and an ordinary decision.
   {
     const ShadowFacts built = BuildWindowsShadowFacts(UiaBase(), UiaRequest());
@@ -3597,15 +3646,29 @@ bool CheckWindowsShadowReader() {
     const ShadowUiaCapture secret = secure_reader.Capture("type", "");
     if (!Check(secret.chain[0].is_password, "winreader-password-flag-is-kept")) return false;
   }
+  // Exercise the actual UIA parent walk as well as the fact builder at both boundaries.
+  for (int depth = 10; depth <= 17; ++depth) {
+    FakeForm form;
+    int tip = form.pane;
+    for (int level = 0; level < depth - 2; ++level)
+      tip = form.source.Add(tip, "Group", "Save");
+    form.source.point = tip;
+    WindowsShadowReader reader(form.source);
+    const auto capture = reader.Capture("click", "");
+    const auto built = BuildWindowsShadowFacts(capture, UiaRequest("click"));
+    if (!Check(capture.chain.size() == static_cast<std::size_t>(depth) &&
+                   capture.chain_reached_root && built.facts.chain_complete == (depth <= 16),
+               "ruleset4-reader-chain-10-through-17")) return false;
+  }
   // A chain that does not arrive at the bound window is cut short; so is a parent that fails.
   {
     FakeForm form;
     int tip = form.pane;
-    for (int level = 0; level < 14; ++level) tip = form.source.Add(tip, "Group");
+    for (int level = 0; level < 20; ++level) tip = form.source.Add(tip, "Group");
     form.source.point = tip;
     WindowsShadowReader reader(form.source);
     const ShadowUiaCapture deep = reader.Capture("click", "");
-    if (!Check(deep.chain.size() == kShadowMaxCaptureNodes && !deep.chain_reached_root, "winreader-chain-cap"))
+    if (!Check(deep.chain.size() == sprint_coder::computer_use::kShadowMaxCaptureNodesWindows && !deep.chain_reached_root, "winreader-chain-cap"))
       return false;
     FakeForm failed;
     failed.Node(failed.pane).parent_result = ShadowReadResult::kFailed;
@@ -4278,7 +4341,7 @@ ApprovalMeasurementInput MeasureInput(const ShadowAxCapture &capture) {
   input.ruleset = EffectRuleset{};
   input.route = ClassifierRoute::kV2;
   input.source = HighImpactSource::kNativeFacts;
-  input.attested_classifier_version = 2;
+  input.attested_classifier_version = 3;
   input.target_frame = ApprovalTargetFrame{true, 30, 60, 100, 24};
   return input;
 }
@@ -4639,25 +4702,25 @@ bool CheckEffectMeasurement() {
     const EffectDecision confirm = ClassifyEffect(built.facts, EffectRuleset{});
     if (!Check(confirm.kind == DecisionKind::kApproval && confirm.approval_effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-fixture-is-a-confirmation")) return false;
-    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 2);
+    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 3);
     if (!Check(offered.offer && offered.refusal == IntentRefusal::kNone &&
                    offered.effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-offer-all-conditions")) return false;
-    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 2);
+    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 3);
     if (!Check(!v1.offer && v1.refusal == IntentRefusal::kRouteNotV2 && v1.effect == NativeApprovalEffect::kInvalid,
                "measure-offer-needs-route-v2")) return false;
     for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kMainProjection}) {
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source, 2);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source, 3);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotNativeFacts, "measure-offer-needs-native-facts"))
         return false;
     }
     EffectRuleset closed;
     closed.high_impact_confirmation = false;
-    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts, 2);
+    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts, 3);
     if (!Check(!disabled.offer && disabled.refusal == IntentRefusal::kNotEnabled, "measure-offer-needs-enabled-effect"))
       return false;
     // The build must attest the version the core has.
-    for (const std::uint32_t attested : {0u, 1u, 3u}) {
+    for (const std::uint32_t attested : {0u, 1u, 2u, 4u}) {
       const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, attested);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAttested, "measure-offer-needs-the-attested-version"))
         return false;
@@ -4667,11 +4730,11 @@ bool CheckEffectMeasurement() {
     supervised_decision.effect_class = EffectClass::kOrdinary;
     supervised_decision.approval_effect = NativeApprovalEffect::kSupervisedAction;
     for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kNativeFacts}) {
-      if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, source, 2).offer,
+      if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, source, 3).offer,
                  "measure-supervised-needs-no-high-impact-claim")) return false;
     }
     {
-      const auto projected = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, HighImpactSource::kMainProjection, 2);
+      const auto projected = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, HighImpactSource::kMainProjection, 3);
       if (!Check(!projected.offer && projected.refusal == IntentRefusal::kNotNativeFacts, "measure-projection-never-grants"))
         return false;
     }
@@ -4679,13 +4742,13 @@ bool CheckEffectMeasurement() {
     for (const DecisionKind kind : {DecisionKind::kOrdinary, DecisionKind::kBlocked, DecisionKind::kTakeover}) {
       EffectDecision other = confirm;
       other.kind = kind;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 2);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 3);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAnApproval, "measure-offer-needs-an-approval"))
         return false;
     }
     EffectDecision no_effect = confirm;
     no_effect.approval_effect = NativeApprovalEffect::kInvalid;
-    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts, 2).refusal ==
+    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts, 3).refusal ==
                    IntentRefusal::kNotAnApproval,
                "measure-offer-needs-an-effect")) return false;
     // A decision made by another version of the core is not trusted.
@@ -4694,7 +4757,7 @@ bool CheckEffectMeasurement() {
       if (field == 0) other.classifier_version += 1;
       if (field == 1) other.ruleset_version += 1;
       if (field == 2) other.lexicon_version += 1;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 2);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 3);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kVersionMismatch, "measure-offer-needs-current-versions"))
         return false;
     }
@@ -4718,7 +4781,7 @@ bool CheckEffectMeasurement() {
       EffectDecision download_open = confirm;
       download_open.effect_class = EffectClass::kE2DownloadOpen;
       download_open.approval_effect = NativeApprovalEffect::kDownloadOpen;
-      const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, 2);
+      const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, 3);
       if (!Check(!widened.offer && widened.refusal == IntentRefusal::kNotEnabled, "measure-ruleset-is-the-versions-own"))
         return false;
       // Any flag that is not the version's own refuses a confirmation too, whichever way it differs.
@@ -4728,19 +4791,19 @@ bool CheckEffectMeasurement() {
         if (flag == 1) other.file_manager_open = true;
         if (flag == 2) other.high_impact_confirmation = false;
         if (flag == 3) other.supervised_action = false;
-        if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, other, confirm, HighImpactSource::kNativeFacts, 2).offer,
+        if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, other, confirm, HighImpactSource::kNativeFacts, 3).offer,
                    "measure-every-ruleset-flag-is-compared")) return false;
       }
       EffectRuleset also_files;
       also_files.file_manager_open = true;
-      if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, 2).offer,
+      if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, 3).offer,
                  "measure-ruleset-widened-refuses-everything")) return false;
     }
     // The first release's rule set offers only the two approvals; E2 / E3 stay refused (decision 2-A).
     for (const NativeApprovalEffect effect : {NativeApprovalEffect::kDownloadOpen, NativeApprovalEffect::kFileManagerOpen}) {
       EffectDecision file = confirm;
       file.approval_effect = effect;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts, 2);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts, 3);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotEnabled, "measure-file-effects-stay-closed"))
         return false;
     }
@@ -4751,7 +4814,7 @@ bool CheckEffectMeasurement() {
     const ShadowAxCapture capture = MeasureCapture();
     const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(capture));
     if (!Check(measured.eligible && !measured.takeover && measured.effect == NativeApprovalEffect::kHighImpactConfirmation &&
-                   measured.authority_digest.size() == 64 && measured.classifier_version == 2 &&
+                   measured.authority_digest.size() == 64 && measured.classifier_version == 3 &&
                    measured.ruleset_version == 2 && measured.lexicon_version == 3,
                "measure-eligible")) return false;
     // The same capture measures the same.
@@ -5616,7 +5679,7 @@ bool CheckEffectClassifierCore() {
   using namespace sprint_coder::computer_use::effect_detail;
 
   // Candidate versions the enabling change will attest. The attested versions are still 1.
-  if (!Check(kEffectClassifierVersion == 2 && kEffectRulesetVersion == 2 &&
+  if (!Check(kEffectClassifierVersion == 3 && kEffectRulesetVersion == 2 &&
                  kEffectLexiconVersion == 3 && kNativePreflightClassifierVersion == 1,
              "effect-versions-not-yet-attested")) return false;
 
@@ -5643,7 +5706,7 @@ bool CheckEffectClassifierCore() {
       if (missing == 1) facts.chain_complete = false;
       if (missing == 2) facts.chain.clear();
       if (missing == 3) facts.surface = SurfaceKind::kUnknown;
-      if (missing == 4) facts.chain.resize(kEffectMaxChainNodes + 1, NodeFacts{"axgroup", "", "x"});
+      if (missing == 4) facts.chain.resize(kEffectMaxChainNodesMacOS + 1, NodeFacts{"axgroup", "", "x"});
       if (missing == 5) facts.chain[0].label = std::string(kEffectMaxLabelBytes + 1, 'a');
       if (missing == 6) facts.neighbor_labels.assign(kEffectMaxNeighborLabels + 1, "x");
       if (missing == 7) facts.extension = std::string(kEffectMaxLabelBytes + 1, 'a');
@@ -7832,7 +7895,7 @@ bool CheckWindowsApprovalCore() {
   input.target_frame = {true, 30, 60, 100, 24};
   input.strict = {true, 4242, true};
   input.route = ClassifierRoute::kV2;
-  input.attested_classifier_version = 2;
+  input.attested_classifier_version = 3;
   input.approval_gate = true;
   const auto measured = MeasureWindowsApproval(input);
   if (!Check(measured.eligible && measured.effect == NativeApprovalEffect::kSupervisedAction &&
@@ -7869,7 +7932,7 @@ bool CheckWindowsApprovalCore() {
   shared.identity = input.identity;
   shared.target_frame = input.target_frame;
   shared.route = input.route;
-  shared.attested_classifier_version = 2;
+  shared.attested_classifier_version = 3;
   if (!Check(MeasureApprovalFromFacts(shared, settled.facts).authority_digest == measured.authority_digest,
              "windows-document-settled-authority")) return false;
   input.approval_gate = false;
@@ -8192,7 +8255,7 @@ bool CheckNativeApprovalOffer() {
                  NativePreflightDecisionName(NativePreflightKind::kTakeover) == "takeover",
              "offer-decision-names")) return false;
   if (!Check(kNativePreflightClassifierVersion == 1 && kNativePreflightReceiptVersion == 2 &&
-                 kNativeApprovalOfferClassifierVersion == 2 && kNativeApprovalOfferMaxMs == 60'000u,
+                 kNativeApprovalOfferClassifierVersion == 3 && kNativeApprovalOfferMaxMs == 60'000u,
              "offer-constants")) return false;
 
   // The key sets: v1 is the original ten; v2 adds one; an offer adds three more. All distinct.
@@ -9545,7 +9608,7 @@ bool CheckStrictInterlock() {
     EffectFacts empty = readable;
     empty.chain.clear();
     EffectFacts long_chain = readable;
-    long_chain.chain.assign(kEffectMaxChainNodes + 1, NodeFacts{"Group", "", "x"});
+    long_chain.chain.assign(kEffectMaxChainNodesMacOS + 1, NodeFacts{"Group", "", "x"});
     if (!Check(!StrictTextReadable(empty).has_value() && !StrictTextReadable(long_chain).has_value() &&
                    StrictTextReadable(readable) == std::optional<bool>(true) &&
                    StrictTextReadable(unreadable) == std::optional<bool>(false),

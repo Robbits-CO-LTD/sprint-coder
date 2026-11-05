@@ -154,6 +154,7 @@ struct WindowsTargetFactsMeasurement {
   std::optional<std::uint32_t> parent_pid;
   std::wstring image_path;
   std::optional<WindowsFileIdentity> file_identity;
+  std::string il_acl_snapshot;
   WindowsTargetSignatureSource signature_source = WindowsTargetSignatureSource::kNone;
   std::string signer_thumbprint;
   std::optional<std::string> package_full_name;
@@ -283,6 +284,9 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
   add("downloads", WindowsTargetKnownFolder(FOLDERID_Downloads));
   return roots;
 }
+
+#include "computer_use_windows_il_acl.h"
+#include "computer_use_windows_il_environment.h"
 
 // Whether a handle's file is on a remote volume (an SMB share and such, which can report a local
 // file system name like "NTFS"). The decision is made from the held handle, so it holds through
@@ -578,6 +582,7 @@ std::optional<std::wstring> WindowsTargetMappedFileName(HANDLE process, LPVOID a
 // values are later matched against the held file's PE header, since the target can remap another
 // file at that address but cannot change what the kernel captured at creation.
 struct WindowsTargetKernelImage {
+  std::string il_acl_snapshot;
   std::wstring mapped_name;
   bool il_only_anchor = false;
   // The entry point as a file RVA (TransferAddress - the mapping's allocation base, both from the
@@ -596,13 +601,13 @@ struct WindowsTargetKernelImage {
   std::uint64_t stack_commit = 0;
 };
 
-// P5 enables this together with the eligibility/ruleset change. Early opt-in requires an explicit
+// ACL admission is mandatory in production and tests. Early opt-in requires an explicit
 // acceptance value of 1; the test switch is forbidden in production build inputs.
 #if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && (defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD) || defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE))
 #error IL-only image anchor test switch must not be used in production builds
 #endif
-// The final declaration alone does not enable the IL-only anchor.
-inline constexpr bool kWindowsIlOnlyImageAnchorReady = false;
+// Classifier 3 includes ACL-gated IL-only admission alongside ruleset 4.
+inline constexpr bool kWindowsIlOnlyImageAnchorReady = true;
 #if defined(SPRINT_CODER_TEST_IL_ONLY_IMAGE_ANCHOR) && SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD == 1
 inline constexpr bool kWindowsIlOnlyImageAnchor =
     true || sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;
@@ -826,8 +831,9 @@ WindowsTargetIlOnlyImageMapping(HANDLE process, LPVOID transfer, HANDLE held_fil
 }
 
 // TransferAddress can land in MEM_IMAGE even for IL-only executables. The disabled
-// gate must inspect the kernel-named file, not infer its CLR kind from address placement.
-bool WindowsTargetImageAllowsDisabledIlOnlyAnchor(HANDLE process, HANDLE held_file) {
+// and ACL gates inspect the kernel-named file, never infer CLR kind from address placement.
+bool WindowsTargetImageAllowsDisabledIlOnlyAnchor(HANDLE process, HANDLE held_file,
+                                                 std::string *acl_snapshot) {
   ScopedKernelHandle opened;
   if (held_file == nullptr) {
     std::vector<wchar_t> name(32'768, L'\0');
@@ -867,14 +873,21 @@ bool WindowsTargetImageAllowsDisabledIlOnlyAnchor(HANDLE process, HANDLE held_fi
   if (*clr_rva == 0) return true;
   // A present but unreadable CLR directory cannot establish that ILONLY is off.
   const auto flags = WindowsHeldImageClrFlags(bytes);
-  return flags && (*flags & 1) == 0;
+  if (!flags) return false;
+  if ((*flags & 1) == 0) return true;
+  if constexpr (!kWindowsIlOnlyImageAnchor) return false;
+  if (!WindowsIlOnlyEnvironmentSafe(process)) return false;
+  const auto acl = WindowsIlOnlyAclSnapshot(held_file);
+  if (!acl) return false;
+  *acl_snapshot = *acl;
+  return true;
 }
 
 std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process,
                                                                    HANDLE held_file = nullptr) {
-  if constexpr (!kWindowsIlOnlyImageAnchor) {
-    if (!WindowsTargetImageAllowsDisabledIlOnlyAnchor(process, held_file)) return std::nullopt;
-  }
+  std::string acl_snapshot;
+  if (!WindowsTargetImageAllowsDisabledIlOnlyAnchor(process, held_file, &acl_snapshot))
+    return std::nullopt;
   using NtQueryInformationProcessFn =
       LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   static const NtQueryInformationProcessFn query = []() {
@@ -912,12 +925,14 @@ std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE proc
   if (query(process, kProcessImageInformation, &image, sizeof(image), &returned) < 0 ||
       image.transfer_address == nullptr)
     return std::nullopt;
-  // Native entry points name their mapping directly. The alternative remains disabled until P5.
+  // Native entry points name their mapping directly; IL-only has already passed the ACL gate.
   MEMORY_BASIC_INFORMATION region{};
   if (VirtualQueryEx(process, image.transfer_address, &region, sizeof(region)) !=
           sizeof(region))
     return std::nullopt;
   WindowsTargetKernelImage info;
+  info.il_acl_snapshot = std::move(acl_snapshot);
+  info.il_only_anchor = !info.il_acl_snapshot.empty();
   if (region.Type != MEM_IMAGE) {
     if constexpr (!kWindowsIlOnlyImageAnchor) {
       return std::nullopt;
@@ -1015,6 +1030,7 @@ std::optional<std::wstring> WindowsTargetModuleListImageName(HANDLE process) {
 }
 
 struct WindowsTargetHeldImage {
+  std::string il_acl_snapshot;
   ScopedKernelHandle file;
   std::wstring canonical_path;
   WindowsFileIdentity identity;
@@ -1086,6 +1102,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   if (!kernel.has_value())
     return false;
   held->il_only_anchor = kernel->il_only_anchor;
+  held->il_acl_snapshot = kernel->il_acl_snapshot;
   const std::wstring global = L"\\\\?\\GLOBALROOT" + kernel->mapped_name;
   held->file.value =
       CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -1151,6 +1168,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
                  : std::nullopt,
       WindowsTargetCreationTime(process));
   held->matches = anchored && !header_disagrees && again.has_value() &&
+                  again->il_acl_snapshot == held->il_acl_snapshot &&
                   SameWindowsTargetName(again->mapped_name, kernel->mapped_name) &&
                   recorded_agrees && module_list_agrees && held->unchanged;
   return true;
@@ -1998,6 +2016,7 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
     reset->reset();
   measured.image_path.clear();
   measured.file_identity.reset();
+  measured.il_acl_snapshot.clear();
   measured.signature_source = WindowsTargetSignatureSource::kNone;
   measured.signer_thumbprint.clear();
   // The running-image anchor rests on QueryFullProcessImageNameW following a rename. The one-time
@@ -2011,6 +2030,7 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
       held.matches, held.remote, held.volume, context.rename_probe);
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
+  measured.il_acl_snapshot = held.il_acl_snapshot;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
   bool windows_apps_from_package_override = false;
   if (path.has_value()) {
@@ -2050,11 +2070,13 @@ void MeasureWindowsTargetHeldFacts(const WindowsTargetHeldImage &held,
   // windows_apps counts only from the fixed %ProgramFiles%WindowsApps prefix: a loose-registered or
   // external-location package's install root, which the override above also calls windows_apps,
   // can be a folder a standard user writes to.
+  if (held.il_only_anchor && (held.il_acl_snapshot.empty() ||
+      !WindowsIlOnlyAclUnchanged(held.file.value, held.il_acl_snapshot))) {
+    facts.running_image_matches = false;
+    return;
+  }
   if (held.il_only_anchor &&
-      facts.image_root != std::optional<std::string>("windows_directory") &&
-      facts.image_root != std::optional<std::string>("program_files") &&
-      (facts.image_root != std::optional<std::string>("windows_apps") ||
-       windows_apps_from_package_override)) {
+      !WindowsIlOnlyPlacementSafe(facts.image_root, windows_apps_from_package_override)) {
     facts.running_image_matches = false;
     return;
   }

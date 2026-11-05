@@ -67,7 +67,7 @@ enum class ShadowItemKind : std::uint8_t { kNone, kFile, kFolder };
 
 struct ShadowUiaCapture {
   bool target_found = false;
-  // [0] is the target, then its parents, at most kShadowMaxCaptureNodes. It ends at the top-level
+  // [0] is the target, then its parents, at most kShadowMaxCaptureNodesWindows. It ends at the top-level
   // window.
   std::vector<ShadowUiaNode> chain;
   // The walk arrived at the top-level window. A missing or unreadable parent, or the cap, leaves
@@ -357,7 +357,7 @@ namespace windows_shadow_detail {
 
   ShadowRequestInfo shared = request;
   shared.executable_path = {};
-  ShadowFacts result = BuildShadowFacts(ax, shared);
+  ShadowFacts result = BuildShadowFacts(ax, shared, EffectPlatform::kWindows);
   EffectFacts &facts = result.facts;
 
   // A file whose real name could not be read (nothing, or only a display name) is a file item with

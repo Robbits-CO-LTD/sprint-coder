@@ -54,7 +54,7 @@ function componentSource(): string {
   );
   shared = replaceOne(
     shared,
-    /AdmitWindowsV2StartInContext\([\s\S]*?&measured->not_web_file,\s*&explorer_scope, &explorer_admitted\)/gu,
+    /AdmitWindowsV2StartInContext\([\s\S]*?&measured->not_web_file,\s*&explorer_scope, &explorer_admitted, &measured->il_acl_snapshot\)/gu,
     'ComponentAdmit(input, measured, &explorer_scope, &explorer_admitted)',
   );
   const functions: Record<string, string> = {
@@ -210,8 +210,8 @@ componentMatrix('Windows shared new-start component matrix: %s', (variant) => {
           ? [
               'FROM_BUILD=1',
               'V2=1',
-              'RULESET_VERSION=3',
-              'CLASSIFIER_VERSION=2',
+              'RULESET_VERSION=4',
+              'CLASSIFIER_VERSION=3',
               'LEXICON_VERSION=3',
               'TICKET_REQUIRED=1',
               'INTERLOCK_ENFORCED=1',

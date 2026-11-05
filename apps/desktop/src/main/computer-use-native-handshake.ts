@@ -122,7 +122,7 @@ export function windowsApprovalEvidenceMatches(
       !declared.success ||
       attested === null ||
       pin.data.mode !== 'v2-denylist' ||
-      pin.data.classifierVersion !== 2 ||
+      pin.data.classifierVersion !== 3 ||
       !pin.data.ticketRequired ||
       pin.data.interlockEnforced !== true
     )

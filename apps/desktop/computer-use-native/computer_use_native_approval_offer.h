@@ -3,7 +3,7 @@
 // Classifier v2, C4-2c-1: the portable parts of an approval OFFER, the receipt a preflight returns
 // when it asks a person to approve one effect, and the binding the waiting intent is made of.
 // Nothing here calls the approval flow by itself, reads the system or touches a version: the
-// macOS preflight wires it in C4-2c-2, and only for a session on route v2 with classifier 2
+// macOS preflight wires it in C4-2c-2, and only for a session on route v2 with classifier 3
 // attested (never in production while the build attests 1).
 //
 //   * the receipt: the version-2 format, the fixed key sets (Main's parser requires exactly these),
@@ -29,7 +29,7 @@ namespace sprint_coder::computer_use {
 // it is version 1 and keeps its original shape.
 inline constexpr std::uint32_t kNativePreflightReceiptVersion = 2;
 // The classifier version an approval offer carries (the core's own).
-inline constexpr std::uint32_t kNativeApprovalOfferClassifierVersion = 2;
+inline constexpr std::uint32_t kNativeApprovalOfferClassifierVersion = 3;
 // An offer waits at most this long (the slot's own bound), in milliseconds.
 inline constexpr std::uint32_t kNativeApprovalOfferMaxMs =
     static_cast<std::uint32_t>(kNativeApprovalWaitMaxNs / 1'000'000ULL);

@@ -824,7 +824,7 @@ NativeApprovalMeasurement GoodMeasurement() {
   good.eligible = true;
   good.effect = NativeApprovalEffect::kHighImpactConfirmation;
   good.authority_digest = std::string(64, 'c');
-  good.classifier_version = 2;
+  good.classifier_version = 3;
   good.ruleset_version = 2;
   good.lexicon_version = 3;
   return good;
