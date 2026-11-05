@@ -8,6 +8,7 @@ import { windowsExplorerCompiledPinMatches } from './computer-use-explorer-prest
 import {
   classifyWindowsExplorerOperation,
   windowsExplorerItemInView,
+  sameWindowsPathAscii,
   type WindowsExplorerOperation,
 } from './computer-use-explorer-effect';
 import {
@@ -8036,7 +8037,7 @@ type WindowsExplorerExceptionInput = Readonly<{
 // point is Main's, the injected point is the helper's WindowsActionPoint, and time passes between
 // them. Before its first input API the native dispatch must re-check, with that same POINT, that the
 // window under it is inside the measured view of the verified explorer.exe and that the view is
-// still the same file-system folder.
+// still the same file-system folder AND item (PIDL digest, normalized path and kind).
 export async function windowsExplorerExceptionAllowed(
   input: WindowsExplorerExceptionInput,
 ): Promise<boolean> {
@@ -8055,7 +8056,7 @@ async function evaluateWindowsExplorerException(
     !point ||
     !Number.isSafeInteger(point.x) ||
     !Number.isSafeInteger(point.y) ||
-    classifyWindowsExplorerOperation(input.operation) !== 'ordinary'
+    (input.operation.verb !== 'select' && input.operation.verb !== 'open')
   )
     return false;
   const facts = await readCurrentWindowsExplorerFacts(
@@ -8073,7 +8074,10 @@ async function evaluateWindowsExplorerException(
     facts.shellView.kind === 'filesystem_folder' &&
     facts.pointOwnerMatches &&
     input.operation.item !== undefined &&
-    windowsExplorerItemInView(input.operation.item.path, facts.shellView.path) &&
+    sameWindowsPathAscii(input.operation.item.path, facts.item.path) &&
+    classifyWindowsExplorerOperation({ ...input.operation, item: facts.item }) === 'ordinary' &&
+    classifyWindowsExplorerOperation(input.operation) === 'ordinary' &&
+    windowsExplorerItemInView(facts.item.path, facts.shellView.path) &&
     /^[a-z]:\\[^:*?"<>|]+$/iu.test(facts.shellView.path) &&
     !facts.shellView.path.split('\\').some((part) => part === '.' || part === '..')
   );

@@ -484,6 +484,120 @@ int ExpectFolder(const std::wstring &path, Refusal expected, const char *what, i
   return 0;
 }
 
+int CheckMeasuredItems(HWND parent, const WindowsExplorerShellView &view,
+    const std::wstring &scratch, bool large, bool localized_collision = false) {
+  using sprint_coder::computer_use::windows_uia_source_detail::ComRef;
+  // Configure only this fixture's exclusive window so the test point is reproducible.
+  auto snapshot = ExplorerEntries();
+  bool configured = false;
+  if (!snapshot.valid) return Fail(66, "item_view_snapshot");
+  for (auto &entry : snapshot.entries) {
+    if (entry.window != parent || entry.path != NormalizeExplorerPath(scratch)) continue;
+    ComRef<IServiceProvider> provider;
+    ComRef<IShellBrowser> browser;
+    ComRef<IShellView> shell_view;
+    ComRef<IFolderView> folder_view;
+    if (configured || FAILED(entry.browser.Get()->QueryInterface(IID_PPV_ARGS(provider.Receive()))) ||
+        FAILED(provider.Get()->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(browser.Receive()))) ||
+        FAILED(browser.Get()->QueryActiveShellView(shell_view.Receive())) ||
+        FAILED(shell_view.Get()->QueryInterface(IID_PPV_ARGS(folder_view.Receive()))) ||
+        FAILED(folder_view.Get()->SetCurrentViewMode(FVM_ICON))) return Fail(66, "item_icon_mode");
+    configured = true;
+  }
+  if (!configured) return Fail(66, "item_icon_view_missing");
+  for (unsigned attempt = 0; attempt < 8; ++attempt) PumpExplorerMessages();
+    // Locate the fixture visually, then ask the real shell-view measurement at that physical point.
+    // No selection or input is injected by this case.
+    ComRef<IUIAutomation> automation;
+    ComRef<IUIAutomationElement> ui_view;
+    ComRef<IUIAutomationCondition> list_items;
+    ComRef<IUIAutomationElementArray> visible_items;
+    VARIANT control; VariantInit(&control); control.vt = VT_I4; control.lVal = UIA_ListItemControlTypeId;
+    using sprint_coder::computer_use::windows_uia_source_detail::CreateBoundedAutomation;
+    if (!CreateBoundedAutomation(150, 150, automation.Receive()) ||
+        FAILED(automation.Get()->ElementFromHandle(view.view, ui_view.Receive())) ||
+        FAILED(automation.Get()->CreatePropertyCondition(UIA_ControlTypePropertyId, control, list_items.Receive())) ||
+        FAILED(ui_view.Get()->FindAll(TreeScope_Descendants, list_items.Get(), visible_items.Receive())))
+      return Fail(66, "item_uia");
+    int item_count = 0;
+    if (FAILED(visible_items.Get()->get_Length(&item_count))) return Fail(66, "item_count");
+    bool folder_checked = false, file_checked = false, collision_checked = false;
+    unsigned localized_hits = 0;
+    for (int index = 0; index < item_count; ++index) {
+      ComRef<IUIAutomationElement> item;
+      sprint_coder::computer_use::windows_uia_source_detail::BstrHolder name;
+      RECT bounds{}; BOOL offscreen = TRUE;
+      if (FAILED(visible_items.Get()->GetElement(index, item.Receive())) ||
+          FAILED(item.Get()->get_CurrentName(name.Receive())) ||
+          FAILED(item.Get()->get_CurrentBoundingRectangle(&bounds)) ||
+          FAILED(item.Get()->get_CurrentIsOffscreen(&offscreen))) return Fail(66, "item_properties");
+      const bool is_folder = name.View() == L"AAA-MeasuredChild";
+      const bool is_file = name.View() == L"AAB-MeasuredFile.txt" || name.View() == L"AAB-MeasuredFile";
+      const bool is_collision = name.View() == L"AAC-setup" || name.View() == L"AAC-setup.exe";
+      if ((!is_folder && !is_file && !is_collision) || offscreen) continue;
+      const POINT point = Center(bounds);
+      const auto started = std::chrono::steady_clock::now();
+      const auto current = [&] { return std::chrono::steady_clock::now() - started <
+          std::chrono::milliseconds(800); };
+      const auto measured = ReadWindowsExplorerShellView(parent, current, &point);
+      if (is_folder) {
+        if (localized_collision) {
+          const std::string stage = windows_explorer_item_stage_for_test;
+          if (measured.item || !current() ||
+              (stage != "uia_name_uniqueness" && stage != "pidl_classification_and_sibling_scan")) {
+            std::cout << "ITEM_DIAGNOSTIC stage=" << stage << std::endl;
+            return Fail(66, "explorer_sibling_localized_collision_refused");
+          }
+          folder_checked = true;
+          ++localized_hits;
+          continue;
+        }
+        if (!measured.item || measured.item->kind != "folder" || measured.item->pidl_digest.size() != 64 ||
+            NormalizeExplorerPath(measured.item->path) != NormalizeExplorerPath(scratch + L"\\AAA-MeasuredChild"))
+        {
+          std::cout << "ITEM_DIAGNOSTIC present=" << measured.item.has_value()
+                    << " stage=" << windows_explorer_item_stage_for_test
+                    << " view=" << static_cast<int>(measured.refusal)
+                    << " folder=" << static_cast<int>(measured.folder_refusal);
+          if (measured.item) std::cout << " kind=" << measured.item->kind
+              << " path=" << Utf8FromWide(measured.item->path)
+              << " digest_length=" << measured.item->pidl_digest.size();
+          std::cout << std::endl;
+          return Fail(66, "explorer_item_is_measured_at_action_point");
+        }
+        if (!current()) return Fail(66, "explorer_item_deadline");
+        if (large) std::cout << "OK explorer_large_folder_deadline elapsed_ms="
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - started).count() << std::endl;
+        folder_checked = true;
+      } else if (is_collision) {
+        if (measured.item || (std::string(windows_explorer_item_stage_for_test) != "file_refused" &&
+            std::string(windows_explorer_item_stage_for_test) != "attributes_or_display_collision" &&
+            std::string(windows_explorer_item_stage_for_test) != "uia_name_uniqueness"))
+          return Fail(66, "explorer_hidden_folder_executable_collision");
+        collision_checked = true;
+      } else {
+        if (measured.item || std::string(windows_explorer_item_stage_for_test) != "file_refused")
+          return Fail(66, "explorer_file_item_refused");
+        file_checked = true;
+      }
+    }
+    // The small fixture must exercise actual file classification, including hidden extensions.
+    if (localized_collision) {
+      std::cout << (localized_hits == 2 ? "OK explorer_sibling_localized_collision_refused\n"
+          : "NOT_RUN explorer_item_fixture_not_visible localized\n");
+      return 0;
+    }
+    std::cout << (folder_checked ? "OK explorer_item_is_measured_at_action_point\n"
+                                 : "NOT_RUN explorer_item_fixture_not_visible folder\n");
+    if (!large) std::cout << (file_checked ? "OK explorer_file_item_refused\n"
+                               : "NOT_RUN explorer_item_fixture_not_visible file\n");
+    if (!large) std::cout << (collision_checked ? "OK explorer_hidden_folder_executable_collision\n"
+        : "NOT_RUN explorer_item_fixture_not_visible collision\n");
+
+  return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
   if (argc == 3 && std::wstring(argv[1]) == L"child") {
     HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(_wcstoui64(argv[2], nullptr, 10)));
@@ -513,6 +627,25 @@ int wmain(int argc, wchar_t **argv) {
   const auto add_folder = [](const std::wstring &path) {
     return CreateDirectoryW(path.c_str(), nullptr) != FALSE;
   };
+  const std::wstring small_fixture = scratch + L"\\Small";
+  if (!add_folder(small_fixture) || !add_folder(small_fixture + L"\\AAA-MeasuredChild") ||
+      !WriteBytes(small_fixture + L"\\AAB-MeasuredFile.txt", "fixture") ||
+      !add_folder(small_fixture + L"\\AAC-setup") ||
+      !SetFileAttributesW((small_fixture + L"\\AAC-setup").c_str(), FILE_ATTRIBUTE_HIDDEN) ||
+      !WriteBytes(small_fixture + L"\\AAC-setup.exe", "inert fixture"))
+    return Fail(66, "item_fixture");
+  const std::wstring bulk = scratch + L"\\Bulk";
+  const std::wstring alias = scratch + L"\\Alias";
+  if (!add_folder(alias) || !add_folder(alias + L"\\AAA-MeasuredChild") ||
+      !add_folder(alias + L"\\Bar") ||
+      !WriteBytes(alias + L"\\Bar\\desktop.ini", "[.ShellClassInfo]\r\nLocalizedResourceName=AAA-MeasuredChild\r\n") ||
+      !SetFileAttributesW((alias + L"\\Bar").c_str(), FILE_ATTRIBUTE_READONLY))
+    return Fail(66, "localized_item_fixture");
+  if (!add_folder(bulk) || !add_folder(bulk + L"\\AAA-MeasuredChild")) return Fail(66, "bulk_fixture");
+  // Keep the file fixture visible in the small folder.
+  for (unsigned index = 0; index < 2000; ++index)
+    if (!add_folder(bulk + L"\\ZZZ-Bulk-" + std::to_wstring(index)))
+      return Fail(66, "large_folder_fixture");
   const std::wstring reparse = scratch + L"\\Reparse";
   if (CreateSymbolicLinkW(reparse.c_str(), scratch.c_str(),
           SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
@@ -579,6 +712,15 @@ int wmain(int argc, wchar_t **argv) {
     break;
   }
 
+  for (const auto &fixture : {small_fixture, bulk, alias}) {
+    OpenedExplorer opened;
+    HWND window = opened.Open(fixture);
+    if (!window) return opened.shared ? 0 : Fail(66, "item_fixture_open");
+    if (!opened.Exclusive()) { std::cout << "NOT_RUN explorer_tab_shared\n"; return 0; }
+    ShowWindow(window, SW_RESTORE); SetForegroundWindow(window); BringWindowToTop(window);
+    const auto view = ReadWindowsExplorerShellView(window, [] { return true; });
+    if (int failed = CheckMeasuredItems(window, view, fixture, fixture == bulk, fixture == alias)) return failed;
+  }
   {
     // The scratch folder: the full measurement through the production dispatch.
     OpenedExplorer opened;
