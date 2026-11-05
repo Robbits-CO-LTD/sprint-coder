@@ -1,5 +1,6 @@
 // Included at two seams of the complete host; only external measurements and input APIs are fake.
 #if defined(SPRINT_CODER_EXPLORER_DISPATCH_DEPENDENCIES)
+struct WindowsClickBasis;
 std::string m2_kind = "click";
 unsigned m2_inputs = 0, m2_measurements = 0, m2_rechecks = 0, m2_send_calls = 0;
 POINT m2_measured_point{}, m2_recheck_point{}, m2_cursor_point{};
@@ -22,6 +23,20 @@ bool m2_foreign_owner = false, m2_identity = true, m2_verified = true, m2_throw 
 bool m2_cancel_during_view = false, m2_stop_during_view = false;
 bool m2_change_after_cursor = false, m2_change_during_interlock = false;
 bool m2_binding_ok = true;
+std::string m2_boundary_change;
+bool m2_stale_hit = false;
+HWND M2Foreground() { return reinterpret_cast<HWND>(100); }
+bool M2Page(const WindowsSession &) { return true; }
+bool M2BoundaryRevalidate(const WindowsSession &, const RECT &, std::uint64_t) {
+  // Change AFTER the common target validation, before the final Explorer check.
+  if (m2_boundary_change == "item") m2_item_digest.assign(64, 'b');
+  if (m2_boundary_change == "runtime") m2_runtime_id = {1, 2, 4};
+  if (m2_boundary_change == "view") m2_view = reinterpret_cast<HWND>(202);
+  if (m2_boundary_change == "folder") m2_folder = L"C:\\changed";
+  if (m2_boundary_change == "epoch") cancellation_epoch.fetch_add(1);
+  if (m2_boundary_change == "stop") WindowsTargetListControl().stop_serial.fetch_add(1);
+  return true;
+}
 bool M2MayInput(const WindowsSession &) { return true; }
 bool M2Flight() { return false; }
 bool M2Binding(const WindowsSession &, const std::string &, std::string *kind, RECT *bounds,
@@ -52,6 +67,9 @@ UINT M2Send(const WindowsSession &, const RECT &, std::uint64_t, UINT count, LPI
   m2_sent.assign(events, events + count);
   if (m2_change_in_send) m2_folder = L"C:\\changed-folder";
   return m2_short_send ? count - 1 : count;
+}
+UINT M2RawSend(UINT count, LPINPUT events, int) {
+  return M2Send(WindowsSession{}, RECT{}, 0, count, events);
 }
 bool M2LastInput(DWORD *tick) { *tick = m2_last_input; return m2_tick_ok; }
 BOOL M2CursorPos(POINT *point) { *point = m2_cursor_point; return TRUE; }
@@ -86,7 +104,8 @@ WindowsExplorerShellView M2View() {
   if (m2_cancel_during_view) cancellation_epoch.fetch_add(1);
   if (m2_stop_during_view) WindowsTargetListControl().stop_serial.fetch_add(1);
   WindowsExplorerShellView result{m2_folder, m2_view};
-  if (m2_item_known) result.item = WindowsExplorerItem{m2_folder + L"\\child", m2_item_digest, "folder", m2_runtime_id};
+  if (m2_item_known) result.item = WindowsExplorerItem{m2_folder + L"\\child", m2_item_digest, "folder", m2_runtime_id,
+      m2_stale_hit ? 1 : MonotonicNowNs()};
   return result;
 }
 WindowsExplorerShellView M2ReadView(HWND, const std::function<bool()> &, const POINT *point) {
@@ -147,7 +166,9 @@ int wmain() {
   const std::string measure = R"({"sessionId":"synthetic-session","windowId":"100","cancelEpoch":2,"x":60,"y":70})";
   const std::string action = R"({"x":0.5,"y":0.5,"deltaX":1,"deltaY":1,"key":"Enter","text":"a"})";
   const auto reset = [&] {
-    m2_binding_ok = true;
+    m2_binding_ok = true; m2_boundary_change.clear(); m2_stale_hit = false;
+    session.approved_helper_generation = windows_helper_generation;
+    session.approved_stop_serial = 0;
     m2_item_digest.assign(64, 'a');
     m2_runtime_id = {1, 2, 3};
     m2_item_known = true;
@@ -263,7 +284,9 @@ int wmain() {
       m2_binding_ok = false;
       blocked("binding_refusal_emits_nothing");
       Require(!session.explorer_dispatch_evidence, "binding_refusal_consumes_evidence");
-      m2_binding_ok = true;
+      m2_binding_ok = true; m2_boundary_change.clear(); m2_stale_hit = false;
+    session.approved_helper_generation = windows_helper_generation;
+    session.approved_stop_serial = 0;
       blocked("binding_refusal_second_dispatch_emits_nothing");
       std::string result, reason; bool accepted = false;
       Require(!DispatchWindowsAction(before_refusal, action, &result, &reason, &accepted) &&
@@ -289,9 +312,9 @@ int wmain() {
           m2_item_recheck_point.x == 60 && m2_item_recheck_point.y == 70 &&
           m2_cursor_point.x == m2_measured_point.x && m2_cursor_point.y == m2_measured_point.y,
           "explorer_item_is_measured_at_action_point");
-      // 1 measurement (the evidence) + 2 re-measures in dispatch: before the cursor and right
+      // 1 measurement + 3 re-measures: before the cursor, before the common boundary and right
       // before the SendInput, both at the very POINT WindowsActionPoint produced.
-      Require(m2_measurements == 1 && m2_rechecks == 2 &&
+      Require(m2_measurements == 1 && m2_rechecks == 3 &&
           m2_recheck_point.x == 60 && m2_recheck_point.y == 70,
           "explorer_dispatch_rechecks_same_action_point");
       Require(m2_sent.size() == 3 && moves_to_action_point(), "explorer_move_and_input_atomic");
@@ -360,7 +383,7 @@ int wmain() {
       reset(); m2_kind = kind; m2_tick_ok = false;
       Require(!dispatch() && m2_send_calls == 0, "unreadable_last_input_emits_nothing");
       reset(); m2_kind = kind; m2_change_in_send = true;
-      Require(dispatch() && m2_send_calls == 1 && m2_rechecks == 2,
+      Require(dispatch() && m2_send_calls == 1 && m2_rechecks == 3,
           "state_change_after_send_sends_no_later_input");
       {
         reset(); m2_kind = kind; m2_short_send = true;
@@ -415,6 +438,79 @@ int wmain() {
     Require(dispatch() && m2_inputs == 3 && m2_send_calls == 2 && m2_rechecks == 0 &&
         plain_flags({MOUSEEVENTF_HWHEEL}), "non_explorer_scroll_unchanged");
   }
+  // Construct native evidence at the measurement seam. No test macro bypasses
+  // the production send guard, including in the gate-off executable.
+  const auto chunk_context = [&] {
+    session.canonical_path = L"C:\\Windows\\explorer.exe";
+    reset();
+    session.explorer_dispatch_evidence.reset();
+    auto evidence = std::make_shared<WindowsExplorerDispatchEvidence>();
+    evidence->window = session.window; evidence->view = m2_view;
+    evidence->point_owner = m2_owner; evidence->pid = session.pid;
+    evidence->point = POINT{60, 70}; evidence->folder = m2_folder;
+    evidence->epoch = 2; evidence->stop_serial = 0;
+    evidence->session_binding = session.input_api_attempts;
+    evidence->item = M2View().item;
+    m2_cursor_point = evidence->point;
+    const auto screen = ReadWindowsExplorerVirtualScreen();
+    return WindowsExplorerSendContext{evidence, evidence->point, m2_last_input,
+        RECT{screen.left, screen.top, screen.width, screen.height}};
+  };
+  const auto chunk = [&](const WindowsExplorerSendContext &context) {
+    const auto screen = ReadWindowsExplorerVirtualScreen();
+    INPUT events[3]{};
+    Require(WindowsExplorerAbsoluteMove(context.point, screen, &events[0]), "chunk_point");
+    events[1].type = events[2].type = INPUT_MOUSE;
+    events[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN; events[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    return SendInputForBoundTarget(session, RECT{}, 2, 3, events, &context);
+  };
+  for (const auto *change : {"item", "runtime", "view", "folder", "epoch", "stop"}) {
+    auto context = chunk_context();
+    m2_boundary_change = change;
+    Require(chunk(context) == 0 && m2_send_calls == 0,
+        "explorer_change_after_revalidation_blocks_send");
+    std::cout << "OK explorer_change_after_revalidation_blocks_send " << change << '\n';
+    context = chunk_context();
+    Require(chunk(context) == 3 && m2_send_calls == 1, "first_click_chunk");
+    m2_boundary_change = change;
+    Require(chunk(context) == 0 && m2_send_calls == 1,
+        "explorer_stop_between_click_chunks_blocks_next_send");
+    std::cout << "OK explorer_stop_between_click_chunks_blocks_next_send " << change << '\n';
+  }
+  auto context = chunk_context();
+  m2_change_in_send = true;
+  Require(chunk(context) == 3 && m2_send_calls == 1, "single_click_open_first_chunk");
+  Require(chunk(context) == 0 && m2_send_calls == 1, "single_click_navigation_blocks_second_click");
+  context = chunk_context();
+  m2_stale_hit = true;
+  Require(chunk(context) == 0 && m2_send_calls == 0, "explorer_stale_final_hit_blocks_send");
+  context = chunk_context(); m2_stop_during_view = true;
+  Require(chunk(context) == 0 && m2_send_calls == 0, "explorer_stop_during_final_measurement");
+  for (const auto *field : {"point", "window", "path", "kind", "binding"}) {
+    context = chunk_context();
+    auto changed = std::make_shared<WindowsExplorerDispatchEvidence>(*context.evidence);
+    const std::string name = field;
+    if (name == "point") ++changed->point.x;
+    if (name == "window") changed->window = reinterpret_cast<HWND>(999);
+    if (name == "path") changed->item->path += L"-replaced";
+    if (name == "kind") changed->item->kind = "document";
+    if (name == "binding") changed->session_binding.reset();
+    context.evidence = changed;
+    Require(chunk(context) == 0 && m2_send_calls == 0, "explorer_chunk_binding_mismatch");
+  }
+  context = chunk_context();
+  INPUT invalid[6]{};
+  Require(SendInputForBoundTarget(session, RECT{}, 2, 6, invalid, &context) == 0,
+      "explorer_batched_double_click_refused");
+  for (const auto flag : {MOUSEEVENTF_WHEEL, MOUSEEVENTF_RIGHTDOWN}) {
+    invalid[0].type = INPUT_MOUSE; invalid[0].mi.dwFlags = flag;
+    Require(SendInputForBoundTarget(session, RECT{}, 2, 3, invalid, &context) == 0 &&
+        m2_send_calls == 0, "explorer_non_left_click_chunk_refused");
+  }
+  context = chunk_context();
+  Require(SendInputForBoundTarget(session, RECT{}, 2, 0, nullptr) == 0 && m2_send_calls == 0,
+      "explorer_missing_chunk_evidence_blocks_send");
+  std::cout << "OK Explorer production pre-send guard\n";
   sessions.clear(); CoUninitialize();
   std::cout << "OK Explorer dispatch M2\n";
   return 0;

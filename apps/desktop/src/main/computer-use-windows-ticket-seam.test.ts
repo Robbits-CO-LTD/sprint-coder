@@ -138,7 +138,8 @@ function explorerStub(name: string, body: string): string {
     'u',
   ).exec(source)?.[0];
   if (!declaration) throw new Error('Explorer seam declaration changed: ' + name);
-  return declaration.slice(0, -1) + ' { ' + body + ' }';
+  // The original declaration is also included below; C++ permits its default only once.
+  return declaration.slice(0, -1).replace(/\s*=\s*nullptr/gu, '') + ' { ' + body + ' }';
 }
 const explorerSessionMember =
   /mutable std::shared_ptr<const WindowsExplorerDispatchEvidence> explorer_dispatch_evidence;/u.exec(

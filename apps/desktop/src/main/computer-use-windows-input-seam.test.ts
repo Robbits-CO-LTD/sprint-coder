@@ -97,6 +97,11 @@ bool RevalidateWindowsTarget(const WindowsSession&, const RECT&, std::uint64_t e
   if (++validations == stopAtValidation) ++stopEpoch;
   return valid && epoch == stopEpoch;
 }
+struct WindowsExplorerSendContext {};
+bool RecheckWindowsExplorerBeforeSend(const WindowsSession &, const WindowsExplorerSendContext *,
+    UINT, LPINPUT, std::uint64_t *) { return true; } // non-Explorer seam
+bool WindowsExplorerSendStillCurrent(const WindowsSession &, const WindowsExplorerSendContext &,
+    std::uint64_t) { return false; } // this seam must never supply Explorer evidence
 UINT SendInput(UINT count, LPINPUT events, unsigned size) {
   ++calls;
   eventCount = count;

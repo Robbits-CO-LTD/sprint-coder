@@ -62,7 +62,11 @@ struct WindowsExplorerItem {
   std::string pidl_digest;
   std::string kind = "folder";
   std::vector<int> runtime_id;
-  bool operator==(const WindowsExplorerItem &) const = default;
+  std::uint64_t checked_at_ns = 0;
+  bool operator==(const WindowsExplorerItem &other) const {
+    return path == other.path && pidl_digest == other.pidl_digest &&
+        kind == other.kind && runtime_id == other.runtime_id;
+  }
 };
 
 struct WindowsExplorerShellView {
@@ -371,7 +375,7 @@ thread_local const char *windows_explorer_item_stage_for_test = "not_started";
 // desktop.ini, and both cached UIA batches must contain exactly one matching ListItem name.
 // The parsed PIDL's SHGDN_NORMAL and parsing names must still equal the hit name. No full-view
 // COM membership walk is used (GetVisibleItem includes offscreen entries and exhausts 800ms).
-// The final UIA hit is rechecked; reordering between this check and SendInput belongs to P5b-B.
+// The final UIA hit and following filesystem reread must remain fresh at each SendInput.
 std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
     HWND window, HWND view, IFolderView *folder_view, PCIDLIST_ABSOLUTE parent,
     const std::wstring &folder_path, POINT point, const std::function<bool()> &current) {
@@ -450,6 +454,7 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
       !(candidate_attributes & FILE_ATTRIBUTE_DIRECTORY) ||
       (candidate_attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_REPARSE_POINT))) {
     windows_explorer_item_stage_for_test = "attributes_or_display_collision";
+#if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
     // This diagnostic proves the hidden-extension live case reached file classification.
     // It cannot authorize an item and does not feed the measured path.
     if (current()) {
@@ -470,6 +475,7 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
         }
       }
     }
+#endif
     return std::nullopt;
   }
   ComRef<IShellFolder> folder;
@@ -496,6 +502,8 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
   result->runtime_id = initial_id;
   // Shell calls above may pump messages. Refresh all bounds and names in one batch, LAST.
   windows_explorer_item_stage_for_test = "uia_final_hit";
+  // Age starts before the cache read, not after a potentially slow UIA tree walk.
+  result->checked_at_ns = MonotonicNowNs();
   ComRef<IUIAutomationElementArray> refreshed;
   if (!current() || FAILED(root.Get()->FindAllBuildCache(TreeScope_Descendants, condition.Get(),
       cache.Get(), refreshed.Receive())) || !current() ||
@@ -536,7 +544,10 @@ std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(
     at_point = std::move(parent_element);
   }
   if (!reached) return std::nullopt;
-  if (!current()) return std::nullopt;
+  // Repeat filesystem facts AFTER the final UIA hit. Include this I/O and COM
+  // cleanup in the 50ms freshness budget; earlier facts cannot authorize a send.
+  if (!current() || !WindowsExplorerUnambiguousFolder(result->path, current) ||
+      !WindowsExplorerPlainFolder(result->path) || !current()) return std::nullopt;
   windows_explorer_item_stage_for_test = "complete";
   return result;
 }
@@ -879,9 +890,11 @@ bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::stri
 }
 
 bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
-    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point) {
-  if constexpr (!sprint_coder::computer_use::kWindowsExplorerException) return false;
-  if (!evidence) return true;  // Begin already rejected an Explorer session without evidence.
+    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point,
+    std::uint64_t *checked_at) {
+  // Read-only guard is unconditional; enablement remains at Begin/measurement.
+  if (checked_at) *checked_at = 0;
+  if (!evidence) return sprint_coder::computer_use::kWindowsExplorerException; // Non-Explorer dispatch.
   try {
     if (!session.approval_route_v2 || session.approval_revoked ||
         evidence->session_binding.lock() != session.input_api_attempts ||
@@ -908,6 +921,7 @@ bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
       if (WindowsExplorerPointRefusal(session.window, shell_view.view, session.pid, point,
               &point_owner) != WindowsExplorerRefusal::kNone ||
           point_owner != evidence->point_owner || !current()) return false;
+      if (checked_at) *checked_at = shell_view.item->checked_at_ns;
     }
     return WindowsValidationStillCurrent(evidence->epoch, evidence->stop_serial);
   } catch (...) {
@@ -968,6 +982,61 @@ bool WindowsExplorerWheelReachesView(HWND window, HWND view) {
   return info.hwndFocus == view || IsChild(view, info.hwndFocus) != FALSE;
 }
 
+// Windows cannot atomically lock Explorer layout/filesystem state with input delivery.
+// Limit final UIA cache-read start -> pre-API check to 50ms, including filesystem reread,
+// COM cleanup and Stop-lock wait. Reordering/replacement after those reads,
+// thread preemption after the check and queued OS delivery remain races.
+// There is no upper bound on OS delivery latency; product gates remain closed.
+constexpr std::uint64_t kWindowsExplorerSendFreshnessNs = 50'000'000;
+
+bool WindowsExplorerSendStillCurrent(const WindowsSession &session,
+    const WindowsExplorerSendContext &context, std::uint64_t checked_at) {
+  const auto &evidence = context.evidence;
+  if (!evidence || !checked_at ||
+      !session.approval_route_v2 || session.approval_revoked ||
+      evidence->session_binding.lock() != session.input_api_attempts ||
+      evidence->window != session.window || session.active_window != session.window ||
+      GetForegroundWindow() != session.window || evidence->pid != session.pid ||
+      session.cancel_epoch != evidence->epoch ||
+      WindowsValidationFrameStopSerial() != evidence->stop_serial ||
+      !WindowsValidationStillCurrent(evidence->epoch, evidence->stop_serial)) return false;
+  POINT cursor{};
+  DWORD tick = 0;
+  const auto screen = ReadWindowsExplorerVirtualScreen();
+  const bool current = GetCursorPos(&cursor) && cursor.x == context.point.x && cursor.y == context.point.y &&
+      WindowsReadLastInputTick(&tick) && tick == context.input_tick &&
+      screen.left == context.screen.left && screen.top == context.screen.top &&
+      screen.width == context.screen.right && screen.height == context.screen.bottom;
+  const auto now = MonotonicNowNs();
+  return current && now >= checked_at && now - checked_at <= kWindowsExplorerSendFreshnessNs;
+}
+
+bool RecheckWindowsExplorerBeforeSend(const WindowsSession &session,
+    const WindowsExplorerSendContext *context, UINT count, LPINPUT events,
+    std::uint64_t *checked_at) {
+  const auto leaf = session.canonical_path.substr(session.canonical_path.find_last_of(L"\\/") + 1);
+  if (!context) return !WindowsExplorerAsciiEqual(leaf, L"explorer.exe") &&
+      !session.explorer_dispatch_evidence;
+  // Exactly one left click per chunk. Scroll, keyboard and batched double-clicks
+  // cannot bypass measurement between clicks, even through a future caller.
+  if (!context->evidence || count != 3 || !events ||
+      !context->evidence->item || context->evidence->item->kind != "folder") return false;
+  INPUT move{};
+  const WindowsExplorerVirtualScreen screen{context->screen.left, context->screen.top,
+      context->screen.right, context->screen.bottom};
+  if (!WindowsExplorerAbsoluteMove(context->point, screen, &move)) return false;
+  for (UINT index = 0; index < count; ++index) {
+    const auto &event = events[index];
+    const DWORD flags = index == 0 ? move.mi.dwFlags :
+        (index == 1 ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
+    if (event.type != INPUT_MOUSE || event.mi.dwFlags != flags || event.mi.mouseData != 0 ||
+        event.mi.time != 0 || event.mi.dwExtraInfo != 0 ||
+        event.mi.dx != (index == 0 ? move.mi.dx : 0) ||
+        event.mi.dy != (index == 0 ? move.mi.dy : 0)) return false;
+  }
+  return RecheckWindowsExplorerDispatch(session, context->evidence, context->point, checked_at);
+}
+
 // The last step before an Explorer click or scroll: re-measure at the action POINT, then, after that
 // re-measure, require the cursor to still be at the POINT and no input (a person's included) since
 // `input_tick`, and send [absolute move, actions...] as one array. Nothing is sent on any failure.
@@ -975,7 +1044,7 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
     const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, const RECT &bounds,
     std::uint64_t expected_epoch, POINT point, DWORD input_tick, bool wheel,
     const INPUT *actions, UINT action_count, bool *accepted) {
-  if (!evidence || action_count == 0 || action_count > 2) return false;
+  if (!evidence || wheel || action_count != 2) return false;
   INPUT events[3]{};
   // The desktop as it was when the re-measure started. The move itself is fixed only after the last
   // check: a monitor added or a resolution changed during the re-measure would map the same value to
@@ -993,7 +1062,9 @@ bool SendWindowsExplorerPointInput(const WindowsSession &session,
   if (!(sending_screen == measured_screen) ||
       !WindowsExplorerAbsoluteMove(point, sending_screen, &events[0])) return false;
   const UINT count = action_count + 1;
-  const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch, count, events);
+  const WindowsExplorerSendContext context{evidence, point, input_tick,
+      RECT{measured_screen.left, measured_screen.top, measured_screen.width, measured_screen.height}};
+  const UINT sent = SendInputForBoundTarget(session, bounds, expected_epoch, count, events, &context);
   if (sent > 0) *accepted = true;
   return sent == count;
 }

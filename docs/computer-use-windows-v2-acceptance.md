@@ -197,3 +197,32 @@ S8でV1を除去した後にS9bで最終文書整理を行う。
 
 参照：[agent-driven V2 ADR](../tasks/designs/adr-computer-use-agent-driven-v2.md) §9 S9a／S9b／S8、§10。
 本書はrelease公開やV1削除を許可するものではない。
+
+
+### Explorer P5b-B：送信直前の保護（gate は閉じたまま）
+
+`SendInputForBoundTarget` は対象・ブラウザの再検証後、各クリックの送信前に
+`RecheckWindowsExplorerBeforeSend` を呼ぶ。操作点、窓、view、親フォルダー、項目の
+PIDL digest・path・種類・RuntimeId、session binding、epoch、Stop を照合する。
+最後の UIA の当たり判定後には、属性・兄弟の列挙・PlainFolder を読み直す。
+Stop mutex の取得後にも epoch・Stop・foreground・cursor・入力時刻・画面配置を確認する。
+証拠なしの Explorer 入力、scroll、keyboard、複数クリックをまとめた配列は拒否する。
+各 chunk は絶対位置への移動と左ボタンの down/up 一組だけで、次のクリックも同じ検査を通す。
+
+最後の UIA キャッシュ読取開始から送信前の時刻確認までを **50 ms 以下**に制限する。
+ファイルシステムの再読、COM の解放、Stop lock の待機時間もこの範囲に含む。
+これは実測性能値ではなく、超過時に拒否する上限である。判定後の並べ替え、項目の差し替え、
+ファイル属性の変更、時刻確認後のスレッド停止、Windows の入力キュー処理とは原子的にできない。
+特に API 呼出しから Explorer が処理するまでの時間には上限を保証できず、残る race はゼロではない。
+
+single-click-to-open や先行クリックとの double click による遷移も、次の chunk では
+元の view・フォルダー・項目の一致を要求するため、変化後のクリックを継続しない。
+ただし送信成功は open の結果確認ではない。現 native click 契約には select/open の区別がなく、
+Explorer の遷移も非同期なので、この段では「測定項目へ遷移した」ことは未確認とする。
+C で操作の区別と結果観測を接続し、別フォルダーへの遷移時は Stop 相当で後続を止めること。
+送信直後に元のフォルダーが見えるだけでは open 成功とせず、再送もしない。
+
+`kWindowsExplorerPreSendHookReady`、製品の Explorer gate と版 5/4/3 は維持する。
+実画面での single/double click、50 ms の成立範囲と open 結果は後続の実機受入対象。
+live fixture の `NOT_RUN` は Vitest 側でも未完了（skip）として扱い、PASS と合算しない。
+拡張子表示時の衝突ケースは `stage` を記録し、単なる file 拒否を表示名衝突の検証と混同しない。

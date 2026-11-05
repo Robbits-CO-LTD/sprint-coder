@@ -8,6 +8,46 @@ const input = native('computer_use_windows_host_input.inc');
 const explorer = native('computer_use_windows_host_explorer.inc');
 const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
+describe('Explorer production pre-send boundary', () => {
+  it('rechecks after target/page validation and serializes each chunk with Stop', () => {
+    const send = input.slice(
+      input.indexOf('UINT SendInputForBoundTarget('),
+      input.indexOf('bool SetWindowsApprovedCursor('),
+    );
+    const ordered = [
+      'RevalidateWindowsTarget(',
+      'RecheckWindowsPageBeforeInput(',
+      'RecheckWindowsExplorerBeforeSend(',
+      'if (explorer) {',
+      'WindowsExplorerSendStillCurrent(',
+      'return SendInput(',
+    ].map((needle) => send.indexOf(needle));
+    expect(ordered.every((offset) => offset >= 0)).toBe(true);
+    expect(ordered).toEqual([...ordered].sort((a, b) => a - b));
+    expect(send.slice(send.indexOf('if (explorer) {'))).toContain('approval_lock.lock()');
+    expect(send).not.toContain('SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS');
+  });
+
+  it('rereads filesystem facts after the final UIA hit and bounds their age', () => {
+    const finalHit = explorer.slice(
+      explorer.indexOf('if (!reached) return std::nullopt;'),
+      explorer.indexOf('WindowsExplorerShellView ReadWindowsExplorerShellView('),
+    );
+    expect(finalHit).toContain('WindowsExplorerUnambiguousFolder(result->path, current)');
+    expect(finalHit).toContain('WindowsExplorerPlainFolder(result->path)');
+    expect(explorer).toContain("kWindowsExplorerSendFreshnessNs = 50'000'000");
+    expect(explorer).toContain('now - checked_at <= kWindowsExplorerSendFreshnessNs');
+    const diagnostics = explorer.slice(
+      explorer.indexOf('// This diagnostic proves'),
+      explorer.indexOf('ComRef<IShellFolder> folder;'),
+    );
+    expect(diagnostics).toContain('#endif');
+    expect(explorer.slice(0, explorer.indexOf('// This diagnostic proves')).trimEnd()).toMatch(
+      /#if defined\(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS\)$/u,
+    );
+  });
+});
+
 describe('Explorer point item measurement boundaries', () => {
   it('rejects zero, overlapping and duplicate-name matches instead of guessing', () => {
     const item = explorer.slice(
@@ -257,7 +297,7 @@ describe('Explorer dispatch M2 source boundaries', () => {
       'const WindowsExplorerVirtualScreen sending_screen = ReadWindowsExplorerVirtualScreen();',
       '!(sending_screen == measured_screen)',
       'WindowsExplorerAbsoluteMove(point, sending_screen, &events[0])',
-      'SendInputForBoundTarget(session, bounds, expected_epoch, count, events)',
+      'SendInputForBoundTarget(session, bounds, expected_epoch, count, events, &context)',
     ].map((needle) => guard.indexOf(needle));
     for (const at of order) expect(at).toBeGreaterThan(0);
     expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -373,13 +413,23 @@ describe('Explorer dispatch M2 source boundaries', () => {
     }
   });
 
-  it('gate_off_begin_and_recheck_fail_closed', () => {
-    for (const name of ['BeginWindowsExplorerDispatch', 'RecheckWindowsExplorerDispatch']) {
-      const body = explorer.slice(explorer.indexOf('bool ' + name + '('));
-      expect(body.slice(0, body.indexOf('return false;') + 'return false;'.length)).toMatch(
-        /\{\s*if constexpr \(!sprint_coder::computer_use::kWindowsExplorerException\) return false;$/u,
-      );
-    }
+  it('gate_off_begin_stays_closed_but_the_pre_send_guard_is_unconditional', () => {
+    const begin = explorer.slice(explorer.indexOf('bool BeginWindowsExplorerDispatch('));
+    expect(begin.slice(0, begin.indexOf('return false;') + 'return false;'.length)).toMatch(
+      /\{\s*if constexpr \(!sprint_coder::computer_use::kWindowsExplorerException\) return false;$/u,
+    );
+    const recheck = explorer.slice(
+      explorer.indexOf('bool RecheckWindowsExplorerDispatch('),
+      explorer.indexOf('bool WindowsExplorerNormalizeAxis('),
+    );
+    expect(recheck).not.toContain('if constexpr');
+    expect(recheck).not.toContain('SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS');
+    expect(recheck).toContain(
+      'if (!evidence) return sprint_coder::computer_use::kWindowsExplorerException;',
+    );
+    expect(native('computer_use_windows_target_facts.h')).toContain(
+      'kWindowsExplorerPreSendHookReady = false',
+    );
   });
 
   it('gate_off_pipe_cleanup_never_looks_up_a_session', () => {

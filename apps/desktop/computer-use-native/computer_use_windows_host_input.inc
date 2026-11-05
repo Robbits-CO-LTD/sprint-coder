@@ -111,14 +111,31 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
          current.right == expected.right && current.bottom == expected.bottom;
 }
 
+// Per-chunk evidence is borrowed only for this synchronous call; never session-global.
+struct WindowsExplorerSendContext {
+  std::shared_ptr<const WindowsExplorerDispatchEvidence> evidence;
+  POINT point{};
+  DWORD input_tick = 0;
+  RECT screen{};  // virtual desktop origin and extent, captured before measurement
+};
+bool RecheckWindowsExplorerBeforeSend(const WindowsSession &session,
+    const WindowsExplorerSendContext *context, UINT count, LPINPUT events,
+    std::uint64_t *checked_at);
+bool WindowsExplorerSendStillCurrent(const WindowsSession &session,
+    const WindowsExplorerSendContext &context, std::uint64_t checked_at);
+
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
-                             UINT count, LPINPUT events) {
+                             UINT count, LPINPUT events,
+                             const WindowsExplorerSendContext *explorer = nullptr) {
 #if SPRINT_CODER_BACKGROUND_EXECUTOR_TEST || SPRINT_CODER_WINDOWS_BACKGROUND_ACCEPTANCE
   if (session.input_session.kind == sprint_coder::computer_use::InputSessionKind::kBackground) return 0;
 #endif
   if (WindowsSemanticInputInFlight() || !RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
   if (!RecheckWindowsPageBeforeInput(session)) return 0;
+  std::uint64_t explorer_checked_at = 0;
+  if (!RecheckWindowsExplorerBeforeSend(session, explorer, count, events,
+                                        &explorer_checked_at)) return 0;
   std::unique_lock approval_lock(WindowsTargetListControl().stop_mutex, std::defer_lock);
   // Page reads may block in UIA: keep them outside Stop, then serialize the actual chunk.
   if (session.observed_page.web) {
@@ -134,6 +151,13 @@ UINT SendInputForBoundTarget(const WindowsSession &session,
         session.approved_helper_generation != windows_helper_generation ||
         !WindowsValidationStillCurrent(expected_epoch, session.approved_stop_serial) ||
         WindowsSemanticInputInFlightLocked()) return 0;
+  }
+  if (explorer) {
+    if (!approval_lock.owns_lock()) approval_lock.lock();
+    // UIA/COM and filesystem reads stay outside Stop. Lock waiting must not
+    // make an old hit usable again, so freshness is also checked under the lock.
+    if (!WindowsExplorerSendStillCurrent(session, *explorer, explorer_checked_at) ||
+        !WindowsRoundTripMayInput(session) || WindowsSemanticInputInFlightLocked()) return 0;
   }
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
   return SendInput(count, events, sizeof(INPUT));
@@ -555,7 +579,8 @@ std::shared_ptr<const WindowsExplorerDispatchEvidence> ConsumeWindowsExplorerDis
 bool BeginWindowsExplorerDispatch(const WindowsSession &session, const std::string &kind,
     std::shared_ptr<const WindowsExplorerDispatchEvidence> *evidence);
 bool RecheckWindowsExplorerDispatch(const WindowsSession &session,
-    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point);
+    const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, POINT point,
+    std::uint64_t *checked_at = nullptr);
 bool SendWindowsExplorerPointInput(const WindowsSession &session,
     const std::shared_ptr<const WindowsExplorerDispatchEvidence> &evidence, const RECT &bounds,
     std::uint64_t expected_epoch, POINT point, DWORD input_tick, bool wheel,

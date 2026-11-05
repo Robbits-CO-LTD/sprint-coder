@@ -27,7 +27,8 @@
 namespace sprint_coder::computer_use {
 
 // #988 P5b: the final declaration alone does not enable Explorer. It also needs a pre-send hook
-// after SendInputForBoundTarget revalidation, and this stays false until that hook exists.
+// after SendInputForBoundTarget revalidation. P5b-B supplies it, but this remains false
+// until P5b-E enables all prerequisites together.
 inline constexpr bool kWindowsExplorerPreSendHookReady = false;
 
 #if defined(SPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION)

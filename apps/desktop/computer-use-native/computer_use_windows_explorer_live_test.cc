@@ -575,6 +575,8 @@ int CheckMeasuredItems(HWND parent, const WindowsExplorerShellView &view,
             std::string(windows_explorer_item_stage_for_test) != "attributes_or_display_collision" &&
             std::string(windows_explorer_item_stage_for_test) != "uia_name_uniqueness"))
           return Fail(66, "explorer_hidden_folder_executable_collision");
+        std::cout << "INFO explorer_hidden_folder_executable_collision stage="
+                  << windows_explorer_item_stage_for_test << '\n';
         collision_checked = true;
       } else {
         if (measured.item || std::string(windows_explorer_item_stage_for_test) != "file_refused")
