@@ -143,11 +143,25 @@ struct WindowsIlImageAclCache {
   ULONGLONG started = GetTickCount64();
 };
 
+// External loaded images can be maintained by services. The executable tree
+// deliberately keeps the narrower WindowsIlAclTrustedSid policy.
+bool WindowsIlImageTrustedSid(PSID sid) {
+  if (!sid || !IsValidSid(sid)) return false;
+  const SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+  if (std::memcmp(GetSidIdentifierAuthority(sid), &nt, sizeof(nt)) == 0 &&
+      *GetSidSubAuthorityCount(sid) > 0) {
+    const DWORD first = *GetSidSubAuthority(sid, 0);
+    if (first == 80 || first == 99) return true;
+  }
+  return WindowsIlAclTrustedSid(sid);
+}
+
 bool WindowsIlImageAclInspect(const std::wstring &path, bool directory) {
   ScopedKernelHandle held(CreateFileW((L"\\\\?\\GLOBALROOT" + path).c_str(),
       READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
       nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  if (held.value == INVALID_HANDLE_VALUE || !WindowsIlAclObject(held.value, directory)) return false;
+  if (held.value == INVALID_HANDLE_VALUE ||
+      !WindowsIlAclObject(held.value, directory, WindowsIlImageTrustedSid)) return false;
   std::array<wchar_t, 32768> name{};
   const DWORD length = GetFinalPathNameByHandleW(held.value, name.data(),
       static_cast<DWORD>(name.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
@@ -180,8 +194,26 @@ bool WindowsIlImageAclSafe(const std::wstring &path, const std::wstring &root,
   return false;
 }
 
+struct WindowsIlImageMapping {
+  LPCVOID allocation;
+  std::wstring path;
+};
+
+template <typename Resolve>
+std::optional<std::wstring> WindowsIlImagePathForAllocation(
+    LPCVOID allocation, std::vector<WindowsIlImageMapping> &cache, Resolve resolve) {
+  const auto known = std::find_if(cache.begin(), cache.end(), [&](const auto &item) {
+    return item.allocation == allocation;
+  });
+  if (known != cache.end()) return known->path;
+  const auto path = resolve();
+  if (path) cache.push_back({allocation, *path});
+  return path;
+}
+
 bool WindowsIlOnlyImagesSafe(HANDLE process) {
   WindowsIlImageAclCache acl;
+  std::vector<WindowsIlImageMapping> mappings;
   std::array<wchar_t, 32768> image{}, windows{};
   DWORD size = static_cast<DWORD>(image.size());
   const UINT length = GetSystemWindowsDirectoryW(windows.data(), static_cast<UINT>(windows.size()));
@@ -223,12 +255,14 @@ bool WindowsIlOnlyImagesSafe(HANDLE process) {
       return found && GetLastError() == ERROR_INVALID_PARAMETER &&
           GetTickCount64() - acl.started < kWindowsIlImageAclMaxMs;
     if (region.Type == MEM_IMAGE) {
-      std::array<wchar_t, 32768> name{};
-      const DWORD count = GetMappedFileNameW(process, region.BaseAddress, name.data(), static_cast<DWORD>(name.size()));
-      if (!count || count >= name.size()) return false;
-      // Mapped names can retain 8.3 aliases. Normalize through a non-reparse handle,
-      // just like the roots, and fail closed if the mapped file cannot be resolved.
-      const auto path = WindowsIlImageRoot(L"\\\\?\\GLOBALROOT" + std::wstring(name.data(), count));
+      const auto path = WindowsIlImagePathForAllocation(region.AllocationBase, mappings,
+          [&]() -> std::optional<std::wstring> {
+        std::array<wchar_t, 32768> name{};
+        const DWORD count = GetMappedFileNameW(process, region.BaseAddress, name.data(), static_cast<DWORD>(name.size()));
+        if (!count || count >= name.size()) return std::nullopt;
+        // Normalize 8.3 aliases once per allocation, only within this recheck.
+        return WindowsIlImageRoot(L"\\\\?\\GLOBALROOT" + std::wstring(name.data(), count));
+      });
       if (!path) return false;
       const auto root = std::find_if(roots.begin(), roots.end(), [&](const auto &root) {
             return WindowsIlImageUnderRoot(*path, root);

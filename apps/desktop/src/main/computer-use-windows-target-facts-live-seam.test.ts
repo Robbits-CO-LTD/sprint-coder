@@ -1482,6 +1482,25 @@ void CheckIlTree() {
   Check(!WindowsIlAclTreeSnapshot(L"Z:\\missing-il-acl-fixture"), "tree_live_missing_directory_refused");
 }
 void CheckIlImageAcl() {
+  std::vector<WindowsIlImageMapping> mappings;
+  unsigned normalizations = 0;
+  const auto resolve = [&]() -> std::optional<std::wstring> {
+    ++normalizations; return L"normalized.dll";
+  };
+  int allocations[2]{};
+  for (unsigned region = 0; region < 20; ++region)
+    Check(WindowsIlImagePathForAllocation(&allocations[0], mappings, resolve) ==
+        std::optional<std::wstring>(L"normalized.dll"), "module_normalization_result_reused");
+  Check(normalizations == 1, "module_twenty_regions_normalized_once");
+  Check(WindowsIlImagePathForAllocation(&allocations[1], mappings, resolve).has_value() &&
+      normalizations == 2, "module_distinct_allocation_normalized");
+  std::vector<WindowsIlImageMapping> next;
+  Check(WindowsIlImagePathForAllocation(&allocations[0], next, resolve).has_value() &&
+      normalizations == 3, "module_next_recheck_normalizes_again");
+  std::vector<WindowsIlImageMapping> failed;
+  Check(!WindowsIlImagePathForAllocation(&allocations[0], failed,
+      []() -> std::optional<std::wstring> { return std::nullopt; }) && failed.empty(),
+      "module_normalization_failure_refused");
   const std::wstring root = L"\\Device\\Volume\\Windows\\System32";
   const auto dll = root + L"\\sub\\profiler.dll";
   const auto run = [&](const wchar_t *file, const wchar_t *folder) {
@@ -1491,7 +1510,7 @@ void CheckIlImageAcl() {
       if (!sddl) return false;
       PSECURITY_DESCRIPTOR descriptor = nullptr;
       if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return false;
-      const bool safe = WindowsIlAclDescriptorSafe(descriptor, directory);
+      const bool safe = WindowsIlAclDescriptorSafe(descriptor, directory, WindowsIlImageTrustedSid);
       LocalFree(descriptor);
       return safe;
     }, [&]() { return cache.started; });
@@ -1504,6 +1523,20 @@ void CheckIlImageAcl() {
   Check(!run(L"O:SYD:P(A;;FW;;;BU)", protected_acl), "module_acl_user_write_refused");
   Check(!run(protected_acl, L"O:SYD:P(A;;0x2;;;BU)"), "module_acl_parent_create_refused");
   Check(!run(protected_acl, L"O:SYD:P(A;;0x40;;;BU)"), "module_acl_parent_delete_refused");
+  for (const auto *sid : {L"S-1-5-80-123", L"S-1-5-99-123", L"S-1-5-80-0",
+                          L"S-1-5-21-1-2-3-1001", L"BU", L"AU", L"WD", L"S-1-16-80-123"}) {
+    const std::wstring sddl = std::wstring(L"O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;FA;;;") + sid + L")";
+    const bool service = std::wstring(sid) == L"S-1-5-80-123" ||
+        std::wstring(sid) == L"S-1-5-99-123" || std::wstring(sid) == L"S-1-5-80-0";
+    Check(run(sddl.c_str(), protected_acl) == service, "module_acl_service_file_policy");
+    Check(run(protected_acl, sddl.c_str()) == service, "module_acl_service_parent_policy");
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    Check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
+        &descriptor, nullptr) != FALSE, "module_acl_service_descriptor");
+    Check(!WindowsIlAclDescriptorSafe(descriptor, false) &&
+        !WindowsIlAclDescriptorSafe(descriptor, true), "exe_tree_service_write_still_refused");
+    LocalFree(descriptor);
+  }
   Check(!run(nullptr, protected_acl), "module_acl_unreadable_file_refused");
   Check(!run(protected_acl, nullptr), "module_acl_unreadable_parent_refused");
   Check(!WindowsIlImageAclInspect(root + L"\\missing-il-fixture.dll", false), "module_acl_live_open_failure_refused");
