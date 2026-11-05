@@ -230,7 +230,20 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
   });
 
   it('ends a path at its first timed-out call, and stops climbing at an element that cannot be read', () => {
-    const c = code(host).replace(/\s+/gu, ' ');
+    // The Explorer item measurement is not on the V1 lane: it creates its own bounded automation
+    // (CreateBoundedAutomation) and checks its deadline before each call, so it is left out here.
+    const itemStart = host.indexOf('std::optional<WindowsExplorerItem> ReadWindowsExplorerItem(');
+    const itemEnd = host.indexOf(
+      'WindowsExplorerShellView ReadWindowsExplorerShellView(',
+      itemStart,
+    );
+    expect(itemStart).toBeGreaterThan(0);
+    expect(itemEnd).toBeGreaterThan(itemStart);
+    const explorerItem = host.slice(itemStart, itemEnd);
+    expect(explorerItem).toContain(
+      '!current() || !CreateBoundedAutomation(150, 150, automation.Receive())',
+    );
+    const c = code(host.slice(0, itemStart) + host.slice(itemEnd)).replace(/\s+/gu, ' ');
     // The state: a timeout, a spent budget and a cancel end the path for good.
     expect(c).toContain('enum class WindowsV1UiaStop { kNone, kTimeout, kBudget, kCanceled };');
     expect(c).toContain('lane->stop = WindowsV1UiaStop::kTimeout;');
