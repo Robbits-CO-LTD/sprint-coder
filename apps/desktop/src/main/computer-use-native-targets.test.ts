@@ -2,7 +2,7 @@ import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake'
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computerWindowsTargetFactsSchema,
   type ComputerUseEligibilityMode,
@@ -12,7 +12,23 @@ import {
   parseWindowsComputerUseTargets,
   windowsComputerTargetCandidates,
 } from './computer-use-native-targets';
-import { createComputerUseNativeHost } from './computer-use-native-host';
+import {
+  createComputerUseNativeHost,
+  readWindowsExplorerPrestart,
+  windowsExplorerPrestartIsCurrent,
+  readWindowsExplorerApproval,
+  readCurrentWindowsExplorerFacts,
+  type WindowsExplorerApproval,
+  type WindowsDispatchLedgerStorage,
+} from './computer-use-native-host';
+import { computerUseNativeCompiledPin } from './computer-use-native-provenance';
+import {
+  createWindowsExplorerPrestartContext,
+  WINDOWS_EXPLORER_FINAL_VERSIONS,
+  windowsExplorerFinalPinMatches,
+} from './computer-use-explorer-prestart';
+import { classifyTarget } from './computer-use-target-eligibility';
+import type { WindowsTerminationCallbacks } from './computer-use-native-types';
 import type { ComputerUseNativeBinding } from './computer-use-native-types';
 
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -520,3 +536,415 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
     parseWindowsComputerUseTargets({ ...value, targets: [browser] }, true)?.targets[0],
   ).toMatchObject({ maximumMode: 'observe_only' });
 });
+
+afterEach(() => vi.unstubAllGlobals());
+
+function explorerRow(): Selectable {
+  const target = row('upper');
+  const path = 'C:\\Windows\\explorer.exe';
+  target.appIdentityDigest = sha256(
+    `computer-win-identity-v1-signed\n${path.toLowerCase()}\n${target.identity.signerDigest}`,
+  );
+  target.maximumMode = 'supervised';
+  target.identity = {
+    ...target.identity,
+    executablePath: path,
+    identityDigest: target.appIdentityDigest,
+    maximumMode: 'supervised',
+  };
+  target.facts = {
+    ...facts,
+    imageRoot: 'windows_directory',
+    imageRelativePath: 'explorer.exe',
+    imageLeaf: 'explorer.exe',
+    signerMicrosoftRoot: true,
+    windowClass: 'CabinetWClass',
+  };
+  target.explorerPrestart = {
+    version: 1,
+    ...WINDOWS_EXPLORER_FINAL_VERSIONS,
+    pid: target.pid,
+    listGeneration: envelope().generation,
+    processStartTime: '133000000000000001',
+    shellView: 'filesystem_folder',
+  };
+  target.windowIdentityDigest = sha256(
+    `computer-window-identity-v1\n${target.appIdentityDigest}\n${target.explorerPrestart.processStartTime}\n${target.windowId}`,
+  );
+  return target;
+}
+
+const finalPin = () => ({
+  ...computerUseNativeCompiledPin(nativeFixture().binding.manifest),
+  eligibility: {
+    mode: 'v2-denylist' as const,
+    ...WINDOWS_EXPLORER_FINAL_VERSIONS,
+    ticketRequired: true,
+    interlockEnforced: true,
+  },
+});
+
+it('approval_boolean_cannot_enable_explorer', () => {
+  const native = explorerRow();
+  for (const approval of [false, true])
+    expect(parseWindowsComputerUseTargets(envelope([native]), approval)?.targets).toEqual([
+      classifyTarget(native.facts),
+    ]);
+  const { explorerPrestart: _evidence, ...missing } = native;
+  expect(
+    parseWindowsComputerUseTargets(
+      envelope([missing]),
+      true,
+      createWindowsExplorerPrestartContext(() => true),
+    )?.targets,
+  ).toEqual([{ kind: 'denied' }]);
+});
+
+it('explorer_private_evidence_is_strict_and_version_bound', () => {
+  const native = explorerRow();
+  const evidence = native.explorerPrestart!;
+  const context = createWindowsExplorerPrestartContext(() => true);
+  expect(
+    parseWindowsComputerUseTargets(envelope([native]), true, context)?.targets[0],
+  ).toMatchObject({ kind: 'selectable', maximumMode: 'supervised' });
+  const invalid: unknown[] = [
+    null,
+    true,
+    {},
+    { ...evidence, extra: true },
+    { ...evidence, shellView: 'virtual' },
+    { ...evidence, processStartTime: '0' },
+    { ...evidence, processStartTime: '18446744073709551616' },
+  ];
+  for (const key of Object.keys(evidence)) {
+    const missing: Record<string, unknown> = { ...evidence };
+    delete missing[key];
+    invalid.push(missing);
+  }
+  for (const key of [
+    'version',
+    'rulesetVersion',
+    'classifierVersion',
+    'lexiconVersion',
+    'listGeneration',
+  ] as const)
+    for (const delta of [-1, 1]) invalid.push({ ...evidence, [key]: evidence[key] + delta });
+  for (const explorerPrestart of invalid)
+    expect(
+      parseWindowsComputerUseTargets(
+        { ...envelope(), targets: [{ ...native, explorerPrestart }] },
+        true,
+        context,
+      ),
+    ).toBeNull();
+  for (const changed of [
+    { pid: 43 },
+    { windowId: '43' },
+    { windowIdentityDigest: 'f'.repeat(64) },
+    { explorerPrestart: { ...evidence, processStartTime: '133000000000000002' } },
+  ])
+    expect(
+      parseWindowsComputerUseTargets(envelope([{ ...native, ...changed }]), true, context),
+    ).toBeNull();
+});
+
+it('explorer_exception_cannot_override_unrelated_denial', () => {
+  const native = explorerRow();
+  const context = createWindowsExplorerPrestartContext(() => true);
+  for (const changed of [
+    { tokenElevated: true },
+    { tokenOtherUser: true },
+    { tokenOtherSession: true },
+    { tokenProtected: true },
+    { tokenUiAccess: true },
+    { tokenIntegrityAboveSelf: true },
+    { requiresAdministrator: true },
+    { imageLeaf: 'cmd.exe' },
+    { runningImageMatches: false },
+    { windowClass: 'Progman' },
+    { signerMicrosoftRoot: false },
+    { windowClass: null },
+  ]) {
+    const target = { ...native, facts: { ...native.facts, ...changed } };
+    expect(
+      parseWindowsComputerUseTargets(envelope([target]), true, context)?.targets[0]?.kind,
+    ).toBe(classifyTarget(target.facts).kind);
+  }
+});
+
+function explorerHost(
+  enabled = true,
+  verified = true,
+  ledger: Partial<WindowsDispatchLedgerStorage> = {},
+  exceptionEnabled = true,
+) {
+  const fixture = nativeFixture();
+  let helper: Readonly<{ helperGeneration: number }> = Object.freeze({ helperGeneration: 1 });
+  let captureMissing = false;
+  let callbacks: WindowsTerminationCallbacks | undefined;
+  const value = envelope([explorerRow()]);
+  fixture.listTargets.mockReturnValue(value);
+  const responses = new WeakMap<object, typeof helper>([[value, helper]]);
+  const sessionReady = vi.fn(() => {
+    throw new Error('prestart must not use session readiness');
+  });
+  const host = createComputerUseNativeHost(
+    {
+      ...fixture.binding,
+      windowsApprovalVerified: verified,
+      addon: {
+        ...fixture.binding.addon!,
+        captureWindowsGeneration: () => (captureMissing ? null : helper),
+        windowsGenerationFor: (response) =>
+          typeof response === 'object' && response !== null
+            ? (responses.get(response) ?? null)
+            : null,
+        isWindowsGenerationCurrent: (token) => token === helper,
+        configureWindowsTermination: (value) => {
+          callbacks = value;
+        },
+        requestWindowsTermination: () => {},
+        cleanupWindowsGeneration: () => {},
+        windowsApprovalAvailable: () => true,
+        windowsApprovalReady: sessionReady,
+        preflight: vi.fn(),
+        approvalApprove: vi.fn(),
+        approvalDiscard: vi.fn(),
+        dispatchApproved: vi.fn(),
+      },
+    },
+    'win32',
+    {
+      ...fixture.options,
+      classifierV2Attested: true,
+      windowsExplorerPrestartForTesting: enabled,
+      windowsExplorerExceptionForTesting: exceptionEnabled,
+      windowsKillStopTermination: { enabled: true },
+      windowsLedger: {
+        write: () => true,
+        update: () => true,
+        delete: () => true,
+        restoreQuarantines: () => true,
+        ...ledger,
+      },
+    },
+  );
+  return {
+    ...fixture,
+    host,
+    value,
+    sessionReady,
+    replaceHelper: () => {
+      helper = Object.freeze({ helperGeneration: 2 });
+    },
+    missingCapture: () => {
+      captureMissing = true;
+    },
+    bindResponse: () => responses.set(value, helper),
+    stop: () => callbacks!.stopping!(1, 'E1', 'test-stop'),
+  };
+}
+
+it('explorer_prestart_capability_requires_build_and_host', async () => {
+  const pin = finalPin();
+  const header = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_native_eligibility.h'),
+    'utf8',
+  );
+  const definition = JSON.parse(
+    readFileSync(join(__dirname, '../../computer-use-native/eligibility.json'), 'utf8'),
+  );
+  const declaration = header.match(
+    /constexpr bool WindowsV2FinalDeclaration\([^]*?return from_build && v2 && ruleset == (\d+) && classifier == (\d+) && lexicon == (\d+)/u,
+  );
+  expect(declaration).not.toBeNull();
+  expect(declaration!.slice(1).map(Number)).toEqual([
+    definition.versions.win32.v2.rulesetVersion,
+    definition.versions.win32.v2.classifierVersion,
+    definition.versions.win32.v2.lexiconVersion,
+  ]);
+  const variants: unknown[] = [
+    undefined,
+    null,
+    { ...pin, eligibility: undefined },
+    { ...pin, platform: 'darwin' },
+    { ...pin, eligibility: { ...pin.eligibility, mode: 'v1-allowlist' } },
+  ];
+  for (const key of ['rulesetVersion', 'classifierVersion', 'lexiconVersion'] as const)
+    for (const delta of [-1, 1])
+      variants.push({
+        ...pin,
+        eligibility: {
+          ...pin.eligibility,
+          [key]: pin.eligibility[key] + delta,
+        },
+      });
+  for (const key of ['ticketRequired', 'interlockEnforced'])
+    variants.push({ ...pin, eligibility: { ...pin.eligibility, [key]: false } });
+  for (const value of [...variants, pin]) {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', value);
+    expect(windowsExplorerFinalPinMatches(value)).toBe(value === pin);
+    const fixture = explorerHost();
+    const list = await fixture.host.listTargets!();
+    expect(readWindowsExplorerPrestart(fixture.host, '42') !== undefined).toBe(value === pin);
+    expect(list.targets[0]?.kind).toBe(value === pin ? 'selectable' : 'denied');
+    expect(fixture.sessionReady).not.toHaveBeenCalled();
+  }
+  for (const [enabled, verified] of [
+    [false, true],
+    [true, false],
+  ]) {
+    const fixture = explorerHost(enabled, verified);
+    expect((await fixture.host.listTargets!()).targets).toEqual([{ kind: 'denied' }]);
+    expect(readWindowsExplorerPrestart(fixture.host, '42')).toBeUndefined();
+    expect(fixture.listTargets).toHaveBeenCalledTimes(1);
+    expect(fixture.binding.addon!.startSession).not.toHaveBeenCalled();
+    expect(fixture.binding.addon!.dispatch).not.toHaveBeenCalled();
+  }
+});
+
+it('prestart_capability_cannot_enable_session_approval', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const { host } = explorerHost();
+  const list = await host.listTargets!();
+  const capability = readWindowsExplorerPrestart(host, '42');
+  expect(capability).toBeDefined();
+  expect(windowsExplorerPrestartIsCurrent(capability, host, '42', list.windowsGeneration!)).toBe(
+    true,
+  );
+  expect(windowsExplorerPrestartIsCurrent(capability, host, '43', list.windowsGeneration!)).toBe(
+    false,
+  );
+  expect(readWindowsExplorerApproval(host, '42')).toBeUndefined();
+  // Deliberate hostile cast tests runtime separation as well as the distinct opaque TS brands.
+  expect(
+    await readCurrentWindowsExplorerFacts(
+      capability as unknown as WindowsExplorerApproval,
+      host,
+      '42',
+      { x: 1, y: 1 },
+    ),
+  ).toBeUndefined();
+  expect(
+    windowsExplorerPrestartIsCurrent({} as typeof capability, host, '42', list.windowsGeneration!),
+  ).toBe(false);
+});
+
+it('explorer_list_evidence_cannot_cross_helper_generations', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  for (const invalidate of ['helper', 'stop', 'list'] as const) {
+    const fixture = explorerHost();
+    const list = await fixture.host.listTargets!();
+    const capability = readWindowsExplorerPrestart(fixture.host, '42');
+    expect(capability).toBeDefined();
+    if (invalidate === 'helper') fixture.replaceHelper();
+    else if (invalidate === 'stop') fixture.stop();
+    else await fixture.host.listTargets!();
+    expect(
+      windowsExplorerPrestartIsCurrent(capability, fixture.host, '42', list.windowsGeneration!),
+    ).toBe(false);
+  }
+  for (const invalidate of ['helper', 'stop', 'list'] as const) {
+    const fixture = explorerHost();
+    let complete!: (value: unknown) => void;
+    fixture.listTargets.mockReturnValueOnce(
+      new Promise((resolve) => {
+        complete = resolve;
+      }),
+    );
+    const pending = fixture.host.listTargets!();
+    await vi.waitFor(() => expect(fixture.listTargets).toHaveBeenCalledTimes(1));
+    if (invalidate === 'helper') fixture.replaceHelper();
+    else if (invalidate === 'stop') fixture.stop();
+    else await fixture.host.listTargets!();
+    complete(fixture.value);
+    await expect(pending).rejects.toThrow('native_target_generation_changed');
+    expect(fixture.binding.addon!.startSession).not.toHaveBeenCalled();
+  }
+});
+
+it('gate off preserves the entire list, ceilings and native call counts', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const fixture = explorerHost(false);
+  fixture.value.targets = [
+    row(),
+    row('upper'),
+    explorerRow(),
+    { kind: 'denied' },
+    { kind: 'unresolvable' },
+  ];
+  const expected = parseWindowsComputerUseTargets(fixture.value, true)!;
+  const result = await fixture.host.listTargets!();
+  expect(result.targets).toEqual(expected.targets);
+  expect(fixture.listTargets).toHaveBeenCalledTimes(1);
+  for (const method of ['listWindows', 'startSession', 'dispatch', 'discoverWindows'] as const)
+    expect(fixture.binding.addon![method]).not.toHaveBeenCalled();
+  expect(readWindowsExplorerPrestart(fixture.host, '42')).toBeUndefined();
+});
+
+it('prestart cancellation during ledger preparation stops before native enumeration', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  let complete!: (value: { rows: never[]; quarantines: never[] }) => void;
+  const read = vi.fn(
+    () =>
+      new Promise<{ rows: never[]; quarantines: never[] }>((resolve) => {
+        complete = resolve;
+      }),
+  );
+  const fixture = explorerHost(true, true, { read });
+  const pending = fixture.host.listTargets!();
+  await vi.waitFor(() => expect(read).toHaveBeenCalled());
+  fixture.stop();
+  complete({ rows: [], quarantines: [] });
+  await expect(pending).rejects.toThrow('native_target_generation_changed');
+  expect(fixture.listTargets).not.toHaveBeenCalled();
+});
+
+it('file and non-file windows of the same Explorer process are judged separately', () => {
+  const native = explorerRow();
+  const { explorerPrestart: _evidence, ...unmeasured } = native;
+  const nonFile = { ...unmeasured, windowId: '43', windowIdentityDigest: 'e'.repeat(64) };
+  expect(
+    parseWindowsComputerUseTargets(
+      envelope([native, nonFile]),
+      true,
+      createWindowsExplorerPrestartContext(() => true),
+    )?.targets.map((target) => target.kind),
+  ).toEqual(['selectable', 'denied']);
+});
+
+it('explorer list binds the responding helper after lazy start or replacement', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  for (const initiallyMissing of [true, false]) {
+    const fixture = explorerHost();
+    fixture.value.targets.push(row());
+    if (initiallyMissing) fixture.missingCapture();
+    fixture.listTargets.mockImplementationOnce(() => {
+      fixture.replaceHelper();
+      fixture.bindResponse();
+      return fixture.value;
+    });
+    const list = await fixture.host.listTargets!();
+    expect(list.targets.map((target) => target.kind)).toEqual(['selectable', 'selectable']);
+    expect(readWindowsExplorerPrestart(fixture.host, '42')).toBeDefined();
+    expect(fixture.listTargets).toHaveBeenCalledTimes(1);
+  }
+});
+
+it.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  'Explorer list requires both switches: prestart=%s exception=%s',
+  async (prestart, exception) => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+    const fixture = explorerHost(prestart, true, {}, exception);
+    const list = await fixture.host.listTargets!();
+    expect(list.targets[0]?.kind).toBe(prestart && exception ? 'selectable' : 'denied');
+    expect(readWindowsExplorerPrestart(fixture.host, '42') !== undefined).toBe(
+      prestart && exception,
+    );
+  },
+);

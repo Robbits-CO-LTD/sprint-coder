@@ -4772,6 +4772,24 @@ const computerWindowsTargetIdentitySchema = computerWindowsAppIdentitySchema
     );
   }, 'Incomplete or inconsistent native package identity');
 
+/** Private prestart measurement only; never an approval or an input ticket. */
+export const computerWindowsExplorerPrestartSchema = z
+  .object({
+    version: z.literal(1),
+    rulesetVersion: z.number().int().positive(),
+    classifierVersion: z.number().int().positive(),
+    lexiconVersion: z.number().int().positive(),
+    listGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    pid: z.number().int().positive().max(0xffffffff),
+    processStartTime: z
+      .string()
+      .regex(/^[1-9][0-9]{0,19}$/u)
+      .refine((value) => BigInt(value) <= 0xffffffffffffffffn),
+    shellView: z.literal('filesystem_folder'),
+  })
+  .strict();
+export type ComputerWindowsExplorerPrestart = z.infer<typeof computerWindowsExplorerPrestartSchema>;
+
 const computerWindowsNativeTargetSchema = z
   .object({
     kind: z.enum(['eligible', 'upper']),
@@ -4795,6 +4813,7 @@ const computerWindowsNativeTargetSchema = z
     maximumMode: computerUseModeSchema,
     identity: computerWindowsTargetIdentitySchema,
     facts: computerWindowsTargetFactsSchema,
+    explorerPrestart: computerWindowsExplorerPrestartSchema.optional(),
   })
   .strict()
   .refine(

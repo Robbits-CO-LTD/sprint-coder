@@ -7862,7 +7862,7 @@ function safeUntrustedDisplayText(value: string, maximum = 256): string {
   return [...normalized].slice(0, maximum).join('') || 'unnamed';
 }
 
-const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;
+export const WINDOWS_EXPLORER_EXCEPTION_ENABLED = false;
 
 type WindowsExplorerExceptionInput = Readonly<{
   host: ComputerUseNativeHost;

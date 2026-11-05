@@ -716,6 +716,7 @@ struct WindowsV2RowWindow {
   std::string title;  // UTF-8, at most 256 bytes, not empty
   RECT client{};
   RECT screen{};
+  std::uint64_t explorer_list_generation = 0;
 };
 
 // Whether the identity strings a row carries are what Main's schema takes: the executable path of 1
@@ -745,6 +746,18 @@ std::string WindowsV2SelectableRow(const WindowsV2Judgement &judgement,
   const std::string window_identity =
       Sha256String("computer-window-identity-v1\n" + judgement.app_identity + "\n" +
                    judgement.process_start + "\n" + std::to_string(window.handle));
+  std::string explorer_evidence;
+  if constexpr (kWindowsExplorerException) {
+    if (judgement.explorer_prestart_admitted && window.explorer_list_generation != 0) {
+      explorer_evidence = ",\"explorerPrestart\":{\"version\":1,\"rulesetVersion\":" +
+          std::to_string(kNativeEligibilityRulesetVersion) + ",\"classifierVersion\":" +
+          std::to_string(kNativeEligibilityClassifierVersion) + ",\"lexiconVersion\":" +
+          std::to_string(kNativeEligibilityLexiconVersion) + ",\"listGeneration\":" +
+          std::to_string(window.explorer_list_generation) + ",\"pid\":" +
+          std::to_string(window.pid) + ",\"processStartTime\":\"" +
+          judgement.process_start + "\",\"shellView\":\"filesystem_folder\"}";
+    }
+  }
   return "{\"kind\":\"" + std::string(TargetVerdictKindName(verdict.kind)) +
          "\",\"windowId\":\"" + std::to_string(window.handle) + "\",\"pid\":" +
          std::to_string(window.pid) + ",\"appIdentityDigest\":\"" + judgement.app_identity +
@@ -758,7 +771,7 @@ std::string WindowsV2SelectableRow(const WindowsV2Judgement &judgement,
          ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
          std::string(verdict.maximum_mode) + "\",\"identity\":" +
          WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
-         ",\"facts\":" + WindowsV2TargetFactsJson(facts) +
+         ",\"facts\":" + WindowsV2TargetFactsJson(facts) + explorer_evidence +
          (include_start_identity ? ",\"processStartTime\":\"" + judgement.process_start + "\"" : "") + "}";
 }
 
@@ -1012,6 +1025,7 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected
     row_window.title = std::move(title_utf8);
     row_window.client = client;
     row_window.screen = screen;
+    if constexpr (kWindowsExplorerException) row_window.explorer_list_generation = generation;
     if (!still_valid()) return false;
     rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window, include_start_identity));
   }

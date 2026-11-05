@@ -223,3 +223,37 @@ describe('private native Windows target list', () => {
     ).toBe(false);
   });
 });
+
+it('strict private Explorer prestart evidence does not accept partial or extra fields', () => {
+  const explorerPrestart = {
+    version: 1,
+    rulesetVersion: 4,
+    classifierVersion: 3,
+    lexiconVersion: 3,
+    listGeneration: 1,
+    pid: 123,
+    processStartTime: '133000000000000001',
+    shellView: 'filesystem_folder',
+  };
+  expect(
+    computerWindowsNativeTargetListSchema.safeParse(envelope([row({ explorerPrestart })])).success,
+  ).toBe(true);
+  for (const key of Object.keys(explorerPrestart)) {
+    const incomplete: Record<string, unknown> = { ...explorerPrestart };
+    delete incomplete[key];
+    expect(
+      computerWindowsNativeTargetListSchema.safeParse(
+        envelope([row({ explorerPrestart: incomplete })]),
+      ).success,
+    ).toBe(false);
+  }
+  expect(
+    computerWindowsNativeTargetListSchema.safeParse(
+      envelope([
+        row({
+          explorerPrestart: { ...explorerPrestart, approval: true },
+        }),
+      ]),
+    ).success,
+  ).toBe(false);
+});
