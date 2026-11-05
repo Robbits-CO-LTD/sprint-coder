@@ -49,6 +49,7 @@ describe('Windows shadow reader is portable and decides nothing', () => {
       '"computer_use_windows_page.h"',
       '"computer_use_windows_shadow.h"',
       '<cstddef>',
+      '<functional>',
       '<array>',
       '<cstdint>',
       '<string>',
@@ -114,6 +115,10 @@ describe('Windows shadow reader is portable and decides nothing', () => {
         ].includes(line.trim())
       )
         continue;
+      if (line.trim() === 'return source_.PageHost(root, [&] { return Step(); }, output);') {
+        calls.push('PageHost');
+        continue;
+      }
       const match = /^\s*return Gated\(\[&\] \{ return source_\.(\w+)\([^;]*\); \}\);$/u.exec(line);
       expect(match, line).not.toBeNull();
       calls.push(match![1]!);
@@ -303,6 +308,10 @@ describe('Windows UI Automation source only reads', () => {
       'ILFree',
       'CoTaskMemFree',
       'GetAncestor',
+      'GetClassNameW',
+      'GetWindowRect',
+      'IsWindowVisible',
+      'EnumChildWindows',
       // the folder's path and a listing of its entries in this process (read-only)
       'SHGetIDListFromObject',
       'SHGetPathFromIDListEx',
@@ -422,6 +431,10 @@ describe('Windows UI Automation source only reads', () => {
       'CoUninitialize',
       'FAILED',
       'GetAncestor',
+      'GetClassNameW',
+      'GetWindowRect',
+      'IsWindowVisible',
+      'EnumChildWindows',
       'GetLastError',
       'IID_PPV_ARGS',
       'ILFree',
@@ -461,6 +474,9 @@ describe('Windows UI Automation source only reads', () => {
     ];
     // The shared shadow helpers and this file's own functions and methods.
     const own = [
+      'PageHost',
+      'Read',
+      'Visit',
       // Measures existing shell and UIA selections without altering them.
       'MeasureWindowsSingleSelection',
       // The bounded measurement lane of the association header (closed-set checked there).
@@ -561,6 +577,14 @@ describe('Windows UI Automation source only reads', () => {
         'class WindowsUiaShadowSource',
       ),
     );
+    const pageHost = between(
+      source,
+      '  ShadowReadResult PageHost(',
+      '  ShadowReadResult WindowProcessPath(',
+    );
+    expect(pageHost.match(/GetWindowThreadProcessId\(/gu)).toHaveLength(2);
+    expect(pageHost).toContain('GetWindowThreadProcessId(window_, &owner)');
+    expect(pageHost).toContain('GetWindowThreadProcessId(child, &pid)');
     const pinned: ReadonlyArray<readonly [RegExp, RegExp, number, number?]> = [
       [/->Items\(/gu, /folder_view\.Get\(\)->Items\(SVGIO_SELECTION,/gu, 1],
       [/->GetCount\(/gu, /selected\.Get\(\)->GetCount\(&array_count\)/gu, 1],
@@ -603,7 +627,9 @@ describe('Windows UI Automation source only reads', () => {
       ],
     ];
     for (const [anywhere, site, count, sites = count] of pinned) {
-      expect(code(source).match(anywhere)?.length ?? 0, anywhere.source).toBe(count);
+      expect(code(source.replace(pageHost, '')).match(anywhere)?.length ?? 0, anywhere.source).toBe(
+        count,
+      );
       expect(selection.match(anywhere)?.length ?? 0, anywhere.source).toBe(count);
       if (count > 0) expect(selection.match(site)?.length ?? 0, site.source).toBe(sites);
     }

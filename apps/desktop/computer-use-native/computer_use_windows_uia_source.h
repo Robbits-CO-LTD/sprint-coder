@@ -2,7 +2,8 @@
 
 // Classifier v2, S5-b-2a: the Windows side of the shadow reader. This is the ONLY place that talks
 // to UI Automation for the shadow: it implements `ShadowUiaSource` (computer_use_windows_shadow_reader.h)
-// with one platform call per method. Nothing here decides what to read or whether it may: the
+// with one platform call per method (PageHost admits its bounded enumeration call by call).
+// Nothing here decides what to read or whether it may: the
 // reader admits every call through its gate first, and settles every answer.
 //
 // What it does, and does not do:
@@ -1182,6 +1183,62 @@ public:
               static_cast<std::int64_t>(bounds.right) - bounds.left,
               static_cast<std::int64_t>(bounds.bottom) - bounds.top};
     return ShadowReadResult::kOk;
+  }
+
+  ShadowReadResult PageHost(Element window, const std::function<bool()> &admit,
+                            Element *output) override {
+    auto *root = At(window);
+    UIA_HWND handle = nullptr;
+    DWORD owner = 0;
+    if (!root || !admit() || FAILED(root->get_CurrentNativeWindowHandle(&handle)) ||
+        reinterpret_cast<HWND>(handle) != window_ || !admit() ||
+        GetAncestor(window_, GA_ROOT) != window_ || !admit() ||
+        GetWindowThreadProcessId(window_, &owner) == 0 || owner == 0)
+      return ShadowReadResult::kFailed;
+    struct Enumeration {
+      HWND top, found = nullptr;
+      DWORD owner;
+      const std::function<bool()> &admit;
+      unsigned visited = 0;
+      bool failed = false;
+      bool Read() {
+        if (failed || !admit()) { failed = true; return false; }
+        return true;
+      }
+      static BOOL CALLBACK Visit(HWND child, LPARAM parameter) {
+        auto &scan = *reinterpret_cast<Enumeration *>(parameter);
+        if (++scan.visited > 64) { scan.failed = true; return FALSE; }
+        wchar_t name[256] = {};
+        if (!scan.Read()) return FALSE;
+        if (!GetClassNameW(child, name, 256)) { scan.failed = true; return FALSE; }
+        if (std::wcscmp(name, L"Chrome_RenderWidgetHostHWND") != 0) return TRUE;
+        if (!scan.Read()) return FALSE;
+        if (!IsWindowVisible(child)) return TRUE;
+        RECT rect{};
+        if (!scan.Read()) return FALSE;
+        if (!GetWindowRect(child, &rect)) { scan.failed = true; return FALSE; }
+        if (rect.right <= rect.left || rect.bottom <= rect.top) return TRUE;
+        DWORD pid = 0;
+        if (!scan.Read()) return FALSE;
+        // Deliberately reject even same-executable children owned by another process.
+        if (!GetWindowThreadProcessId(child, &pid) || pid != scan.owner) {
+          scan.failed = true; return FALSE;
+        }
+        if (!scan.Read()) return FALSE;
+        if (GetAncestor(child, GA_ROOT) != scan.top || scan.found) {
+          scan.failed = true; return FALSE;
+        }
+        scan.found = child;
+        return TRUE;
+      }
+    } scan{window_, nullptr, owner, admit};
+    if (!scan.Read()) return ShadowReadResult::kStopped;
+    // EnumChildWindows' return value is unspecified; Visit records early termination.
+    EnumChildWindows(window_, Enumeration::Visit, reinterpret_cast<LPARAM>(&scan));
+    if (scan.failed || !scan.found || !scan.Read()) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationElement> element;
+    const auto result = automation_.Get()->ElementFromHandle(scan.found, element.Receive());
+    return Keep(result, std::move(element), output);
   }
 
   ShadowReadResult WindowProcessPath(Element window, std::size_t maximum_bytes,
