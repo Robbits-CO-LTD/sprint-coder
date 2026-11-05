@@ -1481,7 +1481,94 @@ void CheckIlTree() {
   }
   Check(!WindowsIlAclTreeSnapshot(L"Z:\\missing-il-acl-fixture"), "tree_live_missing_directory_refused");
 }
+void CheckIlImageAcl() {
+  const std::wstring root = L"\\Device\\Volume\\Windows\\System32";
+  const auto dll = root + L"\\sub\\profiler.dll";
+  const auto run = [&](const wchar_t *file, const wchar_t *folder) {
+    WindowsIlImageAclCache cache;
+    return WindowsIlImageAclSafe(dll, root, cache, [&](const std::wstring &, bool directory) {
+      const auto sddl = directory ? folder : file;
+      if (!sddl) return false;
+      PSECURITY_DESCRIPTOR descriptor = nullptr;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, nullptr)) return false;
+      const bool safe = WindowsIlAclDescriptorSafe(descriptor, directory);
+      LocalFree(descriptor);
+      return safe;
+    }, [&]() { return cache.started; });
+  };
+  const auto protected_acl = L"O:SYD:P(A;;FA;;;SY)(A;;FRFX;;;BU)";
+  Check(run(protected_acl, protected_acl), "module_acl_system_owned_allowed");
+  Check(run(L"O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;FRFX;;;BU)", protected_acl),
+      "module_acl_trustedinstaller_owned_allowed");
+  Check(!run(L"O:S-1-5-21-1-2-3-1001D:P(A;;FRFX;;;BU)", protected_acl), "module_acl_user_owned_refused");
+  Check(!run(L"O:SYD:P(A;;FW;;;BU)", protected_acl), "module_acl_user_write_refused");
+  Check(!run(protected_acl, L"O:SYD:P(A;;0x2;;;BU)"), "module_acl_parent_create_refused");
+  Check(!run(protected_acl, L"O:SYD:P(A;;0x40;;;BU)"), "module_acl_parent_delete_refused");
+  Check(!run(nullptr, protected_acl), "module_acl_unreadable_file_refused");
+  Check(!run(protected_acl, nullptr), "module_acl_unreadable_parent_refused");
+  Check(!WindowsIlImageAclInspect(root + L"\\missing-il-fixture.dll", false), "module_acl_live_open_failure_refused");
+  WindowsIlImageAclCache cache;
+  unsigned files = 0, directories = 0;
+  const auto inspect = [&](const std::wstring &, bool directory) { directory ? ++directories : ++files; return true; };
+  const auto clock = [&]() { return cache.started; };
+  Check(WindowsIlImageAclSafe(dll, root, cache, inspect, clock) &&
+      WindowsIlImageAclSafe(root + L"\\sub\\second.dll", root, cache, inspect, clock) &&
+      WindowsIlImageAclSafe(dll, root, cache, inspect, clock) && files == 2 && directories == 2,
+      "module_acl_shared_parents_cached_root_included");
+  Check(!WindowsIlImageAclSafe(dll, root, cache, inspect,
+      [&]() { return cache.started + kWindowsIlImageAclMaxMs; }), "module_acl_time_limit_refused");
+  cache.files.resize(kWindowsIlImageAclMaxObjects);
+  Check(!WindowsIlImageAclSafe(root + L"\\third.dll", root, cache, inspect, clock), "module_acl_count_limit_refused");
+  WindowsIlImageAclCache slow;
+  ULONGLONG now = slow.started;
+  Check(!WindowsIlImageAclSafe(dll, root, slow, [&](const std::wstring &, bool) {
+    now += kWindowsIlImageAclMaxMs; return true;
+  }, [&]() { return now; }), "module_acl_slow_inspection_refused");
+}
+
+void CheckIlLoadedImage() {
+  std::array<wchar_t, 32768> system{}, self{};
+  if (!GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size())) ||
+      !GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()))) {
+    Check(false, "module_live_fixture_paths"); return;
+  }
+  const auto id = std::to_wstring(GetCurrentProcessId());
+  const std::wstring dll = std::wstring(system.data()) + L"\\spool\\drivers\\color\\sc-il-" + id + L".dll";
+  if (!CopyFileW((std::wstring(system.data()) + L"\\version.dll").c_str(), dll.c_str(), TRUE)) {
+    std::cout << "SKIP module_live_user_dll_refused: writable system folder unavailable\n"; return;
+  }
+  const auto path = WindowsIlImageRoot(dll);
+  if (!path || WindowsIlImageAclInspect(*path, false)) {
+    std::cout << "SKIP module_live_user_dll_refused: copy has trusted ACL\n";
+    DeleteFileW(dll.c_str()); return;
+  }
+  const auto event_name = L"Local\\sc-il-loaded-" + id;
+  ScopedKernelHandle event(CreateEventW(nullptr, TRUE, FALSE, event_name.c_str()));
+  std::wstring command = L"\"" + std::wstring(self.data()) + L"\" --image-child \"" + dll + L"\" " + event_name;
+  STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+  PROCESS_INFORMATION child{};
+  const bool started = event.value && CreateProcessW(self.data(), command.data(), nullptr, nullptr,
+      FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child);
+  if (!started) {
+    const DWORD error = GetLastError();
+    std::cout << "SKIP module_live_user_dll_refused: child start failed event=" << (event.value != nullptr)
+              << " last_error=" << error << "\n";
+    DeleteFileW(dll.c_str()); return;
+  }
+  {
+    const bool loaded = WaitForSingleObject(event.value, 10000) == WAIT_OBJECT_0;
+    Check(loaded, "module_live_user_dll_loaded");
+    const bool refused = loaded && !WindowsIlOnlyImagesSafe(child.hProcess);
+    Check(refused, "module_live_user_dll_refused");
+    if (refused) std::cout << "PASS module_live_user_dll_refused\n";
+    TerminateProcess(child.hProcess, 0); WaitForSingleObject(child.hProcess, 5000);
+    CloseHandle(child.hThread); CloseHandle(child.hProcess);
+  }
+  Check(DeleteFileW(dll.c_str()) != FALSE, "module_live_user_dll_removed");
+}
+
 void CheckIlEnvironment() {
+  CheckIlImageAcl();
   Check(WindowsIlImageUnderRoot(L"\\Device\\Volume\\Windows\\System32\\clr.dll",
       L"\\device\\volume\\windows\\system32"), "module_root_case_insensitive");
   Check(!WindowsIlImageUnderRoot(L"\\Device\\Volume\\Windows\\System32-extra\\clr.dll",
@@ -1545,7 +1632,14 @@ void CheckIlEnvironment() {
   Check(safe(L"PATH=C:\\Windows"), "environment_normal_allowed");
   Check(safe(L"=C:=C:\\Windows"), "environment_drive_entry_allowed");
   Check(WindowsIlEnvironmentBlockSafe(std::array<wchar_t, 2>{0, 0}), "environment_empty_allowed");
-  for (const auto *name : {L"COR_ENABLE_PROFILING", L"COR_PROFILER", L"COR_PROFILER_PATH", L"COR_PROFILER_PATH_32",
+  for (const auto *name : {L"DOTNET_NOLOGO", L"DOTNET_CLI_TELEMETRY_OPTOUT",
+                           L"DOTNET_MULTILEVEL_LOOKUP", L"DoTnEt_SkIp_FiRsT_TiMe_ExPeRiEnCe"})
+    Check(safe(std::wstring(name) + L"=1"), "environment_benign_dotnet_allowed");
+  for (const auto *name : {L"COR_CUSTOM", L"CORECLR_ENABLE_PROFILING", L"cOrEcLr_Test",
+                           L"DOTNET_ADDITIONAL_DEPS", L"DOTNET_SHARED_STORE", L"DOTNET_ROOT",
+                           L"DOTNET_ROOT_X64", L"DoTnEt_RoOt(x86)", L"DOTNET_CUSTOM_PROFILER",
+                           L"DOTNET_CUSTOM_HOOK", L"DOTNET_CUSTOM_DEPS", L"dOtNeT_Custom_Probing",
+                           L"COR_ENABLE_PROFILING", L"COR_PROFILER", L"COR_PROFILER_PATH", L"COR_PROFILER_PATH_32",
                            L"COR_PROFILER_PATH_64", L"COMPlus_Test", L"COMPLUS_Test", L"DOTNET_STARTUP_HOOKS",
                            L"DOTNET_ENABLE_PROFILING", L"dotnet_startup_hooks", L"cOr_PrOfIlEr"}) {
     Check(!safe(std::wstring(name) + L"=value"), "environment_code_injection_refused");
@@ -1579,6 +1673,49 @@ void CheckIlEnvironment() {
   Check(!WindowsIlOnlyEnvironmentSafe(nullptr), "environment_live_invalid_process_refused");
   std::array<wchar_t, 32768> self{};
   Check(GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size())) != 0, "environment_live_fixture_path");
+  // Check the raw PEB independently of registry/image gates and the host's environment.
+  const auto environment = GetEnvironmentStringsW();
+  Check(environment != nullptr, "environment_live_api_block_available");
+  if (environment) {
+    std::size_t count = 0;
+    while (count + 1 < kWindowsIlEnvironmentMaxChars &&
+           !(environment[count] == 0 && environment[count + 1] == 0)) ++count;
+    Check(count + 1 < kWindowsIlEnvironmentMaxChars, "environment_live_api_block_bounded");
+    if (count + 1 < kWindowsIlEnvironmentMaxChars) {
+      using Query = LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+      const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+      struct Basic { PVOID reserved; PVOID peb; PVOID reserved2[2]; ULONG_PTR pid; PVOID reserved3; } basic{};
+      const bool queried = query && query(GetCurrentProcess(), 0, &basic, sizeof(basic), nullptr) >= 0;
+      Check(queried, "environment_live_peb_available");
+      const auto block = WindowsReadIlEnvironment(queried ? reinterpret_cast<std::uintptr_t>(basic.peb) : 0,
+          sizeof(void *) == 8, [](std::uintptr_t address, void *out, std::size_t bytes) {
+            SIZE_T received = 0;
+            return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), out, bytes, &received) && received == bytes;
+          });
+      Check(block && WindowsIlEnvironmentBlockSafe(*block) ==
+          WindowsIlEnvironmentBlockSafe(std::span<const wchar_t>(environment, count + 2)),
+          "environment_live_peb_matches_api_block");
+    }
+    FreeEnvironmentStringsW(environment);
+  }
+  std::array<wchar_t, 32768> short_path{};
+  const DWORD short_length = GetShortPathNameW(self.data(), short_path.data(), static_cast<DWORD>(short_path.size()));
+  if (short_length && short_length < short_path.size() && std::wstring(short_path.data()).find(L'~') != std::wstring::npos) {
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    const bool started = CreateProcessW(short_path.data(), nullptr, nullptr, nullptr, FALSE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child) != FALSE;
+    Check(started, "module_short_path_child_started");
+    if (started) {
+      const bool images_safe = WindowsIlOnlyImagesSafe(child.hProcess);
+      Check(images_safe, "module_short_path_images_allowed");
+      if (images_safe) std::cout << "PASS module_short_path_images_allowed\n";
+      TerminateProcess(child.hProcess, 0); WaitForSingleObject(child.hProcess, 5000);
+      CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    }
+  } else {
+    std::cout << "SKIP module_short_path_images_allowed: 8.3 name unavailable\n";
+  }
   for (const bool injected : {false, true}) {
     std::wstring environment = injected ? L"DOTNET_STARTUP_HOOKS=unused" : L"SAFE_TEST=value";
     environment.append(2, L'\0');
@@ -2048,7 +2185,17 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           seamPrefix +
             '\n' +
             ilAnchorProgram.slice(0, ilAnchorProgram.indexOf('void CheckIlOnlyHeader()')) +
-            '\nint main() { CheckIlAcl(); CheckIlTree(); CheckIlEnvironment(); CheckIlPlacement(); return failures ? 1 : 0; }',
+            String.raw`
+int wmain(int argc, wchar_t **argv) {
+  if (argc == 4 && std::wstring(argv[1]) == L"--image-child") {
+    const auto module = LoadLibraryW(argv[2]);
+    ScopedKernelHandle event(OpenEventW(EVENT_MODIFY_STATE, FALSE, argv[3]));
+    if (!module || !event.value || !SetEvent(event.value)) return 2;
+    Sleep(20000); FreeLibrary(module); return 0;
+  }
+  CheckIlAcl(); CheckIlTree(); CheckIlEnvironment(); CheckIlPlacement(); CheckIlLoadedImage();
+  return failures ? 1 : 0;
+}`,
         );
         const command = build!.wrap([
           '/nologo',
@@ -2090,6 +2237,9 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           throw error;
         });
         expect(result.stdout).not.toContain('FAIL');
+        for (const line of result.stdout.split(/\r?\n/u))
+          if (/^(PASS|SKIP) module_(short_path_images_allowed|live_user_dll_refused)/u.test(line))
+            console.info(line);
       } finally {
         rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
       }
