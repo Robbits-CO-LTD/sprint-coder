@@ -1,3 +1,14 @@
+import { ComputerUseDiscoveryScope } from './computer-use-discovery-scope';
+import {
+  ComputerUseController,
+  computerUseAppIdentityIsPermanentlyDenied,
+  type ComputerUseControllerPersistence,
+  type ComputerUseNativeWindow,
+} from './computer-use-controller';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { computerAppGrantIdentityFrom } from './computer-use-grant-identity';
+import type { ComputerAppGrantRequest, SelectableComputerTarget } from '@sprint-coder/contracts';
+import type { ComputerAppProfileRecord } from './persistence';
 import { windowsApprovalEvidenceMatches } from './computer-use-native-handshake';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -537,9 +548,13 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
   ).toMatchObject({ maximumMode: 'observe_only' });
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 function explorerRow(): Selectable {
+  vi.stubEnv('WINDIR', 'C:\\Windows');
   const target = row('upper');
   const path = 'C:\\Windows\\explorer.exe';
   target.appIdentityDigest = sha256(
@@ -677,10 +692,12 @@ function explorerHost(
   verified = true,
   ledger: Partial<WindowsDispatchLedgerStorage> = {},
   exceptionEnabled = true,
+  addonOverrides: Partial<NonNullable<ComputerUseNativeBinding['addon']>> = {},
 ) {
   const fixture = nativeFixture();
   let helper: Readonly<{ helperGeneration: number }> = Object.freeze({ helperGeneration: 1 });
   let captureMissing = false;
+  let approvalAvailable = true;
   let callbacks: WindowsTerminationCallbacks | undefined;
   const value = envelope([explorerRow()]);
   fixture.listTargets.mockReturnValue(value);
@@ -705,12 +722,13 @@ function explorerHost(
         },
         requestWindowsTermination: () => {},
         cleanupWindowsGeneration: () => {},
-        windowsApprovalAvailable: () => true,
+        windowsApprovalAvailable: () => approvalAvailable,
         windowsApprovalReady: sessionReady,
         preflight: vi.fn(),
         approvalApprove: vi.fn(),
         approvalDiscard: vi.fn(),
         dispatchApproved: vi.fn(),
+        ...addonOverrides,
       },
     },
     'win32',
@@ -736,6 +754,9 @@ function explorerHost(
     sessionReady,
     replaceHelper: () => {
       helper = Object.freeze({ helperGeneration: 2 });
+    },
+    loseCapability: () => {
+      approvalAvailable = false;
     },
     missingCapture: () => {
       captureMissing = true;
@@ -948,3 +969,547 @@ it.each([
     );
   },
 );
+
+// Controller uses the real Host capability issuer; no boolean substitutes for its WeakMap evidence.
+const explorerContext = {
+  taskId: 'explorer-task',
+  turnId: 'explorer-turn',
+  workspaceId: null,
+  policyEpoch: 0,
+};
+async function explorerController(enabled = true, ordinary = false) {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const fixture = explorerHost();
+  if (ordinary) fixture.value.targets = [row()];
+  const list = await fixture.host.listTargets!();
+  const candidate = windowsComputerTargetCandidates(list)[0]!;
+  const profile = candidate.profile;
+  const profiles: ComputerAppProfileRecord[] = [];
+  const store = createComputerAppGrantFixtureStore();
+  const published: ComputerAppGrantRequest[] = [];
+  const persistence: ComputerUseControllerPersistence = {
+    ...store.api,
+    listComputerAppProfiles: () => profiles,
+    getComputerAppProfile: (id) => {
+      const found = profiles.find((p) => p.id === id);
+      if (!found) throw new Error('profile missing');
+      return found;
+    },
+    createComputerAppProfile: vi.fn(),
+    updateComputerAppProfile: vi.fn(),
+    removeComputerAppProfile: vi.fn(),
+    recordComputerActionAudit: vi.fn(),
+    completeComputerActionAudit: vi.fn(),
+    recordComputerActionApprovalOutcome: vi.fn(),
+    listComputerActionAudits: () => [],
+    getActiveTurnId: () => explorerContext.turnId,
+    getPermissionPolicy: () => ({ policyEpoch: 0 }),
+  };
+  const window: ComputerUseNativeWindow = {
+    ...candidate.windows[0]!,
+    platform: 'win32',
+    appIdentityDigest: profile.identityDigest,
+    executableDigest: profile.executableDigest,
+    revision: 1,
+    policyLanguage: 'en',
+    focused: true,
+    ownerKind: 'application',
+    modal: false,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+  };
+  let windows = [window];
+  let beforeWindows: (() => Promise<void> | void) | undefined;
+  const discovery = vi
+    .spyOn(ComputerUseDiscoveryScope.prototype, 'read')
+    .mockImplementation(async () => {
+      await beforeWindows?.();
+      return windows;
+    });
+  const start = vi.mocked(fixture.binding.addon!.startSession!);
+  const arm = vi.fn(async () => true);
+  let mode: ComputerUseEligibilityMode = 'v2-denylist';
+  const currentGeneration = vi.fn(fixture.host.isWindowsTargetGenerationCurrent!);
+  const controller = new ComputerUseController({
+    armEmergencyStop: arm,
+    persistence,
+    native: ordinary
+      ? { ...fixture.host, isWindowsTargetGenerationCurrent: currentGeneration }
+      : fixture.host,
+    featureEnabled: () => true,
+    agentDrivenEnabled: () => true,
+    windowsTargetDiscoveryEnabled: () => true,
+    effectiveEligibilityMode: () => mode,
+    windowsExplorerStartForTesting: enabled,
+    currentPolicyEpoch: () => 0,
+    providerEgressBindingFor: () => ({ connectionId: 'connection', modelId: 'model' }),
+    publishGrantRequest: (card) => published.push(card),
+    repositionEmergencyStop: () => true,
+  });
+  const identity = computerAppGrantIdentityFrom(profile.identity)!;
+  const grant = (version = 4) =>
+    store.api.createComputerAppGrant({
+      identity,
+      displayName: 'File Explorer',
+      maxMode: 'supervised',
+      denyRulesetVersion: version,
+      providerEgress: { connectionId: 'connection', modelId: 'model' },
+    });
+  const targets = async () =>
+    (await controller.listTargets({}, explorerContext)).targets.filter(
+      (target): target is SelectableComputerTarget => target.kind === 'selectable',
+    );
+  const approve = async (card: ComputerAppGrantRequest) =>
+    controller.resolveAppGrantRequest(
+      {
+        requestId: card.id,
+        expectedRevision: card.revision,
+        decision: 'allow_always',
+      },
+      card.activationIntents.allow_always!,
+    );
+  const request = (target: SelectableComputerTarget) =>
+    controller.requestAccess(
+      {
+        appToken: target.appToken,
+        reason: 'Select a measured folder',
+      },
+      explorerContext,
+    );
+  const card = async () => {
+    await vi.waitFor(() => expect(published.some((p) => p.state === 'pending')).toBe(true));
+    return published.find((p) => p.state === 'pending')!;
+  };
+  return {
+    ...fixture,
+    controller,
+    profile,
+    profiles,
+    identity,
+    store,
+    persistence,
+    published,
+    window,
+    targets,
+    grant,
+    approve,
+    request,
+    card,
+    start,
+    discovery,
+    arm,
+    currentGeneration,
+    setWindows: (value: ComputerUseNativeWindow[]) => {
+      windows = value;
+    },
+    beforeWindows: (hook: () => Promise<void> | void) => {
+      beforeWindows = hook;
+    },
+    setMode: (value: ComputerUseEligibilityMode) => {
+      mode = value;
+    },
+  };
+}
+
+it('explorer_registration_stays_denied', async () => {
+  const f = await explorerController();
+  expect(() =>
+    f.controller.registerProfile({
+      label: 'File Explorer',
+      identity: explorerRow().identity,
+      mode: 'supervised',
+      connectionId: 'connection',
+      modelId: 'model',
+      providerEgressConsent: true,
+      remember: true,
+    }),
+  ).toThrow(/cannot register/);
+  expect(f.persistence.createComputerAppProfile).not.toHaveBeenCalled();
+});
+
+it.each([1, 4, 5])('temporary_capability_loss_does_not_delete_grant (%s)', async (version) => {
+  const f = await explorerController();
+  const saved = f.grant(version);
+  f.replaceHelper();
+  expect(f.controller.appGrantFor(f.profile)?.id ?? null).toBe(version > 4 ? null : saved.id);
+  expect(f.controller.listAppGrants().grants).toEqual([saved]);
+  expect(f.store.grants.get(saved.id)).toEqual(saved);
+});
+
+it('explorer_grant_requires_reverified_card_context', async () => {
+  const f = await explorerController();
+  expect(() =>
+    f.controller.createAppGrant(f.identity, {
+      maxMode: 'supervised',
+      providerEgress: null,
+    }),
+  ).toThrow(/cannot be granted/);
+  const target = (await f.targets())[0]!;
+  const pending = f.request(target);
+  await f.approve(await f.card());
+  expect(await pending).toEqual({ granted: true, reasonCode: null });
+  expect(f.store.grants.size).toBe(1);
+  expect(() =>
+    f.controller.createAppGrant(f.identity, {
+      maxMode: 'supervised',
+      providerEgress: null,
+    }),
+  ).toThrow(/cannot be granted/);
+});
+
+it('app_grant_and_window_eligibility_are_separate', async () => {
+  const f = await explorerController();
+  const target = (await f.targets())[0]!;
+  expect(target.granted).toBe(false);
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/access_not_granted/);
+  const saved = f.grant();
+  const granted = (await f.targets())[0]!;
+  expect(granted.granted).toBe(true);
+  f.replaceHelper();
+  expect(f.controller.appGrantFor(f.profile)).toEqual(saved);
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: granted.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/target token is not valid/);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('saved_explorer_profile_cannot_bypass_v2_discovery', async () => {
+  const f = await explorerController();
+  f.profiles.push(f.profile);
+  f.value.targets = [];
+  expect(await f.targets()).toEqual([]);
+  expect(f.discovery).not.toHaveBeenCalled();
+});
+
+it('explorer_snapshot_requires_current_window_evidence', async () => {
+  const f = await explorerController();
+  const target = (await f.targets())[0]!;
+  expect(f.controller.targetTokenBinding(target.targetToken)).not.toBeNull();
+  f.stop();
+  expect(f.controller.targetTokenBinding(target.targetToken)).toBeNull();
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('already_granted_explorer_still_requires_current_candidate', async () => {
+  const f = await explorerController();
+  const saved = f.grant();
+  const target = (await f.targets())[0]!;
+  expect(await f.request(target)).toEqual({ granted: true, reasonCode: null });
+  f.replaceHelper();
+  expect(await f.request(target)).toEqual({
+    granted: false,
+    reasonCode: 'access_request_invalid_token',
+  });
+  expect(f.published).toHaveLength(0);
+  expect(f.store.grants.get(saved.id)).toEqual(saved);
+});
+
+it('explorer_card_requires_eligible_window_and_rechecks_on_answer', async () => {
+  const f = await explorerController();
+  const target = (await f.targets())[0]!;
+  const pending = f.request(target);
+  const card = await f.card();
+  f.beforeWindows(() => f.replaceHelper());
+  await f.approve(card);
+  expect(await pending).toEqual({ granted: false, reasonCode: 'access_request_withdrawn' });
+  expect(f.store.grants.size).toBe(0);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('explorer_start_rejects_evidence_from_another_window', async () => {
+  const f = await explorerController();
+  f.grant();
+  const target = (await f.targets())[0]!;
+  f.setWindows([{ ...f.window, windowId: '43', windowIdentityDigest: 'e'.repeat(64) }]);
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/identity changed/);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it.each([1, 2, 3])('explorer_start_rechecks_evidence_around_awaits (%s)', async (boundary) => {
+  const f = await explorerController();
+  f.grant();
+  const target = (await f.targets())[0]!;
+  let calls = 0;
+  f.beforeWindows(() => {
+    if (++calls === boundary) f.replaceHelper();
+  });
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/target token is not valid|target generation changed/);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('explorer_common_start_rejects_panel_and_v1', async () => {
+  const f = await explorerController();
+  f.profiles.push(f.profile);
+  await expect(
+    f.controller.start({
+      taskId: explorerContext.taskId,
+      turnId: explorerContext.turnId,
+      profileId: f.profile.id,
+      windowId: '42',
+      mode: 'supervised',
+      connectionId: 'connection',
+      modelId: 'model',
+      providerEgressConsent: true,
+      providerEgressConsentBinding: {
+        connectionId: 'connection',
+        modelId: 'model',
+      },
+      remember: false,
+      expectedPolicyEpoch: 0,
+      expectedWindowRevision: 1,
+      expectedProfileRevision: 1,
+    }),
+  ).rejects.toThrow(/cannot target/);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('explorer_path_exception_does_not_relax_other_denials', () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const identity = { ...explorerRow().identity, signerMicrosoftRoot: true };
+  expect(computerUseAppIdentityIsPermanentlyDenied(identity, true)).toBe(false);
+  for (const change of [
+    { executablePath: 'C:\\Windows\\cmd.exe' },
+    { appUserModelId: 'windowsterminal' },
+    { displayName: 'Settings' },
+    { signerDigest: null },
+    { signerMicrosoftRoot: false },
+    { signerMicrosoftRoot: undefined },
+    { executablePath: 'C:\\Users\\u\\Downloads\\explorer.exe' },
+    { executablePath: 'C:\\Windows\\System32\\explorer.exe' },
+    { executablePath: 'C:\\Windows.old\\explorer.exe' },
+  ])
+    expect(computerUseAppIdentityIsPermanentlyDenied({ ...identity, ...change }, true)).toBe(true);
+});
+
+it('explorer_permanent_exception_requires_the_actual_windows_directory', () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const identity = { ...explorerRow().identity, signerMicrosoftRoot: true };
+  vi.stubEnv('WINDIR', 'D:\\WinNT');
+  expect(computerUseAppIdentityIsPermanentlyDenied(identity, true)).toBe(true);
+  expect(
+    computerUseAppIdentityIsPermanentlyDenied(
+      {
+        ...identity,
+        executablePath: 'd:\\wInNt\\EXPLORER.EXE',
+      },
+      true,
+    ),
+  ).toBe(false);
+  vi.stubEnv('WINDIR', '');
+  expect(computerUseAppIdentityIsPermanentlyDenied(identity, true)).toBe(true);
+});
+
+it('ordinary_gate_off_start_preserves_base_host_query_count', async () => {
+  const f = await explorerController(false, true);
+  f.grant();
+  const target = (await f.targets())[0]!;
+  const current = f.currentGeneration.mockClear();
+  f.arm.mockRejectedValueOnce(new Error('common start reached'));
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'editor' },
+      explorerContext,
+    ),
+  ).rejects.toThrow('common start reached');
+  // W3a's token, grant and await-boundary checks make nine queries before the overlay.
+  // The Explorer-only second token check must not add a tenth query for ordinary apps.
+  expect(current).toHaveBeenCalledTimes(9);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('file_explorer_label_is_not_identity_evidence', () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  expect(
+    computerUseAppIdentityIsPermanentlyDenied(
+      { ...row().identity, displayName: 'File Explorer' },
+      true,
+    ),
+  ).toBe(true);
+  expect(
+    computerUseAppIdentityIsPermanentlyDenied(
+      { ...explorerRow().identity, displayName: 'File Explorer' },
+      false,
+    ),
+  ).toBe(true);
+});
+
+it('explorer_controller_gate_off_preserves_outputs_and_native_call_counts', async () => {
+  const f = await explorerController(false);
+  const saved = f.grant();
+  expect(await f.targets()).toEqual([]);
+  expect(f.published).toEqual([]);
+  expect(f.discovery).not.toHaveBeenCalled();
+  expect(f.start).not.toHaveBeenCalled();
+  expect(f.store.grants.get(saved.id)).toEqual(saved);
+  expect(f.controller.appGrantFor(f.profile)).toBeNull();
+  expect(f.store.grants.size).toBe(0);
+});
+
+it('eligible_explorer_reaches_common_start_after_approval', async () => {
+  const f = await explorerController();
+  const target = (await f.targets())[0]!;
+  const pending = f.request(target);
+  await f.approve(await f.card());
+  expect(await pending).toEqual({ granted: true, reasonCode: null });
+  f.arm.mockRejectedValueOnce(new Error('verified common start reached'));
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow('verified common start reached');
+  expect(f.arm).toHaveBeenCalledOnce();
+  expect(f.discovery).toHaveBeenCalledTimes(5);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('explorer_rechecks_after_the_stop_overlay_await', async () => {
+  const f = await explorerController();
+  f.grant();
+  const target = (await f.targets())[0]!;
+  f.arm.mockImplementationOnce(async () => {
+    f.replaceHelper();
+    return true;
+  });
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/target token is not valid/);
+  expect(f.arm).toHaveBeenCalledOnce();
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it.each(['missing', 'cancelled', 'old-epoch', 'new-list'] as const)(
+  'explorer_current_evidence_is_required_with_a_saved_grant: %s',
+  async (state) => {
+    const f = await explorerController();
+    const saved = f.grant();
+    const target = (await f.targets())[0]!;
+    if (state === 'missing') f.loseCapability();
+    else if (state === 'cancelled') f.stop();
+    else if (state === 'old-epoch') f.replaceHelper();
+    else await f.host.listTargets!();
+    expect(await f.request(target)).toEqual({
+      granted: false,
+      reasonCode: 'access_request_invalid_token',
+    });
+    expect(f.controller.appGrantFor(f.profile)).toEqual(saved);
+    expect(f.store.grants.get(saved.id)).toEqual(saved);
+    expect(f.published).toEqual([]);
+    expect(f.start).not.toHaveBeenCalled();
+  },
+);
+
+it.each([false, true])(
+  'explorer_denies_fake_and_non_file_windows (enabled=%s)',
+  async (enabled) => {
+    const f = await explorerController(enabled);
+    const native = explorerRow();
+    const { explorerPrestart: _prestart, ...nonFile } = native;
+    f.value.targets = [nonFile];
+    expect(await f.targets()).toEqual([]);
+    f.value.targets = [{ ...native, facts: { ...native.facts, signerMicrosoftRoot: false } }];
+    expect(await f.targets()).toEqual([]);
+    expect(f.published).toEqual([]);
+    expect(f.start).not.toHaveBeenCalled();
+  },
+);
+
+it.each([undefined, 1, 4, 5])(
+  'explorer_grant_versions_keep_their_existing_meaning (%s)',
+  async (version) => {
+    const f = await explorerController();
+    const saved = version === undefined ? undefined : f.grant(version);
+    const target = (await f.targets())[0]!;
+    expect(target.mode).toBe('supervised');
+    expect(target.granted).toBe(version === 1 || version === 4);
+    if (saved !== undefined) expect(f.store.grants.get(saved.id)).toEqual(saved);
+    if (version === undefined || version === 5) {
+      const pending = f.request(target);
+      await f.approve(await f.card());
+      expect(await pending).toEqual({ granted: true, reasonCode: null });
+      expect(f.controller.appGrantFor(f.profile)?.denyRulesetVersion).toBe(4);
+      expect(f.store.grants.size).toBe(1);
+    }
+  },
+);
+
+it('explorer_permanent_denial_still_revokes_the_grant', async () => {
+  const f = await explorerController();
+  const saved = f.grant();
+  expect(
+    f.controller.appGrantFor({
+      ...f.profile,
+      identity: {
+        ...f.profile.identity,
+        displayName: 'Settings',
+      },
+    }),
+  ).toBeNull();
+  expect(f.store.grants.has(saved.id)).toBe(false);
+});
+
+it('explorer_v1_cannot_reuse_a_v2_candidate', async () => {
+  const f = await explorerController();
+  f.grant();
+  const target = (await f.targets())[0]!;
+  f.setMode('v1-allowlist');
+  expect(await f.request(target)).toEqual({
+    granted: false,
+    reasonCode: 'access_request_invalid_token',
+  });
+  await expect(
+    f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    ),
+  ).rejects.toThrow(/target token is not valid/);
+  expect(f.published).toEqual([]);
+  expect(f.start).not.toHaveBeenCalled();
+});
+
+it('quarantined_explorer_has_no_prestart_capability_or_candidate', async () => {
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  const f = explorerHost(
+    true,
+    true,
+    {
+      read: () => ({
+        rows: [],
+        quarantines: [
+          {
+            identity: { pid: 42, creationTime: '133000000000000001' },
+            reason: 'exit_suspect',
+          },
+        ],
+      }),
+    },
+    true,
+    { checkTargetIdentity: async () => [{ result: 'alive' }] },
+  );
+  const list = await f.host.listTargets!();
+  expect(list.targets).toEqual([{ kind: 'denied' }]);
+  expect(windowsComputerTargetCandidates(list)).toEqual([]);
+  expect(readWindowsExplorerPrestart(f.host, '42')).toBeUndefined();
+  expect(f.binding.addon!.startSession).not.toHaveBeenCalled();
+});

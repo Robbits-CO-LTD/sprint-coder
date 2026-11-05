@@ -308,7 +308,9 @@ it('keeps the Explorer exception closed and its test macro out of production inp
   expect(controller).toMatch(
     /export async function windowsExplorerExceptionAllowed\(\s*input: WindowsExplorerExceptionInput,?\s*\): Promise<boolean> \{\s*return WINDOWS_EXPLORER_EXCEPTION_ENABLED && \(await evaluateWindowsExplorerException\(input\)\);\s*\}/u,
   );
-  expect(controller.match(/WINDOWS_EXPLORER_EXCEPTION_ENABLED/gu)).toHaveLength(2);
+  // Declaration, operation gate, and the start gate's default; only tests inject the override.
+  expect(controller.match(/WINDOWS_EXPLORER_EXCEPTION_ENABLED/gu)).toHaveLength(3);
+  expect(controller.match(/windowsExplorerStartForTesting/gu)).toHaveLength(2);
   expect(controller.match(/windowsExplorerExceptionAllowed\(/gu)).toHaveLength(1);
   // The test entry and the evaluation are defined once and used only by the two entries, so no
   // production path in the controller reaches the evaluation around the constant.
@@ -323,6 +325,9 @@ it('keeps the Explorer exception closed and its test macro out of production inp
     // the controller included, passes it.
     if (file !== 'computer-use-native-host.ts')
       expect(text, file).not.toContain('windowsCompletedStartForTesting');
+    // Only the controller declares/reads this dependency; production constructors never pass it.
+    if (file !== 'computer-use-controller.ts')
+      expect(text, file).not.toContain('windowsExplorerStartForTesting');
   }
   expect(
     readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8').match(

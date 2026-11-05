@@ -1,7 +1,10 @@
 import {
   readCurrentWindowsExplorerFacts,
+  readWindowsExplorerPrestart,
+  windowsExplorerPrestartMatches,
   type WindowsExplorerApproval,
 } from './computer-use-native-host';
+import { windowsExplorerCompiledPinMatches } from './computer-use-explorer-prestart';
 import {
   classifyWindowsExplorerOperation,
   windowsExplorerItemInView,
@@ -723,6 +726,8 @@ export type ComputerUseAuthorization =
   ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
 
 export type ComputerUseControllerDeps = Readonly<{
+  /** Main-only test seam; Host evidence and the compiled pin are still required. */
+  windowsExplorerStartForTesting?: boolean;
   /** Main-only test gate. P6 IPC never enables this; production remains closed until P8. */
   foregroundHandoffForTesting?: Readonly<{
     consumeTrustedActivation: (intentId: string) => boolean;
@@ -1113,6 +1118,82 @@ function computerAppGrantVersionUnreadable(
 }
 
 export class ComputerUseController {
+  private readonly explorerRecordChecks = new WeakMap<
+    ComputerTargetAppTokenRecord,
+    () => boolean
+  >();
+  private readonly explorerGrantAnswers = new WeakSet<ComputerAppGrantIdentity>();
+
+  private explorerStartEnabled(): boolean {
+    return (
+      (this.deps.windowsExplorerStartForTesting ?? WINDOWS_EXPLORER_EXCEPTION_ENABLED) &&
+      windowsExplorerCompiledPinMatches()
+    );
+  }
+
+  private permanentlyDenied(identity: unknown): boolean {
+    return computerUseAppIdentityIsPermanentlyDenied(identity, this.explorerStartEnabled());
+  }
+
+  private computerUseWindowStartEligible(
+    profile: ComputerAppProfileRecord,
+    window: Readonly<{
+      windowId: string;
+      windowIdentityDigest: string;
+      windowsGeneration?: ComputerTargetWindowsGeneration;
+      eligible?: boolean;
+    }>,
+  ): boolean {
+    if (!computerUseExplorerIdentity(profile.identity)) return window.eligible !== false;
+    if (this.permanentlyDenied(profile.identity) || window.eligible === false) return false;
+    const generation = window.windowsGeneration;
+    return (
+      this.explorerStartEnabled() &&
+      this.deps.effectiveEligibilityMode?.() === 'v2-denylist' &&
+      this.deps.windowsTargetDiscoveryEnabled?.() === true &&
+      this.boundGrantIdentity(profile) !== null &&
+      generation !== undefined &&
+      this.windowsTargetGenerationCurrent(generation) &&
+      windowsExplorerPrestartMatches(
+        readWindowsExplorerPrestart(this.deps.native, window.windowId),
+        this.deps.native,
+        profile,
+        window.windowId,
+        window.windowIdentityDigest,
+        generation,
+      )
+    );
+  }
+
+  private bindExplorerRecord(
+    record: ComputerTargetAppTokenRecord,
+    windows: readonly Readonly<{
+      windowId: string;
+      windowIdentityDigest: string;
+      windowsGeneration?: ComputerTargetWindowsGeneration;
+    }>[],
+  ): void {
+    const profile = record.candidateProfile;
+    if (profile === undefined || !computerUseExplorerIdentity(profile.identity)) return;
+    const checks = windows.map((window) => {
+      const capability = readWindowsExplorerPrestart(this.deps.native, window.windowId);
+      return () =>
+        this.explorerStartEnabled() &&
+        this.deps.effectiveEligibilityMode?.() === 'v2-denylist' &&
+        this.deps.windowsTargetDiscoveryEnabled?.() === true &&
+        window.windowsGeneration !== undefined &&
+        windowsExplorerPrestartMatches(
+          capability,
+          this.deps.native,
+          profile,
+          window.windowId,
+          window.windowIdentityDigest,
+          window.windowsGeneration,
+        );
+    });
+    this.explorerRecordChecks.set(record, () => checks.some((check) => check()));
+  }
+
   private readonly consumedHandoffs = new WeakSet<ConsumedComputerUseForegroundHandoff>();
   private readonly broker: MainToolBroker;
   private readonly registry: ComputerUseToolRegistry;
@@ -1683,7 +1764,7 @@ export class ComputerUseController {
     const mismatch = computerAppGrantMismatch(
       computerAppGrantStoredIdentity(stored),
       derived,
-      computerUseAppIdentityIsDenied(profile.identity),
+      this.permanentlyDenied(profile.identity),
     );
     const version = computerAppGrantRulesetVersion(derived.platform);
     if (version === null) return null;
@@ -1811,16 +1892,24 @@ export class ComputerUseController {
     // the one the card was re-verified against, and re-deriving here would be a second derivation
     // that nothing had bound to the profile native verified (T14).
     const derived = identity;
+    const explorerAnswer = this.explorerGrantAnswers.delete(identity);
     const denyRulesetVersion = requireComputerAppGrantRulesetVersion(derived.platform);
     // The gate already applied the deny ruleset to the whole record; this is the belt, over the
     // attributes a grant identity still carries, so a mis-wired caller cannot widen the deny list.
     if (
-      computerUseAppIdentityIsDenied({
-        platform: derived.platform,
-        bundleId: derived.platform === 'darwin' ? derived.appId : null,
-        packageFamilyName: derived.packageFamilyName,
-        executablePath: derived.executablePath,
-      })
+      computerUseAppIdentityIsPermanentlyDenied(
+        {
+          platform: derived.platform,
+          bundleId: derived.platform === 'darwin' ? derived.appId : null,
+          packageFamilyName: derived.packageFamilyName,
+          executablePath: derived.executablePath,
+          signerDigest: derived.signerDigest,
+          // Only the reverified card can supply the static signer fact lost in derivation.
+          signerMicrosoftRoot: explorerAnswer,
+          executableDigest: derived.executableDigest,
+        },
+        explorerAnswer && this.explorerStartEnabled(),
+      )
     )
       throw new Error('Computer Use application cannot be granted');
     // A row written by a newer build is kept unread (it grants nothing here); an explicit approval
@@ -1969,7 +2058,7 @@ export class ComputerUseController {
     // `listTargets` already filters these out before asking, so this is the belt rather than the
     // braces — but a future caller that forgets the filter must not be handed a granted terminal.
     const grant = this.appGrantFor(profile);
-    if (computerUseAppIdentityIsDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
+    if (this.permanentlyDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
     if (grant !== null)
       return Object.freeze({
         granted: true,
@@ -2165,7 +2254,10 @@ export class ComputerUseController {
           )
         )
           continue;
-        candidates.set(candidate.profile.id, candidate);
+        const windows = candidate.windows.filter((window) =>
+          this.computerUseWindowStartEligible(candidate.profile, window),
+        );
+        if (windows.length > 0) candidates.set(candidate.profile.id, { ...candidate, windows });
       }
       profiles.push(...[...candidates.values()].map(({ profile }) => profile));
       if (candidateFilter) {
@@ -2234,7 +2326,9 @@ export class ComputerUseController {
       if (candidate === undefined) snapshots.set(profile.id, { profile, grantState });
       let issued = false;
       let windowIndex = 0;
-      for (const window of windows.filter(({ eligible }) => eligible !== false)) {
+      for (const window of windows.filter((window) =>
+        this.computerUseWindowStartEligible(profile, window),
+      )) {
         windowIndex += 1;
         if (pending.length >= COMPUTER_TARGET_LIST_LIMIT) {
           truncated = true;
@@ -2280,6 +2374,7 @@ export class ComputerUseController {
             ...(windowsGeneration === undefined ? {} : { enumeration }),
           }),
         );
+        this.bindExplorerRecord(this.targetTokens.get(targetToken)!, [window]);
         scope.onCancel(() => this.targetTokens.delete(targetToken));
         issued = true;
         pending.push({
@@ -2304,6 +2399,8 @@ export class ComputerUseController {
           }),
         );
       }
+      const appRecord = this.targetAppTokens.get(appToken);
+      if (appRecord !== undefined) this.bindExplorerRecord(appRecord, windows);
       if (truncated) break;
     }
     // Re-read every contributing application as the store has it now.
@@ -2394,6 +2491,12 @@ export class ComputerUseController {
 
   private targetRecordCurrent(record: ComputerTargetAppTokenRecord): boolean {
     const generation = record.binding.windowsGeneration;
+    if (
+      record.candidateProfile !== undefined &&
+      computerUseExplorerIdentity(record.candidateProfile.identity) &&
+      this.explorerRecordChecks.get(record)?.() !== true
+    )
+      return false;
     return (
       generation === undefined ||
       (this.now() < record.expiresAt &&
@@ -2422,7 +2525,7 @@ export class ComputerUseController {
     if (
       current.revision !== snapshot.profile.revision ||
       current.identityDigest !== snapshot.profile.identityDigest ||
-      computerUseAppIdentityIsDenied(current.identity)
+      this.permanentlyDenied(current.identity)
     )
       return false;
     // The grant as it reads now, compared against the one the row was built on. Compared field by
@@ -2600,7 +2703,12 @@ export class ComputerUseController {
     if (profile === undefined) return this.accessRefused('access_request_invalid_token');
     const targetRecord = this.targetAppTokens.get(input.appToken);
     const identity = this.boundGrantIdentity(profile);
-    if (identity === null) return this.accessRefused('access_request_invalid_token');
+    if (
+      identity === null ||
+      (computerUseExplorerIdentity(profile.identity) &&
+        (targetRecord?.candidateProfile === undefined || !this.targetRecordCurrent(targetRecord)))
+    )
+      return this.accessRefused('access_request_invalid_token');
     const egressBinding =
       this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
     // Without knowing where this Turn sends, there is no sentence to put on the card and no pair to
@@ -2686,7 +2794,9 @@ export class ComputerUseController {
     identity: ComputerAppGrantIdentity,
     windows: readonly ComputerUseNativeWindow[],
   ): ComputerAppGrantCardFacts | null {
-    const eligible = windows.filter((window) => window.eligible !== false);
+    const eligible = windows.filter((window) =>
+      this.computerUseWindowStartEligible(profile, window),
+    );
     if (eligible.length === 0) return null;
     const attested = eligible.reduce<ComputerUseMode>(
       (weakest, window) => bindComputerUseMaximumMode(weakest, window.maximumMode),
@@ -2698,7 +2808,7 @@ export class ComputerUseController {
       publisher: identity.publisher,
       appId: identity.appId,
       grantIdentityDigest: identity.grantIdentityDigest,
-      denied: computerUseAppIdentityIsDenied(profile.identity),
+      denied: this.permanentlyDenied(profile.identity),
       maximumMode: attested,
     });
   }
@@ -3029,6 +3139,14 @@ export class ComputerUseController {
       this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'generation_changed');
       return;
     }
+    if (
+      observed === null &&
+      pending.targetRecord?.candidateProfile !== undefined &&
+      computerUseExplorerIdentity(pending.targetRecord.candidateProfile.identity)
+    ) {
+      this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+      return;
+    }
     // Two comparisons, because they cover different things. The facts are what the card *showed*;
     // the identity is what the card was *about*, including the path — which a signed macOS
     // application's digests all leave out, so a row re-pointed at another copy of the same signed
@@ -3050,13 +3168,18 @@ export class ComputerUseController {
         this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
         return;
       }
-    } else if (input.decision === 'allow_always')
+    } else if (input.decision === 'allow_always') {
+      if (
+        pending.targetRecord?.candidateProfile !== undefined &&
+        this.targetRecordCurrent(pending.targetRecord)
+      )
+        this.explorerGrantAnswers.add(observed.identity);
       this.createAppGrant(observed.identity, {
         displayName: pending.displayName,
         maxMode: observed.facts.maximumMode,
         providerEgress: pending.providerEgress,
       });
-    else this.createTaskScopedAppGrant(pending, observed);
+    } else this.createTaskScopedAppGrant(pending, observed);
     scope.finish();
     this.settleAppGrantCard(pending, input.decision, { granted: true, reasonCode: null });
   }
@@ -3257,7 +3380,8 @@ export class ComputerUseController {
     const profile =
       record.candidateProfile ?? this.deps.persistence.getComputerAppProfile(record.profileId);
     if (
-      computerUseAppIdentityIsDenied(profile.identity) ||
+      this.permanentlyDenied(profile.identity) ||
+      (computerUseExplorerIdentity(profile.identity) && !this.targetRecordCurrent(record)) ||
       profile.revision !== binding.profileRevision ||
       profile.identityDigest !== binding.appIdentityDigest ||
       profile.platform !== binding.platform
@@ -3297,7 +3421,7 @@ export class ComputerUseController {
         computerAppGrantMismatch(
           identity,
           currentIdentity,
-          computerUseAppIdentityIsDenied(current.identity),
+          this.permanentlyDenied(current.identity),
         ) !== null ||
         !ComputerUseController.grantStateMatches(
           this.appGrantState(current, context.taskId),
@@ -3771,8 +3895,18 @@ export class ComputerUseController {
     computerUseModeSchema.parse(input.mode);
     const profile =
       input.agent?.candidateProfile ?? this.deps.persistence.getComputerAppProfile(input.profileId);
-    if (computerUseAppIdentityIsDenied(profile.identity))
+    const explorerPermit = this.windowCandidatePermits.get(input.windowId);
+    if (
+      computerUseAppIdentityIsDenied(profile.identity) &&
+      !(
+        computerUseExplorerIdentity(profile.identity) &&
+        input.agent?.candidateProfile === profile &&
+        explorerPermit?.validateTarget !== undefined &&
+        this.computerUseWindowStartEligible(profile, explorerPermit.native)
+      )
+    )
       throw new Error('Computer Use cannot target this application class');
+    if (computerUseExplorerIdentity(profile.identity)) explorerPermit?.validateTarget?.();
     if (profile.revision !== input.expectedProfileRevision)
       throw new Error('Computer Use app profile is stale');
     const syntheticTurn = ownerTurnId === null;
@@ -7413,7 +7547,25 @@ function computerUseAgentGoal(goal: string): string {
   return capped;
 }
 
+function computerUseExplorerIdentity(identity: unknown): boolean {
+  if (typeof identity !== 'object' || identity === null) return false;
+  const record = identity as Record<string, unknown>;
+  return (
+    record['platform'] === 'win32' &&
+    typeof record['executablePath'] === 'string' &&
+    /[\\/]explorer\.exe$/iu.test(record['executablePath'])
+  );
+}
+
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {
+  return computerUseAppIdentityIsPermanentlyDenied(identity, false);
+}
+
+/** Static identity only: transient window/Host state must never revoke a saved grant. */
+export function computerUseAppIdentityIsPermanentlyDenied(
+  identity: unknown,
+  explorerEnabled = false,
+): boolean {
   if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return true;
   const record = identity as Record<string, unknown>;
   if (record['platform'] === 'win32') {
@@ -7436,6 +7588,15 @@ function computerUseAppIdentityIsDenied(identity: unknown): boolean {
   const appUserModelId = text('appUserModelId');
   const executablePath = text('executablePath').replaceAll('/', '\\');
   const displayName = text('displayName').trim();
+  const windowsDirectory = (process.env['WINDIR'] ?? '').replaceAll('/', '\\').toLowerCase();
+  const explorer =
+    explorerEnabled &&
+    computerUseExplorerIdentity(identity) &&
+    /^[a-z]:\\[^\r\n]+$/u.test(windowsDirectory) &&
+    executablePath === `${windowsDirectory.replace(/\\$/u, '')}\\explorer.exe` &&
+    record['signerMicrosoftRoot'] === true &&
+    computerAppGrantIdentityFrom(identity)?.identityKind === 'verified-signed' &&
+    record['packageFamilyName'] == null;
   const deniedMacBundles = new Set([
     'com.apple.terminal',
     'com.apple.systempreferences',
@@ -7467,12 +7628,12 @@ function computerUseAppIdentityIsDenied(identity: unknown): boolean {
     return true;
   if (
     /\\(cmd|powershell|pwsh|wt|mstsc|msrdc|msrdcw|rdclient\.windows|quickassist|teamviewer|anydesk|rustdesk|parsec|explorer|regedit|mmc|msiexec|setup|installer)\.exe$/u.test(
-      executablePath,
+      explorer ? '' : executablePath,
     )
   )
     return true;
   return /^(terminal|iterm2?|warp|command prompt|powershell|windows terminal|system settings|settings|finder|file explorer|remote desktop|microsoft remote desktop|windows app|quick assist|teamviewer|anydesk|rustdesk|parsec|splashtop remote desktop|screen sharing|citrix workspace|vmware horizon client)$/u.test(
-    displayName,
+    explorer && displayName === 'file explorer' ? '' : displayName,
   );
 }
 

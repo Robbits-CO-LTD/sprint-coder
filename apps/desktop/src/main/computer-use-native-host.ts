@@ -1,3 +1,4 @@
+import type { ComputerAppProfileRecord } from './persistence';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ApprovalRoundTrips,
@@ -147,6 +148,26 @@ export function windowsExplorerPrestartIsCurrent(
     evidence.current()
   );
 }
+/** Bind the opaque prestart capability to the identity used by Controller. */
+export function windowsExplorerPrestartMatches(
+  capability: WindowsExplorerPrestartCapability | undefined,
+  host: ComputerUseNativeHost,
+  profile: ComputerAppProfileRecord,
+  windowId: string,
+  windowIdentityDigest: string,
+  generation: ComputerTargetWindowsGeneration,
+): boolean {
+  const evidence = capability === undefined ? undefined : explorerPrestarts.get(capability);
+  return (
+    windowsExplorerPrestartIsCurrent(capability, host, windowId, generation) &&
+    evidence !== undefined &&
+    evidence.target.appIdentityDigest === profile.identityDigest &&
+    evidence.target.executableDigest === profile.executableDigest &&
+    evidence.target.identity.executablePath === profile.canonicalPath &&
+    evidence.target.windowIdentityDigest === windowIdentityDigest
+  );
+}
+
 export type WindowsExplorerApproval = Readonly<{
   [windowsExplorerApprovalBrand]: true;
 }>;
