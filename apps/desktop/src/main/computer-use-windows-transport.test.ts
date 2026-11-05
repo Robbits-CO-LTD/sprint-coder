@@ -12682,6 +12682,7 @@ int main() {
           ...computerUseNativeHostEligibilityOptions(
             true,
             createComputerUseEligibilityWiring({
+              platform: 'win32',
               compiled: () => eligibility,
               agentDrivenV2: () => gateOpen,
               environment: () => ({}),
@@ -13022,6 +13023,7 @@ int main() {
           ...computerUseNativeHostEligibilityOptions(
             true,
             createComputerUseEligibilityWiring({
+              platform: 'win32',
               compiled: () => eligibility,
               agentDrivenV2: () => scenario !== 'v1',
               environment: () => ({}),
