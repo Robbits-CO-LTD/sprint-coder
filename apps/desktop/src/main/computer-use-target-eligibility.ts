@@ -166,6 +166,33 @@ export function classifyTarget(facts: TargetFacts): TargetEligibility {
   return classifyTargetExplained(facts).verdict;
 }
 
+/** W2's limited route: only W-SYS is waived; every other denial still wins. */
+export function classifyWindowsExplorerPrestart(facts: TargetFacts): TargetEligibility {
+  if (!targetFactsAreComplete(facts)) return { kind: 'unresolvable' };
+  if (
+    facts.platform !== 'win32' ||
+    facts.imageRoot !== 'windows_directory' ||
+    asciiLower(facts.imageRelativePath ?? '') !== 'explorer.exe' ||
+    asciiLower(facts.imageLeaf ?? '') !== 'explorer.exe' ||
+    facts.imageVolume !== 'fixed' ||
+    facts.runningImageMatches !== true ||
+    facts.signature !== 'valid' ||
+    facts.signerMicrosoftRoot !== true ||
+    facts.packaged !== false ||
+    facts.windowClass !== 'CabinetWClass'
+  )
+    return classifyTarget(facts);
+  for (const rule of DENY_RULESET.rules)
+    if (
+      rule.verdict === 'denied' &&
+      rule.class !== 'W-SYS' &&
+      (rule.platforms as readonly string[]).includes('win32') &&
+      allHold(facts, rule.when)
+    )
+      return { kind: 'denied' };
+  return { kind: 'upper', maximumMode: 'supervised' };
+}
+
 /** The ruleset version a platform's targets are judged under, or null when it has no ruleset. */
 export function denyRulesetVersion(platform: string): number | null {
   return rulesetFor(platform)?.rulesetVersion ?? null;

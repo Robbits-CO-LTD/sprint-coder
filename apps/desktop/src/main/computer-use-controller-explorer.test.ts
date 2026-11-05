@@ -647,7 +647,7 @@ it('rejects the old cancel epoch after ledger receipt completion without replaci
   expect(scenario.startSession).toHaveBeenCalledTimes(1);
 });
 it.each([false, true])(
-  'rejects old capability after quarantine release and id reuse (cancel=%s)',
+  'explorer_operation_capability_cannot_be_reused_after_reopen (cancel=%s)',
   async (cancelFirst) => {
     const scenario = await explorerScenario(
       {},

@@ -32,6 +32,7 @@ import {
   computerUseNativeCloseReceiptSchema,
   computerUseWindowCandidateSchema,
   computerUseWindowsApprovalDisplaySchema,
+  computerWindowsNativeTargetListSchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
   type ComputerUseSemanticScrollAction,
@@ -72,6 +73,13 @@ import {
 } from './computer-use-accessibility-tree';
 import { computerUseActionDigest } from './computer-use-action';
 import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
+import {
+  WINDOWS_EXPLORER_PRESTART_ENABLED,
+  windowsExplorerCompiledPinMatches,
+  createWindowsExplorerPrestartContext,
+  type ExplorerPrestartTarget,
+} from './computer-use-explorer-prestart';
+import { WINDOWS_EXPLORER_EXCEPTION_ENABLED } from './computer-use-controller';
 import { denyRulesetVersion } from './computer-use-target-eligibility';
 import { COMPUTER_USE_WINDOWS_BACKGROUND_INPUT_ENABLED } from './computer-use-native-protocol';
 import type {
@@ -95,6 +103,50 @@ import {
 } from './computer-use-windows-stop-outcome';
 
 const windowsExplorerApprovalBrand: unique symbol = Symbol('windows-explorer-approval');
+const explorerPrestartBrand: unique symbol = Symbol('explorer-prestart');
+export type WindowsExplorerPrestartCapability = Readonly<{ [explorerPrestartBrand]: true }>;
+type ExplorerPrestartEvidence = Readonly<{
+  target: ExplorerPrestartTarget;
+  generation: ComputerTargetWindowsGeneration;
+  current: () => boolean;
+}>;
+const explorerPrestartReaders = new WeakMap<
+  ComputerUseNativeHost,
+  (windowId: string) => ExplorerPrestartEvidence | undefined
+>();
+const explorerPrestarts = new WeakMap<
+  WindowsExplorerPrestartCapability,
+  ExplorerPrestartEvidence & { host: ComputerUseNativeHost }
+>();
+
+/** Window-scoped, ephemeral evidence. This cannot satisfy session approval or dispatch. */
+export function readWindowsExplorerPrestart(
+  host: ComputerUseNativeHost,
+  windowId: string,
+): WindowsExplorerPrestartCapability | undefined {
+  const evidence = explorerPrestartReaders.get(host)?.(windowId);
+  if (evidence === undefined || !evidence.current()) return undefined;
+  const capability: WindowsExplorerPrestartCapability = Object.freeze({
+    [explorerPrestartBrand]: true,
+  });
+  explorerPrestarts.set(capability, { ...evidence, host });
+  return capability;
+}
+
+export function windowsExplorerPrestartIsCurrent(
+  capability: WindowsExplorerPrestartCapability | undefined,
+  host: ComputerUseNativeHost,
+  windowId: string,
+  generation: ComputerTargetWindowsGeneration,
+): boolean {
+  const evidence = capability === undefined ? undefined : explorerPrestarts.get(capability);
+  return (
+    evidence?.host === host &&
+    evidence.target.windowId === windowId &&
+    computerTargetWindowsGenerationMatches(evidence.generation, generation) &&
+    evidence.current()
+  );
+}
 export type WindowsExplorerApproval = Readonly<{
   [windowsExplorerApprovalBrand]: true;
 }>;
@@ -332,6 +384,9 @@ export type ComputerUseNativeHostOptions = Readonly<{
   classifierV2Attested?: boolean;
   /** Test-only veto. A true value never substitutes for verified production evidence. */
   windowsApprovalInterlockForTesting?: boolean;
+  /** Internal tests exercise W3a without opening the product gate. No pin/Host bypass. */
+  windowsExplorerPrestartForTesting?: boolean;
+  windowsExplorerExceptionForTesting?: boolean;
   /**
    * The effective eligibility mode, read at every use so that the V2 flag or the force-v1 variable
    * closes the approval path of a running process. Absent: the mode is read from the route the
@@ -409,6 +464,8 @@ export function createComputerUseNativeHost(
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
+  let explorerStopGeneration = 0;
+  const explorerPrestartWindows = new Map<string, ExplorerPrestartEvidence>();
   const foregroundHandoffs = new Map<string, () => boolean>();
   const explorerSessionFacts = new WeakMap<InternalNativeSession, ExplorerEvidence['facts']>();
   const interactionRevoked = new Set<string>();
@@ -825,6 +882,7 @@ export function createComputerUseNativeHost(
         ledgerStates.set(generation, stopDelivery.project(state));
       },
       stopping: (generation, entry, ownerId) => {
+        explorerStopGeneration++;
         const state = ledgerState(generation);
         if (state.exitConfirmed) return;
         const startOwner =
@@ -1434,7 +1492,10 @@ export function createComputerUseNativeHost(
       }
       return await Promise.resolve(method({ ...input, discoveryId: id }));
     },
-    stop: async (id) => await invoke('stopWindowDiscovery', { discoveryId: id }),
+    stop: async (id) => {
+      explorerStopGeneration++;
+      return await invoke('stopWindowDiscovery', { discoveryId: id });
+    },
     cancelUnsubmitted: (id) => {
       const preparation = preparingDiscoveries.get(id);
       if (preparation !== undefined) {
@@ -2118,6 +2179,12 @@ export function createComputerUseNativeHost(
     hasMethod(addon, 'approvalApprove') &&
     hasMethod(addon, 'approvalDiscard') &&
     hasMethod(addon, 'dispatchApproved');
+  const explorerPrestartAvailable = (): boolean =>
+    (WINDOWS_EXPLORER_PRESTART_ENABLED || options.windowsExplorerPrestartForTesting === true) &&
+    (WINDOWS_EXPLORER_EXCEPTION_ENABLED || options.windowsExplorerExceptionForTesting === true) &&
+    windowsExplorerCompiledPinMatches() &&
+    terminationEnabled &&
+    windowsApprovalAvailable();
   const presentedMaximumMode = (raw: Readonly<Record<string, unknown>>): ComputerUseMode => {
     const mode = nativeMaximumMode(raw);
     return platform === 'win32' && mode === 'supervised' && !windowsApprovalAvailable()
@@ -3085,7 +3152,25 @@ export function createComputerUseNativeHost(
       const enumeration = Symbol('target-enumeration');
       targetEnumeration = enumeration;
       targetGeneration = undefined;
+      explorerPrestartWindows.clear();
+      const explorerEnabled = explorerPrestartAvailable();
+      const stopGeneration = explorerStopGeneration;
+      // The request may lazily start or replace the helper; only its response owns the evidence.
+      let responseHelper: WindowsGenerationToken | null | undefined = undefined;
+      const requireExplorerCurrent = (): void => {
+        if (
+          explorerEnabled &&
+          (enumeration !== targetEnumeration ||
+            stopGeneration !== explorerStopGeneration ||
+            !explorerPrestartAvailable() ||
+            (responseHelper != null &&
+              addon?.isWindowsGenerationCurrent?.(responseHelper) !== true))
+        )
+          throw new ComputerUseNativeUnavailableError('native_target_generation_changed');
+      };
+      requireExplorerCurrent();
       if (ledger !== undefined) await retryLedger();
+      requireExplorerCurrent();
       const requireDiscovery = (): void => {
         if (
           platform !== 'win32' ||
@@ -3099,8 +3184,11 @@ export function createComputerUseNativeHost(
       };
       requireDiscovery();
       if (ledger !== undefined) (await prepareTargetAdmission({}, false))();
+      requireExplorerCurrent();
       const value = await invoke('listTargets', {});
+      requireExplorerCurrent();
       const helper = terminationEnabled ? addon?.windowsGenerationFor?.(value) : undefined;
+      responseHelper = helper;
       const requireGeneration = (): void => {
         if (
           terminationEnabled &&
@@ -3112,7 +3200,28 @@ export function createComputerUseNativeHost(
       };
       requireGeneration();
       requireDiscovery();
-      const parsed = parseWindowsComputerUseTargets(value, windowsApprovalAvailable());
+      const explorerList = explorerEnabled
+        ? computerWindowsNativeTargetListSchema.safeParse(value)
+        : undefined;
+      const explorerContext = explorerEnabled
+        ? createWindowsExplorerPrestartContext((target, generation) => {
+            requireExplorerCurrent();
+            return (
+              helper != null &&
+              addon?.isWindowsGenerationCurrent?.(helper) === true &&
+              explorerList?.success === true &&
+              explorerList.data.generation === generation &&
+              explorerList.data.targets.some(
+                (row) => JSON.stringify(row) === JSON.stringify(target),
+              )
+            );
+          })
+        : undefined;
+      const parsed = parseWindowsComputerUseTargets(
+        value,
+        windowsApprovalAvailable(),
+        explorerContext,
+      );
       if (parsed === null)
         throw new ComputerUseNativeUnavailableError('native_target_list_invalid');
       const result = {
@@ -3128,17 +3237,46 @@ export function createComputerUseNativeHost(
             }),
       };
       targetGeneration = result.windowsGeneration;
+      const retainExplorerEvidence = (targets: typeof result.targets): void => {
+        requireExplorerCurrent();
+        if (!explorerEnabled || result.windowsGeneration === undefined) return;
+        const generation = result.windowsGeneration;
+        for (const target of targets) {
+          if (
+            target.kind !== 'selectable' ||
+            target.native.explorerPrestart === undefined ||
+            target.native.facts.imageRoot !== 'windows_directory' ||
+            target.native.facts.imageLeaf?.toLowerCase() !== 'explorer.exe' ||
+            target.maximumMode !== 'supervised'
+          )
+            continue;
+          // Retain an independent snapshot; callers cannot mutate the list into another window.
+          const native = structuredClone(target.native);
+          explorerPrestartWindows.set(native.windowId, {
+            target: native,
+            generation,
+            current: () =>
+              enumeration === targetEnumeration &&
+              stopGeneration === explorerStopGeneration &&
+              explorerPrestartAvailable() &&
+              !ledgerBlocked(native.pid, native.explorerPrestart?.processStartTime) &&
+              targetGenerationCurrent(generation),
+          });
+        }
+      };
       if (ledger !== undefined) {
         const targets = [...result.targets];
         const prepare = admissionBatch();
         const guards: Array<{ index: number; check: () => void }> = [];
         for (const [index, target] of targets.entries()) {
+          requireExplorerCurrent();
           if (target.kind !== 'selectable') continue;
           try {
             guards.push({ index, check: await prepare(target.native) });
           } catch {
             targets[index] = { kind: 'denied' };
           }
+          requireExplorerCurrent();
         }
         for (const { index, check } of guards) {
           try {
@@ -3149,8 +3287,10 @@ export function createComputerUseNativeHost(
         }
         requireDiscovery();
         requireGeneration();
+        retainExplorerEvidence(targets);
         return { ...result, targets };
       }
+      retainExplorerEvidence(result.targets);
       return result;
     },
     availability: (): ComputerUseAvailability => {
@@ -3423,6 +3563,7 @@ export function createComputerUseNativeHost(
     },
 
     stopPendingStart: (sessionId): Promise<ComputerUsePendingStartStop> => {
+      explorerStopGeneration++;
       const owner = startOwners.get(sessionId);
       return owner === undefined
         ? Promise.reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed'))
@@ -3844,6 +3985,7 @@ export function createComputerUseNativeHost(
     },
 
     cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
+      explorerStopGeneration++;
       const internal = sessions.get(session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
@@ -3864,6 +4006,7 @@ export function createComputerUseNativeHost(
     },
 
     close: async (session) => {
+      explorerStopGeneration++;
       const close = async () => {
         const owner = startOwners.get(session.sessionId);
         if (terminatedStart(owner) !== undefined) return terminatedStart(owner);
@@ -3959,6 +4102,7 @@ export function createComputerUseNativeHost(
       return false;
     return startOwners.delete(sessionId);
   });
+  explorerPrestartReaders.set(frozenHost, (windowId) => explorerPrestartWindows.get(windowId));
   explorerApprovalReaders.set(frozenHost, (sessionId) => {
     const session = sessions.get(sessionId);
     if (session === undefined) return undefined;
