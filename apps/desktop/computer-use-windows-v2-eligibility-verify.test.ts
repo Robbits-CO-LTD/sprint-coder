@@ -37,7 +37,7 @@ if (artifactsPath !== undefined) {
 const eligibility = {
   mode: 'v2-denylist',
   rulesetVersion: 4,
-  classifierVersion: 3,
+  classifierVersion: 4,
   lexiconVersion: 3,
   ticketRequired: true,
   interlockEnforced: true,

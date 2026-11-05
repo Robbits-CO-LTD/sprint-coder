@@ -463,7 +463,7 @@ it('N8-5 presents C only with matching approval evidence and never calls the ses
   const value = { ...envelope(), targets: [target] };
   const eligibility = {
     mode: 'v2-denylist',
-    classifierVersion: 3,
+    classifierVersion: 4,
     rulesetVersion: 4,
     lexiconVersion: 3,
     ticketRequired: true,

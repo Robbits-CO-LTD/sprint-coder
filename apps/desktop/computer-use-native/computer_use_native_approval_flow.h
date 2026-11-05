@@ -35,7 +35,7 @@
 namespace sprint_coder::computer_use {
 
 // The classifier version an approval intent requires (IsValidNativeApprovalIntent).
-constexpr std::uint32_t kNativeApprovalClassifierVersion = 3;
+constexpr std::uint32_t kNativeApprovalClassifierVersion = kPlatformEffectClassifierVersion;
 
 enum class NativeApprovalFailure : std::uint8_t {
   kNone,

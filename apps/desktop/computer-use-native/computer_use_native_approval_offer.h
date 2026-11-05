@@ -29,7 +29,7 @@ namespace sprint_coder::computer_use {
 // it is version 1 and keeps its original shape.
 inline constexpr std::uint32_t kNativePreflightReceiptVersion = 2;
 // The classifier version an approval offer carries (the core's own).
-inline constexpr std::uint32_t kNativeApprovalOfferClassifierVersion = 3;
+inline constexpr std::uint32_t kNativeApprovalOfferClassifierVersion = kPlatformEffectClassifierVersion;
 // An offer waits at most this long (the slot's own bound), in milliseconds.
 inline constexpr std::uint32_t kNativeApprovalOfferMaxMs =
     static_cast<std::uint32_t>(kNativeApprovalWaitMaxNs / 1'000'000ULL);
