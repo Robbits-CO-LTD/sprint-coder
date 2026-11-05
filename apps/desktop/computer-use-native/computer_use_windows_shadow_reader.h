@@ -161,11 +161,8 @@ public:
     bool failed = false;
     ShadowUiaCapture window;
     if (ShadowSettle(Root(&root), &failed)) CaptureWindow(true, root, &window);
-    page.web = window.window_class_read && window.process_path_read &&
-        window.window_class == "Chrome_WidgetWin_1" &&
-        windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(window.process_path)) == "chrome.exe";
-    if (page.web && window.process_path_read && window.window_class == "Chrome_WidgetWin_1" &&
-        windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(window.process_path)) == "chrome.exe") {
+    page.web = windows_shadow_detail::IsPageBindableBrowser(window);
+    if (page.web) {
       int count = 0;
       Element document = 0;
       std::string url, identity, repeated_url, repeated_identity;
@@ -504,34 +501,8 @@ private:
     }
   }
 
-  // Count every Document, including those without a ValuePattern. Skipping an unreadable page
-  // would turn ambiguity into certainty. The gate bounds calls/time; depth also bounds recursion.
-  bool ScanDocuments(Element element, std::size_t depth, int *count, Element *document) {
-    using namespace windows_shadow_reader_detail;
-    if (depth > kSearchMaxDepth || origin_stopped_) return false;
-    bool failed = false;
-    std::string type;
-    if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
-                      &failed) || type.empty()) return false;
-    if (type == "Document") {
-      *document = element;
-      if (++*count > 1) return false;
-    }
-    Element child = 0;
-    ShadowReadResult step = FirstChild(element, &child);
-    while (step == ShadowReadResult::kOk) {
-      Element parent = 0;
-      bool same = false;
-      if (!ShadowSettle(Parent(child, &parent), &failed) ||
-          !ShadowSettle(Same(parent, element, &same), &failed) || !same ||
-          !ScanDocuments(child, depth + 1, count, document)) return false;
-      Element next = 0;
-      step = NextSibling(child, &next);
-      child = next;
-    }
-    return step == ShadowReadResult::kAbsent && !origin_stopped_;
-  }
-
+  // Count every top-level Document, including those without a ValuePattern, and stop there.
+  // Page content is not window chrome. The gate bounds calls/time; depth bounds recursion.
   bool ScanPageDocuments(Element element, std::size_t depth, int *count, Element *document) {
     using namespace windows_shadow_reader_detail;
     if (depth > kSearchMaxDepth || origin_stopped_) return false;
@@ -566,15 +537,13 @@ private:
         ShadowSettle(Same(current, expected, &same), &failed) && same;
   }
 
-  // Separate from the legacy URL/surface path: this state grants nothing. A Chrome class alone
-  // also matches Edge and Electron, so require the owning executable's name as well.
+  // Separate from the legacy URL/surface path: this state grants nothing. Both page paths
+  // use the same supported browser predicate and top-level Document walk.
   void CapturePageOrigin(Element root, ShadowUiaCapture *capture) {
     using namespace windows_shadow_reader_detail;
     if (!capture->chain_reached_root || capture->read_failed ||
-        capture->chain.size() > kEffectMaxChainNodesWindows || !capture->process_path_read ||
-        !capture->window_class_read || capture->window_class != "Chrome_WidgetWin_1" ||
-        windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(capture->process_path)) !=
-            "chrome.exe") return;
+        capture->chain.size() > kEffectMaxChainNodesWindows ||
+        !windows_shadow_detail::IsPageBindableBrowser(*capture)) return;
     Element expected = ShadowUiaSource::kNoElement;
     for (std::size_t i = 0; i < capture->chain.size(); ++i) {
       const auto &node = capture->chain[i];
@@ -587,12 +556,15 @@ private:
     if (expected == ShadowUiaSource::kNoElement) return;
     int count = 0;
     Element document = 0;
-    if (!ScanDocuments(root, 0, &count, &document) || count != 1) return;
+    if (!ScanPageDocuments(root, 0, &count, &document) || count != 1) return;
     bool failed = false;
     bool same = false;
     if (!ShadowSettle(Same(document, expected, &same), &failed) || !same) return;
     std::string url;
     if (!ShadowSettle(DocumentUrl(document, kUrlBytes, &url), &failed) || url.empty()) return;
+    std::string repeated_url;
+    if (!ShadowSettle(DocumentUrl(document, kUrlBytes, &repeated_url), &failed) ||
+        url != repeated_url || !PageDocumentStillCurrent(root, document)) return;
     // Recheck the target's entire captured ancestry after the value read (a page may detach).
     for (std::size_t i = 0; i + 1 < chain_elements_.size(); ++i) {
       Element parent = 0;

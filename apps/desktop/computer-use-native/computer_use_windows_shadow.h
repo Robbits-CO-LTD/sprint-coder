@@ -115,6 +115,16 @@ using shadow_detail::Lowercase;
   return separator == std::string_view::npos ? path : path.substr(separator + 1);
 }
 
+// Page evidence only; this does not grant input eligibility. The host's existing
+// process/window identity validation remains required before using the evidence.
+// Exact class + owning executable excludes Electron, CEF and WebView2 child windows.
+[[nodiscard]] inline bool IsPageBindableBrowser(const ShadowUiaCapture &window) {
+  if (window.read_failed || !window.process_path_read || !window.window_class_read ||
+      window.window_class != "Chrome_WidgetWin_1") return false;
+  const auto leaf = Lowercase(BaseName(window.process_path));
+  return leaf == "chrome.exe" || leaf == "msedge.exe";
+}
+
 [[nodiscard]] inline bool OneOf(std::string_view value, const std::string_view *names,
                                 std::size_t count) {
   for (std::size_t index = 0; index < count; ++index)

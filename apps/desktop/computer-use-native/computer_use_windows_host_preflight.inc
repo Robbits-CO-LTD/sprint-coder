@@ -838,16 +838,16 @@ sprint_coder::computer_use::WindowsPageEvidence ReadWindowsPage(const WindowsSes
   window_class.window_class_read = GetClassNameW(window, class_name, 256) > 0;
   window_class.window_class = Utf8FromWide(class_name);
   const auto path = Utf8FromWide(session.canonical_path);
-  const bool readable_page = window_class.window_class_read &&
-      window_class.window_class == "Chrome_WidgetWin_1" &&
-      windows_shadow_detail::Lowercase(windows_shadow_detail::BaseName(path)) == "chrome.exe";
+  window_class.process_path_read = !path.empty();
+  window_class.process_path = path;
+  const bool readable_page = windows_shadow_detail::IsPageBindableBrowser(window_class);
   const bool capped_browser = (session.maximum_mode == "observe_only" || session.maximum_mode == "supervised") &&
       artifact_read_detail::IsBrowserExecutable(path) && windows_shadow_detail::IsWebWindowClass(window_class);
   const bool same_window = window == session.active_window && !window_identity.empty() &&
       window_identity == session.active_window_identity;
   unavailable.web = readable_page || capped_browser || (same_window && session.observed_page.web);
   // Electron/CEF and embedded WebView2 pages are not bound here; existing interlocks own them.
-  if (!unavailable.web || session.maximum_mode == "observe_only") return unavailable;
+  if (!readable_page || session.maximum_mode == "observe_only") return unavailable;
   const auto epoch = session.cancel_epoch;
   const auto serial = WindowsValidationFrameStopSerial();
   const auto start = MonotonicNowNs();
