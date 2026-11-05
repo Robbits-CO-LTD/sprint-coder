@@ -1,10 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computerRequestAccessOutputSchema,
   computerWindowsAppIdentitySchema,
   computerWindowsNativeTargetListSchema,
   computerWindowsTargetFactsSchema,
   type ComputerWindowsTargetFacts,
 } from './index';
+
+it('accepts only the six upgrade fallback reasons on a retained grant', () => {
+  for (const upgradeReasonCode of [
+    'access_request_pending',
+    'access_request_rate_limited',
+    'access_request_invalid_token',
+    'access_request_timed_out',
+    'access_request_withdrawn',
+    'access_request_denied',
+  ]) {
+    expect(
+      computerRequestAccessOutputSchema.safeParse({
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode,
+      }).success,
+    ).toBe(true);
+    expect(
+      computerRequestAccessOutputSchema.safeParse({
+        granted: false,
+        reasonCode: 'access_request_denied',
+        upgradeReasonCode,
+      }).success,
+    ).toBe(false);
+  }
+  for (const upgradeReasonCode of [
+    'access_request_denied_in_task',
+    'app_grant_identity_changed',
+    'access_request_unavailable',
+    'unknown',
+    '',
+  ]) {
+    expect(
+      computerRequestAccessOutputSchema.safeParse({
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode,
+      }).success,
+    ).toBe(false);
+  }
+});
 
 function facts(overrides: Partial<ComputerWindowsTargetFacts> = {}): ComputerWindowsTargetFacts {
   return {

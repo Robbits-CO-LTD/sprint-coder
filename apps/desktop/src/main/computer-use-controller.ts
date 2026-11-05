@@ -52,6 +52,7 @@ import {
   computerAppGrantRequestSchema,
   computerAppAccessRequestViewSchema,
   computerRequestAccessOutputSchema,
+  computerAccessUpgradeReasonCodeSchema,
   computerStartToolOutputSchema,
   computerUseSessionStateIsSettled,
   selectableComputerTargetSchema,
@@ -884,6 +885,7 @@ const COMPUTER_APP_UNGRANTED: ComputerAppGrantState = Object.freeze({
  * against itself and pass every time.
  */
 type PendingAppGrantRequest = {
+  upgrade: boolean;
   targetRecord?: ComputerTargetAppTokenRecord;
   request: ComputerAppGrantRequest;
   facts: ComputerAppGrantCardFacts;
@@ -1913,28 +1915,34 @@ export class ComputerUseController {
       )
     )
       throw new Error('Computer Use application cannot be granted');
-    // A row written by a newer build is kept unread (it grants nothing here); an explicit approval
-    // in this build replaces it, or the store's one-row-per-identity rule would refuse the grant.
+    // Explicit reapproval replaces an unreadable row or widens a stored ceiling;
+    // otherwise the store's one-row-per-identity rule would refuse the new grant.
     const retained = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
       derived.grantIdentityDigest,
     );
-    if (retained !== null && computerAppGrantVersionUnreadable(retained, denyRulesetVersion))
-      this.deps.persistence.removeComputerAppGrant(retained.id, retained.revision);
-    return this.deps.persistence.createComputerAppGrant({
-      identity: derived,
-      // Sanitised before it is stored as well as before it is shown. Storing the raw string would
-      // put app-authored control characters in the database, where the next reader is whichever
-      // surface forgets to sanitise; the verified app id is the fallback when nothing is left.
-      displayName: sanitizeUntrustedTargetLabel(
-        typeof input.displayName === 'string' && input.displayName.trim() !== ''
-          ? input.displayName
-          : derived.appId,
-      ),
-      maxMode: input.maxMode,
-      denyRulesetVersion,
-      providerEgress: input.providerEgress,
-    });
+    const replace =
+      retained !== null &&
+      (computerAppGrantVersionUnreadable(retained, denyRulesetVersion) ||
+        (retained.maxMode !== input.maxMode &&
+          bindComputerUseMaximumMode(retained.maxMode, input.maxMode) === retained.maxMode));
+    return this.deps.persistence.createComputerAppGrant(
+      {
+        identity: derived,
+        // Sanitised before it is stored as well as before it is shown. Storing the raw string would
+        // put app-authored control characters in the database, where the next reader is whichever
+        // surface forgets to sanitise; the verified app id is the fallback when nothing is left.
+        displayName: sanitizeUntrustedTargetLabel(
+          typeof input.displayName === 'string' && input.displayName.trim() !== ''
+            ? input.displayName
+            : derived.appId,
+        ),
+        maxMode: input.maxMode,
+        denyRulesetVersion,
+        providerEgress: input.providerEgress,
+      },
+      replace && retained !== null ? { id: retained.id, revision: retained.revision } : undefined,
+    );
   }
 
   /**
@@ -2060,7 +2068,16 @@ export class ComputerUseController {
     // braces — but a future caller that forgets the filter must not be handed a granted terminal.
     const grant = this.appGrantFor(profile);
     if (this.permanentlyDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
-    if (grant !== null)
+    const scoped = taskId === null ? null : this.taskScopedGrantFor(taskId, profile);
+    // A one-time reapproval may widen an old stored ceiling for this Task only.
+    if (
+      grant !== null &&
+      !(
+        scoped !== null &&
+        bindComputerUseMaximumMode(grant.maxMode, scoped.maxMode) === grant.maxMode &&
+        grant.maxMode !== scoped.maxMode
+      )
+    )
       return Object.freeze({
         granted: true,
         scope: 'grant' as const,
@@ -2074,7 +2091,6 @@ export class ComputerUseController {
                 modelId: grant.providerEgressModelId,
               }),
       });
-    const scoped = taskId === null ? null : this.taskScopedGrantFor(taskId, profile);
     if (scoped !== null)
       return Object.freeze({
         granted: true,
@@ -2392,6 +2408,12 @@ export class ComputerUseController {
         this.targetAppTokens.set(
           appToken,
           Object.freeze({
+            maximumMode: windows
+              .filter((window) => this.computerUseWindowStartEligible(profile, window))
+              .reduce<ComputerUseMode>(
+                (ceiling, window) => bindComputerUseMaximumMode(ceiling, window.maximumMode),
+                maximumModeForProfile(profile),
+              ),
             binding: appBinding,
             profileId: profile.id,
             expiresAt,
@@ -2653,19 +2675,53 @@ export class ComputerUseController {
     if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
       return this.accessRefused('access_request_unavailable');
     const scope = this.discoveryScope(context.taskId, context.turnId, signal);
+    let retainedProfile: ComputerAppProfileRecord | null = null;
+    // Re-read consent after waiting: a withdrawal can also have revoked the saved grant.
+    const retainGrant = (outcome: ComputerRequestAccessOutput): ComputerRequestAccessOutput => {
+      if (
+        // A disabled, disposed or unavailable controller never reports a grant (fail closed).
+        this.disposed ||
+        this.deps.agentDrivenEnabled?.() !== true ||
+        !this.availability().available ||
+        retainedProfile === null ||
+        outcome.reasonCode === null ||
+        !computerAccessUpgradeReasonCodeSchema.safeParse(outcome.reasonCode).success ||
+        this.currentPolicyEpoch(context.taskId) !== context.policyEpoch
+      )
+        return outcome;
+      const state = this.appGrantState(retainedProfile, context.taskId);
+      if (
+        !state.granted ||
+        state.maxMode === null ||
+        !ComputerUseController.egressAgreed(
+          state,
+          this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null,
+        )
+      )
+        return outcome;
+      return {
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode: computerAccessUpgradeReasonCodeSchema.parse(outcome.reasonCode),
+      };
+    };
     try {
       return await scope.run(async () => {
-        const outcome = await this.requestAccessInScope(input, context, scope);
+        const outcome = await this.requestAccessInScope(input, context, scope, (profile) => {
+          retainedProfile = profile;
+        });
         // A settled card already owns its grant/refusal result; withdrawal must not rewrite it.
         scope.finish();
-        return outcome;
+        return retainGrant(outcome);
       });
     } catch (error) {
       if (error !== scope.signal.reason) throw error;
-      return this.accessRefused(
-        this.currentPolicyEpoch(context.taskId) !== context.policyEpoch
-          ? 'access_request_invalid_token'
-          : 'access_request_withdrawn',
+      return retainGrant(
+        this.accessRefused(
+          this.currentPolicyEpoch(context.taskId) !== context.policyEpoch
+            ? 'access_request_invalid_token'
+            : 'access_request_withdrawn',
+        ),
       );
     }
   }
@@ -2674,6 +2730,7 @@ export class ComputerUseController {
     input: Readonly<{ appToken: string; reason: string }>,
     context: ToolExecutionContext,
     scope: ComputerUseDiscoveryScope,
+    retainProfile: (profile: ComputerAppProfileRecord) => void,
   ): Promise<ComputerRequestAccessOutput> {
     const signal = scope.signal;
     if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
@@ -2721,15 +2778,29 @@ export class ComputerUseController {
       state.providerEgress.connectionId === egressBinding.connectionId &&
       state.providerEgress.modelId === egressBinding.modelId;
     // Already agreed, in full: the second and later requests cost the user nothing (§7.2).
-    if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
-    const kind = state.granted ? ('provider-egress' as const) : ('app-grant' as const);
+    const listedCeiling = targetRecord?.maximumMode;
+    // Persisted separately so refusing an upgrade still permits consent for a new destination.
+    // Key only by Task/platform/identity, not the offered ceiling, to avoid repeated upgrade cards.
     const denial = this.deps.persistence.getComputerAppAccessRequest(
       identity.platform,
       identity.grantIdentityDigest,
       context.taskId,
     );
+    const mayUpgrade =
+      denial?.upgradeDenied !== true &&
+      state.granted &&
+      state.maxMode !== null &&
+      listedCeiling !== undefined &&
+      state.maxMode !== listedCeiling &&
+      bindComputerUseMaximumMode(state.maxMode, listedCeiling) === state.maxMode;
+    if (mayUpgrade && egressAgreed) retainProfile(profile);
+    if (state.granted && egressAgreed && !mayUpgrade) return { granted: true, reasonCode: null };
     // A refusal is final for this Task, and a different Task may ask again (§6.1).
-    if (denial?.denied === true) return this.accessRefused('access_request_denied_in_task');
+    if (denial?.denied === true) {
+      // A Task refusal does not revoke an already agreed grant.
+      if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
+      return this.accessRefused('access_request_denied_in_task');
+    }
     if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     if (
       (this.accessRequestsByTurn.get(context.turnId) ?? 0) >= COMPUTER_ACCESS_REQUEST_TURN_LIMIT ||
@@ -2745,6 +2816,13 @@ export class ComputerUseController {
       return this.accessRefused('access_request_invalid_token');
     if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
       return this.accessRefused('access_request_invalid_token');
+    const upgrade =
+      mayUpgrade &&
+      state.granted &&
+      state.maxMode !== null &&
+      state.maxMode !== observed.facts.maximumMode &&
+      bindComputerUseMaximumMode(state.maxMode, observed.facts.maximumMode) === state.maxMode;
+    const kind = state.granted && !upgrade ? ('provider-egress' as const) : ('app-grant' as const);
     // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
     // card to withdraw, and a policy change does not abort this dispatch either. Raising now would
     // put a card bound to the old epoch on screen, so the epoch is read again on this side of the
@@ -2754,8 +2832,10 @@ export class ComputerUseController {
     // A Turn that is already gone has nobody left to click, and the card holds the single global
     // slot for two minutes. Checked before raising, and again through the listener below.
     if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
+    if (state.granted && egressAgreed && !upgrade) return { granted: true, reasonCode: null };
     if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     return await this.raiseAppGrantCard({
+      upgrade,
       ...(targetRecord.binding.windowsGeneration === undefined ? {} : { targetRecord }),
       context,
       kind,
@@ -2767,7 +2847,7 @@ export class ComputerUseController {
       reason: input.reason,
       providerEgress: egressBinding,
       grantId: state.grantId,
-      grantedMaxMode: state.granted ? state.maxMode : null,
+      grantedMaxMode: state.granted && !upgrade ? state.maxMode : null,
       ...(signal === undefined ? {} : { signal }),
     });
   }
@@ -2884,6 +2964,7 @@ export class ComputerUseController {
   /** Builds one card, publishes it, and resolves when a person answers or the card lapses. */
   private async raiseAppGrantCard(
     input: Readonly<{
+      upgrade: boolean;
       targetRecord?: ComputerTargetAppTokenRecord;
       context: ToolExecutionContext;
       kind: 'app-grant' | 'provider-egress';
@@ -2994,6 +3075,7 @@ export class ComputerUseController {
             }, 250);
       generationTimer?.unref?.();
       this.pendingAppGrantRequest = {
+        upgrade: input.upgrade,
         ...(input.targetRecord === undefined ? {} : { targetRecord: input.targetRecord }),
         request,
         facts: input.facts,
@@ -3025,8 +3107,8 @@ export class ComputerUseController {
    * Withdraws the card without a decision (ADR v2 §5.2).
    *
    * Every way a card can stop being answerable ends here: the timeout, the Turn being cancelled,
-   * the Task being switched away from, and a policy epoch change. All of them fail the tool call
-   * closed — the model is told the request did not succeed, never that it did.
+   * the Task being switched away from, and a policy epoch change. None approves the card;
+   * requestAccess may still report an existing narrower grant separately from the failed upgrade.
    */
   private closeAppGrantCard(
     requestId: string,
@@ -3224,7 +3306,7 @@ export class ComputerUseController {
         taskId: pending.taskId,
         appId: pending.identity.appId,
         displayName: pending.displayName,
-        outcome: 'denied',
+        outcome: pending.upgrade ? 'upgrade_denied' : 'denied',
       });
     } catch (error) {
       // The Task itself may be gone, which is the one case the foreign key refuses. Nothing here

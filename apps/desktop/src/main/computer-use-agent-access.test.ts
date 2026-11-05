@@ -235,6 +235,7 @@ async function settle<T>(pending: Promise<T>, steps = 200, stepMs = 1_000): Prom
 function createFixture(
   options: {
     profiles?: readonly ComputerAppProfileRecord[];
+    grantStore?: ReturnType<typeof createComputerAppGrantFixtureStore>;
     beginWindowDiscovery?: ComputerUseNativeHost['beginWindowDiscovery'];
     windowsFor?: (profile: ComputerAppProfileRecord) => readonly ComputerUseNativeWindow[];
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
@@ -270,7 +271,7 @@ function createFixture(
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
-  const grantStore = createComputerAppGrantFixtureStore();
+  const grantStore = options.grantStore ?? createComputerAppGrantFixtureStore();
   const published: ComputerAppGrantRequest[] = [];
   let policyEpoch = 0;
   let activeTurnId: string | null = context.turnId;
@@ -941,35 +942,405 @@ describe('computer_request_access', () => {
     expect(fixture.published).toHaveLength(0);
   });
 
-  it('re-asks only the destination when the model changed (ADR v2 §6.4)', async () => {
+  it.each(['pending', 'rate_limit', 'wrong_window'] as const)(
+    'ruleset4_unchanged_notepad_grant_remains_granted (%s)',
+    async (obstacle) => {
+      const profile = profileRecord(
+        'notepad',
+        macIdentity({
+          platform: 'win32',
+          executablePath: 'C:\\Windows\\System32\\notepad.exe',
+          signerDigest: '9'.repeat(64),
+          packageFamilyName: null,
+          maximumMode: 'supervised',
+        }),
+      );
+      const other = profileRecord('other', macIdentity());
+      let wrongWindow = false;
+      const fixture = createFixture({
+        profiles: [profile, other],
+        windowsFor: (item) => [
+          nativeWindow(item, {
+            platform: item.platform,
+            maximumMode: 'supervised',
+            executableDigest: item.executableDigest,
+            appIdentityDigest: wrongWindow ? '0'.repeat(64) : item.identityDigest,
+          }),
+        ],
+      });
+      const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+        maxMode: 'supervised',
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: 4 });
+      const rows = selectable((await fixture.controller.listTargets({}, context)).targets);
+      const target = rows[0]!;
+      let otherRequest: Promise<unknown> | undefined;
+      if (obstacle === 'pending') {
+        const otherContext = { ...context, taskId: 'task-2', turnId: 'turn-2' };
+        const otherRows = selectable(
+          (await fixture.controller.listTargets({}, otherContext)).targets,
+        );
+        otherRequest = fixture.controller.requestAccess(
+          { appToken: otherRows[1]!.appToken, reason: 'other' },
+          otherContext,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fixture.pending().taskId).toBe('task-2');
+      }
+      if (obstacle === 'rate_limit')
+        fixture.controller['accessRequestsByTurn'].set(context.turnId, 2);
+      if (obstacle === 'wrong_window') wrongWindow = true;
+      const calls = fixture.listWindowCalls();
+      expect(
+        await fixture.controller.requestAccess(
+          { appToken: target.appToken, reason: 'already agreed' },
+          context,
+        ),
+      ).toEqual({ granted: true, reasonCode: null });
+      expect(fixture.listWindowCalls()).toBe(calls);
+      expect(fixture.controller.appGrantFor(profile)).toMatchObject({
+        maxMode: 'supervised',
+        denyRulesetVersion: 4,
+      });
+      if (otherRequest !== undefined) {
+        const card = fixture.pending();
+        await fixture.controller.resolveAppGrantRequest(
+          { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+          null,
+        );
+        await otherRequest;
+      }
+    },
+  );
+
+  it.each(
+    ['chrome.exe', 'msedge.exe'].flatMap((leaf) =>
+      (
+        [
+          'allow_always',
+          'allow_once',
+          'deny',
+          'ceiling_changed',
+          'unchanged',
+          'current_ruleset',
+        ] as const
+      ).map((decision) => [leaf, decision] as const),
+    ),
+  )(
+    'ruleset4_browser_grant_requires_reapproval_before_upgrade (%s, %s)',
+    async (leaf, decision) => {
+      const identity = macIdentity({
+        platform: 'win32',
+        executablePath: `C:\\Program Files\\Browser\\${leaf}`,
+        signerDigest: '9'.repeat(64),
+        packageFamilyName: null,
+        maximumMode: 'supervised',
+      });
+      const profile = profileRecord('browser', identity);
+      let ceiling: 'supervised' | 'observe_only' =
+        decision === 'unchanged' ? 'observe_only' : 'supervised';
+      const grantStore = createComputerAppGrantFixtureStore();
+      const options: Parameters<typeof createFixture>[0] = {
+        grantStore,
+        profiles: [profile],
+        windowsFor: () => [
+          nativeWindow(profile, {
+            platform: 'win32',
+            maximumMode: ceiling,
+            executableDigest: profile.executableDigest,
+          }),
+        ],
+      };
+      const fixture = createFixture(options);
+      const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+        maxMode: 'observe_only',
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      const savedVersion = decision === 'current_ruleset' ? 5 : 4;
+      fixture.grants.set(grant.id, { ...grant, denyRulesetVersion: savedVersion });
+      const target = await listOne(fixture);
+      expect(fixture.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'upgrade' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      if (decision === 'unchanged') {
+        expect(await pending).toEqual({ granted: true, reasonCode: null });
+        expect(fixture.published).toHaveLength(0);
+        expect(fixture.controller.appGrantFor(profile)).toMatchObject({
+          maxMode: 'observe_only',
+          denyRulesetVersion: savedVersion,
+        });
+        return;
+      }
+      const card = fixture.pending();
+      expect(card.kind).toBe('app-grant');
+      expect(card.verified.maxMode).toBe('supervised');
+      expect(fixture.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
+      if (decision === 'ceiling_changed') ceiling = 'observe_only';
+      const answer =
+        decision === 'ceiling_changed' || decision === 'current_ruleset'
+          ? 'allow_always'
+          : decision;
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: answer },
+        answer === 'deny' ? null : intentFor(card, answer),
+      );
+      expect(await pending).toMatchObject({
+        granted:
+          decision === 'allow_always' ||
+          decision === 'allow_once' ||
+          decision === 'deny' ||
+          decision === 'current_ruleset',
+      });
+      expect(fixture.grants.size).toBe(1);
+      expect(fixture.controller.appGrantFor(profile)).toMatchObject(
+        decision === 'allow_always' || decision === 'current_ruleset'
+          ? { maxMode: 'supervised', denyRulesetVersion: 5 }
+          : { maxMode: 'observe_only', denyRulesetVersion: 4 },
+      );
+      if (decision === 'deny') {
+        expect(computerRequestAccessOutputSchema.parse(await pending)).toEqual({
+          granted: true,
+          reasonCode: null,
+          upgradeReasonCode: 'access_request_denied',
+        });
+        expect(fixture.grants.get(grant.id)).toMatchObject({ requestCount: 1, denialCount: 1 });
+        expect([...fixture.accessRequests.values()]).toEqual([
+          expect.objectContaining({ denied: false, upgradeDenied: true, denialCount: 1 }),
+        ]);
+        expect(
+          await fixture.controller.requestAccess(
+            { appToken: target.appToken, reason: 'observe with retained grant' },
+            context,
+          ),
+        ).toEqual({ granted: true, reasonCode: null });
+        expect(fixture.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
+        fixture.controller.taskClosed(context.taskId);
+        await fixture.controller.dispose();
+        const restarted = createFixture(options);
+        const fresh = await listOne(restarted);
+        expect(
+          await restarted.controller.requestAccess(
+            { appToken: fresh.appToken, reason: 'retry after restart and task close' },
+            context,
+          ),
+        ).toEqual({ granted: true, reasonCode: null });
+        expect(restarted.published).toHaveLength(0);
+        expect(restarted.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
+        const otherTask = { ...context, taskId: 'task-2' };
+        const other = await listOne(restarted, otherTask);
+        const otherRequest = restarted.controller.requestAccess(
+          { appToken: other.appToken, reason: 'upgrade in another task' },
+          otherTask,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(restarted.pending().verified.maxMode).toBe('supervised');
+        await restarted.controller.dispose();
+        await otherRequest;
+      }
+      if (decision === 'allow_once') {
+        expect(fixture.controller['appGrantState'](profile, context.taskId).maxMode).toBe(
+          'supervised',
+        );
+        expect(fixture.controller['appGrantState'](profile, 'task-2').maxMode).toBe('observe_only');
+        fixture.controller.taskClosed(context.taskId);
+        expect(fixture.controller['appGrantState'](profile, context.taskId).maxMode).toBe(
+          'observe_only',
+        );
+      }
+    },
+  );
+
+  it.each([
+    'model_changed',
+    'pending',
+    'rate_limit',
+    'refetch',
+    'timeout',
+    'withdrawn',
+    'revoked',
+    'revoked_pending',
+    'revoked_timeout',
+    'revoked_withdrawn',
+  ] as const)('browser_upgrade_retains_saved_grant (%s)', async (obstacle) => {
+    const profile = profileRecord(
+      'browser',
+      macIdentity({
+        platform: 'win32',
+        executablePath: 'C:\\Program Files\\Browser\\chrome.exe',
+        signerDigest: '9'.repeat(64),
+        packageFamilyName: null,
+        maximumMode: 'supervised',
+      }),
+    );
+    let missing = false;
     const fixture = createFixture({
-      providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
+      profiles: [profile],
+      providerBinding: {
+        connectionId: 'connection-1',
+        modelId: obstacle === 'model_changed' ? 'model-2' : 'model-1',
+      },
+      windowsFor: () =>
+        missing
+          ? []
+          : [
+              nativeWindow(profile, {
+                platform: 'win32',
+                maximumMode: 'supervised',
+                executableDigest: profile.executableDigest,
+              }),
+            ],
     });
-    const grant = fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
-      maxMode: 'full_access_app',
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+      maxMode: 'observe_only',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
     const target = await listOne(fixture);
-    const pending = fixture.controller.requestAccess(
-      { appToken: target.appToken, reason: 'new model' },
-      context,
-    );
+    const request = (signal?: AbortSignal) =>
+      fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'upgrade' },
+        context,
+        signal,
+      );
+    if (obstacle === 'rate_limit')
+      fixture.controller['accessRequestsByTurn'].set(context.turnId, 2);
+    if (obstacle === 'refetch') missing = true;
+    const abort = new AbortController();
+    const outcome = request(abort.signal);
     await vi.advanceTimersByTimeAsync(0);
-    const card = fixture.pending();
-    expect(card.kind).toBe('provider-egress');
-    // The smaller confirmation: there is no "just this once" for a destination.
-    expect(card.allowedDecisions).toEqual(['allow_always', 'deny']);
-    expect(card.providerEgressModelId).toBe('model-2');
-    await fixture.controller.resolveAppGrantRequest(
-      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
-      intentFor(card, 'allow_always'),
-    );
-    expect(await pending).toEqual({ granted: true, reasonCode: null });
-    // A stays exactly as it was; only B moved.
-    const stored = fixture.grants.get(grant.id)!;
-    expect(stored.maxMode).toBe('full_access_app');
-    expect(stored.providerEgressModelId).toBe('model-2');
+    if (obstacle.startsWith('revoked_')) {
+      expect(fixture.pending().kind).toBe('app-grant');
+      const current = fixture.grants.get(grant.id)!;
+      fixture.controller['deps'].persistence.removeComputerAppGrant(current.id, current.revision);
+      if (obstacle === 'revoked_pending') {
+        expect(await request()).toMatchObject({ granted: false });
+      }
+      if (obstacle === 'revoked_timeout') await vi.advanceTimersByTimeAsync(120_000);
+      else abort.abort();
+      expect(await outcome).toMatchObject({ granted: false });
+      return;
+    }
+    if (obstacle === 'model_changed') {
+      const card = fixture.pending();
+      expect(card.kind).toBe('app-grant');
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+        null,
+      );
+      expect(await outcome).toMatchObject({ granted: false });
+      const destination = request();
+      await vi.advanceTimersByTimeAsync(0);
+      const egress = fixture.pending();
+      expect(egress.kind).toBe('provider-egress');
+      expect(egress.verified.maxMode).toBe('observe_only');
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: egress.id, expectedRevision: egress.revision, decision: 'allow_always' },
+        intentFor(egress, 'allow_always'),
+      );
+      expect(await destination).toEqual({ granted: true, reasonCode: null });
+      expect(await request()).toEqual({ granted: true, reasonCode: null });
+      expect(fixture.controller.appGrantFor(profile)).toMatchObject({
+        maxMode: 'observe_only',
+        providerEgressModelId: 'model-2',
+      });
+      return;
+    }
+    if (obstacle === 'pending') {
+      expect(await request()).toEqual({
+        granted: true,
+        reasonCode: null,
+        upgradeReasonCode: 'access_request_pending',
+      });
+      abort.abort();
+    }
+    if (obstacle === 'timeout') await vi.advanceTimersByTimeAsync(120_000);
+    if (obstacle === 'withdrawn') abort.abort();
+    if (obstacle === 'revoked') {
+      const current = fixture.grants.get(grant.id)!;
+      await fixture.controller.revokeAppGrant(current.id, current.revision);
+      expect(await outcome).toMatchObject({ granted: false });
+      return;
+    }
+    expect(computerRequestAccessOutputSchema.parse(await outcome)).toEqual({
+      granted: true,
+      reasonCode: null,
+      upgradeReasonCode:
+        obstacle === 'rate_limit'
+          ? 'access_request_rate_limited'
+          : obstacle === 'refetch'
+            ? 'access_request_invalid_token'
+            : obstacle === 'timeout'
+              ? 'access_request_timed_out'
+              : 'access_request_withdrawn',
+    });
+    expect(fixture.controller.appGrantFor(profile)?.maxMode).toBe('observe_only');
   });
+
+  it('keeps the saved grant when upgrade persistence throws', () => {
+    const fixture = createFixture();
+    const profile = fixture.profiles[0]!;
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(profile), {
+      maxMode: 'observe_only',
+      providerEgress: null,
+    });
+    vi.spyOn(
+      fixture.controller['deps'].persistence,
+      'createComputerAppGrant',
+    ).mockImplementationOnce(() => {
+      throw new Error('injected create failure');
+    });
+    expect(() =>
+      fixture.controller.createAppGrant(grantIdentityOf(profile), {
+        maxMode: 'supervised',
+        providerEgress: null,
+      }),
+    ).toThrow('injected create failure');
+    expect(fixture.grants.get(grant.id)).toEqual(grant);
+  });
+
+  it.each(['allow_always', 'deny'] as const)(
+    're-asks only the destination when the model changed (ADR v2 §6.4): %s',
+    async (decision) => {
+      const fixture = createFixture({
+        providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
+      });
+      const grant = fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+        maxMode: 'full_access_app',
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      const target = await listOne(fixture);
+      const pending = fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'new model' },
+        context,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const card = fixture.pending();
+      expect(card.kind).toBe('provider-egress');
+      // The smaller confirmation: there is no "just this once" for a destination.
+      expect(card.allowedDecisions).toEqual(['allow_always', 'deny']);
+      expect(card.providerEgressModelId).toBe('model-2');
+      await fixture.controller.resolveAppGrantRequest(
+        { requestId: card.id, expectedRevision: card.revision, decision },
+        decision === 'deny' ? null : intentFor(card, decision),
+      );
+      expect(await pending).toEqual(
+        decision === 'deny'
+          ? { granted: false, reasonCode: 'access_request_denied' }
+          : { granted: true, reasonCode: null },
+      );
+      expect(fixture.grants.get(grant.id)).toMatchObject({
+        requestCount: 1,
+        denialCount: decision === 'deny' ? 1 : 0,
+      });
+      // A stays exactly as it was; only B moved.
+      const stored = fixture.grants.get(grant.id)!;
+      expect(stored.maxMode).toBe('full_access_app');
+      expect(stored.providerEgressModelId).toBe(decision === 'deny' ? 'model-1' : 'model-2');
+    },
+  );
 
   it('raises no card when the policy changed while native was answering', async () => {
     let release: () => void = () => undefined;

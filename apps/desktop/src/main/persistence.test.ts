@@ -10762,6 +10762,7 @@ if (runsWithElectronAbi)
         { version: 102 },
         { version: 103 },
         { version: 104 },
+        { version: 105 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -13685,7 +13686,8 @@ if (runsWithElectronAbi)
         'requested',
       );
       const denied = fixture.persistence.countComputerAppGrantAccessRequest(grant.id, 'denied');
-      expect([denied.requestCount, denied.denialCount]).toEqual([2, 1]);
+      expect([requested.requestCount, requested.denialCount]).toEqual([1, 0]);
+      expect([denied.requestCount, denied.denialCount]).toEqual([1, 1]);
       expect(requested.revision).toBe(2);
       const used = fixture.persistence.touchComputerAppGrantUsed(
         grant.id,
@@ -13802,6 +13804,37 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
+    it('rolls back a grant replacement when create fails', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence, { maxMode: 'observe_only' });
+      const raw = new Database(fixture.path);
+      raw.exec(`CREATE TRIGGER fail_grant_insert BEFORE INSERT ON computer_app_grants
+        BEGIN SELECT RAISE(ABORT, 'injected create failure'); END`);
+      raw.close();
+      const input = {
+        identity,
+        displayName: 'Notes',
+        maxMode: 'supervised' as const,
+        denyRulesetVersion: 1,
+        providerEgress: null,
+      };
+      expect(() => fixture.persistence.createComputerAppGrant(input, grant)).toThrow(
+        'injected create failure',
+      );
+      expect(fixture.persistence.getComputerAppGrant(grant.id)).toEqual(grant);
+      const recovered = new Database(fixture.path);
+      recovered.exec('DROP TRIGGER fail_grant_insert');
+      recovered.close();
+      expect(() =>
+        fixture.persistence.createComputerAppGrant(input, { ...grant, revision: 99 }),
+      ).toThrow();
+      expect(fixture.persistence.getComputerAppGrant(grant.id)).toEqual(grant);
+      const upgraded = fixture.persistence.createComputerAppGrant(input, grant);
+      expect(fixture.persistence.listComputerAppGrants().grants).toEqual([upgraded]);
+      expect(upgraded.maxMode).toBe('supervised');
+      fixture.persistence.close();
+    });
+
     it('revokes a grant only against the revision the caller saw', () => {
       const fixture = createPersistence();
       const grant = createGrant(fixture.persistence);
@@ -13891,7 +13924,7 @@ if (runsWithElectronAbi)
     function record(
       persistence: SqlitePersistenceClient,
       taskId: string,
-      outcome: 'requested' | 'denied' = 'requested',
+      outcome: 'requested' | 'denied' | 'upgrade_denied' = 'requested',
       overrides: Record<string, unknown> = {},
     ) {
       return persistence.recordComputerAppAccessRequest({
@@ -13904,6 +13937,40 @@ if (runsWithElectronAbi)
         ...overrides,
       });
     }
+
+    it('migrates upgrade refusals and preserves them across reopening without denying egress', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Upgrade denial');
+      record(fixture.persistence, task.id, 'denied');
+      fixture.persistence.close();
+      const old = new Database(fixture.path);
+      old.exec(`ALTER TABLE computer_app_access_requests DROP COLUMN upgrade_denied;
+        DELETE FROM schema_migrations WHERE version = 105;`);
+      old.close();
+      const migrated = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      expect(migrated.getComputerAppAccessRequest('darwin', digest, task.id)).toMatchObject({
+        denied: true,
+        upgradeDenied: false,
+        denialCount: 1,
+      });
+      const other = migrated.createTask('Upgrade only');
+      record(migrated, other.id);
+      expect(record(migrated, other.id, 'upgrade_denied')).toMatchObject({
+        denied: false,
+        upgradeDenied: true,
+        requestCount: 1,
+        denialCount: 1,
+      });
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      expect(record(reopened, other.id)).toMatchObject({
+        denied: false,
+        upgradeDenied: true,
+        requestCount: 2,
+        denialCount: 1,
+      });
+      reopened.close();
+    });
 
     it('counts per application per Task, and keeps a refusal final for that Task', () => {
       const fixture = createPersistence();
@@ -14015,24 +14082,27 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
-    it('takes a Task-scoped refusal away with the Task', () => {
-      const fixture = createPersistence();
-      const task = fixture.persistence.createTask('Doomed');
-      record(fixture.persistence, task.id, 'denied');
-      fixture.persistence.close();
+    it.each(['denied', 'upgrade_denied'] as const)(
+      'takes a Task-scoped %s away with the Task',
+      (outcome) => {
+        const fixture = createPersistence();
+        const task = fixture.persistence.createTask('Doomed');
+        record(fixture.persistence, task.id, outcome);
+        fixture.persistence.close();
 
-      // Tasks are archived rather than deleted today, so the cascade is exercised directly: it is
-      // the schema's promise that a refusal does not outlive the conversation it was made in.
-      const db = new Database(fixture.path);
-      db.pragma('foreign_keys = ON');
-      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
-      db.close();
+        // Tasks are archived rather than deleted today, so the cascade is exercised directly: it is
+        // the schema's promise that a refusal does not outlive the conversation it was made in.
+        const db = new Database(fixture.path);
+        db.pragma('foreign_keys = ON');
+        db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+        db.close();
 
-      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
-      expect(reopened.getComputerAppAccessRequest('darwin', digest, task.id)).toBeNull();
-      expect(reopened.listComputerAppAccessRequestTotals()).toEqual([]);
-      reopened.close();
-    });
+        const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+        expect(reopened.getComputerAppAccessRequest('darwin', digest, task.id)).toBeNull();
+        expect(reopened.listComputerAppAccessRequestTotals()).toEqual([]);
+        reopened.close();
+      },
+    );
 
     it('upgrades a database written before the table existed', () => {
       const fixture = createPersistence();
@@ -14059,7 +14129,7 @@ if (runsWithElectronAbi)
 
       const old = new Database(fixture.path);
       old.exec(
-        'DROP TABLE computer_app_access_requests; DELETE FROM schema_migrations WHERE version = 93;',
+        'DROP TABLE computer_app_access_requests; DELETE FROM schema_migrations WHERE version IN (93, 105);',
       );
       old.close();
 

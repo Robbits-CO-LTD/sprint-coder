@@ -330,9 +330,7 @@ describe('background executor native entry', () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('background executor test build', () => {
-  it('blocks remaining chunks on a page change and input after Stop using the real send boundary', async ({
-    skip,
-  }) => {
+  it('page_change_between_chunks_stops_remaining_input', async ({ skip }) => {
     const build = findBuild();
     if (!build) {
       skip();
@@ -412,6 +410,9 @@ int main() {
   session.observed_page.web = true; page_matches = true;
   session.approved_deadline_ns = 200;
   if (send() != 2 || sends != 3) return 6;
+  page_matches = false;
+  if (send() != 0 || sends != 3 || *session.input_api_attempts != 3) return 8;
+  page_matches = true;
   foreground_window = 2;
   if (send() != 0 || sends != 3) return 7;
   return 0;
