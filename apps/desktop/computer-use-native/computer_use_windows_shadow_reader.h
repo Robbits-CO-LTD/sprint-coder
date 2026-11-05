@@ -23,6 +23,7 @@
 #include "computer_use_windows_page.h"
 
 #include <cstddef>
+#include <functional>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -35,7 +36,8 @@ namespace sprint_coder::computer_use {
 // ("Button", "Edit", "Document", ...), produced by the source from the UIA id.
 enum class ShadowUiaText : std::uint8_t { kControlType, kClassName, kName, kAutomationId, kHelpText };
 
-// One platform call per method. A method never decides whether it may run (the reader's gate does)
+// One platform call per method, except PageHost which admits each call through its callback.
+// A method never decides whether it may run (the reader's gate does)
 // and never invents a value: "no value / unsupported" is kAbsent, an error is kFailed, a string
 // longer than `maximum_bytes` (in UTF-8, after normalization) is kTooLong. Elements are opaque
 // tokens owned by the source for the life of the capture.
@@ -91,6 +93,13 @@ public:
     (void)maximum_bytes;
     (void)output;
     return ShadowReadResult::kAbsent;
+  }
+  // Bounded Win32 enumeration, not a UIA tree scan. Admit every platform operation.
+  // Unsupported sources fail closed.
+  virtual ShadowReadResult PageHost(Element window, const std::function<bool()> &admit,
+                                    Element *output) {
+    (void)window; (void)admit; (void)output;
+    return ShadowReadResult::kFailed;
   }
   // The control signature of one element: the string the observation recorded for its target id
   // (control type, automation id, runtime id, bounds...), so the element a read is about can be
@@ -152,8 +161,8 @@ public:
   // Only a v2 session's interlock asks for it; every other capture makes the calls it made before.
   void ReadChainIdentity(bool read) { read_chain_identity_ = read; }
 
-  // A page read is independent of focus and of the action target. Only a unique top-level
-  // Document of the bound window qualifies; page content is not traversed.
+  // A page read is independent of focus and of the action target. Only the unique visible page host
+  // and its RootWebArea Document qualify; page content is not traversed.
   [[nodiscard]] WindowsPageEvidence ReadPage() {
     WindowsPageEvidence page;
     BeginOrigin();
@@ -163,10 +172,9 @@ public:
     if (ShadowSettle(Root(&root), &failed)) CaptureWindow(true, root, &window);
     page.web = windows_shadow_detail::IsPageBindableBrowser(window);
     if (page.web) {
-      int count = 0;
       Element document = 0;
       std::string url, identity, repeated_url, repeated_identity;
-      if (ScanPageDocuments(root, 0, &count, &document) && count == 1 &&
+      if (FindPageDocument(root, &document) &&
           ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &url), &failed) &&
           ShadowSettle(ControlSignature(document, &identity), &failed) &&
           ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &repeated_url), &failed) &&
@@ -197,12 +205,11 @@ public:
     if (!observed.web) return true;
     BeginOrigin();
     Element root = 0, document = 0;
-    int count = 0;
     bool failed = false;
     std::string url, identity;
     auto current = observed;
     current.complete = ShadowSettle(Root(&root), &failed) &&
-        ScanPageDocuments(root, 0, &count, &document) && count == 1 &&
+        FindPageDocument(root, &document) &&
         ShadowSettle(ControlSignature(document, &identity), &failed) &&
         ShadowSettle(DocumentUrl(document, windows_shadow_reader_detail::kUrlBytes, &url), &failed) &&
         PageDocumentStillCurrent(root, document);
@@ -327,6 +334,9 @@ private:
   }
   ShadowReadResult TargetFrame(Element element, std::array<std::int64_t, 4> *frame) {
     return Gated([&] { return source_.TargetFrame(element, frame); });
+  }
+  ShadowReadResult PageHost(Element root, Element *output) {
+    return source_.PageHost(root, [&] { return Step(); }, output);
   }
   ShadowReadResult Root(Element *output) {
     return Gated([&] { return source_.Root(output); });
@@ -501,58 +511,56 @@ private:
     }
   }
 
-  // Count every top-level Document, including those without a ValuePattern, and stop there.
-  // Page content is not window chrome. The gate bounds calls/time; depth bounds recursion.
-  bool ScanPageDocuments(Element element, std::size_t depth, int *count, Element *document) {
+  bool FindPageDocument(Element root, Element *document) {
     using namespace windows_shadow_reader_detail;
-    if (depth > kSearchMaxDepth || origin_stopped_) return false;
+    Element host = 0, child = 0;
     bool failed = false;
-    std::string type;
-    if (!ShadowSettle(Text(element, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
-                      &failed) || type.empty()) return false;
-    if (type == "Document") {
-      page_document_path_ = page_scan_path_;
-      *document = element;
-      return ++*count == 1;
+    if (!ShadowSettle(PageHost(root, &host), &failed)) return false;
+    Element ancestor = host;
+    bool in_contents = false;
+    for (unsigned depth = 0; depth < 3; ++depth) {
+      Element parent = 0;
+      std::string type, name;
+      if (!ShadowSettle(Parent(ancestor, &parent), &failed) ||
+          !ShadowSettle(Text(parent, ShadowUiaText::kControlType, false, kFrameworkBytes, &type), &failed) ||
+          !ShadowSettle(Text(parent, ShadowUiaText::kClassName, false, kSearchStringBytes, &name), &failed))
+        return false;
+      if (type == "Pane" && name == "MultiContentsView") { in_contents = true; break; }
+      ancestor = parent;
     }
-    // Browser chrome controls do not contain the top-level page. Their descendants
-    // (tab labels, toolbar buttons, omnibox suggestions) do not consume the budget.
-    if (type == "ToolBar" || type == "Tab" || type == "TabItem" || type == "Button" ||
-        type == "Edit" || type == "Text" || type == "Menu" || type == "MenuItem") return true;
-    if (depth == 0) { page_scan_path_.clear(); page_document_path_.clear(); }
-    page_scan_path_.push_back(element);
-    Element child = 0;
-    auto step = FirstChild(element, &child);
+    if (!in_contents) return false;
+    int count = 0;
+    auto step = FirstChild(host, &child);
     while (step == ShadowReadResult::kOk) {
+      std::string type, id;
       Element parent = 0;
       bool same = false;
       if (!ShadowSettle(Parent(child, &parent), &failed) ||
-          !ShadowSettle(Same(parent, element, &same), &failed) || !same ||
-          !ScanPageDocuments(child, depth + 1, count, document)) return false;
+          !ShadowSettle(Same(parent, host, &same), &failed) || !same ||
+          !ShadowSettle(Text(child, ShadowUiaText::kControlType, false, kFrameworkBytes, &type),
+                        &failed)) return false;
+      ShadowSettle(Text(child, ShadowUiaText::kAutomationId, false, kSearchStringBytes, &id), &failed);
+      if (failed) return false;
+      if (type == "Document" && id == "RootWebArea") {
+        *document = child;
+        if (++count > 1) return false;
+      }
       Element next = 0;
       step = NextSibling(child, &next);
       child = next;
     }
-    page_scan_path_.pop_back();
-    return step == ShadowReadResult::kAbsent && !origin_stopped_;
+    return step == ShadowReadResult::kAbsent && count == 1 && OriginWithinBudget();
   }
 
   bool PageDocumentStillCurrent(Element root, Element expected) {
-    // Revalidate the discovered parent chain instead of scanning all chrome twice.
-    if (page_document_path_.empty()) return false;
+    Element document = 0;
     bool failed = false, same = false;
-    Element child = expected;
-    for (auto it = page_document_path_.rbegin(); it != page_document_path_.rend(); ++it) {
-      Element parent = 0;
-      if (!ShadowSettle(Parent(child, &parent), &failed) ||
-          !ShadowSettle(Same(parent, *it, &same), &failed) || !same) return false;
-      child = parent;
-    }
-    return ShadowSettle(Same(child, root, &same), &failed) && same;
+    return FindPageDocument(root, &document) &&
+        ShadowSettle(Same(document, expected, &same), &failed) && same;
   }
 
   // Separate from the legacy URL/surface path: this state grants nothing. Both page paths
-  // use the same supported browser predicate and top-level Document walk.
+  // use the same supported browser predicate and unique visible Win32 page host.
   void CapturePageOrigin(Element root, ShadowUiaCapture *capture) {
     using namespace windows_shadow_reader_detail;
     if (!capture->chain_reached_root || capture->read_failed ||
@@ -562,15 +570,22 @@ private:
     for (std::size_t i = 0; i < capture->chain.size(); ++i) {
       const auto &node = capture->chain[i];
       if (node.read_failed || node.oversize) return;
-      if (node.control_type == "Document") {
-        if (expected != ShadowUiaSource::kNoElement || i + 1 == capture->chain.size()) return;
+      std::string id;
+      bool failed = false;
+      ShadowSettle(Text(chain_elements_[i], ShadowUiaText::kAutomationId, false,
+                        kSearchStringBytes, &id), &failed);
+      if (failed) return;
+      // The first web root is the target's frame, regardless of Document/Group role.
+      if (id == "RootWebArea") {
         expected = chain_elements_[i];
+        break;
       }
+      // An iframe host can be the hit-test target while its web root is unavailable.
+      if (node.control_type == "Document") return;
     }
     if (expected == ShadowUiaSource::kNoElement) return;
-    int count = 0;
     Element document = 0;
-    if (!ScanPageDocuments(root, 0, &count, &document) || count != 1) return;
+    if (!FindPageDocument(root, &document)) return;
     bool failed = false;
     bool same = false;
     if (!ShadowSettle(Same(document, expected, &same), &failed) || !same) return;
@@ -728,7 +743,6 @@ private:
   Element target_element_ = 0;
   bool read_chain_identity_ = false;
   std::vector<Element> chain_elements_;
-  std::vector<Element> page_scan_path_, page_document_path_;
 };
 
 } // namespace sprint_coder::computer_use

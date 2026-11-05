@@ -3161,6 +3161,38 @@ public:
     if (!node.has_url) return ShadowReadResult::kAbsent;
     return ShadowCheckText(node.url, maximum_bytes, output);
   }
+  // Win32 HWND list stand-in, independent of the UIA tree.
+  struct Host { int element; bool visible = true; bool nonempty = true; bool owned = true; bool rwhh = true; };
+  std::vector<Host> hosts;
+  bool host_failed = false;
+  ShadowReadResult PageHost(Element, const std::function<bool()> &admit, Element *output) override {
+    int found = -1;
+    if (host_failed || hosts.size() > 64) return ShadowReadResult::kFailed;
+    for (int i = 0; i < 4; ++i) { if (!admit()) return ShadowReadResult::kStopped; Tick(); }
+    for (const auto &host : hosts) {
+      if (!admit()) return ShadowReadResult::kStopped;
+      Tick();
+      if (!host.rwhh) continue;
+      for (int i = 0; i < 4; ++i) { if (!admit()) return ShadowReadResult::kStopped; Tick(); }
+      if (!host.visible || !host.nonempty) continue;
+      if (!host.owned || found >= 0) return ShadowReadResult::kFailed;
+      int current = host.element;
+      for (unsigned depth = 0; current != root; ++depth) {
+        if (depth == 32 || current < 0) return ShadowReadResult::kFailed;
+        const int parent = nodes[current].parent;
+        if (parent < 0) return ShadowReadResult::kFailed;
+        const auto &children = nodes[parent].children;
+        if (std::find(children.begin(), children.end(), current) == children.end())
+          return ShadowReadResult::kFailed;
+        current = parent;
+      }
+      found = host.element;
+    }
+    if (found < 0 || !admit()) return ShadowReadResult::kFailed;
+    Tick();
+    *output = static_cast<Element>(found);
+    return ShadowReadResult::kOk;
+  }
   ShadowReadResult WindowProcessPath(Element, std::size_t maximum_bytes,
                                      std::string *output) override {
     Tick();
@@ -3255,6 +3287,16 @@ struct FakeForm {
     source.point = edit;
     source.focused = edit;
   }
+  void BindPage() {
+    const int contents = source.Add(window, "Pane", "", "MultiContentsView");
+    const int host = source.Add(contents, "Pane", "Chrome Legacy Window", "Chrome_RenderWidgetHostHWND");
+    auto &siblings = Node(window).children;
+    siblings.erase(std::remove(siblings.begin(), siblings.end(), pane), siblings.end());
+    Node(host).children.push_back(pane);
+    Node(pane).parent = host;
+    Node(pane).automation_id = "RootWebArea";
+    source.hosts.push_back({host});
+  }
   FakeUiaNode &Node(int index) { return source.nodes[static_cast<std::size_t>(index)]; }
 };
 
@@ -3289,6 +3331,7 @@ bool CheckWindowsPageRecheck() {
     FakeForm form;
     form.Node(form.window).class_name = "Chrome_WidgetWin_1";
     form.source.process_path = "C:\\Apps\\chrome.exe";
+    form.BindPage();
     auto &document = form.Node(form.pane);
     document.control_type = "Document";
     document.has_url = true;
@@ -3391,12 +3434,121 @@ bool CheckWindowsPageRecheck() {
   return true;
 }
 
+bool CheckMeasuredBrowserPageBinding() {
+  for (int depth : {7, 10}) {
+    const auto fixture = [=] {
+      FakeForm form;
+      form.Node(form.window).class_name = "Chrome_WidgetWin_1";
+      form.source.process_path = depth == 10 ? "C:/Apps/msedge.exe" : "C:/Apps/chrome.exe";
+      form.BindPage();
+      const int host = form.source.hosts.front().element;
+      form.Node(form.window).children.clear();
+      int parent = form.window;
+      for (int i = 1; i < depth; ++i) parent = form.source.Add(parent, "Pane");
+      form.Node(parent).class_name = depth == 10 ? "View" : "Chrome_WidgetWin_1";
+      form.Node(form.Node(parent).parent).class_name = "MultiContentsView";
+      form.Node(parent).children.push_back(host);
+      form.Node(host).parent = parent;
+      for (int i = 0; i < 296; ++i) {
+        const int node = form.source.Add(form.window, i < 8 ? "Document" : "Group");
+        form.Node(node).automation_id = i < 8 ? "ContentsWebView" : "";
+      }
+      form.Node(form.pane).control_type = "Document";
+      form.Node(form.pane).has_url = true;
+      form.Node(form.pane).url = "https://docs.example/page";
+      form.Node(form.pane).signature = "measured-page";
+      return form;
+    };
+    auto form = fixture();
+    const auto page = WindowsShadowReader(form.source).ReadPage();
+    if (!Check(page.complete && page.origin == OriginState::kOrdinary && form.source.calls < 80,
+               "measured_chrome_edge_many_documents_constant_page_budget")) return false;
+    const auto before = form.source.calls;
+    if (!Check(WindowsShadowReader(form.source).RecheckPage(page) && form.source.calls - before < 80,
+               "measured_deep_edge_recheck_budget")) return false;
+    for (int mode = 0; mode < 4; ++mode) {
+      auto target = fixture();
+      const int group = target.source.Add(target.pane, mode == 2 ? "Document" : "Group", "section");
+      const int root = target.source.Add(group, mode == 2 ? "Document" : "Group", "div");
+      if (mode != 0) target.Node(root).automation_id = "RootWebArea";
+      target.source.point = target.source.Add(root, "Button", "Continue");
+      if (mode == 3) target.source.point = target.source.Add(target.pane, "Document", "Frame host");
+      WindowsShadowReader reader(target.source);
+      const auto capture = reader.Capture("click", "");
+      if (!Check(capture.chain_reached_root &&
+                 capture.page_origin == (mode == 0 ? OriginState::kOrdinary : OriginState::kUnknown) &&
+                 target.source.calls - reader.Gate().Calls() <= 128,
+                 "measured_groups_ordinary_both_iframe_roles_unknown")) return false;
+    }
+    for (int mode = 0; mode < 14; ++mode) {
+      auto bad = fixture();
+      const int host = bad.source.hosts.front().element;
+      switch (mode) {
+      case 0: bad.source.hosts.clear(); break;
+      case 1: bad.source.hosts.push_back({host}); break;
+      case 2: bad.Node(bad.pane).automation_id.clear(); break;
+      case 3: {
+        const int extra = bad.source.Add(host, "Document");
+        bad.Node(extra).automation_id = "RootWebArea";
+        break;
+      }
+      case 4: bad.source.hosts.front().owned = false; break;
+      case 5: bad.source.hosts.front().visible = false; break;
+      case 6: bad.source.hosts.front().nonempty = false; break;
+      case 7: bad.source.hosts.resize(65, {host}); break;
+      case 8: bad.source.step_ns = 5'000'000; break;
+      case 9: bad.source.cancel_after = 5; break;
+      case 10: for (int i = 0; i < 150; ++i) bad.source.Add(host, "Group"); break;
+      case 11: bad.Node(bad.Node(bad.Node(host).parent).parent).class_name = "SidePanel"; break;
+      case 12: bad.Node(bad.Node(bad.Node(host).parent).parent).control_type = "Group"; break;
+      case 13: bad.source.hosts.resize(64, {host, true, true, true, false}); break;
+      }
+      if (!Check(!WindowsShadowReader(bad.source).ReadPage().complete && bad.source.calls <= 128,
+                 "measured_ambiguous_missing_owner_budget_deadline_fail_closed")) return false;
+      if (!Check(!WindowsShadowReader(bad.source).RecheckPage(page),
+                 "measured_recheck_rejects_incomplete_host")) return false;
+    }
+    auto crowded = fixture();
+    crowded.source.hosts.resize(40, {-1, true, true, true, false});
+    const auto crowded_page = WindowsShadowReader(crowded.source).ReadPage();
+    if (!Check(crowded.source.calls == 128 && !crowded_page.complete, "measured_40_hwnds_bounded")) return false;
+    for (int distance : {3, 4}) {
+      auto bounded = fixture();
+      int ancestor = bounded.source.hosts.front().element;
+      for (int level = 1; level <= distance; ++level) {
+        ancestor = bounded.Node(ancestor).parent;
+        bounded.Node(ancestor).class_name = level == distance ? "MultiContentsView" : "View";
+      }
+      if (!Check(WindowsShadowReader(bounded.source).ReadPage().complete == (distance == 3),
+                 "measured_contents_ancestor_three_hops_only")) return false;
+    }
+    for (int mode = 0; mode < 3; ++mode) {
+      auto changed = fixture();
+      changed.source.url_read_hook = [&] {
+        if (mode == 0) changed.source.hosts.push_back(changed.source.hosts.front());
+        else if (mode == 1) changed.Node(changed.pane).automation_id.clear();
+        else {
+          const int host = changed.source.hosts.front().element;
+          changed.Node(host).children.clear();
+          const int replacement = changed.source.Add(host, "Document");
+          changed.Node(replacement) = changed.Node(changed.pane);
+        }
+      };
+      if (!Check(!WindowsShadowReader(changed.source).ReadPage().complete,
+                 "measured_host_and_root_rechecked_after_url")) return false;
+    }
+  }
+  std::cout << "Measured browser RWHH binding: PASS\n";
+  return true;
+}
+
 bool CheckSupportedBrowserPageEvidence() {
   using namespace sprint_coder::computer_use;
   const auto fixture = [](const char *leaf) {
     FakeForm form;
     form.Node(form.window).class_name = "Chrome_WidgetWin_1";
     form.source.process_path = std::string("C:\\Apps\\") + leaf;
+    form.BindPage();
     auto &document = form.Node(form.pane);
     document.control_type = "Document";
     document.has_url = true;
@@ -3406,7 +3558,7 @@ bool CheckSupportedBrowserPageEvidence() {
   };
   for (const char *leaf : {"chrome.exe", "msedge.exe", "MSEDGE.EXE"}) {
     auto form = fixture(leaf);
-    // A nested Document and deep content must not affect the top-level page scan.
+    // A nested Document and deep content must not affect the page-host lookup.
     int child = form.source.Add(form.pane, "Document");
     form.Node(child).has_url = true;
     form.Node(child).url = "https://different.example.test/embedded";
@@ -3425,17 +3577,16 @@ bool CheckSupportedBrowserPageEvidence() {
                "edge_origin_reaches_effect_classifier")) return false;
     for (int mode = 0; mode < 9; ++mode) {
       auto bad = fixture(leaf);
-      if (mode == 0) bad.source.Add(bad.window, "Document");
+      if (mode == 0) bad.source.hosts.push_back(bad.source.hosts.front());
       if (mode == 1) bad.Node(bad.pane).parent = -1;
       if (mode == 2) bad.Node(bad.pane).parent_result = ShadowReadResult::kFailed;
       if (mode == 3) bad.Node(bad.pane).parent = bad.desktop;
       if (mode == 4) bad.source.url_read_hook = [&] { bad.source.now += 31'000'000; };
       if (mode == 5) bad.source.process_result = ShadowReadResult::kFailed;
       if (mode == 6) bad.source.url_read_hook = [&] { bad.Node(bad.window).children.clear(); };
-      if (mode == 7) for (int i = 0; i < 150; ++i) bad.source.Add(bad.window, "Pane");
+      if (mode == 7) bad.source.hosts.resize(65, bad.source.hosts.front());
       if (mode == 8) {
-        int parent = bad.window;
-        for (int i = 0; i < 20; ++i) parent = bad.source.Add(parent, "Pane");
+        bad.source.hosts.front().owned = false;
       }
       const auto page_gap = WindowsShadowReader(bad.source).ReadPage();
       const auto capture_gap = WindowsShadowReader(bad.source).Capture("click", "");
@@ -3478,13 +3629,14 @@ bool CheckWindowsOriginPolicy() {
     FakeForm form;
     form.Node(form.window).class_name = "Chrome_WidgetWin_1";
     form.source.process_path = std::string("C:/Apps/") + browser;
+    form.BindPage();
     form.Node(form.pane).control_type = "Document";
     form.Node(form.pane).has_url = true;
     form.Node(form.pane).url = "https://docs.example/page";
     form.Node(form.pane).signature = "document-1";
     const int toolbar = form.source.Add(form.window, "ToolBar");
     for (int i = 0; i < 80; ++i) form.source.Add(toolbar, "Button", "Tab");
-    form.Node(form.window).children = {toolbar, form.pane};
+    form.Node(form.window).children = {toolbar, form.Node(form.source.hosts.front().element).parent};
     for (auto &node : form.source.nodes) {
       node.process_id = 42;
       node.framework_result = ShadowReadResult::kOk;
@@ -3585,6 +3737,7 @@ bool CheckWindowsPageOrigin() {
     FakeForm form;
     form.Node(form.window).class_name = "Chrome_WidgetWin_1";
     form.source.process_path = "C:\\Apps\\chrome.exe";
+    form.BindPage();
     form.Node(form.pane).control_type = "Document";
     form.Node(form.pane).has_url = true;
     form.Node(form.pane).url = "https://login.example.test/path";
@@ -3631,7 +3784,7 @@ bool CheckWindowsPageOrigin() {
     before.process_path = "C:/Apps/chrome.exe"; // Compare the same browser with unbound origin.
     auto form = page();
     if (mode == 0) {
-      for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
+      form.source.hosts.resize(65, form.source.hosts.front());
     } else {
       form.source.url_read_hook = [&] {
         if (form.source.url_calls == 2)
@@ -3686,16 +3839,16 @@ bool CheckWindowsPageOrigin() {
   for (int mode = 0; mode < 21; ++mode) {
     auto form = page();
     switch (mode) {
-    case 0: form.source.Add(form.window, "Document"); break;
+    case 0: form.source.hosts.push_back(form.source.hosts.front()); break;
     case 1: form.Node(form.pane).parent = -1; break;
     case 2: form.Node(form.pane).parent_result = ShadowReadResult::kFailed; break;
     case 3: form.source.root_result = ShadowReadResult::kFailed; break;
-    case 4: form.Node(form.window).children_result = ShadowReadResult::kFailed; break;
+    case 4: form.source.host_failed = true; break;
     case 5: form.source.same_fails_with = form.window; break;
     case 6: form.source.step_ns = kShadowDeadlineNs / 4; break;
     case 7: form.source.cancel_after = 20; break;
     case 8:
-      for (int i = 0; i < 700; ++i) form.source.Add(form.window, "Pane");
+      form.source.hosts.resize(65, form.source.hosts.front());
       break;
     case 9: {
       int parent = form.pane;
@@ -3721,8 +3874,7 @@ bool CheckWindowsPageOrigin() {
       };
       break;
     case 15: {
-      int parent = form.window;
-      for (int i = 0; i < 20; ++i) parent = form.source.Add(parent, "Pane");
+      form.source.hosts.front().owned = false;
       break;
     }
     case 16: form.Node(form.pane).url = std::string(2049, 'x'); break;
@@ -10111,6 +10263,7 @@ int main() {
   if (!CheckWindowsShadowCore()) return 1;
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
+  if (!CheckMeasuredBrowserPageBinding()) return 1;
   if (!CheckSupportedBrowserPageEvidence()) return 1;
   if (!CheckWindowsPageOrigin()) return 1;
   if (!CheckWindowsOriginPolicy()) return 1;

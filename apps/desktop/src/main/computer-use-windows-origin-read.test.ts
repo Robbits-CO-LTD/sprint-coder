@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -44,6 +44,7 @@ it.runIf(msvc !== null || clang)(
       expect(ran.stdout).toContain('Supported browser page evidence: PASS');
       expect(ran.stdout).toContain('Windows page origin: PASS');
       expect(ran.stdout).toContain('Windows origin policy: PASS');
+      expect(ran.stdout).toContain('Measured browser RWHH binding: PASS');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -73,7 +74,8 @@ describe('Windows page origin metadata (N11-B)', () => {
     const reader = native('computer_use_windows_shadow_reader.h');
     expect(reader).toContain('CapturePageOrigin(root, &capture)');
     expect(reader).toContain('ClassifyPageOrigin(url).state');
-    expect(reader).toContain('ScanPageDocuments(');
+    expect(reader).toContain('FindPageDocument(');
+    expect(reader).not.toContain('ScanPageDocuments(');
     expect(reader).not.toContain('ScanDocuments(');
     expect(reader).toContain('capture.page_origin = OriginState::kUnknown');
     const shadow = native('computer_use_windows_shadow.h');
@@ -128,3 +130,161 @@ describe('Windows page recheck (N11-C)', () => {
     expect(native('computer_use_origin_classify.h')).toContain('kOriginClassificationVersion = 2');
   });
 });
+
+// Compile the actual Win32 enumeration body with a HWND-list stand-in on every compiler.
+// This exercises ownership, geometry and admission without a browser or desktop session.
+it.runIf(msvc !== null || clang)(
+  'runs the production RWHH enumeration against HWND stand-ins',
+  () => {
+    const source = native('computer_use_windows_uia_source.h');
+    const start = source.indexOf('  ShadowReadResult PageHost(');
+    const end = source.indexOf('  ShadowReadResult WindowProcessPath(', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const program = String.raw`
+#include <cstdint>
+#include <cwchar>
+#include <functional>
+#include <iostream>
+#include <utility>
+#include <vector>
+#define CALLBACK
+using BOOL = int;
+using DWORD = unsigned long;
+using LPARAM = std::intptr_t;
+using HRESULT = int;
+constexpr int TRUE = 1, FALSE = 0, GA_ROOT = 2;
+bool FAILED(int result) { return result < 0; }
+struct Window;
+using HWND = Window *;
+using UIA_HWND = HWND;
+struct RECT { int left = 0, top = 0, right = 100, bottom = 100; };
+struct Window {
+  const wchar_t *name = L"Chrome_RenderWidgetHostHWND";
+  bool visible = true, rect_ok = true, class_ok = true;
+  DWORD pid = 42;
+  RECT rect;
+  HWND top = nullptr;
+};
+Window top;
+std::vector<Window> children;
+int calls = 0, permits = 0, converted = 0;
+void Called() { if (++calls > permits) std::abort(); }
+HWND GetAncestor(HWND window, int) { Called(); return window->top; }
+DWORD GetWindowThreadProcessId(HWND window, DWORD *pid) {
+  Called(); *pid = window->pid; return window->pid ? 1 : 0;
+}
+int GetClassNameW(HWND window, wchar_t *name, int) {
+  Called(); if (!window->class_ok) return 0;
+  std::wcscpy(name, window->name); return static_cast<int>(std::wcslen(name));
+}
+BOOL IsWindowVisible(HWND window) { Called(); return window->visible; }
+BOOL GetWindowRect(HWND window, RECT *rect) {
+  Called(); *rect = window->rect; return window->rect_ok;
+}
+BOOL EnumChildWindows(HWND, BOOL (*visit)(HWND, LPARAM), LPARAM parameter) {
+  Called(); for (auto &child : children) if (!visit(&child, parameter)) break;
+  return FALSE; // Windows does not specify a usable completion return value.
+}
+struct IUIAutomationElement {
+  HWND hwnd = &top;
+  HRESULT get_CurrentNativeWindowHandle(UIA_HWND *output) { Called(); *output = hwnd; return 0; }
+};
+struct Automation {
+  IUIAutomationElement element;
+  HRESULT ElementFromHandle(HWND window, IUIAutomationElement **output) {
+    Called(); ++converted; element.hwnd = window; *output = &element; return 0;
+  }
+};
+namespace windows_uia_source_detail {
+template<class T> struct ComRef {
+  T *value = nullptr;
+  T *Get() { return value; }
+  T **Receive() { return &value; }
+};
+}
+enum class ShadowReadResult { kOk, kFailed, kStopped };
+struct Base {
+  using Element = unsigned;
+  virtual ShadowReadResult PageHost(Element, const std::function<bool()> &, Element *) = 0;
+};
+struct Source : Base {
+  HWND window_ = &top;
+  IUIAutomationElement root;
+  Automation automation;
+  windows_uia_source_detail::ComRef<Automation> automation_{&automation};
+  IUIAutomationElement *At(Element) { return &root; }
+  ShadowReadResult Keep(HRESULT result, windows_uia_source_detail::ComRef<IUIAutomationElement>, Element *out) {
+    *out = 1; return result < 0 ? ShadowReadResult::kFailed : ShadowReadResult::kOk;
+  }
+//@@PAGE_HOST@@
+};
+int main() {
+  for (int mode = 0; mode < 17; ++mode) {
+    top.top = &top; top.pid = 42;
+    children = {Window{}}; children[0].top = &top;
+    Source source;
+    bool expected = false;
+    int limit = 128;
+    switch (mode) {
+    case 0: expected = true; break;
+    case 1: children.clear(); break;
+    case 2: children.push_back(children[0]); break;
+    case 3: children[0].visible = false; break;
+    case 4: children[0].rect.right = 0; break;
+    case 5: children[0].pid = 99; break;
+    case 6: children[0].top = nullptr; break;
+    case 7: children[0].class_ok = false; break;
+    case 8: children[0].rect_ok = false; break;
+    case 9: top.pid = 0; break;
+    case 10: children.resize(65); for (auto &w : children) w.name = L"other"; break;
+    case 11: limit = 6; break;
+    case 12:
+      children.push_back(children[0]); children[1].visible = false; expected = true; break;
+    case 13:
+      children.push_back(children[0]); children[1].rect.bottom = 0; expected = true; break;
+    case 14: source.root.hwnd = nullptr; break;
+    case 15:
+    case 16:
+      children.resize(mode == 15 ? 40 : 65);
+      for (size_t i = 1; i < children.size(); ++i) children[i].name = L"Intermediate D3D Window";
+      expected = mode == 15;
+      break;
+    }
+    calls = permits = converted = 0;
+    unsigned output = 0;
+    const auto result = source.PageHost(0, [&] {
+      if (permits >= limit) return false;
+      ++permits; return true;
+    }, &output);
+    if ((result == ShadowReadResult::kOk) != expected || calls > 128 ||
+        converted != (expected ? 1 : 0)) return 1;
+  }
+  std::cout << "RWHH enumeration: PASS\n";
+}
+`;
+    const directory = mkdtempSync(join(tmpdir(), 'sc-page-host-'));
+    try {
+      const input = join(directory, 'page-host.cc');
+      const output = join(directory, 'page-host.exe');
+      writeFileSync(input, program.replace('//@@PAGE_HOST@@', source.slice(start, end)));
+      const command = msvc
+        ? msvc.wrap(['/nologo', '/std:c++20', '/EHsc', input, `/Fe:${output}`, `/Fo:${output}.obj`])
+        : { file: 'clang++', args: ['-std=c++20', input, '-o', output], verbatim: false };
+      const built = spawnSync(command.file, command.args, {
+        cwd: directory,
+        encoding: 'utf8',
+        windowsHide: true,
+        windowsVerbatimArguments: command.verbatim,
+        timeout: 120_000,
+      });
+      expect(built.status, `${built.error ?? ''}\n${built.stdout}\n${built.stderr}`).toBe(0);
+      const ran = spawnSync(output, [], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+      expect(ran.status, `${ran.error ?? ''}\n${ran.stdout}\n${ran.stderr}`).toBe(0);
+      expect(ran.stdout).toContain('RWHH enumeration: PASS');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+  150_000,
+);
