@@ -88,7 +88,14 @@ export function windowsComputerTargetCandidates(
       label: native.identity.displayName,
       canonicalPath: native.identity.executablePath,
       appUrl: null,
-      identity: { ...native.identity, maximumMode },
+      identity: {
+        ...native.identity,
+        maximumMode,
+        // Keep the verified image signer, not transient window/capability state, for grant checks.
+        ...(native.explorerPrestart === undefined
+          ? {}
+          : { signerMicrosoftRoot: native.facts.signerMicrosoftRoot }),
+      },
       identityDigest: native.appIdentityDigest,
       version: null,
       executableDigest: native.executableDigest,
