@@ -18,5 +18,7 @@
 - Node22.23.1/macOS arm64、Electron43.5.0。全workspace型検査、変更TS/TSXのlint/format、prepare:desktopは成功。
 - 関連desktop境界試験15ファイル成功（SQLite/Electron bridge内の試験を含む）。contracts/domainも成功。POSIX/Windows専用等の既存skipを成功へ含めない。
 - 実vendorの同座標ノード→workerのlayout/constraint、Mainのfailed exit/ACK、API Providerの失敗formatterを検証。
-- `ui-checks.json`の通常UIはCUAで確認。制御した添付raceのGUIと#1137原因確定はBLOCKED。
+- `ui-checks.json`の通常UIはCUAで確認。制御した添付raceのGUIもPASS。#1137原因確定だけはBLOCKED。
 - #1137のparentAlive assertionは保持。非表示/表示/表示かつfocus可能の試験に取消前の生存とlifecycleを加えた。製品への推測修正はしていない。
+
+添付raceの実機証拠: capability応答を4500ms遅延させ、送信のHTTP推論開始がその応答より先になった時刻を照合。後着後もdraft0件・次の送信成功。詳細はui-checks.json。

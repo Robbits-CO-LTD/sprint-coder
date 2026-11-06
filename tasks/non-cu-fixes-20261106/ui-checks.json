@@ -12,16 +12,17 @@
   "critical_point": "画像の送信済み状態と未送信状態、フォルダ登録と実行時権限を混同しない",
   "smoke_test_passed": true,
   "e2e_gate": {
-    "source_sha": "d8f27656de9fbf618f046ff35f91d6cc85db37eb",
+    "source_sha": "3f8bca333549b06274999233a8d841d9f67496c1",
     "worktree": "/Users/yusei/sprint-coder-non-cu-fixes-20261106",
     "artifact_path": "/Users/yusei/sprint-coder-non-cu-fixes-20261106/apps/desktop/.vite/build/index.js",
     "status": "blocked",
-    "artifact_sha256": "5603b479f4738654b5ac4eea7257f4b14ca22a366a32fe8026f0f8ff09325184"
+    "artifact_sha256": "5603b479f4738654b5ac4eea7257f4b14ca22a366a32fe8026f0f8ff09325184",
+    "pr": "https://github.com/Robbits-CO-LTD/sprint-coder/pull/1158"
   },
-  "user_perspective_check": "3機能の修正と通常UIの確認はあるが、#1137の原因未確定と制御raceのGUI受入が残る。総合完了とはしない。",
+  "user_perspective_check": "添付race・グラフ・Projectの修正と実UIを確認。#1137は原因未確定のため総合完了とはしない。",
   "confidence_gate": {
     "status": "blocked",
-    "reason": "#1137 RCA and controlled attachment race GUI acceptance pending"
+    "reason": "#1137 RCA pending"
   },
   "items": [
     {
@@ -75,8 +76,8 @@
       "priority": "high",
       "operation_flow": "capability応答の順序を制御して送信と交差させる",
       "acceptance_criteria": "#1157 実アプリでの応答順制御",
-      "result": "BLOCKED",
-      "evidence": "実Zustandの遅延PromiseでRED→GREEN。通常のElectron UI経路は上記PASS。今回のloopback GUI試験ではcapability応答順を制御していない。"
+      "result": "PASS",
+      "evidence": "CUA: 合成PNGとRace image 2下書き→別Task→復帰時のcapabilityを4500ms遅延→先に画像送信→遅い一覧完了→画像なしのAfter delayed attachment list送信成功。fixture時刻: {\"capabilityStarted\": 1793965986640, \"firstChatAfterHold\": 1793965987949, \"capabilityReturned\": 1793965991141}。DBはmessage画像3件/draft0件。"
     },
     {
       "id": "dialog-intermittent-root-cause",
