@@ -529,6 +529,21 @@ it('explorer_action_allowed_after_approval_reobservation_without_status_sync', a
   ).toBe(true);
   // A stale revision (the one the status still holds) is refused.
   expect(await f.controller['explorerActionAllowed'](f.record, folderClick, before)).toBe(false);
+  // An observation that moved on after the re-observation refuses the re-observed revision.
+  const reobserved = f.record.observation!.revision;
+  f.record.observation = { ...f.record.observation!, revision: reobserved + 1 };
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, reobserved)).toBe(
+    false,
+  );
+  // An expired observation is refused even at its own revision.
+  f.record.observation = {
+    ...f.record.observation!,
+    revision: reobserved,
+    expiresAt: new Date(0).toISOString(),
+  };
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, reobserved)).toBe(
+    false,
+  );
 });
 
 it.each(['windowIdentityDigest', 'appIdentityDigest', 'pid', 'processStartTime'] as const)(
