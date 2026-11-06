@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
@@ -17,6 +17,8 @@ import {
 } from './persistence';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { workspaceMutationBinding } from './path-guard';
+import { lstatSync } from 'node:fs';
+import { projectFolderIdentity } from './project-folder-identity';
 
 const directories: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -184,7 +186,7 @@ if (runsWithElectronAbi)
         DROP TABLE project_workspace_roots;
         ALTER TABLE tasks DROP COLUMN legacy_project_workspace_fallback;
         ALTER TABLE projects DROP COLUMN workspace_roots_configured;
-        DELETE FROM schema_migrations WHERE version = 60;
+        DELETE FROM schema_migrations WHERE version IN (60, 106);
       `);
       legacy.close();
 
@@ -341,6 +343,388 @@ if (runsWithElectronAbi)
         ],
       });
       expect(persistence.readTurnWorkspaceSet(started.turnId)).toEqual(started.workspaceSet);
+      persistence.close();
+    });
+
+    it('refreshes a remounted Project root across database reopen without relinking', async () => {
+      const { persistence, path } = createPersistence();
+      const original = {
+        ...folderBinding('/tmp/reboot-root', 'primary', 'a'),
+        persistentIdentityDigest: 'f'.repeat(64),
+      };
+      const project = persistence.createProject({ name: 'Reboot', folders: [original] });
+      const task = persistence.createTask('After reboot', false, project.id);
+      const rootId = persistence.listProjectFolders(project.id)[0]!.id;
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      const current = { ...original, ...folderBinding(original.path, 'primary', 'b') };
+      await reopened.reconcileProjectFolderIdentities(async () => current);
+      expect(reopened.getProjectFolderRootIdentities(project.id).get(rootId)).toBe('b'.repeat(64));
+      const turn = reopened.startTurn(task.id, 'こんにちは');
+      expect(reopened.getTurnWorkspaceRootIdentities(turn.turnId).get(rootId)).toBe('b'.repeat(64));
+      reopened.close();
+    });
+
+    it('refreshes swapped runtime identities without transient uniqueness conflicts', async () => {
+      const { persistence } = createPersistence();
+      const first = {
+        ...folderBinding('/tmp/swap-a', 'primary', 'a'),
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const second = {
+        ...folderBinding('/tmp/swap-b', 'secondary', 'b'),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Device number swap',
+        folders: [first, second],
+      });
+      const originalRoots = persistence.listProjectFolders(project.id);
+      await persistence.reconcileProjectFolderIdentities(async (path) =>
+        path === first.path
+          ? {
+              ...first,
+              workspaceKey: second.workspaceKey,
+              rootIdentityDigest: second.rootIdentityDigest,
+            }
+          : {
+              ...second,
+              workspaceKey: first.workspaceKey,
+              rootIdentityDigest: first.rootIdentityDigest,
+            },
+      );
+      expect(persistence.listProjectFolders(project.id).map(({ id }) => id)).toEqual(
+        originalRoots.map(({ id }) => id),
+      );
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        second.rootIdentityDigest,
+        first.rootIdentityDigest,
+      ]);
+      persistence.close();
+    });
+
+    it('rolls back staged identities when a final registration update fails', async () => {
+      const { persistence, path } = createPersistence();
+      const first = {
+        ...folderBinding('/tmp/rollback-a', 'primary', 'a'),
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const second = {
+        ...folderBinding('/tmp/rollback-b', 'secondary', 'b'),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Atomic remount',
+        folders: [first, second],
+      });
+      const original = [...persistence.getProjectFolderRootIdentities(project.id)];
+      const inspection = new Database(path);
+      inspection.exec(`CREATE TRIGGER refuse_final_identity
+        BEFORE UPDATE OF root_identity_digest ON project_workspace_roots
+        WHEN NEW.root_identity_digest = '${first.rootIdentityDigest}'
+        BEGIN SELECT RAISE(ABORT, 'fixture_final_identity_rejected'); END;`);
+      inspection.close();
+      await expect(
+        persistence.reconcileProjectFolderIdentities(async (folderPath) =>
+          folderPath === first.path
+            ? {
+                ...first,
+                workspaceKey: second.workspaceKey,
+                rootIdentityDigest: second.rootIdentityDigest,
+              }
+            : {
+                ...second,
+                workspaceKey: first.workspaceKey,
+                rootIdentityDigest: first.rootIdentityDigest,
+              },
+        ),
+      ).rejects.toThrow('fixture_final_identity_rejected');
+      expect([...persistence.getProjectFolderRootIdentities(project.id)]).toEqual(original);
+      expect(persistence.listProjects()[0]!.revision).toBe(project.revision);
+      persistence.close();
+    });
+
+    it.runIf(process.platform === 'darwin')(
+      'refreshes actual native APFS evidence after a device-number-only change and keeps references usable',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const rootPath = mkdtempSync(join(tmpdir(), 'sc-device-reboot-'));
+        directories.push(rootPath);
+        writeFileSync(join(rootPath, 'README.md'), '# Still the same folder');
+        const current = await projectFolderIdentity(rootPath);
+        expect(current.persistentIdentityDigest).toMatch(/^[a-f0-9]{64}$/u);
+        const project = persistence.createProject({
+          name: 'Native reboot',
+          folders: [
+            {
+              ...current,
+              path: current.canonicalPath,
+              label: 'root',
+              role: 'primary',
+            },
+          ],
+        });
+        const rootId = persistence.listProjectFolders(project.id)[0]!.id;
+        persistence.addProjectReference({
+          projectId: project.id,
+          projectRootId: rootId,
+          relativePath: 'README.md',
+          registeredRootIdentity: current.rootIdentityDigest,
+        });
+        persistence.close();
+        const stat = lstatSync(current.canonicalPath, { bigint: true });
+        const oldIdentity = createHash('sha256')
+          .update(
+            JSON.stringify([
+              'workspace-root-v2',
+              String(stat.dev + 1n),
+              String(stat.ino),
+              'directory',
+            ]),
+          )
+          .digest('hex');
+        const oldKey = createHash('sha256')
+          .update(JSON.stringify(['workspace-mutation-v2', oldIdentity]))
+          .digest('hex');
+        const inspection = new Database(path);
+        inspection
+          .prepare(
+            'UPDATE project_workspace_roots SET root_identity_digest = ?, workspace_key = ? WHERE id = ?',
+          )
+          .run(oldIdentity, oldKey, rootId);
+        inspection
+          .prepare(
+            'UPDATE project_references SET registered_root_identity = ? WHERE project_root_id = ?',
+          )
+          .run(oldIdentity, rootId);
+        inspection.close();
+        const reopened = new SqlitePersistenceClient(path);
+        expect(reopened.listProjectReferences(project.id)[0]!.status).toBe('workspace_changed');
+        await reopened.reconcileProjectFolderIdentities(projectFolderIdentity);
+        expect(reopened.getProjectFolderRootIdentities(project.id).get(rootId)).toBe(
+          current.rootIdentityDigest,
+        );
+        expect(reopened.listProjectReferences(project.id)[0]).toMatchObject({
+          projectRootId: rootId,
+          status: 'healthy',
+        });
+        reopened.close();
+      },
+    );
+
+    it('enrolls a healthy legacy root once, but never trusts an already stale legacy root', async () => {
+      const { persistence, path } = createPersistence();
+      const original = folderBinding('/tmp/legacy-reboot', 'primary', 'a');
+      const project = persistence.createProject({ name: 'Legacy reboot', folders: [original] });
+      const rootId = persistence.listProjectFolders(project.id)[0]!.id;
+      const current = { ...original, persistentIdentityDigest: 'f'.repeat(64) };
+      await persistence.reconcileProjectFolderIdentities(async () => current);
+      expect(persistence.listProjects().find(({ id }) => id === project.id)!.revision).toBe(
+        project.revision,
+      );
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      const remounted = { ...current, ...folderBinding(original.path, 'primary', 'b') };
+      await reopened.reconcileProjectFolderIdentities(async () => remounted);
+      expect(reopened.getProjectFolderRootIdentities(project.id).get(rootId)).toBe('b'.repeat(64));
+      const stale = reopened.createProject({ name: 'Stale legacy', folders: [original] });
+      await reopened.reconcileProjectFolderIdentities(async () => remounted);
+      expect([...reopened.getProjectFolderRootIdentities(stale.id).values()]).toEqual([
+        'a'.repeat(64),
+      ]);
+      reopened.close();
+    });
+
+    it.each([null, 'e'.repeat(64)])(
+      'refuses a changed or unavailable durable witness: %s',
+      async (witness) => {
+        const { persistence } = createPersistence();
+        const original = {
+          ...folderBinding('/tmp/replaced-root', 'primary', 'a'),
+          persistentIdentityDigest: 'f'.repeat(64),
+        };
+        const project = persistence.createProject({ name: 'Replacement', folders: [original] });
+        await persistence.reconcileProjectFolderIdentities(async () => ({
+          ...original,
+          ...folderBinding(original.path, 'primary', 'b'),
+          persistentIdentityDigest: witness,
+        }));
+        expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+          'a'.repeat(64),
+        ]);
+        persistence.close();
+      },
+    );
+
+    it('leaves active work and historical Turn snapshots sealed to their original identities', async () => {
+      const { persistence } = createPersistence();
+      const original = {
+        ...folderBinding('/tmp/busy-reboot', 'primary', 'a'),
+        persistentIdentityDigest: 'f'.repeat(64),
+      };
+      const project = persistence.createProject({ name: 'Busy reboot', folders: [original] });
+      const task = persistence.createTask('Active', false, project.id);
+      const turn = persistence.startTurn(task.id, 'original Turn');
+      const current = { ...original, ...folderBinding(original.path, 'primary', 'b') };
+      await persistence.reconcileProjectFolderIdentities(async () => current);
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        'a'.repeat(64),
+      ]);
+      persistence.cancelTurn(task.id, turn.turnId);
+      await persistence.reconcileProjectFolderIdentities(async () => current);
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        'b'.repeat(64),
+      ]);
+      expect([...persistence.getTurnWorkspaceRootIdentities(turn.turnId).values()]).toEqual([
+        'a'.repeat(64),
+      ]);
+      persistence.close();
+    });
+
+    it('does not bypass a quarantined Workspace after a device-number change', async () => {
+      const { persistence, path } = createPersistence();
+      const original = {
+        ...folderBinding('/tmp/quarantined-reboot', 'primary', 'a'),
+        persistentIdentityDigest: 'f'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Quarantined reboot',
+        folders: [original],
+      });
+      const inspection = new Database(path);
+      inspection
+        .prepare(
+          `INSERT INTO workspace_mutation_state(
+        workspace_key, root_identity_digest, state, fence, revision, last_observed_at)
+        VALUES (?, ?, 'quarantined', 1, 1, ?)`,
+        )
+        .run(original.workspaceKey, original.rootIdentityDigest, new Date().toISOString());
+      inspection.close();
+      await persistence.reconcileProjectFolderIdentities(async () => ({
+        ...original,
+        ...folderBinding(original.path, 'primary', 'b'),
+      }));
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        'a'.repeat(64),
+      ]);
+      persistence.close();
+    });
+
+    it('never partially refreshes a multi-root Project when another root is unreadable', async () => {
+      const { persistence } = createPersistence();
+      const original = {
+        ...folderBinding('/tmp/multi-a', 'primary', 'a'),
+        persistentIdentityDigest: 'f'.repeat(64),
+      };
+      const other = {
+        ...folderBinding('/tmp/multi-b', 'secondary', 'c'),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Multi reboot',
+        folders: [original, other],
+      });
+      await persistence.reconcileProjectFolderIdentities(async (path) => {
+        if (path === other.path) throw new Error('unreadable');
+        return { ...original, ...folderBinding(original.path, 'primary', 'b') };
+      });
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        'a'.repeat(64),
+        'c'.repeat(64),
+      ]);
+      persistence.close();
+    });
+
+    it('keeps a referenced root on explicit same-path relink without trusting its old references', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sc-legacy-relink-'));
+      directories.push(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Legacy reference');
+      const binding = await workspaceMutationBinding(rootPath);
+      const original = {
+        ...binding,
+        path: binding.canonicalPath,
+        label: 'root',
+        role: 'primary' as const,
+      };
+      const project = persistence.createProject({ name: 'Legacy relink', folders: [original] });
+      const root = persistence.listProjectFolders(project.id)[0]!;
+      persistence.addProjectReference({
+        projectId: project.id,
+        projectRootId: root.id,
+        relativePath: 'README.md',
+        registeredRootIdentity: original.rootIdentityDigest,
+      });
+      const previousPath = `${rootPath}-old`;
+      renameSync(rootPath, previousPath);
+      directories.push(previousPath);
+      mkdirSync(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Different directory');
+      const replacement = await workspaceMutationBinding(rootPath);
+      persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: persistence.listProjects().find(({ id }) => id === project.id)!.revision,
+        folders: [{ ...original, ...replacement, id: root.id }],
+      });
+      expect(persistence.listProjectFolders(project.id)[0]!.id).toBe(root.id);
+      expect(persistence.listProjectReferences(project.id)[0]).toMatchObject({
+        projectRootId: root.id,
+        status: 'workspace_changed',
+        enabled: false,
+      });
+      persistence.close();
+    });
+
+    it('does not revive an unverified relinked reference when a runtime identity is reused', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sc-reference-runtime-reuse-'));
+      directories.push(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Original reference');
+      const binding = await workspaceMutationBinding(rootPath);
+      const original = {
+        ...binding,
+        path: binding.canonicalPath,
+        label: 'root',
+        role: 'primary' as const,
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const project = persistence.createProject({ name: 'Runtime reuse', folders: [original] });
+      const root = persistence.listProjectFolders(project.id)[0]!;
+      const reference = persistence.addProjectReference({
+        projectId: project.id,
+        projectRootId: root.id,
+        relativePath: 'README.md',
+        registeredRootIdentity: binding.rootIdentityDigest,
+      });
+      const task = persistence.createTask('After remount', false, project.id);
+      // Model the other volume's intermediate registration; the later observation reuses
+      // the original runtime digest, while its persistent witness still names that other volume.
+      const replacement = {
+        ...original,
+        rootIdentityDigest: '0'.repeat(64),
+        workspaceKey: '0'.repeat(64),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: persistence.listProjects().find(({ id }) => id === project.id)!.revision,
+        folders: [{ ...replacement, id: root.id }],
+      });
+      writeFileSync(join(rootPath, 'README.md'), '# Replacement volume content');
+      await persistence.reconcileProjectFolderIdentities(async () => ({
+        ...original,
+        persistentIdentityDigest: replacement.persistentIdentityDigest,
+      }));
+      const turn = persistence.startTurn(task.id, 'Use the current project');
+      expect(
+        persistence
+          .prepareContext(task.id, turn.turnId)
+          .projectItems.filter(({ kind }) => kind === 'reference'),
+      ).toEqual([]);
+      expect(
+        persistence.listProjectReferences(project.id).find(({ id }) => id === reference.id)
+          ?.enabled,
+      ).toBe(false);
       persistence.close();
     });
 
