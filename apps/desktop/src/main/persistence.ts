@@ -589,6 +589,7 @@ type ProjectWorkspaceRootRow = {
   ordinal: number;
   workspace_key: string;
   root_identity_digest: string;
+  persistent_identity_digest: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -599,6 +600,7 @@ export type ProjectFolderBinding = Omit<ProjectFolderInput, 'path' | 'label'> & 
   label: string;
   workspaceKey: string;
   rootIdentityDigest: string;
+  persistentIdentityDigest?: string | null;
 };
 type ProjectMemoryRow = {
   id: string;
@@ -4969,6 +4971,13 @@ const migrations = [
     sql: `ALTER TABLE computer_app_access_requests
       ADD COLUMN upgrade_denied INTEGER NOT NULL DEFAULT 0 CHECK (upgrade_denied IN (0, 1));`,
   },
+  {
+    version: 106,
+    checksum: 'project-folder-persistent-identity-v106',
+    sql: `ALTER TABLE project_workspace_roots ADD COLUMN persistent_identity_digest TEXT
+      CHECK (persistent_identity_digest IS NULL OR
+        (length(persistent_identity_digest) = 64 AND persistent_identity_digest NOT GLOB '*[^a-f0-9]*'));`,
+  },
 ];
 
 /** The newest 200 denials and the newest 200 other Auto decisions of a Task, oldest first
@@ -9073,6 +9082,103 @@ export class SqlitePersistenceClient implements PersistenceClient {
     );
   }
 
+  /** Only registrations change after a remount. Historical Turns, grants and recovery
+   * journals keep their original dev/ino seals; replaceProjectFolders enforces their fences. */
+  async reconcileProjectFolderIdentities(
+    resolveIdentity: (path: string) => Promise<{
+      canonicalPath: string;
+      workspaceKey: string;
+      rootIdentityDigest: string;
+      persistentIdentityDigest: string | null;
+    }>,
+  ): Promise<void> {
+    for (const project of this.listProjects()) {
+      const roots = this.getProjectRootRows(project.id);
+      if (roots.length === 0) continue;
+      const observed = await Promise.all(
+        roots.map(async (root) => {
+          try {
+            return await resolveIdentity(root.canonical_path);
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const folders: ProjectFolderBinding[] = [];
+      for (const [index, root] of roots.entries()) {
+        const current = observed[index];
+        if (
+          current === null ||
+          current === undefined ||
+          !pathsEquivalent(current.canonicalPath, root.canonical_path)
+        )
+          break;
+        const sameRuntimeIdentity = current.rootIdentityDigest === root.root_identity_digest;
+        const samePersistentIdentity =
+          root.persistent_identity_digest !== null &&
+          current.persistentIdentityDigest === root.persistent_identity_digest;
+        if (!sameRuntimeIdentity && !samePersistentIdentity) break;
+        if (root.persistent_identity_digest !== null && !samePersistentIdentity) break;
+        folders.push({
+          id: root.id,
+          path: root.canonical_path,
+          canonicalPath: root.canonical_path,
+          label: root.label,
+          role: root.role,
+          workspaceKey: current.workspaceKey,
+          rootIdentityDigest: current.rootIdentityDigest,
+          persistentIdentityDigest: current.persistentIdentityDigest,
+        });
+      }
+      if (folders.length !== roots.length) continue;
+      const needsRefresh = folders.some(
+        (folder, index) => folder.rootIdentityDigest !== roots[index]!.root_identity_digest,
+      );
+      if (needsRefresh) {
+        try {
+          this.db.transaction(() => {
+            this.replaceProjectFolders({
+              projectId: project.id,
+              expectedRevision: project.revision,
+              folders,
+            });
+            const refreshReference = this.db.prepare(`UPDATE project_references
+              SET registered_root_identity = ?, last_sealed_digest = NULL,
+                revision = revision + 1, updated_at = ?
+              WHERE project_root_id = ? AND registered_root_identity = ?`);
+            for (const [index, folder] of folders.entries()) {
+              const previous = roots[index]!;
+              if (folder.rootIdentityDigest !== previous.root_identity_digest)
+                refreshReference.run(
+                  folder.rootIdentityDigest,
+                  new Date().toISOString(),
+                  previous.id,
+                  previous.root_identity_digest,
+                );
+            }
+          })();
+        } catch (error) {
+          if (
+            !(error instanceof ProjectFolderMutationBlockedError) &&
+            !(error instanceof ProjectConflictError)
+          )
+            throw error;
+        }
+      } else {
+        // Enroll old healthy registrations without changing policy epochs or granting access to
+        // legacy registrations that were already stale before durable evidence was recorded.
+        this.db.transaction(() => {
+          const enroll = this.db.prepare(`UPDATE project_workspace_roots
+            SET persistent_identity_digest = ? WHERE id = ? AND root_identity_digest = ?
+              AND persistent_identity_digest IS NULL`);
+          for (const folder of folders)
+            if (folder.persistentIdentityDigest !== null)
+              enroll.run(folder.persistentIdentityDigest, folder.id, folder.rootIdentityDigest);
+        })();
+      }
+    }
+  }
+
   replaceProjectFolders(input: {
     projectId: string;
     expectedRevision: number;
@@ -9102,7 +9208,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
             root.label === (candidate.label ?? folderLabel(candidate.canonicalPath)) &&
             root.role === candidate.role &&
             root.workspace_key === candidate.workspaceKey &&
-            root.root_identity_digest === candidate.rootIdentityDigest
+            root.root_identity_digest === candidate.rootIdentityDigest &&
+            root.persistent_identity_digest === (candidate.persistentIdentityDigest ?? null)
           );
         });
       if (unchanged) return this.getProject(input.projectId);
@@ -9192,6 +9299,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
             .run(primary.id);
         }
       }
+      const persistIdentity = this.db.prepare(
+        'UPDATE project_workspace_roots SET persistent_identity_digest = ? WHERE id = ? AND project_id = ?',
+      );
+      for (const folder of next)
+        persistIdentity.run(folder.persistentIdentityDigest ?? null, folder.id, input.projectId);
       const updated = this.db
         .prepare(
           `UPDATE projects SET revision = revision + 1, context_epoch = context_epoch + 1,
@@ -9220,8 +9332,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const insert = this.db.prepare(
       `INSERT INTO project_workspace_roots(
          id, project_id, canonical_path, label, role, ordinal,
-         workspace_key, root_identity_digest, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         workspace_key, root_identity_digest, persistent_identity_digest, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     folders.forEach((folder, ordinal) =>
       insert.run(
@@ -9233,6 +9345,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ordinal,
         folder.workspaceKey,
         folder.rootIdentityDigest,
+        folder.persistentIdentityDigest ?? null,
         now,
         now,
       ),
@@ -23736,6 +23849,11 @@ function validateProjectFolderBindings(folders: readonly ProjectFolderBinding[])
       throw new InvalidProjectError('Project folder must be an absolute non-filesystem-root path');
     validateMutationDigest(folder.workspaceKey, 'workspace mutation key');
     validateMutationDigest(folder.rootIdentityDigest, 'workspace root identity digest');
+    if (folder.persistentIdentityDigest != null)
+      validateMutationDigest(
+        folder.persistentIdentityDigest,
+        'persistent workspace identity digest',
+      );
     const pathKey = pathComparisonKey(folder.canonicalPath);
     if (paths.has(pathKey) || identities.has(folder.rootIdentityDigest))
       throw new InvalidProjectError('Project folders must resolve to distinct directories');
@@ -23764,7 +23882,14 @@ function assignProjectFolderIds(
     const requested = folder.id === undefined ? undefined : currentById.get(folder.id);
     const identityMatch = currentByIdentity.get(folder.rootIdentityDigest);
     const match =
-      requested?.root_identity_digest === folder.rootIdentityDigest ? requested : identityMatch;
+      requested !== undefined &&
+      (requested.root_identity_digest === folder.rootIdentityDigest ||
+        (identityMatch === undefined &&
+          pathsEquivalent(requested.canonical_path, folder.canonicalPath)) ||
+        (requested.persistent_identity_digest !== null &&
+          requested.persistent_identity_digest === folder.persistentIdentityDigest))
+        ? requested
+        : identityMatch;
     const id = match?.id ?? randomUUID();
     if (used.has(id)) throw new InvalidProjectError('Project folder ID is duplicated');
     used.add(id);

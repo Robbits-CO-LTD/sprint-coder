@@ -11,14 +11,16 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 describe.skipIf(process.platform !== 'darwin' && process.platform !== 'win32')(
   'parented native confirmation cancellation',
   () => {
-    it('keeps a real Electron dialog unanswered until AbortSignal returns its cancel response', async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'sc-native-dialog-abort-'));
-      const fixturePath = join(directory, 'main.cjs');
-      const reportPath = join(directory, 'result.json');
-      try {
-        await writeFile(
-          fixturePath,
-          String.raw`
+    it.each(['hidden', 'visible', 'visible-focusable'] as const)(
+      'keeps a %s parent alive until and after native cancellation',
+      async (visibility) => {
+        const directory = await mkdtemp(join(tmpdir(), 'sc-native-dialog-abort-'));
+        const fixturePath = join(directory, 'main.cjs');
+        const reportPath = join(directory, 'result.json');
+        try {
+          await writeFile(
+            fixturePath,
+            String.raw`
 const { app, BrowserWindow, dialog } = require('electron');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -32,12 +34,18 @@ const watchdog = setTimeout(() => {
 }, 8000);
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.setActivationPolicy('accessory');
-  const parent = new BrowserWindow({ show: false, focusable: false, skipTaskbar: true });
+  const parent = new BrowserWindow({ show: false, focusable: ${JSON.stringify(visibility === 'visible-focusable')}, skipTaskbar: true });
+  const lifecycle = [];
+  for (const event of ['close', 'closed', 'show', 'hide'])
+    parent.on(event, () => lifecycle.push({ event, elapsed: performance.now() }));
+  const visible = ${JSON.stringify(visibility !== 'hidden')};
+  if (visible) parent.showInactive();
   let parentFocusEvents = 0;
   parent.on('focus', () => { parentFocusEvents += 1; });
   const controller = new AbortController();
   let settled = false;
   let pendingBeforeAbort = false;
+  let parentAliveBeforeAbort = false;
   const answer = dialog.showMessageBox(parent, {
     type: 'warning',
     title: 'Native cancellation fixture',
@@ -50,6 +58,7 @@ app.whenReady().then(async () => {
   }).then((result) => { settled = true; return result; });
   const abortTimer = setTimeout(() => {
     pendingBeforeAbort = !settled;
+    parentAliveBeforeAbort = !parent.isDestroyed();
     controller.abort();
   }, 250);
   const result = await answer;
@@ -61,6 +70,9 @@ app.whenReady().then(async () => {
     aborted: controller.signal.aborted,
     response: result.response,
     parentAlive: !parent.isDestroyed(),
+    parentAliveBeforeAbort,
+    visible,
+    lifecycle: lifecycle.slice(),
     parentFocusEvents,
   };
   parent.destroy();
@@ -72,32 +84,37 @@ app.whenReady().then(async () => {
   app.exit(3);
 });
 `,
-        );
-        const environment = { ...process.env };
-        delete environment.ELECTRON_RUN_AS_NODE;
-        await promisify(execFile)(electronTestExecutablePath(), [fixturePath], {
-          env: environment,
-          timeout: 15_000,
-        });
-        const report: unknown = JSON.parse(await readFile(reportPath, 'utf8'));
-        expect(report).toMatchObject({
-          platform: process.platform,
-          electron: expect.any(String),
-          pendingBeforeAbort: true,
-          aborted: true,
-          response: 0,
-          parentAlive: true,
-          parentDestroyed: true,
-        });
-        console.info('Native dialog abort evidence', report);
-      } finally {
-        await rm(directory, {
-          recursive: true,
-          force: true,
-          maxRetries: process.platform === 'win32' ? 5 : 0,
-          retryDelay: 100,
-        });
-      }
-    }, 20_000);
+          );
+          const environment = { ...process.env };
+          delete environment.ELECTRON_RUN_AS_NODE;
+          await promisify(execFile)(electronTestExecutablePath(), [fixturePath], {
+            env: environment,
+            timeout: 15_000,
+          });
+          const report: unknown = JSON.parse(await readFile(reportPath, 'utf8'));
+          // Retain phase evidence even when CI catches the intermittent parent loss (#1137).
+          console.info('Native dialog abort evidence', report);
+          expect(report).toMatchObject({
+            platform: process.platform,
+            electron: expect.any(String),
+            pendingBeforeAbort: true,
+            aborted: true,
+            response: 0,
+            parentAlive: true,
+            parentAliveBeforeAbort: true,
+            visible: visibility !== 'hidden',
+            parentDestroyed: true,
+          });
+        } finally {
+          await rm(directory, {
+            recursive: true,
+            force: true,
+            maxRetries: process.platform === 'win32' ? 5 : 0,
+            retryDelay: 100,
+          });
+        }
+      },
+      20_000,
+    );
   },
 );

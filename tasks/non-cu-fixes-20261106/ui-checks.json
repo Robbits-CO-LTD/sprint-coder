@@ -1,0 +1,92 @@
+{
+  "$schema": "e2e-test-plan-v2",
+  "required_phase": "pre_merge",
+  "mode": "browser",
+  "browser_tool": "cua_repl",
+  "hosting": "local",
+  "execution_cost": "standard",
+  "issue_ref": "#1157, #1137",
+  "issue_body": "#1157: 送信受付後の先行添付読込みが画像を下書きへ戻す。#1137: macOS native取消後に親が破棄されるCI事象。実製品再現未確定。",
+  "purpose": "4件の修正対象に関係するUI経路を隔離した開発版で確認する",
+  "pass_criteria": "再リンクが保存され、取消後も親とTaskが操作可能、画像の次の送信が可能、正常グラフが表示される。未再現・非決定的raceを目視PASSにしない。",
+  "critical_point": "画像の送信済み状態と未送信状態、フォルダ登録と実行時権限を混同しない",
+  "smoke_test_passed": true,
+  "e2e_gate": {
+    "source_sha": "d8f27656de9fbf618f046ff35f91d6cc85db37eb",
+    "worktree": "/Users/yusei/sprint-coder-non-cu-fixes-20261106",
+    "artifact_path": "/Users/yusei/sprint-coder-non-cu-fixes-20261106/apps/desktop/.vite/build/index.js",
+    "status": "blocked",
+    "artifact_sha256": "5603b479f4738654b5ac4eea7257f4b14ca22a366a32fe8026f0f8ff09325184"
+  },
+  "user_perspective_check": "3機能の修正と通常UIの確認はあるが、#1137の原因未確定と制御raceのGUI受入が残る。総合完了とはしない。",
+  "confidence_gate": {
+    "status": "blocked",
+    "reason": "#1137 RCA and controlled attachment race GUI acceptance pending"
+  },
+  "items": [
+    {
+      "id": "project-relink",
+      "screen": "Project",
+      "depth": "L2",
+      "operation_flow": "隔離profileでProjectを作成→同一パスへ再リンク→保存→再度編集し登録を確認",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "project-relink",
+      "result": "PASS",
+      "evidence": "CUA: Project作成→再リンクで同じfixtureフォルダを選択→保存→所属Task反映の確認→OK→Projectへ復帰。失敗テストRED→GREENと併記。"
+    },
+    {
+      "id": "permission-cancel",
+      "screen": "Task権限",
+      "depth": "L2",
+      "operation_flow": "隔離Taskでフルアクセス確認を開く→キャンセル→Task画面と入力欄が操作可能",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "permission-cancel",
+      "result": "PASS",
+      "evidence": "CUA: フルアクセス影響表示→native確認→キャンセルを初期状態と安定後の2回実施。親ウィンドウ、確認する設定、Composerの操作可能状態を確認。#1137の間欠事象の解消証明ではない。"
+    },
+    {
+      "id": "chat-attachments",
+      "screen": "Composer",
+      "depth": "L2",
+      "operation_flow": "合成画像を添付→fixture送信→別Taskへ切替・復帰→次の送信が可能",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "chat-attachments",
+      "result": "PASS",
+      "evidence": "CUA: 合成PNG添付→loopback fixture応答FIXTURE_OK→別Task→復帰→画像なし送信→FIXTURE_OK。実AI課金なし。"
+    },
+    {
+      "id": "graph",
+      "screen": "Taskグラフ",
+      "depth": "L2",
+      "operation_flow": "fixtureでグラフを提案→表示確認。エラー分類は実worker/Provider回帰試験と別記",
+      "method": "direct",
+      "priority": "high",
+      "acceptance_criteria": "graph",
+      "result": "PASS",
+      "evidence": "CUA: loopback fixtureからgraph_propose_document→Archify表示（2ノード/版1）。重複座標の再提案は失敗し、fixture側へGRAPH_RENDER_FAILEDとlayout/constraintだけが届いた。/tmp/sc-graph-error-observation.jsonを照合。"
+    },
+    {
+      "id": "attachment-controlled-race-ui",
+      "screen": "Composer",
+      "depth": "L2",
+      "priority": "high",
+      "operation_flow": "capability応答の順序を制御して送信と交差させる",
+      "acceptance_criteria": "#1157 実アプリでの応答順制御",
+      "result": "BLOCKED",
+      "evidence": "実Zustandの遅延PromiseでRED→GREEN。通常のElectron UI経路は上記PASS。今回のloopback GUI試験ではcapability応答順を制御していない。"
+    },
+    {
+      "id": "dialog-intermittent-root-cause",
+      "screen": "macOS native",
+      "depth": "L2",
+      "priority": "high",
+      "operation_flow": "CIのparentAlive=falseを同一条件で再現し原因を確定する",
+      "acceptance_criteria": "#1137",
+      "result": "BLOCKED",
+      "evidence": "CI一次ログ確認済み。元条件・早期取消・表示計12試行は再現なし、GUI取消2回も正常。原因未確定。新しいphase/lifecycle記録をCIで確認する。"
+    }
+  ]
+}

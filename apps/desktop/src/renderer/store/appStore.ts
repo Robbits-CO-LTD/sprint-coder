@@ -182,6 +182,7 @@ type AppState = {
   draftAttachmentsByTask: Record<string, ImageAttachmentMetadata[] | undefined>;
   attachmentCapabilityByTask: Record<string, ImageAttachmentCapability | undefined>;
   attachmentRequestRevisionByTask: Record<string, number | undefined>;
+  attachmentAcceptanceRevisionByTask: Record<string, number | undefined>;
   attachmentBusyByTask: Record<string, boolean | undefined>;
   attachmentReconciliationByTask: Record<
     string,
@@ -812,6 +813,13 @@ export function handleTurnEvent(
           },
           pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
           sendingByTask: { ...state.sendingByTask, [taskId]: false },
+          attachmentAcceptanceRevisionByTask:
+            ev.userMessage.attachments.length === 0
+              ? state.attachmentAcceptanceRevisionByTask
+              : {
+                  ...state.attachmentAcceptanceRevisionByTask,
+                  [taskId]: (state.attachmentAcceptanceRevisionByTask[taskId] ?? 0) + 1,
+                },
           draftAttachmentsByTask: {
             ...state.draftAttachmentsByTask,
             [taskId]: removeAcceptedAttachmentDrafts(
@@ -1266,6 +1274,7 @@ export const useAppStore = create<AppState>((set, get) => {
     draftAttachmentsByTask: {},
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
+    attachmentAcceptanceRevisionByTask: {},
     attachmentBusyByTask: {},
     attachmentReconciliationByTask: {},
     attachmentErrorByTask: {},
@@ -1774,7 +1783,6 @@ export const useAppStore = create<AppState>((set, get) => {
         teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
       }));
       void restoreDraft(taskId, apply, get);
-      void get().refreshDraftAttachments(taskId);
       void restoreSkillSelection(taskId, apply, get);
       void get().loadSkills();
       void loadWorkspace(taskId, apply, get);
@@ -1947,6 +1955,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
       if (!isCurrentSelection()) return;
       subscribeToTask(taskId, apply, get, afterSeq);
+      void get().refreshDraftAttachments(taskId);
       if (typeof sprintCoder.teams?.subscribe === 'function') {
         subscribeToTeam(taskId, isCurrentSelection);
       } else if (typeof sprintCoder.teams?.get === 'function') {
@@ -2507,6 +2516,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const api = window.sprintCoder?.attachments;
       if (!api) return;
       const revision = (get().attachmentRequestRevisionByTask[taskId] ?? 0) + 1;
+      const acceptanceRevision = get().attachmentAcceptanceRevisionByTask[taskId] ?? 0;
       const mutationRevision = get().attachmentReconciliationByTask[taskId]?.minimumRequestRevision;
       set((state) => {
         const recovery = state.attachmentReconciliationByTask[taskId];
@@ -2530,6 +2540,10 @@ export const useAppStore = create<AppState>((set, get) => {
           api.listDraft(taskId),
         ]);
         if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
+        // A read can have captured drafts before Main moved them to the accepted message.
+        // Re-read rather than adopting that snapshot or dropping unsent concurrent attachments.
+        if ((get().attachmentAcceptanceRevisionByTask[taskId] ?? 0) !== acceptanceRevision)
+          return get().refreshDraftAttachments(taskId);
         set((state) => {
           const recovery = state.attachmentReconciliationByTask[taskId];
           const reconciled =
@@ -2553,6 +2567,8 @@ export const useAppStore = create<AppState>((set, get) => {
         });
       } catch (error) {
         if (get().attachmentRequestRevisionByTask[taskId] !== revision) return;
+        if ((get().attachmentAcceptanceRevisionByTask[taskId] ?? 0) !== acceptanceRevision)
+          return get().refreshDraftAttachments(taskId);
         set((state) => {
           const recovery = state.attachmentReconciliationByTask[taskId];
           return {
@@ -2809,6 +2825,21 @@ export const useAppStore = create<AppState>((set, get) => {
         const renamed = result?.renamedTask;
         set((state) => ({
           // The accepted event may have been published while another Task was selected.
+          ...(selectedAttachmentIds.length === 0
+            ? {}
+            : {
+                attachmentAcceptanceRevisionByTask: {
+                  ...state.attachmentAcceptanceRevisionByTask,
+                  [taskId]: (state.attachmentAcceptanceRevisionByTask[taskId] ?? 0) + 1,
+                },
+                draftAttachmentsByTask: {
+                  ...state.draftAttachmentsByTask,
+                  [taskId]: removeAcceptedAttachmentDrafts(
+                    state.draftAttachmentsByTask[taskId] ?? [],
+                    selectedAttachments,
+                  ),
+                },
+              }),
           sendingByTask:
             state.pendingOptimisticIdByTask[taskId] === optimisticId
               ? { ...state.sendingByTask, [taskId]: false }
@@ -2822,6 +2853,7 @@ export const useAppStore = create<AppState>((set, get) => {
               : task,
           ),
         }));
+        if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
       } catch (err) {
         const code = errorCode(err);
         const message = code === 'TURN_ACTIVE' ? null : describeError(err);
