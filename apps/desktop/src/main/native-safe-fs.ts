@@ -367,7 +367,7 @@ export function nativeSafeFsRequiredExports(
     'openReadSession',
     'closeReadSession',
     'observeSealedPostImage',
-    ...(platform === 'darwin' ? ['directoryCanonicalUnicode'] : []),
+    ...(platform === 'darwin' ? ['directoryCanonicalUnicode', 'directoryPersistentIdentity'] : []),
     ...(platform === 'win32' ? ['caseInsensitiveNamesEqual'] : []),
   ];
 }

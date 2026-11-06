@@ -12,6 +12,7 @@
 #include <sys/xattr.h>
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <sys/attr.h>
 #include <sys/stdio.h>
 #include <sys/un.h>
 #include <sys/mount.h>
@@ -3741,8 +3742,54 @@ napi_value DirectoryCanonicalUnicode(napi_env env, napi_callback_info info) {
   return DirectoryNameRule(env, info, true);
 }
 
+#if defined(__APPLE__)
+napi_value DirectoryPersistentIdentity(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string path, dev, ino;
+  if (argc != 1 || !ReadString(env, argv[0], "path", &path) ||
+      !ReadString(env, argv[0], "dev", &dev) || !ReadString(env, argv[0], "ino", &ino))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid directory identity");
+  NativeFailure failure;
+  const int fd = OpenDirectoryChain(path, &failure, "UNSAFE_PATH");
+  if (fd < 0) return ThrowFailure(env, failure.code, failure.message);
+  struct stat observed {};
+  struct statfs filesystem {};
+  struct attrlist attributes {};
+  attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+  attributes.volattr = ATTR_VOL_INFO | ATTR_VOL_UUID;
+  struct {
+    uint32_t length;
+    unsigned char uuid[16];
+  } volume {};
+  const bool valid = fstat(fd, &observed) == 0 && S_ISDIR(observed.st_mode) &&
+      std::to_string(observed.st_dev) == dev && std::to_string(observed.st_ino) == ino &&
+      fstatfs(fd, &filesystem) == 0 && std::strcmp(filesystem.f_fstypename, "apfs") == 0 &&
+      fgetattrlist(fd, &attributes, &volume, sizeof(volume), 0) == 0 &&
+      volume.length == sizeof(volume) && observed.st_birthtimespec.tv_sec > 0;
+  close(fd);
+  if (!valid || std::all_of(std::begin(volume.uuid), std::end(volume.uuid),
+                           [](unsigned char byte) { return byte == 0; }))
+    return ThrowFailure(env, "NATIVE_FAILURE", "Persistent directory identity unavailable");
+  const char* hex = "0123456789abcdef";
+  std::string witness;
+  for (unsigned char byte : volume.uuid) {
+    witness += hex[byte >> 4];
+    witness += hex[byte & 15];
+  }
+  witness += ":" + ino + ":" + std::to_string(observed.st_birthtimespec.tv_sec) + ":" +
+      std::to_string(observed.st_birthtimespec.tv_nsec);
+  return MakeString(env, witness);
+}
+#endif
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+#if defined(__APPLE__)
+      {"directoryPersistentIdentity", nullptr, DirectoryPersistentIdentity, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
+#endif
       {"directoryCanonicalUnicode", nullptr, DirectoryCanonicalUnicode, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
