@@ -104,6 +104,15 @@ WindowsDiscoveryAdmission Admit(unsigned i,const std::string& id,const std::stri
 int main(){try{
  const std::string query="{\"operation\":\"list_windows_cancellable\",\"discoveryId\":\"host:1\",\"canonicalPath\":\"C:\\\\owned.exe\",\"identityDigest\":\""+std::string(64,'a')+"\",\"executableDigest\":\""+std::string(64,'b')+"\",\"signerDigest\":\"\"}";
  WindowsDiscoveryParameters parsed;Check(ReadWindowsDiscoveryQuery(query,&parsed)&&parsed.id=="host:1","query parser");
+ Check(parsed.classifier_route.empty(),"legacy discovery has no V2 route");
+ for(const auto route:{"v1","v2"}) {
+   const auto routed=query.substr(0,query.size()-1)+",\"includeStartIdentity\":true,\"classifierRoute\":\""+route+"\"}";
+   Check(ReadWindowsDiscoveryQuery(routed,&parsed)&&parsed.classifier_route==route&&parsed.include_start_identity,"explicit route parsed");
+   Check(!ReadWindowsDiscoveryQuery(routed.substr(0,routed.size()-1)+",\"classifierRoute\":\"v1\"}",&parsed),"duplicate route refused");
+ }
+ for(const auto value:{"true","null","\"v3\""})
+   Check(!ReadWindowsDiscoveryQuery(query.substr(0,query.size()-1)+",\"classifierRoute\":"+value+"}",&parsed),"invalid route refused");
+ Check(ReadWindowsDiscoveryQuery(query,&parsed)&&parsed.classifier_route.empty(),"route not retained across parsing");
  Check(!ReadWindowsDiscoveryQuery(query.substr(0,query.size()-1)+",\"extra\":\"x\"}",&parsed),"query extra refused");
  Check(!ReadWindowsDiscoveryQuery(query.substr(0,query.size()-1)+",\"discoveryId\":\"other\"}",&parsed),"duplicate key refused");
  std::string stop_id;Check(ReadWindowsDiscoveryStop("{\"discoveryId\":\"host:1\",\"operation\":\"stop_window_discovery\"}",&stop_id)&&stop_id=="host:1","stop parser");

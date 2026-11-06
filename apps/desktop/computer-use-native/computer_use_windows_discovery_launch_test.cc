@@ -11,7 +11,7 @@ struct WindowsExecutableIdentity;
 struct LockedWindowsExecutable;
 bool FixtureSupported(const WindowsExecutableIdentity&);
 bool FixtureEnumerate(const std::wstring&, std::string_view, std::string_view, std::string_view,
-                      std::vector<std::string>*, const std::function<bool()>&, bool);
+                      std::vector<std::string>*, const std::function<bool()>&, bool, bool);
 void FixtureBeforeClaim();
 BOOL FixtureCreate(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
                    LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION);
@@ -49,7 +49,9 @@ bool FixtureSupported(const WindowsExecutableIdentity& identity) {
 }
 bool FixtureEnumerate(const std::wstring& path, std::string_view, std::string_view,
                       std::string_view, std::vector<std::string>* rows,
-                      const std::function<bool()>& current, bool include_start_identity) {
+                      const std::function<bool()>& current, bool include_start_identity,
+                      bool explorer_route) {
+  Check(!explorer_route, "V1 fixture never receives Explorer admission");
   Check(SameWindowsPath(path, owned_path), "enumeration seam is owned-only");
   Check(include_start_identity == (mode == "identity-only"), "discovery opt-in forwarded");
   if (!current()) return false;

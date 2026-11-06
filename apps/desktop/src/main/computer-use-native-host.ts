@@ -2705,7 +2705,10 @@ export function createComputerUseNativeHost(
         platform === 'win32'
           ? parseWindows(
               input.profile,
-              await startWindowsDiscovery(owner, discoveryInput(input.profile)),
+              await startWindowsDiscovery(owner, {
+                ...discoveryInput(input.profile),
+                ...nativeRouteField(nativeRoute),
+              }),
               () => !owner.stopped,
             )
           : await startDiscovery(owner, () => host.listWindows(input.profile));
@@ -2718,6 +2721,7 @@ export function createComputerUseNativeHost(
     }
     const discoveryRequest = {
       ...input.profile,
+      ...nativeRouteField(nativeRoute),
       pid,
       appIdentityDigest: input.profile.identityDigest,
     };
@@ -2844,6 +2848,9 @@ export function createComputerUseNativeHost(
       });
     if (
       explorerBoundFacts !== undefined &&
+      typeof processStartTime === 'string' &&
+      session.raw['pid'] === selectedPid &&
+      session.raw.processStartTime === processStartTime &&
       session.windowIdentityDigest === selectedRecord['windowIdentityDigest']
     )
       explorerSessionFacts.set(session, explorerBoundFacts);

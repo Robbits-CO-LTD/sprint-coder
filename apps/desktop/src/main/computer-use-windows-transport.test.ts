@@ -2689,16 +2689,25 @@ describe('Computer Use Windows helper transport', () => {
     ).toBe(false);
   });
 
-  it('PR5b transmits the explicit discovery identity opt-in', async () => {
-    const requested = vi.fn(responders()['list_windows']!);
-    const target = createTarget({ ...responders(), list_windows: requested });
-    await target.addon.discoverWindows!({
-      ...profile,
-      discoveryId: 'identity-discovery',
-      includeStartIdentity: true,
-    });
-    expect(requested).toHaveBeenCalledWith(expect.objectContaining({ includeStartIdentity: true }));
-  });
+  it.each([undefined, 'v1', 'v2'] as const)(
+    'transmits discovery identity and classifier route %s',
+    async (classifierRoute) => {
+      const requested = vi.fn(responders()['list_windows']!);
+      const target = createTarget({ ...responders(), list_windows: requested });
+      await target.addon.discoverWindows!({
+        ...profile,
+        discoveryId: 'identity-discovery',
+        includeStartIdentity: true,
+        ...(classifierRoute === undefined ? {} : { classifierRoute }),
+      });
+      expect(requested).toHaveBeenCalledWith(
+        expect.objectContaining({ includeStartIdentity: true }),
+      );
+      if (classifierRoute === undefined)
+        expect(requested.mock.calls[0]?.[0]).not.toHaveProperty('classifierRoute');
+      else expect(requested).toHaveBeenCalledWith(expect.objectContaining({ classifierRoute }));
+    },
+  );
   it.each([false, true])('PR5b requires a true connected capability (%s)', async (enabled) => {
     const base = responders();
     const requested = vi.fn(base['start_session']!);

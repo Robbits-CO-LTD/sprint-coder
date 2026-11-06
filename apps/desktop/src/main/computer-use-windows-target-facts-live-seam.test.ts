@@ -2474,7 +2474,17 @@ describe.skipIf(!onWindows || (build === null && !ci))(
       binary: string,
       gate: boolean,
       source = host,
+      discoveryAdmission = false,
+      discoveryV2 = true,
     ): Promise<void> => {
+      if (discoveryAdmission) {
+        const declaration =
+          'constexpr bool kWindowsApprovalHandlersEnabled =\n    sprint_coder::computer_use::kNativeEligibilityWindowsV2Final;';
+        expect(source.replaceAll('\r\n', '\n')).toContain(declaration);
+        source = source
+          .replaceAll('\r\n', '\n')
+          .replace(declaration, 'constexpr bool kWindowsApprovalHandlersEnabled = true;');
+      }
       writeFileSync(join(scratch, 'explorer-host.cc'), source);
       const provenance = join(scratch, 'provenance.h');
       writeFileSync(
@@ -2493,6 +2503,15 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         '/DWIN32_LEAN_AND_MEAN',
         '/D_WIN32_WINNT=0x0A00',
         '/DSPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=1',
+        ...(discoveryAdmission
+          ? [
+              `/DSPRINT_CODER_ELIGIBILITY_V2=${discoveryV2 ? 1 : 0}`,
+              '/DSPRINT_CODER_ELIGIBILITY_RULESET_VERSION=5',
+              '/DSPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION=4',
+              '/DSPRINT_CODER_ELIGIBILITY_LEXICON_VERSION=3',
+              `/DSPRINT_CODER_ELIGIBILITY_INTERLOCK_ENFORCED=${discoveryV2 ? 1 : 0}`,
+            ]
+          : []),
         ...(gate ? ['/DSPRINT_CODER_TEST_WINDOWS_EXPLORER_EXCEPTION'] : []),
         `/FI${provenance}`,
         `/I${nativeDirectory}`,
@@ -2530,6 +2549,108 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         throw error;
       });
     };
+    it('explorer_native_discovery_emits_bound_facts / explorer_discovery_gate_off_preserves_v1', async () => {
+      const driver = 'computer_use_windows_explorer_discovery_test.cc';
+      let source = host;
+      const replaceReads = (from: string, to: string, reads: Record<string, string>) => {
+        const begin = source.indexOf(from);
+        const end = source.indexOf(to, begin + from.length);
+        expect(begin).toBeGreaterThan(0);
+        expect(end).toBeGreaterThan(begin);
+        let body = source.slice(begin, end);
+        for (const [name, replacement] of Object.entries(reads)) {
+          expect(body).toContain(`${name}(`);
+          body = body.replaceAll(`${name}(`, `${replacement}(`);
+        }
+        source = source.slice(0, begin) + body + source.slice(end);
+      };
+      replaceReads('BOOL CALLBACK CollectTopLevelWindow(', 'bool IsKnownProxyExecutable(', {
+        IsWindowVisible: 'E1Visible',
+        GetWindowThreadProcessId: 'E1Owner',
+        ClientBoundsPhysical: 'E1Bounds',
+        ScreenBoundsPhysicalForWindow: 'E1Bounds',
+        GetWindowTextW: 'E1Title',
+        GetWindow: 'E1Window',
+        IsWindowEnabled: 'E1Enabled',
+        IsApplicationWindow: 'E1Application',
+        GetForegroundWindow: 'E1Foreground',
+      });
+      replaceReads('void JudgeWindowsV2Target(', '// Private evidence for Main', {
+        MeasureWindowsV2Process: 'E1Process',
+        WindowsTargetWindowClass: 'E1Class',
+      });
+      replaceReads('WindowsV2VerdictForWindowClass(WindowsV2Judgement', '// Judges one window', {
+        EnsureWindowsV2Identity: 'E1Identity',
+        MeasureWindowsExplorerPrestart: 'E1View',
+        IsProcessElevated: 'E1Elevated',
+      });
+      replaceReads(
+        'bool MeasureWindowsDiscovery(',
+        '// END windows cancellable discovery measurement',
+        {
+          OpenLockedWindowsExecutable: 'E1Open',
+          EnumerateWindowsForExecutable: 'E1Enumerate',
+        },
+      );
+      source = source.replace(
+        'BOOL CALLBACK CollectTopLevelWindow(',
+        [
+          '#define SPRINT_CODER_EXPLORER_DISCOVERY_DEPENDENCIES',
+          `#include "${driver}"`,
+          '#undef SPRINT_CODER_EXPLORER_DISCOVERY_DEPENDENCIES',
+          'BOOL CALLBACK CollectTopLevelWindow(',
+        ].join('\n'),
+      );
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-discovery-'));
+      try {
+        for (const [gate, v2] of [
+          [false, true],
+          [true, true],
+          [true, false],
+        ] as const) {
+          const binary = join(scratch, `discovery-${gate}-${v2}.exe`);
+          await buildExplorerHostDriver(scratch, driver, binary, gate, source, true, v2);
+          const result = await promisify(execFile)(binary, [], {
+            encoding: 'utf8',
+            timeout: 30_000,
+          }).catch((error: unknown) => {
+            if (error instanceof Error && 'stdout' in error) console.log(error.stdout);
+            throw error;
+          });
+          expect(result.stdout).toContain(
+            gate && v2
+              ? 'OK explorer_native_discovery_emits_bound_facts'
+              : 'OK explorer_discovery_gate_off_preserves_v1',
+          );
+          if (gate && v2) {
+            const line = result.stdout.split(/\r?\n/u).find((value) => value.startsWith('FACTS '));
+            expect(JSON.parse(line!.slice(6))).toEqual([
+              expect.objectContaining({
+                pid: 42,
+                windowId: '100',
+                eligible: true,
+                maximumMode: 'supervised',
+                processStartTime: '123456',
+                facts: expect.objectContaining({
+                  platform: 'win32',
+                  imageRoot: 'windows_directory',
+                  imageRelativePath: 'explorer.exe',
+                  imageLeaf: 'explorer.exe',
+                  imageVolume: 'fixed',
+                  runningImageMatches: true,
+                  signature: 'valid',
+                  signerMicrosoftRoot: true,
+                  packaged: false,
+                  windowClass: 'CabinetWClass',
+                }),
+              }),
+            ]);
+          }
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      }
+    }, 300_000);
     it('checks measured Explorer PIDLs and rejects non-folder items', async (context) => {
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-item-'));
       try {
@@ -2712,6 +2833,50 @@ describe.skipIf(!onWindows || (build === null && !ci))(
         rmSync(scratch, { recursive: true, force: true });
       }
     }, 300_000);
+    it('explorer_live_discovery_emits_facts', async (context) => {
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-discovery-live-'));
+      let cleanupConfirmed = true;
+      try {
+        const binary = join(scratch, 'explorer-discovery.exe');
+        await buildExplorerHostDriver(
+          scratch,
+          'computer_use_windows_explorer_live_test.cc',
+          binary,
+          true,
+          host,
+          true,
+        );
+        // Compilation is always checked. A real shell window needs the parent's desktop.
+        if (process.env['SPRINT_CODER_EXPLORER_DISCOVERY_LIVE'] !== '1') {
+          context.skip(
+            'NOT_RUN explorer_live_discovery_emits_facts: set SPRINT_CODER_EXPLORER_DISCOVERY_LIVE=1',
+          );
+          return;
+        }
+        cleanupConfirmed = false;
+        const result = await promisify(execFile)(binary, [scratch, 'discovery-only'], {
+          encoding: 'utf8',
+          timeout: 90_000,
+        }).catch((error: unknown) => {
+          if (error instanceof Error && 'stdout' in error && typeof error.stdout === 'string') {
+            console.log(error.stdout);
+            cleanupConfirmed = error.stdout.includes('OK explorer_cleanup');
+          }
+          throw error;
+        });
+        console.log(result.stdout);
+        cleanupConfirmed = result.stdout.includes('OK explorer_cleanup');
+        expect(result.stdout).not.toContain('FAIL ');
+        const notRun = result.stdout.split(/\r?\n/u).filter((line) => line.startsWith('NOT_RUN '));
+        if (notRun.length) context.skip(notRun.join('; '));
+        expect(cleanupConfirmed).toBe(true);
+        expect(result.stdout).toContain('OK explorer_live_discovery_emits_facts');
+      } finally {
+        if (cleanupConfirmed)
+          rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+        else console.warn('NOT_RUN explorer_cleanup_unconfirmed: scratch retained');
+      }
+    }, 180_000);
     it('measures live Explorer views and refuses foreign-process child windows', async (context) => {
       expect(build, 'cl.exe (MSVC) is required').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-explorer-view-'));
