@@ -1190,7 +1190,6 @@ async function explorerController(enabled = true, ordinary = false, realDiscover
           ? {
               facts: {
                 ...(ordinary ? row().facts : explorerRow().facts),
-                shellView: { kind: 'filesystem_folder', path: 'C:\\Folder' },
               },
             }
           : {}),
@@ -1372,6 +1371,7 @@ it('explorer_real_host_list_grant_start_binding', async () => {
   );
   const started = f.controller.getStatus(startRequest.sessionId)!;
   expect(f.start).toHaveBeenCalledOnce();
+  expect(f.discovery).toHaveBeenLastCalledWith(expect.objectContaining({ classifierRoute: 'v2' }));
   expect(f.start).toHaveBeenCalledWith(
     expect.objectContaining({
       sessionId: started.sessionId,
@@ -1535,35 +1535,63 @@ it.each([false, true])('explorer_gate_off_controller_baseline (ordinary=%s)', as
   }
 });
 
-it('explorer_real_host_missing_native_facts_cannot_authorize_input', async () => {
-  const f = await explorerController(true, false, true);
-  f.omitExplorerFacts();
-  f.grant();
-  const target = (await f.targets())[0]!;
-  const running = f.controller.startForAgent(
-    { targetToken: target.targetToken, goal: 'folder' },
-    explorerContext,
-  );
-  await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
-  const request = f.start.mock.calls[0]![0] as { sessionId: string };
-  await vi.waitFor(() =>
-    expect(f.controller.getStatus(request.sessionId)?.state).toBe('observing'),
-  );
-  expect(readWindowsExplorerApproval(f.host, request.sessionId)).toBeUndefined();
-  await f.controller.observe(request.sessionId);
-  await expect(
-    f.controller.act(
-      request.sessionId,
-      { type: 'click', x: 0.5, y: 0.5, button: 'left' },
-      'missing-facts',
-    ),
-  ).rejects.toThrow('explorer_action_denied');
-  expect(f.measure).not.toHaveBeenCalled();
-  expect(f.preflight).not.toHaveBeenCalled();
-  expect(f.binding.addon!.dispatch).not.toHaveBeenCalled();
-  await f.controller.stop(request.sessionId);
-  await running;
-});
+it.each(['missing-facts', 'pid', 'processStartTime', 'windowIdentityDigest'] as const)(
+  'explorer_real_host_unbound_native_facts_cannot_authorize_input (%s)',
+  async (missing) => {
+    const f = await explorerController(true, false, true);
+    if (missing === 'missing-facts') f.omitExplorerFacts();
+    else {
+      const original = f.start.getMockImplementation()!;
+      f.start.mockImplementation(async (input, ...rest) => {
+        const response = await original(input, ...rest);
+        if (typeof response !== 'object' || response === null)
+          throw new Error('Missing native session fixture');
+        return {
+          ...response,
+          [missing]:
+            missing === 'pid'
+              ? 43
+              : missing === 'processStartTime'
+                ? '133000000000000002'
+                : 'd'.repeat(64),
+        };
+      });
+    }
+    f.grant();
+    const target = (await f.targets())[0]!;
+    const running = f.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'folder' },
+      explorerContext,
+    );
+    if (missing === 'windowIdentityDigest') {
+      await expect(running).rejects.toThrow('Computer Use native session identity mismatch');
+      const request = f.start.mock.calls[0]![0] as { sessionId: string };
+      expect(readWindowsExplorerApproval(f.host, request.sessionId)).toBeUndefined();
+      expect(f.measure).not.toHaveBeenCalled();
+      expect(f.binding.addon!.dispatch).not.toHaveBeenCalled();
+      return;
+    }
+    await vi.waitFor(() => expect(f.start).toHaveBeenCalledOnce());
+    const request = f.start.mock.calls[0]![0] as { sessionId: string };
+    await vi.waitFor(() =>
+      expect(f.controller.getStatus(request.sessionId)?.state).toBe('observing'),
+    );
+    expect(readWindowsExplorerApproval(f.host, request.sessionId)).toBeUndefined();
+    await f.controller.observe(request.sessionId);
+    await expect(
+      f.controller.act(
+        request.sessionId,
+        { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+        'missing-facts',
+      ),
+    ).rejects.toThrow('explorer_action_denied');
+    expect(f.measure).not.toHaveBeenCalled();
+    expect(f.preflight).not.toHaveBeenCalled();
+    expect(f.binding.addon!.dispatch).not.toHaveBeenCalled();
+    await f.controller.stop(request.sessionId);
+    await running;
+  },
+);
 
 it('explorer_registration_stays_denied', async () => {
   const f = await explorerController();

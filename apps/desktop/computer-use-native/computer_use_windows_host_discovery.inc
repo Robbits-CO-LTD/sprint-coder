@@ -427,9 +427,14 @@ struct WindowEnumerationContext {
   bool include_start_identity = false;
   bool elevated = true;
   bool proxy = false;
+  bool explorer_route = false;
   std::vector<std::string> candidates;
   std::function<bool()> still_valid;
 };
+
+// Implemented alongside V2 judgement; an empty result never waives the common denial.
+std::string MeasureWindowsExplorerDiscoveryFacts(HWND window,
+                                                 const WindowEnumerationContext &context);
 
 bool IsApplicationWindow(HWND window) {
   if (window == nullptr || GetWindow(window, GW_OWNER) != nullptr ||
@@ -920,8 +925,14 @@ BOOL CALLBACK CollectTopLevelWindow(HWND window, LPARAM parameter) {
   const bool same_owner_dialog =
       owner != nullptr && owner_window_pid == context->pid;
   const bool modal = same_owner_dialog && IsWindowEnabled(owner) == FALSE;
+  std::string explorer_facts;
+  if (context->explorer_route && context->identity_matches && !context->elevated &&
+      !same_owner_dialog && IsApplicationWindow(window) && IsWindowEnabled(window) == TRUE)
+    explorer_facts = MeasureWindowsExplorerDiscoveryFacts(window, *context);
+  if (context->still_valid && !context->still_valid()) return FALSE;
+  const bool explorer_admitted = !explorer_facts.empty();
   const bool eligible = context->identity_matches && !context->elevated &&
-                        !context->proxy && !same_owner_dialog &&
+                        (!context->proxy || explorer_admitted) && !same_owner_dialog &&
                         IsApplicationWindow(window) &&
                         IsWindowEnabled(window) == TRUE;
   const std::string window_identity = Sha256String(
@@ -945,8 +956,9 @@ BOOL CALLBACK CollectTopLevelWindow(HWND window, LPARAM parameter) {
       (same_owner_dialog ? "dialog" : "application") +
       "\",\"modal\":" + (modal ? "true" : "false") +
       ",\"policyLanguage\":\"" + context->policy_language +
-      "\",\"maximumMode\":\"" + context->maximum_mode +
+      "\",\"maximumMode\":\"" + (explorer_admitted ? "supervised" : context->maximum_mode) +
       "\",\"revision\":1" +
+      (eligible && explorer_admitted ? ",\"facts\":" + explorer_facts : "") +
       (context->include_start_identity && eligible
           ? ",\"processStartTime\":\"" + context->process_start + "\"" : "") + "}");
   return context->candidates.size() < 64 ? TRUE : FALSE;
@@ -1014,7 +1026,8 @@ bool EnumerateWindowsForExecutable(const std::wstring &canonical_path,
                                    std::string_view expected_signer_digest,
                                    std::vector<std::string> *candidates,
                                    const std::function<bool()>& still_valid = {},
-                                   bool include_start_identity = false) {
+                                   bool include_start_identity = false,
+                                   bool explorer_route = false) {
   const auto current = [&] { return !still_valid || still_valid(); };
   if (!current()) return false;
   ScopedKernelHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -1044,6 +1057,7 @@ bool EnumerateWindowsForExecutable(const std::wstring &canonical_path,
       WindowEnumerationContext context;
       context.still_valid = still_valid;
       context.include_start_identity = include_start_identity;
+      context.explorer_route = explorer_route;
       context.pid = entry.th32ProcessID;
       context.app_identity = std::string(expected_identity);
       context.executable_digest =

@@ -123,13 +123,49 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
     expect(start).not.toMatch(/maximum_mode|policy_language/u);
   });
 
-  it('reaches the Windows host only as the approval gate route binding (N8-5)', () => {
-    // The Windows host reads the key solely into the session approval_route_v2 flag; it never
-    // selects a classifier from it, and Main sends it only to a helper with verified approval
-    // evidence (computer-use-native-host.ts nativeRouteField).
-    const reads = windows.split('\n').filter((line) => line.includes('"classifierRoute"'));
-    expect(reads.length).toBeGreaterThan(0);
-    for (const line of reads) expect(line).toContain('approval_route_v2 =');
+  it('limits Windows route reads to approval binding and Explorer V2 discovery permission', () => {
+    const common = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_common.inc'),
+      'utf8',
+    );
+    const worker = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_discovery_worker.inc'),
+      'utf8',
+    );
+    const session = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_host_session.inc'),
+      'utf8',
+    );
+    const reads = (source: string) =>
+      source.split('\n').filter((line) => line.includes('"classifierRoute"'));
+    // Syntax validation accepts only v1/v2 and rejects duplicate keys; it selects no classifier.
+    expect(reads(common)).toEqual([
+      '    } else if (key == "classifierRoute" && explorer_discovery_route && !route_seen) {',
+    ]);
+    expect(common).toContain(
+      '(*explorer_discovery_route != "v1" && *explorer_discovery_route != "v2")',
+    );
+    expect(reads(worker)).toEqual([
+      '      ReadJsonString(metadata, "classifierRoute", &explorer_discovery_route) &&',
+    ]);
+    expect(worker).toContain(
+      'const bool explorer_v2_requested =\n      ReadJsonString(metadata, "classifierRoute", &explorer_discovery_route) &&\n      explorer_discovery_route == "v2";',
+    );
+    expect(worker).toContain(
+      'const bool explorer_route = sprint_coder::computer_use::kWindowsExplorerException &&\n      sprint_coder::computer_use::kNativeEligibilityIsV2 &&\n      explorer_v2_requested && _wcsicmp(leaf.c_str(), L"explorer.exe") == 0;',
+    );
+    expect(worker.match(/explorer_v2_requested/gu)).toHaveLength(2);
+    expect(worker.match(/explorer_discovery_route/gu)).toHaveLength(3);
+    expect(reads(session)).toHaveLength(3);
+    for (const line of reads(session)) expect(line).toContain('approval_route_v2 =');
+    // Account for every key read across the assembled host, including future fragments.
+    expect(reads(windows).sort()).toEqual(
+      [...reads(common), ...reads(worker), ...reads(session)].sort(),
+    );
     expect(windows).not.toContain('classifier_route');
+    const main = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    expect(main).toContain(
+      "route !== undefined && (platform !== 'win32' || binding.windowsApprovalVerified === true)\n      ? { classifierRoute: route }\n      : {};",
+    );
   });
 });

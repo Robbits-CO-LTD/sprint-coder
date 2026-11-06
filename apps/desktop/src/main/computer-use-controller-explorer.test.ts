@@ -171,6 +171,7 @@ const explorerScenario = async (
         // First discovery is the legacy profile lookup; the bound-row measurement follows.
         ...(discoveryCount++ === 0 ? {} : { facts: measuredFacts }),
         pid: 42,
+        processStartTime: '123456',
         windowHandle: '100',
         boundsUnit: 'physical_px',
         windowId: '100',

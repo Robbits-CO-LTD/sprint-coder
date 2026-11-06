@@ -627,6 +627,7 @@ bool ReadPendingWindowsStop(const std::string& metadata, std::string* session_id
 
 // BEGIN windows discovery syntax
 struct WindowsDiscoveryParameters {
+  std::string explorer_discovery_route;
   std::string id;
   std::string canonical_path;
   std::string identity;
@@ -643,7 +644,8 @@ struct WindowsDiscoveryStringField {
 
 bool ReadWindowsDiscoveryFields(std::string_view metadata,
                                 std::span<WindowsDiscoveryStringField> fields,
-                                bool* include_start_identity = nullptr) {
+                                bool* include_start_identity = nullptr,
+                                std::string* explorer_discovery_route = nullptr) {
   std::size_t cursor = 0;
   const auto space = [&] {
     while (cursor < metadata.size() && (metadata[cursor] == ' ' || metadata[cursor] == '\t' ||
@@ -652,8 +654,10 @@ bool ReadWindowsDiscoveryFields(std::string_view metadata,
   space();
   if (cursor >= metadata.size() || metadata[cursor++] != '{') return false;
   bool identity_seen = false;
+  bool route_seen = false;
+  if (explorer_discovery_route) explorer_discovery_route->clear();
   if (include_start_identity) *include_start_identity = false;
-  for (std::size_t member = 0; member <= fields.size(); ++member) {
+  for (std::size_t member = 0; member <= fields.size() + 1; ++member) {
     space(); std::string key, value;
     if (!ReadJsonStringValueAt(metadata, &cursor, &key)) return false;
     space(); if (cursor >= metadata.size() || metadata[cursor++] != ':') return false;
@@ -663,6 +667,10 @@ bool ReadWindowsDiscoveryFields(std::string_view metadata,
       if (metadata.substr(cursor, 4) == "true") { *include_start_identity = true; cursor += 4; }
       else if (metadata.substr(cursor, 5) == "false") cursor += 5;
       else return false;
+    } else if (key == "classifierRoute" && explorer_discovery_route && !route_seen) {
+      route_seen = true;
+      if (!ReadJsonStringValueAt(metadata, &cursor, explorer_discovery_route) ||
+          (*explorer_discovery_route != "v1" && *explorer_discovery_route != "v2")) return false;
     } else {
       if (!ReadJsonStringValueAt(metadata, &cursor, &value)) return false;
       const auto field = std::find_if(fields.begin(), fields.end(),
@@ -698,7 +706,8 @@ bool ReadWindowsDiscoveryQuery(std::string_view metadata, WindowsDiscoveryParame
       return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     });
   };
-  return ReadWindowsDiscoveryFields(metadata, fields, &output->include_start_identity) && operation == "list_windows_cancellable" &&
+  return ReadWindowsDiscoveryFields(metadata, fields, &output->include_start_identity,
+                                    &output->explorer_discovery_route) && operation == "list_windows_cancellable" &&
       !output->id.empty() && output->id.size() <= 256 && !output->canonical_path.empty() &&
       digest(output->identity) && digest(output->executable_digest) &&
       (output->signer_digest.empty() || digest(output->signer_digest));
