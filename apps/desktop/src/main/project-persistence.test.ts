@@ -365,6 +365,85 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('refreshes swapped runtime identities without transient uniqueness conflicts', async () => {
+      const { persistence } = createPersistence();
+      const first = {
+        ...folderBinding('/tmp/swap-a', 'primary', 'a'),
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const second = {
+        ...folderBinding('/tmp/swap-b', 'secondary', 'b'),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Device number swap',
+        folders: [first, second],
+      });
+      const originalRoots = persistence.listProjectFolders(project.id);
+      await persistence.reconcileProjectFolderIdentities(async (path) =>
+        path === first.path
+          ? {
+              ...first,
+              workspaceKey: second.workspaceKey,
+              rootIdentityDigest: second.rootIdentityDigest,
+            }
+          : {
+              ...second,
+              workspaceKey: first.workspaceKey,
+              rootIdentityDigest: first.rootIdentityDigest,
+            },
+      );
+      expect(persistence.listProjectFolders(project.id).map(({ id }) => id)).toEqual(
+        originalRoots.map(({ id }) => id),
+      );
+      expect([...persistence.getProjectFolderRootIdentities(project.id).values()]).toEqual([
+        second.rootIdentityDigest,
+        first.rootIdentityDigest,
+      ]);
+      persistence.close();
+    });
+
+    it('rolls back staged identities when a final registration update fails', async () => {
+      const { persistence, path } = createPersistence();
+      const first = {
+        ...folderBinding('/tmp/rollback-a', 'primary', 'a'),
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const second = {
+        ...folderBinding('/tmp/rollback-b', 'secondary', 'b'),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      const project = persistence.createProject({
+        name: 'Atomic remount',
+        folders: [first, second],
+      });
+      const original = [...persistence.getProjectFolderRootIdentities(project.id)];
+      const inspection = new Database(path);
+      inspection.exec(`CREATE TRIGGER refuse_final_identity
+        BEFORE UPDATE OF root_identity_digest ON project_workspace_roots
+        WHEN NEW.root_identity_digest = '${first.rootIdentityDigest}'
+        BEGIN SELECT RAISE(ABORT, 'fixture_final_identity_rejected'); END;`);
+      inspection.close();
+      await expect(
+        persistence.reconcileProjectFolderIdentities(async (folderPath) =>
+          folderPath === first.path
+            ? {
+                ...first,
+                workspaceKey: second.workspaceKey,
+                rootIdentityDigest: second.rootIdentityDigest,
+              }
+            : {
+                ...second,
+                workspaceKey: first.workspaceKey,
+                rootIdentityDigest: first.rootIdentityDigest,
+              },
+        ),
+      ).rejects.toThrow('fixture_final_identity_rejected');
+      expect([...persistence.getProjectFolderRootIdentities(project.id)]).toEqual(original);
+      expect(persistence.listProjects()[0]!.revision).toBe(project.revision);
+      persistence.close();
+    });
+
     it.runIf(process.platform === 'darwin')(
       'refreshes actual native APFS evidence after a device-number-only change and keeps references usable',
       async () => {

@@ -9229,6 +9229,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const currentIds = new Set(current.map(({ id }) => id));
       const removeRoot = this.db.prepare('DELETE FROM project_workspace_roots WHERE id = ?');
       for (const root of removed) removeRoot.run(root.id);
+      // A remount may permute runtime identities between retained roots. Free their UNIQUE
+      // slots together; final writes and rollback stay inside this synchronous transaction.
+      const stageIdentity = this.db.prepare(
+        'UPDATE project_workspace_roots SET root_identity_digest = ? WHERE id = ? AND project_id = ?',
+      );
+      for (const folder of next) {
+        const previous = current.find(({ id }) => id === folder.id);
+        if (previous !== undefined && previous.root_identity_digest !== folder.rootIdentityDigest)
+          stageIdentity.run(
+            createHash('sha256')
+              .update(JSON.stringify(['project-root-staging', folder.id, randomUUID()]))
+              .digest('hex'),
+            folder.id,
+            input.projectId,
+          );
+      }
       const updateSecondary = this.db.prepare(
         `UPDATE project_workspace_roots
          SET canonical_path = ?, label = ?, role = 'secondary', ordinal = ?,

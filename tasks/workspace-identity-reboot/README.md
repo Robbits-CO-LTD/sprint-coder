@@ -21,6 +21,7 @@
 - 健全な旧登録は起動時に証拠を追加する。証拠がまだない旧登録がすでにstaleな場合は、
   一度だけ明示的な再リンクが必要。pathだけで自動承認しない。
 - APFS以外では従来のfail-closed動作を維持する。
+- 複数rootのruntime digestが入れ替わる場合は、同じDB transaction内で変更対象の識別値を一時退避してから最終値へ更新し、UNIQUE制約との途中衝突を防ぐ。最終更新の失敗では退避もrollbackする。
 
 Apple仕様: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlist.2
 `ATTR_VOL_UUID` はfilesystem UUID。local SDKとAPFS上のfgetattrlistで実取得を確認。
