@@ -54,7 +54,6 @@ function ProjectEditorDialogOpen({
   const [name, setName] = useState(project?.name ?? '');
   const [folders, setFolders] = useState<DraftProjectFolder[]>([]);
   const [originalFolders, setOriginalFolders] = useState<DraftProjectFolder[]>([]);
-  const [folderRelinked, setFolderRelinked] = useState(false);
   const [loading, setLoading] = useState(project !== null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [pending, setPending] = useState(false);
@@ -93,10 +92,8 @@ function ProjectEditorDialogOpen({
   }, [listProjectFolders, projectId]);
 
   const foldersChanged = useMemo(
-    () =>
-      folderRelinked ||
-      JSON.stringify(folderInputs(folders)) !== JSON.stringify(folderInputs(originalFolders)),
-    [folderRelinked, folders, originalFolders],
+    () => JSON.stringify(folderInputs(folders)) !== JSON.stringify(folderInputs(originalFolders)),
+    [folders, originalFolders],
   );
   const validName = name.trim().length > 0 && name.trim().length <= 120;
 
@@ -118,7 +115,6 @@ function ProjectEditorDialogOpen({
     const picked = await pickProjectFolders();
     if (picked.canceled || picked.folders[0] === undefined) return;
     const selected = picked.folders[0];
-    setFolderRelinked(true);
     setFolders((current) =>
       current.map((folder, candidate) =>
         candidate === index
@@ -164,7 +160,6 @@ function ProjectEditorDialogOpen({
         setSavedProject(replaced);
         setFoldersSaved(true);
         setOriginalFolders(submittedFolders);
-        setFolderRelinked(false);
       }
       if (submittedName !== current.name) {
         const renamed = await updateProject(current.id, current.revision, { name: submittedName });

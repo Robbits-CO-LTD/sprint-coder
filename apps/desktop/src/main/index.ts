@@ -1,5 +1,4 @@
 import { configureWindowsKillStop } from './computer-use-windows-product';
-import { projectFolderIdentity } from './project-folder-identity';
 import {
   app,
   autoUpdater,
@@ -246,7 +245,6 @@ if (squirrelStartup || !hasLock) {
         if (rootId === null) return null;
         return workspace.roots.find((root) => root.rootId === rootId) ?? null;
       });
-      await persistence.reconcileProjectFolderIdentities(projectFolderIdentity);
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined

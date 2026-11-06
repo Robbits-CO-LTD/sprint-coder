@@ -1,7 +1,6 @@
 import type { Writable } from 'node:stream';
 import { GRAPH_WORKER_OUTPUT_MAX_BYTES } from '@sprint-coder/contracts';
 import type { GraphWorkerResult } from '@sprint-coder/contracts';
-import { checkDiagnosticCodes, rendererDiagnosticCodes } from './diagnostics';
 
 function captureWrites(
   stream: Writable,
@@ -37,7 +36,6 @@ function drain(stream: Writable): Promise<boolean> {
 export async function runWithDrainedOutput(
   run: () => Promise<void>,
   onComplete?: (result: GraphWorkerResult) => Promise<void>,
-  mode?: 'render' | 'check',
 ): Promise<never> {
   const realExit = process.exit;
   const requestedExit = new Error('Graph CLI requested exit');
@@ -46,7 +44,6 @@ export async function runWithDrainedOutput(
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let exceeded = false;
-  let diagnosticCodes: NonNullable<GraphWorkerResult['diagnosticCodes']> = [];
   const record = (chunk: string | Uint8Array, encoding: BufferEncoding, stderr: boolean) => {
     const size = typeof chunk === 'string' ? Buffer.byteLength(chunk, encoding) : chunk.byteLength;
     if (stderr) stderrBytes += size;
@@ -75,7 +72,6 @@ export async function runWithDrainedOutput(
     if (error !== requestedExit) {
       process.exitCode = 1;
       if (error !== outputLimit) {
-        diagnosticCodes = rendererDiagnosticCodes(error);
         // Restore before reporting so a nearly full capture cannot throw again in this catch.
         restoreStderr();
         stderrBytes += Buffer.byteLength('Graph worker failed\n');
@@ -92,23 +88,12 @@ export async function runWithDrainedOutput(
   const code = ((Number(process.exitCode ?? 0) % 256) + 256) % 256;
   exceeded ||= stdoutBytes + stderrBytes > GRAPH_WORKER_OUTPUT_MAX_BYTES;
   const exitCode = exceeded || !flushed.every(Boolean) ? code || 1 : code;
-  if (exceeded || !flushed.every(Boolean)) diagnosticCodes = [];
-  const output = exceeded ? '' : Buffer.concat(chunks).toString('utf8');
-  if (
-    mode === 'check' &&
-    exitCode !== 0 &&
-    !exceeded &&
-    flushed.every(Boolean) &&
-    diagnosticCodes.length === 0
-  )
-    diagnosticCodes = checkDiagnosticCodes(output);
   try {
     await onComplete?.({
       type: 'sprint-graph-result',
-      output,
+      output: exceeded ? '' : Buffer.concat(chunks).toString('utf8'),
       exitCode,
       stderrBytes: Math.min(stderrBytes, GRAPH_WORKER_OUTPUT_MAX_BYTES),
-      ...(diagnosticCodes.length > 0 ? { diagnosticCodes } : {}),
     });
   } catch {
     return realExit(exitCode || 1);

@@ -35,15 +35,6 @@ function fixture() {
 }
 
 describe('Graph utility result handoff', () => {
-  it('returns safe layout diagnostics to the caller after a matching failed exit', async () => {
-    const { child, result } = fixture();
-    const rejected = expect(result).rejects.toThrow('Archify check failed [layout/constraint]');
-    child.emit('message', { ...message, exitCode: 1, diagnosticCodes: ['layout/constraint'] });
-    child.emit('exit', 1);
-    await rejected;
-    expect(child.postMessage).toHaveBeenCalledExactlyOnceWith({ type: 'sprint-graph-result-ack' });
-  });
-
   it('acknowledges the full result but waits for matching process exit', async () => {
     const { child, result } = fixture();
     let settled = false;
@@ -94,8 +85,6 @@ describe('Graph utility result handoff', () => {
   it.each([
     { ...message, type: 'wrong' },
     { ...message, extra: true },
-    { ...message, diagnosticCodes: ['private diagram label'] },
-    { ...message, diagnosticCodes: Array(17).fill('layout/constraint') },
     { ...message, output: '界'.repeat(GRAPH_WORKER_OUTPUT_MAX_BYTES / 2) },
     { ...message, stderrBytes: GRAPH_WORKER_OUTPUT_MAX_BYTES },
   ])('rejects invalid or over-budget IPC results', async (payload) => {

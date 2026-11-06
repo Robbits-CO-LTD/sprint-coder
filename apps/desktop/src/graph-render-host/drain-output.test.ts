@@ -119,68 +119,16 @@ describe('graph worker output drain', () => {
       expected: '',
       stderr: 0,
     },
-    {
-      name: 'layout-diagnostic',
-      source: `throw Object.assign(new Error('private diagram label /private/path'), {
-        archifyDiagnostics: [{ code: 'layout/constraint', message: 'private label' },
-          { code: 'secret/credential' }, { code: 'layout/constraint' }],
-      });`,
-      code: 1,
-      expected: '',
-      stderr: Buffer.byteLength('Graph worker failed\n'),
-    },
-    {
-      name: 'pinned-layout',
-      source: '',
-      code: 1,
-      expected: '',
-      stderr: Buffer.byteLength('Graph worker failed\n'),
-    },
-    {
-      name: 'check-diagnostic',
-      source: `console.log(JSON.stringify({ checks: [
-        { name: 'finite_svg', ok: false, details: ['private text'] },
-        { name: 'single_svg', ok: true }, { name: 'private_name', ok: false },
-      ] })); process.exit(1);`,
-      code: 1,
-      expected:
-        JSON.stringify({
-          checks: [
-            { name: 'finite_svg', ok: false, details: ['private text'] },
-            { name: 'single_svg', ok: true },
-            { name: 'private_name', ok: false },
-          ],
-        }) + '\n',
-      stderr: 0,
-    },
   ])(
     'sends the $name IPC result and waits for a valid ACK before exit',
     async ({ name, source, code, expected, stderr }) => {
-      const configured = await fixture(`ipc-${name}`, source);
-      const vendor = name === 'pinned-layout' ? resolve('vendor/archify') : configured.vendor;
-      const mode = name === 'pinned-layout' ? 'render' : 'check';
-      if (name === 'pinned-layout')
-        await writeFile(
-          join(directory, 'input.json'),
-          JSON.stringify({
-            schema_version: 1,
-            diagram_type: 'architecture',
-            meta: { title: 'Private graph title' },
-            components: ['first', 'second'].map((id) => ({
-              id,
-              type: 'backend',
-              label: 'Private label',
-              pos: [40, 40],
-            })),
-            connections: [],
-          }),
-        );
+      const { vendor } = await fixture(`ipc-${name}`, source);
       const shim = `
       import { EventEmitter } from 'node:events';
       const port = process.parentPort = new EventEmitter();
       port.postMessage = (data) => process.send(data);
       process.on('message', (data) => port.emit('message', {data}));
-      process.argv = ${JSON.stringify([process.execPath, worker, mode, 'architecture', vendor, directory])};
+      process.argv = ${JSON.stringify([process.execPath, worker, 'check', 'architecture', vendor, directory])};
       await import(${JSON.stringify(pathToFileURL(worker).href)});
     `;
       const child = spawn(process.execPath, ['--input-type=module', '-e', shim], {
@@ -203,11 +151,6 @@ describe('graph worker output drain', () => {
           output: expected,
           exitCode: code,
           stderrBytes: stderr,
-          ...(['layout-diagnostic', 'pinned-layout'].includes(name)
-            ? { diagnosticCodes: ['layout/constraint'] }
-            : name === 'check-diagnostic'
-              ? { diagnosticCodes: ['check/finite_svg'] }
-              : {}),
         });
         expect(Buffer.byteLength(result.output) + result.stderrBytes).toBeLessThanOrEqual(
           GRAPH_WORKER_OUTPUT_MAX_BYTES,

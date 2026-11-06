@@ -1,4 +1,3 @@
-import { projectFolderIdentity } from './project-folder-identity';
 import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
 import { FullAccessConfirmation } from './full-access-confirmation';
 import {
@@ -3985,11 +3984,6 @@ export class IpcRouter {
       projectSummarySchema,
       async (input, event, envelope) => {
         const folders = await canonicalProjectFolderBindings(input.folders);
-        await confirmProjectFolderRelink(
-          this.window,
-          folders,
-          this.persistence.getProjectFolderRootIdentities(input.projectId),
-        );
         await confirmProjectFolderAccess(
           this.window,
           folders.map(({ canonicalPath }) => canonicalPath),
@@ -10750,7 +10744,7 @@ async function canonicalProjectFolderBindings(
   if (folders.length > 16) throw new InvalidProjectError('Project folder limit reached');
   return Promise.all(
     folders.map(async (folder) => {
-      const binding = await projectFolderIdentity(folder.path);
+      const binding = await workspaceMutationBinding(folder.path);
       return {
         id: folder.id,
         path: binding.canonicalPath,
@@ -10759,7 +10753,6 @@ async function canonicalProjectFolderBindings(
         role: folder.role,
         workspaceKey: binding.workspaceKey,
         rootIdentityDigest: binding.rootIdentityDigest,
-        persistentIdentityDigest: binding.persistentIdentityDigest,
       };
     }),
   );
@@ -10782,34 +10775,6 @@ async function confirmProjectFolderAccess(
   });
   if (confirmation.response !== 0)
     throw new InvalidProjectError('Protected folder access was canceled');
-}
-
-export async function confirmProjectFolderRelink(
-  window: BrowserWindow,
-  folders: readonly ProjectFolderBinding[],
-  registeredIdentities: ReadonlyMap<string, string>,
-): Promise<void> {
-  if (
-    !folders.some(
-      (folder) =>
-        folder.id !== undefined &&
-        registeredIdentities.has(folder.id) &&
-        registeredIdentities.get(folder.id) !== folder.rootIdentityDigest,
-    )
-  )
-    return;
-  const confirmation = await dialog.showMessageBox(window, {
-    type: 'warning',
-    title: 'Projectフォルダの再リンク',
-    message: '識別情報が変わったフォルダを再登録しますか？',
-    detail:
-      '同じパスでもフォルダが置き換わっている場合があります。保存済み参照は同一性を証明できない限り未確認のまま保持します。',
-    buttons: ['キャンセル', '再登録する'],
-    defaultId: 0,
-    cancelId: 0,
-  });
-  if (confirmation.response !== 1)
-    throw new InvalidProjectError('Project folder relink was canceled');
 }
 
 /**

@@ -8,7 +8,6 @@ import { ManagedStdinRejection } from './managed-command-stdin';
 import { SkillSettingsError } from './skill-settings-service';
 import { clipPublicMessage } from './zod-issue-message';
 import { secureLogger } from './secure-logger';
-import { GraphRenderFailure } from './graph-render-failure';
 
 export function formatProviderToolResult(
   providerId: string,
@@ -80,15 +79,6 @@ export function redactProviderCommandFailure(
  * uses, instead of ending the Worker's whole execution.
  */
 export function providerWorkspaceToolFailure(error: unknown): string {
-  if (error instanceof GraphRenderFailure)
-    return JSON.stringify({
-      ok: false,
-      error: {
-        code: 'GRAPH_RENDER_FAILED',
-        message: error.message,
-        diagnosticCodes: error.diagnosticCodes,
-      },
-    });
   if (error instanceof ToolAuthorizationDeniedError)
     return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
   // The schema hint names paths, types and keys but never input values, so the model can fix the

@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  formatProviderToolResult,
-  redactProviderCommandFailure,
-  providerWorkspaceToolFailure,
-} from './provider-tool-result';
-import { GraphRenderFailure } from './graph-render-failure';
+import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { assessProviderDisclosure } from './provider-disclosure-classifier';
 
 const content = 'def example():\n\treturn "quoted"\n# Preserve literal \\n';
@@ -19,20 +14,6 @@ const read = {
 };
 
 describe('Provider tool result text', () => {
-  it('keeps validated graph diagnostics as a failed tool result for API models', () => {
-    expect(
-      JSON.parse(
-        providerWorkspaceToolFailure(new GraphRenderFailure('render', ['layout/constraint'])),
-      ),
-    ).toEqual({
-      ok: false,
-      error: {
-        code: 'GRAPH_RENDER_FAILED',
-        message: 'Archify render failed [layout/constraint]',
-        diagnosticCodes: ['layout/constraint'],
-      },
-    });
-  });
   it.each([
     'no final newline',
     'with final newline\n',
