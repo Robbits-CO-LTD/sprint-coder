@@ -818,10 +818,22 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   if (!ReadJsonUint64(metadata, "windowId", &window_value) ||
       reinterpret_cast<HWND>(static_cast<std::uintptr_t>(window_value)) != session->window)
     return refuse(WindowsExplorerRefusal::kWindowMismatch);
-  if (!ReadJsonDouble(metadata, "x", &x) || !ReadJsonDouble(metadata, "y", &y) ||
-      !std::isfinite(x) || !std::isfinite(y) || std::trunc(x) != x || std::trunc(y) != y ||
-      x < LONG_MIN || x > LONG_MAX || y < LONG_MIN || y > LONG_MAX)
-    return refuse(WindowsExplorerRefusal::kPointInvalid);
+  POINT point{};
+  // Agent clicks and dispatch share the native physical observation and mapping.
+  // Measurement-only callers retain the existing absolute-point protocol.
+  if (metadata.find("\"observationRevision\"") != std::string::npos) {
+    std::uint64_t revision = 0;
+    if (!ReadJsonUint64(metadata, "observationRevision", &revision) || revision == 0 ||
+        revision != session->observation_revision ||
+        !WindowsActionPoint(session->observation_bounds, metadata, &point))
+      return refuse(WindowsExplorerRefusal::kPointInvalid);
+  } else {
+    if (!ReadJsonDouble(metadata, "x", &x) || !ReadJsonDouble(metadata, "y", &y) ||
+        !std::isfinite(x) || !std::isfinite(y) || std::trunc(x) != x || std::trunc(y) != y ||
+        x < LONG_MIN || x > LONG_MAX || y < LONG_MIN || y > LONG_MAX)
+      return refuse(WindowsExplorerRefusal::kPointInvalid);
+    point = POINT{static_cast<LONG>(x), static_cast<LONG>(y)};
+  }
   const auto serial = WindowsValidationFrameStopSerial();
   // A Stop after enqueue or a cancelled epoch ends the request before any identity work.
   if (!WindowsValidationStillCurrent(epoch, serial)) return refuse(WindowsExplorerRefusal::kNotCurrent);
@@ -848,7 +860,6 @@ bool MeasureWindowsExplorerViewUnguarded(const Frame &request, const std::string
   DWORD owner = 0;
   if (!GetWindowThreadProcessId(session->window, &owner) || owner != session->pid)
     return refuse(WindowsExplorerRefusal::kWindowOwner);
-  const POINT point{static_cast<LONG>(x), static_cast<LONG>(y)};
   const WindowsExplorerShellView shell_view = ReadWindowsExplorerShellView(session->window, current, &point);
   trace->view = shell_view.refusal;
   trace->folder = shell_view.folder_refusal;

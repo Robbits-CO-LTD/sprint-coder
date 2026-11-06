@@ -2377,6 +2377,9 @@ function windowsDiscoveryInput(value: NativeRecord): NativeRecord {
     )
       throw new Error('Invalid discovery input');
     const includeStartIdentity = value['includeStartIdentity'];
+    const classifierRoute = value['classifierRoute'];
+    if (classifierRoute !== undefined && classifierRoute !== 'v1' && classifierRoute !== 'v2')
+      throw new Error('Invalid discovery classifier route');
     if (includeStartIdentity !== undefined && typeof includeStartIdentity !== 'boolean')
       throw new Error('Invalid discovery identity opt-in');
     return {
@@ -2386,6 +2389,7 @@ function windowsDiscoveryInput(value: NativeRecord): NativeRecord {
       executableDigest,
       signerDigest,
       ...(includeStartIdentity === undefined ? {} : { includeStartIdentity }),
+      ...(classifierRoute === undefined ? {} : { classifierRoute }),
     };
   } catch {
     throw new ComputerUseDiscoveryNotSubmittedError('Invalid Windows discovery input');

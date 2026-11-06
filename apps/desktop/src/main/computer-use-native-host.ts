@@ -204,7 +204,10 @@ export type WindowsExplorerFacts = Readonly<
 type ExplorerEvidence = Readonly<{
   facts: Readonly<z.infer<typeof explorerFactsSchema>>;
   current: () => boolean;
-  measure: (point: Readonly<{ x: number; y: number }>) => Promise<unknown>;
+  measure: (
+    point: Readonly<{ x: number; y: number }>,
+    observationRevision?: number,
+  ) => Promise<unknown>;
 }>;
 const explorerApprovalReaders = new WeakMap<
   ComputerUseNativeHost,
@@ -232,12 +235,13 @@ export async function readCurrentWindowsExplorerFacts(
   host: ComputerUseNativeHost,
   sessionId: string,
   point: Readonly<{ x: number; y: number }>,
+  observationRevision?: number,
 ): Promise<WindowsExplorerFacts | undefined> {
   const evidence = approval === undefined ? undefined : explorerApprovals.get(approval);
   if (evidence?.host !== host || evidence.sessionId !== sessionId || !evidence.current())
     return undefined;
   try {
-    const view = explorerViewSchema.safeParse(await evidence.measure(point));
+    const view = explorerViewSchema.safeParse(await evidence.measure(point, observationRevision));
     return view.success && evidence.current() ? { ...evidence.facts, ...view.data } : undefined;
   } catch {
     return undefined;
@@ -2298,8 +2302,9 @@ export function createComputerUseNativeHost(
 
   // The route the native is told for a session (C4): the one Main will accept receipts for, which
   // is v2 only when the build attested classifier 3. The native keeps it for the life of the
-  // session. A session that was never bound sends nothing. The Windows host reads it only for
-  // the approval gate (route v2 binding, N8-5), so it is sent only to a helper whose approval
+  // session. A session that was never bound sends nothing. The Windows host uses it for
+  // the approval gate and Explorer V2 discovery permission, never classifier selection.
+  // It is sent only to a helper whose approval
   // evidence was verified; an ordinary Windows helper never receives the key (C4-0).
   const nativeRouteField = (route: 'v1' | 'v2' | undefined): Record<string, unknown> =>
     route !== undefined && (platform !== 'win32' || binding.windowsApprovalVerified === true)
@@ -2326,6 +2331,8 @@ export function createComputerUseNativeHost(
         pids.push(resolvedPid);
       const publicCandidate = stripNativeEphemeralFields(raw);
       delete publicCandidate['processStartTime'];
+      // Measured Explorer facts are private Host evidence, not a renderer window field.
+      delete publicCandidate['facts'];
       delete publicCandidate['quarantineResume'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
@@ -2677,6 +2684,20 @@ export function createComputerUseNativeHost(
       assertStartOwner(owner);
       owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
       sessions.set(session.sessionId, session);
+      const explorerFacts = explorerSessionFacts.get(existing);
+      if (
+        explorerFacts !== undefined &&
+        session.windowIdentityDigest === existing.windowIdentityDigest &&
+        session.appIdentityDigest === existing.appIdentityDigest &&
+        typeof existing.raw['pid'] === 'number' &&
+        session.raw['pid'] === existing.raw['pid'] &&
+        typeof existing.raw.processStartTime === 'string' &&
+        session.raw.processStartTime === existing.raw.processStartTime
+      ) {
+        // Refocus/resume replaces the session object. Retain only bound identity facts;
+        // old approval capabilities expire and M2 must measure each action again.
+        explorerSessionFacts.set(session, explorerFacts);
+      }
       return publicNativeSession(session);
     }
     let pid = pidsByIdentity.get(input.profile.identityDigest);
@@ -2685,7 +2706,10 @@ export function createComputerUseNativeHost(
         platform === 'win32'
           ? parseWindows(
               input.profile,
-              await startWindowsDiscovery(owner, discoveryInput(input.profile)),
+              await startWindowsDiscovery(owner, {
+                ...discoveryInput(input.profile),
+                ...nativeRouteField(nativeRoute),
+              }),
               () => !owner.stopped,
             )
           : await startDiscovery(owner, () => host.listWindows(input.profile));
@@ -2698,6 +2722,7 @@ export function createComputerUseNativeHost(
     }
     const discoveryRequest = {
       ...input.profile,
+      ...nativeRouteField(nativeRoute),
       pid,
       appIdentityDigest: input.profile.identityDigest,
     };
@@ -2824,6 +2849,9 @@ export function createComputerUseNativeHost(
       });
     if (
       explorerBoundFacts !== undefined &&
+      typeof processStartTime === 'string' &&
+      session.raw['pid'] === selectedPid &&
+      session.raw.processStartTime === processStartTime &&
       session.windowIdentityDigest === selectedRecord['windowIdentityDigest']
     )
       explorerSessionFacts.set(session, explorerBoundFacts);
@@ -4146,7 +4174,7 @@ export function createComputerUseNativeHost(
       // P5 REQUIREMENT (M2): this measures Main's point at the time of the request. The dispatch
       // must re-check the point owner and view natively, with WindowsActionPoint's POINT, before
       // its first input API; this answer never authorizes an input by itself.
-      measure: async (point) =>
+      measure: async (point, observationRevision) =>
         addon?.measureExplorerView?.({
           sessionId,
           windowId: session.windowId,
@@ -4154,6 +4182,7 @@ export function createComputerUseNativeHost(
           requestId: randomUUID(),
           x: point.x,
           y: point.y,
+          ...(observationRevision === undefined ? {} : { observationRevision }),
         }),
       current: () =>
         sessions.get(sessionId) === session &&

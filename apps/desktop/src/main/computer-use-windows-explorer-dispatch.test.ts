@@ -9,6 +9,22 @@ const explorer = native('computer_use_windows_host_explorer.inc');
 const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
 describe('Explorer production pre-send boundary', () => {
+  it('maps agent clicks using the native dispatch point and rejects an old observation', () => {
+    const measure = explorer.slice(
+      explorer.indexOf('bool MeasureWindowsExplorerViewUnguarded('),
+      explorer.indexOf('bool MeasureWindowsExplorerView('),
+    );
+    expect(measure).toContain('revision != session->observation_revision');
+    expect(measure).toContain('WindowsActionPoint(session->observation_bounds, metadata, &point)');
+    expect(measure.indexOf('session->explorer_dispatch_evidence.reset()')).toBeLessThan(
+      measure.indexOf('revision != session->observation_revision'),
+    );
+    expect(measure.indexOf('WindowsActionPoint(')).toBeLessThan(
+      measure.indexOf('ReadWindowsExplorerShellView('),
+    );
+    expect(dispatch).toContain('WindowsActionPoint(bounds, metadata, &click_point)');
+    expect(dispatch).toContain('SendWindowsExplorerPointInput(');
+  });
   it('rechecks after target/page validation and serializes each chunk with Stop', () => {
     const send = input.slice(
       input.indexOf('UINT SendInputForBoundTarget('),
@@ -265,16 +281,43 @@ describe('Explorer W2 prestart source boundaries', () => {
     expect(approval).toContain('*reason = "native_approval_closed";');
   });
 
-  it('retains the common Explorer denial and V1 discovery rejection', () => {
+  it('explorer_discovery_gate_off_preserves_v1', () => {
     const discovery = native('computer_use_windows_host_discovery.inc');
-    expect(discovery).not.toContain('kWindowsExplorerException');
     expect(discovery).toContain('L"explorer.exe"');
     expect(discovery).toMatch(
       /context.proxy = IsKnownProxyExecutable\(process_executable.identity.path\) \|\|\s*IsDisallowedTargetExecutable\(\s*process_executable.identity.path\)/u,
     );
-    expect(native('computer_use_windows_host_discovery_worker.inc')).not.toContain(
-      'kWindowsExplorerException',
+    const worker = native('computer_use_windows_host_discovery_worker.inc');
+    expect(worker).toContain(
+      'const bool explorer_route = sprint_coder::computer_use::kWindowsExplorerException &&',
     );
+    expect(worker).toContain('explorer_discovery_route == "v2"');
+    expect(worker).toContain(
+      'explorer_v2_requested && _wcsicmp(leaf.c_str(), L"explorer.exe") == 0',
+    );
+    expect(worker).toContain(
+      '!IsSupportedWindowsV1Target(current_executable.identity) && !explorer_route',
+    );
+    expect(worker).toContain('!IsDisallowedTargetExecutable(current_executable.identity.path)');
+    expect(discovery).toContain('(!context->proxy || explorer_admitted)');
+  });
+
+  it('explorer_native_discovery_emits_bound_facts', () => {
+    const discovery = native('computer_use_windows_host_discovery.inc');
+    const measured = section('// Discovery has no list cache:', '// The window half');
+    expect(measured).toContain(
+      'JudgeWindowsV2Target(context.pid, window, WindowsV2FactsContext(), &measured, &scope)',
+    );
+    for (const binding of ['app_identity', 'process_start'])
+      expect(measured).toContain(`measured.${binding} != context.${binding}`);
+    expect(measured).toContain(
+      'measured.executable.identity.executable_digest != context.executable_digest',
+    );
+    expect(measured).toContain('!measured.explorer_prestart_admitted');
+    expect(measured).toContain('WindowsV2TargetFactsJson(measured.measured.facts)');
+    expect(discovery).toContain('MeasureWindowsExplorerDiscoveryFacts(window, *context)');
+    expect(discovery).toContain('eligible && explorer_admitted ?');
+    expect(discovery).toContain('explorer_admitted ? "supervised" : context->maximum_mode');
   });
 });
 

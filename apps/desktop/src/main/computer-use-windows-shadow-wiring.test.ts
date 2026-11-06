@@ -319,8 +319,10 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(code(point)).toContain('bounds.right - bounds.left - 1');
     expect(code(point)).toContain('x < 0 || x > 1 || y < 0 || y > 1');
     // Callers: the click and the scroll of the dispatch, the shadow, the synchronous entry, and the
-    // approval measurement (#991 N8-2c), which maps the point of the binding it re-validated.
-    expect(text.match(/WindowsActionPoint\(/gu)).toHaveLength(6); // the definition and five calls
+    // approval measurement (#991 N8-2c), which maps the point of the binding it re-validated, and the
+    // Explorer agent click (#988 P5b-C), which maps the action point against the same observation.
+    expect(text.match(/WindowsActionPoint\(/gu)).toHaveLength(7); // the definition and six calls
+    expect(host).toContain('!WindowsActionPoint(session->observation_bounds, metadata, &point)');
     expect(code(approvalMeasurement)).toContain('WindowsActionPoint(bounds, metadata, &point)');
     const dispatch = between(host, 'bool DispatchWindowsAction(', 'std::string ProbeJson(');
     expect(code(dispatch).match(/WindowsActionPoint\(bounds, metadata, &/gu)).toHaveLength(2);

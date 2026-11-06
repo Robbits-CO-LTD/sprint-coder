@@ -718,6 +718,40 @@ std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_
          identity.policy_language + "\",\"maximumMode\":\"" + JsonEscape(mode) + "\"}";
 }
 
+// Discovery has no list cache: remeasure the running image and this HWND, then bind the
+// result back to the enumeration's process incarnation and executable before publishing it.
+std::string MeasureWindowsExplorerDiscoveryFacts(HWND window,
+                                                 const WindowEnumerationContext &context) {
+  using namespace sprint_coder::computer_use;
+  if constexpr (!kWindowsExplorerException) return {};
+  if (!context.explorer_route || !context.still_valid || !context.still_valid() ||
+      windows_v2_main_pid == 0 || windows_v2_list_generation == 0) return {};
+  struct Apartment {
+    HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+  } apartment;
+  if (FAILED(apartment.result)) return {};
+  const auto generation = windows_v2_list_generation;
+  const auto epoch = cancellation_epoch.load(std::memory_order_acquire);
+  const auto serial = WindowsTargetListControl().stop_serial.load(std::memory_order_acquire);
+  const auto current = [&] {
+    return context.still_valid() && windows_v2_list_generation == generation &&
+        cancellation_epoch.load(std::memory_order_acquire) == epoch &&
+        WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == serial;
+  };
+  const WindowsExplorerPrestartScope scope{generation, epoch, serial, current};
+  WindowsV2Judgement measured;
+  JudgeWindowsV2Target(context.pid, window, WindowsV2FactsContext(), &measured, &scope);
+  if (!current() || !measured.explorer_prestart_admitted ||
+      measured.verdict.kind != TargetVerdictKind::kUpper ||
+      measured.verdict.maximum_mode != "supervised" ||
+      measured.app_identity != context.app_identity ||
+      measured.process_start != context.process_start ||
+      measured.executable.identity.executable_digest != context.executable_digest ||
+      !WindowsV2FactsWithinContract(measured.measured.facts)) return {};
+  return WindowsV2TargetFactsJson(measured.measured.facts);
+}
+
 // The window half of a selectable row: what ListWindowsTargets read of the window itself.
 struct WindowsV2RowWindow {
   std::uint64_t handle = 0;

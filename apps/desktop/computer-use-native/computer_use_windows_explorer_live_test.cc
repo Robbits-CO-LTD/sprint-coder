@@ -656,6 +656,109 @@ int CheckMeasuredItems(HWND parent, const WindowsExplorerShellView &view,
   return 0;
 }
 
+// Separate, input-free E1 case: the candidate comes from the real discovery worker, then
+// the normal start path remeasures it. It never reaches the dispatch/item cases below.
+int CheckExplorerLiveDiscovery(const std::wstring &scratch) {
+  using namespace sprint_coder::computer_use;
+  OpenedExplorer opened;
+  HWND window = opened.Open(scratch);
+  if (!window) return opened.shared ? 0 : Fail(80, "discovery_scratch_open");
+  if (!opened.Exclusive()) { std::cout << "NOT_RUN explorer_tab_shared\n"; return 0; }
+  ShowWindow(window, SW_RESTORE);
+  SetForegroundWindow(window);
+  BringWindowToTop(window);
+  if (int failed = ExpectView(window, Refusal::kNone, "discovery_scratch_view", 80)) return failed;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(window, &pid);
+  if (IsProcessElevated(pid)) { std::cout << "NOT_RUN explorer_live_discovery_emits_facts elevated\n"; return 0; }
+  LockedWindowsExecutable image;
+  if (!OpenLockedProcessExecutable(pid, &image)) return Fail(80, "discovery_image");
+  windows_helper_generation = 1;
+  const auto serial = WindowsTargetListControl().stop_serial.load();
+  const auto epoch = cancellation_epoch.load();
+  const auto current = [=] {
+    return !parent_process_dead.load() && cancellation_epoch.load() == epoch &&
+        WindowsTargetListControl().stop_serial.load() == serial;
+  };
+  WindowsDiscoveryWorkControl work{current, [](DWORD ms) { return ms; }, [] { return false; }, [] {}};
+  const std::string query = "{\"canonicalPath\":\"" + JsonEscape(image.identity.path_utf8) +
+      "\",\"identityDigest\":\"" + image.identity.identity_digest +
+      "\",\"executableDigest\":\"" + image.identity.executable_digest +
+      "\",\"signerDigest\":\"" + image.identity.signer_digest +
+      "\",\"includeStartIdentity\":true,\"classifierRoute\":\"v2\"}";
+  std::string response, reason;
+  WindowsNewStartIoRegistration registration;
+  if (!registration.thread || !MeasureWindowsDiscovery(query, work, &response, &reason))
+    return Fail(81, "discovery_worker");
+  const auto handle = std::to_string(reinterpret_cast<std::uintptr_t>(window));
+  const auto offset = response.find("{\"windowId\":\"" + handle + "\"");
+  if (offset == std::string::npos) return Fail(81, "discovery_candidate_missing");
+  const auto end = response.find("},{\"windowId\":", offset);
+  const auto row = response.substr(offset, end == std::string::npos ? end : end + 1 - offset);
+  bool eligible = false;
+  std::string mode, start, identity, window_identity, executable;
+  std::uint64_t selected_pid = 0;
+  if (!ReadOptionalJsonBoolean(row, "eligible", &eligible) || !eligible ||
+      !ReadJsonString(row, "maximumMode", &mode) || mode != "supervised" ||
+      !ReadJsonString(row, "processStartTime", &start) ||
+      !ReadJsonString(row, "appIdentityDigest", &identity) || identity != image.identity.identity_digest ||
+      !ReadJsonString(row, "windowIdentityDigest", &window_identity) ||
+      !ReadJsonString(row, "executableDigest", &executable) || executable != image.identity.executable_digest ||
+      !ReadJsonUint64(row, "pid", &selected_pid) || selected_pid != pid ||
+      row.find("\"facts\":{") == std::string::npos) return Fail(81, "discovery_bound_facts");
+  for (const auto &[field, expected] : {
+      std::pair{"platform", "win32"}, {"imageRoot", "windows_directory"},
+      {"imageRelativePath", "explorer.exe"}, {"imageLeaf", "explorer.exe"},
+      {"imageVolume", "fixed"}, {"signature", "valid"}, {"windowClass", "CabinetWClass"}}) {
+    std::string value;
+    if (!ReadJsonString(row, field, &value) || value != expected) return Fail(81, field);
+  }
+  for (const auto &[field, expected] : {
+      std::pair{"runningImageMatches", true}, {"signerMicrosoftRoot", true}, {"packaged", false}}) {
+    bool value = !expected;
+    if (!ReadOptionalJsonBoolean(row, field, &value) || value != expected) return Fail(81, field);
+  }
+  if (GetForegroundWindow() != window) {
+    std::cout << "NOT_RUN explorer_live_discovery_emits_facts focus_changed\n"; return 0;
+  }
+  Frame frame;
+  frame.header.session_id.bytes.fill(1);
+  WindowsStartInput input;
+  input.pid = pid;
+  input.window = window;
+  input.window_value = reinterpret_cast<std::uintptr_t>(window);
+  input.session_key = FrameIdKey(frame.header.session_id);
+  input.session_id = "01010101-0101-0101-0101-010101010101";
+  input.app_identity = identity;
+  input.expected_window_identity = window_identity;
+  input.expected_process_start = start;
+  input.canonical_path = image.identity.path;
+  input.executable_digest = executable;
+  input.signer_digest = image.identity.signer_digest;
+  if (!ReadJsonDouble(row, "x", &input.bounds_x) || !ReadJsonDouble(row, "y", &input.bounds_y) ||
+      !ReadJsonDouble(row, "width", &input.bounds_width) || !ReadJsonDouble(row, "height", &input.bounds_height))
+    return Fail(81, "discovery_geometry");
+  input.approval_route_v2 = true;
+  input.approval_helper_generation = windows_helper_generation;
+  input.ruleset_version = DenyRulesetVersion(TargetPlatform::kWin32);
+  input.requested_generation = windows_v2_list_generation;
+  input.stop_serial = serial;
+  input.initial_epoch = epoch;
+  input.main_pid = windows_v2_main_pid;
+  input.cancel_epoch = epoch;
+  if (!StartWindowsNewSession(std::move(input), &response, &reason)) {
+    std::cout << "FAIL explorer_live_discovery_start reason=" << reason << '\n'; return 82;
+  }
+  const auto found = sessions.find(FrameIdKey(frame.header.session_id));
+  if (found == sessions.end() || found->second.maximum_mode != "supervised" ||
+      found->second.window_identity != window_identity || found->second.process_start != start ||
+      found->second.input_api_attempts->load() != 0) return Fail(82, "discovery_session_binding");
+  if (!CloseWindowsSession(frame, "{\"cancelEpoch\":" + std::to_string(epoch + 1) + "}", &response, &reason))
+    return Fail(82, "discovery_close");
+  std::cout << "OK explorer_live_discovery_emits_facts\n";
+  return 0;
+}
+
 int wmain(int argc, wchar_t **argv) {
   if (argc == 3 && std::wstring(argv[1]) == L"child") {
     HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(_wcstoui64(argv[2], nullptr, 10)));
@@ -667,7 +770,8 @@ int wmain(int argc, wchar_t **argv) {
     while (GetMessageW(&message, nullptr, 0, 0) > 0) DispatchMessageW(&message);
     return 0;
   }
-  if (argc != 2 || FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return Fail(1, "arguments_or_sta");
+  const bool discovery_only = argc == 3 && std::wstring(argv[2]) == L"discovery-only";
+  if ((argc != 2 && !discovery_only) || FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return Fail(1, "arguments_or_sta");
   if (!sprint_coder::computer_use::kWindowsExplorerException) return Fail(21, "gate_disabled");
   struct Apartment { ~Apartment() { CoUninitialize(); } } apartment;
   struct CleanupReport {
@@ -677,6 +781,7 @@ int wmain(int argc, wchar_t **argv) {
   } cleanup_report;
   windows_v2_main_pid = GetCurrentProcessId();
   const std::wstring scratch = argv[1];
+  if (discovery_only) return CheckExplorerLiveDiscovery(scratch);
 
   // M3 and L2, on the file system only (no Explorer window).
   // A subfolder under a junction-like ancestor is not a plain folder. It is not opened in Explorer:
