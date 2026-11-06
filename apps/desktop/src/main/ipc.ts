@@ -10803,7 +10803,7 @@ export async function confirmProjectFolderRelink(
     title: 'Projectフォルダの再リンク',
     message: '識別情報が変わったフォルダを再登録しますか？',
     detail:
-      '同じパスでもフォルダが置き換わっている場合があります。保存済み参照は同一性を証明できない限り未確認のまま保持します。',
+      '同じパスでもフォルダが置き換わっている場合があります。同一性を確認できない保存済み参照は無効にして保持します。',
     buttons: ['キャンセル', '再登録する'],
     defaultId: 0,
     cancelId: 0,

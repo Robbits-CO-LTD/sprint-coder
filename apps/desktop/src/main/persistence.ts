@@ -9142,20 +9142,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
               expectedRevision: project.revision,
               folders,
             });
-            const refreshReference = this.db.prepare(`UPDATE project_references
-              SET registered_root_identity = ?, last_sealed_digest = NULL,
-                revision = revision + 1, updated_at = ?
-              WHERE project_root_id = ? AND registered_root_identity = ?`);
-            for (const [index, folder] of folders.entries()) {
-              const previous = roots[index]!;
-              if (folder.rootIdentityDigest !== previous.root_identity_digest)
-                refreshReference.run(
-                  folder.rootIdentityDigest,
-                  new Date().toISOString(),
-                  previous.id,
-                  previous.root_identity_digest,
-                );
-            }
           })();
         } catch (error) {
           if (
@@ -9320,6 +9306,36 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
       for (const folder of next)
         persistIdentity.run(folder.persistentIdentityDigest ?? null, folder.id, input.projectId);
+      const refreshReference = this.db.prepare(`UPDATE project_references
+        SET registered_root_identity = ?, last_sealed_digest = NULL,
+          revision = revision + 1, updated_at = ?
+        WHERE project_root_id = ? AND registered_root_identity = ?`);
+      const disableReference = this.db.prepare(`UPDATE project_references
+        SET enabled = 0, last_sealed_digest = NULL, revision = revision + 1, updated_at = ?
+        WHERE project_root_id = ?`);
+      for (const folder of next) {
+        const previous = current.find(({ id }) => id === folder.id);
+        if (previous === undefined) continue;
+        const samePersistentIdentity =
+          previous.persistent_identity_digest !== null &&
+          previous.persistent_identity_digest === folder.persistentIdentityDigest;
+        if (
+          previous.root_identity_digest === folder.rootIdentityDigest &&
+          (previous.persistent_identity_digest === null || samePersistentIdentity)
+        )
+          continue;
+        if (samePersistentIdentity)
+          refreshReference.run(
+            folder.rootIdentityDigest,
+            now,
+            folder.id,
+            previous.root_identity_digest,
+          );
+        else
+          // A dev/ino digest can be reused by another volume later. Keep an unverified
+          // relink disabled rather than letting that coincidence restore automatic context.
+          disableReference.run(now, folder.id);
+      }
       const updated = this.db
         .prepare(
           `UPDATE projects SET revision = revision + 1, context_epoch = context_epoch + 1,

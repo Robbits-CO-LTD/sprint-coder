@@ -670,7 +670,61 @@ if (runsWithElectronAbi)
       expect(persistence.listProjectReferences(project.id)[0]).toMatchObject({
         projectRootId: root.id,
         status: 'workspace_changed',
+        enabled: false,
       });
+      persistence.close();
+    });
+
+    it('does not revive an unverified relinked reference when a runtime identity is reused', async () => {
+      const { persistence } = createPersistence();
+      const rootPath = mkdtempSync(join(tmpdir(), 'sc-reference-runtime-reuse-'));
+      directories.push(rootPath);
+      writeFileSync(join(rootPath, 'README.md'), '# Original reference');
+      const binding = await workspaceMutationBinding(rootPath);
+      const original = {
+        ...binding,
+        path: binding.canonicalPath,
+        label: 'root',
+        role: 'primary' as const,
+        persistentIdentityDigest: 'c'.repeat(64),
+      };
+      const project = persistence.createProject({ name: 'Runtime reuse', folders: [original] });
+      const root = persistence.listProjectFolders(project.id)[0]!;
+      const reference = persistence.addProjectReference({
+        projectId: project.id,
+        projectRootId: root.id,
+        relativePath: 'README.md',
+        registeredRootIdentity: binding.rootIdentityDigest,
+      });
+      const task = persistence.createTask('After remount', false, project.id);
+      // Model the other volume's intermediate registration; the later observation reuses
+      // the original runtime digest, while its persistent witness still names that other volume.
+      const replacement = {
+        ...original,
+        rootIdentityDigest: '0'.repeat(64),
+        workspaceKey: '0'.repeat(64),
+        persistentIdentityDigest: 'd'.repeat(64),
+      };
+      persistence.replaceProjectFolders({
+        projectId: project.id,
+        expectedRevision: persistence.listProjects().find(({ id }) => id === project.id)!.revision,
+        folders: [{ ...replacement, id: root.id }],
+      });
+      writeFileSync(join(rootPath, 'README.md'), '# Replacement volume content');
+      await persistence.reconcileProjectFolderIdentities(async () => ({
+        ...original,
+        persistentIdentityDigest: replacement.persistentIdentityDigest,
+      }));
+      const turn = persistence.startTurn(task.id, 'Use the current project');
+      expect(
+        persistence
+          .prepareContext(task.id, turn.turnId)
+          .projectItems.filter(({ kind }) => kind === 'reference'),
+      ).toEqual([]);
+      expect(
+        persistence.listProjectReferences(project.id).find(({ id }) => id === reference.id)
+          ?.enabled,
+      ).toBe(false);
       persistence.close();
     });
 
