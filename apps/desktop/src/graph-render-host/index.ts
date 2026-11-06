@@ -42,4 +42,5 @@ void runWithDrainedOutput(
           parentPort.postMessage(result);
         })
     : undefined,
+  process.argv[2] === 'check' ? 'check' : 'render',
 );

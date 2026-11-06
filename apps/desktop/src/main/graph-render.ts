@@ -29,6 +29,7 @@ import { nextGraphDocument, type GraphDocumentStore } from './graph-document';
 import { compareGraphDocuments, graphVersionSummary } from './graph-diff';
 import { graphGenerationActive } from './graph-generation';
 import { secureLogger } from './secure-logger';
+import { GraphRenderFailure } from './graph-render-failure';
 
 type StoredGraph = {
   document: GraphDocument;
@@ -487,15 +488,18 @@ export class GraphRenderService {
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
       };
-      const fail = () => {
+      const fail = (
+        reason: 'worker_failure' | 'timeout' | 'canceled' = 'worker_failure',
+        codes: GraphWorkerResult['diagnosticCodes'] = [],
+      ) => {
         if (settled) return;
         settled = true;
         cleanup();
         if (!exited) child.kill();
-        reject(new Error(`Archify ${mode} failed`));
+        reject(new GraphRenderFailure(mode, codes, reason));
       };
-      const timer = setTimeout(fail, 15_000);
-      const onAbort = () => fail();
+      const timer = setTimeout(() => fail('timeout'), 15_000);
+      const onAbort = () => fail('canceled');
       signal.addEventListener('abort', onAbort, { once: true });
       const watched = new Set<NodeJS.ReadableStream>();
       const watchPipes = () => {
@@ -507,7 +511,7 @@ export class GraphRenderService {
             bytes += chunk.byteLength;
             if (bytes > GRAPH_WORKER_OUTPUT_MAX_BYTES) fail();
           });
-          stream.once('error', fail);
+          stream.once('error', () => fail());
         }
       };
       watchPipes();
@@ -535,7 +539,12 @@ export class GraphRenderService {
         exited = true;
         if (settled) return;
         if (result === null || code !== result.exitCode || code !== 0 || signal.aborted)
-          return fail();
+          return fail(
+            signal.aborted ? 'canceled' : 'worker_failure',
+            result !== null && code === result.exitCode && code !== 0 && !signal.aborted
+              ? result.diagnosticCodes
+              : [],
+          );
         settled = true;
         cleanup();
         resolve(result.output);

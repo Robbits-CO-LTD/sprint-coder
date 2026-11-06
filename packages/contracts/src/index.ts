@@ -3956,6 +3956,28 @@ export const graphReadySchema = z
 export type GraphReady = z.infer<typeof graphReadySchema>;
 
 export const GRAPH_WORKER_OUTPUT_MAX_BYTES = 256 * 1024;
+/** Fixed categories only: graph text, paths and renderer messages are never diagnostics. */
+export const graphWorkerDiagnosticCodeSchema = z.enum([
+  'layout/constraint',
+  'workflow/node-overlap',
+  'workflow/unknown-node-lane',
+  'workflow/invalid-node-column',
+  'workflow/non-finite-node-geometry',
+  'workflow/solver-budget-exhausted',
+  'workflow/route-preset-conflict',
+  'workflow/viewbox-capacity',
+  'check/file_readable',
+  'check/single_svg',
+  'check/finite_svg',
+  'check/orthogonal_arrows',
+  'check/label_route_clearance',
+  'check/relationship_crossings',
+  'check/relationship_corridors',
+  'check/container_border_runs',
+  'check/route_rhythm',
+  'check/legend_clearance',
+]);
+export type GraphWorkerDiagnosticCode = z.infer<typeof graphWorkerDiagnosticCodeSchema>;
 /** A private Graph utility-process result; Main acknowledges receipt before the worker exits. */
 export const graphWorkerResultSchema = z
   .object({
@@ -3963,6 +3985,7 @@ export const graphWorkerResultSchema = z
     output: z.string().max(GRAPH_WORKER_OUTPUT_MAX_BYTES),
     exitCode: z.number().int().min(0).max(255),
     stderrBytes: z.number().int().min(0).max(GRAPH_WORKER_OUTPUT_MAX_BYTES),
+    diagnosticCodes: z.array(graphWorkerDiagnosticCodeSchema).max(16).optional(),
   })
   .strict();
 export type GraphWorkerResult = z.infer<typeof graphWorkerResultSchema>;
