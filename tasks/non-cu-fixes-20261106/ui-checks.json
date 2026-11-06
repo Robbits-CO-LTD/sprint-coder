@@ -15,14 +15,15 @@
     "source_sha": "3f8bca333549b06274999233a8d841d9f67496c1",
     "worktree": "/Users/yusei/sprint-coder-non-cu-fixes-20261106",
     "artifact_path": "/Users/yusei/sprint-coder-non-cu-fixes-20261106/apps/desktop/.vite/build/index.js",
-    "status": "blocked",
+    "status": "completed",
     "artifact_sha256": "5603b479f4738654b5ac4eea7257f4b14ca22a366a32fe8026f0f8ff09325184",
     "pr": "https://github.com/Robbits-CO-LTD/sprint-coder/pull/1158"
   },
   "user_perspective_check": "4件の対象へ修正または確認済みの試験不具合修正を実施。実AI課金なし。最新headのCIとReviewBOT、他OSのGUI・実OS再起動は別gate。",
   "confidence_gate": {
-    "status": "blocked",
-    "reason": "Original pre-merge gate snapshot. Current split PR CI and reviews are tracked on GitHub."
+    "status": "pass",
+    "scope": "recorded focused pre-merge GUI/native fixture cases only",
+    "limitations": "Current split PR CI and reviews tracked separately on GitHub; no real-provider Computer Use acceptance or actual OS restart."
   },
   "items": [
     {

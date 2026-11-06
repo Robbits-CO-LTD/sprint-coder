@@ -32,3 +32,9 @@
 - 根拠: 元CI [run41909320726/job126852914663](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/41909320726/job/126852914663)、現行native回帰試験。過去CIにはwatchdog発火traceがないため、当時も同一原因だったという帰属は推論。別原因を含む全てのmacOSウィンドウ問題の解消は主張しない。
 
 Graphの10変更ファイルは元の受入snapshot `f6a8b1a1` と同一の内容で移植する。元の隔離GUIで正常な図と重複座標エラーのモデル到達を確認し、分割先でも実vendor/worker/IPC/Providerの関連5ファイルと全workspace型検査、scoped lint/formatを通した。
+
+## 分割統合の確認
+
+- PR #1158は最新headのCI・ReviewBOTを通過してmerge済み（`0f139b88`）。
+- PR #1160も最新headのCI・ReviewBOTを通過してmerge済み（`cb8f99d1`）。入替digestのatomic更新とrollback、未証明参照の無効化を追加し、runtime番号再利用で置換先の本文が自動contextへ復活するRED→GREENも確認した。
+- この最後の変更ではGraph診断だけを追加する。実AIによるComputer Use受入、他OSのGUI、実OS再起動、配布版更新を実施済みとはしない。
