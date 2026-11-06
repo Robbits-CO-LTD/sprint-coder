@@ -291,7 +291,10 @@ describe('Explorer W2 prestart source boundaries', () => {
     expect(worker).toContain(
       'const bool explorer_route = sprint_coder::computer_use::kWindowsExplorerException &&',
     );
-    expect(worker).toContain('classifier_route == "v2"');
+    expect(worker).toContain('explorer_discovery_route == "v2"');
+    expect(worker).toContain(
+      'explorer_v2_requested && _wcsicmp(leaf.c_str(), L"explorer.exe") == 0',
+    );
     expect(worker).toContain(
       '!IsSupportedWindowsV1Target(current_executable.identity) && !explorer_route',
     );

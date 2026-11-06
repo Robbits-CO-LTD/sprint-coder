@@ -90,13 +90,15 @@ bool MeasureWindowsDiscovery(const std::string &metadata, const WindowsDiscovery
     *reason = "app_identity_changed";
     return false;
   }
-  std::string classifier_route;
-  ReadJsonString(metadata, "classifierRoute", &classifier_route);
+  std::string explorer_discovery_route;
+  const bool explorer_v2_requested =
+      ReadJsonString(metadata, "classifierRoute", &explorer_discovery_route) &&
+      explorer_discovery_route == "v2";
   // This only permits enumeration, not admission: each Explorer window must pass V2 measurement.
   const auto leaf = canonical_path.substr(canonical_path.find_last_of(L"\\/") + 1);
   const bool explorer_route = sprint_coder::computer_use::kWindowsExplorerException &&
       sprint_coder::computer_use::kNativeEligibilityIsV2 &&
-      classifier_route == "v2" && _wcsicmp(leaf.c_str(), L"explorer.exe") == 0;
+      explorer_v2_requested && _wcsicmp(leaf.c_str(), L"explorer.exe") == 0;
   if (identity_matches &&
       !IsSupportedWindowsV1Target(current_executable.identity) && !explorer_route) {
     CloseLockedWindowsExecutable(&current_executable);

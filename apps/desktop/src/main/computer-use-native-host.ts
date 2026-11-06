@@ -2302,8 +2302,9 @@ export function createComputerUseNativeHost(
 
   // The route the native is told for a session (C4): the one Main will accept receipts for, which
   // is v2 only when the build attested classifier 3. The native keeps it for the life of the
-  // session. A session that was never bound sends nothing. The Windows host reads it only for
-  // the approval gate (route v2 binding, N8-5), so it is sent only to a helper whose approval
+  // session. A session that was never bound sends nothing. The Windows host uses it for
+  // the approval gate and Explorer V2 discovery permission, never classifier selection.
+  // It is sent only to a helper whose approval
   // evidence was verified; an ordinary Windows helper never receives the key (C4-0).
   const nativeRouteField = (route: 'v1' | 'v2' | undefined): Record<string, unknown> =>
     route !== undefined && (platform !== 'win32' || binding.windowsApprovalVerified === true)

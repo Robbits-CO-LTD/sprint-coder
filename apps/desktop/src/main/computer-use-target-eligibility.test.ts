@@ -502,6 +502,8 @@ describe('target facts source contract', () => {
       // N9 P2a: the component seams compile the production v2 start engine with controlled facts.
       'computer_use_windows_new_start_test.cc',
       'computer_use_windows_existing_start_test.cc',
+      // P5b-E1: the discovery seam supplies core golden facts to the production V2 judgement.
+      'computer_use_windows_explorer_discovery_test.cc',
     ]);
     for (const name of readdirSync(nativeDirectory)) {
       if (!/\.(cc|mm|h)$/u.test(name)) continue;
