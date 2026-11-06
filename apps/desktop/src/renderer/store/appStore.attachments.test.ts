@@ -23,6 +23,7 @@ beforeEach(() => {
     draftAttachmentsByTask: {},
     attachmentCapabilityByTask: {},
     attachmentRequestRevisionByTask: {},
+    attachmentAcceptanceRevisionByTask: {},
     attachmentBusyByTask: {},
     attachmentReconciliationByTask: {},
     attachmentErrorByTask: {},
@@ -125,6 +126,91 @@ describe('attachment draft store state', () => {
     resolveOld([first]);
     await older;
 
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
+  });
+
+  it.each([false, true])(
+    'reconciles a draft read overtaken by acceptance (pending mutation: %s)',
+    async (pendingMutation) => {
+      let finishCapability!: () => void;
+      const capability = { status: 'supported', reason: null, selectionIdentity: 'selection-1' };
+      const delayed = new Promise<typeof capability>((resolve) => {
+        finishCapability = () => resolve(capability);
+      });
+      const listDraft = vi.fn().mockResolvedValueOnce([first, second]).mockResolvedValue([second]);
+      vi.stubGlobal('window', {
+        sprintCoder: {
+          attachments: {
+            capability: vi.fn().mockReturnValueOnce(delayed).mockResolvedValue(capability),
+            listDraft,
+          },
+        },
+      });
+      useAppStore.setState({
+        messagesByTask: {},
+        turnByTask: {},
+        draftAttachmentsByTask: { [taskId]: [first, second], other: [first] },
+        attachmentReconciliationByTask: pendingMutation
+          ? { [taskId]: { minimumRequestRevision: 1, status: 'loading' } }
+          : {},
+      });
+      const loading = useAppStore.getState().refreshDraftAttachments(taskId);
+      handleTurnEvent(
+        taskId,
+        {
+          type: 'turn.accepted',
+          taskId,
+          turnId: 'turn-accepted',
+          seq: 1,
+          userMessage: {
+            id: 'accepted-message',
+            taskId,
+            turnId: 'turn-accepted',
+            author: 'user',
+            content: '画像を確認',
+            attachments: [first],
+            createdAt: first.createdAt,
+          },
+        },
+        (update) => useAppStore.setState((state) => update(state)),
+      );
+      expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
+      finishCapability();
+      await loading;
+      expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
+      expect(useAppStore.getState().draftAttachmentsByTask.other).toEqual([first]);
+      expect(useAppStore.getState().attachmentReconciliationByTask[taskId]).toBeUndefined();
+    },
+  );
+
+  it('reconciles accepted images when the start reply arrives without a subscribed event', async () => {
+    let finishOld!: (value: ImageAttachmentMetadata[]) => void;
+    const oldList = new Promise<ImageAttachmentMetadata[]>((resolve) => {
+      finishOld = resolve;
+    });
+    const listDraft = vi.fn().mockReturnValueOnce(oldList).mockResolvedValue([second]);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: {},
+        turns: { start: vi.fn().mockResolvedValue({ turnId: 'unsubscribed' }) },
+        attachments: {
+          capability: vi
+            .fn()
+            .mockResolvedValue({ status: 'supported', reason: null, selectionIdentity: 's' }),
+          listDraft,
+        },
+      },
+    });
+    useAppStore.setState({
+      messagesByTask: {},
+      turnByTask: {},
+      draftAttachmentsByTask: { [taskId]: [first, second] },
+    });
+    const loading = useAppStore.getState().refreshDraftAttachments(taskId);
+    await useAppStore.getState().startTurn(taskId, '画像を確認', undefined, [first.id]);
+    await vi.waitFor(() => expect(listDraft).toHaveBeenCalledTimes(2));
+    finishOld([first, second]);
+    await loading;
     expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([second]);
   });
 
