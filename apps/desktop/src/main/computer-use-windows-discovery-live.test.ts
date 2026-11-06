@@ -56,6 +56,14 @@ function instrumentPendingHost(source: string): string {
     .replaceAll('ShowWindow(', 'RcaRefuseShow(')
     .replaceAll('SetForegroundWindow(', 'RcaRefuseForeground(')
     .replaceAll('SendInput(', 'RcaRefuseInput(')
+    .replaceAll(
+      'discovery.lease.reset();',
+      'if (!HoldStopLeaseForRegression()) discovery.lease.reset();',
+    )
+    .replace(
+      '  if (queued) WindowsResidualReady().notify_all();',
+      '  if (request.header.request_id.bytes[0] == 3 && type == MessageType::kProbeResult) PauseAfterDiscoveryStopReply();\n  if (queued) WindowsResidualReady().notify_all();',
+    )
     .replaceAll('GetTickCount64() - owner->admitted_at', 'DiscoveryTestNow() - owner->admitted_at');
 }
 
@@ -135,11 +143,24 @@ describe.skipIf(process.platform !== 'win32')('Windows cancellable discovery ter
         env: { ...process.env, VSLANG: '1033' },
       });
       expect(compiled.status, compiled.stdout + '\n' + compiled.stderr).toBe(0);
-      for (const mode of ['stop', 'deadline', 'queue-expired', 'eof', 'cross-owner-stop']) {
+      for (const mode of [
+        'deadline-held-stop-lease',
+        'stop',
+        'deadline',
+        'queue-expired',
+        'eof',
+        'cross-owner-stop',
+      ]) {
         const result = await runNative(realpathSync.native(binary), [mode], {
           encoding: 'utf8',
           timeout: 20000,
         });
+        if (mode === 'deadline-held-stop-lease') {
+          expect(result.status, result.stdout + '\n' + result.stderr).toBe(7);
+          expect(result.stderr).toContain('RECEIPT_STATE:refs=1,running=0');
+          expect(result.stderr).toContain('FAIL no residual measurement after receipt');
+          continue;
+        }
         expect(result.status, result.stdout + '\n' + result.stderr).toBe(0);
         if (mode === 'eof') {
           expect(result.stdout).toContain(
@@ -192,6 +213,8 @@ const program = String.raw`
 namespace { struct LockedWindowsExecutable; bool HoldListOpen(const std::wstring&, LockedWindowsExecutable*); bool RcaRefuseLaunch(const LockedWindowsExecutable&, HANDLE*, const std::function<bool()>&, const std::function<void()>&); BOOL TrackHandleClose(HANDLE handle); BOOL RcaRefuseShow(HWND, int); BOOL RcaRefuseForeground(HWND); UINT RcaRefuseInput(UINT, LPINPUT, int); }
 ULONGLONG DiscoveryTestNow();
 void ObserveRequestConflict();
+bool HoldStopLeaseForRegression();
+void PauseAfterDiscoveryStopReply();
 #define wmain ProductionHostMain
 #include "pending-host.cc"
 #undef wmain
@@ -201,10 +224,23 @@ using namespace sprint_coder::computer_use;
 std::atomic<bool> hold_start{true}, entered_start{false}, finished{false}, conflict_seen{false};
 std::atomic<ULONGLONG> clock_offset{0};
 std::atomic<bool> cross_owner_mode{false};
+std::atomic<bool> hold_stop_lease{false}, stop_reply_barrier{false};
+std::atomic<unsigned> stop_reply_stage{0}, stop_reply_checked{0};
+bool HoldStopLeaseForRegression(){return hold_stop_lease.load();}
+void PauseAfterDiscoveryStopReply(){
+ if(!stop_reply_barrier.load())return;
+ const auto stage=stop_reply_stage.fetch_add(1)+1;
+ while(stop_reply_checked.load()<stage)Sleep(1);
+}
 std::atomic<unsigned> open_attempts{0};
 ULONGLONG DiscoveryTestNow(){return GetTickCount64()+clock_offset.load();}
 void ObserveRequestConflict(){conflict_seen.store(true);}
 void Require(bool ok,const char* message){if(!ok){std::cerr<<"FAIL "<<message<<std::endl;TerminateProcess(GetCurrentProcess(),7);}}
+void WaitStopReplyStage(unsigned stage){
+ const auto deadline=GetTickCount64()+2000;
+ while(stop_reply_stage.load()<stage&&GetTickCount64()<deadline)Sleep(1);
+ Require(stop_reply_stage.load()==stage,"server paused after Stop reply write");
+}
 std::atomic<DWORD> consumer_thread{0}, io_thread{0};
 std::wstring owned_path;
 std::atomic<unsigned> actual_reads{0}, successful_reads{0}, process_releases{0}, file_releases{0};
@@ -271,7 +307,10 @@ std::string List(){return "{\"operation\":\"list_windows_cancellable\",\"discove
 std::string DiscoveryStop(const std::string& id){return "{\"operation\":\"stop_window_discovery\",\"discoveryId\":\""+id+"\"}";}
 std::string Stop(const std::string& id){return "{\"sessionId\":\""+id+"\",\"operation\":\"stop_pending_start\"}";}
 int wmain(int argc,wchar_t** argv){
- const std::wstring mode=argc>1?argv[1]:L"stop";
+ const std::wstring requested_mode=argc>1?argv[1]:L"stop";
+ hold_stop_lease.store(requested_mode==L"deadline-held-stop-lease");
+ const std::wstring mode=hold_stop_lease.load()?L"deadline":requested_mode;
+ stop_reply_barrier.store(mode==L"deadline");
  std::thread([]{Sleep(15000);if(!finished.load())TerminateProcess(GetCurrentProcess(),42);}).detach();
  const auto name=L"\\\\.\\pipe\\sc-pending-start-"+std::to_wstring(GetCurrentProcessId());
  SECURITY_ATTRIBUTES security{}; PSECURITY_DESCRIPTOR descriptor=nullptr;
@@ -382,7 +421,17 @@ int wmain(int argc,wchar_t** argv){
  }
  auto terminal=Read(client.value,3,MessageType::kProbeResult);std::cout<<"RECEIPT:"<<Payload(terminal)<<"\n";
  Require(GetTickCount64()-stop_started<1000&&hold_start.load()&&actual_reads.load()==1,"Stop cancels synchronous I/O without fixture release");
- {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));Require(owner->terminal&&owner->stopped.load()&&owner->references.load()==0&&!WindowsTargetListWorkerRunning().load(),"no residual measurement after receipt");Require(sessions.size()==1&&!WindowsStarts().owners.at(FrameIdKey(Id(7)))->stopped.load(),"discovery stop leaves control alive");}
+ if(mode==L"deadline")WaitStopReplyStage(1);
+ {std::lock_guard lock(WindowsTargetListControl().stop_mutex);auto owner=WindowsDiscoveries().owners.at(FrameIdKey(Id(8)));if(mode==L"deadline")std::cerr<<"RECEIPT_STATE:refs="<<owner->references.load()<<",running="<<WindowsTargetListWorkerRunning().load()<<std::endl;Require(owner->terminal&&owner->stopped.load()&&owner->references.load()==0&&!WindowsTargetListWorkerRunning().load(),"no residual measurement after receipt");Require(sessions.size()==1&&!WindowsStarts().owners.at(FrameIdKey(Id(7)))->stopped.load(),"discovery stop leaves control alive");}
+ stop_reply_checked.store(1);
+ if(mode==L"deadline"){
+  Require(stop_reply_stage.load()==1,"fresh Stop inspected before handler return");
+  Send(client.value,3,8,DiscoveryStop("discovery:1"));auto replay=Read(client.value,3,MessageType::kProbeResult);
+  WaitStopReplyStage(2);
+  Require(Payload(replay)==Payload(terminal),"Stop receipt replay is identical");
+  {std::lock_guard lock(WindowsTargetListControl().stop_mutex);Require(WindowsDiscoveries().owners.at(FrameIdKey(Id(8)))->references.load()==0&&!WindowsTargetListWorkerRunning().load(),"replayed Stop has no residual reference");}
+  stop_reply_checked.store(2);
+ }
  Require(WindowsTargetListControl().stop_serial.load()==serial&&cancellation_epoch.load()==9,"discovery stop does not alter input epoch or serial");
  Send(client.value,4,9,DiscoveryStop("unknown"));Read(client.value,4,MessageType::kError);
  Send(client.value,5,8,DiscoveryStop("wrong"));Read(client.value,5,MessageType::kError);

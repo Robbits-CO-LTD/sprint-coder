@@ -437,6 +437,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
   }
   if (type != MessageType::kHandshake) {
     bool replayed = false;
+    if (response_cache.contains(ResponseCacheKey(request))) discovery.lease.reset();
     if (!ReplayCachedResponse(pipe, request, &replayed))
       return false;
     if (replayed)
@@ -530,6 +531,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     } else if (operation == "stop_window_discovery") {
       succeeded = StopWindowsDiscovery(FrameIdKey(request.header.session_id), metadata,
                                        discovery.lease, &response, &reason);
+      // Retire this Stop's administrative reference before publishing its terminal receipt.
+      discovery.lease.reset();
     } else if (operation == "list_targets") {
       // S5-c-3 PR-5: unsupported_operation in a v1 build.
       bool include_start_identity = false;
