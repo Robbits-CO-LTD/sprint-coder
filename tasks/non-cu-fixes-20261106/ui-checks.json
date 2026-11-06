@@ -19,10 +19,10 @@
     "artifact_sha256": "5603b479f4738654b5ac4eea7257f4b14ca22a366a32fe8026f0f8ff09325184",
     "pr": "https://github.com/Robbits-CO-LTD/sprint-coder/pull/1158"
   },
-  "user_perspective_check": "添付race・グラフ・Projectの修正と実UIを確認。#1137は原因未確定のため総合完了とはしない。",
+  "user_perspective_check": "4件の対象へ修正または確認済みの試験不具合修正を実施。実AI課金なし。最新headのCIとReviewBOT、他OSのGUI・実OS再起動は別gate。",
   "confidence_gate": {
     "status": "blocked",
-    "reason": "#1137 RCA pending"
+    "reason": "latest-head required CI and ReviewBOT pending; focused local/native and scoped GUI evidence recorded"
   },
   "items": [
     {
@@ -84,10 +84,11 @@
       "screen": "macOS native",
       "depth": "L2",
       "priority": "high",
-      "operation_flow": "CIのparentAlive=falseを同一条件で再現し原因を確定する",
+      "operation_flow": "native fixtureのabort設定後に8100ms停止→8秒watchdogありで元CI同症状→watchdog除去だけで同一入力を再実行",
       "acceptance_criteria": "#1137",
-      "result": "BLOCKED",
-      "evidence": "CI一次ログ確認済み。元条件・早期取消・表示計12試行は再現なし、GUI取消2回も正常。原因未確定。新しいphase/lifecycle記録をCIで確認する。"
+      "result": "PASS",
+      "evidence": "原テストRED(parentAlive=false)/GREEN(parentAlive=true)、通常3条件を含むnative4件PASS。外部15秒timeoutと親生存assertは保持。GUI取消2回も正常。過去CIへの同一原因の帰属は推論。",
+      "method": "shell"
     }
   ]
 }

@@ -11,7 +11,12 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 describe.skipIf(process.platform !== 'darwin' && process.platform !== 'win32')(
   'parented native confirmation cancellation',
   () => {
-    it.each(['hidden', 'visible', 'visible-focusable'] as const)(
+    it.each([
+      'hidden',
+      'visible',
+      'visible-focusable',
+      ...(process.platform === 'darwin' ? ['stalled'] : []),
+    ])(
       'keeps a %s parent alive until and after native cancellation',
       async (visibility) => {
         const directory = await mkdtemp(join(tmpdir(), 'sc-native-dialog-abort-'));
@@ -28,17 +33,15 @@ app.setPath('userData', __dirname);
 app.disableHardwareAcceleration();
 app.on('window-all-closed', () => {});
 const reportPath = join(__dirname, 'result.json');
-const watchdog = setTimeout(() => {
-  writeFileSync(reportPath, JSON.stringify({ error: 'Native dialog did not cancel' }));
-  app.exit(2);
-}, 8000);
+// execFile owns the deadline outside this UI thread. An in-process app.exit watchdog can
+// destroy the parent and then have its failure overwritten by the queued sheet completion.
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.setActivationPolicy('accessory');
   const parent = new BrowserWindow({ show: false, focusable: ${JSON.stringify(visibility === 'visible-focusable')}, skipTaskbar: true });
   const lifecycle = [];
   for (const event of ['close', 'closed', 'show', 'hide'])
     parent.on(event, () => lifecycle.push({ event, elapsed: performance.now() }));
-  const visible = ${JSON.stringify(visibility !== 'hidden')};
+  const visible = ${JSON.stringify(visibility.startsWith('visible'))};
   if (visible) parent.showInactive();
   let parentFocusEvents = 0;
   parent.on('focus', () => { parentFocusEvents += 1; });
@@ -61,6 +64,12 @@ app.whenReady().then(async () => {
     parentAliveBeforeAbort = !parent.isDestroyed();
     controller.abort();
   }, 250);
+  // Both timers are overdue on a busy native UI thread. The fixture's old app.exit watchdog
+  // destroyed the parent before the queued sheet completion and its report then hid that exit.
+  if (${JSON.stringify(visibility === 'stalled')}) {
+    const until = performance.now() + 8100;
+    while (performance.now() < until) {}
+  }
   const result = await answer;
   clearTimeout(abortTimer);
   const report = {
@@ -77,7 +86,6 @@ app.whenReady().then(async () => {
   };
   parent.destroy();
   writeFileSync(reportPath, JSON.stringify({ ...report, parentDestroyed: parent.isDestroyed() }));
-  clearTimeout(watchdog);
   app.exit(0);
 }).catch(() => {
   writeFileSync(reportPath, JSON.stringify({ error: 'Native dialog fixture failed' }));
@@ -102,7 +110,7 @@ app.whenReady().then(async () => {
             response: 0,
             parentAlive: true,
             parentAliveBeforeAbort: true,
-            visible: visibility !== 'hidden',
+            visible: visibility.startsWith('visible'),
             parentDestroyed: true,
           });
         } finally {
