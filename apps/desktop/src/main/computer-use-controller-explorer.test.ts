@@ -1,4 +1,12 @@
 import { expect, it, vi } from 'vitest';
+import {
+  computerUseObservationSchema,
+  computerUseSessionStatusSchema,
+  type ComputerUseAction,
+} from '@sprint-coder/contracts';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { createToolId } from '@sprint-coder/domain';
+import type { ComputerActionAuditRecord } from './persistence';
 import type { ComputerUseNativeBinding } from './computer-use-native';
 import type { ComputerUseNativeHost } from './computer-use-controller';
 import {
@@ -7,6 +15,7 @@ import {
   type ComputerUseNativeHostOptions,
 } from './computer-use-native-host';
 import {
+  ComputerUseController,
   windowsExplorerExceptionAllowed,
   windowsExplorerExceptionAllowedForTesting,
 } from './computer-use-controller';
@@ -113,6 +122,8 @@ const explorerScenario = async (
   const startSession = vi.fn((input: { sessionId: string; cancelEpoch: number }) => ({
     sessionId: input.sessionId,
     windowId: '100',
+    pid: 42,
+    processStartTime: '123456',
     appIdentityDigest: digest('a'),
     windowIdentityDigest: digest('c'),
     profileRevision: 1,
@@ -132,7 +143,8 @@ const explorerScenario = async (
       reasonCode: null,
       deniedResult: null,
       ticket: winTicket,
-      classifierVersion: 1,
+      classifierVersion: classifierRoute === 'v2' ? (platform === 'win32' ? 4 : 3) : 1,
+      ...(classifierRoute === 'v2' ? { receiptVersion: 2 } : {}),
       inputAttemptCount: 0,
       requestId: request['requestId'],
       sessionId: request['sessionId'],
@@ -259,6 +271,7 @@ const explorerScenario = async (
   beforeStart?.(host);
   const session = await host.startSession(startInput);
   return {
+    profile,
     preflight,
     dispatch,
 
@@ -299,6 +312,362 @@ const inputFor = (host: ComputerUseNativeHost, sessionId: string) => ({
   sessionId,
   approval: readWindowsExplorerApproval(host, sessionId),
   operation,
+});
+
+// Start/list/grant acceptance belongs to D. This fixture installs an already bound
+// session and executes the real controller dispatch boundary over the real Host.
+async function actionScenario(enabled: boolean, item: unknown = measuredItem) {
+  const measure = vi.fn(() => ({ shellView: facts.shellView, pointOwnerMatches: true, item }));
+  const observe = vi.fn<() => unknown>(() => ({}));
+  const f = await explorerScenario({}, { measureExplorerView: measure, observe });
+  const audits = new Map<string, ComputerActionAuditRecord>();
+  const authorize = vi.fn(() => ({ decision: 'allow' as const, reason: 'fixture_approved' }));
+  const controller = new ComputerUseController({
+    native: f.host,
+    windowsExplorerActionForTesting: enabled,
+    repositionEmergencyStop: () => true,
+    featureEnabled: () => true,
+    authorize,
+    persistence: {
+      ...createComputerAppGrantFixtureStore().api,
+      listComputerAppProfiles: () => [],
+      getComputerAppProfile: () => f.profile,
+      createComputerAppProfile: vi.fn(),
+      updateComputerAppProfile: vi.fn(),
+      removeComputerAppProfile: vi.fn(),
+      recordComputerActionAudit: (input) => {
+        const now = new Date().toISOString();
+        const audit: ComputerActionAuditRecord = {
+          ...input,
+          id: `audit-${audits.size}`,
+          state: input.state ?? 'pending',
+          reasonCode: input.reasonCode ?? null,
+          approvalId: input.approvalId ?? null,
+          approvalParentRequestId: input.approvalParentRequestId ?? null,
+          approvalOutcome: null,
+          approvalEffect: input.approvalEffect ?? null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        audits.set(audit.id, audit);
+        return audit;
+      },
+      completeComputerActionAudit: (input) => {
+        const previous = audits.get(input.auditId);
+        if (!previous) throw new Error('Missing fixture audit');
+        const audit = {
+          ...previous,
+          state: input.state,
+          reasonCode: input.reasonCode ?? null,
+          updatedAt: input.updatedAt,
+        };
+        audits.set(audit.id, audit);
+        return audit;
+      },
+      recordComputerActionApprovalOutcome: vi.fn(),
+      listComputerActionAudits: () => [...audits.values()],
+      getActiveTurnId: () => 'turn-1',
+      getPermissionPolicy: () => ({ policyEpoch: 0 }),
+    },
+  });
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 20_000).toISOString();
+  const status = computerUseSessionStatusSchema.parse({
+    sessionId: f.session.sessionId,
+    taskId: 'task-1',
+    profileId: f.profile.id,
+    profileRevision: f.profile.revision,
+    windowId: f.session.windowId,
+    connectionId: 'connection-1',
+    modelId: 'model-1',
+    appIdentityDigest: f.session.appIdentityDigest,
+    windowIdentityDigest: f.session.windowIdentityDigest,
+    mode: 'supervised',
+    maximumMode: 'supervised',
+    state: 'acting',
+    policyEpoch: 0,
+    observationRevision: 1,
+    round: 0,
+    maxRounds: 5,
+    startedAt: now,
+    expiresAt,
+    lastObservationAt: now,
+    stopReason: null,
+  });
+  const observation = computerUseObservationSchema.parse({
+    sessionId: f.session.sessionId,
+    appIdentityDigest: f.session.appIdentityDigest,
+    windowIdentityDigest: f.session.windowIdentityDigest,
+    profileRevision: 1,
+    maximumMode: 'supervised',
+    screenBounds: f.session.screenBounds,
+    revision: 1,
+    observedAt: now,
+    expiresAt,
+    clientWidth: 1200,
+    clientHeight: 900,
+    images: [
+      {
+        mimeType: 'image/png',
+        digest: digest('1'),
+        byteLength: 1,
+        width: 1,
+        height: 1,
+        base64: 'AA==',
+      },
+    ],
+    treeDigest: null,
+    treeByteLength: 0,
+    treeDepth: 0,
+    treeNodeCount: 0,
+  });
+  const record: Parameters<ComputerUseController['dispatchNativeAction']>[0] = {
+    status,
+    profile: f.profile,
+    native: f.session,
+    agent: null,
+    classifierRoute: 'v2',
+    approvalHelperGeneration: undefined,
+    screenBounds: f.session.screenBounds,
+    controller: new AbortController(),
+    turnId: 'turn-1',
+    syntheticTurn: false,
+    observation,
+    planGrant: null,
+    plannerExecutionId: null,
+    planner: null,
+    expiryTimer: null,
+    stopPromise: null,
+    artifactGeneration: 0,
+  };
+  observe.mockImplementation(() => ({ ...observation, revision: 2 }));
+  controller['sessions'].set(f.session.sessionId, record);
+  controller['broker'].startTurn(
+    { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+    'computer-controller',
+    [createToolId({ provider: 'builtin', namespace: 'computer', name: 'act', version: '1' })],
+  );
+  const run = (action: ComputerUseAction) =>
+    controller['dispatchNativeAction'](record, action, 'action-1', 1, record.controller.signal);
+  const runAgent = (action: ComputerUseAction) =>
+    controller.act(f.session.sessionId, action, 'agent-action');
+  return { ...f, measure, controller, record, run, runAgent, authorize };
+}
+
+const folderClick: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left' };
+it('explorer_folder_action_uses_measured_item', async () => {
+  const f = await actionScenario(true);
+  expect(await f.runAgent(folderClick)).toMatchObject({ result: 'completed', reasonCode: null });
+  expect(f.measure).toHaveBeenCalledTimes(2);
+  expect(f.measure).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      x: 0.5,
+      y: 0.5,
+      observationRevision: 1,
+      sessionId: f.session.sessionId,
+    }),
+  );
+  expect(f.preflight).toHaveBeenCalledOnce();
+  expect(f.authorize).toHaveBeenCalledOnce();
+  expect(f.measure.mock.invocationCallOrder[0]).toBeLessThan(
+    f.authorize.mock.invocationCallOrder[0]!,
+  );
+  expect(f.authorize.mock.invocationCallOrder[0]).toBeLessThan(
+    f.measure.mock.invocationCallOrder[1]!,
+  );
+  expect(f.dispatch).toHaveBeenCalledOnce();
+  expect(f.measure.mock.invocationCallOrder[0]).toBeLessThan(
+    f.preflight.mock.invocationCallOrder[0]!,
+  );
+  expect(f.preflight.mock.invocationCallOrder[0]).toBeLessThan(
+    f.dispatch.mock.invocationCallOrder[0]!,
+  );
+  expect(f.dispatch.mock.calls[0]![0]).not.toHaveProperty('item');
+  expect(f.dispatch.mock.calls[0]![0]).not.toHaveProperty('path');
+});
+
+it.each([false, true])('explorer_click_after_restart_resume_%s', async (resume) => {
+  const f = await actionScenario(true);
+  const previous = readWindowsExplorerApproval(f.host, f.session.sessionId)!;
+  expect(
+    await windowsExplorerExceptionAllowedForTesting(inputFor(f.host, f.session.sessionId)),
+  ).toBe(true);
+  f.measure.mockClear();
+  f.dispatch.mockClear();
+  if (resume) {
+    f.record.native = await f.host.startSession({ ...f.startInput, resume: true });
+  } else {
+    await f.controller['refocusAndReobserve'](f.record, { focusedSession: null }, () => true, true);
+    f.record.status = { ...f.record.status, observationRevision: f.record.observation!.revision };
+  }
+  expect(
+    await windowsExplorerExceptionAllowedForTesting({
+      ...inputFor(f.host, f.session.sessionId),
+      approval: previous,
+    }),
+  ).toBe(false);
+  expect(await f.runAgent(folderClick)).toMatchObject({ result: 'completed' });
+  expect(f.measure).toHaveBeenCalledTimes(2);
+  expect(f.dispatch).toHaveBeenCalledOnce();
+  expect(f.startSession).toHaveBeenCalledTimes(2);
+});
+
+it('explorer_action_allowed_after_approval_reobservation_without_status_sync', async () => {
+  const f = await actionScenario(true);
+  const before = f.record.status.observationRevision;
+  // The native approval path re-observes and keeps status.observationRevision unchanged.
+  await f.controller['refocusAndReobserve'](f.record, { focusedSession: null }, () => true, true);
+  expect(f.record.status.observationRevision).toBe(before);
+  expect(f.record.observation!.revision).not.toBe(before);
+  expect(
+    await f.controller['explorerActionAllowed'](
+      f.record,
+      folderClick,
+      f.record.observation!.revision,
+    ),
+  ).toBe(true);
+  // A stale revision (the one the status still holds) is refused.
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, before)).toBe(false);
+  // An observation that moved on after the re-observation refuses the re-observed revision.
+  const reobserved = f.record.observation!.revision;
+  f.record.observation = { ...f.record.observation!, revision: reobserved + 1 };
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, reobserved)).toBe(
+    false,
+  );
+  // An expired observation is refused even at its own revision.
+  f.record.observation = {
+    ...f.record.observation!,
+    revision: reobserved,
+    expiresAt: new Date(0).toISOString(),
+  };
+  expect(await f.controller['explorerActionAllowed'](f.record, folderClick, reobserved)).toBe(
+    false,
+  );
+});
+
+it.each(['windowIdentityDigest', 'appIdentityDigest', 'pid', 'processStartTime'] as const)(
+  'explorer_restart_rejects_changed_%s',
+  async (field) => {
+    const f = await actionScenario(true);
+    const original = f.startSession.getMockImplementation()!;
+    f.startSession.mockImplementation((input) => ({
+      ...original(input),
+      [field]: field === 'pid' ? 43 : field === 'processStartTime' ? '654321' : digest('e'),
+    }));
+    if (field === 'appIdentityDigest' || field === 'processStartTime') {
+      await expect(f.host.startSession({ ...f.startInput, resume: true })).rejects.toThrow(
+        'native_session_identity_mismatch',
+      );
+    } else {
+      f.record.native = await f.host.startSession({ ...f.startInput, resume: true });
+      expect(readWindowsExplorerApproval(f.host, f.session.sessionId)).toBeUndefined();
+      expect(await f.run(folderClick)).toEqual({
+        result: 'rejected',
+        reasonCode: 'explorer_action_denied',
+      });
+    }
+    expect(f.measure).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['select', 'open'])('measured folder %s needs no model path', async (verb) => {
+  const f = await explorerScenario();
+  expect(
+    await windowsExplorerExceptionAllowedForTesting({
+      ...inputFor(f.host, f.session.sessionId),
+      operation: { verb, point: { x: 400, y: 300 } },
+    }),
+  ).toBe(true);
+});
+
+it('explorer_scroll_and_document_open_emit_no_input', async () => {
+  const refused: ComputerUseAction[] = [
+    { type: 'scroll', x: 0.5, y: 0.5, deltaX: 0, deltaY: 1 },
+    { type: 'key', key: 'Enter' },
+    { type: 'type', text: 'C:\\Folder' },
+    { type: 'invoke', targetId: 'node', name: 'activate', arguments: {} },
+    { type: 'set_text', targetId: 'node', text: 'C:\\Folder' },
+    { type: 'select', targetId: 'node', value: 'folder' },
+    { type: 'toggle', targetId: 'node', value: true },
+    { type: 'expand_collapse', targetId: 'node', expanded: true },
+  ];
+  for (const action of refused) {
+    const f = await actionScenario(true);
+    expect(await f.run(action)).toEqual({
+      result: 'rejected',
+      reasonCode: 'explorer_action_denied',
+    });
+    expect(f.measure).not.toHaveBeenCalled();
+    expect(f.preflight).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+    await expect(f.runAgent(action)).rejects.toThrow();
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+  }
+  for (const item of [
+    { ...measuredItem, kind: 'file', path: 'C:\\Folder\\document.txt' },
+    { ...measuredItem, path: 'C:\\Folder\\program.exe' },
+    { ...measuredItem, surface: 'address_bar' },
+    { ...measuredItem, surface: 'search_box' },
+    { kind: 'unknown' },
+    undefined,
+  ]) {
+    const f = await actionScenario(true, item === undefined ? null : item);
+    expect(await f.run(folderClick)).toEqual({
+      result: 'rejected',
+      reasonCode: 'explorer_action_denied',
+    });
+    expect(f.measure).toHaveBeenCalledOnce();
+    expect(f.preflight).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+    await expect(f.runAgent(folderClick)).rejects.toThrow();
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+  }
+});
+
+it('explorer_action_gate_off_preserves_zero_native_calls', async () => {
+  const f = await actionScenario(false);
+  expect(await f.run(folderClick)).toEqual({
+    result: 'rejected',
+    reasonCode: 'explorer_action_denied',
+  });
+  expect(f.measure).not.toHaveBeenCalled();
+  expect(f.preflight).not.toHaveBeenCalled();
+  expect(f.dispatch).not.toHaveBeenCalled();
+  await expect(f.runAgent(folderClick)).rejects.toThrow();
+  expect(f.authorize).not.toHaveBeenCalled();
+  expect(f.measure).not.toHaveBeenCalled();
+  expect(f.preflight).not.toHaveBeenCalled();
+  expect(f.dispatch).not.toHaveBeenCalled();
+});
+
+it('ordinary click keeps its output and native calls with the Explorer gate off', async () => {
+  const f = await actionScenario(false);
+  f.record.profile = {
+    ...f.profile,
+    identity: { ...f.profile.identity, executablePath: 'C:\\Apps\\Editor.exe' },
+  };
+  expect(await f.runAgent(folderClick)).toMatchObject({ result: 'completed', reasonCode: null });
+  expect(f.authorize).toHaveBeenCalledOnce();
+  expect(f.measure).not.toHaveBeenCalled();
+  expect(f.preflight).toHaveBeenCalledOnce();
+  expect(f.dispatch).toHaveBeenCalledOnce();
+});
+
+it('Explorer measurement cannot outlive Stop or its observation', async () => {
+  for (const change of ['stop', 'observation'] as const) {
+    const f = await actionScenario(true);
+    f.measure.mockImplementationOnce(() => {
+      if (change === 'stop') f.record.controller.abort();
+      else f.record.status = { ...f.record.status, observationRevision: 2 };
+      return { shellView: facts.shellView, pointOwnerMatches: true, item: measuredItem };
+    });
+    expect(await f.run(folderClick)).toMatchObject({ result: 'rejected' });
+    expect(f.preflight).not.toHaveBeenCalled();
+    expect(f.dispatch).not.toHaveBeenCalled();
+  }
 });
 const withFacts = (measured: Record<string, unknown>) =>
   explorerScenario({}, {}, {}, 'v2', 'win32', undefined, measured);

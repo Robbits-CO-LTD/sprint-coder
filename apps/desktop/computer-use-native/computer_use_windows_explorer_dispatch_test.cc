@@ -164,6 +164,8 @@ int wmain() {
   initial.canonical_path = L"C:\\Windows\\explorer.exe";
   initial.approval_route_v2 = true;
   initial.cancel_epoch = 2;
+  initial.observation_revision = 1;
+  initial.observation_bounds = RECT{10, 20, 110, 120};
   initial.has_focused_element_signature = true;
   initial.focused_element_signature = "synthetic-control";
   initial.visual_control_signatures.insert("synthetic-control");
@@ -263,6 +265,17 @@ int wmain() {
       Require(dispatch() && m2_inputs == 1 && m2_measurements == 0, "gate_off_semantic_unchanged");
     }
   } else {
+    const std::string normalized = R"({"sessionId":"synthetic-session","windowId":"100","cancelEpoch":2,"observationRevision":1,"x":0.5,"y":0.5})";
+    reset();
+    std::string normalized_response;
+    Require(MeasureWindowsExplorerView(frame, normalized, &normalized_response) &&
+        m2_measured_point.x == 60 && m2_measured_point.y == 70,
+        "explorer_agent_point_matches_dispatch");
+    Require(dispatch(), "explorer_agent_measured_item_dispatches");
+    reset(); ++session.observation_revision;
+    Require(!MeasureWindowsExplorerView(frame, normalized, &normalized_response) &&
+        !session.explorer_dispatch_evidence, "explorer_old_observation_clears_evidence");
+    session.observation_revision = 1;
 #if defined(SPRINT_CODER_WINDOWS_EXPLORER_TEST_HOOKS)
     {
       // Every chosen value lands, by Windows' mapping, on the very pixel asked for.

@@ -1414,7 +1414,7 @@ it('file_explorer_label_is_not_identity_evidence', () => {
   ).toBe(true);
 });
 
-it('explorer_controller_gate_off_preserves_outputs_and_native_call_counts', async () => {
+it('explorer_gate_off_retains_unusable_grant_without_native_calls', async () => {
   const f = await explorerController(false);
   const saved = f.grant();
   expect(await f.targets()).toEqual([]);
@@ -1422,8 +1422,29 @@ it('explorer_controller_gate_off_preserves_outputs_and_native_call_counts', asyn
   expect(f.discovery).not.toHaveBeenCalled();
   expect(f.start).not.toHaveBeenCalled();
   expect(f.store.grants.get(saved.id)).toEqual(saved);
-  expect(f.controller.appGrantFor(f.profile)).toBeNull();
-  expect(f.store.grants.size).toBe(0);
+  expect(f.controller.appGrantFor(f.profile)).toEqual(saved);
+  expect(f.store.grants.get(saved.id)).toEqual(saved);
+});
+
+it('explorer_build_mismatch_retains_unusable_grant', async () => {
+  const f = await explorerController();
+  const saved = f.grant();
+  const target = (await f.targets())[0]!;
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', {
+    ...finalPin(),
+    eligibility: { ...finalPin().eligibility, rulesetVersion: 4 },
+  });
+  expect(f.controller.appGrantFor(f.profile)).toEqual(saved);
+  expect(await f.targets()).toEqual([]);
+  expect(await f.request(target)).toEqual({
+    granted: false,
+    reasonCode: 'access_request_invalid_token',
+  });
+  expect(f.store.grants.get(saved.id)).toEqual(saved);
+  expect(f.start).not.toHaveBeenCalled();
+  vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', finalPin());
+  expect((await f.targets())[0]?.granted).toBe(true);
+  expect(f.controller.appGrantFor(f.profile)).toEqual(saved);
 });
 
 it('eligible_explorer_reaches_common_start_after_approval', async () => {

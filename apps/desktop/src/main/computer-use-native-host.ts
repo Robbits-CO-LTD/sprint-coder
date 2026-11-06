@@ -204,7 +204,10 @@ export type WindowsExplorerFacts = Readonly<
 type ExplorerEvidence = Readonly<{
   facts: Readonly<z.infer<typeof explorerFactsSchema>>;
   current: () => boolean;
-  measure: (point: Readonly<{ x: number; y: number }>) => Promise<unknown>;
+  measure: (
+    point: Readonly<{ x: number; y: number }>,
+    observationRevision?: number,
+  ) => Promise<unknown>;
 }>;
 const explorerApprovalReaders = new WeakMap<
   ComputerUseNativeHost,
@@ -232,12 +235,13 @@ export async function readCurrentWindowsExplorerFacts(
   host: ComputerUseNativeHost,
   sessionId: string,
   point: Readonly<{ x: number; y: number }>,
+  observationRevision?: number,
 ): Promise<WindowsExplorerFacts | undefined> {
   const evidence = approval === undefined ? undefined : explorerApprovals.get(approval);
   if (evidence?.host !== host || evidence.sessionId !== sessionId || !evidence.current())
     return undefined;
   try {
-    const view = explorerViewSchema.safeParse(await evidence.measure(point));
+    const view = explorerViewSchema.safeParse(await evidence.measure(point, observationRevision));
     return view.success && evidence.current() ? { ...evidence.facts, ...view.data } : undefined;
   } catch {
     return undefined;
@@ -2677,6 +2681,20 @@ export function createComputerUseNativeHost(
       assertStartOwner(owner);
       owner.knownEpoch = Math.max(owner.knownEpoch, session.cancelEpoch);
       sessions.set(session.sessionId, session);
+      const explorerFacts = explorerSessionFacts.get(existing);
+      if (
+        explorerFacts !== undefined &&
+        session.windowIdentityDigest === existing.windowIdentityDigest &&
+        session.appIdentityDigest === existing.appIdentityDigest &&
+        typeof existing.raw['pid'] === 'number' &&
+        session.raw['pid'] === existing.raw['pid'] &&
+        typeof existing.raw.processStartTime === 'string' &&
+        session.raw.processStartTime === existing.raw.processStartTime
+      ) {
+        // Refocus/resume replaces the session object. Retain only bound identity facts;
+        // old approval capabilities expire and M2 must measure each action again.
+        explorerSessionFacts.set(session, explorerFacts);
+      }
       return publicNativeSession(session);
     }
     let pid = pidsByIdentity.get(input.profile.identityDigest);
@@ -4146,7 +4164,7 @@ export function createComputerUseNativeHost(
       // P5 REQUIREMENT (M2): this measures Main's point at the time of the request. The dispatch
       // must re-check the point owner and view natively, with WindowsActionPoint's POINT, before
       // its first input API; this answer never authorizes an input by itself.
-      measure: async (point) =>
+      measure: async (point, observationRevision) =>
         addon?.measureExplorerView?.({
           sessionId,
           windowId: session.windowId,
@@ -4154,6 +4172,7 @@ export function createComputerUseNativeHost(
           requestId: randomUUID(),
           x: point.x,
           y: point.y,
+          ...(observationRevision === undefined ? {} : { observationRevision }),
         }),
       current: () =>
         sessions.get(sessionId) === session &&

@@ -9,6 +9,22 @@ const explorer = native('computer_use_windows_host_explorer.inc');
 const dispatch = input.slice(input.indexOf('bool DispatchWindowsAction('));
 
 describe('Explorer production pre-send boundary', () => {
+  it('maps agent clicks using the native dispatch point and rejects an old observation', () => {
+    const measure = explorer.slice(
+      explorer.indexOf('bool MeasureWindowsExplorerViewUnguarded('),
+      explorer.indexOf('bool MeasureWindowsExplorerView('),
+    );
+    expect(measure).toContain('revision != session->observation_revision');
+    expect(measure).toContain('WindowsActionPoint(session->observation_bounds, metadata, &point)');
+    expect(measure.indexOf('session->explorer_dispatch_evidence.reset()')).toBeLessThan(
+      measure.indexOf('revision != session->observation_revision'),
+    );
+    expect(measure.indexOf('WindowsActionPoint(')).toBeLessThan(
+      measure.indexOf('ReadWindowsExplorerShellView('),
+    );
+    expect(dispatch).toContain('WindowsActionPoint(bounds, metadata, &click_point)');
+    expect(dispatch).toContain('SendWindowsExplorerPointInput(');
+  });
   it('rechecks after target/page validation and serializes each chunk with Stop', () => {
     const send = input.slice(
       input.indexOf('UINT SendInputForBoundTarget('),
