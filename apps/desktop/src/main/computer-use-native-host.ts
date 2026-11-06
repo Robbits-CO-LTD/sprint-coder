@@ -2330,6 +2330,8 @@ export function createComputerUseNativeHost(
         pids.push(resolvedPid);
       const publicCandidate = stripNativeEphemeralFields(raw);
       delete publicCandidate['processStartTime'];
+      // Measured Explorer facts are private Host evidence, not a renderer window field.
+      delete publicCandidate['facts'];
       delete publicCandidate['quarantineResume'];
       delete publicCandidate['executableDigest'];
       publicCandidate['policyLanguage'] = nativePolicyLanguage(raw);
