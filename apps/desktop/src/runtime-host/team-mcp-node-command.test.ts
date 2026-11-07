@@ -1,14 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 
 describe('Team MCP Node command', () => {
-  it('uses PATH Node instead of the fuse-disabled Electron executable on POSIX', () => {
+  it('uses PATH Node for macOS development and Linux', () => {
     expect(teamMcpNodeCommand('darwin')).toBe('node');
     expect(teamMcpNodeCommand('linux')).toBe('node');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'uses only the bundled executable for a packaged macOS runtime',
+    () => {
+      const resources = mkdtempSync(join(tmpdir(), 'sprint-coder-mac-node-'));
+      try {
+        writeFileSync(join(resources, 'app.asar'), 'fixture');
+        expect(() => teamMcpNodeCommand('darwin', { PATH: '' }, resources)).toThrow(
+          /Bundled Node\.js is missing/,
+        );
+        const executable = join(resources, 'node');
+        writeFileSync(executable, 'fixture', { mode: 0o700 });
+        expect(teamMcpNodeCommand('darwin', { PATH: '' }, resources)).toBe(executable);
+      } finally {
+        rmSync(resources, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform !== 'win32')('prefers the packaged Node executable on Windows', () => {
     const resources = mkdtempSync(join(tmpdir(), 'sprint-coder-node-resources-'));
