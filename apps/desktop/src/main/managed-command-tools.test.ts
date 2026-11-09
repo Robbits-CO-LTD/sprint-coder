@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolBroker, type ManagedToolLifecycleEvent } from './tool-broker';
 import { ToolRegistry, type Capability } from '@sprint-coder/domain';
 import {
+  COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
@@ -269,6 +270,80 @@ describe('managed command root selection (issue #840)', () => {
     } finally {
       prepare.mockRestore();
       await sessions.dispose();
+    }
+  });
+});
+
+describe('desktop control Workspace roots', () => {
+  it('hands the Turn roots to the runner on exec_command, background exec_command and run_command', async () => {
+    const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
+    const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
+    roots.push(primary, secondary);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary } = createCommandBoundary(primary);
+    const single = boundary.persistence.readTurnWorkspaceSet('turn')!;
+    boundary.persistence.readTurnWorkspaceSet = () => ({
+      ...single,
+      roots: [
+        single.roots[0]!,
+        { rootId: 'root-b', path: secondary, label: 'b', role: 'secondary', status: 'available' },
+      ],
+    });
+    const result: CommandResult = {
+      executionId: 'execution',
+      exitCode: 0,
+      signal: null,
+      canceled: false,
+      termination: 'natural',
+      durationMs: 1,
+      outputBytes: 0,
+      truncated: false,
+    };
+    const managedRunner = new CommandRunner({ sandboxed: true });
+    const directRunner = new CommandRunner({ sandboxed: true });
+    const managedRun = vi.spyOn(managedRunner, 'run').mockResolvedValue(result);
+    const directRun = vi.spyOn(directRunner, 'run').mockResolvedValue(result);
+    const sessions = new ManagedCommandSessions(managedRunner);
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+    );
+    registerCommandRunnerTool(broker, managedRunner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
+    registerCommandRunnerTool(broker, directRunner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-roots',
+      turnId: 'turn-desktop-roots',
+      workspaceId: 'workspace-desktop-roots',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const input = { executable: process.execPath, argv: ['-e', ''], purpose: 'desktop roots' };
+    const expected = expect.objectContaining({
+      desktopControlWorkspaceRoots: [primary, secondary],
+    });
+    try {
+      for (const [callId, providerName, background] of [
+        ['exec-foreground', 'exec_command', false],
+        ['exec-background', 'exec_command', true],
+        ['run-command', 'run_command', false],
+      ] as const)
+        await broker.dispatch({
+          ...owner,
+          callId,
+          providerName,
+          input: { ...input, ...(background ? { background } : {}) },
+        });
+      await vi.waitFor(() => expect(managedRun).toHaveBeenCalledTimes(2));
+      expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+    } finally {
+      await broker.dispose();
+      await sessions.dispose();
+      managedRun.mockRestore();
+      directRun.mockRestore();
     }
   });
 });

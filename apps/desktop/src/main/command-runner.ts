@@ -5,6 +5,7 @@ import { stat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import {
+  basename,
   delimiter,
   extname,
   isAbsolute,
@@ -25,6 +26,7 @@ import {
   revalidatePathGuard,
   type PathGuard,
 } from './path-guard';
+import { runsOutsideCommandSandbox } from './agent-desktop';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -671,6 +673,12 @@ type RunnerOptions = Readonly<{
 
 export type RunOptions = Readonly<{
   signal?: AbortSignal;
+  /**
+   * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
+   * sandbox when it directly runs the native agent-desktop binary outside every root (see
+   * `runsOutsideCommandSandbox`); every other command stays inside.
+   */
+  desktopControlWorkspaceRoots?: readonly string[];
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
   onBatch?: (chunks: readonly CommandOutputChunk[]) => void | Promise<void>;
@@ -812,7 +820,20 @@ export class CommandRunner {
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
-      const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
+      // Decided after revalidation, so it judges the sealed image that is about to start. An image
+      // with an argv prefix runs through an interpreter and never qualifies.
+      const desktopControl =
+        this.sandboxed &&
+        options.desktopControlWorkspaceRoots !== undefined &&
+        executionImage.argvPrefix.length === 0 &&
+        runsOutsideCommandSandbox(spec.absoluteExecutable, options.desktopControlWorkspaceRoots);
+      if (desktopControl)
+        secureLogger.info(
+          'Desktop control command runs outside the command sandbox',
+          { executable: basename(spec.absoluteExecutable) },
+          { event: 'command_desktop_control_unsandboxed' },
+        );
+      const sandboxExecutable = !this.sandboxed || desktopControl ? null : sandboxRunnerPath();
       const launchImage =
         process.platform === 'linux' && sandboxExecutable !== null
           ? linuxSandboxExecutionImage(executionImage)

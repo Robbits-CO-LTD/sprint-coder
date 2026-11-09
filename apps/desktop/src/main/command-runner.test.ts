@@ -35,6 +35,8 @@ import {
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import * as sandboxRunnerModule from './sandbox-runner';
+import * as agentDesktopModule from './agent-desktop';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
@@ -2104,6 +2106,56 @@ describe('rejectWindowsSandboxedNodeTestIsolation node version instruction', () 
     ).not.toThrow();
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+describe('desktop control outside the command sandbox', () => {
+  it('starts a command outside the sandbox only when the agent-desktop judgment says so', async () => {
+    const root = await workspace();
+    const prepare = () =>
+      prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', "process.stdout.write('desktop-control-ok')"],
+      });
+    const judge = vi.spyOn(agentDesktopModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
+    try {
+      const runner = new CommandRunner({ sandboxed: true });
+      const spec = await prepare();
+      const chunks: CommandOutputChunk[] = [];
+      const result = await runner.run(spec, {
+        desktopControlWorkspaceRoots: [root],
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(chunks.map(({ text }) => text).join('')).toContain('desktop-control-ok');
+      expect(judge).toHaveBeenCalledWith(spec.absoluteExecutable, [root]);
+      expect(runnerPath).not.toHaveBeenCalled();
+
+      // A negative judgment, or no Turn roots at all, keeps the sandbox runner.
+      runnerPath.mockImplementation(() => {
+        throw new Error('sandbox runner requested');
+      });
+      judge.mockReturnValue(false);
+      await expect(
+        runner.run(await prepare(), { desktopControlWorkspaceRoots: [root] }),
+      ).rejects.toThrow('sandbox runner requested');
+      judge.mockClear();
+      judge.mockReturnValue(true);
+      await expect(runner.run(await prepare())).rejects.toThrow('sandbox runner requested');
+      expect(judge).not.toHaveBeenCalled();
+      // An unsandboxed runner never asks.
+      await expect(
+        new CommandRunner().run(await prepare(), { desktopControlWorkspaceRoots: [root] }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(judge).not.toHaveBeenCalled();
+    } finally {
+      judge.mockRestore();
+      runnerPath.mockRestore();
+    }
+  }, 15_000);
 });
 
 async function expectProcessDead(pid: number): Promise<void> {

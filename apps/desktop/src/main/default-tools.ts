@@ -425,6 +425,7 @@ export function registerCommandRunnerTool(
 ): void {
   const commandIds = new WeakMap<object, string>();
   const resourceKeys = new WeakMap<object, string>();
+  const workspaceRoots = new WeakMap<object, readonly string[]>();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -482,6 +483,10 @@ export function registerCommandRunnerTool(
       });
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
+      workspaceRoots.set(
+        spec,
+        workspace.roots.map(({ path }) => path),
+      );
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -512,8 +517,12 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
+      const roots = workspaceRoots.get(spec);
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),
+        // Lets the runner start the native agent-desktop binary, and nothing else, outside the
+        // command sandbox; the approval and Stop below stay the same.
+        ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
         },

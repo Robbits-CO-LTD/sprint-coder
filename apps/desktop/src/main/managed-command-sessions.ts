@@ -57,7 +57,15 @@ export class ManagedCommandSessions {
   async start(
     spec: ExecutionSpec,
     owner: Readonly<{ taskId: string; turnId: string }>,
-    hooks: Pick<RunOptions, 'signal' | 'beforeSpawn' | 'onStarted' | 'onChunk' | 'onBatch'> = {},
+    hooks: Pick<
+      RunOptions,
+      | 'signal'
+      | 'beforeSpawn'
+      | 'onStarted'
+      | 'onChunk'
+      | 'onBatch'
+      | 'desktopControlWorkspaceRoots'
+    > = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
     if (this.sessions.size >= this.maxSessions) this.evictTerminal();
@@ -91,6 +99,9 @@ export class ManagedCommandSessions {
       .run(spec, {
         signal: session.controller.signal,
         ...(hooks.beforeSpawn === undefined ? {} : { beforeSpawn: hooks.beforeSpawn }),
+        ...(hooks.desktopControlWorkspaceRoots === undefined
+          ? {}
+          : { desktopControlWorkspaceRoots: hooks.desktopControlWorkspaceRoots }),
         onStarted: (startedProcess) => {
           const { executionId } = startedProcess;
           session.executionId = executionId;

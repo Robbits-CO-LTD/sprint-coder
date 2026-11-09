@@ -112,7 +112,7 @@ AIに起動中のデスクトップアプリを操作させたいときは、外
 npm install -g agent-desktop
 ```
 
-PATHに `agent-desktop` があるか、環境変数 `SPRINT_CODER_AGENT_DESKTOP` に実行ファイルの絶対パスがあると、書き込みのできるAIにだけ使い方が伝わります。AIは通常のコマンドとして実行するので、コマンドの承認とStopがそのまま効きます。macOSでは、Sprint Coderに「アクセシビリティ」の許可が必要です。
+PATHに `agent-desktop` があるか、環境変数 `SPRINT_CODER_AGENT_DESKTOP` に実行ファイルの絶対パスがあると、書き込みのできるAIにだけ、その中の native の実行ファイルの場所と使い方が伝わります。AIは通常のコマンドとして実行するので、コマンドの承認とStopがそのまま効きます。他のアプリの窓が見えるよう、この native の実行ファイル1本だけはコマンドの囲い（sandbox）の外で動きます（Workspaceの中に置いたものは対象外）。ほかのコマンドはすべて囲いの中のままです。macOSでは、Sprint Coderに「アクセシビリティ」の許可が必要です。
 
 ## Local-firstとセキュリティ
 
