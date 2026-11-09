@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { graphStartActivationIntent } from '../../graph-activation-intent';
 import type { GraphMissionReview, GraphSourceCheckInput } from '@sprint-coder/contracts';
 
 const messages: Record<GraphMissionReview['issues'][number]['code'], string> = {
@@ -102,8 +101,6 @@ export function GraphMissionReviewNotice({
         <button
           type="button"
           className="button button-primary"
-          data-computer-use-activation="graph-start"
-          data-computer-use-intent={graphStartActivationIntent(startInput)}
           disabled={action?.state === 'starting' || action?.state === 'started'}
           onClick={() => void begin()}
         >

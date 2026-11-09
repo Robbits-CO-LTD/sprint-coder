@@ -221,10 +221,6 @@ type AppState = {
   imagesByTask: Record<string, GeneratedImage[]>;
   /** Files each Turn changed, newest last (issue #37). Keyed by task and kept in arrival order,
    * which is the order the edits actually happened. */
-  discoveryResultsByTask: Record<
-    string,
-    Extract<TurnEvent, { type: 'computer_use.discovery_result' }>[]
-  >;
   fileChangesByTask: Record<string, { seq: number; turnId: string; changes: FileChange[] }[]>;
   /** The Task whose live file bodies are currently buffered (issue #39). The bodies themselves live
    * in lib/file-edit-buffer.ts; this is only the signal that there is something to show. */
@@ -1029,18 +1025,6 @@ export function handleTurnEvent(
       // future audit view has an obvious place to hook in.
       break;
     }
-    case 'computer_use.discovery_result': {
-      apply((state) => ({
-        discoveryResultsByTask: {
-          ...state.discoveryResultsByTask,
-          [taskId]: [
-            ...(state.discoveryResultsByTask[taskId] ?? []).filter((event) => event.seq !== ev.seq),
-            ev,
-          ],
-        },
-      }));
-      break;
-    }
     case 'files.changed': {
       apply((state) => {
         const existing = state.fileChangesByTask[taskId] ?? [];
@@ -1296,7 +1280,6 @@ export const useAppStore = create<AppState>((set, get) => {
     turnDiffByTask: {},
     interruptedTurnIdsByTask: {},
     imagesByTask: {},
-    discoveryResultsByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
     resolvingApprovalIds: {},
@@ -1937,10 +1920,6 @@ export const useAppStore = create<AppState>((set, get) => {
           activatedSkillsByTask: {
             ...state.activatedSkillsByTask,
             [taskId]: snapshot.activatedSkills ?? [],
-          },
-          discoveryResultsByTask: {
-            ...state.discoveryResultsByTask,
-            [taskId]: snapshot.discoveryResults ?? [],
           },
           turnDiffByTask: {
             ...state.turnDiffByTask,

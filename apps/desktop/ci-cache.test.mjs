@@ -534,8 +534,8 @@ describe('full CI partition contract', () => {
         .map((step) => ({ job, step })),
     );
     expect(cargoSteps).toHaveLength(1);
-    expect(cargoSteps[0].job).toBe('computer-use-native-gate');
-    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
+    expect(cargoSteps[0].job).toBe('platform-tests');
+    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows' && matrix.shard == '1/5'");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
     expect(rust.if).toBe("needs.classify.outputs.full_matrix == 'true'");
@@ -599,16 +599,11 @@ describe('full CI partition contract', () => {
       );
     }
     const required = workflow.jobs.required;
-    expect(required.needs).toContain('computer-use-native-gate');
-    expect(required.needs).toContain('computer-use-windows-v2-harness');
-    expect(required.needs).toContain('computer-use-hung-helper');
     const scope = classifyChanges([], { eventName: 'push' });
     const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
     expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
     for (const dependency of [
-      'computer-use-native-gate',
-      'computer-use-windows-v2-harness',
-      'computer-use-hung-helper',
+      'sandbox-rust-windows',
       'test-macos',
       'package-macos',
       'electron-bridges',

@@ -4,14 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 const repositoryRoot = resolve(__dirname, '../..');
 const workflowFiles = [
-  '.github/workflows/computer-use-final-gate.yml',
-  '.github/workflows/computer-use-evidence-harness.yml',
   '.github/workflows/ci.yml',
   '.github/actions/install-deps/action.yml',
   '.github/actions/install-electron/action.yml',
   '.github/actions/prepare-sandbox/action.yml',
   '.github/workflows/release-beta.yml',
-  '.github/workflows/computer-use-acceptance-build.yml',
   '.github/workflows/node-libuv-watch.yml',
 ] as const;
 
@@ -19,17 +16,12 @@ const workflows = Object.fromEntries(
   workflowFiles.map((file) => [file, readFileSync(resolve(repositoryRoot, file), 'utf8')]),
 ) as Record<(typeof workflowFiles)[number], string>;
 
-const desktopPackage = JSON.parse(
-  readFileSync(resolve(repositoryRoot, 'apps/desktop/package.json'), 'utf8'),
-) as { scripts: Record<string, string> };
-
 const reviewedActionCommits: Record<string, string> = {
   'actions/checkout': '9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   'actions/setup-node': '820762786026740c76f36085b0efc47a31fe5020',
   'actions/cache': '2c8a9bd7457de244a408f35966fab2fb45fda9c8',
   'actions/upload-artifact': 'bbbca2ddaa5d8feaa63e36b76fdaad77386f024f',
   'actions/download-artifact': '70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3',
-  'actions/attest-build-provenance': '977bb373ede98d70efdf65b84cb5f73e068dcc2a',
   'ilammy/msvc-dev-cmd': '0b201ec74fa43914dc39ae48a89fd1d8cb592756',
 };
 
@@ -49,81 +41,7 @@ function allJobBlocks(workflow: string): string[] {
   return starts.map((start, index) => workflow.slice(start, starts[index + 1]));
 }
 
-function stepBlock(job: string, name: string): string {
-  const header = `\n      - name: ${name}`;
-  const start = job.indexOf(header);
-  expect(start, `step ${name} must exist`).toBeGreaterThanOrEqual(0);
-  const next = job.indexOf('\n      - name:', start + header.length);
-  return job.slice(start, next === -1 ? job.length : next);
-}
-
-function expectBuildModeContract(workflow: string, route: 'release' | 'acceptance'): void {
-  if (route === 'release') {
-    expect(workflow, route).not.toContain('--eligibility');
-    expect(workflow, route).not.toContain('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD');
-    return;
-  }
-  // Acceptance packages keep their explicit marker and artifact check regardless of eligibility.
-  const build = jobBlock(workflow, 'acceptance-build');
-  expect(stepBlock(build, 'Make unsigned Windows acceptance artifacts')).toContain(
-    'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: windows-unsigned-acceptance',
-  );
-  expect(stepBlock(build, 'Verify the acceptance mode is compiled into Main')).toContain(
-    'verify-computer-use-acceptance-build.mjs --expect present',
-  );
-}
-
 describe('workflow security boundaries', () => {
-  it('isolates the Windows hung helper live seam in its full-matrix job', () => {
-    const job = jobBlock(workflows['.github/workflows/ci.yml'], 'computer-use-hung-helper');
-    expect(job).toContain('name: Computer Use hung helper seam (Windows)');
-    expect(job).toContain("if: needs.classify.outputs.full_matrix == 'true'");
-    expect(job).toContain('runs-on: windows-2022');
-    expect(job).toContain('timeout-minutes: 30');
-    expect(job).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
-    expect(job).toContain('src/main/computer-use-windows-hung-helper-live-seam.test.ts');
-    // The full-matrix gate fails when this job fails, is cancelled or is skipped.
-    expect(jobBlock(workflows['.github/workflows/ci.yml'], 'required')).toContain(
-      'computer-use-hung-helper,',
-    );
-    const run = stepBlock(job, 'Run hung helper seam and sessionless Stop latency proxy');
-    expect(run).toContain("SPRINT_CODER_HUNG_HELPER_SEAM: '1'");
-    expect(job.indexOf('\n      - name: Initialize MSVC developer environment')).toBeLessThan(
-      job.indexOf('\n      - name: Run hung helper seam and sessionless Stop latency proxy'),
-    );
-    // The opt-in appears exactly once across every workflow: in that step of this job. Dropping it
-    // into another job, or naming the seam spec in another job, would put the live part on a
-    // shard that was not sized for it.
-    for (const [file, workflow] of Object.entries(workflows)) {
-      for (const block of allJobBlocks(workflow)) {
-        if (file === '.github/workflows/ci.yml' && block.startsWith('  computer-use-hung-helper:'))
-          continue;
-        expect(block, file).not.toContain('SPRINT_CODER_HUNG_HELPER_SEAM');
-        expect(block, file).not.toContain('hung-helper-live-seam');
-      }
-    }
-    expect(
-      Object.values(workflows)
-        .join('\n')
-        .match(/SPRINT_CODER_HUNG_HELPER_SEAM/gu),
-    ).toHaveLength(1);
-    // The seam itself stays opt-in: without the exact gate every live case is a counted skip.
-    const seam = readFileSync(
-      resolve(
-        repositoryRoot,
-        'apps/desktop/src/main/computer-use-windows-hung-helper-live-seam.test.ts',
-      ),
-      'utf8',
-    );
-    expect(seam).toContain("const enabled = process.env['SPRINT_CODER_HUNG_HELPER_SEAM'] === '1';");
-    expect(seam).toContain('if (!enabled) return;');
-    const liveCases = seam.slice(seam.indexOf("describe('real hung helper"));
-    expect(liveCases.match(/\bit\(/gu)?.length).toBeGreaterThan(0);
-    expect(liveCases.match(/\blive\(context\);/gu)?.length).toBe(
-      liveCases.match(/\bit\(/gu)?.length,
-    );
-  }, 5_000);
-
   it('pins every third-party action to its reviewed immutable commit', () => {
     for (const [file, workflow] of Object.entries(workflows)) {
       const refs = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)@([^\s#]+)/gmu)];
@@ -137,7 +55,7 @@ describe('workflow security boundaries', () => {
     }
   });
 
-  it('scopes permissions per job and protects artifact/attestation jobs', () => {
+  it('scopes permissions per job', () => {
     for (const [file, workflow] of Object.entries(workflows)) {
       if (file.startsWith('.github/actions/')) continue;
       expect(workflow).toMatch(/^permissions:\s*\{\}\s*$/mu);
@@ -146,79 +64,9 @@ describe('workflow security boundaries', () => {
         if (/^\s+uses:/mu.test(block)) expect(block).toMatch(/^ {4}permissions:/mu);
       }
     }
-
-    const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
-    for (const job of [
-      'verify-evidence-attestation',
-      'verify-windows-package',
-      'verify-macos-package',
-      'validate-evidence',
-    ]) {
-      expect(jobBlock(finalGate, job)).toContain('environment: computer-use-final-gate');
-    }
-    expect(jobBlock(finalGate, 'verify-evidence-attestation')).toContain('attestations: read');
-    expect(jobBlock(finalGate, 'verify-evidence-attestation')).toContain('actions: read');
-    expect(jobBlock(finalGate, 'verify-windows-package')).toContain(
-      'needs: [validate-dispatch, verify-evidence-attestation]',
-    );
-    expect(finalGate.indexOf('gh attestation verify')).toBeLessThan(
-      finalGate.indexOf('Assert-PeAmd64'),
-    );
-    const evidenceHarness = workflows['.github/workflows/computer-use-evidence-harness.yml'];
-    for (const job of ['collect-transcript', 'seal-evidence']) {
-      expect(jobBlock(evidenceHarness, job)).toContain('environment: computer-use-final-gate');
-    }
   });
 
-  it('does not let protected jobs run a candidate ref and binds package provenance', () => {
-    const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
-    expect(finalGate).toContain('WORKFLOW_REF: ${{ github.ref }}');
-    expect(finalGate).toContain('[[ "${WORKFLOW_REF}" == \'refs/heads/main\' ]]');
-    expect(finalGate).toContain(
-      '[[ "${package_path}" == \'.github/workflows/release-beta.yml\' ]]',
-    );
-    expect(finalGate).toContain('[[ "${package_event}" == \'push\' ]]');
-    expect(finalGate).toContain('package_branch="$(jq -r \'.head_branch\' <<< "${metadata}")"');
-    expect(finalGate).toMatch(/package_branch.*\^v\[0-9\]/u);
-    expect(finalGate).toContain(
-      'evidence_branch="$(jq -r \'.head_branch\' <<< "${evidence_metadata}")"',
-    );
-    expect(finalGate).not.toContain("jq -r '.ref'");
-    expect(finalGate).toContain('[[ "${package_repository}" == "${GITHUB_REPOSITORY}" ]]');
-    expect(finalGate).toContain('--signer-workflow');
-    expect(finalGate).toContain('--source-digest "${SOURCE_COMMIT}"');
-    expect(finalGate).toContain('--deny-self-hosted-runners');
-    expect(finalGate).toContain('ref: ${{ github.sha }}');
-
-    const evidenceHarness = workflows['.github/workflows/computer-use-evidence-harness.yml'];
-    expect(evidenceHarness).toContain('WORKFLOW_REF: ${{ github.ref }}');
-    expect(evidenceHarness).toContain('[[ "${WORKFLOW_REF}" == \'refs/heads/main\' ]]');
-    expect(evidenceHarness).toContain(
-      '[[ "${package_path}" == \'.github/workflows/release-beta.yml\' ]]',
-    );
-    expect(evidenceHarness).toContain('[[ "${package_event}" == \'push\' ]]');
-    expect(evidenceHarness).toContain(
-      'package_branch="$(jq -r \'.head_branch\' <<< "${metadata}")"',
-    );
-    expect(evidenceHarness).toMatch(/package_branch.*\^v\[0-9\]/u);
-    expect(evidenceHarness).not.toContain("jq -r '.ref'");
-    expect(evidenceHarness).toContain('ref: ${{ github.sha }}');
-  });
-
-  it('checks the expected release signer and the actual Windows PE machine type without executing packages', () => {
-    const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
-    expect(finalGate).toContain('EXPECTED_WINDOWS_SIGNER_THUMBPRINT');
-    expect(finalGate).toContain('EXPECTED_WINDOWS_SIGNER_SUBJECT');
-    expect(finalGate).toContain('EXPECTED_MACOS_TEAM_IDENTIFIER');
-    expect(finalGate).toContain('SignerCertificate.Subject');
-    expect(finalGate).toContain('function Assert-PeAmd64');
-    expect(finalGate).toContain('0x8664');
-    expect(finalGate).toContain('foreach ($pePath in @($app[0].FullName, $helper[0].FullName))');
-    expect(finalGate).not.toContain(
-      'foreach ($pePath in @($installer[0].FullName) + $portableExecutables)',
-    );
-    expect(finalGate).not.toContain('--probe-json');
-
+  it('keeps release signing and publication behind their protected environments', () => {
     const release = workflows['.github/workflows/release-beta.yml'];
     const makeStart = release.indexOf('\n  make:');
     const releaseStart = release.indexOf('\n  release:');
@@ -232,258 +80,5 @@ describe('workflow security boundaries', () => {
     expect(
       publication.indexOf('Require configured protected publication environment'),
     ).toBeLessThan(publication.indexOf('uses: actions/checkout@'));
-  });
-
-  it('provides a protected signed-Windows package source for the external gate', () => {
-    const release = workflows['.github/workflows/release-beta.yml'];
-    const signedWindows = jobBlock(release, 'make-windows-signed');
-    expect(signedWindows).toContain(
-      "if: ${{ vars.COMPUTER_USE_SIGNED_WINDOWS_GATE_ENABLED == 'true' }}",
-    );
-    expect(signedWindows).toContain('runs-on: windows-2022');
-    expect(signedWindows).toContain('environment: windows-signing');
-    expect(signedWindows).toContain('WINDOWS_SIGNING_ENVIRONMENT_SENTINEL');
-    expect(signedWindows).toContain('SPRINT_CODER_WINDOWS_CERTIFICATE_FILE');
-    expect(signedWindows).toContain('SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD');
-    expect(signedWindows).not.toContain('SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS');
-    expect(signedWindows).toContain('npm run make:windows');
-    expect(signedWindows).toContain('Get-AuthenticodeSignature');
-    const attestation = jobBlock(release, 'attest-computer-use-packages');
-    expect(attestation).toContain('needs: [make, make-windows-signed]');
-    expect(attestation).toContain('runs-on: ubuntu-latest');
-    expect(attestation).toContain('environment: computer-use-final-gate');
-    expect(attestation).toContain('actions/attest-build-provenance@');
-    expect(attestation).toContain('id-token: write');
-    expect(attestation).toContain('attestations: write');
-    expect(attestation).toContain('subject-path:');
-  });
-
-  it('builds the Computer Use native host through the canonical signed-Windows make chain', () => {
-    const release = workflows['.github/workflows/release-beta.yml'];
-    const signedWindows = jobBlock(release, 'make-windows-signed');
-    const make = stepBlock(signedWindows, 'Make signed Windows gate artifacts');
-
-    expect(make).toContain('working-directory: apps/desktop');
-    expect(make).toContain('npm run make:windows');
-    expect(desktopPackage.scripts['make:windows']).toContain('npm run prepare:desktop');
-    expect(desktopPackage.scripts['prepare:desktop']).toContain(
-      'node ../../build-computer-use-native.mjs',
-    );
-  });
-
-  it('keeps the Windows certificate password out of cross-step environment files', () => {
-    const release = workflows['.github/workflows/release-beta.yml'];
-    const signedWindows = jobBlock(release, 'make-windows-signed');
-    const materialize = stepBlock(
-      signedWindows,
-      'Materialize temporary Windows signing certificate',
-    );
-    const make = stepBlock(signedWindows, 'Make signed Windows gate artifacts');
-
-    expect(materialize).not.toContain('WINDOWS_CERTIFICATE_PASSWORD');
-    expect(signedWindows).not.toMatch(/SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD=.*GITHUB_ENV/u);
-    expect(make).toContain(
-      'SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}',
-    );
-  });
-
-  it('verifies package attestations before any final-gate package parsing or execution', () => {
-    const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
-    for (const [job, firstUse] of [
-      ['verify-windows-package', 'Expand-Archive'],
-      ['verify-macos-package', 'hdiutil attach'],
-    ] as const) {
-      const block = jobBlock(finalGate, job);
-      expect(block).toContain('attestations: read');
-      expect(block).toContain('GH_TOKEN: ${{ github.token }}');
-      expect(block).toContain('gh attestation verify');
-      expect(block).toContain('.github/workflows/release-beta.yml');
-      expect(block).toMatch(/--source-digest (?:"\$\{SOURCE_COMMIT\}"|\$env:SOURCE_COMMIT)/u);
-      expect(block).toContain('--deny-self-hosted-runners');
-      expect(block.indexOf('gh attestation verify')).toBeLessThan(block.indexOf(firstUse));
-    }
-
-    const windows = jobBlock(finalGate, 'verify-windows-package');
-    const windowsAttestation = stepBlock(
-      windows,
-      'Verify Windows package attestations before parsing',
-    );
-    const windowsPackage = stepBlock(
-      windows,
-      'Verify Authenticode, native manifest, and package digest',
-    );
-    expect(windowsAttestation).toContain('GH_TOKEN: ${{ github.token }}');
-    expect(windowsAttestation).toContain('gh attestation verify');
-    expect(windowsPackage).not.toContain('GH_TOKEN');
-    expect(windowsPackage).not.toContain('gh attestation verify');
-    expect(windowsPackage).not.toContain('--probe-json');
-
-    const macos = jobBlock(finalGate, 'verify-macos-package');
-    const macosAttestation = stepBlock(macos, 'Verify macOS package attestation before parsing');
-    const macosPackage = stepBlock(
-      macos,
-      'Verify notarization, signatures, native manifest, and package digest',
-    );
-    expect(macosAttestation).toContain('GH_TOKEN: ${{ github.token }}');
-    expect(macosAttestation).toContain('gh attestation verify');
-    expect(macosPackage).not.toContain('GH_TOKEN');
-    expect(macosPackage).not.toContain('gh attestation verify');
-  });
-
-  it('builds and checks the native in both eligibility modes on macOS and Windows, and releases only v1', () => {
-    const ci = workflows['.github/workflows/ci.yml'];
-    const gate = jobBlock(ci, 'computer-use-native-gate');
-    const entries = [...gate.matchAll(/- label: (.+)\n\s+os: (.+)\n\s+eligibility: (v[12])/gu)].map(
-      (match) => [match[1], match[2], match[3]],
-    );
-    expect(entries).toEqual([
-      ['macOS', 'macos-latest', 'v1'],
-      ['macOS v2', 'macos-latest', 'v2'],
-      ['Windows', 'windows-2022', 'v1'],
-      ['Windows v2', 'windows-2022', 'v2'],
-    ]);
-    expect(stepBlock(gate, 'Compile and manifest native artifact')).toContain(
-      'npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}',
-    );
-    const verify = stepBlock(gate, 'Verify the built artifact attests what its manifest declares');
-    expect(verify).toContain(
-      'verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require',
-    );
-    expect(verify).toContain('--report=${{ runner.temp }}/computer-use-eligibility-report.json');
-    const loaderTests = stepBlock(gate, 'Verify Gate 0 loader tests');
-    expect(loaderTests).toContain(
-      'COMPUTER_USE_ELIGIBILITY_REPORT: ${{ runner.temp }}/computer-use-eligibility-report.json',
-    );
-    expect(loaderTests).toContain('src/main/computer-use-eligibility-artifact.test.ts');
-    expect(loaderTests).toContain('verify-computer-use-eligibility.test.mjs');
-    // The Windows ticket behaviour seam compiles production code with the runner's compiler, so the
-    // gate (which has cl.exe on Windows and clang++ on macOS) must run it.
-    expect(loaderTests).toContain('src/main/computer-use-windows-ticket-seam.test.ts');
-    // The macOS harness sees the generated header of the mode that was just built.
-    expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
-    const windowsHarness = stepBlock(gate, 'Run protocol harness and attempt Windows ASan');
-    expect(windowsHarness).toContain('$header = (Resolve-Path $header).Path');
-    expect(windowsHarness.indexOf('$header = (Resolve-Path $header).Path')).toBeLessThan(
-      windowsHarness.indexOf('$declaration ='),
-    );
-    // The harness is told which mode its matrix row built, and asserts it.
-    expect(gate).toContain(
-      "-DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }}",
-    );
-    const harness = readFileSync(
-      resolve(repositoryRoot, 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'),
-      'utf8',
-    );
-    expect(harness).toContain('SPRINT_CODER_EXPECT_ELIGIBILITY_V2');
-    expect(harness).toContain('eligibility-mode-matches-matrix');
-  });
-
-  it('keeps the portable Windows v2 harnesses and seams alongside the artifact builds', () => {
-    // The portable seam row builds no artifact; it passes
-    // the v2 mode to the compiler of the portable harnesses and the seam only.
-    const ci = workflows['.github/workflows/ci.yml'];
-    const row = jobBlock(ci, 'computer-use-windows-v2-harness');
-    expect(row).toContain('name: Computer Use native Windows v2 harness');
-    expect(row).toContain('runs-on: windows-2022');
-    expect(row).not.toContain('build:computer-use-native');
-    expect(row).not.toContain('--eligibility');
-    expect(stepBlock(row, 'Check the generated deny ruleset is current')).toContain(
-      'node generate-computer-use-deny-ruleset.mjs --check',
-    );
-    const harnesses = stepBlock(row, 'Run the portable harnesses compiled as v2');
-    expect(harnesses).toContain(
-      "'computer_use_protocol_fuzz', 'computer_use_target_eligibility_harness'",
-    );
-    expect(harnesses).toContain(
-      '/DSPRINT_CODER_ELIGIBILITY_V2=1 /DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=1',
-    );
-    const seam = stepBlock(row, 'Run the target eligibility seam compiled as v2');
-    expect(seam).toContain("COMPUTER_USE_SEAM_ELIGIBILITY_V2: '1'");
-    expect(seam).toContain('src/main/computer-use-target-eligibility-seam.test.ts');
-    // S5-c-3 PR-2: the host's target facts, live on the same runner (MSVC is on its PATH).
-    expect(stepBlock(row, 'Run the Windows target facts live seam')).toContain(
-      'src/main/computer-use-windows-target-facts-live-seam.test.ts',
-    );
-    // S5-c-3 PR-5: the v2 judgement of processes the seam starts itself, on the same runner.
-    expect(stepBlock(row, 'Run the Windows target facts live seam')).toContain(
-      'src/main/computer-use-windows-v2-targets.test.ts',
-    );
-    const required = jobBlock(ci, 'required');
-    expect(required).toContain('computer-use-windows-v2-harness,');
-    expect(required).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
-    expect(required).toContain('run: node ci-scope.mjs gate');
-    expect(row).toContain("if: needs.classify.outputs.full_matrix == 'true'");
-    // The separate native gate also builds a real Windows V2 artifact.
-    const gate = jobBlock(ci, 'computer-use-native-gate');
-    expect(gate).toMatch(/os: windows-2022\n\s+eligibility: v2/u);
-    // The macOS rows run the same target eligibility harness with clang.
-    expect(stepBlock(gate, 'Run protocol harness with macOS sanitizers')).toContain(
-      'computer_use_target_eligibility_harness.cc',
-    );
-  });
-
-  it('release_beta_remains_v1_without_acceptance_mode', () => {
-    // This workflow handles both stable and beta tags.
-    const release = workflows['.github/workflows/release-beta.yml'];
-    expect(release).toContain("prerelease='true'");
-    expect(release).toContain("prerelease='false'");
-    expectBuildModeContract(release, 'release');
-  });
-
-  it.each([
-    'run: npm run build:computer-use-native -- --eligibility=v2',
-    'run: node build-computer-use-native.mjs --eligibility v2',
-    'SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: windows-unsigned-acceptance',
-    '$env:SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD = "windows-unsigned-acceptance"',
-    'echo "SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD=windows-unsigned-acceptance" >> $GITHUB_ENV',
-  ])('rejects a release build mode override: %s', (override) => {
-    const release = workflows['.github/workflows/release-beta.yml'];
-    expect(() => expectBuildModeContract(`${release}\n${override}\n`, 'release')).toThrow();
-  });
-
-  it.each(['', '--eligibility=v2', '--eligibility v2'])(
-    'keeps the acceptance build contract independent of release mode: %s',
-    (eligibility) => {
-      const acceptance = workflows['.github/workflows/computer-use-acceptance-build.yml'];
-      // N7-7 can select v2 here without changing the release contract or today's workflow.
-      const candidate = eligibility
-        ? `${acceptance}\n      - run: npm run build:computer-use-native -- ${eligibility}\n`
-        : acceptance;
-      expectBuildModeContract(candidate, 'acceptance');
-    },
-  );
-
-  it('keeps shared package builders and evidence workflows at the default eligibility mode', () => {
-    // Every route that builds the Computer Use native for a package, by either spelling of its
-    // name, keeps the v1 default. Forge permits an explicit local build environment override.
-    const rootPackage = JSON.parse(
-      readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8'),
-    ) as { scripts: Record<string, string> };
-    const builders = (scripts: Record<string, string>) =>
-      Object.entries(scripts).filter(([, script]) => /build[-:]computer-use-native/u.test(script));
-    // The guard must not be vacuous: the routes it is about really exist.
-    expect(builders(rootPackage.scripts).map(([name]) => name)).toContain(
-      'build:computer-use-native',
-    );
-    expect(builders(desktopPackage.scripts).map(([name]) => name)).toContain('prepare:desktop');
-    for (const [name, script] of [
-      ...builders(rootPackage.scripts),
-      ...builders(desktopPackage.scripts),
-    ])
-      expect(script, name).not.toContain('--eligibility');
-    const forge = readFileSync(resolve(repositoryRoot, 'apps/desktop/forge.config.ts'), 'utf8');
-    expect(forge).toContain('build-computer-use-native.mjs');
-    expect(forge).toContain("process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY'] === undefined");
-    expect(forge).toContain('? []');
-    expect(forge).toContain(
-      "`--eligibility=${process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY']}`",
-    );
-    for (const file of [
-      '.github/workflows/computer-use-final-gate.yml',
-      '.github/workflows/computer-use-evidence-harness.yml',
-    ] as const)
-      expect(workflows[file], file).not.toContain('--eligibility');
-    // The CI gate already selects its matrix mode explicitly.
-    expect(workflows['.github/workflows/ci.yml']).toContain('--eligibility=');
   });
 });

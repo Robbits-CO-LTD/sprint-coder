@@ -9,20 +9,7 @@ export const toolKinds = [
   'network',
   'backgroundTask',
   'agentControl',
-  'computer',
-  'computerTarget',
 ] as const;
-export const computerUseToolKind = 'computer' as const;
-/**
- * Target discovery and session teardown, as seen by the outer Task agent.
- *
- * `computer` is the in-session vocabulary and is hidden from everyone except the Computer Use
- * controller. These tools are the opposite case: they are the only place a target may be chosen, so
- * they must reach the agent that talks to the user — and nowhere else. A subagent, a Team Worker, or
- * a background Turn has no user in front of it to authorise desktop control, so the audience filter
- * below narrows this kind to `chat` instead of widening `computer`.
- */
-export const computerTargetToolKind = 'computerTarget' as const;
 const toolSideEffects = ['none', 'read', 'write', 'process', 'network', 'control'] as const;
 const toolRisks = ['low', 'medium', 'high'] as const;
 const toolExecutionTargets = ['main', 'utility', 'command-runner', 'mcp-gateway'] as const;
@@ -32,14 +19,6 @@ export type ToolSideEffect = (typeof toolSideEffects)[number];
 export type ToolRisk = (typeof toolRisks)[number];
 export type ToolExecutionTarget = (typeof toolExecutionTargets)[number];
 export type ToolImplementationKind = (typeof toolImplementationKinds)[number];
-export const toolRegistryAudiences = [
-  'chat',
-  'managed-coding',
-  'team',
-  'background',
-  'computer-controller',
-] as const;
-export type ToolRegistryAudience = (typeof toolRegistryAudiences)[number];
 export type WorkspaceBinding =
   | Readonly<{ kind: 'none' }>
   | Readonly<{ kind: 'any' }>
@@ -171,14 +150,6 @@ const TOOL_ID_COMPONENT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const TOOL_VERSION = /^[0-9][a-zA-Z0-9._-]{0,31}$/;
 const PROVIDER_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
-
-export function isComputerUseToolKind(kind: ToolKind): boolean {
-  return kind === computerUseToolKind;
-}
-
-export function isComputerTargetToolKind(kind: ToolKind): boolean {
-  return kind === computerTargetToolKind;
-}
 
 export function createToolId(parts: ToolIdParts): ToolId {
   validateToolIdParts(parts);
@@ -555,21 +526,9 @@ export class ToolRegistry {
   }
 
   getByKind(kind: ToolKind): readonly ToolDefinition[] {
-    return this.getByKindForAudience(kind, 'chat');
-  }
-
-  protected getByKindForAudience(
-    kind: ToolKind,
-    audience: ToolRegistryAudience,
-  ): readonly ToolDefinition[] {
     return Object.freeze(
       [...this.definitions.values()]
-        .filter(
-          (definition) =>
-            definition.kind === kind &&
-            (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)) &&
-            (audience === 'chat' || !isComputerTargetToolKind(definition.kind)),
-        )
+        .filter((definition) => definition.kind === kind)
         .sort((left, right) => left.toolId.localeCompare(right.toolId)),
     );
   }
@@ -579,24 +538,11 @@ export class ToolRegistry {
     workspaceId: string | null;
     availableToolIds?: readonly ToolId[];
   }): ToolCatalogSnapshot {
-    return this.createSnapshotForAudience(input, 'chat');
-  }
-
-  protected createSnapshotForAudience(
-    input: {
-      providerId: string;
-      workspaceId: string | null;
-      availableToolIds?: readonly ToolId[];
-    },
-    audience: ToolRegistryAudience,
-  ): ToolCatalogSnapshot {
     if (!TOOL_ID_COMPONENT.test(input.providerId)) throw new Error('Invalid provider id');
     const available =
       input.availableToolIds === undefined ? null : new Set<ToolId>(input.availableToolIds);
     const eligible = [...this.definitions.values()].filter(
       (definition) =>
-        (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)) &&
-        (audience === 'chat' || !isComputerTargetToolKind(definition.kind)) &&
         (available === null || available.has(definition.toolId)) &&
         (definition.providerCompatibility.includes('*') ||
           definition.providerCompatibility.includes(input.providerId)) &&
@@ -632,27 +578,6 @@ export class ToolRegistry {
     return deepFreeze({ ...snapshotFacts, digest: digestToolCatalogValue(snapshotFacts) });
   }
 }
-
-/**
- * The only registry surface that can advertise Computer Use.  Keeping this as a separate type
- * makes the renderer/runtime call site explicit and prevents a regular Chat or Team snapshot from
- * accidentally opting into the controller audience.
- */
-export class ComputerUseToolRegistry extends ToolRegistry {
-  override createSnapshot(input: {
-    providerId: string;
-    workspaceId: string | null;
-    availableToolIds?: readonly ToolId[];
-  }): ToolCatalogSnapshot {
-    return this.createSnapshotForAudience(input, 'computer-controller');
-  }
-
-  override getByKind(kind: ToolKind): readonly ToolDefinition[] {
-    return this.getByKindForAudience(kind, 'computer-controller');
-  }
-}
-
-export const ControllerToolRegistry = ComputerUseToolRegistry;
 
 export function verifyToolCatalogSnapshot(snapshot: ToolCatalogSnapshot): boolean {
   try {
@@ -789,10 +714,7 @@ function validateAuthorityMetadata(
                   (required.has('workspace.read') || required.has('filesystem.external.read')))
               : input.kind === 'backgroundTask' || input.kind === 'agentControl'
                 ? input.sideEffect === 'control' && input.requiredCapabilities.length > 0
-                : input.kind === 'computer' || input.kind === 'computerTarget'
-                  ? input.sideEffect === 'control' &&
-                    (required.has('computer.observe') || required.has('computer.control'))
-                  : false;
+                : false;
   if (!matchesKind) throw new Error('ToolKind, side effect, and capability are inconsistent');
 }
 

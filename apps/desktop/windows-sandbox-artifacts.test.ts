@@ -15,43 +15,8 @@ afterEach(() => {
 const runner = 'resources/sprint-coder-sandbox-runner.exe';
 const seal = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 
-const addon = 'resources/sprint_coder_computer_use_windows_main.node';
-const nativeManifest = 'resources/computer-use-native.manifest.json';
-function nativeEntries(prefix = ''): [string, string][] {
-  return [
-    [prefix + addon, 'signed-addon'],
-    [
-      prefix + nativeManifest,
-      JSON.stringify({
-        version: 1,
-        sourceCommit: 'a'.repeat(40),
-        platform: 'win32',
-        architecture: 'x64',
-        protocolVersion: 1,
-        apiVersion: 3,
-        nativeVersion: 'fixture',
-        moduleDigest: seal('helper'),
-        binaryDigest: seal('helper'),
-        signerDigest: null,
-        capabilities: ['observe'],
-        windowsMainAddon: {
-          kind: 'windows-main-addon',
-          file: addon.split('/')[1],
-          sha256: seal('signed-addon'),
-        },
-      }),
-    ],
-  ];
-}
-
 // Minimal stored ZIP writer keeps the archive-boundary tests independent of OS zip tools.
-function fixture(
-  entries: ReadonlyArray<readonly [string, string]>,
-  extension = '.zip',
-  includeNative = true,
-): string {
-  if (includeNative)
-    entries = [...entries, ...nativeEntries(entries[0]?.[0].toLowerCase().split('resources/')[0])];
+function fixture(entries: ReadonlyArray<readonly [string, string]>, extension = '.zip'): string {
   const root = mkdtempSync(join(tmpdir(), 'sandbox-artifact-'));
   roots.push(root);
   const locals: Buffer[] = [];
@@ -170,31 +135,6 @@ describe('Windows final sandbox artifact seals', () => {
       ]),
     ).rejects.toThrow('bytes differ');
   });
-  it.each(['.zip', '-full.nupkg'])(
-    'rejects invalid Main addon entries in %s',
-    async (extension) => {
-      const prefix = extension === '.zip' ? '' : 'lib/net45/';
-      const native = nativeEntries(prefix);
-      const base: [string, string][] = [
-        [prefix + runner, 'helper'],
-        [prefix + runner + '.sha256', seal('helper')],
-      ];
-      const invalid: [string, string][][] = [
-        [],
-        [native[0]!],
-        [native[1]!],
-        [[prefix + addon, 'tampered'], native[1]!],
-        [native[0]!, [prefix + nativeManifest, '{']],
-        [native[0]!, ['other/' + prefix + nativeManifest, native[1]![1]]],
-        [...native, [native[0]![0].toUpperCase(), native[0]![1]]],
-        [...native, [native[1]![0].toUpperCase(), native[1]![1]]],
-      ];
-      for (const entries of invalid)
-        await expect(
-          verifyWindowsSandboxArchive(fixture([...base, ...entries], extension, false)),
-        ).rejects.toThrow('digest verification failed');
-    },
-  );
   it('does not apply Windows validation to other platforms or delta/installer containers', async () => {
     await expect(
       verifyWindowsSandboxArtifacts([

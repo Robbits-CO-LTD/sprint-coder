@@ -3,17 +3,18 @@ node_modules/
 apps/desktop/.vite/
 apps/desktop/out/
 apps/desktop/native-safe-fs/build/
-apps/desktop/computer-use-native/build/
-apps/desktop/computer-use-native/generated/
 apps/desktop/sandbox-runner/build/
 apps/desktop/sandbox-runner/target/
 # Keep historical build caches ignored after the bundled model runtime was retired.
 apps/desktop/managed-local/cache/
 apps/desktop/managed-local/build/
+# Keep historical native build output ignored after the Computer Use helper was removed.
+apps/desktop/computer-use-native/build/
+apps/desktop/computer-use-native/generated/
 apps/desktop/.vite-user-data/
 *.log
 *.pdb
-# MSVC objects: build-computer-use-native.mjs compiles from the repository root without /Fo.
+# MSVC objects from native builds run without /Fo.
 *.obj
 test-results/
 playwright-report/

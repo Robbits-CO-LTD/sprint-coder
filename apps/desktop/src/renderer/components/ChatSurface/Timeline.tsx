@@ -25,8 +25,6 @@ import { ArrowDown, ArrowUp } from '../icons';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 import { ApprovalCard } from '../ApprovalCard';
-import { ComputerUseAppGrantCard } from '../ComputerUseAppGrantCard';
-import { useComputerUseAppGrant } from '../../hooks/useComputerUseAppGrant';
 import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditGroup } from '../AutoDecisionAuditRow';
@@ -55,23 +53,6 @@ const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTas
 const NO_ACTIVITIES: TeamActivitySummary[] = [];
 const NO_SKILL_DRAFTS: ReturnType<typeof useAppStore.getState>['skillDraftsByTask'][string] = [];
 const NO_INTERRUPTED_TURNS: readonly string[] = [];
-const NO_DISCOVERY_RESULTS: ReturnType<
-  typeof useAppStore.getState
->['discoveryResultsByTask'][string] = [];
-
-function DiscoveryResultNotice({ event }: { event: (typeof NO_DISCOVERY_RESULTS)[number] }) {
-  const suspect = event.result.results.some(
-    (result) => result.kind === 'terminated' && result.result === 'terminated_target_suspect',
-  );
-  const confirmed = event.result.late
-    ? 'Computer Use：遅れて操作補助プロセスの終了を確認しました。'
-    : 'Computer Use：操作補助プロセスの終了を確認しました。';
-  return (
-    <p role="status">
-      {suspect ? `${confirmed}操作対象への影響が不明なため、安全確認が必要です。` : confirmed}
-    </p>
-  );
-}
 
 export function Timeline({
   taskId,
@@ -81,14 +62,6 @@ export function Timeline({
   variant?: 'main' | 'node';
 }) {
   const messages = useAppStore((s) => s.messagesByTask[taskId]) ?? NO_MESSAGES;
-  const discoveryResults =
-    useAppStore((s) => s.discoveryResultsByTask[taskId]) ?? NO_DISCOVERY_RESULTS;
-  const lastMessageByTurn = useMemo(() => {
-    const result = new Map<string, string>();
-    for (const message of messages)
-      if (message.turnId !== null) result.set(message.turnId, message.id);
-    return result;
-  }, [messages]);
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const setDraft = useAppStore((s) => s.setDraft);
   const cancelActiveTurn = useAppStore((s) => s.cancelActiveTurn);
@@ -108,10 +81,6 @@ export function Timeline({
   const installSkillDraft = useAppStore((s) => s.installSkillDraft);
   const discardSkillDraft = useAppStore((s) => s.discardSkillDraft);
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
-  // The application approval card (ADR v2 §6.1). It lives beside the tool approvals because it is
-  // the same kind of interruption, but it is live Main state rather than a stored approval, so it
-  // comes from its own subscription instead of the store.
-  const appGrant = useComputerUseAppGrant(taskId);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Persisted Team history (Core C2b), slotted into the gaps between messages by `recordedAt` so
@@ -347,11 +316,6 @@ export function Timeline({
           {activityGroups.leading.map((activity) => (
             <TeamActivityCard key={activity.id} activity={activity} />
           ))}
-          {discoveryResults
-            .filter((event) => event.turnId === null)
-            .map((event) => (
-              <DiscoveryResultNotice key={event.seq} event={event} />
-            ))}
 
           {messages.map((message) => {
             const messageActivities = activityGroups.byMessageId[message.id] ?? [];
@@ -445,11 +409,6 @@ export function Timeline({
                   content={message.content}
                   attachments={message.attachments}
                 />
-                {message.turnId !== null &&
-                  lastMessageByTurn.get(message.turnId) === message.id &&
-                  discoveryResults
-                    .filter((event) => event.turnId === message.turnId)
-                    .map((event) => <DiscoveryResultNotice key={event.seq} event={event} />)}
                 {interruptedMarker !== null && (
                   <p
                     className="turn-interrupted-marker"
@@ -551,14 +510,6 @@ export function Timeline({
               }
             />
           ))}
-          {appGrant.request === null ? null : (
-            <ComputerUseAppGrantCard
-              key={appGrant.request.id}
-              request={appGrant.request}
-              busy={appGrant.busy}
-              onDecision={appGrant.resolve}
-            />
-          )}
         </div>
 
         {/* Sticky, zero-height rail so the button hovers over the tail of the timeline without

@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { Eye, MoreHorizontal, PanelLeft } from './icons';
+import { MoreHorizontal, PanelLeft } from './icons';
 import { SIDEBAR_SHORTCUT_ARIA, SIDEBAR_SHORTCUT_LABEL } from '../lib/sidebar-preference';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
   task,
   onToggleTeam,
-  onOpenComputerUse,
-  computerUseActive = false,
   inert,
   onToggleSidebar,
   sidebarCollapsed = false,
@@ -17,8 +15,6 @@ export function TaskHeader({
   /** Enters Team mode via App's morph orchestration (SurfaceLayer/TeamCanvas, Slice 6.2) instead
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
-  onOpenComputerUse?: (() => void) | undefined;
-  computerUseActive?: boolean;
   inert?: boolean;
   /** Shows/hides the Task history sidebar (issue #12). Lives here rather than inside the sidebar
    * itself because it has to stay reachable while the sidebar is collapsed. */
@@ -120,17 +116,6 @@ export function TaskHeader({
       >
         Team
       </button>
-      {onOpenComputerUse !== undefined ? (
-        <button
-          type="button"
-          className="computer-use-launch"
-          data-testid="computer-use-launch"
-          aria-pressed={computerUseActive}
-          onClick={onOpenComputerUse}
-        >
-          <Eye size={14} /> Computer Use
-        </button>
-      ) : null}
       <button
         type="button"
         className="icon-btn"

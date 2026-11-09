@@ -693,8 +693,6 @@ function operationFor(capability: Capability): PermissionOperation {
   if (capability === 'shell.execute') return 'execute';
   if (capability === 'secret.use') return 'use';
   if (capability === 'provider.egress') return 'egress';
-  if (capability === 'computer.observe') return 'observe';
-  if (capability === 'computer.control') return 'control';
   return capability.endsWith('.write') ? 'write' : 'read';
 }
 
@@ -919,13 +917,12 @@ const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
  * draw as nothing or reorder what is drawn; line and paragraph separators, private-use, and
  * unassigned codepoints have no reliable glyph.
  *
- * `\p{Cf}` rather than a hand-picked list, for the reason `computerUseUntrustedTextSchemaOf` in the
- * contracts gives: the Unicode Tag block (U+E0000-U+E007F) spells a whole sentence in invisible
- * codepoints, which would then sit in Project memory and be read by every later Turn, and a single
- * U+200B inside a token is enough to hide it from the secret scanner. ZWJ is a format character, so
- * an emoji joined by it is refused, which is accepted.
+ * `\p{Cf}` rather than a hand-picked list: the Unicode Tag block (U+E0000-U+E007F) spells a whole
+ * sentence in invisible codepoints, which would then sit in Project memory and be read by every
+ * later Turn, and a single U+200B inside a token is enough to hide it from the secret scanner. ZWJ
+ * is a format character, so an emoji joined by it is refused, which is accepted.
  *
- * Unlike the contracts, combining marks as a whole stay allowed, since NFD Japanese depends on them.
+ * Combining marks as a whole stay allowed, since NFD Japanese depends on them.
  * The ones that never draw are refused through Unicode's Default_Ignorable_Code_Point rather than a
  * list of names, which kept missing some (the Khmer inherent vowels U+17B4 and U+17B5, for one):
  * each hides a token from the secret scanner as U+200B does, and a run of variation selectors

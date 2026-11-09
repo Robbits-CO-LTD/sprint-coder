@@ -115,11 +115,6 @@ it.each([false, true])(
     };
     for (const key of [
       'providerAbortByTurn',
-      'computerUseSessionByTask',
-      'computerUsePendingApprovalBySession',
-      'computerUseApprovalSessionById',
-      'computerUseStatusBySession',
-      'computerUseQuickStartLatches',
       'teamDetailStream',
       'cliTaskTitleJobs',
       'pendingTaskTitles',
@@ -128,12 +123,10 @@ it.each([false, true])(
     ])
       state[key] = new Map();
     state['providerAbortByTurn'] = new Map([['turn-stream', providerAbort]]);
-    state['computerUsePendingGrantRequestIds'] = new Set();
+    // Not awaited, so it gets its own spy: the held disposal must land on the first awaited one.
+    const disposeApprovals = vi.fn();
+    state['approvalCoordinator'] = { dispose: disposeApprovals };
     for (const key of [
-      'computerUseController',
-      'computerUseActivationGate',
-      'computerUseEmergencyStop',
-      'approvalCoordinator',
       'managedCodingHarness',
       'mockRuntime',
       'taskTitleRuntimes',
@@ -165,7 +158,8 @@ it.each([false, true])(
     expect(confirmationSignal?.aborted).toBe(true);
     await expect(pendingConfirmation).resolves.toBe(false);
     await expect(fullAccessConfirmation.confirm(async () => true)).resolves.toBe(false);
-    expect(dispose).toHaveBeenCalledTimes(14);
+    expect(dispose).toHaveBeenCalledTimes(10);
+    expect(disposeApprovals).toHaveBeenCalledTimes(1);
     expect(disposeGraphSources).toHaveBeenCalledTimes(1);
     expect(policyCleanups.size).toBe(0);
   },

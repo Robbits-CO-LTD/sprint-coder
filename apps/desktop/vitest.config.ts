@@ -5,10 +5,7 @@ import { defineConfig } from 'vitest/config';
 // Slow-file seconds from Windows CI run 37307810511. These are placement hints,
 // never a test allowlist: every new file receives a positive default weight.
 const windowsSeconds: Readonly<Record<string, number>> = {
-  'computer-use-owned-startup.test.ts': 7,
   'src/main/command-runner.test.ts': 47,
-  'src/main/computer-use-privacy-deflate.test.ts': 18,
-  'src/main/computer-use-privacy-inspection.test.ts': 6,
   'src/main/edit-saga-native-integration.test.ts': 23,
   'src/main/graph-mission-persistence.test.ts': 209,
   'src/main/graph-mission-whole-root.test.ts': 38,
@@ -39,9 +36,7 @@ const macSeconds: Readonly<Record<string, number>> = {
   'src/main/worker-worktree.test.ts': 34,
   'src/main/graph-mission-whole-root.test.ts': 29,
   'src/main/persistence-recovery.test.ts': 28,
-  'src/main/computer-use-privacy-deflate.test.ts': 26,
   'src/main/team-tools.test.ts': 20,
-  'src/main/computer-use-macos-cancel-seam.test.ts': 16,
   'src/main/command-runner.test.ts': 14,
   'src/main/team-scenario.test.ts': 12,
   'src/main/provider-egress.test.ts': 11,
@@ -55,7 +50,6 @@ const macSeconds: Readonly<Record<string, number>> = {
   'src/main/team-tools-execute.test.ts': 7,
   'src/main/project-persistence.test.ts': 6,
   'src/main/team-coordinator-persistence.test.ts': 6,
-  'src/main/computer-use-windows-input-seam.test.ts': 5,
   'src/main/team-worker-runtime.test.ts': 5,
 };
 

@@ -1,4 +1,3 @@
-import { configureWindowsKillStop } from './computer-use-windows-product';
 import { projectFolderIdentity } from './project-folder-identity';
 import {
   app,
@@ -8,7 +7,6 @@ import {
   ipcMain,
   net,
   protocol,
-  screen,
   session,
   shell,
   type IpcMainEvent,
@@ -31,21 +29,6 @@ import {
   NativeSafeFsError,
   type NativeSafeFs,
 } from './native-safe-fs';
-import {
-  computerUseBackgroundAcceptanceOptions,
-  computerUseCompiledAcceptanceMode,
-} from './computer-use-acceptance-mode';
-import { loadComputerUseNative } from './computer-use-native';
-import {
-  computerUseRequestedAtStartup,
-  createComputerUseFeatureGate,
-} from './computer-use-feature-gate';
-import { computerUseNativeHostEligibilityOptions } from './computer-use-eligibility-wiring';
-import {
-  createComputerUseNativeHost,
-  type ComputerUseNativeHostOptions,
-} from './computer-use-native-host';
-import { createComputerUseCaptureOutput } from './computer-use-capture-output';
 import {
   SealedPostImageUnsupportedError,
   SqliteEditSagaLeaseGuard,
@@ -92,7 +75,6 @@ const isDevelopment = !app.isPackaged;
 app.setName('Sprint Coder');
 let mainWindow: BrowserWindow | null = null;
 let persistence: SqlitePersistenceClient | null = null;
-let windowsKillStop: ReturnType<typeof configureWindowsKillStop> | undefined;
 let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
@@ -175,60 +157,6 @@ if (squirrelStartup || !hasLock) {
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
       );
-      // Computer Use (beta) is the user's saved setting, with the env as a forced-on override. It is
-      // read here, before the native part loads, because that part is loaded once per process: a
-      // setting turned on later reports that a restart applies it.
-      const computerUseLoadedAtStartup = computerUseRequestedAtStartup(
-        persistence.getComputerUseEnabled(),
-      );
-      // The Computer Use host is always injected through the signed/packaged loader. In source
-      // builds this produces a visible unavailable capability; no PATH or renderer fallback is
-      // permitted to make desktop input reachable.
-      const computerUseBinding = loadComputerUseNative({ userEnabled: computerUseLoadedAtStartup });
-      // Typed explicitly so the callback inside the conditional spread is checked against the host
-      // options (its `bounds` parameter is contextually typed from them).
-      windowsKillStop = configureWindowsKillStop({
-        platform: process.platform,
-        userData: app.getPath('userData'),
-      });
-      const computerUseNativeHostOptions: ComputerUseNativeHostOptions = {
-        ...windowsKillStop.options,
-        ...computerUseNativeHostEligibilityOptions(computerUseBinding.probe.available === true),
-        ...(process.platform === 'win32'
-          ? {
-              windowsPhysicalBoundsToDip: (bounds) => {
-                const topLeft = screen.screenToDipPoint({ x: bounds.x, y: bounds.y });
-                const bottomRight = screen.screenToDipPoint({
-                  x: bounds.x + bounds.width,
-                  y: bounds.y + bounds.height,
-                });
-                return {
-                  x: topLeft.x,
-                  y: topLeft.y,
-                  width: bottomRight.x - topLeft.x,
-                  height: bottomRight.y - topLeft.y,
-                };
-              },
-            }
-          : {}),
-      };
-      const computerUseNativeHost = createComputerUseNativeHost(
-        computerUseBinding,
-        process.platform,
-        { ...computerUseNativeHostOptions, ...computerUseBackgroundAcceptanceOptions() },
-      );
-      const computerUseAcceptanceMode = computerUseCompiledAcceptanceMode();
-      if (computerUseAcceptanceMode !== null)
-        secureLogger.warn(
-          'Computer Use acceptance build waives Windows signer verification',
-          {
-            process: 'main',
-            acceptanceMode: computerUseAcceptanceMode,
-            platform: process.platform,
-            sourceCommit: computerUseBinding.manifest.sourceCommit,
-          },
-          { event: 'system.computer-use.acceptance-build', status: 'completed' },
-        );
       const startupQuarantines = persistence.initializeMutationRecovery(
         randomUUID(),
         new Date().toISOString(),
@@ -258,40 +186,12 @@ if (squirrelStartup || !hasLock) {
         trustedOrigin,
         workspaceEdit,
         undefined,
-        computerUseNativeHost,
-        undefined,
         new GraphRenderService({
           store: persistence,
           vendorRoot: join(app.getAppPath(), 'vendor', 'archify'),
           workRoot: join(app.getPath('userData'), 'graph-render'),
           workerPath: join(__dirname, 'graph-render-host.js'),
           parentOrigin: trustedOrigin,
-        }),
-        createComputerUseCaptureOutput({
-          environment: process.env,
-          hello: {
-            pid: process.pid,
-            parentPid: process.ppid,
-            platform: process.platform,
-            sourceCommit: computerUseBinding.manifest.sourceCommit,
-            nativeManifestDigest:
-              computerUseNativeHost.availability().manifestDigest ?? '0'.repeat(64),
-            packaged: app.isPackaged,
-            packageReady: computerUseNativeHost.availability().packageReady,
-          },
-        }),
-        createComputerUseFeatureGate({
-          setting: () => persistence!.getComputerUseEnabled(),
-          loadedAtStartup: computerUseLoadedAtStartup,
-          buildSupported: () => {
-            // A source build or an unsupported OS is known without loading anything; a packaged
-            // build on Windows/macOS is only verified by the loader, which runs with the feature on.
-            if (!app.isPackaged || (process.platform !== 'darwin' && process.platform !== 'win32'))
-              return false;
-            if (!computerUseLoadedAtStartup) return null;
-            const native = computerUseNativeHost.availability();
-            return native.packageReady && native.handshakeReady;
-          },
         }),
       );
       await router.initialize();
@@ -470,11 +370,6 @@ async function disposeApplicationResources(): Promise<void> {
     await router?.dispose();
   } catch (error) {
     secureLogger.error('CommandRunner shutdown did not fully drain', error);
-  }
-  try {
-    windowsKillStop?.close();
-  } catch (error) {
-    secureLogger.error('Windows kill-stop shutdown did not complete cleanly', error);
   }
   try {
     persistence?.close();

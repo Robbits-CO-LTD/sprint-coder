@@ -10,8 +10,6 @@ export const capabilities = [
   'external.open',
   'secret.use',
   'provider.egress',
-  'computer.observe',
-  'computer.control',
   'project.memory.write',
   'skill.draft.write',
 ] as const;
@@ -61,7 +59,7 @@ export const PROJECT_MEMORY_RESOURCE_PREFIX = 'project-memory:';
 export const SKILL_DRAFT_RESOURCE_PREFIX = 'skill-draft:';
 
 export type PermissionOperation =
-  'read' | 'write' | 'execute' | 'fetch' | 'open' | 'use' | 'egress' | 'observe' | 'control';
+  'read' | 'write' | 'execute' | 'fetch' | 'open' | 'use' | 'egress';
 export type ProviderEgress = 'none' | 'trusted-local' | 'trusted-remote' | 'untrusted-remote';
 export type SandboxProfile = 'read-only' | 'workspace-write' | 'full';
 export type AccessPreset = 'ask' | 'auto' | 'full';
@@ -127,60 +125,7 @@ export type PermissionResource =
       classifierVersion: string;
     }
   | { kind: 'secret'; secretId: string }
-  | { kind: 'external'; target: string }
-  /** Stable app identity only; never use a process id or window handle as authority. */
-  | {
-      kind: 'computer-app';
-      platform: 'darwin' | 'win32';
-      appIdentityDigest: string;
-    }
-  | {
-      kind: 'computer-window';
-      platform: 'darwin' | 'win32';
-      appIdentityDigest: string;
-      windowIdentityDigest: string;
-    }
-  | {
-      kind: 'computer-session';
-      platform: 'darwin' | 'win32';
-      appIdentityDigest: string;
-      windowIdentityDigest: string;
-      sessionId: string;
-      taskId: string;
-    }
-  | {
-      kind: 'computer-revision';
-      platform: 'darwin' | 'win32';
-      appIdentityDigest: string;
-      windowIdentityDigest: string;
-      sessionId: string;
-      revision: number;
-    }
-  /**
-   * The set of drivable targets one Task may be told about, before any of them is chosen.
-   *
-   * Every other computer resource names an app, a window, a session, or an observation — things that
-   * only exist once a target has been picked. Enumeration is what happens before that, so it has no
-   * app identity to bind to; what it does have is a Task, which is the boundary that matters (one
-   * Task must not learn what another Task's desktop contains). It is observe-only by construction:
-   * nothing can be driven through it.
-   */
-  | { kind: 'computer-target-list'; taskId: string }
-  /**
-   * The two control-bearing things a Task may do before a session exists: ask the user for
-   * permission to drive an application, and begin driving one it already has permission for.
-   *
-   * It carries `computer.control` and never `computer.observe`, which is the opposite of the list
-   * above and the reason it is a separate kind rather than a flag on it: neither of these reads a
-   * screen, and pairing control with an enumeration resource would let a control decision be made
-   * against the binding that exists purely to be read.
-   *
-   * Like the list, it binds only the Task, because there is no app identity yet — the token that
-   * names one is spent inside the tool, after this decision. What this resource governs is "may
-   * this Task reach for the desktop at all", and the specific application is decided by the human
-   * click on the approval card and by the stored grant, neither of which is a permission rule.
-   */
-  | { kind: 'computer-target-access'; taskId: string };
+  | { kind: 'external'; target: string };
 
 export type ResourceSet =
   | { kind: 'workspace'; workspaceId?: string }
@@ -220,34 +165,6 @@ export type ResourceSet =
     }
   | { kind: 'secret-exact'; secretId: string }
   | { kind: 'external-exact'; target: string }
-  | {
-      kind: 'computer-app' | 'computer-app-exact';
-      platform?: 'darwin' | 'win32';
-      appIdentityDigest: string;
-    }
-  | {
-      kind: 'computer-window' | 'computer-window-exact';
-      platform?: 'darwin' | 'win32';
-      appIdentityDigest: string;
-      windowIdentityDigest: string;
-    }
-  | {
-      kind: 'computer-session' | 'computer-session-exact';
-      platform?: 'darwin' | 'win32';
-      appIdentityDigest: string;
-      windowIdentityDigest?: string;
-      sessionId: string;
-    }
-  | {
-      kind: 'computer-revision' | 'computer-revision-exact';
-      platform?: 'darwin' | 'win32';
-      appIdentityDigest?: string;
-      windowIdentityDigest?: string;
-      sessionId: string;
-      revision: number;
-    }
-  | { kind: 'computer-target-list' | 'computer-target-list-exact'; taskId?: string }
-  | { kind: 'computer-target-access' | 'computer-target-access-exact'; taskId?: string }
   | { kind: 'all' };
 
 export type PermissionRule = {
@@ -300,13 +217,6 @@ export type SessionGrant = {
   revokedAt?: string;
   consumedAt?: string;
 };
-
-/** The type-level shape exposed to callers that can issue Computer control grants. */
-export type EphemeralComputerControlGrant = Omit<SessionGrant, 'capability' | 'scope'> & {
-  capability: 'computer.control';
-  scope: 'once';
-};
-export type ComputerUseGrant = EphemeralComputerControlGrant;
 
 type ReviewerDecisionFacts = {
   reviewRequestId: string;
@@ -601,31 +511,6 @@ export function createSessionGrant(grant: SessionGrant): SessionGrant {
     throw new Error('Invalid grant operations');
   if (grant.providerEgress.length === 0 || grant.sandboxProfiles.length === 0)
     throw new Error('Grant egress and sandbox bounds are required');
-  // Computer control is intentionally ephemeral.  A task/persistent grant could outlive the
-  // foreground window, user takeover, or the policy epoch that established the app binding.
-  if (grant.capability === 'computer.control' && grant.scope !== 'once')
-    throw new Error('Computer control grants must be ephemeral');
-  // Enumeration is observe-only, so a control grant must never be able to name a target list.
-  if (
-    grant.capability === 'computer.control' &&
-    (grant.resourceSet.kind === 'computer-target-list' ||
-      grant.resourceSet.kind === 'computer-target-list-exact')
-  )
-    throw new Error('Computer control grants cannot bind a target list');
-  // And the mirror: pre-session access is control-only, so an observe grant must never name it.
-  // Without this, "may read the desktop" could be written down as authority over the two calls
-  // that ask for permission and start driving.
-  if (
-    grant.capability === 'computer.observe' &&
-    (grant.resourceSet.kind === 'computer-target-access' ||
-      grant.resourceSet.kind === 'computer-target-access-exact')
-  )
-    throw new Error('Computer observe grants cannot bind pre-session access');
-  if (
-    (grant.capability === 'computer.observe' || grant.capability === 'computer.control') &&
-    !isComputerResourceSet(grant.resourceSet)
-  )
-    throw new Error('Computer grants require an app, window, session, or revision binding');
   if (grant.capability === 'shell.execute' && grant.executionSpecDigest === undefined)
     throw new Error('Shell grants require an exact execution digest');
   // Approved one call at a time (Issue #546): nothing may be written down that covers the next one.
@@ -860,8 +745,6 @@ function requestFactsValid(request: PermissionRequest): boolean {
     'external.open': 'open',
     'secret.use': 'use',
     'provider.egress': 'egress',
-    'computer.observe': 'observe',
-    'computer.control': 'control',
     'project.memory.write': 'write',
     'skill.draft.write': 'write',
   };
@@ -934,42 +817,6 @@ function requestFactsValid(request: PermissionRequest): boolean {
       return false;
     }
   }
-  if (
-    request.resource.kind === 'computer-app' ||
-    request.resource.kind === 'computer-window' ||
-    request.resource.kind === 'computer-session' ||
-    request.resource.kind === 'computer-revision'
-  ) {
-    const computer = request.resource;
-    if (
-      !(['darwin', 'win32'] as const).includes(computer.platform) ||
-      !/^[a-f0-9]{64}$/.test(computer.appIdentityDigest)
-    )
-      return false;
-    if (computer.kind !== 'computer-app' && !/^[a-f0-9]{64}$/.test(computer.windowIdentityDigest))
-      return false;
-    if (
-      (computer.kind === 'computer-session' || computer.kind === 'computer-revision') &&
-      computer.sessionId.length === 0
-    )
-      return false;
-    if (computer.kind === 'computer-session' && computer.taskId.length === 0) return false;
-    if (
-      computer.kind === 'computer-revision' &&
-      (!Number.isSafeInteger(computer.revision) || computer.revision < 0)
-    )
-      return false;
-  }
-  if (
-    request.resource.kind === 'computer-target-list' ||
-    request.resource.kind === 'computer-target-access'
-  ) {
-    // The Task is the whole binding: there is no app identity yet, and the request must not be able
-    // to enumerate, or reach for the desktop, on behalf of a Task other than the one being
-    // evaluated.
-    if (request.resource.taskId.length === 0 || request.resource.taskId !== request.taskId)
-      return false;
-  }
   if (request.capability === 'project.memory.write')
     return (
       request.resource.kind === 'external' &&
@@ -1001,22 +848,8 @@ function requestFactsValid(request: PermissionRequest): boolean {
                   ? request.resource.kind === 'external' ||
                     request.resource.kind === 'workspace-path' ||
                     request.resource.kind === 'external-path'
-                  : request.capability === 'computer.observe' ||
-                      request.capability === 'computer.control'
-                    ? request.resource.kind === 'computer-app' ||
-                      request.resource.kind === 'computer-window' ||
-                      request.resource.kind === 'computer-session' ||
-                      request.resource.kind === 'computer-revision' ||
-                      // Enumeration is observe-only: there is nothing to drive through a list, so
-                      // `computer.control` must never accept it. Pre-session access is the mirror
-                      // image — it is how a Task asks to drive something and how it begins, so
-                      // `computer.observe` must never accept that.
-                      (request.capability === 'computer.observe' &&
-                        request.resource.kind === 'computer-target-list') ||
-                      (request.capability === 'computer.control' &&
-                        request.resource.kind === 'computer-target-access')
-                    : request.resource.kind === 'workspace-path' ||
-                      request.resource.kind === 'external-path';
+                  : request.resource.kind === 'workspace-path' ||
+                    request.resource.kind === 'external-path';
   return resourceMatchesCapability;
 }
 
@@ -1097,11 +930,7 @@ export function revalidateExecutionPermit(input: {
   return { valid: true };
 }
 
-/**
- * Stable, path-free identity used by permits and reviewer bindings.  Computer Use identities are
- * represented only by their app/window/session digests; titles, paths, handles, and screen text
- * never enter this value.
- */
+/** Stable identity used by permits and reviewer bindings. */
 export function permissionResourceIdentity(resource: PermissionResource): string {
   if (resource.kind === 'workspace-path')
     return JSON.stringify([
@@ -1121,35 +950,6 @@ export function permissionResourceIdentity(resource: PermissionResource): string
   if (resource.kind === 'network') return JSON.stringify([resource.kind, resource.origin]);
   if (resource.kind === 'secret') return JSON.stringify([resource.kind, resource.secretId]);
   if (resource.kind === 'external') return JSON.stringify([resource.kind, resource.target]);
-  if (resource.kind === 'computer-app')
-    return JSON.stringify([resource.kind, resource.platform, resource.appIdentityDigest]);
-  if (resource.kind === 'computer-window')
-    return JSON.stringify([
-      resource.kind,
-      resource.platform,
-      resource.appIdentityDigest,
-      resource.windowIdentityDigest,
-    ]);
-  if (resource.kind === 'computer-session')
-    return JSON.stringify([
-      resource.kind,
-      resource.platform,
-      resource.appIdentityDigest,
-      resource.windowIdentityDigest,
-      resource.sessionId,
-      resource.taskId,
-    ]);
-  if (resource.kind === 'computer-revision')
-    return JSON.stringify([
-      resource.kind,
-      resource.platform,
-      resource.appIdentityDigest,
-      resource.windowIdentityDigest,
-      resource.sessionId,
-      resource.revision,
-    ]);
-  if (resource.kind === 'computer-target-list' || resource.kind === 'computer-target-access')
-    return JSON.stringify([resource.kind, resource.taskId]);
   if (resource.kind === 'provider-disclosure')
     return JSON.stringify([
       resource.kind,
@@ -1189,14 +989,7 @@ export function permissionRequestFingerprint(request: PermissionRequest): string
         ]
       : request.resource.kind === 'external-path'
         ? [request.resource.kind, request.resource.identityDigest, request.resource.classification]
-        : request.resource.kind === 'computer-app' ||
-            request.resource.kind === 'computer-window' ||
-            request.resource.kind === 'computer-session' ||
-            request.resource.kind === 'computer-revision' ||
-            request.resource.kind === 'computer-target-list' ||
-            request.resource.kind === 'computer-target-access'
-          ? permissionResourceIdentity(request.resource)
-          : request.resource;
+        : request.resource;
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -1330,87 +1123,12 @@ export function resourceContains(set: ResourceSet, resource: PermissionResource)
     );
   if (set.kind === 'secret-exact')
     return resource.kind === 'secret' && resource.secretId === set.secretId;
-  if (set.kind === 'computer-app' || set.kind === 'computer-app-exact')
-    return (
-      isComputerResource(resource) &&
-      resource.appIdentityDigest === set.appIdentityDigest &&
-      (set.platform === undefined || resource.platform === set.platform)
-    );
-  if (set.kind === 'computer-window' || set.kind === 'computer-window-exact')
-    return (
-      isComputerResource(resource) &&
-      resource.kind !== 'computer-app' &&
-      resource.appIdentityDigest === set.appIdentityDigest &&
-      resource.windowIdentityDigest === set.windowIdentityDigest &&
-      (set.platform === undefined || resource.platform === set.platform)
-    );
-  if (set.kind === 'computer-session' || set.kind === 'computer-session-exact')
-    return (
-      (resource.kind === 'computer-session' || resource.kind === 'computer-revision') &&
-      resource.sessionId === set.sessionId &&
-      resource.appIdentityDigest === set.appIdentityDigest &&
-      (set.windowIdentityDigest === undefined ||
-        resource.windowIdentityDigest === set.windowIdentityDigest) &&
-      (set.platform === undefined || resource.platform === set.platform)
-    );
-  if (set.kind === 'computer-revision' || set.kind === 'computer-revision-exact')
-    return (
-      resource.kind === 'computer-revision' &&
-      resource.sessionId === set.sessionId &&
-      resource.revision === set.revision &&
-      (set.appIdentityDigest === undefined ||
-        resource.appIdentityDigest === set.appIdentityDigest) &&
-      (set.windowIdentityDigest === undefined ||
-        resource.windowIdentityDigest === set.windowIdentityDigest) &&
-      (set.platform === undefined || resource.platform === set.platform)
-    );
-  if (set.kind === 'computer-target-list' || set.kind === 'computer-target-list-exact')
-    return (
-      resource.kind === 'computer-target-list' &&
-      (set.taskId === undefined || resource.taskId === set.taskId)
-    );
-  if (set.kind === 'computer-target-access' || set.kind === 'computer-target-access-exact')
-    return (
-      resource.kind === 'computer-target-access' &&
-      (set.taskId === undefined || resource.taskId === set.taskId)
-    );
   if (set.kind === 'external-exact')
     return resource.kind === 'external' && resource.target === set.target;
   return false;
 }
 
 export const permissionResourceContains = resourceContains;
-
-function isComputerResource(
-  resource: PermissionResource,
-): resource is Extract<
-  PermissionResource,
-  { kind: 'computer-app' | 'computer-window' | 'computer-session' | 'computer-revision' }
-> {
-  return (
-    resource.kind === 'computer-app' ||
-    resource.kind === 'computer-window' ||
-    resource.kind === 'computer-session' ||
-    resource.kind === 'computer-revision'
-  );
-}
-
-function isComputerResourceSet(resourceSet: ResourceSet): boolean {
-  return (
-    resourceSet.kind === 'computer-app' ||
-    resourceSet.kind === 'computer-app-exact' ||
-    resourceSet.kind === 'computer-window' ||
-    resourceSet.kind === 'computer-window-exact' ||
-    resourceSet.kind === 'computer-session' ||
-    resourceSet.kind === 'computer-session-exact' ||
-    resourceSet.kind === 'computer-revision' ||
-    resourceSet.kind === 'computer-revision-exact' ||
-    resourceSet.kind === 'computer-target-list' ||
-    resourceSet.kind === 'computer-target-list-exact' ||
-    resourceSet.kind === 'computer-target-access' ||
-    resourceSet.kind === 'computer-target-access-exact'
-  );
-}
 
 function pathIsWithin(candidate: string, root: string): boolean {
   const windowsPath = /^[a-z]:[\\/]/i.test(candidate) || /^[a-z]:[\\/]/i.test(root);
@@ -1548,11 +1266,7 @@ function ceilingIsSubset(candidate: CapabilityCeiling, parent: CapabilityCeiling
   );
 }
 
-/**
- * Checks the permission lattice without resolving a resource.  This is used when spawning a
- * worker, and is intentionally conservative for Computer Use: an app/window/session/revision
- * binding can only narrow to the same identity (or to a child revision), never to `all`.
- */
+/** Checks the permission lattice without resolving a resource.  This is used when spawning a worker. */
 export function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boolean {
   if (parent.kind === 'all') return true;
   if (candidate.kind === 'all') return false;
@@ -1604,100 +1318,6 @@ export function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet)
       candidate.sourceDigest === parent.sourceDigest &&
       candidate.disclosedDigest === parent.disclosedDigest &&
       candidate.classifierVersion === parent.classifierVersion
-    );
-  if (
-    (candidate.kind === 'computer-app' || candidate.kind === 'computer-app-exact') &&
-    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-window' || candidate.kind === 'computer-window-exact') &&
-    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
-    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
-    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-window' || candidate.kind === 'computer-window-exact') &&
-    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
-    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
-    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
-  )
-    return (
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
-    (parent.kind === 'computer-session' || parent.kind === 'computer-session-exact')
-  )
-    return (
-      candidate.sessionId === parent.sessionId &&
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.windowIdentityDigest === undefined ||
-        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
-    (parent.kind === 'computer-session' || parent.kind === 'computer-session-exact')
-  )
-    return (
-      candidate.sessionId === parent.sessionId &&
-      candidate.appIdentityDigest === parent.appIdentityDigest &&
-      (parent.windowIdentityDigest === undefined ||
-        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
-    );
-  if (
-    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
-    (parent.kind === 'computer-revision' || parent.kind === 'computer-revision-exact')
-  )
-    return (
-      candidate.sessionId === parent.sessionId &&
-      candidate.revision === parent.revision &&
-      (parent.appIdentityDigest === undefined ||
-        candidate.appIdentityDigest === parent.appIdentityDigest) &&
-      (parent.windowIdentityDigest === undefined ||
-        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
-      (parent.platform === undefined || candidate.platform === parent.platform)
     );
   return false;
 }
