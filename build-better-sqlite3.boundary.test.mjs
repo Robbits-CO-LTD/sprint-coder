@@ -381,21 +381,7 @@ test('Failure detail reports only fixed tokens and never a child-supplied string
   assert.equal(leaky.includes(canary), false, 'A non-token code must be reduced, never echoed');
 });
 
-test('Computer Use build failures report the errno rather than inventing an exit code', () => {
-  const source = readFileSync(resolve(root, 'build-computer-use-native.mjs'), 'utf8');
-  assert.equal(
-    source.includes('exit ${result.error ? 1 : (result.status ?? 1)}'),
-    false,
-    'A child that never started has no exit code and must not be reported as exit 1',
-  );
-  assert.ok(
-    source.includes('nativeBuildFailureDetail(result)'),
-    'The Computer Use build must summarize failures with the shared helper',
-  );
-  assert.ok(
-    source.includes("stdio: ['ignore', 'ignore', 'ignore']"),
-    'The build child discards its output at the file descriptor',
-  );
+test('Native build failures report the errno rather than inventing an exit code', () => {
   // The helper carries the errno for exactly those cases, with no budget and no child message.
   assert.equal(
     nativeBuildFailureDetail({ error: { code: 'ENOENT' }, status: null }),
@@ -425,12 +411,11 @@ test('A failed build leaves through the normal exit path so its diagnostics surv
   assert.match(result.output, /SQLite source build failed \(exit 17/u);
   assert.match(result.output, /^native build network policy: /mu);
   // Match a call in statement position so the rule is not satisfied or broken by prose in comments.
-  for (const script of ['build-better-sqlite3.mjs', 'build-computer-use-native.mjs'])
-    assert.equal(
-      /^\s*process\.exit\(/mu.test(readFileSync(resolve(root, script), 'utf8')),
-      false,
-      `${script} must report status through process.exitCode`,
-    );
+  assert.equal(
+    /^\s*process\.exit\(/mu.test(readFileSync(resolve(root, 'build-better-sqlite3.mjs'), 'utf8')),
+    false,
+    'build-better-sqlite3.mjs must report status through process.exitCode',
+  );
 });
 
 test('Pure helper leaves frozen parent signing configuration intact', () => {

@@ -1,14 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  graphResumeActivationIntent,
-  graphResumeStepActivationIntent,
-  graphUpdateActivationIntent,
-} from '../graph-activation-intent';
 
-// `register()` binds one ipcMain listener directly, so importing the router needs an `electron`
-// stub; every other channel goes through the router's own `handle`/`handleMutation`, which the
-// suite below stubs out to capture handlers. The mock is file-wide, which is why this suite lives
-// in its own file rather than inside ipc.test.ts.
+// Importing the router needs an `electron` stub; every channel goes through the router's own
+// `handle`/`handleMutation`, which the suite below stubs out to capture handlers. The mock is
+// file-wide, which is why this suite lives in its own file rather than inside ipc.test.ts.
 vi.mock('electron', () => ({
   app: {},
   clipboard: {},
@@ -42,16 +36,15 @@ describe('graph Mission step resume IPC', () => {
         throw new Error('Unexpected IPC handler registration');
       handlers.set(channel, handler as (input: unknown, event: unknown) => unknown);
     };
-    const consume = vi.fn(() => null as { intent: string | null; token?: string } | null);
     const resumeGraphStep = vi.fn(async () => ({ id: input.missionId }));
     const requestGraphConstraintUpdate = vi.fn(
-      async (_input: unknown, _token: unknown, validate: () => void) => {
+      async (_input: unknown, _requestId: unknown, validate: () => void) => {
         validate();
         return {};
       },
     );
     const agreeGraphConstraintUpdate = vi.fn(
-      async (_input: unknown, _token: unknown, validate: () => void) => {
+      async (_input: unknown, _consentId: unknown, validate: () => void) => {
         validate();
         return {};
       },
@@ -60,12 +53,6 @@ describe('graph Mission step resume IPC', () => {
       handle: capture,
       handleMutation: capture,
       window: { id: 1, webContents: { once: vi.fn() } },
-      computerUseActivationGate: { consume, generation: vi.fn(() => 0) },
-      computerUseController: { availability: vi.fn(() => null) },
-      computerUseNative: { pickApplication: vi.fn() },
-      computerUseStatusBySession: new Map(),
-      computerUseApprovalSessionById: new Map(),
-      computerUseQuickStartLatches: new Map(),
       graphs: {
         liveDocument: vi.fn(() => ({
           id: overrides.graphId ?? 'graph-1',
@@ -94,21 +81,13 @@ describe('graph Mission step resume IPC', () => {
     return {
       handler,
       handlers,
-      consume,
       resumeGraphStep,
       requestGraphConstraintUpdate,
       agreeGraphConstraintUpdate,
     };
   }
 
-  it('refuses a step resume that no trusted control activated', async () => {
-    const { handler, consume, resumeGraphStep } = harness();
-    await expect(handler(input, { sender: {} })).rejects.toThrow('計画の工程再開ボタン');
-    expect(consume).toHaveBeenCalledWith({ sender: {} }, 'graph-resume-step');
-    expect(resumeGraphStep).not.toHaveBeenCalled();
-  });
-
-  it('requires separate bound trusted gestures for requesting and agreeing a constraint update', async () => {
+  it('gives requesting and agreeing a constraint update their own fresh ids', async () => {
     const h = harness();
     const update = {
       taskId: input.taskId,
@@ -117,38 +96,25 @@ describe('graph Mission step resume IPC', () => {
       missionId: input.missionId,
       expectedSemanticRevision: 5,
     };
-    const request = h.handlers.get(IPC_CHANNELS.graphsRequestUpdate)!;
-    const agree = h.handlers.get(IPC_CHANNELS.graphsAgreeUpdate)!;
-    await expect(request(update, {})).rejects.toThrow('確認ボタン');
-    expect(h.requestGraphConstraintUpdate).not.toHaveBeenCalled();
-    h.consume.mockReturnValue({
-      token: 'request-token',
-      intent: graphUpdateActivationIntent(update, 'request'),
-    });
-    await request(update, {});
+    await h.handlers.get(IPC_CHANNELS.graphsRequestUpdate)!(update, {});
     expect(h.requestGraphConstraintUpdate).toHaveBeenCalledWith(
       update,
-      'request-token',
+      expect.stringMatching(/^[0-9a-f-]{36}$/u),
       expect.any(Function),
     );
-    const agreement = { ...update, requestId: 'request-token', contextDigest: 'a'.repeat(64) };
-    await expect(agree(agreement, {})).rejects.toThrow('再合意ボタン');
-    h.consume.mockReturnValue({
-      token: 'consent-token',
-      intent: graphUpdateActivationIntent(agreement, 'agree'),
-    });
-    await expect(agree({ ...agreement, contextDigest: 'b'.repeat(64) }, {})).rejects.toThrow(
-      '再合意ボタン',
-    );
-    await agree(agreement, {});
+    const agreement = { ...update, requestId: 'request-1', contextDigest: 'a'.repeat(64) };
+    await h.handlers.get(IPC_CHANNELS.graphsAgreeUpdate)!(agreement, {});
     expect(h.agreeGraphConstraintUpdate).toHaveBeenCalledWith(
       agreement,
-      'consent-token',
+      expect.stringMatching(/^[0-9a-f-]{36}$/u),
       expect.any(Function),
     );
+    const [, requestId] = h.requestGraphConstraintUpdate.mock.calls[0]!;
+    const [, consentId] = h.agreeGraphConstraintUpdate.mock.calls[0]!;
+    expect(consentId).not.toBe(requestId);
   });
 
-  it('refuses an update gesture once the current Mission agreement no longer matches', async () => {
+  it('refuses an update once the current Mission agreement no longer matches', async () => {
     const h = harness();
     const update = {
       taskId: input.taskId,
@@ -157,44 +123,24 @@ describe('graph Mission step resume IPC', () => {
       missionId: input.missionId,
       expectedSemanticRevision: 4,
     };
-    h.consume.mockReturnValue({
-      token: 'request-token',
-      intent: graphUpdateActivationIntent(update, 'request'),
-    });
     await expect(h.handlers.get(IPC_CHANNELS.graphsRequestUpdate)!(update, {})).rejects.toThrow(
       'agreement changed',
     );
   });
 
-  it('refuses an activation bound to a different operation or a different step', async () => {
-    const integration = harness();
-    integration.consume.mockReturnValue({ intent: graphResumeActivationIntent(input) });
-    await expect(integration.handler(input, {})).rejects.toThrow('計画の工程再開ボタン');
-    expect(integration.resumeGraphStep).not.toHaveBeenCalled();
-    const other = harness();
-    other.consume.mockReturnValue({
-      intent: graphResumeStepActivationIntent({ ...input, stepKey: 'b' }),
-    });
-    await expect(other.handler(input, {})).rejects.toThrow('計画の工程再開ボタン');
-    expect(other.resumeGraphStep).not.toHaveBeenCalled();
-  });
-
   it('refuses a resume once the agreed revision or generation moved on', async () => {
     const stale = harness({ semanticRevision: 6 });
-    stale.consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
     await expect(stale.handler(input, {})).rejects.toThrow('Graph integration agreement changed');
     expect(stale.resumeGraphStep).not.toHaveBeenCalled();
     const regenerated = harness({ generation: 3 });
-    regenerated.consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
     await expect(regenerated.handler(input, {})).rejects.toThrow(
       'Graph integration agreement changed',
     );
     expect(regenerated.resumeGraphStep).not.toHaveBeenCalled();
   });
 
-  it('resumes exactly the agreed step for a matching trusted activation', async () => {
-    const { handler, consume, resumeGraphStep } = harness();
-    consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
+  it('resumes exactly the agreed step', async () => {
+    const { handler, resumeGraphStep } = harness();
     await expect(handler(input, {})).resolves.toEqual({ id: input.missionId });
     expect(resumeGraphStep).toHaveBeenCalledWith(
       input.taskId,
@@ -204,12 +150,9 @@ describe('graph Mission step resume IPC', () => {
     );
   });
 
-  it('binds workspace continuation to the exact review digest in the trusted gesture', async () => {
-    const { handler, consume, resumeGraphStep } = harness();
+  it('passes the workspace review digest through to the step resume', async () => {
+    const { handler, resumeGraphStep } = harness();
     const reviewed = { ...input, workspaceReviewDigest: 'a'.repeat(64) };
-    consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
-    await expect(handler(reviewed, {})).rejects.toThrow('計画の工程再開ボタン');
-    consume.mockReturnValue({ intent: graphResumeStepActivationIntent(reviewed) });
     await handler(reviewed, {});
     expect(resumeGraphStep).toHaveBeenCalledWith(
       input.taskId,

@@ -1,12 +1,5 @@
 import { projectFolderIdentity } from './project-folder-identity';
-import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
 import { FullAccessConfirmation } from './full-access-confirmation';
-import {
-  graphStartActivationIntent,
-  graphUpdateActivationIntent,
-  graphResumeActivationIntent,
-  graphResumeStepActivationIntent,
-} from '../graph-activation-intent';
 import {
   app,
   clipboard,
@@ -15,7 +8,6 @@ import {
   MessageChannelMain,
   shell,
   type BrowserWindow,
-  type IpcMainEvent,
   type IpcMainInvokeEvent,
   type MessagePortMain,
 } from 'electron';
@@ -69,14 +61,7 @@ import {
   type PathGuard,
 } from './path-guard';
 import { configureApprovalDigestKey } from './approval-digest-key';
-import { isComputerUseUiActivationKind } from '../computer-use-activation';
 import { pathComparisonKey } from '../path-comparison';
-import {
-  approvalActivationIntent,
-  foregroundHandoffActivationIntent,
-  quickStartActivationIntent,
-  startActivationIntent,
-} from '../computer-use-activation-intent';
 import { TeamSubscriptionRegistry } from './team-subscription-registry';
 import { TeamDetailStream } from './team-detail-stream';
 import { z } from 'zod';
@@ -91,33 +76,11 @@ import {
   canvasViewSaveInputSchema,
   canvasViewSaveResultSchema,
   chatMessageSchema,
-  computerAppGrantRequestSchema,
-  computerAppGrantResolveInputSchema,
-  computerAppProfileSchema,
-  computerUseApprovalSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
   commandOutputPageSchema,
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
-  computerUseApprovalResolveInputSchema,
-  computerUseForegroundHandoffResolveInputSchema,
-  computerUseAvailabilitySchema,
-  computerUseGrantListResultSchema,
-  computerUseGrantPurgeResultSchema,
-  computerUseGrantRevokeInputSchema,
-  computerUseOpenPermissionSettingsInputSchema,
-  computerUseOpenPermissionSettingsResultSchema,
-  computerUseProfileListInputSchema,
-  computerUseProfileListResultSchema,
-  computerUseProfileRegisterInputSchema,
-  computerUseSessionStatusInputSchema,
-  computerUseSessionStatusSchema,
-  computerUseStartInputSchema,
-  computerUseStopInputSchema,
-  computerUseWindowCandidatesInputSchema,
-  computerUseWindowCandidatesResultSchema,
-  type ComputerUseStartInput,
   emptyPayloadSchema,
   fileChangeRecordSchema,
   filePathPayloadSchema,
@@ -186,8 +149,6 @@ import {
   teamModelResearchSettingsSetInputSchema,
   teamConcurrencySettingsSchema,
   teamConcurrencySettingsSetInputSchema,
-  computerUseSettingsSchema,
-  computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
   teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
@@ -272,9 +233,6 @@ import {
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
-  type ComputerUseApproval,
-  type ComputerUseSessionStatus,
-  type ComputerUseWindowCandidate,
   type ProjectFolderInput,
   type ProjectFolder,
   type ProjectReference,
@@ -346,32 +304,6 @@ import {
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
-import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
-import { computerUseSessionMayStart } from './computer-use-session-gate';
-import {
-  createComputerUseRuntimeCapture,
-  type ComputerUseRuntimeCapture,
-} from './computer-use-runtime-capture';
-import type { ComputerUseCaptureOutput } from './computer-use-capture-output';
-import { ComputerUseEmergencyStop } from './computer-use-emergency-stop';
-import {
-  ComputerUseUserActivationGate,
-  type ComputerUseActivationPermit,
-} from './computer-use-user-activation';
-import {
-  COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
-  ProviderComputerUsePlanner,
-  computerUseProviderEndpointRevision,
-  preflightComputerUseProvider,
-} from './computer-use-planner';
-import {
-  ComputerUseNativeUnavailableError,
-  createUnavailableComputerUseNativeHost,
-} from './computer-use-native-host';
-import {
-  createComputerUsePermissionSettingsOpener,
-  type ComputerUsePermissionSettingsOpener,
-} from './computer-use-permission-settings';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
 import {
@@ -403,7 +335,6 @@ import { clipPublicMessage } from './zod-issue-message';
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
-const COMPUTER_USE_QUICK_START_LATCH_TTL_MS = 2_000;
 /**
  * Shown when the completion gate refuses a Turn. The edits are kept either way; what the Turn does
  * not get is the claim that it finished, so each reason has to say which of the two it was.
@@ -653,8 +584,6 @@ import {
   sessionGrantMatchesPermissionRequest,
   toolValueMatchesSchema,
   type Capability,
-  type PermissionRequest,
-  type ResourceSet,
   type ToolCatalogSnapshot,
 } from '@sprint-coder/domain';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
@@ -680,13 +609,6 @@ import {
 } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
-import {
-  COMPUTER_LIST_TARGETS_TOOL,
-  COMPUTER_REQUEST_ACCESS_TOOL,
-  COMPUTER_START_TOOL,
-  COMPUTER_STOP_TOOL,
-} from './computer-use-target-tools';
-import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
 import {
@@ -788,14 +710,9 @@ import {
 } from './connection-identity';
 import {
   multiProviderModelPickerV2Enabled,
-  computerUseAgentDrivenV2Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
 } from './feature-flags';
-import {
-  createComputerUseFeatureGate,
-  type ComputerUseFeatureGate,
-} from './computer-use-feature-gate';
 import {
   ProviderSecretStorage,
   ProviderSecretStorageUnavailableError,
@@ -920,22 +837,6 @@ type CliTaskTitleJob = {
   resolve: (title: string | null) => void;
 };
 
-type ComputerUseQuickStartLatch = Readonly<{
-  taskId: string;
-  profileId: string;
-  windowId: string;
-  expectedWindowRevision: number;
-  expectedProfileRevision: number;
-  activationExpectedProfileRevision: number;
-  senderId: number;
-  frameProcessId: number;
-  frameRoutingId: number;
-  browserWindowId: number;
-  activationGeneration: number;
-  activationIntent: string;
-  expiresAtMs: number;
-}>;
-
 /** True for the durable session Turn a Graph Mission owns instead of borrowing a chat Turn. */
 export function isGraphMissionSessionTurn(turnId: string): boolean {
   return turnId.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX);
@@ -1029,74 +930,6 @@ export function authorizationTurnIsActive(
   return false;
 }
 
-/**
- * Which authorization lane each agent-facing Computer Use tool belongs in.
- *
- * Three lanes, because the three questions are different. `discovery` asks "may this Task be told
- * what is on the desktop" and is observe-only. `access` asks "may this Task reach for the desktop
- * at all" — it covers the call that raises the approval card and the call that begins a session,
- * neither of which has a session to bind to yet. `session` is the existing lane, bound to a live
- * session id, and it is where `computer_stop` belongs.
- *
- * A table rather than a chain of comparisons so that adding a tool without choosing a lane is
- * visible here and denied at the door, instead of falling into whichever branch happens to be last.
- */
-const COMPUTER_TARGET_TOOL_LANES: ReadonlyMap<string, 'discovery' | 'access' | 'session'> = new Map(
-  [
-    [COMPUTER_LIST_TARGETS_TOOL.toolId, 'discovery' as const],
-    [COMPUTER_REQUEST_ACCESS_TOOL.toolId, 'access' as const],
-    [COMPUTER_START_TOOL.toolId, 'access' as const],
-    [COMPUTER_STOP_TOOL.toolId, 'session' as const],
-  ],
-);
-
-/**
- * The renderer's filtered model list is display-only. Main must independently require a current,
- * available catalog entry for this exact Connection/Provider/Model. An unknown multimodal fact is
- * intentionally allowed through to the fixed-image preflight; a catalog false is a hard deny.
- */
-export function computerUseProviderModelIsEligible(input: {
-  connectionId: string;
-  providerId: string;
-  modelId: string;
-  model: ProviderModel | undefined;
-}): boolean {
-  const model = input.model;
-  return (
-    model !== undefined &&
-    model.connectionId === input.connectionId &&
-    model.providerId === input.providerId &&
-    model.modelId === input.modelId &&
-    model.available === true &&
-    model.multimodalInput.value !== false
-  );
-}
-
-export function createComputerUseControllerForIpc(
-  deps: Omit<
-    ConstructorParameters<typeof ComputerUseController>[0],
-    'publishDiscoveryResult' | 'windowsTargetDiscoveryEnabled'
-  >,
-  persistence: Pick<PersistenceClient, 'recordComputerUseDiscoveryResult'>,
-  publish: (event: TurnEvent) => void,
-  platform: NodeJS.Platform = process.platform,
-): ComputerUseController {
-  return new ComputerUseController({
-    ...deps,
-    windowsTargetDiscoveryEnabled: () =>
-      platform === 'win32' &&
-      deps.effectiveEligibilityMode?.() === 'v2-denylist' &&
-      deps.agentDrivenEnabled?.() === true,
-    publishDiscoveryResult: (result) => {
-      if (result.taskId === null) return;
-      // The public tool error drops the proof (providerWorkspaceToolFailure keeps only a code),
-      // with or without a Turn, so an in-deadline termination is recorded here once instead.
-      if (!result.late && !result.results.some((item) => item.kind === 'terminated')) return;
-      publish(persistence.recordComputerUseDiscoveryResult({ ...result, taskId: result.taskId }));
-    },
-  });
-}
-
 export class IpcRouter {
   private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
@@ -1112,35 +945,6 @@ export class IpcRouter {
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
-  private readonly computerUseController: ComputerUseController;
-  private readonly computerUseRuntimeCapture: ComputerUseRuntimeCapture;
-  private readonly computerUseNative: ComputerUseNativeHost;
-  private readonly computerUseFeature: ComputerUseFeatureGate;
-  private readonly computerUsePermissionSettings: ComputerUsePermissionSettingsOpener;
-  private readonly computerUseActivationGate: ComputerUseUserActivationGate;
-  private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
-  private readonly computerUseStatusBySession = new Map<string, ComputerUseSessionStatus>();
-  private readonly computerUsePendingApprovalBySession = new Map<string, ComputerUseApproval>();
-  private readonly computerUsePendingGrantRequestIds = new Set<string>();
-  private computerUseAttentionFlashing = false;
-  private readonly computerUseApprovalSessionById = new Map<string, string>();
-  private readonly computerUseSessionByTask = new Map<string, string>();
-  private readonly computerUseQuickStartLatches = new Map<string, ComputerUseQuickStartLatch>();
-  private computerUseEmergencySessionId: string | null = null;
-  private readonly handleComputerUseRendererNavigation = (
-    _event: Electron.Event,
-    _url: string,
-    _isInPlace: boolean,
-    isMainFrame: boolean,
-  ): void => {
-    if (!isMainFrame) return;
-    this.computerUseQuickStartLatches.clear();
-    void this.computerUseController.rendererInvalidated();
-  };
-  private readonly handleComputerUseRendererGone = (): void => {
-    this.computerUseQuickStartLatches.clear();
-    void this.computerUseController.rendererInvalidated();
-  };
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   /** The assistant message each Provider-runtime Turn streams into, registered before its first
@@ -1189,18 +993,6 @@ export class IpcRouter {
   private readonly turnLogRuntimeByTurn = new Map<
     string,
     Readonly<{ runtime: RuntimeKind; provider?: string }>
-  >();
-  /**
-   * Where each live Turn actually sends, fixed when the Turn starts.
-   *
-   * The Task's model selection is a mutable setting: `modelsSetSelection` rewrites it without
-   * refusing a running Turn, without stopping it, and without advancing the policy epoch, while the
-   * Turn keeps shipping to the `started.modelSelection` it was dispatched with. Anything that asks
-   * "may this reach the provider this Turn is talking to?" has to ask this map, not the Task row.
-   */
-  private readonly turnProviderBindingByTurn = new Map<
-    string,
-    Readonly<{ taskId: string; connectionId: string; modelId: string }>
   >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
@@ -1317,13 +1109,8 @@ export class IpcRouter {
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
     providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
-    computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
-    computerUseActivationGate?: ComputerUseUserActivationGate,
     private readonly graphs: GraphRenderService | null = null,
-    private readonly computerUseCaptureOutput?: ComputerUseCaptureOutput,
-    computerUseFeature?: ComputerUseFeatureGate,
   ) {
-    this.computerUseRuntimeCapture = createComputerUseRuntimeCapture(computerUseCaptureOutput);
     this.graphSourceMonitor = new GraphSourceMonitor({
       document: (input) => {
         this.persistence.getTask(input.taskId);
@@ -1793,25 +1580,6 @@ export class IpcRouter {
               (action) => this.updateInstallMutationGate.run(action),
             ),
           }),
-      // Registered only when both Computer Use gates are on, so with the flags off the outer Task
-      // catalog has no definition for these tools at all (ADR v2 §9). `this.computerUseController`
-      // is constructed after this harness, which is why the boundary defers to it lazily.
-      ...(computerUseAgentDrivenV2Enabled()
-        ? {
-            computerTargets: {
-              listTargets: (input, context, signal) =>
-                this.computerUseController.listTargets(input, context, signal),
-              // Both wait on the world outside this process, so both take the dispatch's signal:
-              // cancelling the Turn withdraws the card and stops the session.
-              requestAccess: (input, context, signal) =>
-                this.computerUseController.requestAccess(input, context, signal),
-              start: (input, context, signal) =>
-                this.computerUseController.startForAgent(input, context, signal),
-              stop: (sessionId, context) =>
-                this.computerUseController.stopForAgent(sessionId, context),
-            },
-          }
-        : {}),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
       recordPlan: (context, items) =>
         this.persistence.recordManagedTurnPlan({
@@ -1937,188 +1705,6 @@ export class IpcRouter {
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       genericManagedRuntimeTools.grokRuntime,
     );
-    // Computer Use is constructed only after the Main-owned Provider and Permission services
-    // above exist. Its native host is injected by index.ts after the signed package gate runs;
-    // callers without a binding receive a permanently unavailable fail-closed host.
-    this.computerUseActivationGate =
-      computerUseActivationGate ??
-      new ComputerUseUserActivationGate(this.window.webContents, this.window.id);
-    this.computerUseNative = computerUseNative;
-    // The saved beta setting is the user's switch; startup passes whether it loaded the native part
-    // for it. A router built without one (tests, embedded) gates on the setting and env alone.
-    this.computerUseFeature =
-      computerUseFeature ??
-      createComputerUseFeatureGate({
-        setting: () => this.persistence.getComputerUseEnabled(),
-        buildSupported: () => {
-          const native = computerUseNative.availability();
-          return native.packageReady && native.handshakeReady;
-        },
-      });
-    // The URL table lives in this module's constants; Renderer supplies only a permission name.
-    this.computerUsePermissionSettings = createComputerUsePermissionSettingsOpener({
-      openExternal: async (url) => await shell.openExternal(url),
-    });
-    this.computerUseEmergencyStop = new ComputerUseEmergencyStop({
-      onStop: () => {
-        const sessionId = this.computerUseEmergencySessionId;
-        if (sessionId === null) return;
-        return this.computerUseController.stop(sessionId, 'emergency_stop');
-      },
-    });
-    this.computerUseController = createComputerUseControllerForIpc(
-      {
-        runtimeCapture: this.computerUseRuntimeCapture,
-        persistence: this.persistence,
-        native: computerUseNative,
-        featureEnabled: () => this.computerUseFeature.enabled(),
-        agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
-        // The effective eligibility mode (C5-1): v2-denylist only for a build compiled as v2 with the V2
-        // flag on and no force-v1 variable. It decides which route a session asks the native for; the
-        // host binds v2 only when the build also attests classifier 2.
-        effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
-        // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
-        // from the Turn that is calling rather than from the Task's mutable model setting: the Task
-        // row can be pointed at a different connection mid-Turn while the running Turn keeps sending
-        // to the one it started with, which would consent against B and transmit to A.
-        providerEgressBindingFor: (taskId, turnId) =>
-          this.computerUseProviderEgressBindingFor(taskId, turnId),
-        currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
-        // A panel start needs an idle Task. `computer_start` runs inside a Turn, so what it needs is
-        // that its own Turn is still the active one — the same requirement, expressed against the
-        // Turn that owns the session rather than against "none".
-        canStartSession: (taskId, ownerTurnId) =>
-          computerUseSessionMayStart(
-            {
-              persistence: this.persistence,
-              hasBusyWorkers: (id) => this.teamCoordinator.hasBusyWorkers(id),
-            },
-            taskId,
-            ownerTurnId,
-          ),
-        plannerFactory: async ({
-          taskId,
-          turnId,
-          sessionId,
-          connectionId,
-          modelId,
-          mode,
-          policyEpoch,
-          sessionGoal,
-          signal,
-        }) => {
-          const selected = this.persistence.getProviderConnection(connectionId);
-          const connection = await this.ensureProviderEndpointConsent(selected, false);
-          const verified = await this.providerVerification.requireVerifiedForExecution(
-            connection.id,
-            signal,
-          );
-          if (
-            !verified.enabled ||
-            verified.id !== connectionId ||
-            verified.providerId !== selected.providerId
-          )
-            throw new Error('Computer Use provider selection changed');
-          const selectedModel = this.modelCatalog.find(connectionId, modelId);
-          if (
-            !computerUseProviderModelIsEligible({
-              connectionId,
-              providerId: verified.providerId,
-              modelId,
-              model: selectedModel,
-            })
-          )
-            throw new InvalidModelError('provider');
-          const endpointTrust = this.providerEgressTrustForConnection(verified);
-          const catalogRevision = this.modelCatalog.revision;
-          const plannerBaseDeps = {
-            runtimeCapture: this.computerUseRuntimeCapture,
-            runtime: this.providerRegistry.resolve(verified),
-            connection: verified,
-            modelId,
-            mode,
-            task: this.persistence.getTask(taskId),
-            turnId,
-            permissionBroker: this.permissionBroker,
-            endpointTrust,
-            structuredOutputSupported: selectedModel?.structuredOutput.value === true,
-            // What `computer_start` said this session is for, or nothing when a person started it
-            // from the panel and the Task's own objective is the whole story.
-            ...(sessionGoal === null ? {} : { sessionGoal }),
-          } as const;
-          const permit = await preflightComputerUseProvider(
-            { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },
-            signal,
-          );
-          if (
-            permit.sessionId !== sessionId ||
-            permit.connectionId !== connectionId ||
-            permit.modelId !== modelId ||
-            Date.parse(permit.expiresAt) <= Date.now()
-          )
-            throw new Error('Computer Use provider preflight binding changed');
-          return new ProviderComputerUsePlanner({
-            ...plannerBaseDeps,
-            artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,
-            artifactPasteSupported: this.computerUseNative.artifactPasteSupported?.() === true,
-            compatibilityPermit: permit,
-            currentCompatibilityBinding: async (currentSignal) => {
-              const persisted = this.persistence.getProviderConnection(connectionId);
-              const current = await this.providerVerification.requireVerifiedForExecution(
-                persisted.id,
-                currentSignal,
-              );
-              const currentEndpointTrust = this.providerEgressTrustForConnection(current);
-              return {
-                endpointRevision: computerUseProviderEndpointRevision(
-                  current,
-                  modelId,
-                  currentEndpointTrust,
-                ),
-                catalogRevision: this.modelCatalog.revision,
-                policyEpoch: this.permissionBroker.getPolicy(taskId).policyEpoch,
-                adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
-              };
-            },
-          });
-        },
-        authorize: (request) =>
-          this.evaluateToolPermission(
-            {
-              context: request.context,
-              callId: request.callId,
-              entry: request.entry,
-              input: request.input,
-            },
-            request.capability,
-          ),
-        publishApproval: (approval) => this.publishComputerUseApproval(approval),
-        publishGrantRequest: (request) => this.publishComputerUseGrantRequest(request),
-        publishStatus: (status) => this.publishComputerUseStatus(status),
-        armEmergencyStop: (sessionId, targetBounds) => {
-          this.computerUseEmergencySessionId = sessionId;
-          return this.computerUseEmergencyStop.arm(targetBounds);
-        },
-        disarmEmergencyStop: (sessionId) => {
-          if (this.computerUseEmergencySessionId !== sessionId) return;
-          this.computerUseEmergencySessionId = null;
-          this.computerUseEmergencyStop.disarm();
-        },
-        repositionEmergencyStop: (sessionId, screenBounds) =>
-          this.computerUseEmergencySessionId === sessionId &&
-          this.computerUseEmergencyStop.reposition(screenBounds),
-        visualActionBlocked: (sessionId, action) =>
-          this.computerUseEmergencySessionId === sessionId &&
-          this.computerUseEmergencyStop.blocksTargetAction(action),
-        // Computer Use owns a synthetic, non-persisted Turn. Its ToolBroker lifecycle is transient;
-        // durable evidence is stored in computer_action_audits instead of managed_tool_calls.
-        lifecycle: () => undefined,
-      },
-      this.persistence,
-      (event) => this.publish(event),
-    );
-    this.window.webContents.on?.('did-start-navigation', this.handleComputerUseRendererNavigation);
-    this.window.webContents.on?.('render-process-gone', this.handleComputerUseRendererGone);
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
         new RuntimeHostClient(
@@ -2153,14 +1739,10 @@ export class IpcRouter {
       IPC_CHANNELS.graphsRequestUpdate,
       graphMissionUpdateInputSchema,
       graphMissionUpdateReviewSchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
-        if (!activation || activation.intent !== graphUpdateActivationIntent(input, 'request'))
-          throw new Error('変更の確認ボタンから操作してください。');
-        return this.teamCoordinator.requestGraphConstraintUpdate(input, activation.token, () =>
+      async (input) =>
+        this.teamCoordinator.requestGraphConstraintUpdate(input, randomUUID(), () =>
           validateGraphUpdate(input),
-        );
-      },
+        ),
     );
     this.handle(
       IPC_CHANNELS.graphsReviewUpdate,
@@ -2177,14 +1759,10 @@ export class IpcRouter {
       IPC_CHANNELS.graphsAgreeUpdate,
       graphMissionUpdateAgreementSchema,
       teamMissionSummarySchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
-        if (!activation || activation.intent !== graphUpdateActivationIntent(input, 'agree'))
-          throw new Error('再合意ボタンから操作してください。');
-        return this.teamCoordinator.agreeGraphConstraintUpdate(input, activation.token, () =>
+      async (input) =>
+        this.teamCoordinator.agreeGraphConstraintUpdate(input, randomUUID(), () =>
           validateGraphUpdate(input),
-        );
-      },
+        ),
     );
     this.handle(
       IPC_CHANNELS.graphsWorkspaceReview,
@@ -2216,10 +1794,7 @@ export class IpcRouter {
       IPC_CHANNELS.graphsMissionResumeStep,
       graphMissionResumeInputSchema,
       teamMissionSummarySchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'graph-resume-step');
-        if (!activation || activation.intent !== graphResumeStepActivationIntent(input))
-          throw new Error('計画の工程再開ボタンから操作してください。');
+      async (input) => {
         const document = this.graphs?.liveDocument(
           input.taskId,
           input.instanceId,
@@ -2248,10 +1823,7 @@ export class IpcRouter {
       IPC_CHANNELS.graphsMissionResumeIntegration,
       graphMissionResumeInputSchema,
       teamMissionSummarySchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'graph-resume');
-        if (!activation || activation.intent !== graphResumeActivationIntent(input))
-          throw new Error('計画の統合再開ボタンから操作してください。');
+      async (input) => {
         const document = this.graphs?.liveDocument(
           input.taskId,
           input.instanceId,
@@ -2279,10 +1851,8 @@ export class IpcRouter {
       IPC_CHANNELS.graphsMissionStart,
       graphMissionStartInputSchema,
       teamMissionSummarySchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
-        if (activation === null || activation.intent !== graphStartActivationIntent(input))
-          throw new Error('計画の開始ボタンから操作してください。');
+      async (input) => {
+        const consentId = randomUUID();
         return this.teamCoordinator.startGraphMission(input.taskId, async () => {
           if (!this.graphs) throw new Error('Graph service unavailable');
           const document = this.graphs.liveDocument(
@@ -2312,7 +1882,7 @@ export class IpcRouter {
             contextDigest: review.contextDigest,
             workspaceDigest: context.workspace.digest,
             policyEpoch: context.policyEpoch,
-            consentId: activation.token,
+            consentId,
             now: new Date().toISOString(),
           };
         });
@@ -2439,266 +2009,17 @@ export class IpcRouter {
         this.graphSourceMonitor.release(input.taskId, input.instanceId);
       }),
     );
-    ipcMain.on(IPC_CHANNELS.computerUseActivationIntent, this.handleComputerUseActivationIntent);
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
       platform: process.platform,
       settingsWorkspaceV2: settingsWorkspaceV2Enabled(),
       projectMultiFolderUx: projectMultiFolderUxEnabled(),
-      // Main is the only judge of the agent-driven gate; the Renderer shows or hides the grant
-      // management section from this answer rather than reading an environment of its own.
-      computerUseAgentDrivenV2: computerUseAgentDrivenV2Enabled(),
       // Startup recovery outcome (issue #9). Already computed before the window existed — this is
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
       updateHealth: this.persistence.getUpdateHealth(),
       commandSandbox: this.commandSandboxCapability,
     }));
-    this.handle(
-      IPC_CHANNELS.computerUseAvailability,
-      emptyPayloadSchema,
-      computerUseAvailabilitySchema,
-      () => this.computerUseController.availability(),
-    );
-    // Not a mutation: nothing in the app changes, so it is not queued behind the Task mailbox or
-    // the update-install gate. The trusted click, the enum input, and the rate limit are the gates.
-    this.handle(
-      IPC_CHANNELS.computerUseOpenPermissionSettings,
-      computerUseOpenPermissionSettingsInputSchema,
-      computerUseOpenPermissionSettingsResultSchema,
-      async (input, event) => {
-        // A trusted click inside the Computer Use panel, the permission name as the only input,
-        // and a Main-side rate limit. Nothing here can name a URL, a path, or an application.
-        const activation = this.computerUseActivationGate.consume(event, 'permission-settings');
-        if (activation === null) throw new SecurityError();
-        return await this.computerUsePermissionSettings.open(input.permission);
-      },
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseProfilesList,
-      computerUseProfileListInputSchema,
-      computerUseProfileListResultSchema,
-      () => {
-        const availability = this.computerUseController.availability();
-        if (!availability.available)
-          throw new ComputerUseNativeUnavailableError(
-            availability.reasonCode ?? availability.state,
-          );
-        return { profiles: this.computerUseController.listProfiles() };
-      },
-    );
-    // The settings screen's view of the permanent grants (ADR v2 §6.5). Reading is not a mutation
-    // and needs no click; both channels refuse outright when the agent-driven gate is off, so the
-    // section is not merely hidden in the Renderer — Main does not serve it either.
-    this.handle(
-      IPC_CHANNELS.computerUseGrantsList,
-      emptyPayloadSchema,
-      computerUseGrantListResultSchema,
-      () => {
-        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
-        return this.computerUseController.listAppGrantViews();
-      },
-    );
-    this.handleMutation(
-      IPC_CHANNELS.computerUseGrantRevoke,
-      computerUseGrantRevokeInputSchema,
-      computerUseGrantListResultSchema,
-      async (input, event) => {
-        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
-        // A trusted click inside the Computer Use panel, and a row id plus the revision the user was
-        // looking at. Nothing here can name an application, a path, or a mode — revoking can only
-        // ever remove, so the worst a confused caller achieves is asking the user again.
-        const activation = this.computerUseActivationGate.consume(event, 'app-grant-revoke');
-        if (activation === null) throw new SecurityError();
-        await this.computerUseController.revokeAppGrant(input.grantId, input.expectedRevision);
-        return this.computerUseController.listAppGrantViews();
-      },
-    );
-    // Removing grant rows that no longer authenticate (T14). Its own activation kind although it
-    // only ever deletes: the revoke button names a row the user was looking at and this one names
-    // none, and a click that says "remove this app" must not be spendable as "remove those rows".
-    this.handleMutation(
-      IPC_CHANNELS.computerUseGrantPurge,
-      emptyPayloadSchema,
-      computerUseGrantPurgeResultSchema,
-      // Async although nothing awaits: every privileged Computer Use channel answers with a
-      // promise, and a handler that throws synchronously reaches its caller differently.
-      async (_input, event) => {
-        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
-        const activation = this.computerUseActivationGate.consume(event, 'app-grant-purge');
-        if (activation === null) throw new SecurityError();
-        return this.computerUseController.purgeInvalidAppGrants();
-      },
-    );
-    // Answering the in-conversation approval card (ADR v2 §6.1.1). The trusted click is proved
-    // here; the intent it carried is handed to the controller, which is where it is compared
-    // against the card — and where deny is exempted, so refusing is never blocked by a stale
-    // intent. Model output and screen text reach neither.
-    this.handleMutation(
-      IPC_CHANNELS.computerUseGrantRequestResolve,
-      computerAppGrantResolveInputSchema,
-      z.undefined(),
-      async (input, event) => {
-        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
-        const activation = this.computerUseActivationGate.consume(event, 'app-grant');
-        if (activation === null) throw new SecurityError();
-        await this.computerUseController.resolveAppGrantRequest(input, activation.intent);
-        return undefined;
-      },
-    );
-    this.handleMutation(
-      IPC_CHANNELS.computerUseProfileRegister,
-      computerUseProfileRegisterInputSchema,
-      computerAppProfileSchema.nullable(),
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'application');
-        if (activation === null) throw new SecurityError();
-        const availability = this.computerUseController.availability();
-        if (!availability.available)
-          throw new ComputerUseNativeUnavailableError(
-            availability.reasonCode ?? availability.state,
-          );
-        const identity = await this.computerUseNative.pickApplication({
-          activationToken: activation.token,
-          pickerKind: 'application',
-        });
-        if (identity === null) return null;
-        return this.computerUseController.registerProfile({
-          ...this.computerUseRegistrationPreferences(input.taskId),
-          label: identity.displayName,
-          identity,
-        });
-      },
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseWindowCandidates,
-      computerUseWindowCandidatesInputSchema,
-      computerUseWindowCandidatesResultSchema,
-      async (input, event) => {
-        // A Quick Start click is opportunistically consumed here before native enumeration. The
-        // resulting Main-only latch is bound to this Task/profile/frame and the exact single
-        // returned window; ordinary window listing has no activation requirement.
-        const activation = this.computerUseActivationGate.consume(event, 'start');
-        this.persistence.getTask(input.taskId);
-        const activationExpectedProfileRevision =
-          activation === null
-            ? null
-            : this.persistence.getComputerAppProfile(input.profileId).revision;
-        const availability = this.computerUseController.availability();
-        if (!availability.available)
-          throw new ComputerUseNativeUnavailableError(
-            availability.reasonCode ?? availability.state,
-          );
-        const frame = event.senderFrame;
-        if (frame === null) throw new SecurityError();
-        const actor = [this.window.id, event.sender.id, frame.processId, frame.routingId].join(':');
-        const intent = this.computerUseController.beginWindowCandidates(
-          input.profileId,
-          input.taskId,
-          actor,
-        );
-        try {
-          await intent.result;
-          if (event.sender.isDestroyed() || event.senderFrame !== frame || frame.isDestroyed())
-            throw new SecurityError();
-          return intent.commit((candidates) => {
-            if (activation !== null && activationExpectedProfileRevision !== null)
-              this.latchComputerUseQuickStart(
-                event,
-                activation,
-                input,
-                candidates,
-                activationExpectedProfileRevision,
-              );
-            return { profileId: input.profileId, candidates };
-          });
-        } catch (error) {
-          await intent.cancel();
-          throw error;
-        }
-      },
-    );
-    this.handleMutation(
-      IPC_CHANNELS.computerUseStart,
-      computerUseStartInputSchema,
-      computerUseSessionStatusSchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'start');
-        const expectedIntent = startActivationIntent(input);
-        const directActivationMatches = activation?.intent === expectedIntent;
-        if (
-          !directActivationMatches &&
-          (input.resumeSessionId !== undefined ||
-            input.quarantineResume === true ||
-            this.consumeComputerUseQuickStartLatch(event, input) === null)
-        )
-          throw new SecurityError();
-        if (directActivationMatches)
-          this.clearComputerUseQuickStartLatchesForActor(event, input.taskId, input.profileId);
-        const availability = this.computerUseController.availability();
-        if (!availability.available)
-          throw new ComputerUseNativeUnavailableError(
-            availability.reasonCode ?? availability.state,
-          );
-        if (this.persistence.getActiveTurnId(input.taskId) !== null) throw new TurnActiveError();
-        if (this.teamCoordinator.hasBusyWorkers(input.taskId)) throw new TurnActiveError();
-        return this.computerUseController.start({
-          ...input,
-          ...(input.quarantineResume === true && directActivationMatches
-            ? { quarantineResumeTrusted: true }
-            : {}),
-        });
-      },
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseStatusGet,
-      computerUseSessionStatusInputSchema,
-      computerUseSessionStatusSchema.nullable(),
-      (input) =>
-        this.computerUseController.getStatus(input.sessionId) ??
-        this.computerUseStatusBySession.get(input.sessionId) ??
-        null,
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseStop,
-      computerUseStopInputSchema,
-      z.undefined(),
-      async (input) => {
-        await this.computerUseController.stop(input.sessionId, input.reason);
-        return undefined;
-      },
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseForegroundHandoffResolve,
-      computerUseForegroundHandoffResolveInputSchema,
-      computerUseSessionStatusSchema,
-      (input, event) =>
-        this.computerUseController.resolveForegroundHandoff(input, (intentId) => {
-          const activation = this.computerUseActivationGate.consume(event, 'foreground-handoff');
-          return (
-            intentId === input.intentId &&
-            activation?.intent === foregroundHandoffActivationIntent(input)
-          );
-        }),
-    );
-    this.handle(
-      IPC_CHANNELS.computerUseApprovalResolve,
-      computerUseApprovalResolveInputSchema,
-      computerUseSessionStatusSchema,
-      async (input, event) => {
-        const activation = this.computerUseActivationGate.consume(event, 'approval');
-        if (activation?.intent !== approvalActivationIntent(input)) throw new SecurityError();
-        const sessionId = this.computerUseApprovalSessionById.get(input.approvalId);
-        if (sessionId === undefined) throw new NotFoundError('Computer Use approval not found');
-        await this.computerUseController.resolveApproval(input);
-        const status =
-          this.computerUseController.getStatus(sessionId) ??
-          this.computerUseStatusBySession.get(sessionId);
-        if (status === undefined || status === null)
-          throw new NotFoundError('Computer Use session not found');
-        return status;
-      },
-    );
     this.handle(
       IPC_CHANNELS.runtimeFailureDiagnosticGet,
       runtimeFailureDiagnosticQuerySchema,
@@ -2914,26 +2235,6 @@ export class IpcRouter {
         // may start queued Workers right away.
         this.teamCoordinator.notifyConcurrencyLimitChanged();
         return result.value;
-      },
-    );
-    this.handle(
-      IPC_CHANNELS.settingsGetComputerUse,
-      emptyPayloadSchema,
-      computerUseSettingsSchema,
-      () => this.computerUseFeature.settings(),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.settingsSetComputerUse,
-      computerUseSettingsSetInputSchema,
-      computerUseSettingsSchema,
-      async (input, event, envelope) => {
-        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetComputerUse, () =>
-          this.persistence.setComputerUseEnabled(input.enabled),
-        );
-        // Off takes effect now: the gate already reads the saved value, and whatever was running or
-        // starting under it ends here, before the Renderer hears that the change was saved.
-        if (!this.computerUseFeature.enabled()) await this.computerUseController.featureDisabled();
-        return this.computerUseFeature.settings();
       },
     );
     this.handle(
@@ -3762,10 +3063,7 @@ export class IpcRouter {
       IPC_CHANNELS.tasksMessages,
       taskIdPayloadSchema,
       z.array(chatMessageSchema),
-      async (input) => {
-        await this.stopComputerUseOutsideTask(input.taskId);
-        return this.persistence.listMessages(input.taskId);
-      },
+      async (input) => this.persistence.listMessages(input.taskId),
     );
     this.handleMutation(
       IPC_CHANNELS.tasksRename,
@@ -3789,19 +3087,10 @@ export class IpcRouter {
       IPC_CHANNELS.tasksSetArchived,
       taskArchivedInputSchema,
       taskSummarySchema,
-      (input, event, envelope) => {
-        const result = this.runMutation(
-          event,
-          envelope,
-          input.taskId,
-          IPC_CHANNELS.tasksSetArchived,
-          () => this.persistence.setArchived(input.taskId, input.archived),
-        );
-        // Archiving is how a conversation goes away here; nothing deletes a Task. Computer Use's
-        // Task-scoped state has to end with it (ADR v2 §6.1) — see `taskClosed`.
-        if (result.executed && input.archived) this.computerUseController.taskClosed(input.taskId);
-        return result.value;
-      },
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.tasksSetArchived, () =>
+          this.persistence.setArchived(input.taskId, input.archived),
+        ).value,
     );
     this.handleMutation(
       IPC_CHANNELS.tasksSetGoal,
@@ -4264,28 +3553,20 @@ export class IpcRouter {
       IPC_CHANNELS.teamsHireWorker,
       teamHireWorkerInputSchema,
       workerSummarySchema,
-      async (input) => {
-        await this.stopComputerUseForTask(input.taskId, 'turn_started');
-        return this.teamCoordinator.hireWorker(input);
-      },
+      async (input) => this.teamCoordinator.hireWorker(input),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsResumeMission,
       teamResumeMissionInputSchema,
       teamMissionSummarySchema,
-      async (input) => {
-        await this.stopComputerUseForTask(input.taskId, 'turn_started');
-        return this.teamCoordinator.resumeMission(input.taskId, input.missionId);
-      },
+      async (input) => this.teamCoordinator.resumeMission(input.taskId, input.missionId),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsResumeExecutionIntegration,
       teamResumeExecutionIntegrationInputSchema,
       teamDetailSchema,
-      async (input) => {
-        await this.stopComputerUseForTask(input.taskId, 'turn_started');
-        return this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId);
-      },
+      async (input) =>
+        this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId),
     );
     // Worktrees Team Workers left on disk (issue #544): list and read them, show one in the OS file
     // manager, or discard one the user confirmed. The coordinator checks every path it touches.
@@ -4342,10 +3623,7 @@ export class IpcRouter {
       IPC_CHANNELS.teamsSend,
       teamSendMessageInputSchema,
       teamMessageSummarySchema,
-      async (input) => {
-        await this.stopComputerUseForTask(input.taskId, 'turn_started');
-        return this.teamCoordinator.sendToWorker(input);
-      },
+      async (input) => this.teamCoordinator.sendToWorker(input),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsStopWorker,
@@ -4786,19 +4064,13 @@ export class IpcRouter {
         return undefined;
       },
     );
-    this.window.webContents.once('destroyed', () => {
-      this.closeAllPorts();
-      void this.computerUseController.dispose();
-      this.computerUseActivationGate.dispose();
-      this.computerUseEmergencyStop.dispose();
-    });
+    this.window.webContents.once('destroyed', () => this.closeAllPorts());
   }
 
   private async policyEpochChanged(taskId: string, policyEpoch: number): Promise<void> {
     let cleanup = this.policyCleanupsByTask.get(taskId);
     if (cleanup === undefined || cleanup.epoch < policyEpoch) {
       this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
-      this.computerUseController.policyEpochChanged(taskId);
       this.persistence.quarantineBackgroundForPolicyEpoch(
         taskId,
         policyEpoch,
@@ -4916,103 +4188,9 @@ export class IpcRouter {
     }
   }
 
-  private computerUseRegistrationPreferences(taskId: string): {
-    label: string;
-    mode: 'full_access_app';
-    connectionId: string;
-    modelId: string;
-    providerEgressConsent: false;
-    remember: false;
-  } {
-    const taskSelection = this.persistence.getTaskModelSelection(taskId);
-    const fallback =
-      taskSelection ??
-      modelSelectionForRuntime(this.persistence.getRuntime(), this.persistence.getModel());
-    return {
-      // The native picker owns the actual display name/identity. This label is only a temporary
-      // Main-side preference until the picker result is persisted by the controller.
-      label: 'Computer Use target',
-      mode: 'full_access_app',
-      connectionId: fallback.connectionId ?? 'unselected',
-      modelId: fallback.requestedModel ?? 'unselected',
-      providerEgressConsent: false,
-      remember: false,
-    };
-  }
-
-  private async stopComputerUseForTask(
-    taskId: string,
-    reason: 'task_changed' | 'turn_started',
-  ): Promise<void> {
-    await this.computerUseController.stopForTask(taskId, reason);
-  }
-
-  private async stopComputerUseOutsideTask(selectedTaskId: string): Promise<void> {
-    for (const [key, latch] of this.computerUseQuickStartLatches)
-      if (latch.taskId !== selectedTaskId) this.computerUseQuickStartLatches.delete(key);
-    await this.computerUseController.stopOutsideTask(selectedTaskId);
-  }
-
-  private publishComputerUseApproval(rawApproval: unknown): void {
-    const parsed = computerUseApprovalSchema.safeParse(rawApproval);
-    if (!parsed.success) return;
-    const approval = parsed.data;
-    this.computerUseApprovalSessionById.set(approval.id, approval.sessionId);
-    if (approval.state === 'pending')
-      this.computerUsePendingApprovalBySession.set(approval.sessionId, approval);
-    else this.computerUsePendingApprovalBySession.delete(approval.sessionId);
-    const status =
-      this.computerUseStatusBySession.get(approval.sessionId) ??
-      this.computerUseController.getStatus(approval.sessionId);
-    if (status !== null && status !== undefined) this.publishComputerUseStatus(status);
-    this.refreshComputerUseApprovalAttention();
-  }
-
-  private refreshComputerUseApprovalAttention(): void {
-    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    const pending =
-      this.computerUsePendingApprovalBySession.size > 0 ||
-      this.computerUsePendingGrantRequestIds.size > 0;
-    if (pending && !this.window.isVisible()) this.window.showInactive();
-    if (pending !== this.computerUseAttentionFlashing) {
-      this.window.flashFrame(pending);
-      this.computerUseAttentionFlashing = pending;
-    }
-  }
-
   /**
-   * Pushes one application approval card to the window (ADR v2 §6.1).
-   *
-   * Validated on the way out as well as in the controller: this is the only place a card crosses
-   * into the Renderer, and a payload that does not satisfy the contract must not be rendered at all
-   * rather than rendered partially. Nothing is stored — the card is live state, and a Renderer that
-   * reloads is a Renderer whose card the controller has already withdrawn.
-   */
-  private publishComputerUseGrantRequest(request: unknown): void {
-    const parsed = computerAppGrantRequestSchema.safeParse(request);
-    if (!parsed.success) return;
-    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    // Surfaced without being given the keyboard.
-    //
-    // The card asks the user to act inside Sprint Coder, so a hidden window has to come back. But
-    // taking OS focus for something that arrives on the model's schedule is half of a real hazard:
-    // the keystroke a user was aiming at whatever they were doing lands on this window instead, and
-    // that keystroke is a genuine trusted activation. So the window is shown inactive and asks for
-    // attention — a flashing taskbar entry, a bouncing Dock icon — and the person comes to it.
-    if (parsed.data.state === 'pending') this.computerUsePendingGrantRequestIds.add(parsed.data.id);
-    else this.computerUsePendingGrantRequestIds.delete(parsed.data.id);
-    this.refreshComputerUseApprovalAttention();
-    this.window.webContents.send(IPC_CHANNELS.computerUseGrantRequestEvent, parsed.data);
-  }
-
-  /**
-   * The one place a Turn is declared over.
-   *
-   * Both coordinators hear it, because both hold state that outlives nothing: the approval
-   * coordinator's pending approvals, and Computer Use's application approval card, per-Turn request
-   * count, and any session bound to that Turn. They were two separate call lists once and the
-   * second one was simply never written — routing every site through here is what stops that
-   * happening again, and it is why there is no `computerUseController.turnEnded` call anywhere else.
+   * The one place a Turn is declared over: the approval coordinator's pending approvals for that
+   * Turn end here, and routing every site through this one call keeps that list from drifting.
    */
   private notifyTurnEnded(
     taskId: string,
@@ -5020,149 +4198,6 @@ export class IpcRouter {
     outcome: Parameters<ApprovalCoordinator['turnEnded']>[2],
   ): void {
     this.approvalCoordinator.turnEnded(taskId, turnId, outcome);
-    this.computerUseController.turnEnded(taskId, turnId);
-  }
-
-  private readonly handleComputerUseActivationIntent = (
-    event: IpcMainEvent,
-    raw: unknown,
-  ): void => {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return;
-    const rawKind = (raw as Record<string, unknown>)['kind'];
-    const rawIntent = (raw as Record<string, unknown>)['intent'];
-    // The shared list, not a copy: a kind Main consumes but never binds makes that control silently
-    // dead, and a hand-maintained duplicate is how that happens.
-    if (!isComputerUseUiActivationKind(rawKind)) return;
-    if (rawIntent !== null && typeof rawIntent !== 'string') return;
-    this.computerUseActivationGate.bindIntent(event, rawKind, rawIntent);
-  };
-
-  private pruneComputerUseQuickStartLatches(now = Date.now()): void {
-    const generation = this.computerUseActivationGate.generation();
-    for (const [key, latch] of this.computerUseQuickStartLatches) {
-      if (latch.expiresAtMs <= now || latch.activationGeneration !== generation)
-        this.computerUseQuickStartLatches.delete(key);
-    }
-  }
-
-  private clearComputerUseQuickStartLatchesForActor(
-    event: IpcMainInvokeEvent,
-    taskId: string,
-    profileId: string,
-  ): void {
-    const frame = event.senderFrame;
-    if (frame === null) return;
-    for (const [key, latch] of this.computerUseQuickStartLatches)
-      if (
-        latch.taskId === taskId &&
-        latch.profileId === profileId &&
-        latch.senderId === event.sender.id &&
-        latch.frameProcessId === frame.processId &&
-        latch.frameRoutingId === frame.routingId &&
-        latch.browserWindowId === this.window.id
-      )
-        this.computerUseQuickStartLatches.delete(key);
-  }
-
-  private latchComputerUseQuickStart(
-    event: IpcMainInvokeEvent,
-    activation: ComputerUseActivationPermit,
-    input: { taskId: string; profileId: string },
-    candidates: readonly ComputerUseWindowCandidate[],
-    activationExpectedProfileRevision: number,
-  ): void {
-    const frame = event.senderFrame;
-    const eligible = candidates.filter((candidate) => candidate.eligible);
-    if (frame === null || eligible.length !== 1 || activation.intent === null) return;
-    const candidate = eligible[0]!;
-    const profile = this.persistence.getComputerAppProfile(input.profileId);
-    // The trusted click named the pre-enumeration revision. Native enumeration may perform the
-    // one permitted same-signer digest refresh, so bind that old consent separately from the
-    // exact post-refresh revision required by start(). No unrelated revision jump inherits it.
-    if (
-      profile.revision !== activationExpectedProfileRevision &&
-      profile.revision !== activationExpectedProfileRevision + 1
-    )
-      return;
-    this.clearComputerUseQuickStartLatchesForActor(event, input.taskId, input.profileId);
-    this.computerUseQuickStartLatches.set(
-      randomUUID(),
-      Object.freeze({
-        taskId: input.taskId,
-        profileId: input.profileId,
-        windowId: candidate.windowId,
-        expectedWindowRevision: candidate.revision,
-        expectedProfileRevision: profile.revision,
-        activationExpectedProfileRevision,
-        senderId: event.sender.id,
-        frameProcessId: frame.processId,
-        frameRoutingId: frame.routingId,
-        browserWindowId: this.window.id,
-        activationGeneration: activation.generation,
-        activationIntent: activation.intent,
-        expiresAtMs: Date.now() + COMPUTER_USE_QUICK_START_LATCH_TTL_MS,
-      }),
-    );
-  }
-
-  private consumeComputerUseQuickStartLatch(
-    event: IpcMainInvokeEvent,
-    input: ComputerUseStartInput,
-  ): ComputerUseQuickStartLatch | null {
-    const frame = event.senderFrame;
-    const now = Date.now();
-    this.pruneComputerUseQuickStartLatches(now);
-    if (frame === null) return null;
-    for (const [key, latch] of this.computerUseQuickStartLatches) {
-      const sameActor =
-        latch.taskId === input.taskId &&
-        latch.profileId === input.profileId &&
-        latch.senderId === event.sender.id &&
-        latch.frameProcessId === frame.processId &&
-        latch.frameRoutingId === frame.routingId &&
-        latch.browserWindowId === this.window.id;
-      if (!sameActor) continue;
-      this.computerUseQuickStartLatches.delete(key);
-      const expectedIntent = quickStartActivationIntent({
-        taskId: input.taskId,
-        profileId: input.profileId,
-        mode: input.mode,
-        connectionId: input.connectionId,
-        modelId: input.modelId,
-        providerEgressConsent: input.providerEgressConsent,
-        remember: input.remember,
-        maxRounds: input.maxRounds ?? 25,
-        expectedPolicyEpoch: input.expectedPolicyEpoch,
-        expectedProfileRevision: latch.activationExpectedProfileRevision,
-      });
-      return latch.activationIntent === expectedIntent &&
-        latch.windowId === input.windowId &&
-        latch.expectedWindowRevision === input.expectedWindowRevision &&
-        latch.expectedProfileRevision === input.expectedProfileRevision
-        ? latch
-        : null;
-    }
-    return null;
-  }
-
-  private publishComputerUseStatus(status: ComputerUseSessionStatus): void {
-    const pendingApproval = this.computerUsePendingApprovalBySession.get(status.sessionId) ?? null;
-    const published = computerUseSessionStatusSchema.parse({ ...status, pendingApproval });
-    this.computerUseStatusBySession.set(published.sessionId, published);
-    if (published.state === 'stopped') {
-      if (this.computerUseSessionByTask.get(published.taskId) === published.sessionId)
-        this.computerUseSessionByTask.delete(published.taskId);
-      this.computerUsePendingApprovalBySession.delete(published.sessionId);
-      for (const [approvalId, sessionId] of this.computerUseApprovalSessionById)
-        if (sessionId === published.sessionId)
-          this.computerUseApprovalSessionById.delete(approvalId);
-    } else this.computerUseSessionByTask.set(published.taskId, published.sessionId);
-    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    // An approval can arrive while the user is typing in another application. Show the card without
-    // moving keyboard focus, so an in-flight Space or Enter cannot activate its approval button.
-    // A paused session can represent user takeover, so it does not surface this window.
-    this.refreshComputerUseApprovalAttention();
-    this.window.webContents.send(IPC_CHANNELS.computerUseStatusEvent, published);
   }
 
   async dispose(): Promise<void> {
@@ -5177,30 +4212,6 @@ export class IpcRouter {
     this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
-    await this.computerUseController.dispose();
-    if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) {
-      this.window.webContents.removeListener?.(
-        'did-start-navigation',
-        this.handleComputerUseRendererNavigation,
-      );
-      this.window.webContents.removeListener?.(
-        'render-process-gone',
-        this.handleComputerUseRendererGone,
-      );
-    }
-    this.computerUseActivationGate.dispose();
-    this.computerUseEmergencyStop.dispose();
-    this.computerUseEmergencySessionId = null;
-    this.computerUseSessionByTask.clear();
-    this.computerUsePendingApprovalBySession.clear();
-    this.computerUsePendingGrantRequestIds.clear();
-    this.computerUseApprovalSessionById.clear();
-    this.computerUseStatusBySession.clear();
-    this.computerUseQuickStartLatches.clear();
-    ipcMain.removeListener(
-      IPC_CHANNELS.computerUseActivationIntent,
-      this.handleComputerUseActivationIntent,
-    );
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamDetailStream.clear();
@@ -5231,7 +4242,6 @@ export class IpcRouter {
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
-    this.computerUseCaptureOutput?.close();
     if (streamingFailure !== undefined) throw streamingFailure.cause;
   }
 
@@ -5809,395 +4819,6 @@ export class IpcRouter {
   }
 
   /**
-   * Computer Use has a synthetic controller Turn rather than a persisted chat Turn. Do not route
-   * it through the generic approval fact builder: that builder quite correctly treats unknown
-   * tools as external resources, while the Computer Use policy must bind to the Main-owned app,
-   * window, session, and observation revision. This still evaluates and commits through the
-   * PermissionBroker; it only supplies the exact resource facts that the native controller owns.
-   */
-  /**
-   * Target discovery names no session, because it is the call that finds one.
-   *
-   * `evaluateComputerUsePermission` below binds every Computer Use capability to a live session
-   * owned by the Task. That is exactly right for observe and act, and impossible for enumeration —
-   * routing `computer_list_targets` through it denies every call as `computer_session_missing`.
-   * Rather than loosen that binding, discovery gets its own evaluation through the same
-   * PermissionBroker, with the same policy-epoch check and the same non-persistent lane, and a
-   * resource that names what it actually reads: this install's target list, not a window.
-   *
-   * It stays read-only and `providerEgress: 'none'`: the enumeration itself sends nothing, and the
-   * one app-authored string it can return is withheld unless that app already has provider egress
-   * consent for this Task's connection and model.
-   */
-  private async evaluateComputerTargetDiscoveryPermission(
-    request: ToolAuthorizationRequest,
-    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
-  ) {
-    if (capability !== 'computer.observe')
-      return { decision: 'deny' as const, reason: 'computer_target_discovery_capability' };
-    const taskId = request.context.taskId;
-    const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
-    if (policyEpoch !== request.context.policyEpoch)
-      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
-    // `computer-target-list`, not `external`: `requestFactsValid` only pairs `computer.observe`
-    // with a computer resource, so an external target is rejected as `invalid_request_facts` before
-    // any policy runs. The Task is the binding, because enumeration happens before a target exists.
-    const resource = { kind: 'computer-target-list' as const, taskId };
-    const resourceSet = { kind: 'computer-target-list-exact' as const, taskId };
-    const operation = 'observe' as const;
-    const sandboxProfile = 'read-only' as const;
-    const baseRequest = {
-      taskId,
-      subjectId: `computer-use:targets:${capability}`,
-      capability,
-      resource,
-      operation,
-      providerEgress: 'none' as const,
-      sandboxProfile,
-      executionSpecDigest: digestCanonical({
-        schemaVersion: 1,
-        capability,
-        resource,
-        input: request.input,
-      }),
-      risk: request.entry.risk,
-    };
-    const permissionRequest = {
-      ...baseRequest,
-      reviewerInputDigest: autoReviewerInputDigest({
-        request: baseRequest,
-        tool: {
-          kind: request.entry.kind,
-          sideEffect: request.entry.sideEffect,
-          risk: request.entry.risk,
-        },
-        policyEpoch,
-      }),
-    } satisfies PermissionRequest;
-    const ceilingEntry = {
-      capability,
-      resourceSet,
-      operations: [operation],
-      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
-      providerEgress: ['none' as const],
-      sandboxProfiles: [sandboxProfile],
-    };
-    const evaluationInput = {
-      taskId,
-      turnId: request.context.turnId,
-      request: permissionRequest,
-      basePolicy: {
-        managedDeny: [],
-        projectDeny: [],
-        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        sandbox: { feasible: true, profile: sandboxProfile },
-        // Same shape the session lane uses for `computer.observe`: the lane supplies its own allow
-        // rule, so the Task's access preset does not decide it. That is deliberate and unchanged
-        // here — enumeration reads no screen content and is only reachable once the user has turned
-        // on both flags and registered applications. Revoking `computer.observe` in settings still
-        // denies it, because `evaluateCurrentPolicy` folds revoked capabilities into projectDeny,
-        // which runs before any allow rule.
-        allowRules: [
-          {
-            capability,
-            resourceSet,
-            operations: [operation],
-            auditReason: 'computer_target_discovery',
-          },
-        ],
-      },
-      now: new Date().toISOString(),
-    } satisfies Parameters<PermissionBroker['preview']>[0];
-    const evaluation = this.permissionBroker.preview(evaluationInput);
-    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
-      return { decision: evaluation.decision, reason: evaluation.reason };
-    if (evaluation.permit === undefined)
-      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
-    const permit = evaluation.permit;
-    return {
-      decision: 'allow' as const,
-      reason: evaluation.reason,
-      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
-      beforeExecute: () =>
-        this.permissionBroker.revalidateEphemeral({
-          ...evaluationInput,
-          permit,
-          now: new Date().toISOString(),
-        }).valid,
-    };
-  }
-
-  /**
-   * The pre-session control lane: `computer_request_access` and `computer_start`.
-   *
-   * Both carry `computer.control` and neither has a session, so the session lane — which requires a
-   * live session id and answers `computer_session_missing` without one — can never authorize them.
-   * They are not enumeration either: nothing here reads a screen. Hence a third lane, with its own
-   * resource kind that pairs with `computer.control` alone (`packages/domain`), bound to the Task,
-   * because the application is not decided by a permission rule at all.
-   *
-   * **Where the decision actually comes from**, and why this lane supplies its own allow rule:
-   * `computer_request_access` can only raise a card and wait for a human click — the click *is* the
-   * approval, and a second prompt from the Task's access preset would ask the same question twice,
-   * in the wrong order, about an application the user has not been shown yet. `computer_start`
-   * refuses unless `appGrantState` already says the application is granted, which is a decision the
-   * user made on that card. So the preset does not gate these; what still gates them is everything
-   * that is not an allow rule:
-   *
-   * - `computer.control` revoked in settings denies both, because `evaluateCurrentPolicy` folds a
-   *   revoked capability into `projectDeny`, which runs before any allow rule.
-   * - A policy epoch that moved since the tool call was authorized denies both.
-   * - The permit is revalidated immediately before execution, and nothing persistent is written:
-   *   the same non-persistent shape the other two Computer Use lanes use.
-   *
-   * Consistency with the session lane: there, `computer.control` supplies an allow rule only for
-   * `full_access_app`, and `supervised` deliberately leaves `allowRules` empty so the preset raises
-   * a per-action approval. That is the same principle — the lane brings an allow rule exactly where
-   * the human decision has already happened elsewhere — applied to a different question.
-   */
-  private async evaluateComputerTargetAccessPermission(
-    request: ToolAuthorizationRequest,
-    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
-  ) {
-    if (capability !== 'computer.control')
-      return { decision: 'deny' as const, reason: 'computer_target_access_capability' };
-    const taskId = request.context.taskId;
-    const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
-    if (policyEpoch !== request.context.policyEpoch)
-      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
-    const resource = { kind: 'computer-target-access' as const, taskId };
-    const resourceSet = { kind: 'computer-target-access-exact' as const, taskId };
-    const operation = 'control' as const;
-    const sandboxProfile = 'read-only' as const;
-    const baseRequest = {
-      taskId,
-      subjectId: `computer-use:access:${capability}`,
-      capability,
-      resource,
-      operation,
-      providerEgress: 'none' as const,
-      sandboxProfile,
-      executionSpecDigest: digestCanonical({
-        schemaVersion: 1,
-        capability,
-        resource,
-        toolId: request.entry.toolId,
-        input: request.input,
-      }),
-      risk: request.entry.risk,
-    };
-    const permissionRequest = {
-      ...baseRequest,
-      reviewerInputDigest: autoReviewerInputDigest({
-        request: baseRequest,
-        tool: {
-          kind: request.entry.kind,
-          sideEffect: request.entry.sideEffect,
-          risk: request.entry.risk,
-        },
-        policyEpoch,
-      }),
-    } satisfies PermissionRequest;
-    const ceilingEntry = {
-      capability,
-      resourceSet,
-      operations: [operation],
-      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
-      providerEgress: ['none' as const],
-      sandboxProfiles: [sandboxProfile],
-    };
-    const evaluationInput = {
-      taskId,
-      turnId: request.context.turnId,
-      request: permissionRequest,
-      basePolicy: {
-        managedDeny: [],
-        projectDeny: [],
-        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        sandbox: { feasible: true, profile: sandboxProfile },
-        allowRules: [
-          {
-            capability,
-            resourceSet,
-            operations: [operation],
-            auditReason: 'computer_target_access',
-          },
-        ],
-      },
-      now: new Date().toISOString(),
-    } satisfies Parameters<PermissionBroker['preview']>[0];
-    const evaluation = this.permissionBroker.preview(evaluationInput);
-    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
-      return { decision: evaluation.decision, reason: evaluation.reason };
-    if (evaluation.permit === undefined)
-      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
-    const permit = evaluation.permit;
-    return {
-      decision: 'allow' as const,
-      reason: evaluation.reason,
-      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
-      beforeExecute: () =>
-        this.permissionBroker.revalidateEphemeral({
-          ...evaluationInput,
-          permit,
-          now: new Date().toISOString(),
-        }).valid,
-    };
-  }
-
-  private async evaluateComputerUsePermission(
-    request: ToolAuthorizationRequest,
-    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
-  ) {
-    const input =
-      typeof request.input === 'object' && request.input !== null && !Array.isArray(request.input)
-        ? (request.input as Record<string, unknown>)
-        : null;
-    const sessionId = input?.['sessionId'];
-    if (typeof sessionId !== 'string')
-      return { decision: 'deny' as const, reason: 'computer_session_missing' };
-    const status = this.computerUseController.getStatus(sessionId);
-    if (status === null || status.taskId !== request.context.taskId)
-      return { decision: 'deny' as const, reason: 'computer_session_missing' };
-    const profile = this.persistence.getComputerAppProfile(status.profileId);
-    const observationRevision = status.observationRevision;
-    const operation =
-      capability === 'computer.observe' ? ('observe' as const) : ('control' as const);
-    const resource =
-      capability === 'computer.observe'
-        ? ({
-            kind: 'computer-session' as const,
-            platform: profile.platform,
-            appIdentityDigest: status.appIdentityDigest,
-            windowIdentityDigest: status.windowIdentityDigest,
-            sessionId,
-            taskId: status.taskId,
-          } satisfies Extract<PermissionRequest['resource'], { kind: 'computer-session' }>)
-        : ({
-            kind: 'computer-revision' as const,
-            platform: profile.platform,
-            appIdentityDigest: status.appIdentityDigest,
-            windowIdentityDigest: status.windowIdentityDigest,
-            sessionId,
-            revision: observationRevision,
-          } satisfies Extract<PermissionRequest['resource'], { kind: 'computer-revision' }>);
-    const resourceSet =
-      capability === 'computer.observe'
-        ? ({
-            kind: 'computer-session-exact' as const,
-            platform: profile.platform,
-            appIdentityDigest: status.appIdentityDigest,
-            windowIdentityDigest: status.windowIdentityDigest,
-            sessionId,
-          } satisfies ResourceSet)
-        : ({
-            kind: 'computer-revision-exact' as const,
-            platform: profile.platform,
-            appIdentityDigest: status.appIdentityDigest,
-            windowIdentityDigest: status.windowIdentityDigest,
-            sessionId,
-            revision: observationRevision,
-          } satisfies ResourceSet);
-    const policyEpoch = this.permissionBroker.getPolicy(status.taskId).policyEpoch;
-    if (policyEpoch !== request.context.policyEpoch)
-      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
-    const sandboxProfile = 'read-only' as const;
-    const executionSpecDigest = digestCanonical({
-      schemaVersion: 1,
-      capability,
-      sessionId,
-      profileId: status.profileId,
-      profileRevision: status.profileRevision,
-      windowIdentityDigest: status.windowIdentityDigest,
-      observationRevision,
-      input,
-    });
-    const baseRequest = {
-      taskId: status.taskId,
-      subjectId: `computer-use:${sessionId}:${capability}`,
-      capability,
-      resource,
-      operation,
-      providerEgress: 'none' as const,
-      sandboxProfile,
-      executionSpecDigest,
-      risk: request.entry.risk,
-    };
-    const toolFacts = {
-      kind: request.entry.kind,
-      sideEffect: request.entry.sideEffect,
-      risk: request.entry.risk,
-    } as const;
-    const permissionRequest = {
-      ...baseRequest,
-      reviewerInputDigest: autoReviewerInputDigest({
-        request: baseRequest,
-        tool: toolFacts,
-        policyEpoch,
-      }),
-    } satisfies PermissionRequest;
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
-    const ceilingEntry = {
-      capability,
-      resourceSet,
-      operations: [operation],
-      expiresAt,
-      providerEgress: ['none' as const],
-      sandboxProfiles: [sandboxProfile],
-    };
-    const evaluationInput = {
-      taskId: status.taskId,
-      turnId: request.context.turnId,
-      request: permissionRequest,
-      basePolicy: {
-        managedDeny: [],
-        projectDeny: [],
-        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-        sandbox: { feasible: true, profile: sandboxProfile },
-        allowRules:
-          capability === 'computer.observe' || status.mode === 'full_access_app'
-            ? [
-                {
-                  capability,
-                  resourceSet,
-                  operations: [operation],
-                  auditReason:
-                    capability === 'computer.observe'
-                      ? 'computer_observe_session'
-                      : 'computer_full_access_app',
-                },
-              ]
-            : [],
-      },
-      now: new Date().toISOString(),
-    } satisfies Parameters<PermissionBroker['preview']>[0];
-    // The Computer Use lane is deliberately non-persistent. It still evaluates the current
-    // PermissionBroker policy and revalidates the returned permit immediately before execution,
-    // but it never creates a generic permission audit/token/grant containing a live session id.
-    // Supervised mode also never delegates the user decision to AutoReviewer.
-    const evaluation = this.permissionBroker.preview(evaluationInput);
-    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
-      return { decision: evaluation.decision, reason: evaluation.reason };
-    if (evaluation.permit === undefined)
-      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
-    const permit = evaluation.permit;
-    return {
-      decision: 'allow' as const,
-      reason: evaluation.reason,
-      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
-      beforeExecute: () =>
-        this.permissionBroker.revalidateEphemeral({
-          ...evaluationInput,
-          permit,
-          now: new Date().toISOString(),
-        }).valid,
-    };
-  }
-
-  /**
    * Marks where in the assistant's reply a graph was rendered. The user reads the diagram beside
    * the text that produced it, so the anchor is appended to the Turn's assistant message at the
    * moment the graph tool succeeds — as its own fenced block the Renderer turns into an inline
@@ -6233,20 +4854,6 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
-    if (capability === 'computer.observe' || capability === 'computer.control') {
-      // Routed by exact tool id, never by the shape of the input. "Has no sessionId" would make a
-      // future tool that forgets the field fall into a pre-session lane by accident; a
-      // `computerTarget` tool that is not in the table is one nobody has decided about, and it is
-      // denied rather than defaulted into the session lane.
-      const lane = COMPUTER_TARGET_TOOL_LANES.get(request.entry.toolId);
-      if (request.entry.kind === 'computerTarget' && lane === undefined)
-        return { decision: 'deny' as const, reason: 'computer_target_tool_unknown' };
-      if (lane === 'discovery')
-        return this.evaluateComputerTargetDiscoveryPermission(request, capability);
-      if (lane === 'access')
-        return this.evaluateComputerTargetAccessPermission(request, capability);
-      return this.evaluateComputerUsePermission(request, capability);
-    }
     const teamResult =
       request.entry.providerName === 'read_file'
         ? teamResultReadAuthorizationFacts(request.input, request.context, request.callId)
@@ -6510,12 +5117,6 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
-    void this.stopComputerUseForTask(started.event.taskId, 'turn_started').catch((error) =>
-      secureLogger.warn('Computer Use was not stopped before a new Turn started', {
-        taskId: started.event.taskId,
-        error,
-      }),
-    );
     this.turnLogCategoryByTurn.set(started.turnId, started.teamTurn ? 'team' : 'chat');
     this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
     this.turnLogRuntimeByTurn.set(started.turnId, {
@@ -6524,7 +5125,6 @@ export class IpcRouter {
         ? {}
         : { provider: started.modelSelection.requestedProvider }),
     });
-    this.rememberTurnProviderBinding(started);
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
@@ -6533,13 +5133,6 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
-    void this.stopComputerUseForTask(transition.started.event.taskId, 'turn_started').catch(
-      (error) =>
-        secureLogger.warn('Computer Use was not stopped before a queued Turn started', {
-          taskId: transition.started.event.taskId,
-          error,
-        }),
-    );
     this.turnLogCategoryByTurn.set(
       transition.started.turnId,
       transition.started.teamTurn ? 'team' : 'chat',
@@ -6551,7 +5144,6 @@ export class IpcRouter {
         ? {}
         : { provider: transition.started.modelSelection.requestedProvider }),
     });
-    this.rememberTurnProviderBinding(transition.started);
     this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
@@ -6837,13 +5429,6 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillActivation: autoSkills.length > 0,
-        // Same decision point the provider-API route uses. A CLI runtime always accepts tools, so
-        // the only questions left are the flags, the native boundary, and whether this is a Leader
-        // Turn with a user present to authorise desktop control.
-        computerTargets: this.computerTargetsExposedForTurn({
-          teamTurn: started.teamTurn,
-          toolCalling: true,
-        }),
       },
     );
     if (kind === 'codex' && teamMcp !== undefined) {
@@ -8292,54 +6877,6 @@ export class IpcRouter {
     return this.taskTitleRuntimes.get(kind);
   }
 
-  /** Records the destination this Turn was dispatched with, before any setting can move. */
-  private rememberTurnProviderBinding(started: StartedTurn): void {
-    const { connectionId, requestedModel } = started.modelSelection;
-    if (connectionId === null || requestedModel === null) return;
-    this.turnProviderBindingByTurn.set(started.turnId, {
-      taskId: started.event.taskId,
-      connectionId,
-      modelId: requestedModel,
-    });
-  }
-
-  /**
-   * The one place that decides whether a Turn may see the Computer Use target tools.
-   *
-   * Both runtime routes ask this, because deciding it twice is how the routes drifted apart: the CLI
-   * route exposed the tools wherever the flags were on, while the provider-API route also required a
-   * usable native boundary, so a machine without the native helper offered the model two tools that
-   * could only ever fail. `toolCalling` is the same fact `providerWorkspaceToolsEligible` reads —
-   * attaching tools to a model that does not accept them breaks the request itself, not just the
-   * tool call. A CLI runtime always accepts tools, so it passes `true`.
-   */
-  private computerTargetsExposedForTurn(
-    input: Readonly<{ teamTurn: boolean; toolCalling: boolean | null | undefined }>,
-  ): boolean {
-    return (
-      !input.teamTurn &&
-      input.toolCalling !== false &&
-      computerUseAgentDrivenV2Enabled() &&
-      this.computerUseController.availability().available
-    );
-  }
-
-  /**
-   * The `{connectionId, modelId}` a Computer Use consent check must be measured against.
-   *
-   * Null whenever this Main cannot say where the Turn sends — an unrecorded Turn, a Turn that has
-   * finished, or a Turn id belonging to another Task. Callers withhold app-authored text on null,
-   * so an unknown destination is treated as an unconsented one.
-   */
-  private computerUseProviderEgressBindingFor(
-    taskId: string,
-    turnId: string,
-  ): Readonly<{ connectionId: string; modelId: string }> | null {
-    const binding = this.turnProviderBindingByTurn.get(turnId);
-    if (binding === undefined || binding.taskId !== taskId) return null;
-    return { connectionId: binding.connectionId, modelId: binding.modelId };
-  }
-
   private rememberTaskTitleRequest(started: StartedTurn): void {
     if (started.renamedTask === undefined) return;
     this.pendingTaskTitles.set(started.turnId, {
@@ -8796,34 +7333,23 @@ export class IpcRouter {
         memoryTurn ||
         skillCreatorTurn ||
         autoSkills.length > 0;
-      // Desktop targets need no Workspace, no Project, and no Skill, so a plain API Task would
-      // otherwise publish no catalog at all and the tools would never reach the model.
-      const computerTargetsEligible = this.computerTargetsExposedForTurn({
-        teamTurn,
-        toolCalling: selectedModel?.toolCalling.value,
-      });
-      workspaceToolSnapshot =
-        managedToolsEligible || computerTargetsEligible
-          ? this.managedCodingHarness.startTurn(
-              {
-                taskId,
-                turnId: started.turnId,
-                workspaceId:
-                  started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
-                policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
-              },
-              connection.providerId,
-              {
-                projectMemory: memoryTurn,
-                skillDrafts: skillCreatorTurn,
-                skillActivation: autoSkills.length > 0,
-                computerTargets: computerTargetsEligible,
-                // A Turn that qualifies only because of Computer Use carries the two desktop tools
-                // and nothing else; an empty Workspace must not drag the managed surface in.
-                ...(managedToolsEligible ? {} : { toolSurface: 'computer-targets-only' as const }),
-              },
-            )
-          : undefined;
+      workspaceToolSnapshot = managedToolsEligible
+        ? this.managedCodingHarness.startTurn(
+            {
+              taskId,
+              turnId: started.turnId,
+              workspaceId:
+                started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
+              policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+            },
+            connection.providerId,
+            {
+              projectMemory: memoryTurn,
+              skillDrafts: skillCreatorTurn,
+              skillActivation: autoSkills.length > 0,
+            },
+          )
+        : undefined;
       const workspaceGuidance = providerWorkspaceGuidance(
         process.platform,
         started.workspaceSet.roots,
@@ -8839,15 +7365,6 @@ export class IpcRouter {
           content:
             'The Skill catalog marks user-approved candidates with activationPolicy=auto-allowed. Call skill_activate with the exact id and digest only when the current request clearly matches. Treat the returned instructions as user-authority workflow guidance. Availability is not proof of activation.',
         });
-      // This route assembles its messages and its tools separately, so the label-isolation sentence
-      // cannot ride along with the compiled prompt guidance the CLI route uses. It is derived from
-      // the same catalog through the same helper, so "the catalog carries a target tool" and "the
-      // system prompt carries the warning" stay one condition (ADR v2 §5.2).
-      const computerTargetGuidance = computerTargetSystemPromptFor(
-        workspaceToolSnapshot?.entries ?? [],
-      );
-      if (computerTargetGuidance !== null)
-        messages.unshift({ role: 'system', content: computerTargetGuidance });
       let roundTools = assertUniqueProviderTools([
         ...(workspaceToolSnapshot === undefined
           ? []
@@ -10027,7 +8544,6 @@ export class IpcRouter {
       this.turnLogCategoryByTurn.delete(turnId);
       this.turnLogStartedAtByTurn.delete(turnId);
       this.turnLogRuntimeByTurn.delete(turnId);
-      this.turnProviderBindingByTurn.delete(turnId);
     }
   }
 
@@ -11056,12 +9572,6 @@ export function toPublicError(error: unknown): PublicError {
     return {
       code: 'INVALID_REQUEST',
       userMessage: 'Canvasの配置に不正な値が含まれています。',
-      retryable: false,
-    };
-  if (error instanceof ComputerUseNativeUnavailableError)
-    return {
-      code: 'RUNTIME_UNAVAILABLE',
-      userMessage: 'Computer Useのネイティブ機能を利用できません。',
       retryable: false,
     };
   if (error instanceof SecurityError)

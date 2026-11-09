@@ -23,17 +23,6 @@ import {
   graphReleaseInputSchema,
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
-  computerUseApprovalResolveInputSchema,
-  computerUseForegroundHandoffResolveInputSchema,
-  computerUseOpenPermissionSettingsInputSchema,
-  computerUseProfileListInputSchema,
-  computerAppGrantResolveInputSchema,
-  computerUseGrantRevokeInputSchema,
-  computerUseProfileRegisterInputSchema,
-  computerUseSessionStatusInputSchema,
-  computerUseStartInputSchema,
-  computerUseStopInputSchema,
-  computerUseWindowCandidatesInputSchema,
   canvasViewSaveInputSchema,
   commandEnvelopeSchema,
   commandOutputPageInputSchema,
@@ -107,7 +96,6 @@ import {
   teamPolicyUpdateInputSchema,
   teamModelResearchSettingsSetInputSchema,
   teamConcurrencySettingsSetInputSchema,
-  computerUseSettingsSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamSendMessageInputSchema,
   teamSubscriptionInputSchema,
@@ -2911,8 +2899,7 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded },
-        // Every Turn ending fans out to both coordinators through `notifyTurnEnded`.
-        computerUseController: { turnEnded: vi.fn() },
+        // Every Turn ending reaches the approval coordinator through `notifyTurnEnded`.
         managedCodingHarness: {
           broker: {
             getTurnSnapshot: (taskId: string, turnId: string) => {
@@ -2999,7 +2986,6 @@ describe('Main image attachment dispatch boundary', () => {
         ]),
         persistence: { getActiveTurnId: () => null },
         approvalCoordinator: { turnEnded },
-        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: { finishTurn },
       });
       releaseManagedWorkerTurn.call(router, 'worker-a');
@@ -3032,7 +3018,6 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded: vi.fn() },
-        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: { getTurnSnapshot: () => started.get(missionTurnId) },
           startTurn,
@@ -7929,21 +7914,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsListRecent]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsResolve]: approvalResolveInputSchema,
-  [IPC_CHANNELS.computerUseAvailability]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseOpenPermissionSettings]: computerUseOpenPermissionSettingsInputSchema,
-  [IPC_CHANNELS.computerUseProfilesList]: computerUseProfileListInputSchema,
-  [IPC_CHANNELS.computerUseProfileRegister]: computerUseProfileRegisterInputSchema,
-  [IPC_CHANNELS.computerUseGrantsList]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseGrantRevoke]: computerUseGrantRevokeInputSchema,
-  [IPC_CHANNELS.computerUseGrantPurge]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseGrantRequestResolve]: computerAppGrantResolveInputSchema,
-  [IPC_CHANNELS.computerUseWindowCandidates]: computerUseWindowCandidatesInputSchema,
-  [IPC_CHANNELS.computerUseStart]: computerUseStartInputSchema,
-  [IPC_CHANNELS.computerUseStatusGet]: computerUseSessionStatusInputSchema,
-  [IPC_CHANNELS.computerUseStop]: computerUseStopInputSchema,
-  [IPC_CHANNELS.computerUseApprovalResolve]: computerUseApprovalResolveInputSchema,
-  [IPC_CHANNELS.computerUseForegroundHandoffResolve]:
-    computerUseForegroundHandoffResolveInputSchema,
   [IPC_CHANNELS.commandsList]: taskIdPayloadSchema,
   [IPC_CHANNELS.commandsOutputPage]: commandOutputPageInputSchema,
   [IPC_CHANNELS.commandsOutputTail]: commandOutputTailInputSchema,
@@ -8004,8 +7974,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamConcurrency]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamConcurrency]: teamConcurrencySettingsSetInputSchema,
-  [IPC_CHANNELS.settingsGetComputerUse]: emptyPayloadSchema,
-  [IPC_CHANNELS.settingsSetComputerUse]: computerUseSettingsSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamModelSelectionGuidance]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelSelectionGuidance]: teamModelSelectionGuidanceSetInputSchema,
   [IPC_CHANNELS.settingsGetSprintCoderPrePrompt]: emptyPayloadSchema,
@@ -8035,10 +8003,6 @@ const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.fileEditEvent,
   IPC_CHANNELS.runtimeStatusEvent,
   IPC_CHANNELS.updateHealthEvent,
-  IPC_CHANNELS.computerUseActivationIntent,
-  IPC_CHANNELS.computerUseStatusEvent,
-  // Main pushes the application approval card; the Renderer answers on its own router channel.
-  IPC_CHANNELS.computerUseGrantRequestEvent,
   IPC_CHANNELS.updateCheckNow,
   IPC_CHANNELS.updateOpenManual,
   IPC_CHANNELS.updateOpenLog,
@@ -8055,37 +8019,6 @@ describe('IPC channel registry stays in sync with the adversarial fuzz table', (
     }
     expect(handled.size + NON_ROUTER_CHANNELS.size).toBe(allChannels.size);
   });
-});
-
-describe('Computer Use stop channel', () => {
-  // The schema ipc.ts registers for the stop channel and preload validates against (T15-1).
-  const envelope = commandEnvelopeSchema(computerUseStopInputSchema);
-  const stop = (reason: string) =>
-    envelope.safeParse({
-      requestId: 'r1',
-      operationId: 'o1',
-      payload: { sessionId: 'session-1', reason },
-    }).success;
-
-  it('accepts the reasons the Renderer actually sends', () => {
-    // useComputerUse.tsx sends `user_stop` (the Stop button) and `task_changed` (Task switch).
-    expect(stop('user_stop')).toBe(true);
-    expect(stop('task_changed')).toBe(true);
-  });
-
-  it.each(['agent_stop', 'agent_finish'])(
-    'refuses %s from the Renderer, so a model-ended session cannot be claimed or faked',
-    (reason) => {
-      expect(stop(reason)).toBe(false);
-    },
-  );
-
-  it.each(['emergency_stop', 'renderer_reloaded', 'limit_reached', 'policy_changed'])(
-    'refuses Main-only reason %s from the Renderer',
-    (reason) => {
-      expect(stop(reason)).toBe(false);
-    },
-  );
 });
 
 describe('every registered IPC channel rejects adversarial envelopes', () => {
@@ -8649,7 +8582,6 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
-      computerUseController: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,
       persistence: {

@@ -65,8 +65,6 @@ it('binds start to the reviewed context, prevents duplicate starts, and offers f
       root.render(<GraphMissionReviewNotice input={input} reviewKey="ready" />),
     );
     const button = container.querySelector('button')!;
-    expect(button.dataset['computerUseActivation']).toBe('graph-start');
-    expect(JSON.parse(button.dataset['computerUseIntent']!).contextDigest).toBe('b'.repeat(64));
     await act(async () => button.click());
     expect(startMission).toHaveBeenCalledWith({ ...input, contextDigest: 'b'.repeat(64) });
     expect(button.disabled).toBe(true);

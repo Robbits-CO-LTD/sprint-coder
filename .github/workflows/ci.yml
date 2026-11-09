@@ -126,158 +126,6 @@ jobs:
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
 
-  computer-use-native-gate:
-    name: Computer Use native Gate 0 (${{ matrix.label }})
-    needs: classify
-    if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        # Both platforms build and check V1 and opt-in V2. Release builds still default to V1.
-        include:
-          - label: macOS
-            os: macos-latest
-            eligibility: v1
-          - label: macOS v2
-            os: macos-latest
-            eligibility: v2
-          - label: Windows
-            os: windows-2022
-            eligibility: v1
-          - label: Windows v2
-            os: windows-2022
-            eligibility: v2
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install Electron binary
-        uses: ./.github/actions/install-electron
-
-      - name: Initialize MSVC developer environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-
-      - name: Compile and manifest native artifact
-        run: npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}
-
-      - name: Reject test hang hooks in the Windows helper
-        if: runner.os == 'Windows'
-        run: node verify-computer-use-test-hang-absent.mjs --require
-
-      - name: Verify the built artifact attests what its manifest declares
-        run: node verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require --report=${{ runner.temp }}/computer-use-eligibility-report.json
-
-      - name: Build deterministic Win32 acceptance fixture
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $output = Join-Path $env:RUNNER_TEMP 'computer-use-win32-acceptance-fixture'
-          ./apps/desktop/computer-use-native/fixtures/win32-acceptance/build.ps1 `
-            -OutputDirectory $output
-
-      - name: Run protocol harness with macOS sanitizers
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          harness="${RUNNER_TEMP}/computer-use-protocol-harness"
-          /usr/bin/clang++ \
-            -std=c++20 -O1 -g -fno-omit-frame-pointer -Werror=switch \
-            -fsanitize=address,undefined \
-            -I apps/desktop/computer-use-native \
-            -I apps/desktop/computer-use-native/generated \
-            -DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }} \
-            apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
-            -o "${harness}"
-          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-            UBSAN_OPTIONS=halt_on_error=1 \
-            "${harness}"
-          # S5-c-3 PR-1: the shared target eligibility core, compiled by clang as well.
-          target="${RUNNER_TEMP}/computer-use-target-eligibility-harness"
-          /usr/bin/clang++ \
-            -std=c++20 -O1 -g -fno-omit-frame-pointer -Wall -Wextra -Werror=switch \
-            -fsanitize=address,undefined \
-            -I apps/desktop/computer-use-native \
-            -I apps/desktop/computer-use-native/generated \
-            -DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }} \
-            apps/desktop/computer-use-native/computer_use_target_eligibility_harness.cc \
-            -o "${target}"
-          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-            UBSAN_OPTIONS=halt_on_error=1 \
-            "${target}"
-
-      - name: Run protocol harness and attempt Windows ASan
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
-          $include = 'apps/desktop/computer-use-native'
-          $header = Join-Path $include 'build/Release/computer_use_build_eligibility.h'
-          $header = (Resolve-Path $header).Path
-          $expectedV2 = '${{ matrix.eligibility == 'v2' && '1' || '0' }}'
-          $declaration = @("/FI$header", "/DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=$expectedV2")
-          $target = Join-Path $env:RUNNER_TEMP 'computer-use-target-eligibility-harness.exe'
-          $targetObject = Join-Path $env:RUNNER_TEMP 'computer-use-target-eligibility-harness.obj'
-          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 "/I$include" @declaration "$include/computer_use_target_eligibility_harness.cc" "/Fo$targetObject" "/Fe$target"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $target
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $normal = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.exe'
-          $normalObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.obj'
-          # /utf-8: the harness sources carry CJK lexicon terms; the default code page would misread them.
-          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 "/I$include" @declaration $source "/Fo$normalObject" "/Fe$normal"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $normal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $asan = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.exe'
-          $asanObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.obj'
-          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /utf-8 /fsanitize=address "/I$include" @declaration $source "/Fo$asanObject" "/Fe$asan"
-          if ($LASTEXITCODE -ne 0) {
-            'Windows ASan: SKIP - windows-2022 MSVC sanitizer compile/link unavailable; mandatory malformed-frame harness passed.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            exit 0
-          }
-          & $asan
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          'Windows ASan: PASS' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-
-      - name: Verify Gate 0 loader tests
-        working-directory: apps/desktop
-        env:
-          COMPUTER_USE_ELIGIBILITY_REPORT: ${{ runner.temp }}/computer-use-eligibility-report.json
-        run: >-
-          npx vitest run
-          src/main/computer-use-native.test.ts
-          src/main/computer-use-eligibility-artifact.test.ts
-          src/main/computer-use-native-interlock-gate.test.ts
-          src/main/computer-use-windows-eligibility-build.test.ts
-          src/main/computer-use-windows-approval-handlers.test.ts
-          src/main/computer-use-windows-ticket.test.ts
-          src/main/computer-use-windows-ticket-seam.test.ts
-          verify-computer-use-eligibility.test.mjs
-          computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
-      - name: Test Windows sandbox working directory and access boundary
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
-
   sandbox-rust-windows:
     name: Rust Windows build
     needs: classify
@@ -309,106 +157,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --no-run --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml
           exit $LASTEXITCODE
-
-  computer-use-windows-v2-harness:
-    # Portable V2 seams complement the real Windows V2 artifact row above.
-    # PR-2 adds the live seam of the host's target facts (still called from nowhere).
-    name: Computer Use native Windows v2 harness
-    needs: classify
-    if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: windows-2022
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Initialize MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-
-      - name: Check the generated deny ruleset is current
-        run: node generate-computer-use-deny-ruleset.mjs --check
-
-      - name: Run the portable harnesses compiled as v2
-        shell: pwsh
-        run: |
-          $include = 'apps/desktop/computer-use-native'
-          foreach ($name in 'computer_use_protocol_fuzz', 'computer_use_target_eligibility_harness') {
-            $source = Join-Path $include "$name.cc"
-            $binary = Join-Path $env:RUNNER_TEMP "$name-v2.exe"
-            $object = Join-Path $env:RUNNER_TEMP "$name-v2.obj"
-            # /utf-8: the harness sources carry CJK lexicon terms; the default code page would misread them.
-            & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /we4062 /DSPRINT_CODER_ELIGIBILITY_V2=1 /DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=1 "/I$include" $source "/Fo$object" "/Fe$binary"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & $binary
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
-      - name: Run the target eligibility seam compiled as v2
-        working-directory: apps/desktop
-        env:
-          COMPUTER_USE_SEAM_ELIGIBILITY_V2: '1'
-        run: >-
-          npx vitest run
-          src/main/computer-use-target-eligibility.test.ts
-          src/main/computer-use-target-eligibility-seam.test.ts
-
-      # S5-c-3 PR-2 (#500): the host's target facts measured on processes the seam starts itself
-      # (cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage, a rename swap).
-      # PR-5 adds the anchor premises (remote, another file system, a failed probe), the IL-only
-      # images, and the v2 judgement of processes the seam starts itself (built as v1 and as v2).
-      - name: Run the Windows target facts live seam
-        working-directory: apps/desktop
-        run: >-
-          npx vitest run
-          src/main/computer-use-windows-target-facts-live-seam.test.ts
-          src/main/computer-use-windows-v2-targets.test.ts
-
-  computer-use-hung-helper:
-    name: Computer Use hung helper seam (Windows)
-    needs: classify
-    if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Initialize MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-
-      - name: Run hung helper seam and sessionless Stop latency proxy
-        working-directory: apps/desktop
-        env:
-          SPRINT_CODER_HUNG_HELPER_SEAM: '1'
-        run: npx vitest run src/main/computer-use-windows-hung-helper-live-seam.test.ts --pool=threads
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -622,6 +370,11 @@ jobs:
 
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
+
+      - name: Test Windows sandbox working directory and access boundary
+        if: runner.os == 'Windows' && matrix.shard == '1/5'
+        shell: pwsh
+        run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -855,10 +608,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         uses: ./.github/actions/install-electron
-      - name: Initialize MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
@@ -886,8 +635,6 @@ jobs:
       - name: Seal the package for this checkout
         id: package-artifact
         run: node ci-windows-package.mjs create
-      - name: Reject test hang hooks in Windows package artifacts
-        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
       - name: Upload the shared Windows production package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -918,10 +665,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         uses: ./.github/actions/install-electron
-      - name: Initialize MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
@@ -949,8 +692,6 @@ jobs:
       - name: Make Windows wizard installer
         working-directory: apps/desktop
         run: npx electron-forge make --platform=win32 --arch=x64
-      - name: Reject test hang hooks in Windows package artifacts
-        run: node verify-computer-use-test-hang-absent.mjs --require --out=apps/desktop/out
       - name: Verify Windows wizard artifact
         shell: pwsh
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
@@ -1019,9 +760,6 @@ jobs:
         renderer-tests,
         package-tests,
         sandbox-rust-windows,
-        computer-use-native-gate,
-        computer-use-windows-v2-harness,
-        computer-use-hung-helper,
         test-macos,
         package-macos,
         platform-tests,

@@ -639,67 +639,6 @@ describe('Main PermissionBroker', () => {
   });
 
   it.each([
-    ['computer.observe', 'observe'],
-    ['computer.control', 'control'],
-  ] as const)('maps a revoked %s capability to its exact operation', (capability, operation) => {
-    const { broker } = fixture(undefined, [capability]);
-    const computerRequest: PermissionRequest = {
-      taskId: 'task-1',
-      subjectId: 'computer-use:session-1',
-      capability,
-      resource: {
-        kind: 'computer-session',
-        platform: 'darwin',
-        appIdentityDigest: 'a'.repeat(64),
-        windowIdentityDigest: 'b'.repeat(64),
-        sessionId: 'session-1',
-        taskId: 'task-1',
-      },
-      operation,
-      providerEgress: 'none',
-      sandboxProfile: 'read-only',
-      executionSpecDigest: EXECUTION_DIGEST,
-      reviewerInputDigest: 'c'.repeat(64),
-      risk: capability === 'computer.control' ? 'high' : 'low',
-    };
-    const computerCeiling: CapabilityCeiling = {
-      entries: [
-        {
-          capability,
-          resourceSet: { kind: 'all' },
-          operations: [operation],
-          expiresAt: '2026-07-22T13:00:00.000Z',
-          providerEgress: ['none'],
-          sandboxProfiles: ['read-only'],
-        },
-      ],
-      maxWorkerDepth: 0,
-      maxConcurrentWorkers: 0,
-    };
-    const result = broker.preview({
-      taskId: 'task-1',
-      request: computerRequest,
-      now: NOW,
-      basePolicy: {
-        managedDeny: [],
-        projectDeny: [],
-        parentCeiling: computerCeiling,
-        modeCeiling: computerCeiling,
-        sandbox: { feasible: true, profile: 'read-only' },
-        allowRules: [
-          {
-            capability,
-            resourceSet: { kind: 'all' },
-            operations: [operation],
-          },
-        ],
-      },
-    });
-
-    expect(result).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
-  });
-
-  it.each([
     ['project.memory.write', 'project-memory:project-1'],
     ['skill.draft.write', 'skill-draft:task-1'],
   ] as const)(

@@ -1,10 +1,7 @@
-import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
 import type { ForgeMakeResult } from '@electron-forge/shared-types';
 import { open, type Entry, type ZipFile } from 'yauzl';
 
-const ADDON = 'sprint_coder_computer_use_windows_main.node';
-const NATIVE_MANIFEST = 'computer-use-native.manifest.json';
 const RUNNER = 'sprint-coder-sandbox-runner.exe';
 
 /** Inspect sealed bytes without extracting executable artifacts or trusting archive paths. */
@@ -15,10 +12,6 @@ export function verifyWindowsSandboxArchive(path: string): Promise<string> {
     let expected: string | undefined;
     let runnerPath: string | undefined;
     let manifestPath: string | undefined;
-    let addonPath: string | undefined;
-    let nativeManifestPath: string | undefined;
-    let addonDigest: string | undefined;
-    let expectedAddonDigest: string | undefined;
     const fail = (): void => {
       archive?.close();
       reject(new Error('Windows artifact sandbox runner digest verification failed'));
@@ -33,13 +26,6 @@ export function verifyWindowsSandboxArchive(path: string): Promise<string> {
       opened.on('end', () => {
         if (actual === undefined || actual !== expected || manifestPath !== `${runnerPath}.sha256`)
           fail();
-        else if (
-          addonDigest === undefined ||
-          addonDigest !== expectedAddonDigest ||
-          addonPath !== runnerPath?.replace(RUNNER, ADDON) ||
-          nativeManifestPath !== runnerPath?.replace(RUNNER, NATIVE_MANIFEST)
-        )
-          fail();
         else resolve(actual);
       });
       opened.on('entry', (entry: Entry) => {
@@ -48,28 +34,21 @@ export function verifyWindowsSandboxArchive(path: string): Promise<string> {
         const isRunner = name.endsWith(`/resources/${RUNNER}`) || name === `resources/${RUNNER}`;
         const isManifest =
           name.endsWith(`/resources/${RUNNER}.sha256`) || name === `resources/${RUNNER}.sha256`;
-        const isAddon = name.endsWith(`/resources/${ADDON}`) || name === `resources/${ADDON}`;
-        const isNativeManifest =
-          name.endsWith(`/resources/${NATIVE_MANIFEST}`) || name === `resources/${NATIVE_MANIFEST}`;
-        const limit = isManifest ? 128 : isNativeManifest ? 64 * 1024 : 64 * 1024 * 1024;
-        if (!isRunner && !isManifest && !isAddon && !isNativeManifest) {
+        const limit = isManifest ? 128 : 64 * 1024 * 1024;
+        if (!isRunner && !isManifest) {
           opened.readEntry();
           return;
         }
         if (
           (isRunner && runnerPath !== undefined) ||
           (isManifest && manifestPath !== undefined) ||
-          (isAddon && addonPath !== undefined) ||
-          (isNativeManifest && nativeManifestPath !== undefined) ||
           entry.uncompressedSize > limit
         ) {
           fail();
           return;
         }
         if (isRunner) runnerPath = name;
-        else if (isManifest) manifestPath = name;
-        else if (isAddon) addonPath = name;
-        else nativeManifestPath = name;
+        else manifestPath = name;
         opened.openReadStream(entry, (streamError, stream) => {
           if (streamError !== null || stream === undefined) {
             fail();
@@ -86,27 +65,12 @@ export function verifyWindowsSandboxArchive(path: string): Promise<string> {
               fail();
               return;
             }
-            if (isRunner || isAddon) hash.update(chunk);
+            if (isRunner) hash.update(chunk);
             else chunks.push(chunk);
           });
           stream.on('end', () => {
             if (isRunner) actual = hash.digest('hex');
-            else if (isAddon) addonDigest = hash.digest('hex');
-            else if (isNativeManifest) {
-              try {
-                const manifest = computerUseNativeManifestSchema.parse(
-                  JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown,
-                );
-                if (manifest.platform !== 'win32' || manifest.windowsMainAddon === undefined) {
-                  fail();
-                  return;
-                }
-                expectedAddonDigest = manifest.windowsMainAddon.sha256;
-              } catch {
-                fail();
-                return;
-              }
-            } else {
+            else {
               expected = Buffer.concat(chunks).toString('utf8').trim();
               if (!/^[a-f0-9]{64}$/u.test(expected)) {
                 fail();

@@ -1,9 +1,3 @@
-import {
-  graphStartActivationIntent,
-  graphUpdateActivationIntent,
-  graphResumeActivationIntent,
-  graphResumeStepActivationIntent,
-} from '../graph-activation-intent';
 import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
@@ -45,26 +39,6 @@ import {
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
   commandResultSchema,
-  computerAppProfileSchema,
-  computerUseApprovalResolveInputSchema,
-  computerUseForegroundHandoffResolveInputSchema,
-  computerUseAvailabilitySchema,
-  computerAppGrantRequestSchema,
-  computerAppGrantResolveInputSchema,
-  computerUseGrantListResultSchema,
-  computerUseGrantPurgeResultSchema,
-  computerUseGrantRevokeInputSchema,
-  computerUseOpenPermissionSettingsInputSchema,
-  computerUseOpenPermissionSettingsResultSchema,
-  computerUseProfileListInputSchema,
-  computerUseProfileListResultSchema,
-  computerUseProfileRegisterInputSchema,
-  computerUseSessionStatusInputSchema,
-  computerUseSessionStatusSchema,
-  computerUseStartInputSchema,
-  computerUseStopInputSchema,
-  computerUseWindowCandidatesInputSchema,
-  computerUseWindowCandidatesResultSchema,
   emptyPayloadSchema,
   permissionSetInputSchema,
   permissionSettingsSchema,
@@ -180,8 +154,6 @@ import {
   teamModelResearchSettingsSetInputSchema,
   teamConcurrencySettingsSchema,
   teamConcurrencySettingsSetInputSchema,
-  computerUseSettingsSchema,
-  computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
   teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
@@ -211,7 +183,6 @@ import {
 import { createTeamSubscriptionBuffer } from './team-subscription-buffer';
 import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
 import { clipboardCarriesImage, createTrustedImagePasteGate } from '../clipboard-image-paste';
-import { createTrustedComputerUseUiActivationGate } from '../computer-use-activation';
 
 async function invoke<TInput, TOutput>(
   channel: string,
@@ -266,7 +237,6 @@ function getTaskId(value: unknown): string | undefined {
 }
 
 const trustedImagePaste = createTrustedImagePasteGate(() => Date.now());
-const trustedComputerUseActivation = createTrustedComputerUseUiActivationGate(() => Date.now());
 // Capture phase: this runs before any listener the page installed, and `isTrusted` is false for
 // every event the page can dispatch itself.
 window.addEventListener(
@@ -276,37 +246,16 @@ window.addEventListener(
   },
   true,
 );
-function observeTrustedComputerUseActivation(event: Event): void {
-  trustedComputerUseActivation.observe(event, (kind, intent) => {
-    ipcRenderer.send(IPC_CHANNELS.computerUseActivationIntent, { kind, intent });
-  });
-}
-
-window.addEventListener('pointerdown', observeTrustedComputerUseActivation, true);
-window.addEventListener(
-  'keydown',
-  (event) => {
-    if (event.key === 'Enter' || event.key === ' ') observeTrustedComputerUseActivation(event);
-  },
-  true,
-);
 
 const api: SprintCoderApi = {
   graphs: {
-    requestUpdate: async (input) => {
-      const parsed = graphMissionUpdateInputSchema.parse(input);
-      if (
-        trustedComputerUseActivation.consume('graph-start')?.intent !==
-        graphUpdateActivationIntent(parsed, 'request')
-      )
-        throw new Error('変更の確認ボタンから操作してください。');
-      return invoke(
+    requestUpdate: (input) =>
+      invoke(
         IPC_CHANNELS.graphsRequestUpdate,
         graphMissionUpdateInputSchema,
         graphMissionUpdateReviewSchema,
-        parsed,
-      );
-    },
+        input,
+      ),
     reviewUpdate: (input) =>
       invoke(
         IPC_CHANNELS.graphsReviewUpdate,
@@ -314,20 +263,13 @@ const api: SprintCoderApi = {
         graphMissionUpdateReviewSchema,
         input,
       ),
-    agreeUpdate: async (input) => {
-      const parsed = graphMissionUpdateAgreementSchema.parse(input);
-      if (
-        trustedComputerUseActivation.consume('graph-start')?.intent !==
-        graphUpdateActivationIntent(parsed, 'agree')
-      )
-        throw new Error('再合意ボタンから操作してください。');
-      return invoke(
+    agreeUpdate: (input) =>
+      invoke(
         IPC_CHANNELS.graphsAgreeUpdate,
         graphMissionUpdateAgreementSchema,
         teamMissionSummarySchema,
-        parsed,
-      );
-    },
+        input,
+      ),
     reviewWorkspace: (input) =>
       invoke(
         IPC_CHANNELS.graphsWorkspaceReview,
@@ -335,42 +277,27 @@ const api: SprintCoderApi = {
         graphWorkspaceReviewSchema,
         input,
       ),
-    resumeStep: async (input) => {
-      const parsed = graphMissionResumeInputSchema.parse(input);
-      const activation = trustedComputerUseActivation.consume('graph-resume-step');
-      if (activation?.intent !== graphResumeStepActivationIntent(parsed))
-        throw new Error('計画の工程再開ボタンから操作してください。');
-      return invoke(
+    resumeStep: (input) =>
+      invoke(
         IPC_CHANNELS.graphsMissionResumeStep,
         graphMissionResumeInputSchema,
         teamMissionSummarySchema,
-        parsed,
-      );
-    },
-    resumeIntegration: async (input) => {
-      const parsed = graphMissionResumeInputSchema.parse(input);
-      const activation = trustedComputerUseActivation.consume('graph-resume');
-      if (activation?.intent !== graphResumeActivationIntent(parsed))
-        throw new Error('計画の統合再開ボタンから操作してください。');
-      return invoke(
+        input,
+      ),
+    resumeIntegration: (input) =>
+      invoke(
         IPC_CHANNELS.graphsMissionResumeIntegration,
         graphMissionResumeInputSchema,
         teamMissionSummarySchema,
-        parsed,
-      );
-    },
-    startMission: async (input) => {
-      const parsed = graphMissionStartInputSchema.parse(input);
-      const activation = trustedComputerUseActivation.consume('graph-start');
-      if (activation?.intent !== graphStartActivationIntent(parsed))
-        throw new Error('計画の開始ボタンから操作してください。');
-      return invoke(
+        input,
+      ),
+    startMission: (input) =>
+      invoke(
         IPC_CHANNELS.graphsMissionStart,
         graphMissionStartInputSchema,
         teamMissionSummarySchema,
-        parsed,
-      );
-    },
+        input,
+      ),
     reviewMission: (input) =>
       invoke(
         IPC_CHANNELS.graphsMissionReview,
@@ -447,143 +374,6 @@ const api: SprintCoderApi = {
     },
   },
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
-  computerUse: {
-    availability: () =>
-      invoke(
-        IPC_CHANNELS.computerUseAvailability,
-        emptyPayloadSchema,
-        computerUseAvailabilitySchema,
-        {},
-      ),
-    // Main owns the settings URL table and the rate limit; this seam only proves the click and
-    // forwards the permission name.
-    openPermissionSettings: (input) =>
-      trustedComputerUseActivation.consume('permission-settings')
-        ? invoke(
-            IPC_CHANNELS.computerUseOpenPermissionSettings,
-            computerUseOpenPermissionSettingsInputSchema,
-            computerUseOpenPermissionSettingsResultSchema,
-            input,
-          )
-        : Promise.reject(new Error('Computer Use settings shortcut requires a trusted click')),
-    registerProfile: (input) =>
-      trustedComputerUseActivation.consume('application')
-        ? invoke(
-            IPC_CHANNELS.computerUseProfileRegister,
-            computerUseProfileRegisterInputSchema,
-            computerAppProfileSchema.nullable(),
-            input,
-          )
-        : Promise.reject(new Error('Computer Use app registration requires a trusted click')),
-    listGrants: () =>
-      invoke(
-        IPC_CHANNELS.computerUseGrantsList,
-        emptyPayloadSchema,
-        computerUseGrantListResultSchema,
-        {},
-      ),
-    // Revoking is destructive from the user's point of view, so it carries the same trusted-click
-    // proof the other privileged Computer Use seams do. Main verifies the click again.
-    revokeGrant: (input) =>
-      trustedComputerUseActivation.consume('app-grant-revoke')
-        ? invoke(
-            IPC_CHANNELS.computerUseGrantRevoke,
-            computerUseGrantRevokeInputSchema,
-            computerUseGrantListResultSchema,
-            input,
-          )
-        : Promise.reject(new Error('Computer Use grant revocation requires a trusted click')),
-    purgeGrants: () =>
-      trustedComputerUseActivation.consume('app-grant-purge')
-        ? invoke(
-            IPC_CHANNELS.computerUseGrantPurge,
-            emptyPayloadSchema,
-            computerUseGrantPurgeResultSchema,
-            {},
-          )
-        : Promise.reject(new Error('Computer Use grant cleanup requires a trusted click')),
-    // The card's own click. The intent is compared in Main against the card it was built for, so
-    // this seam only proves that a real activation happened and forwards the row the user answered.
-    // Deny carries no intent on purpose: refusing must never fail because the card went stale.
-    resolveGrantRequest: (input) => {
-      const parsed = computerAppGrantResolveInputSchema.parse(input);
-      return trustedComputerUseActivation.consume('app-grant')
-        ? invoke(
-            IPC_CHANNELS.computerUseGrantRequestResolve,
-            computerAppGrantResolveInputSchema,
-            z.undefined(),
-            parsed,
-          )
-        : Promise.reject(new Error('Computer Use application approval requires a trusted click'));
-    },
-    subscribeGrantRequests: (listener) => {
-      const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
-        const parsed = computerAppGrantRequestSchema.safeParse(value);
-        if (parsed.success) listener(parsed.data);
-      };
-      ipcRenderer.on(IPC_CHANNELS.computerUseGrantRequestEvent, handler);
-      return () => ipcRenderer.removeListener(IPC_CHANNELS.computerUseGrantRequestEvent, handler);
-    },
-    listProfiles: (input = {}) =>
-      invoke(
-        IPC_CHANNELS.computerUseProfilesList,
-        computerUseProfileListInputSchema,
-        computerUseProfileListResultSchema,
-        input,
-      ),
-    listWindowCandidates: (input) =>
-      invoke(
-        IPC_CHANNELS.computerUseWindowCandidates,
-        computerUseWindowCandidatesInputSchema,
-        computerUseWindowCandidatesResultSchema,
-        input,
-      ),
-    // Main is authoritative for the fresh start gesture and its deferred Quick Start latch.
-    // A preload-local two-second check here would expire while native window enumeration is still
-    // running and reject a valid one-click resume before Main can consume its bound latch.
-    start: (input) =>
-      invoke(
-        IPC_CHANNELS.computerUseStart,
-        computerUseStartInputSchema,
-        computerUseSessionStatusSchema,
-        input,
-      ),
-    getStatus: (input) =>
-      invoke(
-        IPC_CHANNELS.computerUseStatusGet,
-        computerUseSessionStatusInputSchema,
-        computerUseSessionStatusSchema.nullable(),
-        input,
-      ),
-    stop: (input) =>
-      invoke(IPC_CHANNELS.computerUseStop, computerUseStopInputSchema, z.undefined(), input),
-    resolveForegroundHandoff: (input) =>
-      trustedComputerUseActivation.consume('foreground-handoff')
-        ? invoke(
-            IPC_CHANNELS.computerUseForegroundHandoffResolve,
-            computerUseForegroundHandoffResolveInputSchema,
-            computerUseSessionStatusSchema,
-            input,
-          )
-        : Promise.reject(new Error('Computer Use handoff requires a trusted click')),
-    resolveApproval: (input) =>
-      trustedComputerUseActivation.consume('approval')
-        ? invoke(
-            IPC_CHANNELS.computerUseApprovalResolve,
-            computerUseApprovalResolveInputSchema,
-            computerUseSessionStatusSchema,
-            input,
-          )
-        : Promise.reject(new Error('Computer Use approval requires a trusted click')),
-    subscribeStatus: (sessionId, listener) => {
-      const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
-        const status = computerUseSessionStatusSchema.safeParse(value);
-        if (status.success && status.data.sessionId === sessionId) listener(status.data);
-      };
-      ipcRenderer.on(IPC_CHANNELS.computerUseStatusEvent, handler);
-      return () => ipcRenderer.removeListener(IPC_CHANNELS.computerUseStatusEvent, handler);
-    },
-  },
   windowControls: {
     platform: process.platform,
     minimize: () => ipcRenderer.send(WINDOW_CONTROL_CHANNELS.action, 'minimize'),
@@ -1117,20 +907,6 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.settingsSetTeamConcurrency,
         teamConcurrencySettingsSetInputSchema,
         z.undefined(),
-        input,
-      ),
-    getComputerUse: () =>
-      invoke(
-        IPC_CHANNELS.settingsGetComputerUse,
-        emptyPayloadSchema,
-        computerUseSettingsSchema,
-        {},
-      ),
-    setComputerUse: (input) =>
-      invoke(
-        IPC_CHANNELS.settingsSetComputerUse,
-        computerUseSettingsSetInputSchema,
-        computerUseSettingsSchema,
         input,
       ),
     getTeamModelSelectionGuidance: () =>

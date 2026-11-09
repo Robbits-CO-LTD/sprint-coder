@@ -4,7 +4,6 @@ import type {
   GraphMissionUpdateInput,
   GraphMissionUpdateReview,
 } from '@sprint-coder/contracts';
-import { graphUpdateActivationIntent } from '../../graph-activation-intent';
 import { GraphDifference } from './GraphHistoryPanel';
 
 export function GraphMissionUpdatePanel({ input }: { input: GraphMissionUpdateInput }) {
@@ -62,14 +61,7 @@ export function GraphMissionUpdatePanel({ input }: { input: GraphMissionUpdateIn
       <p>
         依存・変更範囲・共有資源を更新できます。担当・権限・完了条件・工程構造の変更は、現行計画を停止・取消した後の別案として扱います。
       </p>
-      <button
-        type="button"
-        className="button"
-        disabled={pending}
-        data-computer-use-activation="graph-start"
-        data-computer-use-intent={graphUpdateActivationIntent(input, 'request')}
-        onClick={() => void request()}
-      >
+      <button type="button" className="button" disabled={pending} onClick={() => void request()}>
         影響する工程を停止して変更を確認
       </button>
       {pending ? <p role="status">停止状態と変更内容を確認しています…</p> : null}
@@ -89,8 +81,6 @@ export function GraphMissionUpdatePanel({ input }: { input: GraphMissionUpdateIn
             type="button"
             className="button button-primary"
             disabled={pending}
-            data-computer-use-activation="graph-start"
-            data-computer-use-intent={graphUpdateActivationIntent(agreement!, 'agree')}
             onClick={() => void agree()}
           >
             この変更に再合意して再開

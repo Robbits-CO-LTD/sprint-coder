@@ -15,8 +15,6 @@ UI・E2E・ユーザー操作の動作確認は、**開発エージェントのC
 | キーボード、axe、zoom、動きを減らす、性能、最終layout     | [アクセシビリティ・性能](accessibility-performance.md) |
 | 承認、ファイル編集、command、実CLI、実Worker              | [Workspace・実Provider](provider-workspace.md)         |
 | サイトのdesktop/mobile、動画、録画ラベル                  | [公式サイト](website.md)                               |
-| Windows V2の対象判定、承認、Stop、隔離、実機受入 (#988 / #1099) | [Windows V2受入 journey](../../computer-use-windows-v2-acceptance.md) |
-| Windows ブラウザのページ再確認・承認失効・有効化待ち (#988 N11) | [Windows ブラウザのページ受入](windows-browser-page-acceptance.md) |
 | 元ケース名、parameter、取りこぼし確認                     | [移行対応表](migration-map.md)                         |
 
 元Desktop50ファイルの126定義をparameter展開して140ケース、サイト18ケース、録画ラベル112条件を引き継いだ。旧ケース名は履歴の照合用であり、旧ドライバーAPIを実行する手順ではない。内部assertionも各手順の合格条件へ保持し、観測できない条件を省略して合格にしない。

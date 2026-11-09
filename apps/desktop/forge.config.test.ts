@@ -12,46 +12,21 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createPackage as createAsarPackage, uncache as uncacheAsar } from '@electron/asar';
-import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { describe, expect, it } from 'vitest';
 import type { ResolvedForgeConfig } from '@electron-forge/shared-types';
-import {
-  COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
-  COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
-  COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
-  computerUseAcceptanceBuildForEnv,
-} from './computer-use-acceptance-build';
-import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './src/main/computer-use-acceptance-mode';
 import config, {
-  signAndSealWindowsComputerUse,
-  verifyWindowsMainAddonSignature,
-  assertComputerUseAcceptanceBuildAllowed,
-  assertPackagedComputerUseAcceptanceConsistency,
   assertNativePackagingHost,
-  writeComputerUseAcceptanceBuildReceipt,
   createDMGContents,
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
-  isComputerUseNativeArtifactPath,
-  COMPUTER_USE_NATIVE_MANIFEST_PATH,
-  COMPUTER_USE_NATIVE_RESOURCE_ROOT,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
-  refreshPackagedComputerUseArtifactDigest,
   refreshPackagedSandboxRunnerDigest,
   shouldIgnoreFromPackage,
-  verifyComputerUseNativeBuild,
-  verifyPackagedComputerUseNativeBundle,
   verifyBundledNodeResources,
 } from './forge.config';
-import viteMainConfig, {
-  macAutoUpdateEligibleForIdentity,
-  computerUseAcceptanceBuildForBuild,
-  computerUseNativePinForBuild,
-} from './vite.main.config';
-import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
+import viteMainConfig, { macAutoUpdateEligibleForIdentity } from './vite.main.config';
 import { planWindowsWizardInstaller, SQUIRREL_SETUP_EXE } from './windows-wizard-installer';
 import {
   probeSandboxRunner,
@@ -113,135 +88,7 @@ describe('native package target', () => {
       expect.arrayContaining([expect.stringContaining('managed-local')]),
     );
     expect(shouldIgnoreFromPackage('/managed-local/build/legacy-runtime')).toBe(true);
-    expect(typeof config.hooks?.generateAssets).toBe('function');
     expect(typeof config.hooks?.postPackage).toBe('function');
-    expect(
-      isComputerUseNativeArtifactPath(
-        'C:\\Sprint Coder\\resources\\sprint-coder-computer-use-host.exe',
-      ),
-    ).toBe(true);
-    expect(
-      isComputerUseNativeArtifactPath(
-        '/Applications/Sprint Coder.app/Contents/Resources/sprint_coder_computer_use_native.node',
-      ),
-    ).toBe(true);
-  });
-
-  it('keeps the Computer Use native artifact and manifest on the target host only', () => {
-    const resources = config.packagerConfig?.extraResource ?? [];
-    if (process.platform === 'darwin')
-      expect(resources).toContain(
-        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node'),
-      );
-    else if (process.platform === 'win32')
-      expect(resources).toContain(
-        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe'),
-      );
-    else expect(resources).not.toContain(COMPUTER_USE_NATIVE_MANIFEST_PATH);
-    expect(config.packagerConfig?.extendInfo).toMatchObject({
-      NSScreenCaptureUsageDescription: expect.stringContaining('Screen Recording'),
-    });
-    expect(readFileSync(resolve(__dirname, 'computer-use-native/binding.gyp'), 'utf8')).toContain(
-      'MACOSX_DEPLOYMENT_TARGET',
-    );
-    expect(() => verifyComputerUseNativeBuild('linux', 'x64')).not.toThrow();
-    expect(
-      shouldIgnoreFromPackage(
-        '/computer-use-native/build/Release/sprint_coder_computer_use_native.node',
-      ),
-    ).toBe(true);
-    expect(
-      shouldIgnoreFromPackage(
-        '/computer-use-native/build/Release/computer-use-native.manifest.json',
-      ),
-    ).toBe(true);
-  });
-
-  it('packages exactly one Computer Use artifact/manifest in Resources and rejects asar duplicates', async () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-package-'));
-    try {
-      const outputPath = join(root, 'out');
-      const resources = join(outputPath, 'Sprint Coder.app', 'Contents', 'Resources');
-      const asarSource = join(root, 'asar-source');
-      const artifactName = 'sprint_coder_computer_use_native.node';
-      const artifactBytes = Buffer.from('native-fixture');
-      const digest = createHash('sha256').update(artifactBytes).digest('hex');
-      mkdirSync(join(asarSource, '.vite', 'build'), { recursive: true });
-      mkdirSync(resources, { recursive: true });
-      writeFileSync(join(resources, artifactName), artifactBytes);
-      const manifest = computerUseNativeManifestSchema.parse({
-        version: 1,
-        sourceCommit: 'f'.repeat(40),
-        platform: 'darwin',
-        architecture: 'arm64',
-        protocolVersion: 1,
-        apiVersion: 3,
-        nativeVersion: 'fixture',
-        moduleDigest: digest,
-        binaryDigest: digest,
-        signerDigest: null,
-        capabilities: ['observe'],
-      });
-      const compiledPin = computerUseNativeCompiledPin(manifest);
-      writeFileSync(
-        join(asarSource, '.vite', 'build', 'index.js'),
-        `const computerUsePin=${JSON.stringify(compiledPin)};`,
-      );
-      writeFileSync(join(resources, 'computer-use-native.manifest.json'), JSON.stringify(manifest));
-      await createAsarPackage(asarSource, join(resources, 'app.asar'));
-      expect(() =>
-        verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64'),
-      ).not.toThrow();
-
-      writeFileSync(join(asarSource, '.vite', 'build', 'index.js'), 'const stalePin=true;');
-      rmSync(join(resources, 'app.asar'), { force: true });
-      await createAsarPackage(asarSource, join(resources, 'app.asar'));
-      uncacheAsar(join(resources, 'app.asar'));
-      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
-        'Packaged Computer Use native artifact verification failed',
-      );
-      writeFileSync(
-        join(asarSource, '.vite', 'build', 'index.js'),
-        `const computerUsePin=${JSON.stringify(compiledPin)};`,
-      );
-
-      const duplicateDirectory = join(asarSource, 'computer-use-native', 'build', 'Release');
-      mkdirSync(duplicateDirectory, { recursive: true });
-      writeFileSync(join(duplicateDirectory, artifactName), artifactBytes);
-      rmSync(join(resources, 'app.asar'), { force: true });
-      await createAsarPackage(asarSource, join(resources, 'app.asar'));
-      uncacheAsar(join(resources, 'app.asar'));
-      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
-        'Packaged Computer Use native artifact verification failed',
-      );
-
-      rmSync(join(asarSource, 'computer-use-native'), { recursive: true, force: true });
-      writeFileSync(join(asarSource, artifactName), artifactBytes);
-      rmSync(join(resources, 'app.asar'), { force: true });
-      await createAsarPackage(asarSource, join(resources, 'app.asar'));
-      uncacheAsar(join(resources, 'app.asar'));
-      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
-        'Packaged Computer Use native artifact verification failed',
-      );
-
-      rmSync(join(asarSource, artifactName), { force: true });
-      rmSync(join(resources, 'app.asar'), { force: true });
-      await createAsarPackage(asarSource, join(resources, 'app.asar'));
-      uncacheAsar(join(resources, 'app.asar'));
-      const incompleteManifest = JSON.parse(
-        readFileSync(join(resources, 'computer-use-native.manifest.json'), 'utf8'),
-      ) as Record<string, unknown>;
-      delete incompleteManifest.capabilities;
-      writeFileSync(
-        join(resources, 'computer-use-native.manifest.json'),
-        JSON.stringify(incompleteManifest),
-      );
-      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
-        'capabilities',
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 
   it.runIf(process.platform === 'win32')(
@@ -297,36 +144,6 @@ describe('macOS auto-update signing gate', () => {
   });
 });
 
-describe('Computer Use native Vite provenance pin', () => {
-  it('derives the signed Main pin only for a supported matching platform manifest', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-vite-pin-'));
-    try {
-      const path = resolve(root, 'computer-use-native.manifest.json');
-      const digest = 'b'.repeat(64);
-      const manifest = computerUseNativeManifestSchema.parse({
-        version: 1,
-        sourceCommit: 'a'.repeat(40),
-        platform: process.platform === 'win32' ? 'win32' : 'darwin',
-        architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
-        protocolVersion: 1,
-        apiVersion: 3,
-        nativeVersion: 'computer-use-native-gate0-1',
-        moduleDigest: digest,
-        binaryDigest: digest,
-        signerDigest: 'c'.repeat(64),
-        capabilities: ['observe', 'capture', 'accessibility', 'input'],
-      });
-      writeFileSync(path, JSON.stringify(manifest));
-
-      expect(computerUseNativePinForBuild(path)).toEqual(
-        process.platform === 'linux' ? null : computerUseNativeCompiledPin(manifest),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
 describe('retired model runtime package boundary', () => {
   it('does not compile a sidecar pin into Main', () => {
     expect(viteMainConfig.define).not.toHaveProperty('__SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__');
@@ -375,8 +192,6 @@ describe('macOS sandbox runner sealing', () => {
       // Deterministic signing-byte mutation; no certificate or signing service is used.
       writeFileSync(runner, 'post-signing-runner');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
-      // This deliberately minimal fixture has no Computer Use artifact. Its separate verifier
-      // still fails, after the sandbox runner has been sealed by the real product hook.
       const resolvedConfig: ResolvedForgeConfig = {
         ...config,
         plugins: config.plugins ?? [],
@@ -399,7 +214,7 @@ describe('macOS sandbox runner sealing', () => {
           arch: 'x64',
           outputPaths: [root],
         }),
-      ).rejects.toThrow('ENOENT');
+      ).resolves.toBeUndefined();
       expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
       writeFileSync(runner, 'tampered-after-package');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
@@ -422,42 +237,6 @@ describe('macOS sandbox runner sealing', () => {
 
       expect(digest).toBe(createHash('sha256').update('post-signing-runner-bytes').digest('hex'));
       expect(readFileSync(`${runner}.sha256`, 'utf8')).toBe(`${digest}\n`);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('Computer Use native sealing', () => {
-  it('refreshes the manifest from post-signing artifact bytes', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-seal-'));
-    try {
-      const artifact = resolve(root, 'sprint_coder_computer_use_native.node');
-      const manifest = resolve(root, 'computer-use-native.manifest.json');
-      writeFileSync(artifact, 'post-signing-native-bytes');
-      writeFileSync(
-        manifest,
-        JSON.stringify({
-          version: 1,
-          sourceCommit: 'f'.repeat(40),
-          platform: 'darwin',
-          architecture: 'arm64',
-          protocolVersion: 1,
-          apiVersion: 3,
-          nativeVersion: 'fixture',
-          moduleDigest: '0'.repeat(64),
-          binaryDigest: '0'.repeat(64),
-          signerDigest: null,
-          capabilities: ['observe'],
-        }),
-      );
-
-      const digest = refreshPackagedComputerUseArtifactDigest(root, 'darwin');
-      const refreshed = JSON.parse(readFileSync(manifest, 'utf8')) as Record<string, unknown>;
-      expect(digest).toBe(createHash('sha256').update('post-signing-native-bytes').digest('hex'));
-      expect(refreshed['moduleDigest']).toBe(digest);
-      expect(refreshed['binaryDigest']).toBe(digest);
-      expect(refreshed['sourceCommit']).toBe('f'.repeat(40));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -600,260 +379,4 @@ describe('release artifacts', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-});
-
-describe('Computer Use acceptance-only build mode', () => {
-  const acceptanceEnvironment = {
-    [COMPUTER_USE_ACCEPTANCE_BUILD_ENV]: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
-  };
-
-  it('names the build variable the release workflow must never set', () => {
-    expect(COMPUTER_USE_ACCEPTANCE_BUILD_ENV).toBe('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD');
-    expect(COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME).toBe('computer-use-acceptance-build.json');
-  });
-
-  it('enables the mode only for the exact value on a Windows build host', () => {
-    expect(computerUseAcceptanceBuildForEnv({}, 'win32')).toBeNull();
-    expect(computerUseAcceptanceBuildForEnv({ ...acceptanceEnvironment }, 'win32')).toEqual({
-      mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
-      marker: COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
-    });
-    expect(() =>
-      computerUseAcceptanceBuildForEnv({ [COMPUTER_USE_ACCEPTANCE_BUILD_ENV]: '1' }, 'win32'),
-    ).toThrow('acceptance build mode');
-    expect(() => computerUseAcceptanceBuildForEnv({ ...acceptanceEnvironment }, 'darwin')).toThrow(
-      'Windows build host',
-    );
-  });
-
-  it('bakes the compiled acceptance payload into Main only for an acceptance build', () => {
-    expect(computerUseAcceptanceBuildForBuild({}, 'win32')).toBeNull();
-    expect(computerUseAcceptanceBuildForBuild({ ...acceptanceEnvironment }, 'win32')).toMatchObject(
-      {
-        marker: COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
-      },
-    );
-  });
-
-  it('refuses to produce a release package from an acceptance build', () => {
-    expect(() =>
-      assertComputerUseAcceptanceBuildAllowed(
-        { ...acceptanceEnvironment, SPRINT_CODER_RELEASE: '1' },
-        'win32',
-      ),
-    ).toThrow('release');
-    expect(() =>
-      assertComputerUseAcceptanceBuildAllowed({ SPRINT_CODER_RELEASE: '1' }, 'win32'),
-    ).not.toThrow();
-    expect(() =>
-      assertComputerUseAcceptanceBuildAllowed({ ...acceptanceEnvironment }, 'win32'),
-    ).not.toThrow();
-  });
-
-  it('writes the paste-able receipt only for a Windows acceptance package', () => {
-    const resources = mkdtempSync(resolve(tmpdir(), 'sprint-coder-acceptance-receipt-'));
-    try {
-      const sourceCommit = 'a'.repeat(40);
-      expect(writeComputerUseAcceptanceBuildReceipt(resources, 'darwin', sourceCommit, {})).toBe(
-        false,
-      );
-      expect(writeComputerUseAcceptanceBuildReceipt(resources, 'win32', sourceCommit, {})).toBe(
-        false,
-      );
-      expect(existsSync(resolve(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME))).toBe(
-        false,
-      );
-
-      expect(
-        writeComputerUseAcceptanceBuildReceipt(resources, 'win32', sourceCommit, {
-          ...acceptanceEnvironment,
-        }),
-      ).toBe(true);
-      expect(
-        JSON.parse(
-          readFileSync(resolve(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME), 'utf8'),
-        ),
-      ).toEqual({ mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE, sourceCommit });
-    } finally {
-      rmSync(resources, { recursive: true, force: true });
-    }
-  });
-
-  it('requires the packaged Main bundle and the receipt to agree about the mode', () => {
-    expect(() =>
-      assertPackagedComputerUseAcceptanceConsistency('main-without-marker', false, null),
-    ).not.toThrow();
-    expect(() =>
-      assertPackagedComputerUseAcceptanceConsistency(
-        `main ${COMPUTER_USE_ACCEPTANCE_BUILD_MARKER} bundle`,
-        true,
-        COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
-      ),
-    ).not.toThrow();
-    expect(() =>
-      assertPackagedComputerUseAcceptanceConsistency(
-        `main ${COMPUTER_USE_ACCEPTANCE_BUILD_MARKER} bundle`,
-        false,
-        null,
-      ),
-    ).toThrow('acceptance');
-    expect(() =>
-      assertPackagedComputerUseAcceptanceConsistency(
-        'main-without-marker',
-        true,
-        COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
-      ),
-    ).toThrow('acceptance');
-  });
-});
-
-describe('Windows Main addon package provenance', () => {
-  it.each([
-    { Status: 'NotSigned', Thumbprint: 'a'.repeat(40) },
-    { Status: 'HashMismatch', Thumbprint: 'a'.repeat(40) },
-    { Status: 'Valid', Thumbprint: 'b'.repeat(40) },
-    { Status: 'Valid' },
-  ])('rejects invalid or different addon signer: %j', (addon) => {
-    expect(() =>
-      verifyWindowsMainAddonSignature({ Status: 'Valid', Thumbprint: 'A'.repeat(40) }, addon),
-    ).toThrow('Signed Windows Main addon failed Authenticode verification or signer mismatch');
-  });
-  it('accepts Valid addon and helper signatures from the same signer', () => {
-    expect(() =>
-      verifyWindowsMainAddonSignature(
-        { Status: 'Valid', Thumbprint: 'A'.repeat(40) },
-        { Status: 'Valid', Thumbprint: 'a'.repeat(40) },
-      ),
-    ).not.toThrow();
-  });
-  it('seals signed bytes before deriving the compiled pin', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'sc-sign-seal-'));
-    try {
-      const addon = 'sprint_coder_computer_use_windows_main.node';
-      const helper = 'sprint-coder-computer-use-host.exe';
-      const manifestPath = join(root, 'computer-use-native.manifest.json');
-      const sha = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
-      const manifest = computerUseNativeManifestSchema.parse({
-        version: 1,
-        sourceCommit: 'a'.repeat(40),
-        platform: 'win32',
-        architecture: 'x64',
-        protocolVersion: 1,
-        apiVersion: 3,
-        nativeVersion: 'fixture',
-        moduleDigest: sha('helper'),
-        binaryDigest: sha('helper'),
-        signerDigest: null,
-        capabilities: ['observe'],
-        windowsMainAddon: { kind: 'windows-main-addon', file: addon, sha256: sha('addon') },
-      });
-      writeFileSync(manifestPath, JSON.stringify(manifest));
-      writeFileSync(join(root, addon), 'addon');
-      writeFileSync(join(root, helper), 'helper');
-      await signAndSealWindowsComputerUse(root, async (files) => {
-        expect(files).toEqual([join(root, helper), join(root, addon)]);
-        await Promise.resolve();
-        for (const file of files) appendFileSync(file, '-signed');
-      });
-      const signed = computerUseNativeManifestSchema.parse(
-        JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-      );
-      expect(signed.windowsMainAddon?.sha256).toBe(sha('addon-signed'));
-      expect(signed.moduleDigest).toBe(sha('helper-signed'));
-      expect(signed.binaryDigest).toBe(sha('helper-signed'));
-      const expected = {
-        ...manifest,
-        moduleDigest: sha('helper-signed'),
-        binaryDigest: sha('helper-signed'),
-        windowsMainAddon: { ...manifest.windowsMainAddon!, sha256: sha('addon-signed') },
-      };
-      expect(computerUseNativeCompiledPin(signed)).toEqual(computerUseNativeCompiledPin(expected));
-      expect(computerUseNativeCompiledPin(signed).manifestDigest).not.toBe(
-        computerUseNativeCompiledPin(manifest).manifestDigest,
-      );
-      if (process.platform === 'win32' && process.arch === 'x64')
-        expect(computerUseNativePinForBuild(manifestPath)).toEqual(
-          computerUseNativeCompiledPin(expected),
-        );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-  it('packages the addon resource and excludes it from a second signing pass', () => {
-    const name = 'sprint_coder_computer_use_windows_main.node';
-    expect(isComputerUseNativeArtifactPath(`C:/resources/${name}`)).toBe(true);
-    if (process.platform === 'win32')
-      expect(config.packagerConfig?.extraResource).toContain(
-        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, name),
-      );
-  });
-  it.each(['valid', 'tampered', 'missing', 'duplicate', 'asar-duplicate', 'no-entry'] as const)(
-    'verifies the packaged Main addon: %s',
-    async (scenario) => {
-      const root = mkdtempSync(join(tmpdir(), 'sc-main-package-'));
-      try {
-        const resources = join(root, 'out/resources');
-        const asarSource = join(root, 'source');
-        const addonName = 'sprint_coder_computer_use_windows_main.node';
-        const sha = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
-        mkdirSync(resources, { recursive: true });
-        mkdirSync(join(asarSource, '.vite/build'), { recursive: true });
-        const manifest = computerUseNativeManifestSchema.parse({
-          version: 1,
-          sourceCommit: 'a'.repeat(40),
-          platform: 'win32',
-          architecture: 'x64',
-          protocolVersion: 1,
-          apiVersion: 3,
-          nativeVersion: 'fixture',
-          moduleDigest: sha('helper'),
-          binaryDigest: sha('helper'),
-          signerDigest: null,
-          capabilities: ['observe'],
-          ...(scenario === 'no-entry'
-            ? {}
-            : {
-                windowsMainAddon: {
-                  kind: 'windows-main-addon',
-                  file: addonName,
-                  sha256: sha('addon'),
-                },
-              }),
-        });
-        writeFileSync(join(resources, 'sprint-coder-computer-use-host.exe'), 'helper');
-        if (scenario !== 'missing')
-          writeFileSync(join(resources, addonName), scenario === 'tampered' ? 'changed' : 'addon');
-        if (scenario === 'duplicate') {
-          mkdirSync(join(resources, 'extra'));
-          writeFileSync(join(resources, 'extra', addonName), 'addon');
-        }
-        if (scenario === 'asar-duplicate') writeFileSync(join(asarSource, addonName), 'addon');
-        writeFileSync(
-          join(resources, 'computer-use-native.manifest.json'),
-          JSON.stringify(manifest),
-        );
-        writeFileSync(
-          join(asarSource, '.vite/build/index.js'),
-          `const pin=${JSON.stringify(computerUseNativeCompiledPin(manifest))};`,
-        );
-        await createAsarPackage(asarSource, join(resources, 'app.asar'));
-        const verify = () =>
-          verifyPackagedComputerUseNativeBundle(join(root, 'out'), 'win32', 'x64');
-        if (scenario === 'valid') expect(verify).not.toThrow();
-        else
-          expect(verify).toThrow(
-            {
-              tampered: 'Windows Main addon digest mismatch',
-              missing: 'ENOENT',
-              duplicate: 'Packaged Windows Main addon must occur exactly once',
-              'asar-duplicate':
-                'Packaged Computer Use native artifact verification failed for win32',
-              'no-entry': 'Windows Main addon provenance unavailable',
-            }[scenario],
-          );
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
 });

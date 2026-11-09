@@ -80,7 +80,6 @@ describe('permission epoch coordinator', () => {
       Object.assign(router, {
         policyCleanupsByTask: new Map(),
         approvalCoordinator: { policyEpochChanged: () => events.push('approvals') },
-        computerUseController: { policyEpochChanged: () => events.push('computer') },
         persistence: { quarantineBackgroundForPolicyEpoch: () => events.push('quarantine') },
         managedCodingHarness: {
           beginPolicyEpochChange: () => {
@@ -99,7 +98,7 @@ describe('permission epoch coordinator', () => {
         completed = true;
       });
       await Promise.resolve();
-      expect(events).toEqual(['approvals', 'computer', 'quarantine', 'commands']);
+      expect(events).toEqual(['approvals', 'quarantine', 'commands']);
       expect(completed).toBe(false);
       if (failure) {
         const rejected = expect(result).rejects.toThrow('stop unconfirmed');
@@ -130,7 +129,6 @@ it('retries a captured cleanup without repeating revocation, and starts new epoc
   Object.assign(router, {
     policyCleanupsByTask: new Map(),
     approvalCoordinator: { policyEpochChanged: revoke },
-    computerUseController: { policyEpochChanged: vi.fn() },
     persistence: { quarantineBackgroundForPolicyEpoch: vi.fn() },
     managedCodingHarness: { beginPolicyEpochChange: begin },
   });
