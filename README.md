@@ -104,6 +104,16 @@ npm start
 4. メッセージを送り、ファイル変更やコマンドを確認する。
 5. 並列化したくなったら「Team」を開き、Leaderへ目的を伝える。
 
+### デスクトップアプリの操作（agent-desktop）
+
+AIに起動中のデスクトップアプリを操作させたいときは、外部の [agent-desktop](https://github.com/vercel-labs/agent-desktop)（Apache-2.0）を入れます。
+
+```bash
+npm install -g agent-desktop
+```
+
+PATHに `agent-desktop` があるか、環境変数 `SPRINT_CODER_AGENT_DESKTOP` に実行ファイルの絶対パスがあると、書き込みのできるAIにだけ使い方が伝わります。AIは通常のコマンドとして実行するので、コマンドの承認とStopがそのまま効きます。macOSでは、Sprint Coderに「アクセシビリティ」の許可が必要です。
+
 ## Local-firstとセキュリティ
 
 Local-firstは、Task履歴、設定、実行状態を端末内で管理するという意味です。クラウドProviderを選んだTurnでは、生成に必要なpromptやcontextが選択先へ送信されます。完全にオフラインで使う場合は、Mock RuntimeまたはローカルLLMを選択してください。
