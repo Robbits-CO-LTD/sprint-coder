@@ -309,6 +309,7 @@ import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permissi
 import {
   ApprovalCoordinator,
   approvalFactsForTool,
+  isDesktopControlCall,
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
@@ -5052,6 +5053,14 @@ export class IpcRouter {
         return {
           decision: 'approval_required' as const,
           reason: 'provider_disclosure_requires_explicit_approval',
+          beforeExecute: disclosureBoundBeforeExecute,
+        };
+      // The person's own Task grant for this exact agent-desktop command, given on its card. The
+      // ApprovalCoordinator accepts no other allow for it, so it is kept instead of asking again.
+      if (evaluation.reason === 'remembered_grant' && isDesktopControlCall(request))
+        return {
+          decision: 'allow' as const,
+          reason: evaluation.reason,
           beforeExecute: disclosureBoundBeforeExecute,
         };
       // Outside the Full preset, Provider-issued processes are never covered by a preset-wide

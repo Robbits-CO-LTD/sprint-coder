@@ -26,7 +26,7 @@ import {
   revalidatePathGuard,
   type PathGuard,
 } from './path-guard';
-import { runsOutsideCommandSandbox } from './agent-desktop';
+import { agentDesktopArgvRefusal, runsOutsideCommandSandbox } from './agent-desktop';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -817,9 +817,6 @@ export class CommandRunner {
       const executionId = randomUUID();
       const lease = randomUUID();
       const posixControlNonce = randomUUID();
-      const startedAt = Date.now();
-      options.beforeSpawn?.();
-      let child: ChildProcess;
       // Decided after revalidation, so it judges the sealed image that is about to start. An image
       // with an argv prefix runs through an interpreter and never qualifies.
       const desktopControl =
@@ -827,6 +824,14 @@ export class CommandRunner {
         options.desktopControlWorkspaceRoots !== undefined &&
         executionImage.argvPrefix.length === 0 &&
         runsOutsideCommandSandbox(spec.absoluteExecutable, options.desktopControlWorkspaceRoots);
+      const desktopControlRefusal = desktopControl
+        ? agentDesktopArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? [])
+        : null;
+      if (desktopControlRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      const startedAt = Date.now();
+      options.beforeSpawn?.();
+      let child: ChildProcess;
       if (desktopControl)
         secureLogger.info(
           'Desktop control command runs outside the command sandbox',

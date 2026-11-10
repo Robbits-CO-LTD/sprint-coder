@@ -17,6 +17,7 @@ import {
 import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
 import { CommandRunner, CommandRunnerError, type CommandResult } from './command-runner';
 import * as commandRunnerModule from './command-runner';
+import * as agentDesktopModule from './agent-desktop';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -306,10 +307,17 @@ describe('desktop control Workspace roots', () => {
     const managedRun = vi.spyOn(managedRunner, 'run').mockResolvedValue(result);
     const directRun = vi.spyOn(directRunner, 'run').mockResolvedValue(result);
     const sessions = new ManagedCommandSessions(managedRunner);
+    // What the person chose on the card; `undefined` is a preset or policy allow with no card.
+    let approvalDecision: 'allow_once' | 'allow_task' | undefined = 'allow_once';
     const broker = new ToolBroker(
       registry,
       () => 1,
-      () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+        ...(approvalDecision === undefined ? {} : { approvalDecision }),
+      }),
     );
     registerCommandRunnerTool(broker, managedRunner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
     registerCommandRunnerTool(broker, directRunner, boundary, COMMAND_RUNNER_TOOL);
@@ -324,7 +332,7 @@ describe('desktop control Workspace roots', () => {
     const expected = expect.objectContaining({
       desktopControlWorkspaceRoots: [primary, secondary],
     });
-    try {
+    const dispatchAll = async (suffix: string) => {
       for (const [callId, providerName, background] of [
         ['exec-foreground', 'exec_command', false],
         ['exec-background', 'exec_command', true],
@@ -332,18 +340,72 @@ describe('desktop control Workspace roots', () => {
       ] as const)
         await broker.dispatch({
           ...owner,
-          callId,
+          callId: `${callId}-${suffix}`,
           providerName,
           input: { ...input, ...(background ? { background } : {}) },
         });
       await vi.waitFor(() => expect(managedRun).toHaveBeenCalledTimes(2));
+    };
+    try {
+      await dispatchAll('once');
       expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
       expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+
+      approvalDecision = 'allow_task';
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('task');
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+
+      // A preset or policy allow never lets a command out of the sandbox.
+      approvalDecision = undefined;
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('preset');
+      for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
+        expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
     } finally {
       await broker.dispose();
       await sessions.dispose();
       managedRun.mockRestore();
       directRun.mockRestore();
+    }
+  });
+
+  it('refuses agent-desktop arguments before a command or card exists', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-refusal-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run');
+    const authorize = vi.fn(() => ({ decision: 'allow' as const, reason: 'test' }));
+    const broker = new ToolBroker(registry, () => 1, authorize);
+    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-refusal',
+      turnId: 'turn-desktop-refusal',
+      workspaceId: 'workspace-desktop-refusal',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary').mockReturnValue(true);
+    try {
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'desktop-mcp',
+          providerName: 'run_command',
+          input: { executable: process.execPath, argv: ['mcp'], purpose: 'desktop refusal' },
+        }),
+      ).rejects.toThrow('agent-desktop の実行を拒否した: mcp は使えない。');
+      expect(authorize).not.toHaveBeenCalled();
+      expect(commandRows.size).toBe(0);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      desktop.mockRestore();
+      await broker.dispose();
     }
   });
 });

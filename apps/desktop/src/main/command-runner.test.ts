@@ -2118,9 +2118,17 @@ describe('desktop control outside the command sandbox', () => {
         argv: ['-e', "process.stdout.write('desktop-control-ok')"],
       });
     const judge = vi.spyOn(agentDesktopModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const argvCheck = vi.spyOn(agentDesktopModule, 'agentDesktopArgvRefusal').mockReturnValue(null);
     const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
     try {
       const runner = new CommandRunner({ sandboxed: true });
+      // Arguments the check refuses never start, inside or outside the sandbox.
+      argvCheck.mockReturnValueOnce('refused for the test');
+      const beforeSpawn = vi.fn();
+      await expect(
+        runner.run(await prepare(), { desktopControlWorkspaceRoots: [root], beforeSpawn }),
+      ).rejects.toThrow('refused for the test');
+      expect(beforeSpawn).not.toHaveBeenCalled();
       const spec = await prepare();
       const chunks: CommandOutputChunk[] = [];
       const result = await runner.run(spec, {
@@ -2132,6 +2140,7 @@ describe('desktop control outside the command sandbox', () => {
       expect(result.exitCode).toBe(0);
       expect(chunks.map(({ text }) => text).join('')).toContain('desktop-control-ok');
       expect(judge).toHaveBeenCalledWith(spec.absoluteExecutable, [root]);
+      expect(argvCheck).toHaveBeenLastCalledWith(spec.argv, [root]);
       expect(runnerPath).not.toHaveBeenCalled();
 
       // A negative judgment, or no Turn roots at all, keeps the sandbox runner.
@@ -2153,6 +2162,7 @@ describe('desktop control outside the command sandbox', () => {
       expect(judge).not.toHaveBeenCalled();
     } finally {
       judge.mockRestore();
+      argvCheck.mockRestore();
       runnerPath.mockRestore();
     }
   }, 15_000);

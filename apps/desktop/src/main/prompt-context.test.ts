@@ -189,6 +189,8 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain('文字の入力は、まず set-value');
     expect(compiled.content).toContain('list-windows で id を調べて --window-id を付け');
     expect(compiled.content).toContain('同じ Task で既に読んでいれば読み直さない');
+    expect(compiled.content).toContain('mcp・open-system-surface・clipboard-get・trace');
+    expect(compiled.content).toContain('実行しても拒否される');
     expect(compiled.content).toContain(`${JSON.stringify(command)} launch <アプリ名> を使う`);
     expect(compiled.content).toContain(
       '[{"command":"expand","args":{"ref_id":"<ref>"}},{"command":"snapshot","args":{"window_id":"<id>"}}]',

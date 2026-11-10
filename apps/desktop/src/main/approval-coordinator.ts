@@ -25,6 +25,7 @@ import type {
   ApprovalRequestInput,
   ApprovalResolutionInput,
 } from './persistence';
+import { isAgentDesktopBinary } from './agent-desktop';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
 import {
@@ -219,11 +220,22 @@ export class ApprovalCoordinator {
     for (const evaluation of evaluations) {
       // The policy engine never allows a per-call capability, and if it ever did, the person would
       // still be asked: only their decision on this call's card covers this call.
+      // The native agent-desktop binary runs outside the command sandbox, so it is never covered by
+      // a preset or policy allow either: the person decides it on its own card. The one allow that
+      // is their decision is the Task grant they gave on such a card, which the policy engine
+      // matches only for the exact same ExecutionSpec (executable identity, argv, cwd, env).
+      const desktopControl = isDesktopControlCall(request);
+      const desktopTaskGrant =
+        desktopControl &&
+        evaluation.decision.decision === 'allow' &&
+        evaluation.decision.reason === 'remembered_grant';
       if (
         evaluation.decision.decision === 'allow' &&
-        !requiresPerCallHumanApproval(evaluation.capability)
+        !requiresPerCallHumanApproval(evaluation.capability) &&
+        (!desktopControl || desktopTaskGrant)
       ) {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
+        if (desktopTaskGrant) approvalDecision ??= 'allow_task';
         continue;
       }
       if (evaluation.decision.beforeExecute !== undefined)
@@ -291,6 +303,9 @@ export class ApprovalCoordinator {
       return {
         decision: 'allow',
         reason: 'task_grant',
+        // The person chose "allow for the Task" on a card for this exact request (the digest binds
+        // the tool, its whole input and the policy epoch), so it counts as their decision.
+        approvalDecision: 'allow_task',
         beforeExecute: () =>
           this.options.persistence.hasTaskGrant?.({
             taskId: request.context.taskId,
@@ -970,6 +985,14 @@ function displayTarget(input: unknown): string {
  * grant recognises a repeat, but nobody holding the database can confirm a candidate password
  * (Issue #473).
  */
+export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    request.entry.implementationKind === 'command-runner' &&
+    validateExecutionSpec(request.input) &&
+    isAgentDesktopBinary(request.input.absoluteExecutable)
+  );
+}
+
 function durableDigestInput(input: unknown): unknown {
   const stdin = managedStdinAuthorizationFacts(input);
   return stdin === undefined ? input : managedStdinApprovalExecution(stdin);

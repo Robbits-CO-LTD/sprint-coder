@@ -9,8 +9,10 @@ import {
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
+import { agentDesktopArgvRefusal, isAgentDesktopBinary } from './agent-desktop';
 import {
   CommandRunner,
+  CommandRunnerError,
   prepareExecutionSpec,
   rejectWindowsSandboxedNodeTestIsolation,
   shouldRejectWindowsSandboxedNodeTestIsolation,
@@ -471,6 +473,13 @@ export function registerCommandRunnerTool(
         spec.argv,
         commandRunner.isSandboxed,
       );
+      const roots = workspace.roots.map(({ path }) => path);
+      // Refused before a card exists, so nothing the person could approve would escape the sandbox.
+      const desktopControlRefusal = isAgentDesktopBinary(spec.absoluteExecutable)
+        ? agentDesktopArgvRefusal(spec.argv, roots)
+        : null;
+      if (desktopControlRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,
@@ -483,10 +492,7 @@ export function registerCommandRunnerTool(
       });
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
-      workspaceRoots.set(
-        spec,
-        workspace.roots.map(({ path }) => path),
-      );
+      workspaceRoots.set(spec, roots);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -517,11 +523,16 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
-      const roots = workspaceRoots.get(spec);
+      // Only a call the person allowed on its own card ("allow once", or "allow for the Task" kept
+      // for exactly this command) may start the native agent-desktop binary, and nothing else,
+      // outside the command sandbox. A preset or policy allow never does; the Stop stays the same.
+      const roots =
+        control.authorizationDecision === 'allow_once' ||
+        control.authorizationDecision === 'allow_task'
+          ? workspaceRoots.get(spec)
+          : undefined;
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),
-        // Lets the runner start the native agent-desktop binary, and nothing else, outside the
-        // command sandbox; the approval and Stop below stay the same.
         ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
