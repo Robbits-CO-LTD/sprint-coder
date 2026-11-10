@@ -339,7 +339,7 @@ function renderDesktopControl(command: string): string[] {
     'デスクトップ操作（agent-desktop）:',
     `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。同じ Task で既に読んでいれば読み直さない。`,
     `- アプリを起動する時は ${cli} launch <アプリ名> を使う。アプリの実行ファイルを直接実行しない。`,
-    '- 端末・shell・設定の道具の launch、Workspace の中や相対のパスの launch、mcp・open-system-surface・clipboard-get・trace、--trace・--screenshot・screenshot の保存先の指定は、実行しても拒否される。',
+    '- launch に渡せるのはアプリ名（または Workspace の外の絶対パス）と --activate・--no-attach・--timeout だけで、--arg・--env・--cwd、端末・shell・設定の道具、mcp・open-system-surface・clipboard-get・trace、--trace・--screenshot・--stdin・--force、help に無い option は拒否される。ファイルはアプリの中の操作で開く。',
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',
     '- 文字の入力は、まず set-value。キー入力が要る時は --headed focus-window --window-id <id> で窓を前面に出し、--headed focus <ref> の後に --headed type <ref> <文字>。',
     '- 同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付け、利用者が元から開いていた窓には触らない。',

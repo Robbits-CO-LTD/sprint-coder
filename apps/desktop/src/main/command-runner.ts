@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import {
   basename,
+  dirname,
   delimiter,
   extname,
   isAbsolute,
@@ -839,6 +840,13 @@ export class CommandRunner {
           { event: 'command_desktop_control_unsandboxed' },
         );
       const sandboxExecutable = !this.sandboxed || desktopControl ? null : sandboxRunnerPath();
+      // Outside the sandbox agent-desktop starts in its own folder, which is outside every
+      // Workspace root, so neither it nor an app it launches can pick up a file the agent wrote
+      // there (a bare launch name or a DLL). This differs from the cwd shown on the approval card
+      // and kept in the ExecutionSpec, which stay as approved.
+      const launchCwd = desktopControl
+        ? dirname(spec.absoluteExecutable)
+        : spec.cwdIdentity.canonicalPath;
       const launchImage =
         process.platform === 'linux' && sandboxExecutable !== null
           ? linuxSandboxExecutionImage(executionImage)
@@ -881,7 +889,7 @@ export class CommandRunner {
                 ]),
           ],
           {
-            cwd: spec.cwdIdentity.canonicalPath,
+            cwd: launchCwd,
             // The host Job wrapper creates pipes outside AppContainer and must stay unguarded.
             // Only its payload below inherits the sandbox compatibility preload.
             env: windows
@@ -934,7 +942,7 @@ export class CommandRunner {
                       ...executionImage.argvPrefix,
                       ...spec.argv,
                     ],
-              cwd: spec.cwdIdentity.canonicalPath,
+              cwd: launchCwd,
               env: commandEnvironment,
             }),
           );

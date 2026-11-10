@@ -96,54 +96,106 @@ function outsideWorkspaceRoots(
   });
 }
 
-// The arguments are what the agent chose, and outside the sandbox the binary acts with the user's
-// own authority. Anything that would hand out more than looking at and operating the apps on
-// screen is refused here, before an approval card exists: a terminal, shell, script host or
-// settings tool to launch, a long-lived server (`mcp`), the clipboard's contents, an arbitrary
-// file to write (`--trace`, `--screenshot`, a screenshot path), or anything this cannot parse.
-const GLOBAL_VALUE_OPTIONS = [
-  '--session',
-  '--agent-id',
-  '-w',
-  '--wait-for',
-  '--wait-for-gone',
-  '--wait-timeout',
-];
-const GLOBAL_FLAGS = new Set(['-v', '--verbose', '--headed', '-h', '--help', '-V', '--version']);
-const REFUSED_OPTIONS = new Set([
-  '--trace',
-  '--trace-strict',
-  '--screenshot',
-  '--debug',
-  '--cdp',
-  '--image',
-  '--file-url',
-  '--out',
-]);
-const REFUSED_COMMANDS = new Set(['mcp', 'open-system-surface', 'clipboard-get', 'trace']);
-const KNOWN_COMMANDS = new Set(
+// The arguments are what the agent chose. The safety boundary is that the person allows every
+// agent-desktop run on its own approval card; nothing here makes operating the desktop safe, since
+// keystrokes reach whatever window has focus. This check only drops the plainly dangerous forms
+// before a card exists: an option or command it does not know, a file path to read or write, the
+// clipboard's contents, a long-lived server (`mcp`), a launch that passes arguments, environment
+// or a working directory to the app, and — as a convenience, never a boundary — launching a
+// terminal, shell, script host or settings tool by name.
+const GLOBAL_OPTIONS =
+  '--session= --agent-id= -w= --wait-for= --wait-for-gone= --wait-timeout= -v --verbose --headed';
+const HELP_OPTIONS = new Set(['-h', '--help', '-V', '--version']);
+const REFUSED_OPTIONS = new Set(
   [
-    'snapshot find screenshot get is click double-click triple-click right-click type set-value',
-    'clear focus select toggle check uncheck expand collapse scroll scroll-to press key-down',
-    'key-up hover drag mouse-move mouse-click mouse-down mouse-up mouse-wheel launch close-app',
-    'list-windows list-displays list-apps focus-window resize-window move-window minimize',
-    'maximize restore list-surfaces list-notifications dismiss-notification',
-    'dismiss-all-notifications notification-action clipboard-set clipboard-clear wait status',
-    'permissions version batch skills session cursor-overlay help',
+    '--trace --trace-strict --screenshot --debug --screenshots --cdp --image --file-url',
+    '--pointer-image --out --stdin --env --cwd --arg --force --guide --request',
   ]
     .join(' ')
     .split(' '),
 );
-// Commands whose positional arguments are checked, with the options that take a value.
-const POSITIONAL_COMMANDS: Readonly<Record<string, readonly string[]>> = {
-  launch: ['--timeout', '--arg', '--env', '--cwd'],
-  batch: ['--timeout-ms'],
-  screenshot: ['--app', '--window-id', '--screen'],
+const REFUSED_COMMANDS = new Set(['mcp', 'open-system-surface', 'clipboard-get', 'trace']);
+const REF = '--timeout-ms=';
+const WINDOW = '--app= --window-id=';
+const BUTTONS = '--xy= --button= --modifiers=';
+// Every option of agent-desktop 1.2.0 (`<command> --help`) except the refused ones above. `=`
+// marks an option that takes a value. Commands with subcommands are listed as `command sub`.
+const COMMAND_OPTIONS: Readonly<Record<string, string>> = {
+  snapshot: `${WINDOW} --max-depth= --include-bounds -i --interactive-only --compact --skeleton --surface= --root= ${REF} --force-electron-a11y`,
+  find: `${WINDOW} --role= --name= --value= --text= --description= --native-id= --exact --root= --surface= --state= ${REF} --count --first --last --nth= --limit=`,
+  screenshot: `${WINDOW} --screen=`,
+  get: '--property=',
+  is: '--property=',
+  click: REF,
+  'double-click': REF,
+  'triple-click': REF,
+  'right-click': REF,
+  type: `${REF} --interval-ms=`,
+  'set-value': REF,
+  clear: REF,
+  focus: REF,
+  select: REF,
+  toggle: REF,
+  check: REF,
+  uncheck: REF,
+  expand: REF,
+  collapse: REF,
+  scroll: `--direction= --amount= ${REF}`,
+  'scroll-to': REF,
+  press: WINDOW,
+  'key-down': '',
+  'key-up': '',
+  hover: `--xy= --duration= ${REF}`,
+  drag: `--from= --from-xy= --to= --to-xy= --duration= --drop-delay= ${REF} --wait-for-scope=`,
+  'mouse-move': '--xy=',
+  'mouse-click': `${BUTTONS} --count=`,
+  'mouse-down': BUTTONS,
+  'mouse-up': BUTTONS,
+  'mouse-wheel': '--x= --y= --dy= --dx= --modifiers=',
+  launch: '--timeout= --no-attach --activate',
+  'close-app': '',
+  'list-windows': `--app= ${REF}`,
+  'list-displays': '',
+  'list-apps': `--app= ${REF}`,
+  'focus-window': `${WINDOW} --title=`,
+  'resize-window': `${WINDOW} --width= --height=`,
+  'move-window': `${WINDOW} --x= --y=`,
+  minimize: WINDOW,
+  maximize: WINDOW,
+  restore: WINDOW,
+  'list-surfaces': '--app=',
+  'list-notifications': '--app= --text= --limit=',
+  'dismiss-notification': '--app= --expected-app= --expected-title=',
+  'dismiss-all-notifications': '--app=',
+  'notification-action': '--expected-app= --expected-title=',
+  'clipboard-set': '',
+  'clipboard-clear': '',
+  wait: `--element= --window= --text= --menu --menu-closed --notification --event= --window-id= --predicate= --value= --action= --count= --timeout= --app=`,
+  status: '',
+  permissions: '',
+  version: '',
+  batch: '--stop-on-error --timeout-ms=',
+  help: '',
+  'skills list': '',
+  'skills get': '--full',
+  'skills path': '',
+  'skills help': '',
+  'session start': '--name= --no-trace --cursor --multi-agent',
+  'session end': '',
+  'session list': '',
+  'session gc': '--older-than= --ended',
+  'session help': '',
+  'cursor-overlay enable':
+    '--multi-agent --label= --max-words= --fill= --rim= --accent= --size= --no-ripple --no-highlight --hotspot= --pointer-hotspot= --travel-ms= --bow= --overshoot= --tremor= --dwell-ms= --motion-seed=',
+  'cursor-overlay disable': '',
+  'cursor-overlay help': '',
 };
-const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  launch: ['--activate', '--no-attach'],
-  batch: ['--stop-on-error'],
-};
+const WITH_SUBCOMMANDS = new Set(['skills', 'session', 'cursor-overlay']);
+// In a batch, the same refusals by argument name (agent-desktop rejects unknown names itself).
+const REFUSED_BATCH_KEYS = new Set(
+  [...REFUSED_OPTIONS, '--path'].map((option) => option.slice(2).replace(/-/gu, '')),
+);
+const BATCH_LAUNCH_KEYS = new Set(['app', 'timeout', 'no_attach', 'activate']);
 const REFUSED_LAUNCH_NAMES = new Set(
   [
     'cmd powershell powershellise pwsh wt windowsterminal conhost openconsole bash sh zsh fish',
@@ -165,17 +217,18 @@ const REFUSED_LAUNCH_EXTENSIONS = new Set(
     .join(' ')
     .split(' '),
 );
-const REFUSED_BATCH_KEYS = new Set([
-  'trace',
-  'tracestrict',
-  'screenshot',
-  'debug',
-  'cdp',
-  'image',
-  'fileurl',
-  'out',
-  'path',
-]);
+
+type ParsedOptions = Readonly<{ values: ReadonlySet<string>; flags: ReadonlySet<string> }>;
+
+function parseOptions(spec: string): ParsedOptions {
+  const tokens = `${GLOBAL_OPTIONS} ${spec}`.split(' ').filter((token) => token !== '');
+  return {
+    values: new Set(
+      tokens.filter((token) => token.endsWith('=')).map((token) => token.slice(0, -1)),
+    ),
+    flags: new Set(tokens.filter((token) => !token.endsWith('='))),
+  };
+}
 
 /** Why agent-desktop must not run with these arguments, or `null` when it may. */
 export function agentDesktopArgvRefusal(
@@ -183,60 +236,66 @@ export function agentDesktopArgvRefusal(
   workspaceRoots: readonly string[],
   lookup: AgentDesktopLookup = {},
 ): string | null {
-  let index = 0;
   let command: string | undefined;
-  for (; index < argv.length; index += 1) {
-    const token = argv[index]!;
-    if (!token.startsWith('-')) {
-      command = token;
-      break;
-    }
-    const name = optionName(token);
-    if (REFUSED_OPTIONS.has(name)) return refusal(`${name} は使えない`);
-    if (GLOBAL_VALUE_OPTIONS.includes(name)) {
-      if (!token.includes('=')) index += 1;
-    } else if (!GLOBAL_FLAGS.has(name)) return refusal(`${token} を判定できない`);
-  }
-  if (command === undefined) return null;
-  if (REFUSED_COMMANDS.has(command)) return refusal(`${command} は使えない`);
-  if (!KNOWN_COMMANDS.has(command)) return refusal(`${command} を判定できない`);
-  const rest = argv.slice(index + 1);
-  const separator = rest.indexOf('--');
-  for (const token of separator < 0 ? rest : rest.slice(0, separator))
-    if (token.startsWith('-') && REFUSED_OPTIONS.has(optionName(token)))
-      return refusal(`${optionName(token)} は使えない`);
-  const valueOptions = POSITIONAL_COMMANDS[command];
-  if (valueOptions === undefined) return null;
+  let key: string | undefined;
+  let options = parseOptions('');
+  let help = false;
+  let separated = false;
   const positionals: string[] = [];
-  const values: string[] = [];
-  for (let at = 0; at < rest.length; at += 1) {
-    const token = rest[at]!;
-    if (at > separator && separator >= 0) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (separated) {
       positionals.push(token);
       continue;
     }
-    if (token === '--' || !token.startsWith('-')) {
-      if (token !== '--') positionals.push(token);
+    if (token === '--') {
+      if (key === undefined) return refusal('-- の位置を判定できない');
+      separated = true;
       continue;
     }
-    const name = optionName(token);
-    if ([...valueOptions, ...GLOBAL_VALUE_OPTIONS].includes(name)) {
-      const value = token.includes('=') ? token.slice(token.indexOf('=') + 1) : rest[(at += 1)];
-      if (value === undefined) return refusal(`${name} に値が無い`);
-      values.push(value);
-    } else if (!GLOBAL_FLAGS.has(name) && !(COMMAND_FLAGS[command] ?? []).includes(name))
-      return refusal(`${token} を判定できない`);
+    if (token.startsWith('-') && token !== '-') {
+      const name = optionName(token);
+      if (REFUSED_OPTIONS.has(name)) return refusal(`${name} は使えない`);
+      if (HELP_OPTIONS.has(name) && name === token) help = true;
+      else if (options.values.has(name)) {
+        if (!token.includes('=') && (index += 1) >= argv.length)
+          return refusal(`${name} に値が無い`);
+      } else if (!options.flags.has(token))
+        return refusal(
+          `${token} を判定できない（${key ?? command ?? 'agent-desktop'} で使える option だけにする）`,
+        );
+      continue;
+    }
+    if (command === undefined) {
+      command = token;
+      if (REFUSED_COMMANDS.has(command)) return refusal(`${command} は使えない`);
+      if (WITH_SUBCOMMANDS.has(command)) continue;
+    } else if (key === undefined) {
+      if (COMMAND_OPTIONS[`${command} ${token}`] === undefined)
+        return refusal(`${command} ${token} を判定できない`);
+      command = `${command} ${token}`;
+    } else {
+      positionals.push(token);
+      continue;
+    }
+    key = command;
+    const spec = COMMAND_OPTIONS[key];
+    if (spec === undefined) return refusal(`${key} を判定できない`);
+    options = parseOptions(spec);
   }
-  if (command === 'screenshot')
-    return positionals.length === 0 ? null : refusal('screenshot の保存先は指定できない');
-  if (positionals.length !== 1) return refusal(`${command} の引数を判定できない`);
-  if (command === 'launch')
-    return (
-      launchTargetRefusal(positionals[0]!, workspaceRoots, lookup) ??
-      values.map(launchValueRefusal).find((reason) => reason !== null) ??
-      null
-    );
-  return batchRefusal(positionals[0]!, workspaceRoots, lookup);
+  // Help and version print and exit without acting.
+  if (help || key === undefined) return null;
+  if (key === 'screenshot' && positionals.length > 0)
+    return refusal('screenshot の保存先は指定できない');
+  if (key === 'launch')
+    return positionals.length === 1
+      ? launchTargetRefusal(positionals[0]!, workspaceRoots, lookup)
+      : refusal('launch に渡せるのはアプリ名か Workspace の外の絶対パス 1 つだけ');
+  if (key === 'batch')
+    return positionals.length === 1
+      ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
+      : refusal('batch には JSON の配列を 1 つだけ渡す');
+  return null;
 }
 
 function refusal(reason: string): string {
@@ -260,36 +319,24 @@ function launchTargetRefusal(
   if (/^[a-z][a-z0-9+.-]+:/iu.test(app) && !/^[a-z]:[\\/]/iu.test(app))
     return refusal(`launch で URI（${app}）は開けない`);
   if (/[\\/]/u.test(app)) {
-    // A path outside the Workspace was not written by the agent's sandboxed commands; one inside
-    // could be anything the agent built.
     if (!paths.isAbsolute(app) || app.startsWith('\\\\') || app.startsWith('//'))
       return refusal('launch のパスは Workspace の外の絶対パスだけ');
     if (!outsideWorkspaceRoots(app, workspaceRoots, lookup))
       return refusal('launch で Workspace の中の実行ファイルは起動できない');
   }
-  return launchValueRefusal(app);
-}
-
-// Names a terminal, shell, script host or settings tool, with or without a path or `.exe`.
-function launchValueRefusal(value: string): string | null {
-  for (const part of value.split('=')) {
-    const base =
-      part
-        .trim()
-        .replace(/^["']|["']$/gu, '')
-        .split(/[\\/]/u)
-        .pop() ?? '';
-    const lower = base.toLowerCase();
-    const extension = /\.[a-z0-9-]+$/u.exec(lower)?.[0] ?? '';
-    if (REFUSED_LAUNCH_EXTENSIONS.has(extension))
-      return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
-    const stem = ['.exe', '.com', '.app'].includes(extension)
-      ? lower.slice(0, -extension.length)
-      : lower;
-    const names = [stem, ...stem.split('.')].map((name) => name.replace(/[^a-z0-9]/gu, ''));
-    if (names.some((name) => REFUSED_LAUNCH_NAMES.has(name)))
-      return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
-  }
+  // A convenience for an obvious mistake, not a boundary: the card is.
+  const base = app.split(/[\\/]/u).pop() ?? '';
+  const lower = base.toLowerCase();
+  const extension = /\.[a-z0-9-]+$/u.exec(lower)?.[0] ?? '';
+  const stem = ['.exe', '.com', '.app'].includes(extension)
+    ? lower.slice(0, -extension.length)
+    : lower;
+  const names = [stem, ...stem.split('.')].map((name) => name.replace(/[^a-z0-9]/gu, ''));
+  if (
+    REFUSED_LAUNCH_EXTENSIONS.has(extension) ||
+    names.some((name) => REFUSED_LAUNCH_NAMES.has(name))
+  )
+    return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
   return null;
 }
 
@@ -315,36 +362,34 @@ function batchRefusal(
       return refusal('batch の args を判定できない');
     if (REFUSED_COMMANDS.has(command) || command === 'batch')
       return refusal(`batch の中の ${command} は使えない`);
-    if (!KNOWN_COMMANDS.has(command)) return refusal(`batch の中の ${command} を判定できない`);
+    if (COMMAND_OPTIONS[command] === undefined || WITH_SUBCOMMANDS.has(command))
+      return refusal(`batch の中の ${command} を判定できない`);
     const fields = (args ?? {}) as Record<string, unknown>;
-    const strings: string[] = [];
-    const keyRefusal = collectBatchStrings(fields, strings);
-    if (keyRefusal !== null) return keyRefusal;
     if (command === 'launch') {
+      const unknown = Object.keys(fields).find((name) => !BATCH_LAUNCH_KEYS.has(name));
+      if (unknown !== undefined) return refusal(`batch の中の launch の ${unknown} は使えない`);
       if (typeof fields['app'] !== 'string')
         return refusal('batch の launch の app を判定できない');
-      const reason =
-        launchTargetRefusal(fields['app'], workspaceRoots, lookup) ??
-        strings.map(launchValueRefusal).find((found) => found !== null) ??
-        null;
+      const reason = launchTargetRefusal(fields['app'], workspaceRoots, lookup);
       if (reason !== null) return reason;
     }
+    const keyRefusal = refusedBatchKey(fields);
+    if (keyRefusal !== null) return keyRefusal;
   }
   return null;
 }
 
-function collectBatchStrings(value: unknown, strings: string[]): string | null {
-  if (typeof value === 'string') strings.push(value);
-  else if (Array.isArray(value)) {
+function refusedBatchKey(value: unknown): string | null {
+  if (Array.isArray(value)) {
     for (const item of value) {
-      const reason = collectBatchStrings(item, strings);
+      const reason = refusedBatchKey(item);
       if (reason !== null) return reason;
     }
   } else if (typeof value === 'object' && value !== null)
     for (const [key, item] of Object.entries(value)) {
       if (REFUSED_BATCH_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/gu, '')))
         return refusal(`batch の中の ${key} は使えない`);
-      const reason = collectBatchStrings(item, strings);
+      const reason = refusedBatchKey(item);
       if (reason !== null) return reason;
     }
   return null;

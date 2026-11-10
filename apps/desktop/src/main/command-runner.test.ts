@@ -18,7 +18,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { join, win32 as windowsPath } from 'node:path';
+import { dirname, join, win32 as windowsPath } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -2115,8 +2115,14 @@ describe('desktop control outside the command sandbox', () => {
       prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
-        argv: ['-e', "process.stdout.write('desktop-control-ok')"],
+        argv: ['-e', "process.stdout.write('desktop-control-ok:' + process.cwd())"],
       });
+    const ranIn = (chunks: readonly CommandOutputChunk[]) =>
+      chunks
+        .map(({ text }) => text)
+        .join('')
+        .split('desktop-control-ok:')[1]
+        ?.toLowerCase();
     const judge = vi.spyOn(agentDesktopModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
     const argvCheck = vi.spyOn(agentDesktopModule, 'agentDesktopArgvRefusal').mockReturnValue(null);
     const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
@@ -2138,7 +2144,8 @@ describe('desktop control outside the command sandbox', () => {
         },
       });
       expect(result.exitCode).toBe(0);
-      expect(chunks.map(({ text }) => text).join('')).toContain('desktop-control-ok');
+      // Outside the sandbox it starts in the executable's own folder, not the approved cwd.
+      expect(ranIn(chunks)).toBe(dirname(spec.absoluteExecutable).toLowerCase());
       expect(judge).toHaveBeenCalledWith(spec.absoluteExecutable, [root]);
       expect(argvCheck).toHaveBeenLastCalledWith(spec.argv, [root]);
       expect(runnerPath).not.toHaveBeenCalled();
@@ -2155,10 +2162,18 @@ describe('desktop control outside the command sandbox', () => {
       judge.mockReturnValue(true);
       await expect(runner.run(await prepare())).rejects.toThrow('sandbox runner requested');
       expect(judge).not.toHaveBeenCalled();
-      // An unsandboxed runner never asks.
+      // An unsandboxed runner never asks, and keeps the approved cwd.
+      const plain: CommandOutputChunk[] = [];
+      const unsandboxed = await prepare();
       await expect(
-        new CommandRunner().run(await prepare(), { desktopControlWorkspaceRoots: [root] }),
+        new CommandRunner().run(unsandboxed, {
+          desktopControlWorkspaceRoots: [root],
+          onChunk: (chunk) => {
+            plain.push(chunk);
+          },
+        }),
       ).resolves.toMatchObject({ exitCode: 0 });
+      expect(ranIn(plain)).toBe(unsandboxed.cwdIdentity.canonicalPath.toLowerCase());
       expect(judge).not.toHaveBeenCalled();
     } finally {
       judge.mockRestore();
