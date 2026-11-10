@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   desktopControlArgvRefusal,
+  desktopControlEnvironment,
   isDesktopControlExecutable,
   resolveDesktopControlCommand,
   runsOutsideCommandSandbox,
@@ -51,6 +52,60 @@ const development = {
   contentDigest: digests({ [DEVELOPMENT]: PIN }),
   realpath: (path: string) => path,
 };
+
+describe('desktop-control run environment', () => {
+  it('drops every PATH folder inside a Workspace root, and relative or empty ones, keeping the rest', () => {
+    const environment = {
+      PATH: [
+        'C:\\Windows\\System32',
+        'F:\\work\\app',
+        'f:\\WORK\\app\\node_modules\\.bin\\',
+        '"F:\\work\\app\\tools"',
+        'F:\\work\\second\\bin',
+        'F:\\work\\application',
+        '',
+        'relative\\bin',
+        '.',
+        '\\root-relative',
+        'C:drive-relative',
+        '\\\\server\\share\\bin',
+        '"C:\\Program Files\\Git\\cmd"',
+        'D:\\tools',
+      ].join(';'),
+      TEMP: 'F:\\work\\app\\tmp',
+    };
+    const filtered = desktopControlEnvironment(environment, ['F:\\work\\app', 'F:\\work\\second'], {
+      platform: 'win32',
+      realpath: (path) => path,
+    });
+    expect(filtered['PATH']!.split(';')).toEqual([
+      'C:\\Windows\\System32',
+      'F:\\work\\application',
+      '"C:\\Program Files\\Git\\cmd"',
+      'D:\\tools',
+    ]);
+    // Only PATH changes.
+    expect(filtered['TEMP']).toBe(environment.TEMP);
+    expect(
+      desktopControlEnvironment({ Path: 'F:\\work\\app' }, ['F:\\work\\app'], {
+        platform: 'win32',
+        realpath: (path) => path,
+      }),
+    ).toEqual({ Path: '' });
+  });
+
+  it('judges a PATH folder by where it really is', () => {
+    const filtered = desktopControlEnvironment(
+      { PATH: 'C:\\linked;C:\\other' },
+      ['F:\\work\\app'],
+      {
+        platform: 'win32',
+        realpath: (path) => (path === 'C:\\linked' ? 'F:\\work\\app\\bin' : path),
+      },
+    );
+    expect(filtered).toEqual({ PATH: 'C:\\other' });
+  });
+});
 
 describe('desktop-control pin', () => {
   it('pins only the Windows x64 binary of 1.2.0, to the npm package bytes', () => {

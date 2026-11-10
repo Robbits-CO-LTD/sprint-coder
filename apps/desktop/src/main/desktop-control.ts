@@ -84,6 +84,33 @@ export function runsOutsideCommandSandbox(
   );
 }
 
+/**
+ * The environment of a desktop-control run outside the sandbox. Its PATH keeps only the absolute
+ * folders outside every root of the Turn's Workspace, so a bare `launch` name never resolves to a
+ * file the agent wrote in the Workspace. Relative, root-relative, UNC and empty entries are
+ * dropped as well, since what they name depends on where they are read. Other variables, the
+ * approved ExecutionSpec and the approval card stay as they are.
+ */
+export function desktopControlEnvironment(
+  environment: Readonly<Record<string, string>>,
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup = {},
+): Readonly<Record<string, string>> {
+  const windows = (lookup.platform ?? process.platform) === 'win32';
+  const separator = windows ? ';' : ':';
+  return Object.fromEntries(
+    Object.entries(environment).map(([key, value]) => {
+      if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
+      const kept = value.split(separator).filter((entry) => {
+        const folder = windows ? entry.trim().replace(/^"(.*)"$/u, '$1') : entry;
+        const absolute = windows ? /^[a-z]:[\\/]/iu.test(folder) : posix.isAbsolute(folder);
+        return absolute && outsideWorkspaceRoots(folder, workspaceRoots, lookup);
+      });
+      return [key, kept.join(separator)];
+    }),
+  );
+}
+
 function comparisonKey(path: string, lookup: DesktopControlLookup): string {
   const platform = lookup.platform ?? process.platform;
   const normalized = (platform === 'win32' ? win32 : posix).normalize(

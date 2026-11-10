@@ -2190,6 +2190,147 @@ describe('desktop control outside the command sandbox', () => {
       runnerPath.mockRestore();
     }
   }, 15_000);
+
+  it.skipIf(process.platform !== 'win32')(
+    'lets only a desktop-control run leave the apps it started running, with a PATH outside the Workspace',
+    async () => {
+      const root = await workspace();
+      const insideFolder = join(root, 'bin');
+      await mkdir(insideFolder);
+      vi.stubEnv('PATH', `${insideFolder};${process.env['PATH'] ?? ''}`);
+      // The command starts a long-lived process of another image, reports it and its PATH, and ends.
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        'process.stdout.write(JSON.stringify({ pid: child.pid, path: process.env.PATH }));',
+      ].join('\n');
+      const prepare = () =>
+        prepareTestExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: ['-e', script, process.execPath],
+        });
+      const report = (chunks: readonly CommandOutputChunk[]) =>
+        JSON.parse(chunks.map(({ text }) => text).join('')) as { pid: number; path: string };
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const started: number[] = [];
+      try {
+        const desktopChunks: CommandOutputChunk[] = [];
+        const desktopSpec = await prepare();
+        expect(desktopSpec.envDelta['PATH']?.toLowerCase()).toContain(insideFolder.toLowerCase());
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(desktopSpec, {
+            desktopControlWorkspaceRoots: [root],
+            onChunk: (chunk) => {
+              desktopChunks.push(chunk);
+            },
+          }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        const desktop = report(desktopChunks);
+        started.push(desktop.pid);
+        // The approved spec keeps its PATH; only the launch leaves out the Workspace folder.
+        expect(desktopSpec.envDelta['PATH']?.toLowerCase()).toContain(insideFolder.toLowerCase());
+        expect(desktop.path.toLowerCase()).not.toContain(insideFolder.toLowerCase());
+        expect(desktop.path.toLowerCase()).toContain('system32');
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        expect(() => process.kill(desktop.pid, 0)).not.toThrow();
+
+        // Any other command still ends with everything it started, and keeps its PATH.
+        const plainChunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner().run(await prepare(), {
+            desktopControlWorkspaceRoots: [root],
+            onChunk: (chunk) => {
+              plainChunks.push(chunk);
+            },
+          }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        const plain = report(plainChunks);
+        started.push(plain.pid);
+        expect(plain.path.toLowerCase()).toContain(insideFolder.toLowerCase());
+        await expectProcessDead(plain.pid);
+      } finally {
+        for (const pid of started) {
+          try {
+            process.kill(pid);
+          } catch {
+            // Already ended.
+          }
+        }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'Stop still ends a running desktop-control command and everything it started',
+    async () => {
+      const root = await workspace();
+      // Output can reach the sink only as the command closes, so the started process is reported
+      // through a file.
+      const report = join(root, 'started.txt');
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        "require('node:fs').writeFileSync(process.argv[2], String(child.pid));",
+        'setTimeout(() => {}, 60000);',
+      ].join('\n');
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', script, process.execPath, report],
+      });
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const controller = new AbortController();
+      let wrapper = 0;
+      let started = 0;
+      try {
+        const running = new CommandRunner({ sandboxed: true, cancelGraceMs: 100 }).run(spec, {
+          desktopControlWorkspaceRoots: [root],
+          signal: controller.signal,
+          onStarted: ({ pid }) => {
+            wrapper = pid;
+          },
+        });
+        const deadline = Date.now() + 10_000;
+        while (started === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          started = Number(await readFile(report, 'utf8').catch(() => '0'));
+        }
+        controller.abort();
+        const result = await running;
+        expect(result).toMatchObject({ canceled: true, termination: 'forced' });
+        expect(started).toBeGreaterThan(0);
+        await expectProcessDead(wrapper);
+        await expectProcessDead(started);
+      } finally {
+        if (started > 0)
+          try {
+            process.kill(started);
+          } catch {
+            // Already ended.
+          }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
 });
 
 // The real shipped binary (node_modules in a development checkout); Windows only for now.
