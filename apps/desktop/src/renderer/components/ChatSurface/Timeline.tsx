@@ -267,6 +267,13 @@ export function Timeline({
   }, [graphVersions, isActive, messages, turn?.streamingMessageId]);
 
   const isEmpty = messages.length === 0 && !turn && activityGroups.leading.length === 0;
+  // A desktop-control command shows what its approval card described; both carry the call's id.
+  const desktopActionByCall = useMemo(() => {
+    const byCall = new Map<string, NonNullable<ApprovalSummary['desktopAction']>>();
+    for (const approval of [...approvalHistory, ...approvals])
+      if (approval.desktopAction !== undefined) byCall.set(approval.callId, approval.desktopAction);
+    return byCall;
+  }, [approvalHistory, approvals]);
 
   return (
     <GraphTaskContext.Provider value={taskId}>
@@ -442,7 +449,12 @@ export function Timeline({
                   }
                 />
                 {commandCards.map((card) => (
-                  <CommandCard key={card.command.id} taskId={taskId} card={card} />
+                  <CommandCard
+                    key={card.command.id}
+                    taskId={taskId}
+                    card={card}
+                    desktopAction={desktopActionByCall.get(card.command.callId)}
+                  />
                 ))}
                 {turnFileChanges.map((entry) => (
                   <FileChangeCard key={entry.seq} changes={entry.changes} />

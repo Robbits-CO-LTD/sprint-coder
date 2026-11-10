@@ -2092,6 +2092,67 @@ export type ApprovalState = z.infer<typeof approvalStateSchema>;
  */
 export const APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS = 20_480;
 
+/**
+ * What a desktop-control run does, as its approval card shows it (built by Main from the sealed
+ * argv). Display only: no decision is taken from it, and an approval without it shows the plain
+ * command card. Names come from the app being operated and are untrusted text.
+ */
+export const desktopActionTargetSchema = z
+  .object({
+    /** Whether the app and part were read from the snapshot the ref belongs to. */
+    resolved: z.boolean(),
+    app: z.string().min(1).max(120).optional(),
+    window: z.string().min(1).max(120).optional(),
+    /** The part's role, in Japanese. */
+    role: z.string().min(1).max(40).optional(),
+    name: z.string().min(1).max(120).optional(),
+    /** The ref or window id as given, shown when the target could not be confirmed. */
+    reference: z.string().min(1).max(120).optional(),
+  })
+  .strict();
+export type DesktopActionTarget = z.infer<typeof desktopActionTargetSchema>;
+
+export const desktopActionKindSchema = z.enum([
+  'read',
+  'operate',
+  'input',
+  'launch',
+  'window',
+  'close',
+  'other',
+]);
+export const desktopActionModeSchema = z.enum(['read', 'background', 'foreground']);
+
+export const desktopActionStepSchema = z
+  .object({
+    kind: desktopActionKindSchema,
+    title: z.string().min(1).max(40),
+    mode: desktopActionModeSchema,
+    target: desktopActionTargetSchema.optional(),
+    /** The text it enters, the value it selects or the keys it presses. */
+    text: z.string().min(1).max(1_000).optional(),
+    /** What `text` is: entered text, a selected value, keys, clipboard text or a button's name. */
+    textRole: z.enum(['enter', 'select', 'keys', 'clipboard', 'button']).optional(),
+  })
+  .strict();
+export type DesktopActionStep = z.infer<typeof desktopActionStepSchema>;
+
+export const DESKTOP_ACTION_MAX_STEPS = 20;
+
+export const desktopApprovalActionSchema = desktopActionStepSchema
+  .extend({
+    /** The operations of a batch, in order, up to the bound; `stepsOmitted` counts the rest. */
+    steps: z.array(desktopActionStepSchema).max(DESKTOP_ACTION_MAX_STEPS).optional(),
+    stepsOmitted: z.number().int().positive().optional(),
+    /** Whether the card offers 「Task中許可」. Main refuses it anyway when this is false. */
+    allowTaskGrant: z.boolean(),
+    notes: z.array(z.string().min(1).max(200)).max(6),
+    /** Whether the card opens its details: something could not be confirmed or shown in full. */
+    openDetails: z.boolean(),
+  })
+  .strict();
+export type DesktopApprovalAction = z.infer<typeof desktopApprovalActionSchema>;
+
 export const approvalSummarySchema = z
   .object({
     id: idSchema,
@@ -2122,6 +2183,8 @@ export const approvalSummarySchema = z
       .min(1)
       .max(APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS)
       .optional(),
+    /** A desktop-control run's own card (absent on every other approval and on older rows). */
+    desktopAction: desktopApprovalActionSchema.optional(),
     risk: toolRiskSchema,
     capability: toolCapabilitySchema,
     challenge: z.string().min(8).max(256),

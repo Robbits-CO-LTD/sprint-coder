@@ -1,18 +1,30 @@
-import { useEffect, useRef, useState } from 'react';
-import { TriangleAlert } from './icons';
+import { useEffect, useId, useRef, useState } from 'react';
+import { Monitor, TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
+import { desktopModeLabel, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
 
-export function ApprovalCard({
-  approval,
-  busy,
-  onDecision,
-}: {
+type ApprovalCardProps = {
   approval: ApprovalSummary;
   busy: boolean;
   onDecision: (decision: ApprovalDecision, userInputSelection?: number) => void;
-}) {
+};
+
+export function ApprovalCard(props: ApprovalCardProps) {
+  // A desktop-control run gets its own card, described by Main; any other approval, and a
+  // desktop-control approval recorded before that description existed, keeps the command card.
+  return props.approval.desktopAction === undefined ? (
+    <CommandApprovalCard {...props} />
+  ) : (
+    <DesktopControlApprovalCard {...props} action={props.approval.desktopAction} />
+  );
+}
+
+function CommandApprovalCard({ approval, busy, onDecision }: ApprovalCardProps) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
+  const ids = useId();
+  const headingId = `${ids}-heading`;
+  const targetId = `${ids}-target`;
   // A stdin write is approved on its exact characters, and those characters are live-only: they
   // are never stored, so a card rebuilt from a snapshot or from the durable event does not have
   // them (Issue #473). Approving without them would approve bytes nobody read, so the card fails
@@ -41,6 +53,7 @@ export function ApprovalCard({
   const perCallContentCollapsed = perCall !== null && executionIsLong && !executionExpanded;
   const allowDisabled =
     busy || liveDetailMissing || perCallContentMissing || perCallContentCollapsed;
+  const labelledBy = userInput === null ? `${headingId} ${targetId}` : headingId;
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -60,7 +73,7 @@ export function ApprovalCard({
           <TriangleAlert size={16} />
         </span>
         <div>
-          <strong>
+          <strong id={headingId}>
             {perCall !== null
               ? perCall.title
               : userInput === null
@@ -102,7 +115,7 @@ export function ApprovalCard({
       <dl className="approval-card__facts">
         <div>
           <dt>対象</dt>
-          <dd>{approval.target}</dd>
+          <dd id={targetId}>{approval.target}</dd>
         </div>
         <div>
           <dt>影響</dt>
@@ -128,10 +141,14 @@ export function ApprovalCard({
         </div>
       </dl>
       <div className="approval-card__actions">
+        {/* Each button is named with the card's heading (and target), so two cards side by side
+            read apart to a screen reader. */}
         <button
           type="button"
           className="primary"
           data-testid="approval-allow-once"
+          id={`${ids}-once`}
+          aria-labelledby={`${ids}-once ${labelledBy}`}
           disabled={allowDisabled}
           onClick={() => onDecision('allow_once', userInput === null ? undefined : 0)}
         >
@@ -141,6 +158,8 @@ export function ApprovalCard({
           <button
             data-testid="approval-allow-task"
             type="button"
+            id={`${ids}-task`}
+            aria-labelledby={`${ids}-task ${labelledBy}`}
             disabled={allowDisabled}
             onClick={() => onDecision('allow_task', userInput === null ? undefined : 1)}
           >
@@ -152,6 +171,8 @@ export function ApprovalCard({
             className={userInput === null ? 'danger' : undefined}
             data-testid="approval-deny"
             type="button"
+            id={`${ids}-deny`}
+            aria-labelledby={`${ids}-deny ${labelledBy}`}
             disabled={busy}
             onClick={() => onDecision('deny', userInput === null ? undefined : 2)}
           >
@@ -165,6 +186,188 @@ export function ApprovalCard({
         </span>
       ) : null}
     </section>
+  );
+}
+
+type DesktopAction = NonNullable<ApprovalSummary['desktopAction']>;
+
+/**
+ * A desktop-control run's card: what it does, to which app and part, and what it enters, as Main
+ * described it from the sealed argv. The command itself stays one click away under 「詳細」, open
+ * from the start when Main could not confirm the target. 「Task中許可」 is offered only when Main
+ * says the run may be covered by one (it refuses one anyway for a run that uses the foreground).
+ */
+function DesktopControlApprovalCard({
+  approval,
+  busy,
+  onDecision,
+  action,
+}: ApprovalCardProps & { action: DesktopAction }) {
+  const cardRef = useRef<HTMLElement>(null);
+  const ids = useId();
+  const headingId = `${ids}-heading`;
+  const targetId = `${ids}-target`;
+  const labelledBy = action.target === undefined ? headingId : `${headingId} ${targetId}`;
+  const badge = desktopModeLabel(action.mode);
+
+  useEffect(() => {
+    cardRef.current?.focus({ preventScroll: true });
+  }, [approval.id]);
+
+  return (
+    <section
+      ref={cardRef}
+      className={`approval-card approval-card--desktop approval-card--${action.mode}`}
+      aria-labelledby={labelledBy}
+      aria-busy={busy}
+      data-testid="approval-card"
+      data-desktop-mode={action.mode}
+      tabIndex={-1}
+    >
+      <div className="approval-card__head">
+        <span className="approval-card__icon">
+          <Monitor size={16} />
+        </span>
+        <div>
+          <strong id={headingId}>{action.title}</strong>
+          <div className="approval-card__tool">デスクトップ操作</div>
+        </div>
+        {badge === null ? null : (
+          <span
+            className={`approval-card__mode is-${action.mode}`}
+            data-testid="desktop-approval-mode"
+          >
+            {badge}
+          </span>
+        )}
+      </div>
+      <DesktopStepFacts step={action} targetId={targetId} />
+      {action.steps === undefined || action.steps.length === 0 ? null : (
+        <ol className="approval-card__steps" data-testid="desktop-approval-steps">
+          {action.steps.map((step, index) => (
+            <li key={index}>
+              <strong>{step.title}</strong>
+              {step.mode === 'foreground' && action.mode === 'foreground' ? null : badgeFor(step)}
+              <DesktopStepFacts step={step} />
+            </li>
+          ))}
+        </ol>
+      )}
+      {action.notes.map((note) => (
+        <p key={note} className="approval-card__warning" role="note">
+          {note}
+        </p>
+      ))}
+      <details
+        className="approval-card__details"
+        open={action.openDetails}
+        data-testid="desktop-approval-details"
+      >
+        <summary>詳細（実行内容）</summary>
+        <dl className="approval-card__facts">
+          <div>
+            <dt>実行ファイル</dt>
+            <dd>{approval.target}</dd>
+          </div>
+          <div>
+            <dt>影響</dt>
+            <dd>{approval.impact}</dd>
+          </div>
+          <div>
+            <dt>実行内容</dt>
+            <dd>
+              <code>{approval.execution}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>道具</dt>
+            <dd>
+              {approval.toolName} · {approval.capability}
+            </dd>
+          </div>
+          <div>
+            <dt>危険度</dt>
+            <dd>{approval.risk}</dd>
+          </div>
+        </dl>
+      </details>
+      <div className="approval-card__actions">
+        <button
+          type="button"
+          className="primary"
+          data-testid="approval-allow-once"
+          id={`${ids}-once`}
+          aria-labelledby={`${ids}-once ${labelledBy}`}
+          disabled={busy}
+          onClick={() => onDecision('allow_once')}
+        >
+          今回のみ許可
+        </button>
+        {action.allowTaskGrant ? (
+          <button
+            data-testid="approval-allow-task"
+            type="button"
+            id={`${ids}-task`}
+            aria-labelledby={`${ids}-task ${labelledBy}`}
+            disabled={busy}
+            onClick={() => onDecision('allow_task')}
+          >
+            Task中許可
+          </button>
+        ) : null}
+        <button
+          className="danger"
+          data-testid="approval-deny"
+          type="button"
+          id={`${ids}-deny`}
+          aria-labelledby={`${ids}-deny ${labelledBy}`}
+          disabled={busy}
+          onClick={() => onDecision('deny')}
+        >
+          拒否
+        </button>
+      </div>
+      {busy ? (
+        <span className="sr-only" role="status">
+          承認結果を保存しています
+        </span>
+      ) : null}
+    </section>
+  );
+}
+
+function badgeFor(step: { mode: DesktopAction['mode'] }) {
+  const label = desktopModeLabel(step.mode);
+  return label === null ? null : (
+    <span className={`approval-card__mode is-${step.mode}`}>{label}</span>
+  );
+}
+
+function DesktopStepFacts({
+  step,
+  targetId,
+}: {
+  step: Pick<DesktopAction, 'target' | 'text' | 'textRole'>;
+  targetId?: string;
+}) {
+  if (step.target === undefined && step.text === undefined) return null;
+  return (
+    <dl className="approval-card__facts">
+      {step.target === undefined ? null : (
+        <div>
+          <dt>対象</dt>
+          <dd id={targetId}>{desktopTargetText(step.target)}</dd>
+        </div>
+      )}
+      {step.text === undefined ? null : (
+        <div>
+          <dt>{desktopTextLabel(step)}</dt>
+          <dd>
+            <code>「{step.text}」</code>
+          </dd>
+        </div>
+      )}
+    </dl>
   );
 }
 
