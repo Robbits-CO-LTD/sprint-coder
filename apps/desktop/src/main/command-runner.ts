@@ -663,6 +663,21 @@ export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
   return identity.pathGuard;
 }
 
+/**
+ * The SHA-256 of the executable bytes sealed when this ExecutionSpec was prepared, which the
+ * ExecutionSpec's identity digest binds; `null` for a spec this module did not seal, or one that
+ * runs through a script interpreter (its bytes are not the program that starts).
+ */
+export function executionSpecContentDigest(spec: unknown): string | null {
+  if (typeof spec !== 'object' || spec === null) return null;
+  const identity = issuedSpecs.get(spec);
+  if (identity === undefined || identity.executable.interpreter !== undefined) return null;
+  const sealed = spec as ExecutionSpec;
+  return sealed.executionIdentityDigest === sealedExecutableIdentityDigest(identity.executable)
+    ? identity.executable.digest
+    : null;
+}
+
 type RunnerOptions = Readonly<{
   batchIntervalMs?: number;
   maxBatchBytes?: number;
@@ -676,8 +691,9 @@ export type RunOptions = Readonly<{
   signal?: AbortSignal;
   /**
    * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
-   * sandbox when it directly runs the native agent-desktop binary outside every root (see
-   * `runsOutsideCommandSandbox`); every other command stays inside.
+   * sandbox when the sealed image about to start is the shipped agent-desktop, by its bytes, and
+   * it lives outside every root (see `runsOutsideCommandSandbox`); every other command stays
+   * inside. Callers pass it only for a call prepared as agent-desktop and allowed on its card.
    */
   desktopControlWorkspaceRoots?: readonly string[];
   beforeSpawn?: () => void;
@@ -818,13 +834,21 @@ export class CommandRunner {
       const executionId = randomUUID();
       const lease = randomUUID();
       const posixControlNonce = randomUUID();
-      // Decided after revalidation, so it judges the sealed image that is about to start. An image
-      // with an argv prefix runs through an interpreter and never qualifies.
+      // Decided after revalidation on the digest of the sealed image that is about to start, never
+      // on a path resolved again here. On Windows that digest is of the bytes read through the
+      // handle that holds the private launch copy against writes, renames and deletes; on Linux of
+      // the sealed memfd the process starts from. It must also equal the bytes sealed at prepare.
+      // An image with an argv prefix runs through an interpreter and never qualifies.
       const desktopControl =
         this.sandboxed &&
         options.desktopControlWorkspaceRoots !== undefined &&
         executionImage.argvPrefix.length === 0 &&
-        runsOutsideCommandSandbox(spec.absoluteExecutable, options.desktopControlWorkspaceRoots);
+        executionImage.digest === executionSpecContentDigest(spec) &&
+        runsOutsideCommandSandbox(
+          spec.absoluteExecutable,
+          executionImage.digest,
+          options.desktopControlWorkspaceRoots,
+        );
       const desktopControlRefusal = desktopControl
         ? agentDesktopArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? [])
         : null;

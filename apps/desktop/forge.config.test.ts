@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ResolvedForgeConfig } from '@electron-forge/shared-types';
 import config, {
+  agentDesktopResources,
   assertNativePackagingHost,
   createDMGContents,
   DMG_BACKGROUND_PATH,
@@ -24,6 +25,7 @@ import config, {
   NATIVE_ASAR_UNPACK_GLOB,
   refreshPackagedSandboxRunnerDigest,
   shouldIgnoreFromPackage,
+  verifyAgentDesktopBinary,
   verifyBundledNodeResources,
 } from './forge.config';
 import viteMainConfig, { macAutoUpdateEligibleForIdentity } from './vite.main.config';
@@ -33,6 +35,16 @@ import {
   sandboxRunnerPath,
   verifySandboxRunnerDigest,
 } from './src/main/sandbox-runner';
+
+const AGENT_DESKTOP_SOURCE = resolve(
+  __dirname,
+  '..',
+  '..',
+  'node_modules',
+  'agent-desktop',
+  'bin',
+  'agent-desktop-win32-x64.exe',
+);
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -192,6 +204,9 @@ describe('macOS sandbox runner sealing', () => {
       // Deterministic signing-byte mutation; no certificate or signing service is used.
       writeFileSync(runner, 'post-signing-runner');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
+      // The pinned agent-desktop the package ships next to it (checked in the same hook).
+      const desktop = join(resources, 'agent-desktop-win32-x64.exe');
+      copyFileSync(AGENT_DESKTOP_SOURCE, desktop);
       const resolvedConfig: ResolvedForgeConfig = {
         ...config,
         plugins: config.plugins ?? [],
@@ -218,6 +233,15 @@ describe('macOS sandbox runner sealing', () => {
       expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
       writeFileSync(runner, 'tampered-after-package');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
+      // A signed or otherwise altered agent-desktop fails the package instead of shipping off.
+      appendFileSync(desktop, 'signature');
+      await expect(
+        config.hooks!.postPackage!(resolvedConfig, {
+          platform: 'win32',
+          arch: 'x64',
+          outputPaths: [root],
+        }),
+      ).rejects.toThrow('does not match the pin');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -237,6 +261,55 @@ describe('macOS sandbox runner sealing', () => {
 
       expect(digest).toBe(createHash('sha256').update('post-signing-runner-bytes').digest('hex'));
       expect(readFileSync(`${runner}.sha256`, 'utf8')).toBe(`${digest}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('agent-desktop resources', () => {
+  it('ships only the pinned Windows x64 binary and its license', () => {
+    expect(agentDesktopResources('win32', 'x64')).toEqual([
+      AGENT_DESKTOP_SOURCE,
+      resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt'),
+    ]);
+    for (const [platform, arch] of [
+      ['win32', 'arm64'],
+      ['darwin', 'arm64'],
+      ['darwin', 'x64'],
+      ['linux', 'x64'],
+    ] as const)
+      expect(agentDesktopResources(platform, arch)).toEqual([]);
+    const extra = (config.packagerConfig?.extraResource ?? []) as string[];
+    const shipped = extra.filter((path) => /agent-desktop/iu.test(path));
+    expect(shipped).toEqual(
+      process.platform === 'win32' && process.arch === 'x64'
+        ? agentDesktopResources('win32', 'x64')
+        : [],
+    );
+    // node_modules (with every other platform's binary) never enters the package.
+    expect(shouldIgnoreFromPackage('/node_modules/agent-desktop/bin/agent-desktop-linux-x64')).toBe(
+      true,
+    );
+    const license = readFileSync(shipped[1] ?? agentDesktopResources('win32', 'x64')[1]!, 'utf8');
+    expect(license).toContain('agent-desktop 1.2.0');
+    expect(license).toContain('https://github.com/vercel-labs/agent-desktop');
+    expect(license).toContain('Apache License');
+    expect(license).toContain('END OF TERMS AND CONDITIONS');
+  });
+
+  it('fails the build when the binary is not the pinned bytes', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-agent-desktop-pin-'));
+    try {
+      const copy = join(root, 'agent-desktop-win32-x64.exe');
+      copyFileSync(AGENT_DESKTOP_SOURCE, copy);
+      expect(() => verifyAgentDesktopBinary(copy, 'win32', 'x64')).not.toThrow();
+      appendFileSync(copy, 'x');
+      expect(() => verifyAgentDesktopBinary(copy, 'win32', 'x64')).toThrow(
+        'does not match the pin',
+      );
+      expect(() => verifyAgentDesktopBinary(join(root, 'missing.exe'), 'win32', 'x64')).toThrow();
+      expect(() => verifyAgentDesktopBinary(copy, 'linux', 'x64')).toThrow('No agent-desktop pin');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

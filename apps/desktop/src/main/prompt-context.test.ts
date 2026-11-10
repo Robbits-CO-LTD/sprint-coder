@@ -179,12 +179,14 @@ describe('prompt context compiler', () => {
     expect(compiled.context.environment.currentDate).toBe('2026-08-11');
   });
 
-  it('tells a write-capable agent how to use agent-desktop and what it must not operate', () => {
+  it('tells a write-capable agent how to use Sprint Coder desktop control and what it must not operate', () => {
     const base = { workspace, toolCatalog: catalog([]), workspaceRules: [], vcs: [] };
     const command = 'C:\\npm\\node_modules\\agent-desktop\\bin\\agent-desktop-win32-x64.exe';
     const compiled = compilePromptGuidance({ ...base, desktopControlCommand: command });
     expect(compiled.context.desktopControl).toEqual({ command });
-    expect(compiled.content).toContain('デスクトップ操作（agent-desktop）:');
+    expect(compiled.content).toContain('Sprint Coder のデスクトップ操作:');
+    expect(compiled.content).toContain('この実行ファイルは Sprint Coder に同梱の agent-desktop で');
+    expect(compiled.content.match(/同梱の agent-desktop/gu)).toHaveLength(1);
     expect(compiled.content).toContain(`${JSON.stringify(command)} skills get desktop`);
     expect(compiled.content).toContain('文字の入力は、まず set-value');
     expect(compiled.content).toContain('list-windows で id を調べて --window-id を付け');
@@ -206,6 +208,7 @@ describe('prompt context compiler', () => {
     const without = compilePromptGuidance({ ...base, desktopControlCommand: null });
     expect(without.context).not.toHaveProperty('desktopControl');
     expect(without.content).not.toContain('agent-desktop');
+    expect(without.content).not.toContain('デスクトップ操作');
     expect(without.digest).not.toBe(compiled.digest);
 
     const readOnly = compilePromptGuidance({

@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
+import { AGENT_DESKTOP_VERSION, agentDesktopPin } from './src/main/agent-desktop-pins';
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
 // from the packaged app). The native-safe-fs compiled addon lives outside `.vite` and
@@ -93,6 +94,44 @@ function sandboxRunnerResources(): string[] {
       ? [join(dirname(executable), 'sandbox-node-pipe-guard.cjs')]
       : []),
   ];
+}
+
+// Sprint Coder's desktop control ships the one pinned agent-desktop binary for the build host
+// (Windows only for now; see src/main/agent-desktop-pins.ts) and its license. The npm package's
+// other native binaries stay out: node_modules is not packaged (see shouldIgnoreFromPackage).
+export function agentDesktopResources(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string[] {
+  const pin = agentDesktopPin(platform, arch);
+  if (pin === null) return [];
+  const executable = resolve(
+    __dirname,
+    '..',
+    '..',
+    'node_modules',
+    'agent-desktop',
+    'bin',
+    pin.file,
+  );
+  verifyAgentDesktopBinary(executable, platform, arch);
+  return [
+    executable,
+    resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt'),
+  ];
+}
+
+/** Fails the build unless the file holds exactly the pinned agent-desktop bytes. */
+export function verifyAgentDesktopBinary(executable: string, platform: string, arch: string): void {
+  const pin = agentDesktopPin(platform, arch);
+  if (pin === null) throw new Error(`No agent-desktop pin for ${platform}-${arch}`);
+  if (!lstatSync(executable).isFile())
+    throw new Error(`agent-desktop ${AGENT_DESKTOP_VERSION} binary was not found`);
+  const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  if (digest !== pin.sha256)
+    throw new Error(
+      `agent-desktop ${AGENT_DESKTOP_VERSION} ${pin.file} SHA-256 ${digest} does not match the pin ${pin.sha256}`,
+    );
 }
 
 export function refreshPackagedSandboxRunnerDigest(
@@ -289,6 +328,7 @@ const config: ForgeConfig = {
       resolve(__dirname, '..', '..', 'docs', 'licenses', 'unicode-license.txt'),
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
+      ...agentDesktopResources(),
     ],
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
@@ -314,17 +354,30 @@ const config: ForgeConfig = {
     ],
   },
   hooks: {
-    prePackage: async (_forgeConfig, platform) => {
+    prePackage: async (_forgeConfig, platform, arch) => {
       assertNativePackagingHost(platform);
       if (platform === 'win32') verifyBundledNodeResources();
+      // The resources above were chosen for the build host's architecture.
+      if (agentDesktopPin(platform, arch) !== null && arch !== process.arch)
+        throw new Error(`agent-desktop for ${platform}-${arch} must be packaged on ${arch}`);
     },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') {
         // Packager's Authenticode signing changes the sandbox runner after the build-time seal.
         // Seal its final bytes before ZIP/Squirrel consume this packaged directory.
         if (packageResult.platform === 'win32')
-          for (const outputPath of packageResult.outputPaths)
+          for (const outputPath of packageResult.outputPaths) {
             refreshPackagedSandboxRunnerDigest(outputPath, 'win32');
+            // agent-desktop is trusted only by its pinned bytes; a signed or altered copy would
+            // silently turn desktop control off, so the package fails instead.
+            const pin = agentDesktopPin('win32', packageResult.arch);
+            if (pin !== null)
+              verifyAgentDesktopBinary(
+                join(outputPath, 'resources', pin.file),
+                'win32',
+                packageResult.arch,
+              );
+          }
         return;
       }
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)

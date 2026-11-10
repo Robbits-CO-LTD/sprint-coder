@@ -9,10 +9,11 @@ import {
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
-import { agentDesktopArgvRefusal, isAgentDesktopBinary } from './agent-desktop';
+import { agentDesktopArgvRefusal, isAgentDesktopExecutable } from './agent-desktop';
 import {
   CommandRunner,
   CommandRunnerError,
+  executionSpecContentDigest,
   prepareExecutionSpec,
   rejectWindowsSandboxedNodeTestIsolation,
   shouldRejectWindowsSandboxedNodeTestIsolation,
@@ -427,7 +428,8 @@ export function registerCommandRunnerTool(
 ): void {
   const commandIds = new WeakMap<object, string>();
   const resourceKeys = new WeakMap<object, string>();
-  const workspaceRoots = new WeakMap<object, readonly string[]>();
+  // The Turn's Workspace roots, kept only for a call prepared as the shipped agent-desktop.
+  const desktopControlRoots = new WeakMap<object, readonly string[]>();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -474,8 +476,13 @@ export function registerCommandRunnerTool(
         commandRunner.isSandboxed,
       );
       const roots = workspace.roots.map(({ path }) => path);
-      // Refused before a card exists, so nothing the person could approve would escape the sandbox.
-      const desktopControlRefusal = isAgentDesktopBinary(spec.absoluteExecutable)
+      // Judged on the bytes sealed into this ExecutionSpec, as the card and the run are. Refused
+      // before a card exists, so nothing the person could approve would escape the sandbox.
+      const desktopControl = isAgentDesktopExecutable(
+        spec.absoluteExecutable,
+        executionSpecContentDigest(spec),
+      );
+      const desktopControlRefusal = desktopControl
         ? agentDesktopArgvRefusal(spec.argv, roots)
         : null;
       if (desktopControlRefusal !== null)
@@ -492,7 +499,7 @@ export function registerCommandRunnerTool(
       });
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
-      workspaceRoots.set(spec, roots);
+      if (desktopControl) desktopControlRoots.set(spec, roots);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -523,13 +530,15 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
-      // Only a call the person allowed on its own card ("allow once", or "allow for the Task" kept
-      // for exactly this command) may start the native agent-desktop binary, and nothing else,
-      // outside the command sandbox. A preset or policy allow never does; the Stop stays the same.
+      // Only a call prepared as the shipped agent-desktop and allowed on its own card ("allow
+      // once", or "allow for the Task" kept for exactly this command) may start outside the
+      // command sandbox, and the runner checks the bytes again before it starts. Every other
+      // command, explicitly allowed or not, gets no roots and stays inside. A preset or policy
+      // allow never does; the Stop stays the same.
       const roots =
         control.authorizationDecision === 'allow_once' ||
         control.authorizationDecision === 'allow_task'
-          ? workspaceRoots.get(spec)
+          ? desktopControlRoots.get(spec)
           : undefined;
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),

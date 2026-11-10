@@ -1,157 +1,193 @@
-import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import {
   agentDesktopArgvRefusal,
-  isAgentDesktopBinary,
+  isAgentDesktopExecutable,
   resolveAgentDesktopCommand,
   runsOutsideCommandSandbox,
 } from './agent-desktop';
+import { AGENT_DESKTOP_PINS, AGENT_DESKTOP_VERSION, agentDesktopPin } from './agent-desktop-pins';
 
-const files = (...paths: string[]) => {
-  const set = new Set(paths);
-  return (path: string) => set.has(path);
-};
-
-const WIN_NATIVE = 'C:\\npm\\node_modules\\agent-desktop\\bin\\agent-desktop-win32-x64.exe';
-const windows = {
-  env: { Path: 'C:\\npm' },
+const PIN = 'd274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3';
+const OTHER = 'e'.repeat(64);
+const RESOURCES = 'C:\\Program Files\\Sprint Coder\\resources';
+const PACKAGED = `${RESOURCES}\\agent-desktop-win32-x64.exe`;
+const DEVELOPMENT = 'F:\\repo\\node_modules\\agent-desktop\\bin\\agent-desktop-win32-x64.exe';
+const REPOSITORY_BIN = join(
+  __dirname,
+  '..',
+  '..',
+  '..',
+  '..',
+  'node_modules',
+  'agent-desktop',
+  'bin',
+);
+const digests =
+  (entries: Record<string, string>) =>
+  (path: string): string | null =>
+    entries[path] ?? null;
+const packaged = {
   platform: 'win32' as const,
   arch: 'x64',
-  isFile: files('C:\\npm\\agent-desktop.cmd', WIN_NATIVE),
+  packaged: true,
+  resourcesPath: RESOURCES,
+  contentDigest: digests({ [PACKAGED]: PIN }),
+  realpath: (path: string) => path,
+};
+const development = {
+  platform: 'win32' as const,
+  arch: 'x64',
+  packaged: false,
+  repositoryRoot: 'F:\\repo',
+  contentDigest: digests({ [DEVELOPMENT]: PIN }),
   realpath: (path: string) => path,
 };
 
-describe('agent-desktop lookup', () => {
-  it('uses an explicit absolute path when it names an existing native binary', () => {
+describe('agent-desktop pin', () => {
+  it('pins only the Windows x64 binary of 1.2.0, to the npm package bytes', () => {
+    expect(AGENT_DESKTOP_VERSION).toBe('1.2.0');
+    expect(Object.keys(AGENT_DESKTOP_PINS)).toEqual(['win32-x64']);
+    expect(agentDesktopPin('win32', 'x64')).toEqual({
+      file: 'agent-desktop-win32-x64.exe',
+      sha256: PIN,
+    });
+    for (const [platform, arch] of [
+      ['win32', 'arm64'],
+      ['darwin', 'arm64'],
+      ['linux', 'x64'],
+      ['__proto__', 'x'],
+    ] as const)
+      expect(agentDesktopPin(platform, arch)).toBeNull();
+    // The installed dependency carries exactly these bytes and agrees with its own manifest.
+    const binary = readFileSync(join(REPOSITORY_BIN, 'agent-desktop-win32-x64.exe'));
+    expect(createHash('sha256').update(binary).digest('hex')).toBe(PIN);
     expect(
-      resolveAgentDesktopCommand({
-        env: { SPRINT_CODER_AGENT_DESKTOP: 'C:\\tools\\agent-desktop.exe' },
-        platform: 'win32',
-        isFile: files('C:\\tools\\agent-desktop.exe'),
-      }),
-    ).toBe('C:\\tools\\agent-desktop.exe');
-  });
-
-  it('does not fall back to PATH when the explicit path is relative, missing or not agent-desktop', () => {
-    const onPath = files('C:\\npm\\agent-desktop.cmd', WIN_NATIVE, 'C:\\node\\node.exe');
-    const env = { Path: 'C:\\npm' };
-    for (const explicit of [
-      'agent-desktop.exe',
-      'C:\\missing\\agent-desktop.exe',
-      'C:\\node\\node.exe',
-    ])
-      expect(
-        resolveAgentDesktopCommand({
-          env: { ...env, SPRINT_CODER_AGENT_DESKTOP: explicit },
-          platform: 'win32',
-          arch: 'x64',
-          isFile: onPath,
-        }),
-      ).toBeNull();
-  });
-
-  it('maps the Windows npm shim to the native binary in the package', () => {
-    expect(resolveAgentDesktopCommand(windows)).toBe(WIN_NATIVE);
-    const local = 'C:\\app\\node_modules\\agent-desktop\\bin\\agent-desktop-win32-arm64.exe';
-    expect(
-      resolveAgentDesktopCommand({
-        env: { SPRINT_CODER_AGENT_DESKTOP: 'C:\\app\\node_modules\\.bin\\agent-desktop.cmd' },
-        platform: 'win32',
-        arch: 'arm64',
-        isFile: files('C:\\app\\node_modules\\.bin\\agent-desktop.cmd', local),
-      }),
-    ).toBe(local);
-  });
-
-  it('skips a Windows shim without its native binary and keeps searching the Path in order', () => {
-    expect(
-      resolveAgentDesktopCommand({
-        env: { Path: '.;"C:\\Program Files\\nodejs";C:\\npm;C:\\later' },
-        platform: 'win32',
-        arch: 'x64',
-        isFile: files('C:\\npm\\agent-desktop.cmd', 'C:\\later\\agent-desktop.exe'),
-      }),
-    ).toBe('C:\\later\\agent-desktop.exe');
-  });
-
-  it('follows the POSIX launcher link to the native binary next to it', () => {
-    const launcher = '/opt/homebrew/lib/node_modules/agent-desktop/bin/agent-desktop';
-    const native = '/opt/homebrew/lib/node_modules/agent-desktop/bin/agent-desktop-darwin-arm64';
-    const lookup = {
-      env: { PATH: 'relative:/usr/bin:/opt/homebrew/bin' },
-      platform: 'darwin' as const,
-      arch: 'arm64',
-      realpath: (path: string) => (path === '/opt/homebrew/bin/agent-desktop' ? launcher : path),
-    };
-    expect(
-      resolveAgentDesktopCommand({
-        ...lookup,
-        isFile: files('/opt/homebrew/bin/agent-desktop', launcher, native),
-      }),
-    ).toBe(native);
-    // A release archive that put the binary itself on PATH resolves to that binary.
-    expect(
-      resolveAgentDesktopCommand({
-        ...lookup,
-        isFile: files('/opt/homebrew/bin/agent-desktop', launcher),
-      }),
-    ).toBe(launcher);
-  });
-
-  it('returns null when nothing is installed', () => {
-    expect(
-      resolveAgentDesktopCommand({ env: { PATH: '/usr/bin' }, platform: 'linux', isFile: files() }),
-    ).toBeNull();
-    expect(resolveAgentDesktopCommand({ env: {}, platform: 'linux', isFile: files() })).toBeNull();
-    expect(
-      resolveAgentDesktopCommand({ ...windows, isFile: files('C:\\npm\\agent-desktop.cmd') }),
-    ).toBeNull();
+      readFileSync(join(REPOSITORY_BIN, 'agent-desktop-win32-x64.exe.sha256'), 'utf8').trim(),
+    ).toBe(PIN);
   });
 });
 
-describe('agent-desktop outside the command sandbox', () => {
-  it('lets only the resolved native binary out, matched by canonical path', () => {
-    expect(runsOutsideCommandSandbox(WIN_NATIVE, ['C:\\work\\repo'], windows)).toBe(true);
-    expect(runsOutsideCommandSandbox(WIN_NATIVE.toUpperCase(), ['C:\\work\\repo'], windows)).toBe(
-      true,
-    );
+describe('agent-desktop lookup', () => {
+  it('uses only the shipped copy: the packaged resources, or node_modules in development', () => {
+    expect(resolveAgentDesktopCommand(packaged)).toBe(PACKAGED);
+    expect(resolveAgentDesktopCommand(development)).toBe(DEVELOPMENT);
+    // The packaged app never looks at node_modules, and development never at resources.
     expect(
-      runsOutsideCommandSandbox('C:\\link\\ad.exe', ['C:\\work\\repo'], {
-        ...windows,
-        realpath: (path) => (path === 'C:\\link\\ad.exe' ? WIN_NATIVE : path),
-      }),
-    ).toBe(true);
+      resolveAgentDesktopCommand({ ...packaged, contentDigest: digests({ [DEVELOPMENT]: PIN }) }),
+    ).toBeNull();
+    expect(
+      resolveAgentDesktopCommand({ ...development, contentDigest: digests({ [PACKAGED]: PIN }) }),
+    ).toBeNull();
+    expect(resolveAgentDesktopCommand({ ...packaged, resourcesPath: '' })).toBeNull();
   });
 
-  it('keeps every other executable inside', () => {
+  it('returns null when the shipped file is missing or its bytes are not the pin', () => {
+    expect(resolveAgentDesktopCommand({ ...packaged, contentDigest: () => null })).toBeNull();
+    expect(
+      resolveAgentDesktopCommand({ ...packaged, contentDigest: digests({ [PACKAGED]: OTHER }) }),
+    ).toBeNull();
+  });
+
+  it('is off on macOS, Linux and architectures without a pin', () => {
+    const contentDigest = () => PIN;
+    for (const platform of ['darwin', 'linux'] as const)
+      expect(resolveAgentDesktopCommand({ ...development, platform, contentDigest })).toBeNull();
+    expect(resolveAgentDesktopCommand({ ...development, arch: 'arm64', contentDigest })).toBeNull();
+  });
+
+  it('reads no environment variable and searches no PATH', () => {
+    vi.stubEnv('SPRINT_CODER_AGENT_DESKTOP', 'C:\\tools\\agent-desktop.exe');
+    vi.stubEnv('Path', 'C:\\tools;C:\\npm');
+    vi.stubEnv('PATH', 'C:\\tools;C:\\npm');
+    const seen: string[] = [];
+    try {
+      expect(
+        resolveAgentDesktopCommand({
+          ...development,
+          contentDigest: (path) => {
+            seen.push(path);
+            return PIN;
+          },
+        }),
+      ).toBe(DEVELOPMENT);
+      expect(seen).toEqual([DEVELOPMENT]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.skipIf(process.platform !== 'win32' || process.arch !== 'x64')(
+    'finds the real dependency in this checkout',
+    () => {
+      expect(resolveAgentDesktopCommand()?.toLowerCase()).toBe(
+        join(REPOSITORY_BIN, 'agent-desktop-win32-x64.exe').toLowerCase(),
+      );
+    },
+  );
+});
+
+describe('agent-desktop outside the command sandbox', () => {
+  it('lets only the shipped file with the pinned bytes out', () => {
+    expect(isAgentDesktopExecutable(PACKAGED, PIN, packaged)).toBe(true);
+    expect(isAgentDesktopExecutable(PACKAGED.toUpperCase(), PIN, packaged)).toBe(true);
+    expect(runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo'], packaged)).toBe(true);
+    expect(runsOutsideCommandSandbox(DEVELOPMENT, PIN, ['C:\\work\\repo'], development)).toBe(true);
+  });
+
+  it('never trusts the path alone: other sealed bytes at the shipped path stay inside', () => {
+    // The Critical: a sealed Workspace binary whose path was swapped to point at agent-desktop.
+    for (const digest of [OTHER, null]) {
+      expect(isAgentDesktopExecutable(PACKAGED, digest, packaged)).toBe(false);
+      expect(runsOutsideCommandSandbox(PACKAGED, digest, ['C:\\work\\repo'], packaged)).toBe(false);
+      expect(isAgentDesktopExecutable(DEVELOPMENT, digest, development)).toBe(false);
+    }
+    expect(
+      runsOutsideCommandSandbox('C:\\link\\ad.exe', OTHER, ['C:\\work\\repo'], {
+        ...packaged,
+        realpath: (path) => (path === 'C:\\link\\ad.exe' ? PACKAGED : path),
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps the pinned bytes inside anywhere but the shipped file', () => {
     for (const executable of [
-      'C:\\npm\\agent-desktop.cmd',
+      'C:\\work\\repo\\agent-desktop-win32-x64.exe',
       'C:\\other\\agent-desktop-win32-x64.exe',
       'C:\\Windows\\System32\\cmd.exe',
-      'C:\\Program Files\\nodejs\\node.exe',
     ])
-      expect(runsOutsideCommandSandbox(executable, ['C:\\work\\repo'], windows)).toBe(false);
-    expect(runsOutsideCommandSandbox(WIN_NATIVE, [], { ...windows, isFile: files() })).toBe(false);
+      expect(runsOutsideCommandSandbox(executable, PIN, ['C:\\work\\repo'], packaged)).toBe(false);
+    // Nor when the shipped file itself no longer holds the pinned bytes.
+    expect(
+      runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo'], {
+        ...packaged,
+        contentDigest: () => OTHER,
+      }),
+    ).toBe(false);
+    // Nor on a platform without a pin.
+    expect(
+      runsOutsideCommandSandbox(DEVELOPMENT, PIN, ['/home/me/repo'], {
+        ...development,
+        platform: 'linux',
+      }),
+    ).toBe(false);
   });
 
   it('keeps the binary inside when it lives in any Workspace root of the Turn', () => {
-    for (const root of ['C:\\npm', 'c:\\NPM\\node_modules', 'C:\\'])
-      expect(runsOutsideCommandSandbox(WIN_NATIVE, ['C:\\work\\repo', root], windows)).toBe(false);
+    for (const root of [RESOURCES, 'c:\\PROGRAM FILES', 'C:\\'])
+      expect(runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo', root], packaged)).toBe(
+        false,
+      );
     expect(
-      runsOutsideCommandSandbox(WIN_NATIVE, ['C:\\np', 'C:\\npm-other', 'D:\\npm'], windows),
+      runsOutsideCommandSandbox(
+        PACKAGED,
+        PIN,
+        ['C:\\Program Files\\Sprint', 'C:\\Program Files\\Sprint Coder-other', 'D:\\'],
+        packaged,
+      ),
     ).toBe(true);
-    const native = '/usr/lib/node_modules/agent-desktop/bin/agent-desktop-linux-x64';
-    const linux = {
-      env: { PATH: '/usr/bin' },
-      platform: 'linux' as const,
-      arch: 'x64',
-      isFile: files('/usr/bin/agent-desktop', native),
-      realpath: (path: string) =>
-        path === '/usr/bin/agent-desktop'
-          ? '/usr/lib/node_modules/agent-desktop/bin/agent-desktop'
-          : path,
-    };
-    expect(runsOutsideCommandSandbox(native, ['/home/me/repo'], linux)).toBe(true);
-    expect(runsOutsideCommandSandbox(native, ['/usr/lib'], linux)).toBe(false);
   });
 });
 
@@ -161,11 +197,6 @@ describe('agent-desktop arguments outside the command sandbox', () => {
   const refused = (argv: string[]) => agentDesktopArgvRefusal(argv, roots, lookup);
   const BATCH_MENU =
     '[{"command":"expand","args":{"ref_id":"@s1:e3"}},{"command":"snapshot","args":{"window_id":"w1"}}]';
-
-  it('matches the binary itself for the card, wherever it lives', () => {
-    expect(isAgentDesktopBinary(WIN_NATIVE, windows)).toBe(true);
-    expect(isAgentDesktopBinary('C:\\npm\\agent-desktop.cmd', windows)).toBe(false);
-  });
 
   // Every form the agent used on the real desktop, and a few more ordinary ones.
   it.each([

@@ -23,6 +23,7 @@ import {
   CommandRunner,
   CommandRunnerError,
   buildControlledEnvironment,
+  executionSpecContentDigest,
   executionSpecPathGuard,
   posixSupervisorCommand,
   posixGroupSignalIsAuthorized,
@@ -40,6 +41,8 @@ import * as agentDesktopModule from './agent-desktop';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
+import * as preparedExecutionImageModule from './prepared-execution-image';
+import { resolveAgentDesktopCommand } from './agent-desktop';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -2146,7 +2149,11 @@ describe('desktop control outside the command sandbox', () => {
       expect(result.exitCode).toBe(0);
       // Outside the sandbox it starts in the executable's own folder, not the approved cwd.
       expect(ranIn(chunks)).toBe(dirname(spec.absoluteExecutable).toLowerCase());
-      expect(judge).toHaveBeenCalledWith(spec.absoluteExecutable, [root]);
+      expect(judge).toHaveBeenCalledWith(
+        spec.absoluteExecutable,
+        executionSpecContentDigest(spec),
+        [root],
+      );
       expect(argvCheck).toHaveBeenLastCalledWith(spec.argv, [root]);
       expect(runnerPath).not.toHaveBeenCalled();
 
@@ -2181,6 +2188,110 @@ describe('desktop control outside the command sandbox', () => {
       runnerPath.mockRestore();
     }
   }, 15_000);
+});
+
+// The real shipped binary (node_modules in a development checkout); Windows only for now.
+const shippedAgentDesktop = process.platform === 'win32' ? resolveAgentDesktopCommand() : null;
+
+describe.skipIf(shippedAgentDesktop === null)('desktop control bound to the pinned bytes', () => {
+  const stdout = (chunks: readonly CommandOutputChunk[]) =>
+    chunks
+      .filter(({ stream }) => stream === 'stdout')
+      .map(({ text }) => text)
+      .join('');
+  const refuseSandboxRunner = () =>
+    vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath').mockImplementation(() => {
+      throw new Error('sandbox runner requested');
+    });
+
+  it('runs the shipped agent-desktop outside the sandbox when its sealed bytes are the pin', async () => {
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: shippedAgentDesktop!,
+      argv: ['status'],
+    });
+    expect(executionSpecContentDigest(spec)).toBe(
+      'd274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3',
+    );
+    const runnerPath = refuseSandboxRunner();
+    try {
+      const chunks: CommandOutputChunk[] = [];
+      const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+        desktopControlWorkspaceRoots: [root],
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(stdout(chunks))).toMatchObject({ ok: true });
+      expect(runnerPath).not.toHaveBeenCalled();
+    } finally {
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
+
+  it('keeps the sandbox when the image about to start is not the pinned bytes, though the path is', async () => {
+    // The Critical: the path still names the shipped agent-desktop, but the image sealed for the
+    // launch holds other bytes (on Linux, a memfd fixed before the path was swapped).
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: shippedAgentDesktop!,
+      argv: ['status'],
+    });
+    const original = preparedExecutionImageModule.prepareExecutionImage;
+    const prepare = vi
+      .spyOn(preparedExecutionImageModule, 'prepareExecutionImage')
+      .mockImplementation(async (...args) => {
+        const image = await original(...args);
+        return { ...image, digest: 'f'.repeat(64), close: () => image.close() };
+      });
+    const runnerPath = refuseSandboxRunner();
+    try {
+      await expect(
+        new CommandRunner({ sandboxed: true }).run(spec, { desktopControlWorkspaceRoots: [root] }),
+      ).rejects.toThrow('sandbox runner requested');
+      expect(prepare).toHaveBeenCalled();
+    } finally {
+      prepare.mockRestore();
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
+
+  it('keeps any other binary inside, whatever it is named and wherever it lives', async () => {
+    const root = await workspace();
+    const elsewhere = await workspace();
+    // Other bytes under the shipped name outside the Workspace, and the pinned bytes copied into
+    // the Workspace: neither is the shipped agent-desktop.
+    const renamed = join(elsewhere, 'agent-desktop-win32-x64.exe');
+    await copyFile(process.execPath, renamed);
+    const copied = join(root, 'agent-desktop-win32-x64.exe');
+    await copyFile(shippedAgentDesktop!, copied);
+    const runnerPath = refuseSandboxRunner();
+    try {
+      for (const executable of [renamed, copied]) {
+        const spec = await prepareExecutionSpec({
+          workspacePath: root,
+          executable,
+          argv: ['status'],
+        });
+        expect(
+          agentDesktopModule.isAgentDesktopExecutable(
+            spec.absoluteExecutable,
+            executionSpecContentDigest(spec),
+          ),
+        ).toBe(false);
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(spec, {
+            desktopControlWorkspaceRoots: [root],
+          }),
+        ).rejects.toThrow('sandbox runner requested');
+      }
+    } finally {
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
 });
 
 async function expectProcessDead(pid: number): Promise<void> {

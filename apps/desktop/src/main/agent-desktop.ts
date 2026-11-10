@@ -1,75 +1,86 @@
-import { realpathSync, statSync } from 'node:fs';
-import { posix, win32 } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { posix, resolve, win32 } from 'node:path';
+import { agentDesktopPin } from './agent-desktop-pins';
 
 /**
- * Desktop control goes through the external `agent-desktop` CLI (vercel-labs/agent-desktop,
- * Apache-2.0). Sprint Coder does not ship or wrap it: the agent runs it through its ordinary shell
- * tool, so the command approval and Stop that already cover every shell command cover it too.
+ * Sprint Coder's desktop control is the agent-desktop CLI (vercel-labs/agent-desktop, Apache-2.0)
+ * that ships with the app: one native binary, pinned by its SHA-256 in `agent-desktop-pins.ts`.
+ * The agent runs it through its ordinary shell tool, so the command approval and Stop that already
+ * cover every shell command cover it too.
  *
- * `SPRINT_CODER_AGENT_DESKTOP` names the executable explicitly (an absolute path); otherwise the
- * first `agent-desktop` on PATH is used. Nothing found means the guidance is left out entirely.
- * Either way the result is the native binary itself, never the npm shim or the Node launcher, so
- * it is the one file `runsOutsideCommandSandbox` can match exactly.
+ * Only the shipped copy is used: the packaged app's resources, or, in a development run, the
+ * package in the repository's node_modules. No environment variable or PATH lookup can point it
+ * elsewhere. A file whose bytes are not the pinned ones is not agent-desktop, and then the guidance
+ * is left out entirely. Windows only for now (see `agent-desktop-pins.ts`); elsewhere this is
+ * always `null`.
  */
-export const AGENT_DESKTOP_PATH_ENV = 'SPRINT_CODER_AGENT_DESKTOP';
-
 export type AgentDesktopLookup = Readonly<{
-  env?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   arch?: string;
-  isFile?: (path: string) => boolean;
+  /** Whether this is the packaged app; otherwise a development run from the repository. */
+  packaged?: boolean;
+  resourcesPath?: string;
+  /** The repository root whose node_modules holds the package in a development run. */
+  repositoryRoot?: string;
+  /** SHA-256 (hex) of the file's current bytes, or `null` when it is not a readable file. */
+  contentDigest?: (path: string) => string | null;
   realpath?: (path: string) => string;
 }>;
 
-const NATIVE_NAME = /^agent-desktop(?:-(?:win32|darwin|linux)-[a-z0-9]+)?(?:\.exe)?$/iu;
-
 export function resolveAgentDesktopCommand(lookup: AgentDesktopLookup = {}): string | null {
-  const env = lookup.env ?? process.env;
   const platform = lookup.platform ?? process.platform;
-  const isFile = lookup.isFile ?? isRegularFile;
-  const paths = platform === 'win32' ? win32 : posix;
-  const explicit = env[AGENT_DESKTOP_PATH_ENV]?.trim();
-  if (explicit !== undefined && explicit !== '')
-    return paths.isAbsolute(explicit) && isFile(explicit) ? nativeBinary(explicit, lookup) : null;
-  const pathValue = platform === 'win32' ? (env['Path'] ?? env['PATH']) : env['PATH'];
-  if (pathValue === undefined || pathValue === '') return null;
-  // npm's global install leaves `agent-desktop.cmd` on Windows; a release archive leaves the `.exe`.
-  const names =
-    platform === 'win32' ? ['agent-desktop.cmd', 'agent-desktop.exe'] : ['agent-desktop'];
-  for (const entry of pathValue.split(paths.delimiter)) {
-    const directory = entry.trim().replace(/^"(.*)"$/, '$1');
-    if (directory === '' || !paths.isAbsolute(directory)) continue;
-    for (const name of names) {
-      const candidate = paths.join(directory, name);
-      if (!isFile(candidate)) continue;
-      const native = nativeBinary(candidate, lookup);
-      if (native !== null) return native;
-    }
+  if (platform !== 'win32') return null;
+  const pin = agentDesktopPin(platform, lookup.arch ?? process.arch);
+  if (pin === null) return null;
+  const packaged = lookup.packaged ?? __dirname.includes('app.asar');
+  let candidate: string;
+  if (packaged) {
+    const resources = lookup.resourcesPath ?? process.resourcesPath;
+    if (typeof resources !== 'string' || !win32.isAbsolute(resources)) return null;
+    candidate = win32.join(resources, pin.file);
+  } else {
+    // `.vite/build` (the built main) and `src/main` (tests) are both four levels below the root.
+    const root = lookup.repositoryRoot ?? resolve(__dirname, '..', '..', '..', '..');
+    candidate = win32.join(root, 'node_modules', 'agent-desktop', 'bin', pin.file);
   }
-  return null;
+  return (lookup.contentDigest ?? cachedFileDigest)(candidate) === pin.sha256 ? candidate : null;
 }
 
 /**
- * Whether one approved command may run outside the command sandbox: only the native agent-desktop
- * binary found above, matched by canonical path, and only when it does not live inside any root
- * of the Turn's Workspace (where the agent could have replaced it). Desktop control cannot work in
+ * Whether a sealed executable is the shipped agent-desktop: its content digest (the bytes that
+ * were sealed, or that are about to start) equals the pin, and it is the shipped file. The path
+ * alone never qualifies, so a file that only resolves to the shipped location cannot borrow its
+ * trust.
+ */
+export function isAgentDesktopExecutable(
+  executable: string,
+  contentDigest: string | null,
+  lookup: AgentDesktopLookup = {},
+): boolean {
+  const platform = lookup.platform ?? process.platform;
+  const pin = agentDesktopPin(platform, lookup.arch ?? process.arch);
+  if (pin === null || contentDigest !== pin.sha256) return false;
+  const native = resolveAgentDesktopCommand(lookup);
+  return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
+}
+
+/**
+ * Whether one approved command may run outside the command sandbox: only the shipped agent-desktop
+ * (see `isAgentDesktopExecutable`), judged on the digest of the image about to start, and only
+ * when it does not live inside any root of the Turn's Workspace. Desktop control cannot work in
  * the sandbox, which hides other apps' windows and processes and `~/.agent-desktop`.
  */
 export function runsOutsideCommandSandbox(
   executable: string,
+  contentDigest: string | null,
   workspaceRoots: readonly string[],
   lookup: AgentDesktopLookup = {},
 ): boolean {
   return (
-    isAgentDesktopBinary(executable, lookup) &&
+    isAgentDesktopExecutable(executable, contentDigest, lookup) &&
     outsideWorkspaceRoots(executable, workspaceRoots, lookup)
   );
-}
-
-/** Whether `executable` is the native agent-desktop binary found above, by canonical path. */
-export function isAgentDesktopBinary(executable: string, lookup: AgentDesktopLookup = {}): boolean {
-  const native = resolveAgentDesktopCommand(lookup);
-  return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
 }
 
 function comparisonKey(path: string, lookup: AgentDesktopLookup): string {
@@ -395,29 +406,24 @@ function refusedBatchKey(value: unknown): string | null {
   return null;
 }
 
-// The npm shim and the Node launcher only start the native binary next to the package's launcher.
-function nativeBinary(found: string, lookup: AgentDesktopLookup): string | null {
-  const platform = lookup.platform ?? process.platform;
-  const arch = lookup.arch ?? process.arch;
-  const isFile = lookup.isFile ?? isRegularFile;
-  const paths = platform === 'win32' ? win32 : posix;
-  let native = found;
-  if (platform === 'win32' && paths.extname(found).toLowerCase() === '.cmd') {
-    // `<prefix>\agent-desktop.cmd` (global) or `<project>\node_modules\.bin\agent-desktop.cmd`.
-    const directory = paths.dirname(found);
-    const binary = `agent-desktop-win32-${arch}.exe`;
-    native =
-      [
-        paths.join(directory, 'node_modules', 'agent-desktop', 'bin', binary),
-        paths.join(directory, '..', 'agent-desktop', 'bin', binary),
-      ].find(isFile) ?? '';
-    if (native === '') return null;
-  } else if (platform !== 'win32') {
-    const launcher = (lookup.realpath ?? canonicalPath)(found);
-    const sibling = paths.join(paths.dirname(launcher), `agent-desktop-${platform}-${arch}`);
-    native = isFile(sibling) ? sibling : launcher;
+// Hashing the ~4 MB binary on every lookup would be slow, so the digest is kept per file version.
+// This only decides whether to offer desktop control; the run itself is judged on the digest of
+// the sealed image that starts (CommandRunner.run).
+const digestCache = new Map<string, Readonly<{ version: string; digest: string }>>();
+
+function cachedFileDigest(path: string): string | null {
+  try {
+    const stats = statSync(path, { bigint: true });
+    if (!stats.isFile()) return null;
+    const version = [stats.dev, stats.ino, stats.size, stats.mtimeNs, stats.ctimeNs].join(':');
+    const cached = digestCache.get(path);
+    if (cached?.version === version) return cached.digest;
+    const digest = createHash('sha256').update(readFileSync(path)).digest('hex');
+    digestCache.set(path, { version, digest });
+    return digest;
+  } catch {
+    return null;
   }
-  return NATIVE_NAME.test(paths.basename(native)) ? native : null;
 }
 
 function canonicalPath(path: string): string {
@@ -425,13 +431,5 @@ function canonicalPath(path: string): string {
     return realpathSync.native(path);
   } catch {
     return path;
-  }
-}
-
-function isRegularFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
   }
 }

@@ -25,7 +25,8 @@ import type {
   ApprovalRequestInput,
   ApprovalResolutionInput,
 } from './persistence';
-import { isAgentDesktopBinary } from './agent-desktop';
+import { isAgentDesktopExecutable } from './agent-desktop';
+import { executionSpecContentDigest } from './command-runner';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
 import {
@@ -976,6 +977,21 @@ function displayTarget(input: unknown): string {
 }
 
 /**
+ * Whether this call runs the shipped agent-desktop, judged on the executable bytes sealed when its
+ * ExecutionSpec was prepared (the pin), not on its path.
+ */
+export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    request.entry.implementationKind === 'command-runner' &&
+    validateExecutionSpec(request.input) &&
+    isAgentDesktopExecutable(
+      request.input.absoluteExecutable,
+      executionSpecContentDigest(request.input),
+    )
+  );
+}
+
+/**
  * What a persisted digest over a Tool input may be taken from.
  *
  * Every digest this module produces is stored — `spec_digest` on the approval row, the permission
@@ -985,13 +1001,6 @@ function displayTarget(input: unknown): string {
  * grant recognises a repeat, but nobody holding the database can confirm a candidate password
  * (Issue #473).
  */
-export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean {
-  return (
-    request.entry.implementationKind === 'command-runner' &&
-    validateExecutionSpec(request.input) &&
-    isAgentDesktopBinary(request.input.absoluteExecutable)
-  );
-}
 
 function durableDigestInput(input: unknown): unknown {
   const stdin = managedStdinAuthorizationFacts(input);

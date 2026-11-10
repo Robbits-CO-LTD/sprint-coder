@@ -2059,7 +2059,7 @@ describe('ApprovalCoordinator desktop control card', () => {
 
   it('raises a card for agent-desktop even when the preset allows, and records the person', async () => {
     const harness = createHarness({ evaluatePermission: policyAllow });
-    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary').mockReturnValue(true);
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable').mockReturnValue(true);
     try {
       await withSpecs(async (prepare) => {
         const pending = harness.coordinator.authorizeTool(
@@ -2088,7 +2088,7 @@ describe('ApprovalCoordinator desktop control card', () => {
 
   it('reuses only a Task grant given on the card of this exact agent-desktop command', async () => {
     const harness = createHarness({ evaluatePermission: () => 'approval_required' });
-    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary').mockReturnValue(false);
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable').mockReturnValue(false);
     try {
       await withSpecs(async (prepare) => {
         // A Task grant on another executable's card.
@@ -2127,7 +2127,7 @@ describe('ApprovalCoordinator desktop control card', () => {
     const harness = createHarness({
       evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
     });
-    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary').mockReturnValue(true);
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable').mockReturnValue(true);
     try {
       await withSpecs(async (prepare) => {
         const granted = await harness.coordinator.authorizeTool(

@@ -58,9 +58,9 @@ export type CanonicalPromptContext = Readonly<{
   skills: readonly string[];
   integrations: readonly string[];
   /**
-   * The external `agent-desktop` CLI the agent may run through its shell tool to see and operate
-   * desktop apps. Present only for a write-capable agent when the CLI was found, so every other
-   * Turn keeps its digest.
+   * Sprint Coder's desktop control: the shipped agent-desktop CLI the agent may run through its
+   * shell tool to see and operate desktop apps. Present only for a write-capable agent when the
+   * shipped binary matches its pin (Windows only for now), so every other Turn keeps its digest.
    */
   desktopControl?: Readonly<{ command: string }>;
 }>;
@@ -336,8 +336,8 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
 function renderDesktopControl(command: string): string[] {
   const cli = JSON.stringify(command);
   return [
-    'デスクトップ操作（agent-desktop）:',
-    `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。同じ Task で既に読んでいれば読み直さない。`,
+    'Sprint Coder のデスクトップ操作:',
+    `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。この実行ファイルは Sprint Coder に同梱の agent-desktop で、その skills の文書に出てくる agent-desktop はこれを指す。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。同じ Task で既に読んでいれば読み直さない。`,
     `- アプリを起動する時は ${cli} launch <アプリ名> を使う。アプリの実行ファイルを直接実行しない。`,
     '- launch に渡せるのはアプリ名（または Workspace の外の絶対パス）と --activate・--no-attach・--timeout だけで、--arg・--env・--cwd、端末・shell・設定の道具、mcp・open-system-surface・clipboard-get・trace、--trace・--screenshot・--stdin・--force、help に無い option は拒否される。ファイルはアプリの中の操作で開く。',
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',

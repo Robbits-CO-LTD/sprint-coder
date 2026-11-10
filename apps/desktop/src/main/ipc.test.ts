@@ -3421,7 +3421,7 @@ describe('Main image attachment dispatch boundary', () => {
     const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-ad' })
       .entries[0]!;
     const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-ad-grant-'));
-    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary');
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable');
     try {
       const request = {
         context: {

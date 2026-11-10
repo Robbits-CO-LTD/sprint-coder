@@ -276,7 +276,7 @@ describe('managed command root selection (issue #840)', () => {
 });
 
 describe('desktop control Workspace roots', () => {
-  it('hands the Turn roots to the runner on exec_command, background exec_command and run_command', async () => {
+  it('hands the Turn roots to the runner only for agent-desktop allowed on its card', async () => {
     const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
     const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
     roots.push(primary, secondary);
@@ -328,7 +328,7 @@ describe('desktop control Workspace roots', () => {
       policyEpoch: 1,
     };
     broker.startTurn(owner, 'grok');
-    const input = { executable: process.execPath, argv: ['-e', ''], purpose: 'desktop roots' };
+    const input = { executable: process.execPath, argv: ['status'], purpose: 'desktop roots' };
     const expected = expect.objectContaining({
       desktopControlWorkspaceRoots: [primary, secondary],
     });
@@ -346,8 +346,14 @@ describe('desktop control Workspace roots', () => {
         });
       await vi.waitFor(() => expect(managedRun).toHaveBeenCalledTimes(2));
     };
+    // Prepared as the shipped agent-desktop (by its sealed bytes); the runner is mocked here.
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable').mockReturnValue(true);
     try {
       await dispatchAll('once');
+      expect(desktop).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      );
       expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
       expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
 
@@ -364,7 +370,20 @@ describe('desktop control Workspace roots', () => {
       await dispatchAll('preset');
       for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
         expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+
+      // Any other command never gets the roots, even when the person allowed it on its card.
+      desktop.mockReturnValue(false);
+      for (const decision of ['allow_once', 'allow_task'] as const) {
+        approvalDecision = decision;
+        managedRun.mockClear();
+        directRun.mockClear();
+        await dispatchAll(`ordinary-${decision}`);
+        expect(directRun).toHaveBeenCalledOnce();
+        for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
+          expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+      }
     } finally {
+      desktop.mockRestore();
       await broker.dispose();
       await sessions.dispose();
       managedRun.mockRestore();
@@ -390,7 +409,7 @@ describe('desktop control Workspace roots', () => {
       policyEpoch: 1,
     };
     broker.startTurn(owner, 'grok');
-    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopBinary').mockReturnValue(true);
+    const desktop = vi.spyOn(agentDesktopModule, 'isAgentDesktopExecutable').mockReturnValue(true);
     try {
       await expect(
         broker.dispatch({
