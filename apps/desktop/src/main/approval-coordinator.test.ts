@@ -23,6 +23,7 @@ import {
   type ToolAuthorizationRequest,
 } from './tool-broker';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import * as desktopControlModule from './desktop-control';
 import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
@@ -2004,5 +2005,164 @@ describe('managed command stdin approval', () => {
     harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
     await expect(dispatch).resolves.toEqual({ written: true });
     expect(written).toEqual([chars]);
+  });
+});
+
+describe('ApprovalCoordinator desktop control card', () => {
+  const definition = createToolDefinition({
+    toolId: createToolId({ provider: 'builtin', namespace: 'command', name: 'run', version: '1' }),
+    providerName: 'run_command',
+    kind: 'shell',
+    schemaVersion: 1,
+    inputSchema: { type: 'object' },
+    outputSchema: { type: 'object' },
+    sideEffect: 'process',
+    risk: 'high',
+    requiredCapabilities: ['shell.execute'],
+    executionTarget: 'command-runner',
+    implementationKind: 'command-runner',
+    priority: 1,
+    workspaceBinding: { kind: 'any' },
+    providerCompatibility: ['mock'],
+  });
+  const registry = new ToolRegistry();
+  registry.register(definition);
+  const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-1' })
+    .entries[0]!;
+
+  async function withSpecs(
+    run: (prepare: (argv: string[]) => Promise<ToolAuthorizationRequest['input']>) => Promise<void>,
+  ) {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-desktop-'));
+    try {
+      const { prepareExecutionSpec } = await import('./command-runner');
+      await run((argv) =>
+        prepareExecutionSpec({ workspacePath, executable: process.execPath, argv }),
+      );
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  }
+
+  const request = (input: unknown, callId: string): ToolAuthorizationRequest => ({
+    context: toolContext,
+    callId,
+    entry,
+    input,
+  });
+  // What the Full preset or a policy allow hands back for a command.
+  const policyAllow = () => ({
+    decision: 'allow' as const,
+    reason: 'preset_full',
+    beforeExecute: () => true,
+  });
+
+  it('raises a card for desktop control even when the preset allows, and records the person', async () => {
+    const harness = createHarness({ evaluatePermission: policyAllow });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        const pending = harness.coordinator.authorizeTool(
+          request(await prepare(['snapshot']), 'desktop-once'),
+        );
+        const approval = await waitForPublished(harness);
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+        await expect(pending).resolves.toMatchObject({
+          decision: 'allow',
+          approvalDecision: 'allow_once',
+        });
+
+        // Any other executable keeps the preset's silent allow, with no decision of the person.
+        desktop.mockReturnValue(false);
+        const silent = await harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-silent'),
+        );
+        expect(silent.decision).toBe('allow');
+        expect(silent).not.toHaveProperty('approvalDecision');
+        expect(harness.published).toHaveLength(1);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('reuses only a Task grant given on the card of this exact desktop-control command', async () => {
+    const harness = createHarness({ evaluatePermission: () => 'approval_required' });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(false);
+    try {
+      await withSpecs(async (prepare) => {
+        // A Task grant on another executable's card.
+        const other = harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-task'),
+        );
+        harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_task'));
+        await expect(other).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+
+        desktop.mockReturnValue(true);
+        const spec = await prepare(['snapshot']);
+        const first = harness.coordinator.authorizeTool(request(spec, 'desktop-task'));
+        await viWaitFor(() => harness.published.length === 2);
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'allow_task'));
+        await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+
+        // The same command again is the person's Task decision, without a new card.
+        await expect(
+          harness.coordinator.authorizeTool(request(spec, 'desktop-reuse')),
+        ).resolves.toMatchObject({
+          decision: 'allow',
+          reason: 'all_capabilities_allowed',
+          approvalDecision: 'allow_task',
+        });
+        expect(harness.published).toHaveLength(2);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('takes the Task grant the policy engine matched for this exact command as the person', async () => {
+    // How production delivers 「Task中許可」: the grant is saved with the approval and the policy
+    // engine matches it for the same ExecutionSpec only, reporting `remembered_grant`.
+    let reason = 'remembered_grant';
+    const harness = createHarness({
+      evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
+    });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        const granted = await harness.coordinator.authorizeTool(
+          request(await prepare(['list-windows']), 'desktop-remembered'),
+        );
+        expect(granted).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(granted.beforeExecute?.()).toBe(true);
+        expect(harness.published).toHaveLength(0);
+
+        // Any other allow still asks the person on a card.
+        reason = 'narrow_allow';
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['list-windows']), 'desktop-narrow'),
+        );
+        await waitForPublished(harness);
+        harness.coordinator.resolve(resolveCommand(harness.published[0]!, 'deny'));
+        await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+
+        // Another executable's remembered grant stays a plain allow, with no decision recorded.
+        desktop.mockReturnValue(false);
+        reason = 'remembered_grant';
+        const other = await harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-remembered'),
+        );
+        expect(other.decision).toBe('allow');
+        expect(other).not.toHaveProperty('approvalDecision');
+      });
+    } finally {
+      desktop.mockRestore();
+    }
   });
 });

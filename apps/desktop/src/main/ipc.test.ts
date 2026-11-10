@@ -1,5 +1,6 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
 import { RetryableActionRegistry } from './retryable-action';
+import * as desktopControlModule from './desktop-control';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
@@ -3391,6 +3392,100 @@ describe('Main image attachment dispatch boundary', () => {
       }
     },
   );
+
+  it('keeps the Task grant of an exact desktop-control command, and only that, under Ask and Auto', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'command',
+          name: 'run',
+          version: '1',
+        }),
+        providerName: 'run_command',
+        kind: 'shell',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+        sideEffect: 'process',
+        risk: 'high',
+        requiredCapabilities: ['shell.execute'],
+        executionTarget: 'command-runner',
+        implementationKind: 'command-runner',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['mock'],
+      }),
+    );
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-ad' })
+      .entries[0]!;
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-ad-grant-'));
+    const desktop = vi.spyOn(desktopControlModule, 'isDesktopControlExecutable');
+    try {
+      const request = {
+        context: {
+          taskId: 'task-ad',
+          turnId: 'turn-ad',
+          workspaceId: 'workspace-ad',
+          policyEpoch: 1,
+        },
+        callId: 'call-ad',
+        entry,
+        input: await prepareExecutionSpec({
+          workspacePath,
+          executable: process.execPath,
+          argv: ['list-windows'],
+          cwd: '.',
+        }),
+      } as unknown as ToolAuthorizationRequest;
+      const decide = async (preset: AccessPreset, reason: string) => {
+        const router = Object.create(IpcRouter.prototype) as {
+          evaluateToolPermission(
+            request: ToolAuthorizationRequest,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        };
+        Object.assign(router, {
+          managedWorkerCall: new Map(),
+          autoReviewer: AutoReviewer.createProduction(),
+          publish: () => undefined,
+          permissionBroker: {
+            getPolicy: () => ({ preset, policyEpoch: 1 }),
+            // What the policy engine reports for a matched grant or another allow.
+            previewExecutionSpec: () => ({
+              decision: 'allow',
+              reason,
+              policyEpoch: 1,
+              permit: { id: 'permit' },
+            }),
+            commitEvaluation: () => undefined,
+            revalidate: () => ({ valid: true }),
+          },
+        });
+        return router.evaluateToolPermission(request, 'shell.execute');
+      };
+      for (const preset of ['ask', 'auto'] as const) {
+        desktop.mockReturnValue(true);
+        await expect(decide(preset, 'remembered_grant')).resolves.toMatchObject({
+          decision: 'allow',
+          reason: 'remembered_grant',
+        });
+        await expect(decide(preset, 'narrow_allow')).resolves.toMatchObject({
+          decision: 'approval_required',
+        });
+        // Every other command keeps being asked again, as before.
+        desktop.mockReturnValue(false);
+        await expect(decide(preset, 'remembered_grant')).resolves.toMatchObject({
+          decision: 'approval_required',
+          reason: 'provider_command_requires_explicit_approval',
+        });
+      }
+    } finally {
+      desktop.mockRestore();
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
 
   describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {
     const prepareWorkerManagedCatalog = Reflect.get(

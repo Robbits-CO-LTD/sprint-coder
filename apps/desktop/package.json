@@ -20,6 +20,7 @@
   "dependencies": {
     "@sprint-coder/contracts": "*",
     "@sprint-coder/domain": "*",
+    "agent-desktop": "1.2.0",
     "better-sqlite3": "13.0.3",
     "electron-squirrel-startup": "^1.0.1",
     "lottie-web": "^5.13.0",
