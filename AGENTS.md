@@ -56,6 +56,11 @@ Sprint Coderは、Electron、React、TypeScriptで構成されたlocal-firstのA
 - **コードを書くのは Codex**:
   - 実装、修正、試験の追加は Codex CLI に任せる。
   - Claude のサブエージェント（Opus・Sonnet など）に実装させない。
+  - 例外（ユーザーの指示 2026-11-10）: メインセッションが Fable 5.2 の時は、次のどちらかに当たる塊だけ Opus 5.5 のサブエージェントに実装させてよい。
+    - 同じ塊を Codex に 2 回任せても直らなかった。
+    - ユーザーが急ぎだと伝えた作業で、独立した塊を同時に進めると完了が早まる。
+  - 例外を使った時は、どの塊をどちらの理由で回したかを人への報告に書く。
+  - 調査、検証、レビューを Claude のサブエージェントに任せることは、この制限の対象外。手順は [sprint-coder-fable-commander Skill](.claude/skills/sprint-coder-fable-commander/SKILL.md) に従う。
 - **Claude は指揮役**。Claude がするのは次のこと:
   - 計画を立て、依存を整理する
   - Codex への依頼文を書く
