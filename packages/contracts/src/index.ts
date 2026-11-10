@@ -2106,6 +2106,13 @@ export const desktopActionTargetSchema = z
     /** The part's role, in Japanese. */
     role: z.string().min(1).max(40).optional(),
     name: z.string().min(1).max(120).optional(),
+    /** The window's id, which tells apart two windows with the same title. */
+    windowId: z
+      .string()
+      .regex(/^w-[A-Za-z0-9-]{1,64}$/u)
+      .optional(),
+    /** A run over every window, app, display or notification rather than one of them. */
+    all: z.enum(['windows', 'apps', 'displays', 'surfaces', 'notifications']).optional(),
     /** The ref or window id as given, shown when the target could not be confirmed. */
     reference: z.string().min(1).max(120).optional(),
   })
@@ -2267,6 +2274,11 @@ export const commandSummarySchema = z
     cwd: z.string().min(1).max(32_768),
     envDelta: z.record(z.string(), z.string().max(1_000_000)),
     purpose: z.string().min(1).max(500),
+    /**
+     * Set by Main when the command ran the shipped desktop-control binary: what it did, from its
+     * argv, without the part names (those are on its approval card, when it had one).
+     */
+    desktopAction: desktopApprovalActionSchema.optional(),
     risk: toolRiskSchema,
     state: commandStateSchema,
     pid: z.number().int().positive().nullable(),

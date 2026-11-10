@@ -7,6 +7,7 @@ import {
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   isDesktopControlExecutable,
+  isShippedDesktopControlPath,
   resolveDesktopControlCommand,
   runsOutsideCommandSandbox,
 } from './desktop-control';
@@ -529,5 +530,17 @@ describe('desktop-control runs that touch no other app', () => {
     [['trace']],
   ])('%j keeps the card', (argv) => {
     expect(desktopControlArgvIsInert(argv)).toBe(false);
+  });
+});
+
+describe('shipped desktop-control path', () => {
+  it('recognizes a recorded command of the shipped binary only, for the timeline', () => {
+    expect(isShippedDesktopControlPath(PACKAGED, packaged)).toBe(true);
+    expect(isShippedDesktopControlPath(PACKAGED.toUpperCase(), packaged)).toBe(true);
+    expect(isShippedDesktopControlPath('C:\\Windows\\System32\\cmd.exe', packaged)).toBe(false);
+    // A shipped file whose bytes are not the pinned ones is not it.
+    expect(isShippedDesktopControlPath(PACKAGED, { ...packaged, contentDigest: digests({}) })).toBe(
+      false,
+    );
   });
 });

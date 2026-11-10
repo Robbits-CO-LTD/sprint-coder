@@ -78,11 +78,13 @@ describe('desktop-control approval description', () => {
         window: '文字コード表',
         role: '入力欄',
         name: 'コピーする文字(A):',
+        windowId: 'w-62263518',
       },
       text: 'ABC',
       textRole: 'enter',
       allowTaskGrant: true,
-      notes: [],
+      // No mouse or keyboard, but the call can bring the window to the front.
+      notes: ['対象の窓が手前に出ることがあります。'],
       openDetails: false,
     });
     // What the field holds is never read out.
@@ -140,6 +142,40 @@ describe('desktop-control approval description', () => {
       text: 'hello',
       textRole: 'clipboard',
     });
+  });
+
+  it('names everything of a kind, help and status, and warns only where a window may come up', () => {
+    expect(describeArgv(['list-windows']).target).toEqual({ resolved: true, all: 'windows' });
+    expect(describeArgv(['list-apps']).target).toEqual({ resolved: true, all: 'apps' });
+    expect(describeArgv(['list-windows', '--app', 'charmap']).target).toEqual({
+      resolved: true,
+      app: 'charmap',
+    });
+    expect(describeArgv(['click', '--help'])).toMatchObject({
+      title: '使い方を読みます',
+      mode: 'read',
+    });
+    expect(describeArgv(['status'])).toMatchObject({ title: '状態を確かめます', mode: 'read' });
+    expect(describeArgv(['skills', 'get', 'desktop'])).toMatchObject({ title: '説明書を読みます' });
+    expect(describeArgv(['snapshot', '--app', 'charmap']).notes).toEqual([]);
+    expect(describeArgv(['minimize', '--app', 'charmap']).notes).toEqual([]);
+    expect(describeArgv(['launch', 'charmap']).notes).toEqual([
+      '新しい窓が手前に出ることがあります。',
+    ]);
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([{ command: 'expand', args: { ref_id: '@s1abc:e3' } }]),
+      ]).notes,
+    ).toEqual(['対象の窓が手前に出ることがあります。']);
+    // A foreground run already says the window comes to the front.
+    expect(describeArgv(['--headed', 'click', '@s1abc:e1']).notes).toEqual([
+      '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
+    ]);
+    // Without reading snapshots, for a timeline row.
+    expect(
+      desktopControlApprovalAction(['click', '@s1abc:e1'], { stateRoot, names: false }).target,
+    ).toMatchObject({ resolved: false });
   });
 
   it('says a foreground run uses the mouse and keyboard and offers no Task grant', () => {

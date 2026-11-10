@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { posix, resolve, win32 } from 'node:path';
+import { homedir } from 'node:os';
+import { join, posix, resolve, win32 } from 'node:path';
 import { desktopControlPin } from './desktop-control-pins';
+import { applyWindowsAcl } from './native-file-publication';
 
 /**
  * Sprint Coder's desktop control is the bundled desktop-control binary that ships with the app:
@@ -61,6 +63,19 @@ export function isDesktopControlExecutable(
   const platform = lookup.platform ?? process.platform;
   const pin = desktopControlPin(platform, lookup.arch ?? process.arch);
   if (pin === null || contentDigest !== pin.sha256) return false;
+  const native = resolveDesktopControlCommand(lookup);
+  return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
+}
+
+/**
+ * Whether a recorded command ran the shipped desktop-control binary, for the timeline only: its
+ * path is the shipped file, whose bytes are checked against the pin. A recorded command keeps no
+ * content digest, so this decides nothing about running; the run itself was judged on its bytes.
+ */
+export function isShippedDesktopControlPath(
+  executable: string,
+  lookup: DesktopControlLookup = {},
+): boolean {
   const native = resolveDesktopControlCommand(lookup);
   return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
 }
@@ -144,21 +159,45 @@ let configuredStateRoot: string | null = null;
  * sandbox keeps its snapshots. The approval card reads the names of the parts a ref points at from
  * there (`desktop-control-display.ts`). Called once at startup; until then, and in tests, runs keep
  * the binary's default folder in the user's home and the card reads that one.
+ *
+ * The binary refuses a state folder whose DACL grants anyone but the user, SYSTEM and
+ * Administrators any access, even read (checked on 1.2.0). A folder under a drive root inherits
+ * Authenticated Users and Users, so the folder is made private on every start, which also repairs
+ * one an earlier version left inheriting. When that cannot be done, the folder is not used at all
+ * and runs keep the binary's default, so the run and the card never read different folders.
  */
-export function configureDesktopControlStateRoot(root: string | null): void {
-  const paths = process.platform === 'win32' ? win32 : posix;
-  configuredStateRoot = root !== null && paths.isAbsolute(root) ? paths.normalize(root) : null;
-  if (configuredStateRoot === null) return;
+export function configureDesktopControlStateRoot(
+  root: string | null,
+  makePrivate: (folder: string) => void = (folder) =>
+    applyWindowsAcl(folder, 'directory', 'secure'),
+): void {
+  configuredStateRoot = null;
+  // Desktop control ships for Windows only, the one place its folder can be checked here.
+  if (root === null || process.platform !== 'win32' || !win32.isAbsolute(root)) return;
+  const folder = win32.normalize(root);
   try {
-    mkdirSync(configuredStateRoot, { recursive: true });
+    mkdirSync(folder, { recursive: true });
+    makePrivate(folder);
   } catch {
-    // The binary creates what it needs; the card then finds nothing to read and says so.
+    return;
   }
+  configuredStateRoot = folder;
 }
 
 /** The configured state folder, or `null` for the binary's default. */
 export function desktopControlStateRoot(): string | null {
   return configuredStateRoot;
+}
+
+/**
+ * The folder a desktop-control run outside the sandbox keeps its state in: the configured one, or
+ * else where the binary looks by itself (an inherited variable, then its folder in the home).
+ */
+export function desktopControlStateFolder(): string {
+  if (configuredStateRoot !== null) return configuredStateRoot;
+  const inherited = process.env[DESKTOP_CONTROL_STATE_VARIABLE];
+  if (inherited !== undefined && win32.isAbsolute(inherited)) return inherited;
+  return join(homedir(), '.agent-desktop');
 }
 
 function comparisonKey(path: string, lookup: DesktopControlLookup): string {
@@ -648,10 +687,17 @@ export function readDesktopControlCommand(argv: readonly string[]): {
   positionals: readonly string[];
   /** Option values by name, in the order given (`--app=x` and `--app x` both read as `x`). */
   options: ReadonlyMap<string, string>;
+  /** Whether help or the version was asked for, which only prints and exits. */
+  help: boolean;
 } | null {
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string') return null;
-  return { command: read.command, positionals: read.positionals, options: read.options };
+  return {
+    command: read.command,
+    positionals: read.positionals,
+    options: read.options,
+    help: read.help.length > 0,
+  };
 }
 
 /** Why the desktop-control binary must not run with these arguments, or `null` when it may. */

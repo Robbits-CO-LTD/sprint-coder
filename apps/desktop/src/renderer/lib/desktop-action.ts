@@ -3,17 +3,29 @@ import type { ApprovalSummary } from '../types/sprint-coder';
 type DesktopAction = NonNullable<ApprovalSummary['desktopAction']>;
 type DesktopStep = Pick<DesktopAction, 'kind' | 'title' | 'mode' | 'target' | 'text' | 'textRole'>;
 
+const ALL_TARGET = {
+  windows: 'すべての窓',
+  apps: '起動中のアプリ',
+  displays: 'すべての画面',
+  surfaces: 'アプリの画面の構成',
+  notifications: 'すべての通知',
+} as const;
+
 /** The line a desktop-control card shows for what the run acts on. Names are the app's own text. */
 export function desktopTargetText(target: NonNullable<DesktopStep['target']>): string {
   if (!target.resolved)
     return `対象を確かめられません${target.reference === undefined ? '' : `（${target.reference}）`}`;
+  if (target.all !== undefined) return ALL_TARGET[target.all];
+  // The window id tells apart two windows with the same title.
+  const id = target.windowId === undefined ? '' : ` · ${target.windowId}`;
   const app = target.app === undefined ? '' : `（${target.app}）`;
-  if (target.role === '窓' && target.window !== undefined) return `窓「${target.window}」${app}`;
+  if (target.role === '窓' && target.window !== undefined)
+    return `窓「${target.window}」${app}${id}`;
   if (target.window === undefined && target.role === undefined)
     return target.app === undefined ? '対象を確かめられません' : `アプリ「${target.app}」`;
   const place = target.window ?? target.app ?? '';
   const part = `${target.role ?? '部品'}${target.name === undefined ? '' : `「${target.name}」`}`;
-  return target.window === undefined ? `${place} の${part}` : `${place}${app} の${part}`;
+  return target.window === undefined ? `${place} の${part}${id}` : `${place}${app} の${part}${id}`;
 }
 
 const TEXT_LABEL = {
@@ -28,10 +40,14 @@ export function desktopTextLabel(step: Pick<DesktopStep, 'textRole'>): string {
   return TEXT_LABEL[step.textRole ?? 'enter'];
 }
 
-/** The mark beside the heading: background runs and foreground runs are told apart at a glance. */
-export function desktopModeLabel(mode: DesktopStep['mode']): string | null {
-  if (mode === 'background') return '裏で動きます';
-  if (mode === 'foreground') return '前面を使います';
+/**
+ * The mark beside the heading. A background run takes no mouse or keyboard, which is all that can
+ * be said of it: the window it acts on, or a launched one, may still come to the front. A launch
+ * gets no mark, and a read none.
+ */
+export function desktopModeLabel(step: Pick<DesktopStep, 'mode' | 'kind'>): string | null {
+  if (step.mode === 'foreground') return '前面を使います';
+  if (step.mode === 'background' && step.kind !== 'launch') return 'マウスとキーボードは使いません';
   return null;
 }
 

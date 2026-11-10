@@ -2677,7 +2677,8 @@ body.is-resizing-sidebar iframe {
   color: var(--success);
 }
 .command-card--failed .command-card__status,
-.command-card--interrupted .command-card__status {
+.command-card--interrupted .command-card__status,
+.command-card--exited .command-card__status.is-failure {
   color: var(--danger);
 }
 .command-card__risk {

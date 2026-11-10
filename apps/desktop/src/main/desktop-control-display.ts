@@ -1,6 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import {
   DESKTOP_ACTION_MAX_STEPS,
   desktopApprovalActionSchema,
@@ -12,7 +11,7 @@ import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-ch
 import {
   desktopControlArgvMode,
   desktopControlBatchEntryMode,
-  desktopControlStateRoot,
+  desktopControlStateFolder,
   readBatchEntries,
   readDesktopControlCommand,
 } from './desktop-control';
@@ -24,13 +23,15 @@ import {
  * — so a part that cannot be named is shown as not confirmed and the card stays as it is.
  *
  * The app, window and part names are read only from the snapshot a ref belongs to, in the state
- * folder desktop-control runs keep (`desktopControlStateRoot`). They are text the app chose, so
+ * folder desktop-control runs keep (`desktopControlStateFolder`). They are text the app chose, so
  * they are cut short and invisible characters are shown as their code points. The part's value
  * (what a field holds) is never read out.
  */
 export type DesktopControlDisplayLookup = Readonly<{
-  /** The state folder; by default the one Sprint Coder set, or the binary's own default. */
+  /** The state folder; by default the one the runs use (`desktopControlStateFolder`). */
   stateRoot?: string;
+  /** False to leave the snapshots unread, for a summary that names no part. */
+  names?: boolean;
 }>;
 
 type Kind = DesktopActionStep['kind'];
@@ -49,10 +50,10 @@ const COMMANDS: Readonly<Record<string, readonly [Kind, string]>> = {
   'list-surfaces': ['read', '画面の構成を読みます'],
   'list-notifications': ['read', '通知を読みます'],
   wait: ['read', '画面の変化を待ちます'],
-  status: ['read', 'デスクトップ操作の状態を読みます'],
-  permissions: ['read', 'デスクトップ操作の状態を読みます'],
-  version: ['read', 'デスクトップ操作の状態を読みます'],
-  help: ['read', '説明書を読みます'],
+  status: ['read', '状態を確かめます'],
+  permissions: ['read', '状態を確かめます'],
+  version: ['read', '状態を確かめます'],
+  help: ['read', '使い方を読みます'],
   'skills list': ['read', '説明書を読みます'],
   'skills get': ['read', '説明書を読みます'],
   'skills path': ['read', '説明書を読みます'],
@@ -100,10 +101,10 @@ const COMMANDS: Readonly<Record<string, readonly [Kind, string]>> = {
   'session end': ['other', '操作の記録を管理します'],
   'session list': ['read', '操作の記録を確かめます'],
   'session gc': ['other', '操作の記録を管理します'],
-  'session help': ['read', '説明書を読みます'],
+  'session help': ['read', '使い方を読みます'],
   'cursor-overlay enable': ['other', 'カーソルの表示を切り替えます'],
   'cursor-overlay disable': ['other', 'カーソルの表示を切り替えます'],
-  'cursor-overlay help': ['read', '説明書を読みます'],
+  'cursor-overlay help': ['read', '使い方を読みます'],
 };
 const UNKNOWN: readonly [Kind, string] = ['other', 'デスクトップを操作します'];
 
@@ -128,6 +129,29 @@ const REF_COMMANDS = new Set([
   'get',
   'is',
   'hover',
+]);
+// Commands over everything of a kind when no app or window narrows them.
+const ALL_TARGETS: Readonly<Record<string, NonNullable<DesktopActionTarget['all']>>> = {
+  'list-windows': 'windows',
+  'list-apps': 'apps',
+  'list-displays': 'displays',
+  'list-surfaces': 'surfaces',
+  'list-notifications': 'notifications',
+};
+// Semantic operations on a part. They take no mouse or keyboard, but the accessibility call can
+// bring the part's window to the front (seen with set-value and expand).
+const PART_OPERATIONS = new Set([
+  'click',
+  'set-value',
+  'clear',
+  'select',
+  'toggle',
+  'check',
+  'uncheck',
+  'expand',
+  'collapse',
+  'scroll',
+  'scroll-to',
 ]);
 // Commands whose first positional is an app name.
 const APP_COMMANDS = new Set(['launch', 'close-app']);
@@ -199,6 +223,7 @@ const FOREGROUND_NOTE =
   '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。';
 const LAUNCH_NOTE = '新しい窓が手前に出ることがあります。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
+const RAISE_NOTE = '対象の窓が手前に出ることがあります。';
 const TEXT_CUT_NOTE =
   '入れる文字が長いため、途中までを表示しています。全文は「詳細（実行内容）」で確かめてください。';
 
@@ -207,7 +232,9 @@ export function desktopControlApprovalAction(
   lookup: DesktopControlDisplayLookup = {},
 ): DesktopApprovalAction {
   try {
-    const action = describe(argv, new SnapshotReader(lookup.stateRoot ?? defaultStateRoot()));
+    const snapshots = new SnapshotReader(lookup.stateRoot ?? desktopControlStateFolder());
+    if (lookup.names === false) snapshots.disable();
+    const action = describe(argv, snapshots);
     return desktopApprovalActionSchema.parse(action);
   } catch {
     // Never in the way of the approval itself: the card then says it could not describe the run.
@@ -238,9 +265,11 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   let head: DesktopActionStep;
   // A session keeps its snapshots elsewhere, in a form not relied on here.
   if (read !== null && read.options.has('--session')) snapshots.disable();
-  if (read === null || read.command === undefined) {
+  if (read === null || (read.command === undefined && !read.help)) {
     head = { kind: 'other', title: UNKNOWN[1], mode };
     openDetails = true;
+  } else if (read.help) {
+    head = { kind: 'read', title: '使い方を読みます', mode };
   } else if (read.command === 'batch') {
     const entries = readBatchEntries(read.positionals) ?? [];
     const described = entries.slice(0, DESKTOP_ACTION_MAX_STEPS).map(({ command, args }) =>
@@ -277,7 +306,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     if (entries.length === 0 || stepsOmitted !== undefined || described.some(({ cut }) => cut))
       openDetails = true;
   } else {
-    const command = read.command;
+    const command = read.command!;
     const text = textArgument(command);
     const described = describeStep(
       command,
@@ -297,7 +326,15 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     }
   }
   const all = [head, ...(steps ?? [])];
+  const partOperation =
+    read !== null &&
+    (read.command === 'batch'
+      ? (readBatchEntries(read.positionals) ?? []).some(({ command }) =>
+          PART_OPERATIONS.has(command),
+        )
+      : !read.help && read.command !== undefined && PART_OPERATIONS.has(read.command));
   if (all.some(({ target }) => target !== undefined && !target.resolved)) openDetails = true;
+  if (mode === 'background' && partOperation) notes.unshift(RAISE_NOTE);
   if (all.some(({ kind }) => kind === 'launch')) notes.unshift(LAUNCH_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
   if (mode === 'foreground') notes.unshift(FOREGROUND_NOTE);
@@ -332,7 +369,9 @@ function describeStep(
         ? snapshots.window(windowId)
         : app !== undefined && app.trim() !== ''
           ? { resolved: true, app: visible(app, NAME_MAX).text }
-          : undefined;
+          : Object.hasOwn(ALL_TARGETS, command)
+            ? { resolved: true, all: ALL_TARGETS[command]! }
+            : undefined;
   const shown = text === undefined || text === '' ? undefined : visible(text, TEXT_MAX, true);
   return {
     step: {
@@ -380,14 +419,6 @@ function visible(value: string, max: number, multiline = false): { text: string;
   return { text: `${kept}…`, cut: true };
 }
 
-function defaultStateRoot(): string {
-  const configured = desktopControlStateRoot();
-  if (configured !== null) return configured;
-  const inherited = process.env['AGENT_DESKTOP_HOME'];
-  if (inherited !== undefined && isAbsolute(inherited)) return inherited;
-  return join(homedir(), '.agent-desktop');
-}
-
 type RefmapEntry = Readonly<{
   role?: unknown;
   name?: unknown;
@@ -421,12 +452,17 @@ class SnapshotReader {
         ? ROLES[entry.role]!
         : '部品';
     if (app === undefined && window === undefined) return unresolved;
+    const windowId =
+      typeof entry.source_window_id === 'string' && WINDOW_ID.test(entry.source_window_id)
+        ? entry.source_window_id
+        : undefined;
     return {
       resolved: true,
       ...(app === undefined ? {} : { app }),
       ...(window === undefined ? {} : { window }),
       role: role.slice(0, ROLE_MAX),
       ...(name === undefined ? {} : { name }),
+      ...(windowId === undefined ? {} : { windowId }),
     };
   }
 
@@ -446,6 +482,7 @@ class SnapshotReader {
           ...(app === undefined ? {} : { app }),
           ...(window === undefined ? {} : { window }),
           role: '窓',
+          windowId: id,
         };
       }
     }

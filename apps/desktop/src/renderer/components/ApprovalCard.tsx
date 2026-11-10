@@ -208,7 +208,7 @@ function DesktopControlApprovalCard({
   const headingId = `${ids}-heading`;
   const targetId = `${ids}-target`;
   const labelledBy = action.target === undefined ? headingId : `${headingId} ${targetId}`;
-  const badge = desktopModeLabel(action.mode);
+  const badge = desktopModeLabel(action);
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -263,7 +263,10 @@ function DesktopControlApprovalCard({
         open={action.openDetails}
         data-testid="desktop-approval-details"
       >
-        <summary>詳細（実行内容）</summary>
+        {/* Named with the card's heading and target, so each card's details read apart. */}
+        <summary id={`${ids}-details`} aria-labelledby={`${ids}-details ${labelledBy}`}>
+          詳細（実行内容）
+        </summary>
         <dl className="approval-card__facts">
           <div>
             <dt>実行ファイル</dt>
@@ -336,8 +339,8 @@ function DesktopControlApprovalCard({
   );
 }
 
-function badgeFor(step: { mode: DesktopAction['mode'] }) {
-  const label = desktopModeLabel(step.mode);
+function badgeFor(step: Pick<DesktopAction, 'mode' | 'kind'>) {
+  const label = desktopModeLabel(step);
   return label === null ? null : (
     <span className={`approval-card__mode is-${step.mode}`}>{label}</span>
   );

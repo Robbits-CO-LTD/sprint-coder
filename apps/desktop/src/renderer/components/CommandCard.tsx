@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalSummary, CommandOutputRecord } from '../types/sprint-coder';
-import { desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
+import { desktopActionSummary, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
 import type { CommandCardState } from '../store/appStore';
 import {
   commandDurationMs,
@@ -17,14 +17,16 @@ const RISK_LABEL = { low: '低リスク', medium: '中リスク', high: '高リ�
 export function CommandCard({
   taskId,
   card,
-  desktopAction,
+  desktopAction: approvalAction,
 }: {
   taskId: string;
   card: CommandCardState;
-  /** The approval card's description of this desktop-control run, when it had one. */
+  /** The approval card's description of this desktop-control run, when it had one: it names the
+   * part. Without one (a run that needed no card) the row uses Main's own description. */
   desktopAction?: NonNullable<ApprovalSummary['desktopAction']> | undefined;
 }) {
   const { command, tail } = card;
+  const desktopAction = approvalAction ?? command.desktopAction;
   const [expanded, setExpanded] = useState(false);
   const [outputs, setOutputs] = useState<CommandOutputRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -170,7 +172,13 @@ export function CommandCard({
         <span className="command-card__kind">
           {desktopAction === undefined ? 'Command' : 'デスクトップ操作'}
         </span>
-        <span className="command-card__status">{commandStatus(command)}</span>
+        <span
+          className={`command-card__status${
+            command.state === 'exited' && command.exitCode !== 0 ? ' is-failure' : ''
+          }`}
+        >
+          {commandStatus(command)}
+        </span>
         {desktopAction === undefined ? (
           <span className={`command-card__risk risk-${command.risk}`}>
             {RISK_LABEL[command.risk]}
@@ -200,8 +208,14 @@ export function CommandCard({
               <code>「{desktopAction.text}」</code>
             </div>
           )}
+          {/* The summary is named with the heading, target and start time, so each row's
+              details read apart. */}
           <details className="command-card__details">
-            <summary>詳細（実行内容）</summary>
+            <summary
+              aria-label={`詳細（実行内容） ${desktopActionSummary(desktopAction)} ${startedLabel(command.createdAt)}`}
+            >
+              詳細（実行内容）
+            </summary>
             <p className="command-card__purpose">AI の説明: {command.purpose}</p>
             {commandFacts}
           </details>
@@ -283,6 +297,11 @@ export function CommandCard({
       ) : null}
     </section>
   );
+}
+
+function startedLabel(createdAt: string): string {
+  const time = new Date(createdAt);
+  return Number.isNaN(time.getTime()) ? '' : `${time.toLocaleTimeString('ja-JP')} 開始`;
 }
 
 function commandStatus(command: CommandCardState['command']): string {

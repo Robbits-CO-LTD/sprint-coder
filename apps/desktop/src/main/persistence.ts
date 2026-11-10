@@ -317,6 +317,8 @@ import {
 } from './edit-saga';
 import { assertStableSingleLinkFile } from './stable-file-snapshot';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
+import { isShippedDesktopControlPath } from './desktop-control';
+import { desktopControlApprovalAction } from './desktop-control-display';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -23364,6 +23366,7 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     cwd: spec.cwdIdentity.canonicalPath,
     envDelta: { ...spec.envDelta },
     purpose: row.purpose,
+    ...commandDesktopAction(spec),
     risk: row.risk,
     state: row.state,
     pid: row.pid,
@@ -23375,6 +23378,20 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
   });
+}
+
+/**
+ * What a desktop-control command did, for its timeline row: only for the shipped binary, and
+ * without reading any snapshot (the part names are on its approval card, when it had one).
+ */
+function commandDesktopAction(spec: ExecutionSpec): { desktopAction?: DesktopApprovalAction } {
+  try {
+    return isShippedDesktopControlPath(spec.absoluteExecutable)
+      ? { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function validateApprovalRequest(input: ApprovalRequestInput): void {

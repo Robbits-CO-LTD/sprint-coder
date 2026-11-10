@@ -70,7 +70,8 @@ describe('desktop-control approval card', () => {
   it('says what it does, to what, and what it enters, with the command folded away', () => {
     const html = card(typing);
     expect(html).toContain('文字を入力します');
-    expect(html).toContain('裏で動きます');
+    expect(html).toContain('マウスとキーボードは使いません');
+    expect(html).not.toContain('裏で動きます');
     expect(html).toContain('文字コード表（charmap.exe） の入力欄「コピーする文字」');
     expect(html).toContain('入れる文字');
     expect(html).toContain('「ABC」');
@@ -98,6 +99,8 @@ describe('desktop-control approval card', () => {
       notes: ['新しい窓が手前に出ることがあります。'],
     } as DesktopAction);
     expect(launch).toContain('アプリ「charmap」');
+    // A launch gets no mark: its window can come up in front.
+    expect(launch).not.toContain('desktop-approval-mode');
     expect(launch).toContain('新しい窓が手前に出ることがあります。');
     expect(launch).not.toContain('入れる文字');
 
@@ -322,5 +325,134 @@ describe('desktop-control history and timeline', () => {
     expect(container.querySelector('details')).toBeNull();
     await act(async () => root.unmount());
     vi.unstubAllGlobals();
+  });
+
+  it('shows a run that needed no card with Main’s description, and a failed exit as failed', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const base: CommandCardState['command'] = {
+      id: 'command-2',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-2',
+      specDigest: 'digest',
+      executable: 'C:\\desktop-control.exe',
+      argv: ['status'],
+      cwd: 'C:\\workspace',
+      envDelta: {},
+      purpose: '状態を見る',
+      risk: 'high',
+      state: 'exited',
+      pid: 1,
+      exitCode: 1,
+      signal: null,
+      outputBytes: 0,
+      truncated: false,
+      createdAt: '2026-11-10T00:00:00.000Z',
+      startedAt: '2026-11-10T00:00:00.000Z',
+      finishedAt: '2026-11-10T00:00:01.000Z',
+      desktopAction: {
+        kind: 'read',
+        title: '状態を確かめます',
+        mode: 'read',
+        allowTaskGrant: true,
+        notes: [],
+        openDetails: false,
+      },
+    };
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <CommandCard
+          taskId="task-1"
+          card={{ command: base, tail: { lines: [], lastOutputSeq: 0 } }}
+        />,
+      ),
+    );
+    const head = container.querySelector('.command-card__head')!.textContent;
+    expect(head).toContain('デスクトップ操作');
+    expect(head).toContain('状態を確かめます');
+    expect(head).not.toContain('高リスク');
+    expect(container.querySelector('details')?.textContent).toContain('status');
+    expect(container.querySelector('summary')?.getAttribute('aria-label')).toContain(
+      '詳細（実行内容） 状態を確かめます',
+    );
+    // exit 1 is not drawn as a success, on this row or on a plain command's.
+    expect(container.querySelector('.command-card__status')?.className).toContain('is-failure');
+    const { desktopAction: _omitted, ...plain } = base;
+    await act(async () =>
+      root.render(
+        <CommandCard
+          taskId="task-1"
+          card={{ command: plain, tail: { lines: [], lastOutputSeq: 0 } }}
+        />,
+      ),
+    );
+    expect(container.querySelector('.command-card__status')?.className).toContain('is-failure');
+    await act(async () =>
+      root.render(
+        <CommandCard
+          taskId="task-1"
+          card={{ command: { ...plain, exitCode: 0 }, tail: { lines: [], lastOutputSeq: 0 } }}
+        />,
+      ),
+    );
+    expect(container.querySelector('.command-card__status')?.className).not.toContain('is-failure');
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  });
+
+  it('tells apart same-titled windows by id, names lists of everything, and names each details', async () => {
+    const withId = card({
+      ...typing,
+      target: { ...typing.target!, windowId: 'w-23073794' },
+    });
+    expect(withId).toContain('文字コード表（charmap.exe） の入力欄「コピーする文字」 · w-23073794');
+    const list = card({
+      kind: 'read',
+      title: '窓の一覧を読みます',
+      mode: 'read',
+      target: { resolved: true, all: 'windows' },
+      allowTaskGrant: true,
+      notes: [],
+      openDetails: false,
+    });
+    expect(list).toContain('すべての窓');
+
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <>
+          <ApprovalCard
+            approval={{ ...base, desktopAction: typing }}
+            busy={false}
+            onDecision={() => undefined}
+          />
+          <ApprovalCard
+            approval={{
+              ...base,
+              id: 'approval-2',
+              callId: 'call-2',
+              desktopAction: { ...typing, title: 'クリックします' },
+            }}
+            busy={false}
+            onDecision={() => undefined}
+          />
+        </>,
+      ),
+    );
+    const names = [...container.querySelectorAll('summary')].map((summary) =>
+      (summary.getAttribute('aria-labelledby') ?? '')
+        .split(' ')
+        .map((id) => document.getElementById(id)?.textContent?.trim() ?? '')
+        .join(' '),
+    );
+    expect(names).toEqual([
+      '詳細（実行内容） 文字を入力します 文字コード表（charmap.exe） の入力欄「コピーする文字」',
+      '詳細（実行内容） クリックします 文字コード表（charmap.exe） の入力欄「コピーする文字」',
+    ]);
+    await act(async () => root.unmount());
   });
 });
