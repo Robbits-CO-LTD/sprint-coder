@@ -373,8 +373,35 @@ const INERT_COMMANDS = new Set([
   'permissions',
   'help',
 ]);
-// Of those, the ones that take positionals: a skill and its reference, or the command to explain.
-const INERT_WITH_POSITIONALS = new Set(['skills get', 'help']);
+// The skill names `skills get` accepts on the desktop-control binary 1.2.0 (`skills get --help`,
+// `skills list`), and the form of a reference name such as `commands-system`. The binary's own
+// answer to anything else is not relied on: other positionals keep the card.
+const INERT_SKILL_NAMES = new Set([
+  'desktop',
+  'platform',
+  'macos',
+  'windows',
+  'linux',
+  'ffi',
+  'jev',
+]);
+const INERT_SKILL_REFERENCE = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+
+/** Whether the positionals of an inert command are ones it is known to only print for. */
+function inertPositionals(command: string, positionals: readonly string[]): boolean {
+  if (positionals.length === 0) return true;
+  if (command === 'skills get')
+    return (
+      positionals.length <= 2 &&
+      INERT_SKILL_NAMES.has(positionals[0]!) &&
+      (positionals[1] === undefined || INERT_SKILL_REFERENCE.test(positionals[1]))
+    );
+  if (command !== 'help' || positionals.length > 2) return false;
+  // `help <command>` or `help <command> <subcommand>`, named as the commands above are.
+  const [name, sub] = positionals as [string, string | undefined];
+  if (sub === undefined) return COMMAND_OPTIONS[name] !== undefined || WITH_SUBCOMMANDS.has(name);
+  return WITH_SUBCOMMANDS.has(name) && COMMAND_OPTIONS[`${name} ${sub}`] !== undefined;
+}
 
 /**
  * Whether these arguments, which are never refused, only print the bundled guides, the version,
@@ -398,7 +425,9 @@ export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
   return (
     read.command !== undefined &&
     INERT_COMMANDS.has(read.command) &&
-    (read.positionals.length === 0 || INERT_WITH_POSITIONALS.has(read.command))
+    // No path separator, dot, colon, space, control character or leading dash in any of them.
+    read.positionals.every((token) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) &&
+    inertPositionals(read.command, read.positionals)
   );
 }
 
