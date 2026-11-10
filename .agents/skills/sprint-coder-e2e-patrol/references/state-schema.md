@@ -96,7 +96,6 @@ filing result to `events.jsonl` with `scripts/Write-E2ePatrolRecord.ps1`.
 Computer Use records must include one allowed `computer_use_reason`; Browser
 Use records must not include one.
 
-Computer Use preflight and cleanup records store window ids plus app ids,
-ownership, focus-capture status, close verification, focus restoration, and
-discarded-handle status in the event `details`. Raw window titles are omitted
+Computer Use preflight records store window ids plus app ids and
+focus-capture status in the event `details`. Raw window titles are omitted
 or replaced with hashes.
