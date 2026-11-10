@@ -152,7 +152,8 @@ function outsideWorkspaceRoots(
 }
 
 // The arguments are what the agent chose. The safety boundary is that the person allows every
-// desktop-control run on its own approval card; nothing here makes operating the desktop safe,
+// desktop-control run that reads or operates the desktop on its own approval card (only the
+// closed list in `desktopControlArgvIsInert` runs without one); nothing here makes operating the desktop safe,
 // since keystrokes reach whatever window has focus. This check only drops the plainly dangerous forms
 // before a card exists: an option or command it does not know, a file path to read or write, the
 // clipboard's contents, a long-lived server (`mcp`), a launch that passes arguments, environment
@@ -285,16 +286,31 @@ function parseOptions(spec: string): ParsedOptions {
   };
 }
 
-/** Why the desktop-control binary must not run with these arguments, or `null` when it may. */
-export function desktopControlArgvRefusal(
-  argv: readonly string[],
-  workspaceRoots: readonly string[],
-  lookup: DesktopControlLookup = {},
-): string | null {
+/** How the arguments read: the command, and which options and positionals came with it. */
+type ReadArgv = Readonly<{
+  /** `skills get` for a command with subcommands, or `skills` alone; `undefined` for none. */
+  command: string | undefined;
+  /** Set once the command (and subcommand, if it has them) is complete. */
+  key: string | undefined;
+  /** The help and version options given, by name. */
+  help: readonly string[];
+  /** Whether any option shared by every command (`--session`, `--headed`, `-w` …) was given. */
+  global: boolean;
+  separated: boolean;
+  positionals: readonly string[];
+}>;
+
+const GLOBAL_OPTION_NAMES = new Set(
+  GLOBAL_OPTIONS.split(' ').map((token) => (token.endsWith('=') ? token.slice(0, -1) : token)),
+);
+
+/** The arguments as the desktop-control binary reads them, or why they are refused. */
+function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
   let command: string | undefined;
   let key: string | undefined;
   let options = parseOptions('');
-  let help = false;
+  const help: string[] = [];
+  let global = false;
   let separated = false;
   const positionals: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -311,7 +327,8 @@ export function desktopControlArgvRefusal(
     if (token.startsWith('-') && token !== '-') {
       const name = optionName(token);
       if (REFUSED_OPTIONS.has(name)) return refusal(`${name} は使えない`);
-      if (HELP_OPTIONS.has(name) && name === token) help = true;
+      if (GLOBAL_OPTION_NAMES.has(name)) global = true;
+      if (HELP_OPTIONS.has(name) && name === token) help.push(name);
       else if (options.values.has(name)) {
         if (!token.includes('=') && (index += 1) >= argv.length)
           return refusal(`${name} に値が無い`);
@@ -338,8 +355,64 @@ export function desktopControlArgvRefusal(
     if (spec === undefined) return refusal(`${key} を判定できない`);
     options = parseOptions(spec);
   }
+  return { command, key, help, global, separated, positionals };
+}
+
+// Commands that only print what is compiled into the binary or its own state, and touch no other
+// app, window or file: checked on the desktop-control binary 1.2.0. `status` reports permissions,
+// platform, version, its state folder and the last snapshot's id and ref count, never a window's
+// title or content. `skills` alone lists the skills.
+const INERT_COMMANDS = new Set([
+  'skills',
+  'skills list',
+  'skills get',
+  'skills path',
+  'skills help',
+  'status',
+  'version',
+  'permissions',
+  'help',
+]);
+// Of those, the ones that take positionals: a skill and its reference, or the command to explain.
+const INERT_WITH_POSITIONALS = new Set(['skills get', 'help']);
+
+/**
+ * Whether these arguments, which are never refused, only print the bundled guides, the version,
+ * help or the binary's own status, touching no other app, window or file. Such a run needs no
+ * approval card. Any option shared by every command (`--headed`, `--session`, `-w` …) keeps the
+ * card, and so does every other command, `batch` included.
+ */
+export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string' || read.global || read.separated) return false;
+  if (read.help.length > 0) {
+    // Top-level help or version alone, or `<command> --help` with nothing else.
+    if (read.command === undefined) return read.positionals.length === 0;
+    return (
+      !read.command.startsWith('batch') &&
+      read.positionals.length === 0 &&
+      argv.length === read.command.split(' ').length + read.help.length &&
+      read.help.every((name) => name === '-h' || name === '--help')
+    );
+  }
+  return (
+    read.command !== undefined &&
+    INERT_COMMANDS.has(read.command) &&
+    (read.positionals.length === 0 || INERT_WITH_POSITIONALS.has(read.command))
+  );
+}
+
+/** Why the desktop-control binary must not run with these arguments, or `null` when it may. */
+export function desktopControlArgvRefusal(
+  argv: readonly string[],
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup = {},
+): string | null {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string') return read;
+  const { key, positionals } = read;
   // Help and version print and exit without acting.
-  if (help || key === undefined) return null;
+  if (read.help.length > 0 || key === undefined) return null;
   if (key === 'screenshot' && positionals.length > 0)
     return refusal('screenshot の保存先は指定できない');
   if (key === 'launch')

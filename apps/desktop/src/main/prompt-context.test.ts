@@ -197,6 +197,10 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain('文字の入力は、まず set-value');
     expect(compiled.content).toContain('list-windows で id を調べて --window-id を付け');
     expect(compiled.content).toContain('同じ Task で既に読んでいれば読み直さない');
+    // The guides and status checks need no card, which the agent can count on.
+    expect(compiled.content).toContain(
+      '説明書（skills）・status・version・--help は、--headed などを付けなければ承認なしで実行できる',
+    );
     expect(compiled.content).toContain('mcp・open-system-surface・clipboard-get・trace');
     expect(compiled.content).toContain('--arg・--env・--cwd');
     expect(compiled.content).toContain('ファイルはアプリの中の操作で開く');

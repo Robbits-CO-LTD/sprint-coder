@@ -9,7 +9,11 @@ import {
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
-import { desktopControlArgvRefusal, isDesktopControlExecutable } from './desktop-control';
+import {
+  desktopControlArgvIsInert,
+  desktopControlArgvRefusal,
+  isDesktopControlExecutable,
+} from './desktop-control';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -532,12 +536,15 @@ export function registerCommandRunnerTool(
       const toolOutput = { stdout: '', stderr: '', truncated: false };
       // Only a call prepared as the shipped desktop control and allowed on its own card ("allow
       // once", or "allow for the Task" kept for exactly this command) may start outside the
-      // command sandbox, and the runner checks the bytes again before it starts. Every other
-      // command, explicitly allowed or not, gets no roots and stays inside. A preset or policy
-      // allow never does; the Stop stays the same.
+      // command sandbox, and the runner checks the bytes again before it starts. So may one that
+      // only prints the bundled guides, help, the version or its own status, which the
+      // ApprovalCoordinator allows without a card; that is judged again here on the same sealed
+      // argv. Every other command, explicitly allowed or not, gets no roots and stays inside. A
+      // preset or policy allow never does; the Stop stays the same.
       const roots =
         control.authorizationDecision === 'allow_once' ||
-        control.authorizationDecision === 'allow_task'
+        control.authorizationDecision === 'allow_task' ||
+        desktopControlArgvIsInert(spec.argv)
           ? desktopControlRoots.get(spec)
           : undefined;
       const hooks = {

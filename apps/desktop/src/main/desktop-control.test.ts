@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   isDesktopControlExecutable,
@@ -440,5 +441,71 @@ describe('desktop-control arguments outside the command sandbox', () => {
     const refusal = refused(argv);
     expect(refusal).toMatch(/^デスクトップ操作の実行を拒否した: .+。$/u);
     expect(refusal).toContain(reason);
+  });
+});
+
+describe('desktop-control runs that touch no other app', () => {
+  const roots = ['C:\\work\\repo'];
+  const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+
+  // Only print the bundled guides, help, the version or the binary's own status.
+  it.each([
+    [['skills', 'get', 'desktop']],
+    [['skills', 'get', 'desktop', 'commands-system']],
+    [['skills', 'get', 'platform']],
+    [['skills', 'get', 'platform', '--full']],
+    [['skills']],
+    [['skills', 'list']],
+    [['skills', 'path']],
+    [['status']],
+    [['version']],
+    [['--version']],
+    [['-V']],
+    [['--help']],
+    [['help']],
+    [['help', 'launch']],
+    [['launch', '--help']],
+    [['snapshot', '-h']],
+    [['skills', 'get', '--help']],
+    [['permissions']],
+  ])('%j needs no card', (argv) => {
+    expect(desktopControlArgvRefusal(argv, roots, lookup)).toBeNull();
+    expect(desktopControlArgvIsInert(argv)).toBe(true);
+  });
+
+  it.each([
+    // Reading the screen or operating it.
+    [['list-windows']],
+    [['list-apps']],
+    [['snapshot']],
+    [['snapshot', '--window-id', 'w1']],
+    [['launch', 'notepad']],
+    [['click', '@s1:e3']],
+    [['set-value', '@s1:e3', 'text']],
+    [['batch', '[{"command":"status"}]']],
+    [['batch', '--help']],
+    [['session', 'list']],
+    [['session']],
+    // Options shared by every command keep the card, even on a status check.
+    [['--headed', 'status']],
+    [['--session', 's1', 'status']],
+    [['status', '--session=s1']],
+    [['-w', 'w1', 'skills', 'get', 'desktop']],
+    [['-v', 'version']],
+    // Help that comes with anything else, or a version option on a command.
+    [['launch', 'notepad', '--help']],
+    [['snapshot', '--compact', '-h']],
+    [['launch', '-V']],
+    [['status', 'extra']],
+    [['skills', 'get', 'desktop', '--', 'x']],
+    [[]],
+    // Refused arguments are never inert.
+    [['permissions', '--request']],
+    [['permissions', '--guide']],
+    [['skills', 'get', 'desktop', '--out', 'x']],
+    [['mcp']],
+    [['trace']],
+  ])('%j keeps the card', (argv) => {
+    expect(desktopControlArgvIsInert(argv)).toBe(false);
   });
 });
