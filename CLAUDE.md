@@ -39,3 +39,11 @@ UI・E2E・ユーザー操作の動作確認は、Computer Useで実アプリを
 - 対象build、環境、操作、証拠と各ケースの `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録する。Computer Useが利用できない場合は `BLOCKED` とし、CI成功で代用しない。
 - 実Providerの課金を伴う検証は、現在の依頼で明示された場合だけ実施する。
 - 性能の数値基準とaxe監査は元の受入要件を維持する。計測や監査をしていない状態を目視だけでPASSにしない。
+
+## モデルに応じた必須Skill
+
+自分（メインセッション）のモデルがFable 5.2（`claude-fable-5-2`）の場合は、複数ステップの作業を始める前に [sprint-coder-fable-commander Skill](.claude/skills/sprint-coder-fable-commander/SKILL.md) を呼び出し、Opus 5.5サブエージェントを子分として指揮して作業を速く進める。実装の既定はCodexのままで、Opus 5.5に実装させてよい条件は[AGENTS.mdの役割分担](AGENTS.md#役割分担コードは-codexclaude-は指揮)に従う。
+
+- 数回のツール呼び出しで終わる作業と一問一答は対象外とし、そのまま自分で行う。
+- 自分がサブエージェントとして起動されている場合は対象外とし、再委譲しない。
+- Fable 5.2以外のモデルでは適用しない。モデルが確認できない場合も適用しない。
