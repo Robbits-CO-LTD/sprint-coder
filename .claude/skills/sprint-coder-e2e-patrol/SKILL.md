@@ -18,12 +18,11 @@ description: Sprint Coderの開発buildを開発エージェントのComputer Us
 
 ## 2. 実行前に必ず読む
 
-1. [正典 SKILL.md](../../../.agents/skills/sprint-coder-e2e-patrol/SKILL.md) — 実行手順 15 ステップ、デスクトップ実行の追加ガード、停止理由コード
+1. [正典 SKILL.md](../../../.agents/skills/sprint-coder-e2e-patrol/SKILL.md) — 実行手順 14 ステップ、デスクトップ実行の追加ガード、停止理由コード
 2. [E2E 実行契約](../../../.agents/skills/sprint-coder-e2e-patrol/references/e2e-contract.md)
 3. [Finding 契約](../../../.agents/skills/sprint-coder-e2e-patrol/references/finding-contract.md)
 4. [Issue 契約](../../../.agents/skills/sprint-coder-e2e-patrol/references/issue-contract.md)
 5. [実行状態スキーマ](../../../.agents/skills/sprint-coder-e2e-patrol/references/state-schema.md)
-6. [Computer Use cleanup 契約](../../../.agents/skills/sprint-coder-e2e-patrol/references/computer-use-cleanup.md)
 
 そのうえで、OSに応じた `sprint-coder-e2e` / `sprint-coder-e2e-windows` と、現在のComputer Useツールのドキュメントを読む。製品自身のComputer Use機能とは区別し、利用不能は `BLOCKED`、実Providerの課金は明示opt-inとする。
 
