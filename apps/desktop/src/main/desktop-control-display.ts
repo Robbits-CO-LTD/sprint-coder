@@ -139,6 +139,8 @@ const ALL_TARGETS: Readonly<Record<string, NonNullable<DesktopActionTarget['all'
   'list-notifications': 'notifications',
   'dismiss-all-notifications': 'notifications',
 };
+// Options that give a point as coordinates, which the card does not name.
+const COORDINATE_OPTIONS = ['--xy', '--from-xy', '--to-xy'];
 // Operations that act on no app, window or part, so a card without a target still says it all.
 const NO_TARGET_COMMANDS = new Set([
   'clipboard-set',
@@ -305,6 +307,13 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     steps = described.map(({ step }) => step);
     if (described.some(({ unexplained }) => unexplained)) openDetails = true;
+    // The same in a batch, by argument name (`xy`, `from_xy`, `to_xy` …).
+    if (
+      entries.some(({ args }) =>
+        Object.keys(args).some((key) => /xy$/u.test(key.toLowerCase().replace(/[^a-z0-9]/gu, ''))),
+      )
+    )
+      openDetails = true;
     if (described.some(({ cut }) => cut)) notes.push(TEXT_CUT_NOTE);
     if (entries.length > DESKTOP_ACTION_MAX_STEPS) {
       stepsOmitted = entries.length - DESKTOP_ACTION_MAX_STEPS;
@@ -336,6 +345,8 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     head = described.step;
     if (described.unexplained) openDetails = true;
+    // A point given as coordinates is not what the card names, even beside a part.
+    if (COORDINATE_OPTIONS.some((option) => read.options.has(option))) openDetails = true;
     if (described.cut) {
       notes.push(TEXT_CUT_NOTE);
       openDetails = true;

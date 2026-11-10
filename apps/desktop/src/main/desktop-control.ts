@@ -726,6 +726,42 @@ export function desktopControlArgvRefusal(
     return positionals.length === 1
       ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
       : refusal('batch には JSON の配列を 1 つだけ渡す');
+  return pointChoiceRefusal(
+    key,
+    Object.hasOwn(POINT_CHOICES, key) ? POINT_CHOICES[key]! : [],
+    (name) => (name === '' ? positionals.length > 0 : read.options.has(name)),
+  );
+}
+
+// Commands of the desktop-control binary 1.2.0 that take one point either as a part or as
+// coordinates (`<command> --help`): the part's option (`''` for the first positional, the ref)
+// and the coordinates' option. Given both, which one the binary uses is up to the binary, and the
+// card names only the part, so that is refused. In a batch, the same by argument name.
+const POINT_CHOICES: Readonly<Record<string, readonly (readonly [string, string])[]>> = {
+  hover: [['', '--xy']],
+  drag: [
+    ['--from', '--from-xy'],
+    ['--to', '--to-xy'],
+  ],
+};
+const BATCH_POINT_CHOICES: Readonly<Record<string, readonly (readonly [string, string])[]>> = {
+  hover: [['ref_id', 'xy']],
+  drag: [
+    ['from', 'from_xy'],
+    ['to', 'to_xy'],
+  ],
+};
+
+function pointChoiceRefusal(
+  label: string,
+  choices: readonly (readonly [string, string])[],
+  given: (name: string) => boolean,
+): string | null {
+  for (const [part, coordinates] of choices)
+    if (given(part) && given(coordinates))
+      return refusal(
+        `${label} の ${part === '' ? 'ref' : part} と ${coordinates} は同時に指定できない（部品の指定と座標の指定は、どちらか片方だけにする）`,
+      );
   return null;
 }
 
@@ -806,6 +842,15 @@ function batchRefusal(
     }
     const keyRefusal = refusedBatchKey(fields);
     if (keyRefusal !== null) return keyRefusal;
+    // Compared without letter case or separators, as the refused names are.
+    const plain = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/gu, '');
+    const keys = new Set(Object.keys(fields).map(plain));
+    const pointRefusal = pointChoiceRefusal(
+      `batch の中の ${command}`,
+      Object.hasOwn(BATCH_POINT_CHOICES, command) ? BATCH_POINT_CHOICES[command]! : [],
+      (name) => keys.has(plain(name)),
+    );
+    if (pointRefusal !== null) return pointRefusal;
   }
   return null;
 }

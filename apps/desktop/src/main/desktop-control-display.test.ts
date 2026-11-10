@@ -292,6 +292,22 @@ describe('desktop-control approval description', () => {
     ).toBe(true);
   });
 
+  it('opens the details whenever a point is also given as coordinates, beside a named part', () => {
+    for (const argv of [
+      ['drag', '--from', '@s1abc:e1', '--to', '@s1abc:e3', '--to-xy', '2,2'],
+      ['drag', '--from', '@s1abc:e1', '--from-xy=1,1', '--to', '@s1abc:e3'],
+      ['hover', '@s1abc:e3', '--xy', '1,1'],
+      ['batch', JSON.stringify([{ command: 'hover', args: { ref_id: '@s1abc:e3', xy: '1,1' } }])],
+    ])
+      expect(describeArgv(argv).openDetails).toBe(true);
+    // The part alone stays closed.
+    expect(describeArgv(['hover', '@s1abc:e3']).openDetails).toBe(false);
+    expect(
+      describeArgv(['batch', JSON.stringify([{ command: 'hover', args: { ref_id: '@s1abc:e3' } }])])
+        .openDetails,
+    ).toBe(false);
+  });
+
   it('opens the details of any operation whose target it cannot name', () => {
     for (const argv of [
       ['mouse-click', '--xy', '10,10'],

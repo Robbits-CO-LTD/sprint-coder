@@ -314,8 +314,35 @@ describe('desktop-control arguments outside the command sandbox', () => {
   const roots = ['C:\\work\\repo'];
   const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
   const refused = (argv: string[]) => desktopControlArgvRefusal(argv, roots, lookup);
+  const batch = (entries: unknown) => ['batch', JSON.stringify(entries)];
   const BATCH_MENU =
     '[{"command":"expand","args":{"ref_id":"@s1:e3"}},{"command":"snapshot","args":{"window_id":"w1"}}]';
+
+  it('refuses a point given both as a part and as coordinates, and takes either one alone', () => {
+    const both = '部品の指定と座標の指定は、どちらか片方だけにする';
+    for (const argv of [
+      ['--headed', 'drag', '--from', '@s1:e1', '--from-xy', '1,1', '--to', '@s1:e2'],
+      ['--headed', 'drag', '--from', '@s1:e1', '--to', '@s1:e2', '--to-xy=2,2'],
+      ['--headed', 'hover', '@s1:e1', '--xy', '1,1'],
+      batch([{ command: 'drag', args: { from: '@s1:e1', from_xy: '1,1', to: '@s1:e2' } }]),
+      batch([{ command: 'drag', args: { from: '@s1:e1', to: '@s1:e2', toXy: '2,2' } }]),
+      batch([{ command: 'hover', args: { ref_id: '@s1:e1', xy: '1,1' } }]),
+    ])
+      expect(refused(argv)).toContain(both);
+    expect(refused(['drag', '--from', '@s1:e1', '--to', '@s1:e2', '--to-xy', '2,2'])).toBe(
+      'デスクトップ操作の実行を拒否した: drag の --to と --to-xy は同時に指定できない（部品の指定と座標の指定は、どちらか片方だけにする）。',
+    );
+    for (const argv of [
+      ['--headed', 'drag', '--from', '@s1:e1', '--to', '@s1:e2'],
+      ['--headed', 'drag', '--from-xy', '1,1', '--to-xy', '2,2'],
+      ['--headed', 'drag', '--from', '@s1:e1', '--to-xy', '2,2'],
+      ['--headed', 'hover', '@s1:e1'],
+      ['--headed', 'hover', '--xy', '1,1'],
+      batch([{ command: 'drag', args: { from: '@s1:e1', to_xy: '2,2' } }]),
+      batch([{ command: 'hover', args: { ref_id: '@s1:e1' } }]),
+    ])
+      expect(refused(argv)).toBeNull();
+  });
 
   // Every form the agent used on the real desktop, and a few more ordinary ones.
   it.each([
