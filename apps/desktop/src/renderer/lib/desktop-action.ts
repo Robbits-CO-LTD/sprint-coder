@@ -1,7 +1,10 @@
 import type { ApprovalSummary } from '../types/sprint-coder';
 
 type DesktopAction = NonNullable<ApprovalSummary['desktopAction']>;
-type DesktopStep = Pick<DesktopAction, 'kind' | 'title' | 'mode' | 'target' | 'text' | 'textRole'>;
+type DesktopStep = Pick<
+  DesktopAction,
+  'kind' | 'title' | 'mode' | 'target' | 'destination' | 'text' | 'textRole'
+>;
 
 const ALL_TARGET = {
   windows: 'すべての窓',
@@ -24,7 +27,8 @@ export function desktopTargetText(target: NonNullable<DesktopStep['target']>): s
   if (target.window === undefined && target.role === undefined)
     return target.app === undefined ? '対象を確かめられません' : `アプリ「${target.app}」`;
   const place = target.window ?? target.app ?? '';
-  const part = `${target.role ?? '部品'}${target.name === undefined ? '' : `「${target.name}」`}`;
+  // A part without a name is said to have none, so it is not taken for the window's only one.
+  const part = `${target.role ?? '部品'}${target.name === undefined ? '（名前なし）' : `「${target.name}」`}`;
   return target.window === undefined ? `${place} の${part}${id}` : `${place}${app} の${part}${id}`;
 }
 
@@ -53,5 +57,9 @@ export function desktopModeLabel(step: Pick<DesktopStep, 'mode' | 'kind'>): stri
 
 /** Heading and target in one line, for history rows and accessible names. */
 export function desktopActionSummary(step: DesktopStep): string {
-  return step.target === undefined ? step.title : `${step.title} ${desktopTargetText(step.target)}`;
+  const summary =
+    step.target === undefined ? step.title : `${step.title} ${desktopTargetText(step.target)}`;
+  return step.destination === undefined
+    ? summary
+    : `${summary} → ${desktopTargetText(step.destination)}`;
 }

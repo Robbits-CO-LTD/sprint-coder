@@ -6,6 +6,7 @@ import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlStateFolder,
   isDesktopControlExecutable,
   isShippedDesktopControlPath,
   resolveDesktopControlCommand,
@@ -92,7 +93,7 @@ describe('desktop-control run environment', () => {
         platform: 'win32',
         realpath: (path) => path,
       }),
-    ).toEqual({ Path: '' });
+    ).toEqual({ Path: '', AGENT_DESKTOP_HOME: desktopControlStateFolder() });
   });
 
   it('drops any entry with a quote unread, and rebuilds PATH from the normalized folders', () => {
@@ -117,6 +118,7 @@ describe('desktop-control run environment', () => {
     // The quoted `;` splits into `"C:\outside` and `F:\work\app\bin"`: both carry a quote.
     expect(filtered).toEqual({
       PATH: ['C:\\Windows\\System32', 'C:\\Tools\\forward', 'D:\\'].join(';'),
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
     });
   });
 
@@ -131,7 +133,12 @@ describe('desktop-control run environment', () => {
         ['F:\\work\\app'],
         { platform: 'win32', realpath: (path) => path },
       ),
-    ).toEqual({ Path: 'C:\\one', PATH: 'C:\\two', OTHER: 'F:\\work\\app' });
+    ).toEqual({
+      Path: 'C:\\one',
+      PATH: 'C:\\two',
+      OTHER: 'F:\\work\\app',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
   });
 
   it('judges a PATH folder by where it really is', () => {
@@ -143,7 +150,10 @@ describe('desktop-control run environment', () => {
         realpath: (path) => (path === 'C:\\linked' ? 'F:\\work\\app\\bin' : path),
       },
     );
-    expect(filtered).toEqual({ PATH: 'C:\\other' });
+    expect(filtered).toEqual({
+      PATH: 'C:\\other',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
   });
 });
 

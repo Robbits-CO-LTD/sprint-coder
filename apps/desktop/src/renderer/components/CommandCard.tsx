@@ -202,6 +202,11 @@ export function CommandCard({
           {desktopAction.target === undefined ? null : (
             <p className="command-card__purpose">{desktopTargetText(desktopAction.target)}</p>
           )}
+          {desktopAction.destination === undefined ? null : (
+            <p className="command-card__purpose">
+              移動先: {desktopTargetText(desktopAction.destination)}
+            </p>
+          )}
           {desktopAction.text === undefined ? null : (
             <div className="command-card__fact command-card__fact--wide">
               <span>{desktopTextLabel(desktopAction)}</span>

@@ -35,6 +35,12 @@ beforeAll(() => {
       name: `${String.fromCodePoint(0x200b)}隠し${String.fromCodePoint(0x202e)}テキスト`,
     },
     '@e5': { ...charmapField, name: 'あ'.repeat(300), source_window_title: 'い'.repeat(300) },
+    // An icon-only button: no name, or only spaces.
+    '@e6': { ...charmapField, role: 'button', name: undefined },
+    '@e7': { ...charmapField, role: 'button', name: '   ' },
+  });
+  writeRefmap('suntitled', {
+    '@e1': { role: 'window', source_app: 'untitled.exe', source_window_id: 'w-777' },
   });
   writeRefmap('snotepad', {
     '@e1': {
@@ -259,6 +265,96 @@ describe('desktop-control approval description', () => {
       allowTaskGrant: false,
       openDetails: true,
     });
+  });
+
+  it('shows where a drag drops, and opens the details when the drop is not a named part', () => {
+    const drag = describeArgv(['drag', '--from', '@s1abc:e1', '--to', '@s1abc:e3']);
+    expect(drag).toMatchObject({
+      title: 'ドラッグします',
+      target: { resolved: true, name: 'コピーする文字(A):' },
+      destination: { resolved: true, role: 'メニューボタン', name: 'ファイル' },
+      openDetails: false,
+    });
+    // A drop that cannot be read, one on coordinates, and one on a part with no name.
+    for (const to of [
+      ['--to', '@s1abc:e99'],
+      ['--to-xy', '10,10'],
+      ['--to', '@s1abc:e6'],
+    ])
+      expect(describeArgv(['drag', '--from', '@s1abc:e1', ...to]).openDetails).toBe(true);
+    expect(describeArgv(['drag', '--from', '@s1abc:e1', '--to', '@s1abc:e99']).destination).toEqual(
+      { resolved: false, reference: '@s1abc:e99' },
+    );
+    // A drag in a batch, whose drop is not read, is never shown as explained.
+    expect(
+      describeArgv(['batch', JSON.stringify([{ command: 'drag', args: { ref_id: '@s1abc:e1' } }])])
+        .openDetails,
+    ).toBe(true);
+  });
+
+  it('opens the details of any operation whose target it cannot name', () => {
+    for (const argv of [
+      ['mouse-click', '--xy', '10,10'],
+      ['mouse-move', '--xy', '10,10'],
+      ['mouse-down', '--xy', '10,10'],
+      ['mouse-up', '--xy', '10,10'],
+      ['mouse-wheel', '--x', '10', '--y', '10', '--dy', '3'],
+      ['hover', '--xy', '10,10'],
+      ['drag', '--from-xy', '1,1', '--to-xy', '2,2'],
+      ['scroll', '--direction', 'down'],
+      ['press', 'ctrl+c'],
+      ['key-down', 'shift'],
+    ]) {
+      const action = describeArgv(argv);
+      expect(action.target).toBeUndefined();
+      expect(action.openDetails).toBe(true);
+    }
+    // One such entry opens a batch's details too.
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([
+          { command: 'expand', args: { ref_id: '@s1abc:e3' } },
+          { command: 'mouse-click', args: { xy: '10,10' } },
+        ]),
+      ]).openDetails,
+    ).toBe(true);
+    // Reads, and operations that act on no app or part, stay closed.
+    for (const argv of [
+      ['snapshot'],
+      ['wait', '200'],
+      ['clipboard-set', 'hello'],
+      ['clipboard-clear'],
+      ['press', 'ctrl+c', '--app', 'charmap'],
+    ])
+      expect(describeArgv(argv).openDetails).toBe(false);
+    expect(describeArgv(['dismiss-all-notifications'])).toMatchObject({
+      target: { resolved: true, all: 'notifications' },
+      openDetails: false,
+    });
+  });
+
+  it('says a part has no name and opens the details', () => {
+    for (const ref of ['@s1abc:e6', '@s1abc:e7']) {
+      const action = describeArgv(['click', ref]);
+      expect(action.target).toEqual({
+        resolved: true,
+        app: 'charmap.exe',
+        window: '文字コード表',
+        role: 'ボタン',
+        windowId: 'w-62263518',
+      });
+      expect(action.openDetails).toBe(true);
+    }
+    // A window with no title, found by its id.
+    const untitled = describeArgv(['minimize', '--window-id', 'w-777']);
+    expect(untitled.target).toEqual({
+      resolved: true,
+      app: 'untitled.exe',
+      role: '窓',
+      windowId: 'w-777',
+    });
+    expect(untitled.openDetails).toBe(true);
   });
 
   it('cuts long names and shows invisible characters as code points', () => {

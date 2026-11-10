@@ -2273,6 +2273,56 @@ describe('desktop control outside the command sandbox', () => {
   );
 
   it.skipIf(process.platform !== 'win32')(
+    'gives a desktop-control run the state folder its approval card reads, and only that one',
+    async () => {
+      const root = await workspace();
+      // The command reports every variable named like the state folder's, in any letter case.
+      const script = [
+        'const found = Object.entries(process.env).filter(([key]) => /^agent_desktop_home$/iu.test(key));',
+        'process.stdout.write(JSON.stringify(found));',
+      ].join('\n');
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const run = async () => {
+        const chunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(
+            await prepareTestExecutionSpec({
+              workspacePath: root,
+              executable: process.execPath,
+              argv: ['-e', script],
+            }),
+            { desktopControlWorkspaceRoots: [root], onChunk: (chunk) => void chunks.push(chunk) },
+          ),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        return JSON.parse(chunks.map(({ text }) => text).join('')) as [string, string][];
+      };
+      try {
+        // The folder could not be made private, so runs and the card fall back to the default.
+        desktopControlModule.configureDesktopControlStateRoot(join(root, 'state'), () => {
+          throw new Error('ACL refused');
+        });
+        expect(await run()).toEqual([
+          ['AGENT_DESKTOP_HOME', desktopControlModule.desktopControlStateFolder()],
+        ]);
+        // Sprint Coder's own folder, once it can be used.
+        const own = join(root, 'own-state');
+        desktopControlModule.configureDesktopControlStateRoot(own, () => {});
+        expect(await run()).toEqual([['AGENT_DESKTOP_HOME', own]]);
+      } finally {
+        desktopControlModule.configureDesktopControlStateRoot(null);
+        judge.mockRestore();
+        argvCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
     'Stop still ends a running desktop-control command and everything it started',
     async () => {
       const root = await workspace();

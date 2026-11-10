@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
@@ -146,8 +146,11 @@ describe('desktop-control state folder', () => {
   it.runIf(process.platform === 'win32')(
     'makes the folder private and points every run, and the card, at it',
     () => {
-      // Not set: the environment is only filtered, as before.
-      expect(desktopControlEnvironment({ A: '1' }, [], lookup)).toEqual({ A: '1' });
+      // Not set: the run still gets the folder the card reads.
+      expect(desktopControlEnvironment({ A: '1' }, [], lookup)).toEqual({
+        A: '1',
+        AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+      });
       const root = temporaryRoot();
       const makePrivate = vi.fn();
       configureDesktopControlStateRoot(root, makePrivate);
@@ -194,8 +197,34 @@ describe('desktop-control state folder', () => {
       throw new Error('ACL refused');
     });
     expect(desktopControlStateRoot()).toBeNull();
-    expect(desktopControlStateFolder()).not.toBe(root);
-    expect(desktopControlEnvironment({ A: '1' }, [], lookup)).toEqual({ A: '1' });
+    const folder = desktopControlStateFolder();
+    expect(folder).not.toBe(root);
+    // The run is pointed at the same default folder the card reads, never the caller's.
+    for (const name of ['AGENT_DESKTOP_HOME', 'agent_desktop_home', 'Agent_Desktop_Home'])
+      expect(
+        desktopControlEnvironment({ A: '1', [name]: 'C:\\attacker\\state' }, [], lookup),
+      ).toEqual({ A: '1', AGENT_DESKTOP_HOME: folder });
+    // Two spellings at once leave only the one value.
+    expect(
+      desktopControlEnvironment(
+        { AGENT_DESKTOP_HOME: 'C:\\one', agent_desktop_home: 'C:\\two', HOME: 'C:\\three' },
+        [],
+        lookup,
+      ),
+    ).toEqual({ HOME: 'C:\\three', AGENT_DESKTOP_HOME: folder });
+  });
+
+  it('reads the default folder from Sprint Coder’s own variable only when it has a drive', () => {
+    vi.stubEnv('AGENT_DESKTOP_HOME', 'D:\\own\\state\\');
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    expect(desktopControlStateFolder()).toBe('D:\\own\\state\\');
+    expect(desktopControlEnvironment({ AGENT_DESKTOP_HOME: 'C:\\x' }, [], lookup)).toEqual({
+      AGENT_DESKTOP_HOME: 'D:\\own\\state\\',
+    });
+    vi.stubEnv('AGENT_DESKTOP_HOME', '\\root-relative');
+    expect(desktopControlStateFolder()).toBe(join(homedir(), '.agent-desktop'));
   });
 
   it.runIf(process.platform === 'win32')(

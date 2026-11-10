@@ -137,7 +137,18 @@ const ALL_TARGETS: Readonly<Record<string, NonNullable<DesktopActionTarget['all'
   'list-displays': 'displays',
   'list-surfaces': 'surfaces',
   'list-notifications': 'notifications',
+  'dismiss-all-notifications': 'notifications',
 };
+// Operations that act on no app, window or part, so a card without a target still says it all.
+const NO_TARGET_COMMANDS = new Set([
+  'clipboard-set',
+  'clipboard-clear',
+  'session start',
+  'session end',
+  'session gc',
+  'cursor-overlay enable',
+  'cursor-overlay disable',
+]);
 // Semantic operations on a part. They take no mouse or keyboard, but the accessibility call can
 // bring the part's window to the front (seen with set-value and expand).
 const PART_OPERATIONS = new Set([
@@ -282,6 +293,8 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
           ref: stringField(args, 'ref_id'),
           windowId: stringField(args, 'window_id'),
           app: stringField(args, 'app'),
+          // Not read from a batch entry, so a drag in one is never shown as explained.
+          destination: undefined,
           text:
             textArgument(command) === undefined
               ? undefined
@@ -291,6 +304,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
       ),
     );
     steps = described.map(({ step }) => step);
+    if (described.some(({ unexplained }) => unexplained)) openDetails = true;
     if (described.some(({ cut }) => cut)) notes.push(TEXT_CUT_NOTE);
     if (entries.length > DESKTOP_ACTION_MAX_STEPS) {
       stepsOmitted = entries.length - DESKTOP_ACTION_MAX_STEPS;
@@ -315,11 +329,13 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
         ref: REF_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--from'),
         windowId: read.options.get('--window-id'),
         app: APP_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--app'),
+        destination: command === 'drag' ? read.options.get('--to') : undefined,
         text: text === undefined ? undefined : read.positionals[text[0]],
       },
       snapshots,
     );
     head = described.step;
+    if (described.unexplained) openDetails = true;
     if (described.cut) {
       notes.push(TEXT_CUT_NOTE);
       openDetails = true;
@@ -333,7 +349,14 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
           PART_OPERATIONS.has(command),
         )
       : !read.help && read.command !== undefined && PART_OPERATIONS.has(read.command));
-  if (all.some(({ target }) => target !== undefined && !target.resolved)) openDetails = true;
+  if (
+    all.some(
+      ({ target, destination }) =>
+        (target !== undefined && !target.resolved) ||
+        (destination !== undefined && !destination.resolved),
+    )
+  )
+    openDetails = true;
   if (mode === 'background' && partOperation) notes.unshift(RAISE_NOTE);
   if (all.some(({ kind }) => kind === 'launch')) notes.unshift(LAUNCH_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
@@ -352,15 +375,22 @@ type StepArguments = Readonly<{
   ref: string | undefined;
   windowId: string | undefined;
   app: string | undefined;
+  /** The ref a drag drops on. */
+  destination: string | undefined;
   text: string | undefined;
 }>;
 
+/**
+ * One operation for the card. `unexplained` is set when the card cannot say what an operation
+ * that is not a read acts on: no target (coordinates, or keys to whatever has focus), a part with
+ * no name, or a drag whose drop is not a named part. The card then opens its details.
+ */
 function describeStep(
   command: string,
   mode: Mode,
-  { ref, windowId, app, text }: StepArguments,
+  { ref, windowId, app, destination, text }: StepArguments,
   snapshots: SnapshotReader,
-): { step: DesktopActionStep; cut: boolean } {
+): { step: DesktopActionStep; cut: boolean; unexplained: boolean } {
   const [kind, title] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
   const target =
     ref !== undefined && ref !== ''
@@ -372,17 +402,37 @@ function describeStep(
           : Object.hasOwn(ALL_TARGETS, command)
             ? { resolved: true, all: ALL_TARGETS[command]! }
             : undefined;
+  const drop =
+    command === 'drag' && destination !== undefined && destination !== ''
+      ? snapshots.part(destination)
+      : undefined;
   const shown = text === undefined || text === '' ? undefined : visible(text, TEXT_MAX, true);
+  const unexplained =
+    kind !== 'read' &&
+    ((target === undefined && !NO_TARGET_COMMANDS.has(command)) ||
+      (target !== undefined && unnamed(target)) ||
+      (command === 'drag' && (drop === undefined || unnamed(drop))));
   return {
     step: {
       kind,
       title,
       mode,
       ...(target === undefined ? {} : { target }),
+      ...(drop === undefined ? {} : { destination: drop }),
       ...(shown === undefined ? {} : { text: shown.text, textRole: textArgument(command)![2] }),
     },
     cut: shown?.cut === true,
+    unexplained,
   };
+}
+
+/**
+ * Whether a confirmed target is a part, or a window, without a name, which the card cannot tell
+ * apart from others of its kind in the same window (an icon-only button, an untitled window).
+ */
+function unnamed(target: DesktopActionTarget): boolean {
+  if (!target.resolved || target.all !== undefined || target.role === undefined) return false;
+  return target.role === '窓' ? target.window === undefined : target.name === undefined;
 }
 
 function textArgument(command: string): readonly [number, string, TextRole] | undefined {

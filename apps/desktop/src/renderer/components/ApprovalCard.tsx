@@ -350,16 +350,23 @@ function DesktopStepFacts({
   step,
   targetId,
 }: {
-  step: Pick<DesktopAction, 'target' | 'text' | 'textRole'>;
+  step: Pick<DesktopAction, 'target' | 'destination' | 'text' | 'textRole'>;
   targetId?: string;
 }) {
-  if (step.target === undefined && step.text === undefined) return null;
+  if (step.target === undefined && step.destination === undefined && step.text === undefined)
+    return null;
   return (
     <dl className="approval-card__facts">
       {step.target === undefined ? null : (
         <div>
           <dt>対象</dt>
           <dd id={targetId}>{desktopTargetText(step.target)}</dd>
+        </div>
+      )}
+      {step.destination === undefined ? null : (
+        <div>
+          <dt>移動先</dt>
+          <dd>{desktopTargetText(step.destination)}</dd>
         </div>
       )}
       {step.text === undefined ? null : (

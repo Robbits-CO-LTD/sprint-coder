@@ -117,14 +117,15 @@ export function desktopControlEnvironment(
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
   const separator = windows ? ';' : ':';
-  const stateRoot = desktopControlStateRoot();
+  // The run always gets the folder the approval card reads its snapshots from, whether that is
+  // Sprint Coder's own or the binary's default, and never one the caller chose in any letter case:
+  // otherwise a refmap the agent wrote elsewhere could name a different part on the card than the
+  // one the run operates. The binary finds its default from HOME or USERPROFILE, which the caller
+  // may also set, so the default is passed explicitly too.
   const filtered = Object.entries(environment).filter(
-    ([key]) =>
-      stateRoot === null || (windows ? key.toUpperCase() : key) !== DESKTOP_CONTROL_STATE_VARIABLE,
+    ([key]) => (windows ? key.toUpperCase() : key) !== DESKTOP_CONTROL_STATE_VARIABLE,
   );
-  // The state folder is Sprint Coder's own, so the approval card reads the same snapshots the run
-  // writes (see `configureDesktopControlStateRoot`).
-  if (stateRoot !== null) filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, stateRoot]);
+  filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
   return Object.fromEntries(
     filtered.map(([key, value]) => {
       if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
@@ -164,7 +165,8 @@ let configuredStateRoot: string | null = null;
  * Administrators any access, even read (checked on 1.2.0). A folder under a drive root inherits
  * Authenticated Users and Users, so the folder is made private on every start, which also repairs
  * one an earlier version left inheriting. When that cannot be done, the folder is not used at all
- * and runs keep the binary's default, so the run and the card never read different folders.
+ * and runs are pointed at the default folder of `desktopControlStateFolder`, the one the card then
+ * reads, so the run and the card never read different folders.
  */
 export function configureDesktopControlStateRoot(
   root: string | null,
@@ -190,13 +192,16 @@ export function desktopControlStateRoot(): string | null {
 }
 
 /**
- * The folder a desktop-control run outside the sandbox keeps its state in: the configured one, or
- * else where the binary looks by itself (an inherited variable, then its folder in the home).
+ * The folder a desktop-control run outside the sandbox keeps its state in, and the one its approval
+ * card reads: the configured one, or else Sprint Coder's own inherited variable (an absolute path
+ * with a drive letter), then the binary's folder in the home. `desktopControlEnvironment` passes
+ * this to every run, so the run never looks anywhere else.
  */
 export function desktopControlStateFolder(): string {
   if (configuredStateRoot !== null) return configuredStateRoot;
   const inherited = process.env[DESKTOP_CONTROL_STATE_VARIABLE];
-  if (inherited !== undefined && win32.isAbsolute(inherited)) return inherited;
+  if (inherited !== undefined && /^[a-z]:[\\/]/iu.test(inherited))
+    return win32.normalize(inherited);
   return join(homedir(), '.agent-desktop');
 }
 

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalCard } from './ApprovalCard';
 import { ApprovalAuditRow } from './ApprovalAuditRow';
 import { CommandCard } from './CommandCard';
+import { desktopActionsByCall, desktopCallKey } from './ChatSurface/Timeline';
 import type { ApprovalSummary } from '../types/sprint-coder';
 import type { CommandCardState } from '../store/appStore';
 
@@ -454,5 +455,48 @@ describe('desktop-control history and timeline', () => {
       '詳細（実行内容） クリックします 文字コード表（charmap.exe） の入力欄「コピーする文字」',
     ]);
     await act(async () => root.unmount());
+  });
+
+  it('shows where a drag drops, and says a part has no name', () => {
+    const drag: DesktopAction = {
+      kind: 'operate',
+      title: 'ドラッグします',
+      mode: 'foreground',
+      target: { ...typing.target! },
+      destination: { resolved: true, app: 'charmap.exe', window: '文字コード表', role: 'ボタン' },
+      allowTaskGrant: false,
+      notes: [],
+      openDetails: true,
+    };
+    const html = card(drag);
+    expect(html).toContain('移動先');
+    expect(html).toContain('文字コード表（charmap.exe） のボタン（名前なし）');
+    expect(html).toMatch(/<details[^>]*open=""/u);
+    const row = renderToStaticMarkup(
+      <ApprovalAuditRow
+        approval={{
+          ...base,
+          state: 'resolved',
+          decision: 'allow_once',
+          decidedAt: '2026-11-10T00:00:10.000Z',
+          desktopAction: drag,
+        }}
+      />,
+    );
+    expect(row).toContain(
+      'ドラッグします 文字コード表（charmap.exe） の入力欄「コピーする文字」 → 文字コード表（charmap.exe） のボタン（名前なし）',
+    );
+  });
+
+  it('matches a command to its approval by Turn and call id, never by call id alone', () => {
+    const other = { ...typing, title: 'クリックします' };
+    const byCall = desktopActionsByCall([
+      { ...base, desktopAction: typing },
+      { ...base, id: 'approval-2', turnId: 'turn-2', desktopAction: other },
+    ]);
+    expect(byCall.get(desktopCallKey('turn-1', 'call-1'))).toBe(typing);
+    expect(byCall.get(desktopCallKey('turn-2', 'call-1'))).toBe(other);
+    // The same call id in a Turn whose approval had no description gets none.
+    expect(byCall.get(desktopCallKey('turn-3', 'call-1'))).toBeUndefined();
   });
 });

@@ -2136,6 +2136,8 @@ export const desktopActionStepSchema = z
     title: z.string().min(1).max(40),
     mode: desktopActionModeSchema,
     target: desktopActionTargetSchema.optional(),
+    /** Where a drag drops what it picked up (`target` is where it starts). */
+    destination: desktopActionTargetSchema.optional(),
     /** The text it enters, the value it selects or the keys it presses. */
     text: z.string().min(1).max(1_000).optional(),
     /** What `text` is: entered text, a selected value, keys, clipboard text or a button's name. */

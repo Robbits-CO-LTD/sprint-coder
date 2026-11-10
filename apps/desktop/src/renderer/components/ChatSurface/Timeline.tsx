@@ -267,13 +267,12 @@ export function Timeline({
   }, [graphVersions, isActive, messages, turn?.streamingMessageId]);
 
   const isEmpty = messages.length === 0 && !turn && activityGroups.leading.length === 0;
-  // A desktop-control command shows what its approval card described; both carry the call's id.
-  const desktopActionByCall = useMemo(() => {
-    const byCall = new Map<string, NonNullable<ApprovalSummary['desktopAction']>>();
-    for (const approval of [...approvalHistory, ...approvals])
-      if (approval.desktopAction !== undefined) byCall.set(approval.callId, approval.desktopAction);
-    return byCall;
-  }, [approvalHistory, approvals]);
+  // A desktop-control command shows what its approval card described. Both carry the Turn and the
+  // call's id; a call id alone can repeat in another Turn of the Task.
+  const desktopActionByCall = useMemo(
+    () => desktopActionsByCall([...approvalHistory, ...approvals]),
+    [approvalHistory, approvals],
+  );
 
   return (
     <GraphTaskContext.Provider value={taskId}>
@@ -453,7 +452,9 @@ export function Timeline({
                     key={card.command.id}
                     taskId={taskId}
                     card={card}
-                    desktopAction={desktopActionByCall.get(card.command.callId)}
+                    desktopAction={desktopActionByCall.get(
+                      desktopCallKey(card.command.turnId, card.command.callId),
+                    )}
                   />
                 ))}
                 {turnFileChanges.map((entry) => (
@@ -542,6 +543,21 @@ export function Timeline({
       </div>
     </GraphTaskContext.Provider>
   );
+}
+
+/** The desktop-control descriptions of approvals, by Turn and call id (`desktopCallKey`). */
+export function desktopActionsByCall(
+  approvals: readonly ApprovalSummary[],
+): ReadonlyMap<string, NonNullable<ApprovalSummary['desktopAction']>> {
+  const byCall = new Map<string, NonNullable<ApprovalSummary['desktopAction']>>();
+  for (const approval of approvals)
+    if (approval.desktopAction !== undefined)
+      byCall.set(desktopCallKey(approval.turnId, approval.callId), approval.desktopAction);
+  return byCall;
+}
+
+export function desktopCallKey(turnId: string, callId: string): string {
+  return JSON.stringify([turnId, callId]);
 }
 
 export function mergeWorkspaceDiffs(
