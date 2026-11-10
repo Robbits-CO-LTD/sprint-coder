@@ -15,7 +15,6 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ResolvedForgeConfig } from '@electron-forge/shared-types';
 import config, {
-  copyDesktopControlBinary,
   desktopControlResources,
   desktopControlSource,
   assertNativePackagingHost,
@@ -25,6 +24,7 @@ import config, {
   DMG_WINDOW_SIZE,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
+  refreshPackagedDesktopControlDigest,
   refreshPackagedSandboxRunnerDigest,
   shouldIgnoreFromPackage,
   verifyDesktopControlBinary,
@@ -38,16 +38,15 @@ import {
   verifySandboxRunnerDigest,
 } from './src/main/sandbox-runner';
 
-// The binary's path inside the npm package it ships from.
+// The desktop-control executable's build output, which the package ships under the same name.
 const DESKTOP_CONTROL_SOURCE = resolve(
   __dirname,
-  '..',
-  '..',
-  'node_modules',
-  'agent-desktop',
-  'bin',
-  'agent-desktop-win32-x64.exe',
+  'desktop-control',
+  'build',
+  'Release',
+  'sprint-coder-desktop-control.exe',
 );
+const sha256 = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -207,9 +206,13 @@ describe('macOS sandbox runner sealing', () => {
       // Deterministic signing-byte mutation; no certificate or signing service is used.
       writeFileSync(runner, 'post-signing-runner');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
-      // The pinned desktop-control binary the package ships next to it (checked in the same hook).
+      // The desktop-control executable the package ships next to it, resealed in the same hook.
       const desktop = join(resources, 'sprint-coder-desktop-control.exe');
-      copyFileSync(DESKTOP_CONTROL_SOURCE, desktop);
+      writeFileSync(desktop, 'unsigned-desktop-control');
+      writeFileSync(`${desktop}.sha256`, `${sha256('unsigned-desktop-control')}\n`);
+      expect(() => verifyDesktopControlBinary(desktop)).not.toThrow();
+      writeFileSync(desktop, 'post-signing-desktop-control');
+      expect(() => verifyDesktopControlBinary(desktop)).toThrow('does not match its sealed digest');
       const resolvedConfig: ResolvedForgeConfig = {
         ...config,
         plugins: config.plugins ?? [],
@@ -236,16 +239,13 @@ describe('macOS sandbox runner sealing', () => {
       expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
       writeFileSync(runner, 'tampered-after-package');
       expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
-      // A signed or otherwise altered desktop-control binary fails the package instead of
-      // shipping off.
-      appendFileSync(desktop, 'signature');
-      await expect(
-        config.hooks!.postPackage!(resolvedConfig, {
-          platform: 'win32',
-          arch: 'x64',
-          outputPaths: [root],
-        }),
-      ).rejects.toThrow('does not match the pin');
+      // The desktop-control seal now holds the signed bytes, which the app checks at run time.
+      expect(readFileSync(`${desktop}.sha256`, 'utf8')).toBe(
+        `${sha256('post-signing-desktop-control')}\n`,
+      );
+      expect(() => verifyDesktopControlBinary(desktop)).not.toThrow();
+      appendFileSync(desktop, 'tampered-after-package');
+      expect(() => verifyDesktopControlBinary(desktop)).toThrow('does not match its sealed digest');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -274,9 +274,13 @@ describe('macOS sandbox runner sealing', () => {
 describe('desktop-control resources', () => {
   const LICENSE = resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt');
 
-  it('ships only the pinned Windows x64 binary, under its shipped name, and its license', () => {
+  it('ships only the Windows x64 build output, its seal and its license, under their build names', () => {
     expect(desktopControlSource('win32', 'x64')).toBe(DESKTOP_CONTROL_SOURCE);
-    expect(desktopControlResources('win32', 'x64')).toEqual([LICENSE]);
+    expect(desktopControlResources('win32', 'x64')).toEqual([
+      DESKTOP_CONTROL_SOURCE,
+      `${DESKTOP_CONTROL_SOURCE}.sha256`,
+      LICENSE,
+    ]);
     for (const [platform, arch] of [
       ['win32', 'arm64'],
       ['darwin', 'arm64'],
@@ -287,60 +291,91 @@ describe('desktop-control resources', () => {
       expect(desktopControlResources(platform, arch)).toEqual([]);
     }
     const extra = (config.packagerConfig?.extraResource ?? []) as string[];
-    // The binary never goes through extraResource, which would keep the npm file name.
-    expect(extra).not.toContain(DESKTOP_CONTROL_SOURCE);
-    expect(extra.filter((path) => path === LICENSE)).toEqual(
-      process.platform === 'win32' && process.arch === 'x64' ? [LICENSE] : [],
+    const shipped = [DESKTOP_CONTROL_SOURCE, `${DESKTOP_CONTROL_SOURCE}.sha256`, LICENSE];
+    expect(extra.filter((path) => shipped.includes(path))).toEqual(
+      process.platform === 'win32' && process.arch === 'x64' ? shipped : [],
     );
     expect(config.packagerConfig?.afterCopyExtraResources).toHaveLength(1);
-    // node_modules (with every other platform's binary) never enters the package.
-    expect(shouldIgnoreFromPackage('/node_modules/agent-desktop/bin/agent-desktop-linux-x64')).toBe(
-      true,
-    );
+    // The source and its Cargo output never enter the package.
+    expect(shouldIgnoreFromPackage('/desktop-control/src/main.rs')).toBe(true);
+    expect(shouldIgnoreFromPackage('/desktop-control/target/release/app.exe')).toBe(true);
     // The third-party license stays shipped in full, with its source.
     const license = readFileSync(LICENSE, 'utf8');
     expect(license).toContain('agent-desktop 1.2.0');
     expect(license).toContain('https://github.com/vercel-labs/agent-desktop');
+    expect(license).toContain('2b0a7334fc111730454b726e6800aa41cdafc093');
+    expect(license).toContain('apps/desktop/desktop-control/VENDORED.md');
     expect(license).toContain('Apache License');
     expect(license).toContain('END OF TERMS AND CONDITIONS');
   });
 
-  it('copies the same bytes into resources under the shipped name, in the real hook', async () => {
+  it('checks the copied bytes against their build seal before signing, in the real hook', async () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-copy-'));
+    const [hook] = config.packagerConfig!.afterCopyExtraResources!;
+    const runHook = (platform: string, arch: string) =>
+      new Promise<void>((done, fail) =>
+        hook!(root, '0.0.0', platform, arch, (error) => (error ? fail(error) : done())),
+      );
     try {
       const resources = join(root, 'resources');
       mkdirSync(resources, { recursive: true });
-      const [hook] = config.packagerConfig!.afterCopyExtraResources!;
-      await new Promise<void>((done, fail) =>
-        hook!(root, '0.0.0', 'win32', 'x64', (error) => (error ? fail(error) : done())),
-      );
       const shipped = join(resources, 'sprint-coder-desktop-control.exe');
-      expect(readFileSync(shipped).equals(readFileSync(DESKTOP_CONTROL_SOURCE))).toBe(true);
-      expect(existsSync(join(resources, 'agent-desktop-win32-x64.exe'))).toBe(false);
-      // Nothing is copied for a target without a pin.
-      const other = join(root, 'other');
-      mkdirSync(other, { recursive: true });
-      copyDesktopControlBinary(other, 'linux', 'x64');
-      expect(existsSync(join(other, 'sprint-coder-desktop-control.exe'))).toBe(false);
+      writeFileSync(shipped, 'built-desktop-control');
+      writeFileSync(`${shipped}.sha256`, `${sha256('built-desktop-control')}\n`);
+      await expect(runHook('win32', 'x64')).resolves.toBeUndefined();
+      appendFileSync(shipped, 'x');
+      await expect(runHook('win32', 'x64')).rejects.toThrow('does not match its sealed digest');
+      // Nothing is checked for a target it is not shipped for.
+      await expect(runHook('linux', 'x64')).resolves.toBeUndefined();
+      await expect(runHook('win32', 'arm64')).resolves.toBeUndefined();
+      rmSync(shipped);
+      await expect(runHook('win32', 'x64')).rejects.toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('fails the build when the binary is not the pinned bytes', () => {
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-pin-'));
+  it('fails the build when the executable is not the bytes its manifest seals', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-seal-'));
     try {
       const copy = join(root, 'sprint-coder-desktop-control.exe');
-      copyFileSync(DESKTOP_CONTROL_SOURCE, copy);
-      expect(() => verifyDesktopControlBinary(copy, 'win32', 'x64')).not.toThrow();
+      writeFileSync(copy, 'desktop-control');
+      writeFileSync(`${copy}.sha256`, `${sha256('desktop-control')}\n`);
+      expect(() => verifyDesktopControlBinary(copy)).not.toThrow();
       appendFileSync(copy, 'x');
-      expect(() => verifyDesktopControlBinary(copy, 'win32', 'x64')).toThrow(
-        'does not match the pin',
+      expect(() => verifyDesktopControlBinary(copy)).toThrow('does not match its sealed digest');
+      writeFileSync(`${copy}.sha256`, 'not-a-digest\n');
+      expect(() => verifyDesktopControlBinary(copy)).toThrow('invalid digest manifest');
+      rmSync(`${copy}.sha256`);
+      expect(() => verifyDesktopControlBinary(copy)).toThrow();
+      expect(() => verifyDesktopControlBinary(join(root, 'missing.exe'))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform === 'win32' && process.arch === 'x64')(
+    'has a real build output that agrees with its seal',
+    () => {
+      expect(() => verifyDesktopControlBinary(DESKTOP_CONTROL_SOURCE)).not.toThrow();
+      expect(existsSync(DESKTOP_CONTROL_SOURCE)).toBe(true);
+    },
+  );
+
+  it('reseals the packaged executable from its post-signing bytes', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-desktop-control-reseal-'));
+    try {
+      const resources = join(root, 'resources');
+      mkdirSync(resources, { recursive: true });
+      const shipped = join(resources, 'sprint-coder-desktop-control.exe');
+      writeFileSync(shipped, 'signed-desktop-control');
+      writeFileSync(`${shipped}.sha256`, `${'0'.repeat(64)}\n`);
+      expect(refreshPackagedDesktopControlDigest(root)).toBe(sha256('signed-desktop-control'));
+      expect(readFileSync(`${shipped}.sha256`, 'utf8')).toBe(
+        `${sha256('signed-desktop-control')}\n`,
       );
-      expect(() => verifyDesktopControlBinary(join(root, 'missing.exe'), 'win32', 'x64')).toThrow();
-      expect(() => verifyDesktopControlBinary(copy, 'linux', 'x64')).toThrow(
-        'No desktop-control pin',
-      );
+      rmSync(shipped);
+      expect(() => refreshPackagedDesktopControlDigest(root)).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

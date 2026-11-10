@@ -13,6 +13,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 const runner = 'resources/sprint-coder-sandbox-runner.exe';
+const desktop = 'resources/sprint-coder-desktop-control.exe';
 const seal = (bytes: string) => createHash('sha256').update(bytes).digest('hex');
 
 // Minimal stored ZIP writer keeps the archive-boundary tests independent of OS zip tools.
@@ -121,11 +122,15 @@ describe('Windows final sandbox artifact seals', () => {
     const zip = fixture([
       [runner, 'one'],
       [runner + '.sha256', seal('one')],
+      [desktop, 'desktop'],
+      [desktop + '.sha256', seal('desktop')],
     ]);
     const nupkg = fixture(
       [
         ['lib/net45/' + runner, 'two'],
         ['lib/net45/' + runner + '.sha256', seal('two')],
+        ['lib/net45/' + desktop, 'desktop'],
+        ['lib/net45/' + desktop + '.sha256', seal('desktop')],
       ],
       '-full.nupkg',
     );
@@ -133,7 +138,45 @@ describe('Windows final sandbox artifact seals', () => {
       verifyWindowsSandboxArtifacts([
         { platform: 'win32', arch: 'x64', packageJSON: {}, artifacts: [zip, nupkg] },
       ]),
-    ).rejects.toThrow('bytes differ');
+    ).rejects.toThrow('sandbox runner bytes differ');
+  });
+  it('requires the desktop-control executable sealed by its final bytes, the same in both', async () => {
+    const helper: ReadonlyArray<readonly [string, string]> = [
+      [runner, 'helper'],
+      [runner + '.sha256', seal('helper')],
+    ];
+    const artifacts = (...paths: string[]) =>
+      verifyWindowsSandboxArtifacts([
+        { platform: 'win32', arch: 'x64', packageJSON: {}, artifacts: paths },
+      ]);
+    const sealedZip = fixture([...helper, [desktop, 'one'], [desktop + '.sha256', seal('one')]]);
+    await expect(artifacts(sealedZip)).resolves.toBeUndefined();
+    await expect(
+      verifyWindowsSandboxArchive(sealedZip, 'sprint-coder-desktop-control.exe'),
+    ).resolves.toBe(seal('one'));
+    for (const entries of [
+      [...helper],
+      [...helper, [desktop, 'signed']],
+      [...helper, [desktop, 'signed'], [desktop + '.sha256', seal('unsigned')]],
+    ] as const)
+      await expect(artifacts(fixture(entries))).rejects.toThrow(
+        'sprint-coder-desktop-control.exe digest verification failed',
+      );
+    const otherNupkg = fixture(
+      [
+        ...helper.map(([path, text]) => ['lib/net45/' + path, text] as const),
+        ['lib/net45/' + desktop, 'two'],
+        ['lib/net45/' + desktop + '.sha256', seal('two')],
+      ],
+      '-full.nupkg',
+    );
+    await expect(artifacts(sealedZip, otherNupkg)).rejects.toThrow('desktop-control bytes differ');
+    // Only Windows x64 ships it.
+    await expect(
+      verifyWindowsSandboxArtifacts([
+        { platform: 'win32', arch: 'arm64', packageJSON: {}, artifacts: [fixture(helper)] },
+      ]),
+    ).resolves.toBeUndefined();
   });
   it('does not apply Windows validation to other platforms or delta/installer containers', async () => {
     await expect(

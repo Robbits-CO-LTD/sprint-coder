@@ -11,27 +11,27 @@ import {
   runsOutsideCommandSandbox,
 } from './desktop-control';
 import {
-  DESKTOP_CONTROL_PINS,
+  DESKTOP_CONTROL_EXECUTABLE,
   DESKTOP_CONTROL_VERSION,
-  desktopControlPin,
-} from './desktop-control-pins';
+  desktopControlSupported,
+} from './desktop-control-build';
 
-const PIN = 'd274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3';
+// The digest a build (or the package's signing step) sealed in the `.sha256` manifest.
+const SEALED = 'd274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3';
 const OTHER = 'e'.repeat(64);
 const RESOURCES = 'C:\\Program Files\\Sprint Coder\\resources';
 const PACKAGED = `${RESOURCES}\\sprint-coder-desktop-control.exe`;
-// In a development run the binary keeps its npm package name and path.
-const NPM_FILE = 'agent-desktop-win32-x64.exe';
-const DEVELOPMENT = `F:\\repo\\node_modules\\agent-desktop\\bin\\${NPM_FILE}`;
-const REPOSITORY_BIN = join(
+// In a development run, the build output in the repository.
+const DEVELOPMENT =
+  'F:\\repo\\apps\\desktop\\desktop-control\\build\\Release\\sprint-coder-desktop-control.exe';
+const REPOSITORY_BUILD = join(
   __dirname,
   '..',
   '..',
-  '..',
-  '..',
-  'node_modules',
-  'agent-desktop',
-  'bin',
+  'desktop-control',
+  'build',
+  'Release',
+  DESKTOP_CONTROL_EXECUTABLE,
 );
 const digests =
   (entries: Record<string, string>) =>
@@ -42,7 +42,8 @@ const packaged = {
   arch: 'x64',
   packaged: true,
   resourcesPath: RESOURCES,
-  contentDigest: digests({ [PACKAGED]: PIN }),
+  contentDigest: digests({ [PACKAGED]: SEALED }),
+  sealedDigest: digests({ [PACKAGED]: SEALED }),
   realpath: (path: string) => path,
 };
 const development = {
@@ -50,7 +51,8 @@ const development = {
   arch: 'x64',
   packaged: false,
   repositoryRoot: 'F:\\repo',
-  contentDigest: digests({ [DEVELOPMENT]: PIN }),
+  contentDigest: digests({ [DEVELOPMENT]: SEALED }),
+  sealedDigest: digests({ [DEVELOPMENT]: SEALED }),
   realpath: (path: string) => path,
 };
 
@@ -146,63 +148,103 @@ describe('desktop-control run environment', () => {
   });
 });
 
-describe('desktop-control pin', () => {
-  it('pins only the Windows x64 binary of 1.2.0, to the npm package bytes', () => {
+describe('desktop-control build', () => {
+  it('is built and shipped for Windows x64 only, from the 1.2.0 source, under one name', () => {
     expect(DESKTOP_CONTROL_VERSION).toBe('1.2.0');
-    expect(Object.keys(DESKTOP_CONTROL_PINS)).toEqual(['win32-x64']);
-    expect(desktopControlPin('win32', 'x64')).toEqual({
-      file: NPM_FILE,
-      shipped: 'sprint-coder-desktop-control.exe',
-      sha256: PIN,
-    });
+    expect(DESKTOP_CONTROL_EXECUTABLE).toBe('sprint-coder-desktop-control.exe');
+    expect(desktopControlSupported('win32', 'x64')).toBe(true);
     for (const [platform, arch] of [
       ['win32', 'arm64'],
+      ['win32', 'ia32'],
       ['darwin', 'arm64'],
+      ['darwin', 'x64'],
       ['linux', 'x64'],
       ['__proto__', 'x'],
     ] as const)
-      expect(desktopControlPin(platform, arch)).toBeNull();
-    // The installed dependency carries exactly these bytes and agrees with its own manifest.
-    const binary = readFileSync(join(REPOSITORY_BIN, NPM_FILE));
-    expect(createHash('sha256').update(binary).digest('hex')).toBe(PIN);
-    expect(readFileSync(join(REPOSITORY_BIN, `${NPM_FILE}.sha256`), 'utf8').trim()).toBe(PIN);
+      expect(desktopControlSupported(platform, arch)).toBe(false);
   });
+
+  it.skipIf(process.platform !== 'win32' || process.arch !== 'x64')(
+    'has a build in this checkout whose bytes agree with its own manifest',
+    () => {
+      const sealed = readFileSync(`${REPOSITORY_BUILD}.sha256`, 'utf8').trim();
+      expect(sealed).toMatch(/^[a-f0-9]{64}$/u);
+      expect(createHash('sha256').update(readFileSync(REPOSITORY_BUILD)).digest('hex')).toBe(
+        sealed,
+      );
+    },
+  );
 });
 
 describe('desktop-control lookup', () => {
-  it('uses only the shipped copy: the packaged resources, or node_modules in development', () => {
+  it('uses only the shipped copy: the packaged resources, or the build output in development', () => {
     expect(resolveDesktopControlCommand(packaged)).toBe(PACKAGED);
     expect(resolveDesktopControlCommand(development)).toBe(DEVELOPMENT);
-    // The packaged app never looks at node_modules, and development never at resources.
-    expect(
-      resolveDesktopControlCommand({ ...packaged, contentDigest: digests({ [DEVELOPMENT]: PIN }) }),
-    ).toBeNull();
-    expect(
-      resolveDesktopControlCommand({ ...development, contentDigest: digests({ [PACKAGED]: PIN }) }),
-    ).toBeNull();
-    expect(resolveDesktopControlCommand({ ...packaged, resourcesPath: '' })).toBeNull();
-    // The packaged app looks only under the shipped name, never the npm package's file name.
+    // The packaged app never looks at the build output, and development never at resources.
+    const atDevelopment = digests({ [DEVELOPMENT]: SEALED });
+    const atPackaged = digests({ [PACKAGED]: SEALED });
     expect(
       resolveDesktopControlCommand({
         ...packaged,
-        contentDigest: digests({ [`${RESOURCES}\\${NPM_FILE}`]: PIN }),
+        contentDigest: atDevelopment,
+        sealedDigest: atDevelopment,
+      }),
+    ).toBeNull();
+    expect(
+      resolveDesktopControlCommand({
+        ...development,
+        contentDigest: atPackaged,
+        sealedDigest: atPackaged,
+      }),
+    ).toBeNull();
+    expect(resolveDesktopControlCommand({ ...packaged, resourcesPath: '' })).toBeNull();
+    // The packaged app looks only under the shipped name.
+    const elsewhere = digests({ [`${RESOURCES}\\desktop-control.exe`]: SEALED });
+    expect(
+      resolveDesktopControlCommand({
+        ...packaged,
+        contentDigest: elsewhere,
+        sealedDigest: elsewhere,
       }),
     ).toBeNull();
   });
 
-  it('returns null when the shipped file is missing or its bytes are not the pin', () => {
+  it('returns null when the shipped file is missing or its bytes are not the sealed ones', () => {
     expect(resolveDesktopControlCommand({ ...packaged, contentDigest: () => null })).toBeNull();
     expect(
       resolveDesktopControlCommand({ ...packaged, contentDigest: digests({ [PACKAGED]: OTHER }) }),
     ).toBeNull();
   });
 
-  it('is off on macOS, Linux and architectures without a pin', () => {
-    const contentDigest = () => PIN;
+  it('returns null when the seal is missing or malformed, whatever the bytes', () => {
+    for (const sealed of [null, '', 'not-a-digest', SEALED.toUpperCase(), `${SEALED}0`])
+      for (const lookup of [packaged, development])
+        expect(
+          resolveDesktopControlCommand({
+            ...lookup,
+            contentDigest: () => sealed,
+            sealedDigest: () => sealed,
+          }),
+        ).toBeNull();
+  });
+
+  it('trusts whatever digest the shipped file is sealed with, and only while its bytes match', () => {
+    // A rebuild (or the package's signing step) seals new bytes; the old digest stops counting.
+    const rebuilt = { ...packaged, contentDigest: () => OTHER, sealedDigest: () => OTHER };
+    expect(resolveDesktopControlCommand(rebuilt)).toBe(PACKAGED);
+    expect(isDesktopControlExecutable(PACKAGED, OTHER, rebuilt)).toBe(true);
+    expect(isDesktopControlExecutable(PACKAGED, SEALED, rebuilt)).toBe(false);
+  });
+
+  it('is off on macOS, Linux and architectures it is not built for', () => {
+    const contentDigest = () => SEALED;
+    const sealedDigest = () => SEALED;
     for (const platform of ['darwin', 'linux'] as const)
-      expect(resolveDesktopControlCommand({ ...development, platform, contentDigest })).toBeNull();
+      expect(
+        resolveDesktopControlCommand({ ...development, platform, contentDigest, sealedDigest }),
+      ).toBeNull();
     expect(
-      resolveDesktopControlCommand({ ...development, arch: 'arm64', contentDigest }),
+      resolveDesktopControlCommand({ ...development, arch: 'arm64', contentDigest, sealedDigest }),
     ).toBeNull();
   });
 
@@ -217,32 +259,36 @@ describe('desktop-control lookup', () => {
           ...development,
           contentDigest: (path) => {
             seen.push(path);
-            return PIN;
+            return SEALED;
+          },
+          sealedDigest: (path) => {
+            seen.push(path);
+            return SEALED;
           },
         }),
       ).toBe(DEVELOPMENT);
-      expect(seen).toEqual([DEVELOPMENT]);
+      expect(seen).toEqual([DEVELOPMENT, DEVELOPMENT]);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
   it.skipIf(process.platform !== 'win32' || process.arch !== 'x64')(
-    'finds the real dependency in this checkout',
+    'finds the real build in this checkout',
     () => {
-      expect(resolveDesktopControlCommand()?.toLowerCase()).toBe(
-        join(REPOSITORY_BIN, NPM_FILE).toLowerCase(),
-      );
+      expect(resolveDesktopControlCommand()?.toLowerCase()).toBe(REPOSITORY_BUILD.toLowerCase());
     },
   );
 });
 
 describe('desktop control outside the command sandbox', () => {
-  it('lets only the shipped file with the pinned bytes out', () => {
-    expect(isDesktopControlExecutable(PACKAGED, PIN, packaged)).toBe(true);
-    expect(isDesktopControlExecutable(PACKAGED.toUpperCase(), PIN, packaged)).toBe(true);
-    expect(runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo'], packaged)).toBe(true);
-    expect(runsOutsideCommandSandbox(DEVELOPMENT, PIN, ['C:\\work\\repo'], development)).toBe(true);
+  it('lets only the shipped file with the sealed bytes out', () => {
+    expect(isDesktopControlExecutable(PACKAGED, SEALED, packaged)).toBe(true);
+    expect(isDesktopControlExecutable(PACKAGED.toUpperCase(), SEALED, packaged)).toBe(true);
+    expect(runsOutsideCommandSandbox(PACKAGED, SEALED, ['C:\\work\\repo'], packaged)).toBe(true);
+    expect(runsOutsideCommandSandbox(DEVELOPMENT, SEALED, ['C:\\work\\repo'], development)).toBe(
+      true,
+    );
   });
 
   it('never trusts the path alone: other sealed bytes at the shipped path stay inside', () => {
@@ -260,23 +306,32 @@ describe('desktop control outside the command sandbox', () => {
     ).toBe(false);
   });
 
-  it('keeps the pinned bytes inside anywhere but the shipped file', () => {
+  it('keeps the sealed bytes inside anywhere but the shipped file', () => {
     for (const executable of [
       'C:\\work\\repo\\sprint-coder-desktop-control.exe',
-      `C:\\other\\${NPM_FILE}`,
+      'C:\\other\\desktop-control.exe',
       'C:\\Windows\\System32\\cmd.exe',
     ])
-      expect(runsOutsideCommandSandbox(executable, PIN, ['C:\\work\\repo'], packaged)).toBe(false);
-    // Nor when the shipped file itself no longer holds the pinned bytes.
+      expect(runsOutsideCommandSandbox(executable, SEALED, ['C:\\work\\repo'], packaged)).toBe(
+        false,
+      );
+    // Nor when the shipped file itself no longer holds the sealed bytes.
     expect(
-      runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo'], {
+      runsOutsideCommandSandbox(PACKAGED, SEALED, ['C:\\work\\repo'], {
         ...packaged,
         contentDigest: () => OTHER,
       }),
     ).toBe(false);
-    // Nor on a platform without a pin.
+    // Nor when the shipped file has no seal.
     expect(
-      runsOutsideCommandSandbox(DEVELOPMENT, PIN, ['/home/me/repo'], {
+      runsOutsideCommandSandbox(PACKAGED, SEALED, ['C:\\work\\repo'], {
+        ...packaged,
+        sealedDigest: () => null,
+      }),
+    ).toBe(false);
+    // Nor on a platform it is not built for.
+    expect(
+      runsOutsideCommandSandbox(DEVELOPMENT, SEALED, ['/home/me/repo'], {
         ...development,
         platform: 'linux',
       }),
@@ -285,13 +340,13 @@ describe('desktop control outside the command sandbox', () => {
 
   it('keeps the binary inside when it lives in any Workspace root of the Turn', () => {
     for (const root of [RESOURCES, 'c:\\PROGRAM FILES', 'C:\\'])
-      expect(runsOutsideCommandSandbox(PACKAGED, PIN, ['C:\\work\\repo', root], packaged)).toBe(
+      expect(runsOutsideCommandSandbox(PACKAGED, SEALED, ['C:\\work\\repo', root], packaged)).toBe(
         false,
       );
     expect(
       runsOutsideCommandSandbox(
         PACKAGED,
-        PIN,
+        SEALED,
         ['C:\\Program Files\\Sprint', 'C:\\Program Files\\Sprint Coder-other', 'D:\\'],
         packaged,
       ),

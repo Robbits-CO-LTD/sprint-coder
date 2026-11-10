@@ -6,20 +6,16 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { createHash } from 'node:crypto';
-import {
-  copyFileSync,
-  cpSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
-import { DESKTOP_CONTROL_VERSION, desktopControlPin } from './src/main/desktop-control-pins';
+import {
+  DESKTOP_CONTROL_EXECUTABLE,
+  DESKTOP_CONTROL_VERSION,
+  desktopControlSupported,
+} from './src/main/desktop-control-build';
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
 // from the packaged app). The native-safe-fs compiled addon lives outside `.vite` and
@@ -104,64 +100,57 @@ function sandboxRunnerResources(): string[] {
   ];
 }
 
-// Sprint Coder's desktop control ships the one pinned desktop-control binary for the build host
-// (Windows only for now; see src/main/desktop-control-pins.ts) and the license of that
-// third-party binary. The npm package's other native binaries stay out: node_modules is not
-// packaged (see shouldIgnoreFromPackage).
+// Sprint Coder's desktop control ships the desktop-control executable built from the source in
+// desktop-control/ (build-desktop-control.mjs; Windows x64 only for now, see
+// src/main/desktop-control-build.ts), the `.sha256` manifest its build wrote beside it, and the
+// license of that third-party source. Like the sandbox runner, the files keep their build names.
 export function desktopControlSource(
   platform: string = process.platform,
   arch: string = process.arch,
 ): string | null {
-  const pin = desktopControlPin(platform, arch);
-  if (pin === null) return null;
-  const executable = resolve(
-    __dirname,
-    '..',
-    '..',
-    'node_modules',
-    'agent-desktop',
-    'bin',
-    pin.file,
-  );
-  verifyDesktopControlBinary(executable, platform, arch);
-  return executable;
+  if (!desktopControlSupported(platform, arch)) return null;
+  return resolve(__dirname, 'desktop-control', 'build', 'Release', DESKTOP_CONTROL_EXECUTABLE);
 }
 
-// Packager copies extraResource files under their own names, so only the license goes there;
-// the binary is copied by copyDesktopControlBinary under the pin's `shipped` name.
 export function desktopControlResources(
   platform: string = process.platform,
   arch: string = process.arch,
 ): string[] {
-  if (desktopControlSource(platform, arch) === null) return [];
-  return [resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt')];
+  const executable = desktopControlSource(platform, arch);
+  if (executable === null) return [];
+  return [
+    executable,
+    `${executable}.sha256`,
+    resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt'),
+  ];
 }
 
-/** Copies the pinned bytes into the package's resources under the shipped name, and checks them. */
-export function copyDesktopControlBinary(resources: string, platform: string, arch: string): void {
-  const source = desktopControlSource(platform, arch);
-  const pin = desktopControlPin(platform, arch);
-  if (source === null || pin === null) return;
-  const destination = join(resources, pin.shipped);
-  copyFileSync(source, destination);
-  verifyDesktopControlBinary(destination, platform, arch);
-}
-
-/** Fails the build unless the file holds exactly the pinned desktop-control bytes. */
-export function verifyDesktopControlBinary(
-  executable: string,
-  platform: string,
-  arch: string,
-): void {
-  const pin = desktopControlPin(platform, arch);
-  if (pin === null) throw new Error(`No desktop-control pin for ${platform}-${arch}`);
+/** Fails the build unless the file holds exactly the bytes its `.sha256` manifest seals. */
+export function verifyDesktopControlBinary(executable: string): void {
   if (!lstatSync(executable).isFile())
-    throw new Error(`desktop-control ${DESKTOP_CONTROL_VERSION} binary was not found`);
+    throw new Error(`desktop-control ${DESKTOP_CONTROL_VERSION} executable was not found`);
+  const expected = readFileSync(`${executable}.sha256`, 'utf8').trim();
+  if (!/^[a-f0-9]{64}$/u.test(expected))
+    throw new Error(`desktop-control ${basename(executable)} has an invalid digest manifest`);
   const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
-  if (digest !== pin.sha256)
+  if (digest !== expected)
     throw new Error(
-      `desktop-control ${DESKTOP_CONTROL_VERSION} ${basename(executable)} SHA-256 ${digest} does not match the pin ${pin.sha256}`,
+      `desktop-control ${basename(executable)} SHA-256 ${digest} does not match its sealed digest ${expected}`,
     );
+}
+
+/**
+ * Seals the packaged desktop-control executable's final bytes, after Packager's Authenticode
+ * signing changed them (as for the sandbox runner). The copy was checked against its build-time
+ * seal before signing, in afterCopyExtraResources.
+ */
+export function refreshPackagedDesktopControlDigest(appPath: string): string {
+  const executable = join(appPath, 'resources', DESKTOP_CONTROL_EXECUTABLE);
+  if (!lstatSync(executable).isFile())
+    throw new Error('Packaged desktop-control executable was not found');
+  const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  writeFileSync(`${executable}.sha256`, `${digest}\n`, { mode: 0o600 });
+  return digest;
 }
 
 export function refreshPackagedSandboxRunnerDigest(
@@ -382,13 +371,14 @@ const config: ForgeConfig = {
         }
       },
     ],
-    // Runs before Packager's Windows signing, like the extraResource copies it follows. Only
-    // Windows has a desktop-control pin, and its resources sit directly under the build path.
+    // Runs before Packager's Windows signing, right after the extraResource copies: the copied
+    // desktop-control executable must still be the bytes its build sealed. Only Windows x64 ships
+    // it, and its resources sit directly under the build path.
     afterCopyExtraResources: [
       (buildPath, _electronVersion, platform, arch, done) => {
         try {
-          if (platform === 'win32')
-            copyDesktopControlBinary(join(buildPath, 'resources'), platform, arch);
+          if (desktopControlSupported(platform, arch))
+            verifyDesktopControlBinary(join(buildPath, 'resources', DESKTOP_CONTROL_EXECUTABLE));
           done();
         } catch (error) {
           done(error instanceof Error ? error : new Error(String(error)));
@@ -401,8 +391,11 @@ const config: ForgeConfig = {
       assertNativePackagingHost(platform);
       if (platform === 'win32') verifyBundledNodeResources();
       // The resources above were chosen for the build host's architecture.
-      if (desktopControlPin(platform, arch) !== null && arch !== process.arch)
-        throw new Error(`desktop-control for ${platform}-${arch} must be packaged on ${arch}`);
+      if (desktopControlSupported(platform, arch)) {
+        if (arch !== process.arch)
+          throw new Error(`desktop-control for ${platform}-${arch} must be packaged on ${arch}`);
+        verifyDesktopControlBinary(desktopControlSource(platform, arch)!);
+      }
     },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') {
@@ -411,15 +404,9 @@ const config: ForgeConfig = {
         if (packageResult.platform === 'win32')
           for (const outputPath of packageResult.outputPaths) {
             refreshPackagedSandboxRunnerDigest(outputPath, 'win32');
-            // The desktop-control binary is trusted only by its pinned bytes; a signed or altered
-            // copy would silently turn desktop control off, so the package fails instead.
-            const pin = desktopControlPin('win32', packageResult.arch);
-            if (pin !== null)
-              verifyDesktopControlBinary(
-                join(outputPath, 'resources', pin.shipped),
-                'win32',
-                packageResult.arch,
-              );
+            // The same for the desktop-control executable, which signing changes too.
+            if (desktopControlSupported('win32', packageResult.arch))
+              refreshPackagedDesktopControlDigest(outputPath);
           }
         return;
       }

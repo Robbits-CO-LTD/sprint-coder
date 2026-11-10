@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -2394,10 +2394,10 @@ describe('desktop control outside the command sandbox', () => {
   );
 });
 
-// The real shipped binary (node_modules in a development checkout); Windows only for now.
+// The real shipped executable (the build output in a development checkout); Windows x64 only.
 const shippedDesktopControl = process.platform === 'win32' ? resolveDesktopControlCommand() : null;
 
-describe.skipIf(shippedDesktopControl === null)('desktop control bound to the pinned bytes', () => {
+describe.skipIf(shippedDesktopControl === null)('desktop control bound to the sealed bytes', () => {
   const stdout = (chunks: readonly CommandOutputChunk[]) =>
     chunks
       .filter(({ stream }) => stream === 'stdout')
@@ -2408,7 +2408,7 @@ describe.skipIf(shippedDesktopControl === null)('desktop control bound to the pi
       throw new Error('sandbox runner requested');
     });
 
-  it('runs the shipped desktop-control binary outside the sandbox when its sealed bytes are the pin', async () => {
+  it('runs the shipped desktop-control binary outside the sandbox when its sealed bytes are its seal', async () => {
     const root = await workspace();
     const spec = await prepareExecutionSpec({
       workspacePath: root,
@@ -2416,7 +2416,7 @@ describe.skipIf(shippedDesktopControl === null)('desktop control bound to the pi
       argv: ['status'],
     });
     expect(executionSpecContentDigest(spec)).toBe(
-      'd274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3',
+      readFileSync(`${shippedDesktopControl!}.sha256`, 'utf8').trim(),
     );
     const runnerPath = refuseSandboxRunner();
     try {
@@ -2435,7 +2435,7 @@ describe.skipIf(shippedDesktopControl === null)('desktop control bound to the pi
     }
   }, 30_000);
 
-  it('keeps the sandbox when the image about to start is not the pinned bytes, though the path is', async () => {
+  it('keeps the sandbox when the image about to start is not the sealed bytes, though the path is', async () => {
     // The Critical: the path still names the shipped desktop-control binary, but the image sealed
     // for the launch holds other bytes (on Linux, a memfd fixed before the path was swapped).
     const root = await workspace();
@@ -2466,7 +2466,7 @@ describe.skipIf(shippedDesktopControl === null)('desktop control bound to the pi
   it('keeps any other binary inside, whatever it is named and wherever it lives', async () => {
     const root = await workspace();
     const elsewhere = await workspace();
-    // Other bytes under the shipped name outside the Workspace, and the pinned bytes copied into
+    // Other bytes under the shipped name outside the Workspace, and the sealed bytes copied into
     // the Workspace: neither is the shipped desktop-control binary.
     const renamed = join(elsewhere, 'sprint-coder-desktop-control.exe');
     await copyFile(process.execPath, renamed);

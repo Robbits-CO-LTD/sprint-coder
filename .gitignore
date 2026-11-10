@@ -5,6 +5,8 @@ apps/desktop/out/
 apps/desktop/native-safe-fs/build/
 apps/desktop/sandbox-runner/build/
 apps/desktop/sandbox-runner/target/
+apps/desktop/desktop-control/build/
+apps/desktop/desktop-control/target/
 # Keep historical build caches ignored after the bundled model runtime was retired.
 apps/desktop/managed-local/cache/
 apps/desktop/managed-local/build/

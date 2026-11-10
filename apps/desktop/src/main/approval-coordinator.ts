@@ -996,7 +996,7 @@ function displayTarget(input: unknown): string {
 
 /**
  * Whether this call runs the shipped desktop-control binary, judged on the executable bytes sealed
- * when its ExecutionSpec was prepared (the pin), not on its path.
+ * when its ExecutionSpec was prepared (against the shipped file's seal), not on its path.
  */
 export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean {
   return (

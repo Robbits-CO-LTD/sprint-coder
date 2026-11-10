@@ -9,7 +9,7 @@
   "main": ".vite/build/index.js",
   "scripts": {
     "start": "electron-forge start",
-    "prepare:desktop": "node ../../build-better-sqlite3.mjs && node ../../build-native-safe-fs.mjs && node ../../build-sandbox-runner.mjs",
+    "prepare:desktop": "node ../../build-better-sqlite3.mjs && node ../../build-native-safe-fs.mjs && node ../../build-sandbox-runner.mjs && node ../../build-desktop-control.mjs",
     "package": "npm run prepare:desktop && electron-forge package",
     "make": "npm run prepare:desktop && electron-forge make",
     "make:windows": "npm run prepare:desktop && electron-forge make --platform=win32 --arch=x64",
@@ -20,7 +20,6 @@
   "dependencies": {
     "@sprint-coder/contracts": "*",
     "@sprint-coder/domain": "*",
-    "agent-desktop": "1.2.0",
     "better-sqlite3": "13.0.3",
     "electron-squirrel-startup": "^1.0.1",
     "lottie-web": "^5.13.0",
