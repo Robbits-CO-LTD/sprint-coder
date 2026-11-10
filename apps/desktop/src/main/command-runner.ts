@@ -5,6 +5,8 @@ import { stat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import {
+  basename,
+  dirname,
   delimiter,
   extname,
   isAbsolute,
@@ -25,6 +27,7 @@ import {
   revalidatePathGuard,
   type PathGuard,
 } from './path-guard';
+import { desktopControlArgvRefusal, runsOutsideCommandSandbox } from './desktop-control';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -660,6 +663,21 @@ export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
   return identity.pathGuard;
 }
 
+/**
+ * The SHA-256 of the executable bytes sealed when this ExecutionSpec was prepared, which the
+ * ExecutionSpec's identity digest binds; `null` for a spec this module did not seal, or one that
+ * runs through a script interpreter (its bytes are not the program that starts).
+ */
+export function executionSpecContentDigest(spec: unknown): string | null {
+  if (typeof spec !== 'object' || spec === null) return null;
+  const identity = issuedSpecs.get(spec);
+  if (identity === undefined || identity.executable.interpreter !== undefined) return null;
+  const sealed = spec as ExecutionSpec;
+  return sealed.executionIdentityDigest === sealedExecutableIdentityDigest(identity.executable)
+    ? identity.executable.digest
+    : null;
+}
+
 type RunnerOptions = Readonly<{
   batchIntervalMs?: number;
   maxBatchBytes?: number;
@@ -671,6 +689,13 @@ type RunnerOptions = Readonly<{
 
 export type RunOptions = Readonly<{
   signal?: AbortSignal;
+  /**
+   * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
+   * sandbox when the sealed image about to start is the shipped desktop-control binary, by its
+   * bytes, and it lives outside every root (see `runsOutsideCommandSandbox`); every other command stays
+   * inside. Callers pass it only for a call prepared as desktop control and allowed on its card.
+   */
+  desktopControlWorkspaceRoots?: readonly string[];
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
   onBatch?: (chunks: readonly CommandOutputChunk[]) => void | Promise<void>;
@@ -809,10 +834,43 @@ export class CommandRunner {
       const executionId = randomUUID();
       const lease = randomUUID();
       const posixControlNonce = randomUUID();
+      // Decided after revalidation on the digest of the sealed image that is about to start, never
+      // on a path resolved again here. On Windows that digest is of the bytes read through the
+      // handle that holds the private launch copy against writes, renames and deletes; on Linux of
+      // the sealed memfd the process starts from. It must also equal the bytes sealed at prepare.
+      // An image with an argv prefix runs through an interpreter and never qualifies.
+      const desktopControl =
+        this.sandboxed &&
+        options.desktopControlWorkspaceRoots !== undefined &&
+        executionImage.argvPrefix.length === 0 &&
+        executionImage.digest === executionSpecContentDigest(spec) &&
+        runsOutsideCommandSandbox(
+          spec.absoluteExecutable,
+          executionImage.digest,
+          options.desktopControlWorkspaceRoots,
+        );
+      const desktopControlRefusal = desktopControl
+        ? desktopControlArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? [])
+        : null;
+      if (desktopControlRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
-      const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
+      if (desktopControl)
+        secureLogger.info(
+          'Desktop control command runs outside the command sandbox',
+          { executable: basename(spec.absoluteExecutable) },
+          { event: 'command_desktop_control_unsandboxed' },
+        );
+      const sandboxExecutable = !this.sandboxed || desktopControl ? null : sandboxRunnerPath();
+      // Outside the sandbox the desktop-control binary starts in its own folder, which is outside
+      // every Workspace root, so neither it nor an app it launches can pick up a file the agent wrote
+      // there (a bare launch name or a DLL). This differs from the cwd shown on the approval card
+      // and kept in the ExecutionSpec, which stay as approved.
+      const launchCwd = desktopControl
+        ? dirname(spec.absoluteExecutable)
+        : spec.cwdIdentity.canonicalPath;
       const launchImage =
         process.platform === 'linux' && sandboxExecutable !== null
           ? linuxSandboxExecutionImage(executionImage)
@@ -855,7 +913,7 @@ export class CommandRunner {
                 ]),
           ],
           {
-            cwd: spec.cwdIdentity.canonicalPath,
+            cwd: launchCwd,
             // The host Job wrapper creates pipes outside AppContainer and must stay unguarded.
             // Only its payload below inherits the sandbox compatibility preload.
             env: windows
@@ -908,7 +966,7 @@ export class CommandRunner {
                       ...executionImage.argvPrefix,
                       ...spec.argv,
                     ],
-              cwd: spec.cwdIdentity.canonicalPath,
+              cwd: launchCwd,
               env: commandEnvironment,
             }),
           );
