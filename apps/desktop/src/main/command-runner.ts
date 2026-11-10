@@ -27,7 +27,11 @@ import {
   revalidatePathGuard,
   type PathGuard,
 } from './path-guard';
-import { desktopControlArgvRefusal, runsOutsideCommandSandbox } from './desktop-control';
+import {
+  desktopControlArgvRefusal,
+  desktopControlEnvironment,
+  runsOutsideCommandSandbox,
+} from './desktop-control';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -46,6 +50,7 @@ import { secureLogger } from './secure-logger';
 import {
   assignProcessToOwnedJob,
   closeOwnedJob,
+  releaseOwnedJob,
   terminateOwnedJob,
   WINDOWS_JOB_WRAPPER,
   windowsJobWrapperCommand,
@@ -723,6 +728,12 @@ type ActiveProcess = {
   posixOwnedMembers?: Map<number, string>;
   posixIdentityMonitor?: ReturnType<typeof setTimeout>;
   windowsJobId?: string;
+  /**
+   * Set only for the approved desktop-control run: the image the command itself runs from. Closing
+   * its Job then terminates just the members running this image, so an app the command launched
+   * outlives it. Stop and every forced termination still terminate the whole Job.
+   */
+  windowsJobCommandImage?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
   executionImage?: PreparedExecutionImage;
 };
@@ -875,14 +886,19 @@ export class CommandRunner {
         process.platform === 'linux' && sandboxExecutable !== null
           ? linuxSandboxExecutionImage(executionImage)
           : { ...executionImage, sandboxArguments: [] };
+      // Outside the sandbox the PATH also leaves out every folder inside the Workspace, so a bare
+      // launch name cannot resolve to a file the agent wrote there.
+      const envDelta = desktopControl
+        ? desktopControlEnvironment(spec.envDelta, options.desktopControlWorkspaceRoots ?? [])
+        : spec.envDelta;
       const commandEnvironment =
         process.platform === 'win32'
           ? windowsCommandEnvironment(
-              spec.envDelta,
+              envDelta,
               executionImage.environment,
               sandboxExecutable !== null,
             )
-          : buildEnvironment(spec.envDelta, launchImage.environment);
+          : buildEnvironment(envDelta, launchImage.environment);
       try {
         const windows = process.platform === 'win32';
         if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
@@ -917,7 +933,7 @@ export class CommandRunner {
             // The host Job wrapper creates pipes outside AppContainer and must stay unguarded.
             // Only its payload below inherits the sandbox compatibility preload.
             env: windows
-              ? windowsCommandEnvironment(spec.envDelta, executionImage.environment, false)
+              ? windowsCommandEnvironment(envDelta, executionImage.environment, false)
               : commandEnvironment,
             shell: false,
             stdio: windows
@@ -993,6 +1009,9 @@ export class CommandRunner {
         outcome: processClosePromise,
         ...(process.platform === 'win32' ? {} : { posixOwnedMembers: new Map<number, string>() }),
         ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
+        ...(process.platform === 'win32' && desktopControl
+          ? { windowsJobCommandImage: executionImage.launchPath }
+          : {}),
       };
       this.active.set(executionId, active);
       const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
@@ -1625,7 +1644,10 @@ export class CommandRunner {
       clearTimeout(active.posixIdentityMonitor);
       delete active.posixIdentityMonitor;
     }
-    if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
+    if (active.windowsJobId !== undefined) {
+      if (active.windowsJobCommandImage === undefined) closeOwnedJob(active.windowsJobId);
+      else releaseOwnedJob(active.windowsJobId, active.windowsJobCommandImage);
+    }
     const executionImage = active.executionImage;
     delete active.executionImage;
     if (executionImage === undefined) active.resolveSettled();

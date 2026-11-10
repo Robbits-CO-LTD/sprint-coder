@@ -84,6 +84,49 @@ export function runsOutsideCommandSandbox(
   );
 }
 
+/**
+ * The environment of a desktop-control run outside the sandbox. Its PATH keeps only the absolute
+ * folders outside every root of the Turn's Workspace, so a bare `launch` name never resolves to a
+ * file the agent wrote in the Workspace. Relative, root-relative, UNC and empty entries are
+ * dropped as well, since what they name depends on where they are read. An entry with a `"`
+ * anywhere is dropped without being read, since quoting is read differently by different users of
+ * PATH. The PATH is rebuilt from the normalized folders that were judged, not from the original
+ * text, and every variable named PATH in any letter case is filtered. Other variables, the
+ * approved ExecutionSpec and the approval card stay as they are.
+ */
+export function desktopControlEnvironment(
+  environment: Readonly<Record<string, string>>,
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup = {},
+): Readonly<Record<string, string>> {
+  const windows = (lookup.platform ?? process.platform) === 'win32';
+  const paths = windows ? win32 : posix;
+  const separator = windows ? ';' : ':';
+  return Object.fromEntries(
+    Object.entries(environment).map(([key, value]) => {
+      if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
+      const seen = new Set<string>();
+      const kept: string[] = [];
+      for (const entry of value.split(separator)) {
+        const trimmed = entry.trim();
+        if (trimmed.includes('"') || trimmed.includes('\0')) continue;
+        if (!(windows ? /^[a-z]:[\\/]/iu.test(trimmed) : posix.isAbsolute(trimmed))) continue;
+        const normalized = paths.normalize(trimmed);
+        const minimum = windows ? 3 : 1;
+        const folder =
+          normalized.length > minimum
+            ? normalized.replace(windows ? /[\\/]+$/u : /\/+$/u, '')
+            : normalized;
+        const identity = windows ? folder.toLowerCase() : folder;
+        if (seen.has(identity) || !outsideWorkspaceRoots(folder, workspaceRoots, lookup)) continue;
+        seen.add(identity);
+        kept.push(folder);
+      }
+      return [key, kept.join(separator)];
+    }),
+  );
+}
+
 function comparisonKey(path: string, lookup: DesktopControlLookup): string {
   const platform = lookup.platform ?? process.platform;
   const normalized = (platform === 'win32' ? win32 : posix).normalize(

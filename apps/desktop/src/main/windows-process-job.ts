@@ -8,6 +8,7 @@ type WindowsJobAddon = Readonly<{
   assignProcessToOwnedJob(pid: number, jobId: string): boolean;
   terminateOwnedJob(jobId: string): boolean;
   closeOwnedJob(jobId: string): boolean;
+  releaseOwnedJob?(jobId: string, commandImage: string): boolean;
   terminateRetainedOwnedJob?(jobId: string): boolean;
   ownedJobActiveProcesses?(jobId: string): number;
   runPreparedExecutionImage(executable: string, argv: readonly string[]): number;
@@ -27,6 +28,19 @@ export function terminateOwnedJob(jobId: string): boolean {
 
 export function closeOwnedJob(jobId: string): boolean {
   return addon().closeOwnedJob(jobId);
+}
+
+/**
+ * Closes an owned Job like `closeOwnedJob`, except that only the members still running
+ * `commandImage` (the command's own launch image) are terminated: the processes the command
+ * started outlive it. Only the approved desktop-control run uses this, so the app a `launch`
+ * started stays open after the command returns. A build without the release, or any failure in
+ * it, terminates the whole Job as `closeOwnedJob` does.
+ */
+export function releaseOwnedJob(jobId: string, commandImage: string): boolean {
+  const operation = addon().releaseOwnedJob;
+  if (operation === undefined) return addon().closeOwnedJob(jobId);
+  return operation(jobId, commandImage);
 }
 
 /** Keeps ownership after termination so callers can confirm that every member exited. */
