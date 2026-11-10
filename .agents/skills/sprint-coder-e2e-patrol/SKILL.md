@@ -35,7 +35,6 @@ GitHubへの起票は現在の依頼に「起票して」「Issue化して」な
 2. [Finding契約](references/finding-contract.md)
 3. [Issue契約](references/issue-contract.md)
 4. [実行状態スキーマ](references/state-schema.md)
-5. [Computer Use cleanup契約](references/computer-use-cleanup.md)
 
 実行前にOSに応じて、リポジトリ内の
 `.claude/skills/sprint-coder-e2e/SKILL.md`または
@@ -63,9 +62,8 @@ GitHubの実状態確認とIssue操作には`gh`を使う。
 11. [Issue契約](references/issue-contract.md)に従うタイトルとIssue本文を生成する。
 12. 起票が明示された場合だけ1件ずつ作成し、直後にOPEN状態・本文marker・ラベルを確認する。
     report-onlyでは検証済みFindingと安全な本文案までで停止する。
-13. Computer Useの所有権付きcleanupを行う。
-14. 操作ハンドルを破棄し、cleanup結果を実行記録へ残す。
-15. 各ケースの`PASS` / `FAIL` / `SKIP` / `BLOCKED`、対象build、OS、操作、証拠と起票状態をrun reportへまとめる。
+13. テストで自分が開いた窓・プロセスは、終わったら閉じる（利用者の窓には触らない）。
+14. 各ケースの`PASS` / `FAIL` / `SKIP` / `BLOCKED`、対象build、OS、操作、証拠と起票状態をrun reportへまとめる。
     CI成功はUI検証の代用にしない。性能基準とaxe監査は計測・監査未実施のままPASSにしない。
 
 ## デスクトップ実行の追加ガード
@@ -97,8 +95,6 @@ referenceにある同じ判定を実測してrun reportへ残す。スクリプ�
 ```powershell
 & "$PSScriptRoot\scripts\New-E2ePatrolRun.ps1" <parameters>
 & "$PSScriptRoot\scripts\Write-E2ePatrolRecord.ps1" <parameters>
-& "$PSScriptRoot\scripts\Get-ComputerUseCleanupPlan.ps1" <parameters>
-& "$PSScriptRoot\scripts\Confirm-ComputerUseCleanup.ps1" <parameters>
 & "$PSScriptRoot\scripts\New-FindingFingerprint.ps1" <parameters>
 & "$PSScriptRoot\scripts\Test-FindingPromotable.ps1" <parameters>
 & "$PSScriptRoot\scripts\Protect-E2ePatrolText.ps1" <parameters>
@@ -115,7 +111,7 @@ PowerShellは判定、保存、GitHub操作だけを担う。UI操作はComputer
 起票しない理由を、`blocked_auth`、`blocked_artifact`、`blocked_env`、
 `fail_tooling`、`flaky_unresolved`、`redaction_failed`、
 `dedup_incomplete`、`regression_hold`、`halted_budget`、
-`aborted_safety`、`cleanup_hold`のいずれかで示す。本文案を安全に作れた場合はローカル
+`aborted_safety`のいずれかで示す。本文案を安全に作れた場合はローカル
 保存先だけを報告し、GitHubへは送らない。
 
 ## トラブルシューティング
@@ -125,7 +121,7 @@ PowerShellは判定、保存、GitHub操作だけを担う。UI操作はComputer
 | 対象processと操作windowの状態が違う | stale sessionを破棄し、fresh sessionで2 marker以上を再照合する |
 | `record start`後に操作不能になった | `fail_tooling`を記録し、応答中のアプリを保持してframe samplingへ切り替える |
 | restart後に設定がdefaultへ戻る | 前後のlaunchが同じ所有profile / storage pathか確認する |
-| 正常close後もprocessが残る | 強制終了せず`cleanup_hold`にし、利用者へ残存windowを1つだけ案内する |
+| 正常close後もprocessが残る | 強制終了せず、利用者へ残存windowを1つだけ案内する |
 
 ## 関連するプロジェクトSkill
 
