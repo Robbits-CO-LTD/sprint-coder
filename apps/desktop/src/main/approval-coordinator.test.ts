@@ -2165,4 +2165,85 @@ describe('ApprovalCoordinator desktop control card', () => {
       desktop.mockRestore();
     }
   });
+
+  it('allows a desktop-control run that touches no other app without a card, under any preset', async () => {
+    for (const evaluatePermission of [policyAllow, () => 'approval_required' as const]) {
+      const harness = createHarness({ evaluatePermission });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          // The agent asks for both guides at once at the start of a Turn: neither waits on a card
+          // nor on the other.
+          const [desktopGuide, platformGuide, status] = await Promise.all([
+            harness.coordinator.authorizeTool(
+              request(await prepare(['skills', 'get', 'desktop']), 'guide-desktop'),
+            ),
+            harness.coordinator.authorizeTool(
+              request(await prepare(['skills', 'get', 'platform']), 'guide-platform'),
+            ),
+            harness.coordinator.authorizeTool(request(await prepare(['status']), 'status')),
+          ]);
+          for (const decision of [desktopGuide, platformGuide, status]) {
+            expect(decision).toMatchObject({ decision: 'allow' });
+            // Nobody decided it on a card, so it carries no decision of the person.
+            expect(decision).not.toHaveProperty('approvalDecision');
+            expect(decision.beforeExecute?.()).toBe(true);
+          }
+          expect(harness.published).toHaveLength(0);
+          // A policy change before the run withdraws it.
+          harness.setPolicyEpoch(8);
+          expect(desktopGuide.beforeExecute?.()).toBe(false);
+          harness.setPolicyEpoch(7);
+
+          // Reading the screen, operating, a batch or a shared option still asks every time.
+          for (const argv of [['list-windows'], ['launch', 'notepad'], ['--headed', 'status']]) {
+            const asked = harness.coordinator.authorizeTool(
+              request(await prepare(argv), `asked-${argv.join('-')}`),
+            );
+            const approval = await waitForPublished(harness);
+            harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+            await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+            harness.published.length = 0;
+          }
+
+          // The same argv on any other executable keeps its own path: the policy's allow, or a card.
+          desktop.mockReturnValue(false);
+          const other = harness.coordinator.authorizeTool(
+            request(await prepare(['skills', 'get', 'desktop']), 'other-skills'),
+          );
+          if (evaluatePermission === policyAllow) {
+            await expect(other).resolves.toMatchObject({ decision: 'allow' });
+            expect(harness.published).toHaveLength(0);
+          } else {
+            const approval = await waitForPublished(harness);
+            harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+            await expect(other).resolves.toMatchObject({ decision: 'deny' });
+          }
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    }
+  });
+
+  it('keeps a policy deny of a desktop-control run that touches no other app', async () => {
+    const harness = createHarness({ evaluatePermission: () => 'deny' });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['skills', 'get', 'desktop']), 'denied'),
+          ),
+        ).resolves.toMatchObject({ decision: 'deny' });
+        expect(harness.published).toHaveLength(0);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
 });

@@ -28,6 +28,7 @@ import {
   type PathGuard,
 } from './path-guard';
 import {
+  desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   runsOutsideCommandSandbox,
@@ -698,7 +699,8 @@ export type RunOptions = Readonly<{
    * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
    * sandbox when the sealed image about to start is the shipped desktop-control binary, by its
    * bytes, and it lives outside every root (see `runsOutsideCommandSandbox`); every other command stays
-   * inside. Callers pass it only for a call prepared as desktop control and allowed on its card.
+   * inside. Callers pass it only for a call prepared as desktop control and allowed on its card,
+   * or one that only prints the bundled guides, help, the version or its own status.
    */
   desktopControlWorkspaceRoots?: readonly string[];
   beforeSpawn?: () => void;
@@ -871,7 +873,11 @@ export class CommandRunner {
       if (desktopControl)
         secureLogger.info(
           'Desktop control command runs outside the command sandbox',
-          { executable: basename(spec.absoluteExecutable) },
+          {
+            executable: basename(spec.absoluteExecutable),
+            // Whether it only prints guides, help, version or status, and so ran without a card.
+            inert: desktopControlArgvIsInert(spec.argv),
+          },
           { event: 'command_desktop_control_unsandboxed' },
         );
       const sandboxExecutable = !this.sandboxed || desktopControl ? null : sandboxRunnerPath();
@@ -1401,6 +1407,10 @@ export class CommandRunner {
         if (forceTimer !== undefined) clearTimeout(forceTimer);
         if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
         options.signal?.removeEventListener('abort', cancel);
+        // A Stop ends everything the run started, the apps a desktop-control `launch` opened
+        // included, even when it lands while the final output is saved after the command itself
+        // ended (and the forced termination never came).
+        if (canceled) delete active.windowsJobCommandImage;
         if (!retainActive) this.releaseActive(executionId, active);
       }
     } finally {

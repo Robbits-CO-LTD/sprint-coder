@@ -38,6 +38,7 @@ import {
 import { probeSandboxRunner } from './sandbox-runner';
 import * as sandboxRunnerModule from './sandbox-runner';
 import * as desktopControlModule from './desktop-control';
+import * as windowsProcessJobModule from './windows-process-job';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
@@ -2327,6 +2328,66 @@ describe('desktop control outside the command sandbox', () => {
           }
         judge.mockRestore();
         argvCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'Stop while the final output is saved still ends everything a desktop-control command started',
+    async () => {
+      const root = await workspace();
+      // The command starts a long-lived process of another image, reports it and ends at once.
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        'process.stdout.write(String(child.pid));',
+      ].join('\n');
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', script, process.execPath],
+      });
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const release = vi.spyOn(windowsProcessJobModule, 'releaseOwnedJob');
+      const controller = new AbortController();
+      let started = 0;
+      try {
+        // The output is held until the command has ended, so the one batch is the final save; the
+        // Stop lands during it and the save ends long before the forced termination would.
+        const result = await new CommandRunner({
+          sandboxed: true,
+          cancelGraceMs: 10_000,
+          batchIntervalMs: 60_000,
+        }).run(spec, {
+          desktopControlWorkspaceRoots: [root],
+          signal: controller.signal,
+          onBatch: async (chunks) => {
+            started = Number(chunks.map(({ text }) => text).join(''));
+            controller.abort();
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          },
+        });
+        expect(result).toMatchObject({ canceled: true, termination: 'cooperative' });
+        expect(started).toBeGreaterThan(0);
+        expect(release).not.toHaveBeenCalled();
+        await expectProcessDead(started);
+      } finally {
+        if (started > 0)
+          try {
+            process.kill(started);
+          } catch {
+            // Already ended.
+          }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+        release.mockRestore();
       }
     },
     20_000,

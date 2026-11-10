@@ -310,6 +310,7 @@ import {
   ApprovalCoordinator,
   approvalFactsForTool,
   isDesktopControlCall,
+  isInertDesktopControlCall,
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
@@ -4953,7 +4954,12 @@ export class IpcRouter {
     const preset = this.permissionBroker.getPolicy(request.context.taskId).preset;
     // A per-call capability is decided by the person on its card under every preset, so the Auto
     // reviewer is never consulted and no Auto decision is recorded for it (Issue #546).
-    const autoPreset = preset === 'auto' && !requiresPerCallHumanApproval(capability);
+    // A desktop-control run that only prints its guides, help, version or status needs no card,
+    // so there is nothing for the reviewer to decide either (the ApprovalCoordinator allows it).
+    const autoPreset =
+      preset === 'auto' &&
+      !requiresPerCallHumanApproval(capability) &&
+      !isInertDesktopControlCall(request);
     const reviewRequestId = randomUUID();
     if (evaluation.decision === 'approval_required' && autoPreset) {
       reviewerDecision = await this.autoReviewer.review({

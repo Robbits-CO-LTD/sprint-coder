@@ -276,7 +276,7 @@ describe('managed command root selection (issue #840)', () => {
 });
 
 describe('desktop control Workspace roots', () => {
-  it('hands the Turn roots to the runner only for desktop control allowed on its card', async () => {
+  it('hands the Turn roots to the runner only for desktop control allowed on its card or touching no other app', async () => {
     const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
     const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
     roots.push(primary, secondary);
@@ -328,7 +328,7 @@ describe('desktop control Workspace roots', () => {
       policyEpoch: 1,
     };
     broker.startTurn(owner, 'grok');
-    const input = { executable: process.execPath, argv: ['status'], purpose: 'desktop roots' };
+    let input = { executable: process.execPath, argv: ['list-windows'], purpose: 'desktop roots' };
     const expected = expect.objectContaining({
       desktopControlWorkspaceRoots: [primary, secondary],
     });
@@ -373,13 +373,25 @@ describe('desktop control Workspace roots', () => {
       for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
         expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
 
-      // Any other command never gets the roots, even when the person allowed it on its card.
+      // A run that only prints the guides or the status needs no card, and runs outside the
+      // sandbox with the roots, judged again on the sealed argv.
+      for (const argv of [['status'], ['skills', 'get', 'desktop']]) {
+        input = { ...input, argv };
+        managedRun.mockClear();
+        directRun.mockClear();
+        await dispatchAll(`inert-${argv.join('-')}`);
+        expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+        expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+      }
+
+      // Any other command never gets the roots, even when the person allowed it on its card, or
+      // when it has the same arguments as a desktop-control status check.
       desktop.mockReturnValue(false);
-      for (const decision of ['allow_once', 'allow_task'] as const) {
+      for (const decision of ['allow_once', 'allow_task', undefined] as const) {
         approvalDecision = decision;
         managedRun.mockClear();
         directRun.mockClear();
-        await dispatchAll(`ordinary-${decision}`);
+        await dispatchAll(`ordinary-${decision ?? 'preset'}`);
         expect(directRun).toHaveBeenCalledOnce();
         for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
           expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
@@ -392,6 +404,62 @@ describe('desktop control Workspace roots', () => {
       directRun.mockRestore();
     }
   });
+
+  it.skipIf(
+    process.platform !== 'win32' || desktopControlModule.resolveDesktopControlCommand() === null,
+  )(
+    'runs the shipped guides and status outside the sandbox without a decision of the person',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-inert-'));
+      roots.push(workspace);
+      const registry = new ToolRegistry();
+      registry.register(COMMAND_RUNNER_TOOL);
+      const { boundary } = createCommandBoundary(workspace);
+      // What the ApprovalCoordinator returns for such a run: an allow with no card behind it.
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      );
+      registerCommandRunnerTool(
+        broker,
+        new CommandRunner({ sandboxed: true }),
+        boundary,
+        COMMAND_RUNNER_TOOL,
+      );
+      const owner = {
+        taskId: 'task-desktop-inert',
+        turnId: 'turn-desktop-inert',
+        workspaceId: 'workspace-desktop-inert',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'grok');
+      const executable = desktopControlModule.resolveDesktopControlCommand()!;
+      const dispatch = (callId: string, argv: string[]) =>
+        broker.dispatch({
+          ...owner,
+          callId,
+          providerName: 'run_command',
+          input: { executable, argv, purpose: 'desktop guides' },
+        }) as Promise<{ exitCode: number; stdout: string }>;
+      try {
+        // Both guides at once, as the agent asks for them at the start of a Turn, and the status,
+        // which fails inside the sandbox (no home folder there).
+        const results = await Promise.all([
+          dispatch('guide-desktop', ['skills', 'get', 'desktop']),
+          dispatch('guide-platform', ['skills', 'get', 'platform']),
+          dispatch('status', ['status']),
+        ]);
+        for (const result of results) {
+          expect(result.exitCode).toBe(0);
+          expect(JSON.parse(result.stdout)).toMatchObject({ ok: true });
+        }
+      } finally {
+        await broker.dispose();
+      }
+    },
+    60_000,
+  );
 
   it('refuses desktop-control arguments before a command or card exists', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-refusal-'));

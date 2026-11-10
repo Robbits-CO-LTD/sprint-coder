@@ -3487,6 +3487,91 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
+  it('consults no Auto reviewer for a desktop-control run that touches no other app', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'command',
+          name: 'run',
+          version: '1',
+        }),
+        providerName: 'run_command',
+        kind: 'shell',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+        sideEffect: 'process',
+        risk: 'high',
+        requiredCapabilities: ['shell.execute'],
+        executionTarget: 'command-runner',
+        implementationKind: 'command-runner',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['mock'],
+      }),
+    );
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-ad' })
+      .entries[0]!;
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-ad-inert-'));
+    const desktop = vi.spyOn(desktopControlModule, 'isDesktopControlExecutable');
+    try {
+      const request = {
+        context: {
+          taskId: 'task-ad',
+          turnId: 'turn-ad',
+          workspaceId: 'workspace-ad',
+          policyEpoch: 1,
+        },
+        callId: 'call-ad',
+        entry,
+        input: await prepareExecutionSpec({
+          workspacePath,
+          executable: process.execPath,
+          argv: ['skills', 'get', 'desktop'],
+          cwd: '.',
+        }),
+      } as unknown as ToolAuthorizationRequest;
+      const review = vi.fn(async () => {
+        throw new Error('reviewer consulted');
+      });
+      const decide = async (decision: 'approval_required' | 'deny') => {
+        const router = Object.create(IpcRouter.prototype) as {
+          evaluateToolPermission(
+            request: ToolAuthorizationRequest,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        };
+        Object.assign(router, {
+          managedWorkerCall: new Map(),
+          autoReviewer: { review },
+          publish: () => undefined,
+          permissionBroker: {
+            getPolicy: () => ({ preset: 'auto', policyEpoch: 1 }),
+            previewExecutionSpec: () => ({ decision, reason: 'policy', policyEpoch: 1 }),
+            commitEvaluation: () => undefined,
+          },
+        });
+        return router.evaluateToolPermission(request, 'shell.execute');
+      };
+      // The ApprovalCoordinator allows it without a card; a policy deny stays a deny.
+      desktop.mockReturnValue(true);
+      await expect(decide('approval_required')).resolves.toMatchObject({
+        decision: 'approval_required',
+      });
+      await expect(decide('deny')).resolves.toMatchObject({ decision: 'deny' });
+      expect(review).not.toHaveBeenCalled();
+      // Any other executable with the same arguments goes to the reviewer as before.
+      desktop.mockReturnValue(false);
+      await expect(decide('approval_required')).rejects.toThrow('reviewer consulted');
+      expect(review).toHaveBeenCalledTimes(1);
+    } finally {
+      desktop.mockRestore();
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
   describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {
     const prepareWorkerManagedCatalog = Reflect.get(
       IpcRouter.prototype,

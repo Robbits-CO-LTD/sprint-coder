@@ -25,7 +25,7 @@ import type {
   ApprovalRequestInput,
   ApprovalResolutionInput,
 } from './persistence';
-import { isDesktopControlExecutable } from './desktop-control';
+import { desktopControlArgvIsInert, isDesktopControlExecutable } from './desktop-control';
 import { executionSpecContentDigest } from './command-runner';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
@@ -230,6 +230,24 @@ export class ApprovalCoordinator {
         desktopControl &&
         evaluation.decision.decision === 'allow' &&
         evaluation.decision.reason === 'remembered_grant';
+      // A desktop-control run that only prints the bundled guides, help, the version or its own
+      // status touches no other app, window or file, so it runs without a card wherever the policy
+      // allows or would ask; a deny was returned above. Judged on the sealed argv, as the run is.
+      if (
+        desktopControl &&
+        !requiresPerCallHumanApproval(evaluation.capability) &&
+        isInertDesktopControlCall(request)
+      ) {
+        const policyCheck = evaluation.decision.beforeExecute;
+        revalidators.push(
+          () =>
+            this.options.isTurnActive(request.context.taskId, request.context.turnId) &&
+            this.options.getCurrentPolicyEpoch(request.context.taskId) ===
+              request.context.policyEpoch &&
+            (policyCheck?.() ?? true),
+        );
+        continue;
+      }
       if (
         evaluation.decision.decision === 'allow' &&
         !requiresPerCallHumanApproval(evaluation.capability) &&
@@ -988,6 +1006,19 @@ export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean
       request.input.absoluteExecutable,
       executionSpecContentDigest(request.input),
     )
+  );
+}
+
+/**
+ * Whether this desktop-control call only prints the bundled guides, help, the version or the
+ * binary's own status (see `desktopControlArgvIsInert`), judged on the argv sealed into its
+ * ExecutionSpec. The command tool judges the same sealed argv again before it starts the run.
+ */
+export function isInertDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    isDesktopControlCall(request) &&
+    validateExecutionSpec(request.input) &&
+    desktopControlArgvIsInert(request.input.argv)
   );
 }
 
