@@ -81,7 +81,6 @@ describe('desktop-control run environment', () => {
     expect(filtered['PATH']!.split(';')).toEqual([
       'C:\\Windows\\System32',
       'F:\\work\\application',
-      '"C:\\Program Files\\Git\\cmd"',
       'D:\\tools',
     ]);
     // Only PATH changes.
@@ -92,6 +91,45 @@ describe('desktop-control run environment', () => {
         realpath: (path) => path,
       }),
     ).toEqual({ Path: '' });
+  });
+
+  it('drops any entry with a quote unread, and rebuilds PATH from the normalized folders', () => {
+    const windows = { platform: 'win32' as const, realpath: (path: string) => path };
+    const filtered = desktopControlEnvironment(
+      {
+        PATH: [
+          '"C:\\Program Files\\Git\\cmd"',
+          'C:\\Tools\\"x"\\bin',
+          '"C:\\outside;F:\\work\\app\\bin"',
+          'C:\\Tools\\with"quote',
+          '  C:\\Windows\\System32\\  ',
+          'C:\\Windows\\.\\System32',
+          'c:\\windows\\system32\\',
+          'C:/Tools/forward/',
+          'D:\\',
+        ].join(';'),
+      },
+      ['F:\\work\\app'],
+      windows,
+    );
+    // The quoted `;` splits into `"C:\outside` and `F:\work\app\bin"`: both carry a quote.
+    expect(filtered).toEqual({
+      PATH: ['C:\\Windows\\System32', 'C:\\Tools\\forward', 'D:\\'].join(';'),
+    });
+  });
+
+  it('filters every PATH variable whatever its letter case', () => {
+    expect(
+      desktopControlEnvironment(
+        {
+          Path: 'F:\\work\\app\\bin;C:\\one',
+          PATH: 'F:\\work\\app;C:\\two',
+          OTHER: 'F:\\work\\app',
+        },
+        ['F:\\work\\app'],
+        { platform: 'win32', realpath: (path) => path },
+      ),
+    ).toEqual({ Path: 'C:\\one', PATH: 'C:\\two', OTHER: 'F:\\work\\app' });
   });
 
   it('judges a PATH folder by where it really is', () => {
