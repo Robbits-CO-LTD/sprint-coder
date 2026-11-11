@@ -2160,6 +2160,14 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
     stepsOmitted: z.number().int().positive().optional(),
     /** Whether the card offers 「Task中許可」. Main refuses it anyway when this is false. */
     allowTaskGrant: z.boolean(),
+    /**
+     * The app the card offers 「このアプリは Task 中許可」 for: its reads and background operations
+     * for the rest of the Task. Absent when not offered, and Main refuses that choice then.
+     */
+    appGrant: z
+      .object({ app: z.string().min(1).max(120) })
+      .strict()
+      .optional(),
     notes: z.array(z.string().min(1).max(200)).max(6),
     /** Whether the card opens its details: something could not be confirmed or shown in full. */
     openDetails: z.boolean(),
@@ -2252,6 +2260,8 @@ export const approvalResolveInputSchema = z
     approvalId: idSchema,
     decision: approvalDecisionSchema,
     userInputSelection: z.number().int().min(0).max(2).optional(),
+    /** With `allow_task` on a desktop-control card that offers it: allow the app, not the command. */
+    grantScope: z.literal('app').optional(),
     expectedRevision: z.number().int().nonnegative(),
     expectedPolicyEpoch: z.number().int().nonnegative(),
     challenge: z.string().min(8).max(256),

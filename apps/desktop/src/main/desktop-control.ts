@@ -915,18 +915,25 @@ function launchTargetRefusal(
   }
   // A convenience for an obvious mistake, not a boundary: the card is.
   const base = app.split(/[\\/]/u).pop() ?? '';
+  if (desktopControlNamesTool(base))
+    return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
+  return null;
+}
+
+/**
+ * Whether an app or file name (no folder) names a terminal, shell, script host or settings tool,
+ * the kind `launch` refuses by name. Also used to keep such an app out of an app-wide Task grant.
+ */
+export function desktopControlNamesTool(base: string): boolean {
   const lower = base.toLowerCase();
   const extension = /\.[a-z0-9-]+$/u.exec(lower)?.[0] ?? '';
   const stem = ['.exe', '.com', '.app'].includes(extension)
     ? lower.slice(0, -extension.length)
     : lower;
   const names = [stem, ...stem.split('.')].map((name) => name.replace(/[^a-z0-9]/gu, ''));
-  if (
-    REFUSED_LAUNCH_EXTENSIONS.has(extension) ||
-    names.some((name) => REFUSED_LAUNCH_NAMES.has(name))
-  )
-    return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
-  return null;
+  return (
+    REFUSED_LAUNCH_EXTENSIONS.has(extension) || names.some((name) => REFUSED_LAUNCH_NAMES.has(name))
+  );
 }
 
 function batchRefusal(

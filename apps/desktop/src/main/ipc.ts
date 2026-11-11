@@ -3016,6 +3016,7 @@ export class IpcRouter {
           ...(input.userInputSelection === undefined
             ? {}
             : { userInputSelection: input.userInputSelection }),
+          ...(input.grantScope === undefined ? {} : { grantScope: input.grantScope }),
           expectedRevision: input.expectedRevision,
           challenge: input.challenge,
           operationId: envelope.operationId,

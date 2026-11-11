@@ -248,7 +248,7 @@ const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'lau
 const TEXT_CUT_NOTE =
   '入れる文字が長いため、途中までを表示しています。全文は「詳細（実行内容）」で確かめてください。';
 
-type KnownWindow = Readonly<{ app: unknown; title: unknown }>;
+type KnownWindow = Readonly<{ app: unknown; title: unknown; pid: unknown; instance: unknown }>;
 const KNOWN_TASKS = 50;
 const KNOWN_WINDOWS_PER_TASK = 200;
 const OUTPUT_MAX_CHARACTERS = 1_048_576;
@@ -295,10 +295,16 @@ export function rememberDesktopControlWindows(
     const known = knownWindows.get(taskId) ?? new Map<string, KnownWindow>();
     for (const window of windows) {
       if (typeof window !== 'object' || window === null) continue;
-      const { id, app_name: app, title } = window as Record<string, unknown>;
+      const {
+        id,
+        app_name: app,
+        title,
+        pid,
+        process_instance: instance,
+      } = window as Record<string, unknown>;
       if (typeof id !== 'string' || !WINDOW_ID.test(id)) continue;
       known.delete(id);
-      known.set(id, { app, title });
+      known.set(id, { app, title, pid, instance });
       if (known.size > KNOWN_WINDOWS_PER_TASK) known.delete(known.keys().next().value!);
     }
     if (known.size === 0) return;
@@ -308,6 +314,83 @@ export function rememberDesktopControlWindows(
   } catch {
     // Output that cannot be read names no window.
   }
+}
+
+/**
+ * The process a part or window belongs to, as the desktop-control executable recorded it: its pid,
+ * the process instance (which tells a reused pid apart) and its executable's name.
+ */
+export type DesktopControlOwner = Readonly<{ pid: number; instance: string; app: string }>;
+
+/**
+ * Reads which process the parts and windows of desktop-control runs belong to, from the same
+ * records the card names them from: the snapshots the executable wrote in the state folder, and
+ * the windows the Task's earlier runs printed (`rememberDesktopControlWindows`). Never from the
+ * agent's arguments. `null` whenever a record is missing, malformed or the records disagree.
+ */
+export type DesktopControlOwnerReader = Readonly<{
+  /** The owner of the part a qualified ref (`@<snapshot id>:eN`) names. */
+  part(ref: string): DesktopControlOwner | null;
+  /** The one owner every record of this window id agrees on. */
+  window(id: string): DesktopControlOwner | null;
+  /** Every recorded owner whose executable has this name, or `null` when one cannot be read. */
+  named(app: string): readonly DesktopControlOwner[] | null;
+}>;
+
+export function desktopControlOwnerReader(
+  lookup: Pick<DesktopControlDisplayLookup, 'stateRoot' | 'taskId'> = {},
+): DesktopControlOwnerReader {
+  const reader = new SnapshotReader(
+    lookup.stateRoot ?? desktopControlStateFolder(),
+    lookup.taskId === undefined ? undefined : knownWindows.get(lookup.taskId),
+  );
+  return {
+    part: (ref) => reader.partOwner(ref),
+    window: (id) => reader.windowOwner(id),
+    named: (app) => reader.namedOwners(app),
+  };
+}
+
+/** Whether two owners are the same process instance of the same executable. */
+export function sameDesktopControlOwner(
+  left: DesktopControlOwner,
+  right: DesktopControlOwner,
+): boolean {
+  return (
+    left.pid === right.pid &&
+    left.instance === right.instance &&
+    left.app.toLowerCase() === right.app.toLowerCase()
+  );
+}
+
+/**
+ * Whether an app name given to the executable (`--app`) names this executable as the executable
+ * matches it: letter case aside, exactly or with `.exe` added. A name with an invisible character
+ * names nothing here.
+ */
+export function desktopControlAppNameMatches(given: string, app: string): boolean {
+  if (!APP_NAME.test(given) || UNDISPLAYABLE.test(given)) return false;
+  const name = given.toLowerCase();
+  const actual = app.toLowerCase();
+  return name === actual || (!name.endsWith('.exe') && `${name}.exe` === actual);
+}
+
+const PROCESS_INSTANCE = /^[A-Za-z0-9:._-]{1,128}$/u;
+// Other control characters are refused with the invisible ones (`UNDISPLAYABLE`).
+const APP_NAME = /^[^\t\n\r\\/:*?"<>|]{1,255}$/u;
+const UNDISPLAYABLE = new RegExp(APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.source, 'u');
+
+function ownerOf(pid: unknown, instance: unknown, app: unknown): DesktopControlOwner | null {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (typeof instance !== 'string' || !PROCESS_INSTANCE.test(instance)) return null;
+  if (
+    typeof app !== 'string' ||
+    app.trim() === '' ||
+    !APP_NAME.test(app) ||
+    UNDISPLAYABLE.test(app)
+  )
+    return null;
+  return { pid, instance, app };
 }
 
 export function desktopControlApprovalAction(
@@ -568,6 +651,8 @@ function visible(value: string, max: number, multiline = false): { text: string;
 }
 
 type RefmapEntry = Readonly<{
+  pid?: unknown;
+  process_instance?: unknown;
   role?: unknown;
   name?: unknown;
   source_app?: unknown;
@@ -703,6 +788,52 @@ class SnapshotReader {
       if (app !== undefined || window !== undefined) return windowTarget(id, app, window);
     }
     return unresolved;
+  }
+
+  partOwner(ref: string): DesktopControlOwner | null {
+    const match = QUALIFIED_REF.exec(ref);
+    if (match === null) return null;
+    const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
+    if (typeof entry !== 'object' || entry === null) return null;
+    return ownerOf(entry.pid, entry.process_instance, entry.source_app);
+  }
+
+  windowOwner(id: string): DesktopControlOwner | null {
+    if (!WINDOW_ID.test(id)) return null;
+    const owners: (DesktopControlOwner | null)[] = [];
+    for (const snapshot of this.recentSnapshots())
+      for (const entry of Object.values(this.refmap(snapshot) ?? {}))
+        if (typeof entry === 'object' && entry !== null && entry.source_window_id === id)
+          owners.push(ownerOf(entry.pid, entry.process_instance, entry.source_app));
+    const known = this.known?.get(id);
+    if (known !== undefined) owners.push(ownerOf(known.pid, known.instance, known.app));
+    const [first] = owners;
+    if (first === undefined || first === null) return null;
+    return owners.every((owner) => owner !== null && sameDesktopControlOwner(owner, first))
+      ? first
+      : null;
+  }
+
+  namedOwners(app: string): readonly DesktopControlOwner[] | null {
+    const owners: DesktopControlOwner[] = [];
+    const add = (pid: unknown, instance: unknown, name: unknown): boolean => {
+      if (typeof name !== 'string' || !desktopControlAppNameMatches(app, name)) return true;
+      const owner = ownerOf(pid, instance, name);
+      if (owner === null) return false;
+      owners.push(owner);
+      return true;
+    };
+    for (const snapshot of this.recentSnapshots())
+      for (const entry of Object.values(this.refmap(snapshot) ?? {}))
+        if (
+          typeof entry === 'object' &&
+          entry !== null &&
+          !add(entry.pid, entry.process_instance, entry.source_app)
+        )
+          return null;
+    for (const known of this.known?.values() ?? [])
+      if (!add(known.pid, known.instance, known.app)) return null;
+    return owners;
   }
 
   private recentSnapshots(): string[] {

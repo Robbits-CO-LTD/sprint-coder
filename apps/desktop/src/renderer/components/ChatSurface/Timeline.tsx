@@ -518,8 +518,8 @@ export function Timeline({
               key={approval.id}
               approval={approval}
               busy={resolving[approval.id] === true}
-              onDecision={(decision, userInputSelection) =>
-                void resolveApproval(taskId, approval.id, decision, userInputSelection)
+              onDecision={(decision, userInputSelection, grantScope) =>
+                void resolveApproval(taskId, approval.id, decision, userInputSelection, grantScope)
               }
             />
           ))}
