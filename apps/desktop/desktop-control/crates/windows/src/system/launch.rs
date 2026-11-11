@@ -81,12 +81,14 @@ impl ForegroundGuard {
 
     fn finish(mut self, pid: ProcessId, window: Option<&WindowInfo>) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsWindow, SWP_ASYNCWINDOWPOS,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetForegroundWindow,
-            SetWindowPos, WS_EX_TOPMOST,
+            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsIconic, IsWindow,
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+            SetForegroundWindow, SetWindowPos, WS_EX_TOPMOST,
         };
         let foreground_is_prior = unsafe { GetForegroundWindow() } == self.prior;
-        let may_restore = may_restore_foreground(self.locked, foreground_is_prior);
+        let prior_is_minimized = unsafe { IsIconic(self.prior) } != 0;
+        let may_restore =
+            may_restore_foreground(self.locked, foreground_is_prior, prior_is_minimized);
         self.unlock();
         if !may_restore {
             return;
@@ -150,9 +152,16 @@ impl Drop for ForegroundGuard {
 /// or Alt, which also drops the lock) or by that window closing or minimizing;
 /// either way it is left alone. Without the lock that cannot be told apart
 /// from the launched app taking the foreground, so the guard still restores.
+/// A prior window minimized during the launch can stay the foreground, but it
+/// sits at the bottom of the z-order, so restacking below it would bury the
+/// launched window behind every other one; it is left alone like a closed one.
 #[cfg(any(target_os = "windows", test))]
-fn may_restore_foreground(locked: bool, foreground_is_prior: bool) -> bool {
-    !locked || foreground_is_prior
+fn may_restore_foreground(
+    locked: bool,
+    foreground_is_prior: bool,
+    prior_is_minimized: bool,
+) -> bool {
+    !prior_is_minimized && (!locked || foreground_is_prior)
 }
 
 #[cfg(target_os = "windows")]
@@ -514,18 +523,26 @@ mod foreground_guard_tests {
 
     #[test]
     fn a_locked_foreground_that_stayed_on_the_prior_window_is_restored() {
-        assert!(may_restore_foreground(true, true));
+        assert!(may_restore_foreground(true, true, false));
     }
 
     #[test]
     fn a_foreground_the_user_moved_while_locked_is_left_alone() {
-        assert!(!may_restore_foreground(true, false));
+        assert!(!may_restore_foreground(true, false, false));
     }
 
     #[test]
     fn without_the_lock_the_guard_still_restores() {
-        assert!(may_restore_foreground(false, true));
-        assert!(may_restore_foreground(false, false));
+        assert!(may_restore_foreground(false, true, false));
+        assert!(may_restore_foreground(false, false, false));
+    }
+
+    #[test]
+    fn a_minimized_prior_window_is_left_alone_even_while_it_is_the_foreground() {
+        assert!(!may_restore_foreground(true, true, true));
+        assert!(!may_restore_foreground(true, false, true));
+        assert!(!may_restore_foreground(false, true, true));
+        assert!(!may_restore_foreground(false, false, true));
     }
 }
 
