@@ -2106,6 +2106,11 @@ export const desktopActionTargetSchema = z
     /** The part's role, in Japanese. */
     role: z.string().min(1).max(40).optional(),
     name: z.string().min(1).max(120).optional(),
+    /** The named part that holds this one, when its window has others of the same role and name. */
+    within: z
+      .object({ role: z.string().min(1).max(40), name: z.string().min(1).max(120) })
+      .strict()
+      .optional(),
     /** The window's id, which tells apart two windows with the same title. */
     windowId: z
       .string()
