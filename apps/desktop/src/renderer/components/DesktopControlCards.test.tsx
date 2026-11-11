@@ -97,12 +97,14 @@ describe('desktop-control approval card', () => {
       target: { resolved: true, app: 'charmap' },
       text: undefined,
       textRole: undefined,
-      notes: ['起動した窓は、今使っている窓の後ろに開きます。'],
+      notes: ['起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。'],
     } as DesktopAction);
     expect(launch).toContain('アプリ「charmap」');
     // A launch gets no mark: its window can come up in front.
     expect(launch).not.toContain('desktop-approval-mode');
-    expect(launch).toContain('起動した窓は、今使っている窓の後ろに開きます。');
+    expect(launch).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
     expect(launch).not.toContain('入れる文字');
 
     const read = card({

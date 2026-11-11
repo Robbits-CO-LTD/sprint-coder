@@ -239,10 +239,12 @@ const FOREGROUND_NOTE =
   '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。';
 // Bringing a window to the front without `--headed` takes no mouse or keyboard.
 const FRONT_NOTE = '対象の窓が前面に出ます。';
-const LAUNCH_NOTE = '起動した窓は、今使っている窓の後ろに開きます。';
+const LAUNCH_NOTE =
+  '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。';
 const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
-const BEHIND_NOTE = '対象の窓は前面に出ません。';
+const BEHIND_NOTE =
+  '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。';
 // Foreground commands that only bring a window to the front (`launch` with `--activate`).
 const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'launch']);
 const TEXT_CUT_NOTE =
