@@ -99,12 +99,12 @@ mod imp {
         selection_item_available,
     };
     use crate::actions::value_write::gated_pattern_value_equals;
-    use crate::actions::win32_combo::{WIN32_COMBO_SELECT_LABEL, owning_combo};
+    use crate::actions::win32_combo::{WIN32_COMBO_SELECT_LABEL, after_item_select, owning_combo};
     use crate::tree::automation::automation_client;
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::read_one;
     use crate::tree::walk::walker_source::parent_step;
-    use agent_desktop_core::DeliverySemantics;
+    use agent_desktop_core::{DeliverySemantics, LocatorField};
     use uiautomation::patterns::{UIExpandCollapsePattern, UISelectionItemPattern};
     use windows::Win32::UI::Accessibility::UIA_ComboBoxControlTypeId;
 
@@ -256,21 +256,36 @@ mod imp {
         }
         let item_selected =
             read_one(element, TreeProperty::SelectionItemIsSelected).flag() == Some(true);
-        let Some(index) = combo.selected_index(deadline).map_err(after_delivery)? else {
-            return Ok(Some(vec![build_step(
-                WIN32_COMBO_SELECT_LABEL,
-                DeliveryOutcome::DeliveredUnverified,
-            )]));
+        let item_name = match read_one(element, TreeProperty::Name).text() {
+            LocatorField::Known(name) if !name.is_empty() => Some(name),
+            _ => None,
         };
-        let outcome = combo
-            .select_index(index, deadline)
-            .map_err(after_delivery)?;
-        let outcome = if item_selected || outcome == DeliveryOutcome::NotDelivered {
-            outcome
-        } else {
-            DeliveryOutcome::DeliveredUnverified
+        // The item's own Select put the box on the item's position. Closing
+        // the list notifies the owner, which may change the items then, so
+        // the position is confirmed to the owner only when it carries this
+        // item's text both before and after the close.
+        let index = combo.selected_index(deadline).map_err(after_delivery)?;
+        let text_at = |index: Option<usize>| match index {
+            Some(index) => combo.text_at(index, deadline).map_err(after_delivery),
+            None => Ok(None),
         };
-        Ok(Some(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]))
+        let before = text_at(index)?;
+        combo.close_list(deadline).map_err(after_delivery)?;
+        let after = text_at(index)?;
+        let carries = |text: &Option<String>, name: &str| {
+            text.as_deref()
+                .is_some_and(|text| text.to_lowercase() == name.to_lowercase())
+        };
+        let commit = match (index, item_name) {
+            (Some(index), Some(name)) if carries(&before, &name) && carries(&after, &name) => combo
+                .commit(index, &name, deadline)
+                .map_err(after_delivery)?,
+            _ => DeliveryOutcome::DeliveredUnverified,
+        };
+        Ok(Some(vec![build_step(
+            WIN32_COMBO_SELECT_LABEL,
+            after_item_select(item_selected, commit),
+        )]))
     }
 
     /// Closes the combo box list `element` is, or whose item it is, when that

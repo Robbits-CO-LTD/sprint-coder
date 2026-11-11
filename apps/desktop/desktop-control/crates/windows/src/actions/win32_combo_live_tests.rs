@@ -35,6 +35,13 @@ const ITEMS: [&str; 4] = ["Alpha", "Beta", "Gamma", "Twin"];
 /// `CBN_SELCHANGE` notifications the owner received, per test window. Each
 /// test owns one window, so the count is keyed by the owner handle.
 static NOTIFIED: std::sync::Mutex<Vec<(isize, usize)>> = std::sync::Mutex::new(Vec::new());
+/// Owners that, like an application refreshing its list, insert an item at
+/// the top when told the drop-down list closed (`CBN_CLOSEUP`).
+static INSERT_ON_CLOSEUP: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
+const CBN_CLOSEUP: usize = 8;
+const CB_INSERTSTRING: u32 = 0x014A;
+const CB_GETLBTEXT: u32 = 0x0148;
+const INSERTED: &str = "Aardvark";
 static NEXT_TOP: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn owner_proc(
@@ -50,6 +57,17 @@ unsafe extern "system" fn owner_proc(
             .find(|(owner, _)| *owner == window as isize)
         {
             entry.1 += 1;
+        }
+        return 0;
+    }
+    if message == WM_COMMAND && wparam >> 16 == CBN_CLOSEUP && wparam & 0xFFFF == COMBO_ID {
+        let inserts = INSERT_ON_CLOSEUP
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains(&(window as isize));
+        if inserts {
+            let text = wide(INSERTED);
+            unsafe { SendMessageW(lparam as HWND, CB_INSERTSTRING, 0, text.as_ptr() as LPARAM) };
         }
         return 0;
     }
@@ -357,4 +375,63 @@ fn a_click_on_an_item_ref_selects_that_very_item_even_when_its_text_is_shared() 
     assert_eq!(result.steps[0].label(), WIN32_COMBO_SELECT_LABEL);
     assert_eq!(host.selected(), 2);
     assert_eq!(host.notified(), 1);
+}
+
+impl ComboHost {
+    fn insert_on_closeup(&self) {
+        INSERT_ON_CLOSEUP
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(self.owner);
+    }
+
+    fn selected_text(&self) -> String {
+        let index = self.selected();
+        let mut buffer = [0u16; 64];
+        let length = unsafe {
+            SendMessageW(
+                self.combo as HWND,
+                CB_GETLBTEXT,
+                index as usize,
+                buffer.as_mut_ptr() as LPARAM,
+            )
+        };
+        String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)])
+    }
+}
+
+#[test]
+fn a_name_is_looked_up_again_when_closing_the_list_changes_the_items() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Alpha", "Beta"]);
+    host.insert_on_closeup();
+    unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 1, 0) };
+    let steps = select_steps(&host.element(), "Beta", deadline(5_000)).expect("select");
+    assert_eq!(steps[0].label(), WIN32_COMBO_SELECT_LABEL);
+    assert_eq!(
+        host.selected(),
+        2,
+        "Beta moved down when Aardvark was added"
+    );
+    assert_eq!(host.selected_text(), "Beta");
+    assert_eq!(steps[0].verified(), Some(true));
+    assert_eq!(host.notified(), 1);
+}
+
+#[test]
+fn an_item_ref_is_never_verified_on_an_item_that_moved_into_its_place() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Alpha", "Beta"]);
+    host.insert_on_closeup();
+    let items = list_items(&host);
+    assert_eq!(items.len(), 2);
+    let steps = select_steps(&items[1], "", deadline(5_000)).expect("select by item ref");
+    assert_eq!(steps[0].label(), WIN32_COMBO_SELECT_LABEL);
+    assert!(
+        steps[0].verified() != Some(true) || host.selected_text() == "Beta",
+        "verified only when the box really holds Beta"
+    );
+    if host.selected_text() != "Beta" {
+        assert_eq!(host.notified(), 0, "a different item is never confirmed");
+    }
 }

@@ -67,9 +67,11 @@ mod imp {
         let mut uncommitted = None;
         if let Some(combo) = owning_combo(element, deadline)? {
             match combo.find_item(value, deadline)? {
-                Some(ItemMatch::Unique(index)) => {
-                    let outcome = combo.select_index(index, deadline)?;
-                    return Ok(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]);
+                Some(ItemMatch::Unique(_)) => {
+                    // The position is looked up again once the list is closed.
+                    if let Some(outcome) = combo.select_text(value, deadline)? {
+                        return Ok(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]);
+                    }
                 }
                 Some(ItemMatch::Missing | ItemMatch::Ambiguous) => {
                     uncommitted = Some(build_step(

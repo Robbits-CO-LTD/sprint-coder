@@ -24,6 +24,8 @@
 
 use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
 
+use crate::actions::chain::DeliveryOutcome;
+
 pub(crate) const WIN32_COMBO_SELECT_LABEL: &str = "Win32ComboBox.SelectAndNotify";
 
 /// Ancestors climbed from an item to its box: item, list, box, plus one spare.
@@ -88,6 +90,39 @@ pub(crate) fn selchange_wparam(control_id: i32) -> usize {
     (usize::from(CBN_SELCHANGE) << 16) | usize::from(control_id as u16)
 }
 
+/// Whether a commit landed on the requested item: the box holds the position
+/// it was given, its list is closed, and the item at that position carries
+/// the requested text (compared as `CB_FINDSTRINGEXACT` compares, ignoring
+/// case). A position alone is not enough: the owner may change the items when
+/// told of the close or of the selection.
+pub(crate) fn holds_requested(
+    held: isize,
+    index: usize,
+    dropped: isize,
+    held_text: Option<&str>,
+    requested: &str,
+) -> bool {
+    usize::try_from(held).ok() == Some(index)
+        && dropped == 0
+        && held_text.is_some_and(|text| text.to_lowercase() == requested.to_lowercase())
+}
+
+/// The outcome of choosing an item by its own ref once the item's own Select
+/// has landed. The box's selection has already moved by then, so a commit
+/// that reports nothing delivered is still a delivery whose result is
+/// unknown, never "nothing happened" - the same disposition an error after
+/// that point gets. An item that did not report itself selected is never
+/// verified.
+pub(crate) fn after_item_select(item_selected: bool, commit: DeliveryOutcome) -> DeliveryOutcome {
+    match commit {
+        DeliveryOutcome::NotDelivered => DeliveryOutcome::DeliveredUnverified,
+        DeliveryOutcome::DeliveredVerified if !item_selected => {
+            DeliveryOutcome::DeliveredUnverified
+        }
+        other => other,
+    }
+}
+
 fn missing_item_error(chars: usize) -> AdapterError {
     AdapterError::new(
         ErrorCode::ElementNotFound,
@@ -106,7 +141,7 @@ fn ambiguous_item_error() -> AdapterError {
 mod imp {
     use super::{
         AdapterError, ComboClass, DeliverySemantics, ErrorCode, ItemMatch, MAX_CLIMB,
-        ambiguous_item_error, classify_class, classify_matches, keeps_item_text,
+        ambiguous_item_error, classify_class, classify_matches, holds_requested, keeps_item_text,
         missing_item_error, selchange_wparam,
     };
     use crate::actions::chain::{DeliveryOutcome, after_delivery};
@@ -127,6 +162,8 @@ mod imp {
     const CB_SETCURSEL: u32 = 0x014E;
     const CB_SHOWDROPDOWN: u32 = 0x014F;
     const CB_GETDROPPEDSTATE: u32 = 0x0157;
+    const CB_GETLBTEXT: u32 = 0x0148;
+    const CB_GETLBTEXTLEN: u32 = 0x0149;
     /// One message never waits longer than this, whatever the action budget.
     const MESSAGE_CAP_MS: u64 = 2_000;
 
@@ -261,12 +298,51 @@ mod imp {
             text: &str,
             deadline: Deadline,
         ) -> Result<Option<DeliveryOutcome>, AdapterError> {
+            let missing = || missing_item_error(text.chars().count());
             match self.find_item(text, deadline)? {
-                None => Ok(None),
-                Some(ItemMatch::Missing) => Err(missing_item_error(text.chars().count())),
-                Some(ItemMatch::Ambiguous) => Err(ambiguous_item_error()),
-                Some(ItemMatch::Unique(index)) => self.select_index(index, deadline).map(Some),
+                None => return Ok(None),
+                Some(ItemMatch::Missing) => return Err(missing()),
+                Some(ItemMatch::Ambiguous) => return Err(ambiguous_item_error()),
+                Some(ItemMatch::Unique(_)) => {}
             }
+            // Closing the list notifies the owner, which may add or reorder
+            // items then, so the position is looked up again afterwards.
+            self.close_list(deadline)?;
+            match self.find_item(text, deadline)? {
+                None | Some(ItemMatch::Missing) => Err(missing()),
+                Some(ItemMatch::Ambiguous) => Err(ambiguous_item_error()),
+                Some(ItemMatch::Unique(index)) => self.commit(index, text, deadline).map(Some),
+            }
+        }
+
+        /// Closes an open drop-down list. The box tells its owner
+        /// (`CBN_CLOSEUP`), and the owner may change the items in reply, so a
+        /// position read before this may no longer name the same item.
+        pub(crate) fn close_list(&self, deadline: Deadline) -> Result<(), AdapterError> {
+            if self.send(CB_GETDROPPEDSTATE, 0, 0, deadline)? != 0 {
+                self.send(CB_SHOWDROPDOWN, 0, 0, deadline)?;
+            }
+            Ok(())
+        }
+
+        /// The text of the item at `index`, `None` when there is none.
+        pub(crate) fn text_at(
+            &self,
+            index: usize,
+            deadline: Deadline,
+        ) -> Result<Option<String>, AdapterError> {
+            let length = self.send(CB_GETLBTEXTLEN, index, 0, deadline)?;
+            let Ok(length) = usize::try_from(length) else {
+                return Ok(None);
+            };
+            let mut buffer = vec![0u16; length + 1];
+            let copied = self.send(CB_GETLBTEXT, index, buffer.as_mut_ptr() as isize, deadline)?;
+            let Ok(copied) = usize::try_from(copied) else {
+                return Ok(None);
+            };
+            Ok(Some(String::from_utf16_lossy(
+                &buffer[..copied.min(length)],
+            )))
         }
 
         /// Whether `element` is the box itself rather than one of its parts.
@@ -286,17 +362,15 @@ mod imp {
             Ok(usize::try_from(self.send(CB_GETCURSEL, 0, 0, deadline)?).ok())
         }
 
-        /// Closes an open drop-down list, selects `index`, and sends the owner
-        /// `CBN_SELCHANGE`. Verified when the box then holds `index` with its
-        /// list closed.
-        pub(crate) fn select_index(
+        /// Selects `index` in the closed box and sends the owner
+        /// `CBN_SELCHANGE`. Verified only when the box then holds `index`
+        /// with its list closed and the item there carries `requested`.
+        pub(crate) fn commit(
             &self,
             index: usize,
+            requested: &str,
             deadline: Deadline,
         ) -> Result<DeliveryOutcome, AdapterError> {
-            if self.send(CB_GETDROPPEDSTATE, 0, 0, deadline)? != 0 {
-                self.send(CB_SHOWDROPDOWN, 0, 0, deadline)?;
-            }
             let selected = self.send(CB_SETCURSEL, index, 0, deadline)?;
             if usize::try_from(selected).ok() != Some(index) {
                 return Ok(DeliveryOutcome::NotDelivered);
@@ -309,9 +383,13 @@ mod imp {
             let dropped = self
                 .send(CB_GETDROPPEDSTATE, 0, 0, deadline)
                 .map_err(after_delivery)?;
+            let held_text = match usize::try_from(held) {
+                Ok(position) => self.text_at(position, deadline).map_err(after_delivery)?,
+                Err(_) => None,
+            };
             Ok(DeliveryOutcome::from_delivery(
                 true,
-                usize::try_from(held).ok() == Some(index) && dropped == 0,
+                holds_requested(held, index, dropped, held_text.as_deref(), requested),
             ))
         }
 
@@ -461,9 +539,22 @@ mod imp {
             Ok(None)
         }
 
-        pub(crate) fn select_index(
+        pub(crate) fn close_list(&self, _deadline: Deadline) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        pub(crate) fn text_at(
             &self,
             _index: usize,
+            _deadline: Deadline,
+        ) -> Result<Option<String>, AdapterError> {
+            Ok(None)
+        }
+
+        pub(crate) fn commit(
+            &self,
+            _index: usize,
+            _requested: &str,
             _deadline: Deadline,
         ) -> Result<DeliveryOutcome, AdapterError> {
             Ok(DeliveryOutcome::NotDelivered)

@@ -1,7 +1,8 @@
 use super::{
-    ComboClass, ItemMatch, ambiguous_item_error, classify_class, classify_matches, keeps_item_text,
-    missing_item_error, selchange_wparam,
+    ComboClass, ItemMatch, after_item_select, ambiguous_item_error, classify_class,
+    classify_matches, holds_requested, keeps_item_text, missing_item_error, selchange_wparam,
 };
+use crate::actions::chain::DeliveryOutcome;
 use agent_desktop_core::{DeliveryDisposition, ErrorCode};
 
 #[test]
@@ -63,4 +64,40 @@ fn errors_never_echo_the_requested_text() {
     );
     let ambiguous = ambiguous_item_error();
     assert_eq!(ambiguous.code, ErrorCode::AmbiguousTarget);
+}
+
+#[test]
+fn a_commit_is_verified_only_on_the_requested_item() {
+    assert!(holds_requested(2, 2, 0, Some("Beta"), "beta"));
+    assert!(
+        !holds_requested(1, 1, 0, Some("Alpha"), "Beta"),
+        "the position held, but another item moved into it"
+    );
+    assert!(!holds_requested(2, 2, 0, None, "Beta"));
+    assert!(!holds_requested(1, 2, 0, Some("Beta"), "Beta"));
+    assert!(
+        !holds_requested(2, 2, 1, Some("Beta"), "Beta"),
+        "list still open"
+    );
+}
+
+#[test]
+fn a_failure_after_the_items_own_select_is_still_a_delivery() {
+    assert_eq!(
+        after_item_select(true, DeliveryOutcome::NotDelivered),
+        DeliveryOutcome::DeliveredUnverified,
+        "the box's selection already moved"
+    );
+    assert_eq!(
+        after_item_select(true, DeliveryOutcome::DeliveredVerified),
+        DeliveryOutcome::DeliveredVerified
+    );
+    assert_eq!(
+        after_item_select(false, DeliveryOutcome::DeliveredVerified),
+        DeliveryOutcome::DeliveredUnverified
+    );
+    assert_eq!(
+        after_item_select(true, DeliveryOutcome::DeliveredUnverified),
+        DeliveryOutcome::DeliveredUnverified
+    );
 }
