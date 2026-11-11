@@ -9,7 +9,8 @@
 //! window to the front and moves the keyboard focus into it.
 //!
 //! This module chooses the item with the box's own messages and then sends
-//! the owner the `CBN_SELCHANGE` notification that a keyboard selection sends.
+//! the owner the notifications a keyboard selection sends (`CBN_SELENDOK`,
+//! then `CBN_SELCHANGE`).
 //! An open drop-down list is closed first with `CB_SHOWDROPDOWN`, which the box
 //! reports to its owner as a dismissed list, as Esc would. No input is
 //! synthesized and neither the focus nor the foreground window changes.
@@ -35,6 +36,9 @@ const CBS_OWNERDRAWFIXED: u32 = 0x0010;
 const CBS_OWNERDRAWVARIABLE: u32 = 0x0020;
 const CBS_HASSTRINGS: u32 = 0x0200;
 const CBN_SELCHANGE: u16 = 1;
+const CBN_SELENDOK: u16 = 9;
+const CBS_TYPE_MASK: u32 = 0x0003;
+const CBS_DROPDOWNLIST: u32 = 0x0003;
 
 /// What a window class says about the climb from an element to its box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +88,22 @@ pub(crate) fn classify_matches(first: isize, again: isize) -> ItemMatch {
     }
 }
 
-/// `WM_COMMAND`'s `wParam` for a box's `CBN_SELCHANGE`: the control id in the
-/// low word, the notification code in the high word.
-pub(crate) fn selchange_wparam(control_id: i32) -> usize {
-    (usize::from(CBN_SELCHANGE) << 16) | usize::from(control_id as u16)
+/// The `WM_COMMAND` `wParam`s that tell the owner of a selection, in the order
+/// the box sends them when a person picks an item with the keyboard:
+/// `CBN_SELENDOK` (toolkits run their "selection committed" handlers on it),
+/// then `CBN_SELCHANGE`.
+pub(crate) fn selection_notifications(control_id: i32) -> [usize; 2] {
+    let low = usize::from(control_id as u16);
+    [
+        (usize::from(CBN_SELENDOK) << 16) | low,
+        (usize::from(CBN_SELCHANGE) << 16) | low,
+    ]
+}
+
+/// Whether the style is a drop-down list (`CBS_DROPDOWNLIST`), which holds
+/// only its items and takes no free text.
+pub(crate) fn is_drop_down_list(style: u32) -> bool {
+    style & CBS_TYPE_MASK == CBS_DROPDOWNLIST
 }
 
 /// Whether a commit landed on the requested item: the box holds the position
@@ -141,7 +157,7 @@ pub(crate) fn after_item_select(item_selected: bool, commit: DeliveryOutcome) ->
     }
 }
 
-fn missing_item_error(chars: usize) -> AdapterError {
+pub(crate) fn missing_item_error(chars: usize) -> AdapterError {
     AdapterError::new(
         ErrorCode::ElementNotFound,
         format!("No item of the combo box matched the requested value ({chars} chars)"),
@@ -150,7 +166,7 @@ fn missing_item_error(chars: usize) -> AdapterError {
     .with_suggestion("Use find or snapshot to inspect the available items.")
 }
 
-fn ambiguous_item_error() -> AdapterError {
+pub(crate) fn ambiguous_item_error() -> AdapterError {
     AdapterError::ambiguous_target("Multiple items of the combo box share the requested text")
         .with_details(serde_json::json!({ "kind": "ambiguous_select_value" }))
 }
@@ -159,8 +175,8 @@ fn ambiguous_item_error() -> AdapterError {
 mod imp {
     use super::{
         AdapterError, ComboClass, DeliverySemantics, ErrorCode, ItemMatch, MAX_CLIMB,
-        ambiguous_item_error, classify_class, classify_matches, holds_requested, keeps_item_text,
-        missing_item_error, search_start, selchange_wparam,
+        ambiguous_item_error, classify_class, classify_matches, holds_requested, is_drop_down_list,
+        keeps_item_text, missing_item_error, search_start, selection_notifications,
     };
     use crate::actions::chain::{DeliveryOutcome, after_delivery};
     use crate::tree::automation::automation_client;
@@ -461,14 +477,19 @@ mod imp {
                 ));
             }
             let id = unsafe { GetDlgCtrlID(window) };
-            send_timeout(
-                owner as isize,
-                WM_COMMAND,
-                selchange_wparam(id),
-                self.hwnd,
-                deadline,
-            )
-            .map(|_| ())
+            // In the order the box itself notifies a keyboard selection:
+            // `CBN_SELENDOK` (the selection is to be processed), then
+            // `CBN_SELCHANGE`.
+            for wparam in selection_notifications(id) {
+                send_timeout(owner as isize, WM_COMMAND, wparam, self.hwnd, deadline)?;
+            }
+            Ok(())
+        }
+
+        /// Whether the box takes free text (`CBS_DROPDOWN`, `CBS_SIMPLE`)
+        /// rather than only its items (`CBS_DROPDOWNLIST`).
+        pub(crate) fn accepts_free_text(&self) -> bool {
+            !is_drop_down_list(unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32)
         }
 
         fn send(

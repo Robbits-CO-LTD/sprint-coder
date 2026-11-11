@@ -42,6 +42,8 @@ const CBN_CLOSEUP: usize = 8;
 const CB_INSERTSTRING: u32 = 0x014A;
 const CB_FINDSTRINGEXACT: u32 = 0x0158;
 const INSERTED: &str = "Aardvark";
+/// Every combo-box notification each owner received, in order.
+static SEQUENCE: std::sync::Mutex<Vec<(isize, usize)>> = std::sync::Mutex::new(Vec::new());
 static NEXT_TOP: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn owner_proc(
@@ -50,6 +52,12 @@ unsafe extern "system" fn owner_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if message == WM_COMMAND && wparam & 0xFFFF == COMBO_ID {
+        SEQUENCE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push((window as isize, wparam >> 16));
+    }
     if message == WM_COMMAND && wparam >> 16 == CBN_SELCHANGE && wparam & 0xFFFF == COMBO_ID {
         let mut notified = NOTIFIED.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(entry) = notified
@@ -87,7 +95,7 @@ struct ComboHost {
 
 impl ComboHost {
     fn create(items: &[&'static str]) -> Self {
-        Self::create_styled(items, CBS_HASSTRINGS)
+        Self::create_styled(items, CBS_DROPDOWNLIST | CBS_HASSTRINGS)
     }
 
     fn create_styled(items: &[&'static str], style: u32) -> Self {
@@ -176,7 +184,7 @@ fn host(
             0,
             combo_class.as_ptr(),
             empty.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST | style,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | style,
             8,
             8,
             200,
@@ -295,21 +303,68 @@ fn set_value_naming_an_item_chooses_it_and_tells_the_owner() {
 }
 
 #[test]
-fn set_value_naming_no_item_says_no_item_was_chosen() {
+fn set_value_naming_no_item_of_a_drop_down_list_is_not_found_and_writes_nothing() {
     ensure_test_apartment();
     let host = ComboHost::create(&ITEMS);
+    let error = set_value_steps(
+        &host.element(),
+        "Zeta",
+        InteractionPolicy::headless(),
+        deadline(5_000),
+    )
+    .expect_err("no such item");
+    assert_eq!(error.code, ErrorCode::ElementNotFound);
+    assert_eq!(host.selected(), -1, "nothing was written");
+    assert_eq!(host.notified(), 0);
+}
+
+#[test]
+fn set_value_naming_two_items_is_ambiguous_and_moves_nothing() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Red", "Twin", "Blue", "Twin"]);
+    let error = set_value_steps(
+        &host.element(),
+        "Twin",
+        InteractionPolicy::headless(),
+        deadline(5_000),
+    )
+    .expect_err("twins");
+    assert_eq!(error.code, ErrorCode::AmbiguousTarget);
+    assert_eq!(host.selected(), -1, "the box was not moved onto a twin");
+    assert_eq!(host.notified(), 0);
+}
+
+#[test]
+fn set_value_of_free_text_in_an_editable_box_says_no_item_was_chosen() {
+    const CBS_DROPDOWN: u32 = 0x0002;
+    ensure_test_apartment();
+    let host = ComboHost::create_styled(&ITEMS, CBS_DROPDOWN | CBS_HASSTRINGS);
     let steps = set_value_steps(
         &host.element(),
         "Zeta",
         InteractionPolicy::headless(),
         deadline(5_000),
-    );
-    if let Ok(steps) = steps {
-        assert!(crate::actions::value_write::left_list_unchosen(&steps));
-    }
+    )
+    .expect("free text is written");
+    assert!(crate::actions::value_write::left_list_unchosen(&steps));
+    assert_eq!(host.selected(), -1);
     assert_eq!(host.notified(), 0);
 }
 
+#[test]
+fn the_owner_hears_selendok_before_selchange_as_for_a_keyboard_selection() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&ITEMS);
+    select_steps(&host.element(), "Beta", deadline(5_000)).expect("select");
+    let codes: Vec<usize> = SEQUENCE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .filter(|(owner, _)| *owner == host.owner)
+        .map(|(_, code)| *code)
+        .collect();
+    assert_eq!(codes, vec![9, 1], "CBN_SELENDOK, then CBN_SELCHANGE");
+}
 /// The UI Automation elements of the box's list items, in list order, reached
 /// through the box the way a snapshot reaches them. The system proxy
 /// publishes the items only while the drop-down list is open, so the list is
@@ -495,7 +550,7 @@ fn an_item_ref_does_not_confirm_a_twin_that_moved_into_its_place() {
 fn an_owner_drawn_box_without_item_text_is_left_to_ui_automation() {
     const CBS_OWNERDRAWFIXED: u32 = 0x0010;
     ensure_test_apartment();
-    let host = ComboHost::create_styled(&["Alpha", "Beta"], CBS_OWNERDRAWFIXED);
+    let host = ComboHost::create_styled(&["Alpha", "Beta"], CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED);
     unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 1, 0) };
     let element = host.element();
     let combo = crate::actions::win32_combo::owning_combo(&element, deadline(5_000))

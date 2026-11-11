@@ -1,7 +1,7 @@
 use super::{
     ComboClass, ItemMatch, after_item_select, ambiguous_item_error, classify_class,
-    classify_matches, holds_requested, keeps_item_text, missing_item_error,
-    position_still_names_item, search_start, selchange_wparam,
+    classify_matches, holds_requested, is_drop_down_list, keeps_item_text, missing_item_error,
+    position_still_names_item, search_start, selection_notifications,
 };
 use crate::actions::chain::DeliveryOutcome;
 use agent_desktop_core::{DeliveryDisposition, ErrorCode};
@@ -45,13 +45,25 @@ fn a_second_search_that_wraps_to_the_first_hit_means_one_item() {
 }
 
 #[test]
-fn the_notification_carries_the_control_id_and_cbn_selchange() {
-    assert_eq!(selchange_wparam(105), 0x0001_0069);
+fn the_owner_hears_selendok_then_selchange_with_the_control_id() {
     assert_eq!(
-        selchange_wparam(-1),
-        0x0001_FFFF,
+        selection_notifications(105),
+        [0x0009_0069, 0x0001_0069],
+        "CBN_SELENDOK first, as the box sends it for a keyboard selection"
+    );
+    assert_eq!(
+        selection_notifications(-1),
+        [0x0009_FFFF, 0x0001_FFFF],
         "only the low word of the id"
     );
+}
+
+#[test]
+fn only_a_drop_down_list_refuses_free_text() {
+    assert!(is_drop_down_list(0x0003));
+    assert!(is_drop_down_list(0x0313), "owner-drawn drop-down list");
+    assert!(!is_drop_down_list(0x0002), "drop-down with an edit field");
+    assert!(!is_drop_down_list(0x0001), "simple");
 }
 
 #[test]

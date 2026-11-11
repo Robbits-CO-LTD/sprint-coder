@@ -2,9 +2,11 @@
 //! ValuePattern / RangeValuePattern writes for `SetValue` and `Clear`.
 //!
 //! On a standard Win32 combo box, a value that names one of its items is
-//! chosen through `win32_combo` instead, so the box's owner is told; any other
-//! value is written as text with a skipped `Win32ComboBox.SelectAndNotify`
-//! step saying that no item was chosen.
+//! chosen through `win32_combo` instead, so the box's owner is told. A value
+//! that names several items is `AMBIGUOUS_TARGET`, and one that names none is
+//! `ELEMENT_NOT_FOUND` in a drop-down list; only a box that takes free text is
+//! written as text, with a skipped `Win32ComboBox.SelectAndNotify` step saying
+//! that no item was chosen.
 //!
 //! Verification re-reads route through [`gated_pattern_value_equals`] /
 //! [`gated_pattern_range_equals`] so an `IsPassword` element never calls
@@ -47,7 +49,9 @@ mod imp {
     };
     use crate::actions::chain::{after_delivery, build_step, gated};
     use crate::actions::mutation::{classify_success, classify_write};
-    use crate::actions::win32_combo::{ItemMatch, WIN32_COMBO_SELECT_LABEL, owning_combo};
+    use crate::actions::win32_combo::{
+        ItemMatch, WIN32_COMBO_SELECT_LABEL, ambiguous_item_error, missing_item_error, owning_combo,
+    };
     use crate::tree::properties::element_properties::ElementProperties;
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::property_outcome::PropertyOutcome;
@@ -73,7 +77,17 @@ mod imp {
                         return Ok(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]);
                     }
                 }
-                Some(ItemMatch::Missing | ItemMatch::Ambiguous) => {
+                // Writing the text would move the box onto one of the twins
+                // without telling the owner.
+                Some(ItemMatch::Ambiguous) => return Err(ambiguous_item_error()),
+                // A drop-down list holds only its items: there is no text to
+                // write instead.
+                Some(ItemMatch::Missing) if !combo.accepts_free_text() => {
+                    return Err(missing_item_error(value.chars().count()));
+                }
+                // Free text in a box that takes it: written as text, and the
+                // steps say that no item was chosen.
+                Some(ItemMatch::Missing) => {
                     uncommitted = Some(build_step(
                         WIN32_COMBO_SELECT_LABEL,
                         DeliveryOutcome::NotDelivered,
