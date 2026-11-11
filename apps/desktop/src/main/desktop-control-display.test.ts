@@ -111,7 +111,9 @@ describe('desktop-control approval description', () => {
       textRole: 'enter',
       allowTaskGrant: true,
       // No mouse or keyboard, but the call can bring the window to the front.
-      notes: ['対象の窓は前面に出ません。'],
+      notes: [
+        '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。',
+      ],
       openDetails: false,
     });
     // What the field holds is never read out.
@@ -143,7 +145,7 @@ describe('desktop-control approval description', () => {
       title: 'アプリを起動します',
       mode: 'background',
       target: { resolved: true, app: 'charmap' },
-      notes: ['起動した窓は、今使っている窓の後ろに開きます。'],
+      notes: ['起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。'],
     });
     expect(describeArgv(['close-app', 'charmap'])).toMatchObject({
       kind: 'close',
@@ -187,14 +189,16 @@ describe('desktop-control approval description', () => {
     expect(describeArgv(['snapshot', '--app', 'charmap']).notes).toEqual([]);
     expect(describeArgv(['minimize', '--app', 'charmap']).notes).toEqual([]);
     expect(describeArgv(['launch', 'charmap']).notes).toEqual([
-      '起動した窓は、今使っている窓の後ろに開きます。',
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
     ]);
     expect(
       describeArgv([
         'batch',
         JSON.stringify([{ command: 'expand', args: { ref_id: '@s1abc:e3' } }]),
       ]).notes,
-    ).toEqual(['対象の窓は前面に出ません。']);
+    ).toEqual([
+      '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。',
+    ]);
     // A foreground run already says the window comes to the front.
     expect(describeArgv(['--headed', 'click', '@s1abc:e1']).notes).toEqual([
       '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',

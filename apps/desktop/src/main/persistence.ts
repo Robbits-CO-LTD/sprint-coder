@@ -4883,6 +4883,11 @@ export type ApprovalResolutionInput = {
   operationId: string;
   decidedAt: string;
   grantExpiresAt?: string;
+  /**
+   * `false` records an `allow_task` without saving its Task grant for the exact command: the
+   * desktop-control app-wide grant (「このアプリは Task 中許可」) is kept in memory only.
+   */
+  saveTaskGrant?: false;
 };
 
 export type ApprovalPersistenceResult = {
@@ -16478,7 +16483,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           row.runtime_call_id,
           row.subject_id,
         );
-    } else if (decision === 'allow_task') {
+    } else if (decision === 'allow_task' && input.saveTaskGrant !== false) {
       const grantExpiresAt = new Date(input.grantExpiresAt ?? row.expires_at).toISOString();
       if (Date.parse(grantExpiresAt) <= Date.parse(decidedAt))
         throw new Error('Approval grant expiry must be in the future');

@@ -239,10 +239,12 @@ const FOREGROUND_NOTE =
   '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。';
 // Bringing a window to the front without `--headed` takes no mouse or keyboard.
 const FRONT_NOTE = '対象の窓が前面に出ます。';
-const LAUNCH_NOTE = '起動した窓は、今使っている窓の後ろに開きます。';
+const LAUNCH_NOTE =
+  '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。';
 const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
-const BEHIND_NOTE = '対象の窓は前面に出ません。';
+const BEHIND_NOTE =
+  '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。';
 // Foreground commands that only bring a window to the front (`launch` with `--activate`).
 const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'launch']);
 const TEXT_CUT_NOTE =
@@ -333,8 +335,6 @@ export type DesktopControlOwnerReader = Readonly<{
   part(ref: string): DesktopControlOwner | null;
   /** The one owner every record of this window id agrees on. */
   window(id: string): DesktopControlOwner | null;
-  /** Every recorded owner whose executable has this name, or `null` when one cannot be read. */
-  named(app: string): readonly DesktopControlOwner[] | null;
 }>;
 
 export function desktopControlOwnerReader(
@@ -347,7 +347,6 @@ export function desktopControlOwnerReader(
   return {
     part: (ref) => reader.partOwner(ref),
     window: (id) => reader.windowOwner(id),
-    named: (app) => reader.namedOwners(app),
   };
 }
 
@@ -361,18 +360,6 @@ export function sameDesktopControlOwner(
     left.instance === right.instance &&
     left.app.toLowerCase() === right.app.toLowerCase()
   );
-}
-
-/**
- * Whether an app name given to the executable (`--app`) names this executable as the executable
- * matches it: letter case aside, exactly or with `.exe` added. A name with an invisible character
- * names nothing here.
- */
-export function desktopControlAppNameMatches(given: string, app: string): boolean {
-  if (!APP_NAME.test(given) || UNDISPLAYABLE.test(given)) return false;
-  const name = given.toLowerCase();
-  const actual = app.toLowerCase();
-  return name === actual || (!name.endsWith('.exe') && `${name}.exe` === actual);
 }
 
 const PROCESS_INSTANCE = /^[A-Za-z0-9:._-]{1,128}$/u;
@@ -798,6 +785,10 @@ class SnapshotReader {
     return ownerOf(entry.pid, entry.process_instance, entry.source_app);
   }
 
+  /**
+   * Known limit: the executable resolves a window id by its handle alone, so a handle reused by
+   * another app after the recorded window closed is not told apart unless a newer record disagrees.
+   */
   windowOwner(id: string): DesktopControlOwner | null {
     if (!WINDOW_ID.test(id)) return null;
     const owners: (DesktopControlOwner | null)[] = [];
@@ -812,28 +803,6 @@ class SnapshotReader {
     return owners.every((owner) => owner !== null && sameDesktopControlOwner(owner, first))
       ? first
       : null;
-  }
-
-  namedOwners(app: string): readonly DesktopControlOwner[] | null {
-    const owners: DesktopControlOwner[] = [];
-    const add = (pid: unknown, instance: unknown, name: unknown): boolean => {
-      if (typeof name !== 'string' || !desktopControlAppNameMatches(app, name)) return true;
-      const owner = ownerOf(pid, instance, name);
-      if (owner === null) return false;
-      owners.push(owner);
-      return true;
-    };
-    for (const snapshot of this.recentSnapshots())
-      for (const entry of Object.values(this.refmap(snapshot) ?? {}))
-        if (
-          typeof entry === 'object' &&
-          entry !== null &&
-          !add(entry.pid, entry.process_instance, entry.source_app)
-        )
-          return null;
-    for (const known of this.known?.values() ?? [])
-      if (!add(known.pid, known.instance, known.app)) return null;
-    return owners;
   }
 
   private recentSnapshots(): string[] {

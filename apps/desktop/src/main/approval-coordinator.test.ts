@@ -2353,11 +2353,21 @@ describe('ApprovalCoordinator desktop control card', () => {
           allowTaskGrant: true,
           appGrant: { app: 'charmap.exe' },
         });
+        const recorded = vi.spyOn(harness.persistence, 'resolveApproval');
         harness.coordinator.resolve({
           ...resolveCommand(approval, 'allow_task'),
           grantScope: 'app',
         });
-        await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+        const granted = await first;
+        expect(granted).toMatchObject({ approvalDecision: 'allow_task' });
+        // Kept in memory only: no Task grant of the exact command is stored with it.
+        expect(recorded.mock.calls[0]![0]).toMatchObject({
+          decision: 'allow_task',
+          saveTaskGrant: false,
+        });
+        expect(harness.persistence.grants).toHaveLength(0);
+        // The run the card was raised for goes ahead under the app-wide grant.
+        expect(granted.beforeExecute?.()).toBe(true);
 
         // A different command on the same app: no card, recorded as the person's Task decision.
         const next = await harness.coordinator.authorizeTool(

@@ -90,7 +90,8 @@ describe('desktop-control app-wide Task grant', () => {
       ['snapshot', '--window-id', 'w-1', '-i', '--compact'],
       ['find', '--root', '@scharmap:e1', '--role', 'button'],
       ['wait', '--element', '@scharmap:e1', '--predicate', 'actionable'],
-      ['minimize', '--window-id', 'w-1'],
+      ['move-window', '--window-id', 'w-1', '--x', '10', '--y', '10'],
+      ['resize-window', '--window-id', 'w-1', '--width', '400', '--height', '300'],
     ])
       expect(offer(argv)?.id, argv.join(' ')).toBe(charmap!.id);
   });
@@ -117,9 +118,12 @@ describe('desktop-control app-wide Task grant', () => {
     expect(covers(['click', '@scharmap:e1'], [])).toBe(false);
   });
 
-  it('never covers or offers what uses the foreground, launches or closes an app', () => {
+  it('never covers or offers what uses the foreground, launches, closes or minimizes an app', () => {
     const charmap = offer(['click', '@scharmap:e1'])!;
     for (const argv of [
+      // Minimizing hands the front, and the person's typing, to another window.
+      ['minimize', '--window-id', 'w-1'],
+      batch({ command: 'minimize', args: { window_id: 'w-1' } }),
       ['--headed', 'click', '@scharmap:e1'],
       ['click', '@scharmap:e1', '--headed'],
       ['type', '@scharmap:e2', 'ABC'],
@@ -181,6 +185,7 @@ describe('desktop-control app-wide Task grant', () => {
       batch({ command: 'snapshot', args: { window_id: null } }),
       batch({ command: 'snapshot', args: { window_id: 'w-1', surface: 'desktop' } }),
       batch({ command: 'wait', args: { ms: 500 } }),
+      batch({ command: 'click', args: { ref_id: '@scharmap:e1' }, session: 'abc' }),
       batch(),
     ]) {
       expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
@@ -210,28 +215,66 @@ describe('desktop-control app-wide Task grant', () => {
     ).toBe(false);
   });
 
-  it('takes an app name only when the records confirm it is the granted process', () => {
+  it('never takes an app given by name, which the executable resolves to a window itself', () => {
     const charmap = offer(['click', '@scharmap:e1'])!;
-    // A name alone cannot establish the app for an offer.
-    expect(offer(['snapshot', '--app', 'charmap'])).toBeNull();
-    expect(covers(['snapshot', '--app', 'charmap'], [charmap])).toBe(true);
-    expect(covers(['snapshot', '--app', 'CHARMAP.EXE', '-i'], [charmap])).toBe(true);
-    expect(covers(['snapshot', '--app', 'notepad'], [charmap])).toBe(false);
-    expect(covers(['snapshot', '--app', 'charmap.exe.exe'], [charmap])).toBe(false);
-    expect(covers(['snapshot', '--app', `char${String.fromCodePoint(0x200b)}map`], [charmap])).toBe(
-      false,
-    );
-    // When the records know a second copy of the app, the name could reach either.
-    const root = mkdtempSync(join(tmpdir(), 'sc-dc-app-grant-twice-'));
+    for (const argv of [
+      ['snapshot', '--app', 'charmap'],
+      ['snapshot', '--app', 'charmap.exe', '-i'],
+      ['screenshot', '--app', 'charmap'],
+      ['find', '--app', 'charmap', '--role', 'button'],
+      ['wait', '--text', 'OK', '--app', 'charmap'],
+      ['move-window', '--app', 'charmap', '--x', '0', '--y', '0'],
+      ['resize-window', '--app', 'charmap', '--width', '1', '--height', '1'],
+      // Not even beside the app's own window or part.
+      ['snapshot', '--window-id', 'w-1', '--app', 'charmap'],
+      ['wait', '--element', '@scharmap:e1', '--app', 'charmap'],
+      batch({ command: 'snapshot', args: { app: 'charmap' } }),
+      batch({ command: 'snapshot', args: { window_id: 'w-1', app: 'charmap' } }),
+    ]) {
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
+      expect(offer(argv), argv.join(' ')).toBeNull();
+    }
+  });
+
+  it('keeps browsers, editors with a terminal, shell hosts and system settings out', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sc-dc-app-grant-names-'));
     try {
-      writeRefmap(root, 'sfirst', { '@e1': part('charmap.exe', 100, 'w-1') });
-      writeRefmap(root, 'ssecond', { '@e1': part('charmap.exe', 101, 'w-11') });
-      expect(
-        desktopAppGrantCovering(['snapshot', '--app', 'charmap'], [charmap], { stateRoot: root }),
-      ).toBeNull();
-      expect(
-        desktopAppGrantCovering(['click', '@sfirst:e1'], [charmap], { stateRoot: root }),
-      ).not.toBeNull();
+      const names = [
+        'chrome.exe',
+        'msedge.exe',
+        'firefox.exe',
+        'brave.exe',
+        'opera.exe',
+        'vivaldi.exe',
+        'Arc.exe',
+        'iexplore.exe',
+        'Code.exe',
+        'Code - Insiders.exe',
+        'Cursor.exe',
+        'devenv.exe',
+        'idea64.exe',
+        'ShellHost.exe',
+        'PickerHost.exe',
+        'Widgets.exe',
+        'OpenWith.exe',
+        'smartscreen.exe',
+        'SystemPropertiesAdvanced.exe',
+        'msconfig.exe',
+        'SecHealthUI.exe',
+      ];
+      writeRefmap(
+        root,
+        'snames',
+        Object.fromEntries(
+          names.map((app, index) => [`@e${index}`, part(app, 700 + index, `w-7${index}`)]),
+        ),
+      );
+      names.forEach((app, index) =>
+        expect(
+          desktopAppGrantOffer(['click', `@snames:e${index}`], { stateRoot: root }),
+          app,
+        ).toBeNull(),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

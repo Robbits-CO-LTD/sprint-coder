@@ -572,6 +572,7 @@ export class ApprovalCoordinator {
         isForegroundDesktopControlCall(waiter.request))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
+    const appScope = command.grantScope === 'app';
     // Approved one call at a time (Issue #546). Refused before anything is recorded, whether or not
     // this process still holds the waiter, so no Task grant can come out of such a card.
     if (
@@ -623,6 +624,8 @@ export class ApprovalCoordinator {
       operationId: command.operationId,
       decidedAt: this.options.now(),
       grantExpiresAt: this.options.expiresAt(),
+      // The app-wide grant lives in memory only, so no grant for the exact command is stored.
+      ...(appScope ? { saveTaskGrant: false as const } : {}),
     });
     if (policyChanged) {
       this.options.publish(result.approval, result.event);
@@ -637,6 +640,7 @@ export class ApprovalCoordinator {
 
     if (
       command.decision === 'allow_task' &&
+      !appScope &&
       waiter !== undefined &&
       waiter.request.entry.providerName !== 'request_user_input'
     )
@@ -646,7 +650,7 @@ export class ApprovalCoordinator {
         policyEpoch: current.policyEpoch,
         expiresAt: this.options.expiresAt(),
       });
-    if (command.grantScope === 'app' && waiter?.desktopAppGrant != null)
+    if (appScope && waiter?.desktopAppGrant != null)
       this.saveDesktopAppGrant(command.taskId, {
         key: waiter.desktopAppGrant,
         policyEpoch: current.policyEpoch,
@@ -692,6 +696,8 @@ export class ApprovalCoordinator {
                     ) ??
                       true)
                   );
+                // The run this card was raised for, under the app-wide grant just given.
+                if (appScope) return this.desktopAppGrantCovers(waiter.request);
                 if (
                   this.options.revalidateTaskGrant?.({
                     capability: waiter.capability,

@@ -6,7 +6,6 @@ import {
   readDesktopControlCommand,
 } from './desktop-control';
 import {
-  desktopControlAppNameMatches,
   desktopControlOwnerReader,
   sameDesktopControlOwner,
   type DesktopControlOwner,
@@ -25,9 +24,12 @@ import {
  *
  * Covered, and offered on a card, only when every part of the run is a read or a background
  * operation listed in `CLI_COMMANDS` and `BATCH_COMMANDS`, with only the options listed there, on
- * one such app: never anything that takes the foreground, the cursor or the keyboard (those are
- * `foreground` and keep their card), launches or closes an app, or reads or acts on something other
- * than one app's windows (every window, the screen, a shell surface, notifications, the clipboard).
+ * one such app named by a ref or a window id: never anything that takes the foreground, the cursor
+ * or the keyboard (those are `foreground` and keep their card), launches, closes or minimizes an
+ * app (minimizing hands the front to another window), or reads or acts on something other than one
+ * app's windows (every window, the screen, a shell surface, notifications, the clipboard). An app
+ * given by name (`--app`) is not covered either: the executable picks a window of that name itself,
+ * which may belong to another copy of the app the records do not know.
  */
 export type DesktopAppGrantLookup = Readonly<{
   /** The Task whose earlier runs' windows may say which app a window id belongs to. */
@@ -43,21 +45,28 @@ export type DesktopAppGrantKey = DesktopControlOwner & Readonly<{ id: string; la
 const REF = /^@[a-z0-9]{1,64}:e[0-9]{1,9}$/u;
 const WINDOW = /^w-[A-Za-z0-9-]{1,64}$/u;
 
-// Executables that hold windows of more than one app, so one process does not mean one app: the
-// frame host of packaged apps when the executable cannot tell the hosted app, the shell (desktop,
-// taskbar and File Explorer), and other shared hosts. Never granted as an app.
-const SHARED_HOSTS = new Set(
+// Executables never granted as an app, by name without `.exe`, in lower case. Shared hosts hold
+// windows of more than one app, so one process does not mean one app: the frame host of packaged
+// apps when the executable cannot tell the hosted app, the shell (desktop, taskbar, File Explorer)
+// and other shell hosts. A web browser holds every window, tab and signed-in site in one process.
+// An editor with a built-in terminal runs commands, and the rest change system settings. Terminals,
+// shells and settings tools are refused by name as `launch` refuses them (`desktopControlNamesTool`).
+const NOT_GRANTED = new Set(
   [
     'applicationframehost explorer dllhost svchost sihost runtimebroker shellexperiencehost',
-    'startmenuexperiencehost searchhost searchapp searchui textinputhost lockapp',
-    'credentialuibroker consent logonui winlogon',
+    'startmenuexperiencehost searchhost searchapp searchui textinputhost lockapp shellhost',
+    'pickerhost widgets openwith smartscreen credentialuibroker consent logonui winlogon',
+    'chrome msedge msedgewebview2 firefox brave opera vivaldi arc iexplore chromium waterfox',
+    'librewolf thorium',
+    'code code-insiders cursor windsurf devenv idea idea64 pycharm pycharm64 webstorm64 rider64',
+    'clion64 goland64 phpstorm64 rubymine64 datagrip64 studio64 eclipse zed sublime_text',
+    'systempropertiesadvanced msconfig sechealthui',
   ]
     .join(' ')
-    .split(' ')
-    .map((name) => `${name}.exe`),
+    .split(' '),
 );
 
-type Target = Readonly<{ kind: 'ref' | 'window' | 'app'; value: string }>;
+type Target = Readonly<{ kind: 'ref' | 'window'; value: string }>;
 
 type CliCommand = Readonly<{
   /** Options it may take, `=` marking one that takes a value. */
@@ -65,41 +74,39 @@ type CliCommand = Readonly<{
   /** How many positionals it takes; the first is the ref when `ref` is set. */
   positionals: readonly [number, number];
   ref?: true;
-  /** Options whose value is a ref, a window id or an app name. */
+  /** Options whose value is a ref or a window id. */
   refs?: readonly string[];
   windows?: readonly string[];
-  apps?: readonly string[];
 }>;
 
 const REF_TIMEOUT = '--timeout-ms=';
-const SCOPE = { windows: ['--window-id'], apps: ['--app'] } as const;
+const SCOPE = { windows: ['--window-id'] } as const;
 // Checked on the desktop-control binary 1.2.0 (`<command> --help`). `--surface` is left out: its
-// other values read the shell, not the app. So are the shared `--wait-for` options and
+// other values read the shell, not the app. So are `--app`, the shared `--wait-for` options and
 // `--session`, which reads its refs from another folder.
 const CLI_COMMANDS: Readonly<Record<string, CliCommand>> = {
   snapshot: {
     options:
-      '--app= --window-id= --root= --max-depth= --include-bounds -i --interactive-only --compact --skeleton --timeout-ms= --force-electron-a11y',
+      '--window-id= --root= --max-depth= --include-bounds -i --interactive-only --compact --skeleton --timeout-ms= --force-electron-a11y',
     positionals: [0, 0],
     refs: ['--root'],
     ...SCOPE,
   },
   find: {
     options:
-      '--app= --window-id= --root= --role= --name= --value= --text= --description= --native-id= --exact --state= --timeout-ms= --count --first --last --nth= --limit=',
+      '--window-id= --root= --role= --name= --value= --text= --description= --native-id= --exact --state= --timeout-ms= --count --first --last --nth= --limit=',
     positionals: [0, 0],
     refs: ['--root'],
     ...SCOPE,
   },
-  screenshot: { options: '--app= --window-id=', positionals: [0, 0], ...SCOPE },
+  screenshot: { options: '--window-id=', positionals: [0, 0], ...SCOPE },
   get: { options: '--property=', positionals: [1, 1], ref: true },
   is: { options: '--property=', positionals: [1, 1], ref: true },
   // `--window-id` only narrows `--event`, which watches the whole desktop.
   wait: {
-    options: '--element= --app= --text= --predicate= --value= --action= --count= --timeout=',
+    options: '--element= --predicate= --value= --action= --count= --timeout=',
     positionals: [0, 1],
     refs: ['--element'],
-    apps: ['--app'],
   },
   click: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
   'set-value': { options: REF_TIMEOUT, positionals: [2, 2], ref: true },
@@ -112,44 +119,34 @@ const CLI_COMMANDS: Readonly<Record<string, CliCommand>> = {
   collapse: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
   scroll: { options: `--direction= --amount= ${REF_TIMEOUT}`, positionals: [1, 1], ref: true },
   'scroll-to': { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
-  minimize: { options: '--app= --window-id=', positionals: [0, 0], ...SCOPE },
-  'move-window': { options: '--app= --window-id= --x= --y=', positionals: [0, 0], ...SCOPE },
-  'resize-window': {
-    options: '--app= --window-id= --width= --height=',
-    positionals: [0, 0],
-    ...SCOPE,
-  },
+  'move-window': { options: '--window-id= --x= --y=', positionals: [0, 0], ...SCOPE },
+  'resize-window': { options: '--window-id= --width= --height=', positionals: [0, 0], ...SCOPE },
 };
 
 type BatchCommand = Readonly<{
   keys: string;
   refs?: readonly string[];
   windows?: readonly string[];
-  apps?: readonly string[];
 }>;
 
 const REF_KEYS = 'ref_id timeout_ms';
-const BATCH_SCOPE = { windows: ['window_id'], apps: ['app'] } as const;
+const BATCH_SCOPE = { windows: ['window_id'] } as const;
 // The same, by the argument names a batch entry takes (the binary refuses any other name).
 const BATCH_COMMANDS: Readonly<Record<string, BatchCommand>> = {
   snapshot: {
-    keys: 'app window_id root max_depth include_bounds interactive_only compact skeleton timeout_ms force_electron_a11y',
+    keys: 'window_id root max_depth include_bounds interactive_only compact skeleton timeout_ms force_electron_a11y',
     refs: ['root'],
     ...BATCH_SCOPE,
   },
   find: {
-    keys: 'app window_id root role name value text description native_id exact states timeout_ms count first last nth limit',
+    keys: 'window_id root role name value text description native_id exact states timeout_ms count first last nth limit',
     refs: ['root'],
     ...BATCH_SCOPE,
   },
-  screenshot: { keys: 'app window_id', ...BATCH_SCOPE },
+  screenshot: { keys: 'window_id', ...BATCH_SCOPE },
   get: { keys: 'ref_id property', refs: ['ref_id'] },
   is: { keys: 'ref_id property', refs: ['ref_id'] },
-  wait: {
-    keys: 'ms element app text predicate value action count timeout',
-    refs: ['element'],
-    apps: ['app'],
-  },
+  wait: { keys: 'ms element predicate value action count timeout', refs: ['element'] },
   click: { keys: REF_KEYS, refs: ['ref_id'] },
   'set-value': { keys: `${REF_KEYS} value`, refs: ['ref_id'] },
   clear: { keys: REF_KEYS, refs: ['ref_id'] },
@@ -161,16 +158,15 @@ const BATCH_COMMANDS: Readonly<Record<string, BatchCommand>> = {
   collapse: { keys: REF_KEYS, refs: ['ref_id'] },
   scroll: { keys: `${REF_KEYS} direction amount`, refs: ['ref_id'] },
   'scroll-to': { keys: REF_KEYS, refs: ['ref_id'] },
-  minimize: { keys: 'app window_id', ...BATCH_SCOPE },
-  'move-window': { keys: 'app window_id x y', ...BATCH_SCOPE },
-  'resize-window': { keys: 'app window_id width height', ...BATCH_SCOPE },
+  'move-window': { keys: 'window_id x y', ...BATCH_SCOPE },
+  'resize-window': { keys: 'window_id width height', ...BATCH_SCOPE },
 };
 const BATCH_OPTIONS = '--stop-on-error --timeout-ms=';
 
 /**
- * The parts, windows and app names this run acts on, or `null` when it is not one the grant can
- * cover. Read on its own, more strictly than the executable reads it: an option not listed, one
- * given twice, a value that starts with `-`, `--` or a shared option makes it `null`.
+ * The parts and windows this run acts on, or `null` when it is not one the grant can cover. Read
+ * on its own, more strictly than the executable reads it: an option not listed, one given twice, a
+ * value that starts with `-`, `--` or a shared option makes it `null`.
  */
 function runTargets(argv: readonly string[]): Target[] | null {
   const mode = desktopControlArgvMode(argv);
@@ -191,7 +187,6 @@ function runTargets(argv: readonly string[]): Target[] | null {
   for (const [kind, names] of [
     ['ref', spec.refs],
     ['window', spec.windows],
-    ['app', spec.apps],
   ] as const)
     for (const name of names ?? []) {
       const value = options.get(name);
@@ -203,6 +198,18 @@ function runTargets(argv: readonly string[]): Target[] | null {
 function batchTargets(argv: readonly string[]): Target[] | null {
   const parsed = strictOptions(argv.slice(1), BATCH_OPTIONS);
   if (parsed === null || parsed.positionals.length !== 1) return null;
+  // Only `{command, args}` entries, judged here too and not only where the run is refused.
+  const raw: unknown = JSON.parse(parsed.positionals[0]!);
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (entry) =>
+        typeof entry !== 'object' ||
+        entry === null ||
+        Object.keys(entry as object).some((key) => key !== 'command' && key !== 'args'),
+    )
+  )
+    return null;
   const entries = readBatchEntries(parsed.positionals);
   if (entries === null || entries.length === 0) return null;
   const targets: Target[] = [];
@@ -215,7 +222,6 @@ function batchTargets(argv: readonly string[]): Target[] | null {
     for (const [kind, names] of [
       ['ref', spec.refs],
       ['window', spec.windows],
-      ['app', spec.apps],
     ] as const)
       for (const name of names ?? []) {
         const value = args[name];
@@ -223,7 +229,7 @@ function batchTargets(argv: readonly string[]): Target[] | null {
         if (typeof value !== 'string') return null;
         targets.push({ kind, value });
       }
-    // A step that names no part, window or app acts on whatever has focus.
+    // A step that names no part or window acts on whatever has focus.
     if (targets.length === before) return null;
   }
   return targets;
@@ -263,8 +269,13 @@ function strictOptions(
 
 function grantable(owner: DesktopControlOwner, lookup: DesktopAppGrantLookup): boolean {
   const app = owner.app.toLowerCase();
+  // `Code - Insiders.exe` reads as `code-insiders`.
+  const stem = app
+    .replace(/\.exe$/u, '')
+    .trim()
+    .replace(/\s*-\s*|\s+/gu, '-');
   const own = (lookup.ownExecutable ?? basename(process.execPath)).toLowerCase();
-  return !SHARED_HOSTS.has(app) && app !== own && !desktopControlNamesTool(owner.app);
+  return !NOT_GRANTED.has(stem) && app !== own && !desktopControlNamesTool(owner.app);
 }
 
 function keyOf(owner: DesktopControlOwner): DesktopAppGrantKey {
@@ -278,48 +289,25 @@ function keyOf(owner: DesktopControlOwner): DesktopAppGrantKey {
 }
 
 /**
- * The one app every part and window of this run belongs to, by the records, when an app name the
- * run gives also names it (see `nameConfirms`). `undefined` when the run names no part or window,
- * and `null` when it is not one the grant can cover.
+ * The one app every part and window of this run belongs to, by the records, or `null` when the run
+ * names none, or one the records cannot place, or parts of more than one app.
  */
 function recordedOwner(
   targets: readonly Target[],
   reader: DesktopControlOwnerReader,
-): DesktopControlOwner | null | undefined {
-  let found: DesktopControlOwner | undefined;
+): DesktopControlOwner | null {
+  let found: DesktopControlOwner | null = null;
   for (const { kind, value } of targets) {
-    if (kind === 'app') continue;
     if (!(kind === 'ref' ? REF : WINDOW).test(value)) return null;
     const owner = kind === 'ref' ? reader.part(value) : reader.window(value);
     if (owner === null) return null;
-    if (found !== undefined && !sameDesktopControlOwner(found, owner)) return null;
+    if (found !== null && !sameDesktopControlOwner(found, owner)) return null;
     found = owner;
   }
   return found;
 }
 
-/**
- * Whether an app name confirms this owner: it is the owner's executable name, and every process of
- * that name the records know is this one, so the name cannot reach another copy the Task has seen.
- */
-function nameConfirms(
-  name: string,
-  owner: DesktopControlOwner,
-  reader: DesktopControlOwnerReader,
-): boolean {
-  if (!desktopControlAppNameMatches(name, owner.app)) return false;
-  const named = reader.named(name);
-  return (
-    named !== null &&
-    named.length > 0 &&
-    named.every((other) => sameDesktopControlOwner(other, owner))
-  );
-}
-
-/**
- * The app a card for this run may offer the app-wide Task grant for, or `null`. Only a run that
- * names a part or a window can establish the app; one that gives only an app name cannot.
- */
+/** The app a card for this run may offer the app-wide Task grant for, or `null`. */
 export function desktopAppGrantOffer(
   argv: readonly string[],
   lookup: DesktopAppGrantLookup = {},
@@ -327,19 +315,15 @@ export function desktopAppGrantOffer(
   try {
     const targets = runTargets(argv);
     if (targets === null) return null;
-    const reader = desktopControlOwnerReader(lookup);
-    const owner = recordedOwner(targets, reader);
-    if (owner === null || owner === undefined || !grantable(owner, lookup)) return null;
-    for (const { kind, value } of targets)
-      if (kind === 'app' && !nameConfirms(value, owner, reader)) return null;
-    return keyOf(owner);
+    const owner = recordedOwner(targets, desktopControlOwnerReader(lookup));
+    return owner === null || !grantable(owner, lookup) ? null : keyOf(owner);
   } catch {
     return null;
   }
 }
 
 /**
- * The granted app this run is confined to, when it is one of `granted` (ids from
+ * The granted app this run is confined to, when it is one of `granted` (from
  * `desktopAppGrantOffer`), or `null`. Judged again from the records each time, never remembered.
  */
 export function desktopAppGrantCovering(
@@ -350,18 +334,12 @@ export function desktopAppGrantCovering(
   try {
     if (granted.length === 0) return null;
     const targets = runTargets(argv);
-    if (targets === null || targets.length === 0) return null;
-    const reader = desktopControlOwnerReader(lookup);
-    const owner = recordedOwner(targets, reader);
+    if (targets === null) return null;
+    const owner = recordedOwner(targets, desktopControlOwnerReader(lookup));
     if (owner === null) return null;
-    const candidates =
-      owner === undefined ? granted : granted.filter((key) => sameDesktopControlOwner(key, owner));
-    for (const key of candidates) {
-      if (!grantable(key, lookup)) continue;
-      if (targets.every(({ kind, value }) => kind !== 'app' || nameConfirms(value, key, reader)))
-        return key;
-    }
-    return null;
+    return (
+      granted.find((key) => sameDesktopControlOwner(key, owner) && grantable(key, lookup)) ?? null
+    );
   } catch {
     return null;
   }

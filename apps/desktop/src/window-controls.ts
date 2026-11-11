@@ -76,6 +76,21 @@ export function windowChromeOptions(
   return { autoHideMenuBar: true };
 }
 
+/**
+ * Chromium features turned off before the app is ready.
+ *
+ * On Windows, Chromium marks a window it judges fully covered as hidden: it stops painting it and
+ * stops updating its accessibility tree. It judges again when a window is shown, moved, resized or
+ * activated, but not when only the stacking order changes. A desktop-control launch shows the new
+ * app's window on top of everything (Sprint Coder is judged covered) and then moves it below the
+ * window that was in front by a stacking-order change alone, so Sprint Coder stayed "hidden" while
+ * it was in plain view: the screen kept the frame from the launch (the command still "running",
+ * no approval card) and screen readers saw nothing new until the window was moved or re-activated.
+ */
+export function disabledChromiumFeatures(platform: NodeJS.Platform): readonly string[] {
+  return platform === 'win32' ? ['CalculateNativeWinOcclusion'] : [];
+}
+
 export function isWindowControlAction(value: unknown): value is WindowControlAction {
   return WINDOW_CONTROL_ACTIONS.some((action) => action === value);
 }

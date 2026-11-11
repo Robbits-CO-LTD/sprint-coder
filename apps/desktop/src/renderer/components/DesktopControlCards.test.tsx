@@ -97,12 +97,14 @@ describe('desktop-control approval card', () => {
       target: { resolved: true, app: 'charmap' },
       text: undefined,
       textRole: undefined,
-      notes: ['起動した窓は、今使っている窓の後ろに開きます。'],
+      notes: ['起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。'],
     } as DesktopAction);
     expect(launch).toContain('アプリ「charmap」');
     // A launch gets no mark: its window can come up in front.
     expect(launch).not.toContain('desktop-approval-mode');
-    expect(launch).toContain('起動した窓は、今使っている窓の後ろに開きます。');
+    expect(launch).toContain(
+      '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
+    );
     expect(launch).not.toContain('入れる文字');
 
     const read = card({
@@ -146,7 +148,7 @@ describe('desktop-control approval card', () => {
     const html = card(offered);
     expect(html).toContain('このアプリは Task 中許可');
     expect(html).toContain(
-      'この Task の間、「charmap.exe」の読み取りと、裏での操作（押す・値を入れる・選ぶなど）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。',
+      'この Task の間、「charmap.exe」のすべての窓（前から開いていた窓も含む）で、読み取りと、裏での操作（押す・値を入れる・選ぶ・窓の移動や大きさの変更など）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。',
     );
     // The existing choices stay.
     expect(html).toContain('approval-allow-once');
@@ -175,7 +177,7 @@ describe('desktop-control approval card', () => {
     )!;
     expect(
       document.getElementById(button.getAttribute('aria-describedby')!)?.textContent,
-    ).toContain('「charmap.exe」の読み取り');
+    ).toContain('「charmap.exe」のすべての窓');
     await act(async () => button.click());
     container.querySelector<HTMLButtonElement>('[data-testid="approval-allow-task"]')!.click();
     expect(decisions).toEqual([['allow_task', undefined, 'app'], ['allow_task']]);
