@@ -28,6 +28,7 @@ import type {
 import {
   desktopControlArgvIsInert,
   desktopControlArgvMode,
+  desktopControlExpectedWindowOwner,
   isDesktopControlExecutable,
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
@@ -246,6 +247,7 @@ export class ApprovalCoordinator {
     const revalidators: (() => boolean)[] = [];
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
+    let expectedWindowOwner: string | undefined;
     const desktopControl = isDesktopControlCall(request);
     // A desktop-control run that takes the foreground, the cursor or the keyboard is decided on its
     // own card every time: no Task grant covers it, including one given before this rule.
@@ -311,6 +313,13 @@ export class ApprovalCoordinator {
       )
         throw new Error('APPROVAL_USER_INPUT_SELECTION_CONFLICT');
       userInputSelection ??= decision.userInputSelection;
+      if (
+        expectedWindowOwner !== undefined &&
+        decision.desktopControlExpectedWindowOwner !== undefined &&
+        expectedWindowOwner !== decision.desktopControlExpectedWindowOwner
+      )
+        throw new Error('APPROVAL_DESKTOP_WINDOW_OWNER_CONFLICT');
+      expectedWindowOwner ??= decision.desktopControlExpectedWindowOwner;
       revalidators.push(decision.beforeExecute ?? (() => false));
     }
     return {
@@ -319,6 +328,9 @@ export class ApprovalCoordinator {
       beforeExecute: () => revalidators.every((revalidate) => revalidate()),
       ...(approvalDecision === undefined ? {} : { approvalDecision }),
       ...(userInputSelection === undefined ? {} : { userInputSelection }),
+      ...(expectedWindowOwner === undefined
+        ? {}
+        : { desktopControlExpectedWindowOwner: expectedWindowOwner }),
     };
   }
 
@@ -345,14 +357,24 @@ export class ApprovalCoordinator {
     const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
     // A read or background run on an app the person allowed for the Task on an earlier card of
     // this Task, judged again from the executable's own records before it starts.
-    if (!perCall && desktopControl && !desktopForeground && this.desktopAppGrantCovers(request))
+    // The executable checks each window id the run names against the granted process instance as
+    // it runs (`desktopControlExpectedWindowOwner`), since a closed window's id can be reused by
+    // another app's window while the records still name the granted one.
+    const grantedApp =
+      !perCall && desktopControl && !desktopForeground
+        ? this.desktopAppGrantCovering(request)
+        : null;
+    const expectedWindowOwner =
+      grantedApp === null ? null : desktopControlExpectedWindowOwner(grantedApp);
+    if (grantedApp !== null && expectedWindowOwner !== null)
       return {
         decision: 'allow',
         reason: 'desktop_app_task_grant',
         approvalDecision: 'allow_task',
+        desktopControlExpectedWindowOwner: expectedWindowOwner,
         beforeExecute: () =>
           this.options.isTurnActive(request.context.taskId, request.context.turnId) &&
-          this.desktopAppGrantCovers(request),
+          this.desktopAppGrantCovering(request)?.id === grantedApp.id,
       };
     // A per-call capability never reuses a Task grant, including one left by an earlier version,
     // and neither does a desktop-control run that uses the foreground.
@@ -697,7 +719,7 @@ export class ApprovalCoordinator {
                       true)
                   );
                 // The run this card was raised for, under the app-wide grant just given.
-                if (appScope) return this.desktopAppGrantCovers(waiter.request);
+                if (appScope) return this.desktopAppGrantCovering(waiter.request) !== null;
                 if (
                   this.options.revalidateTaskGrant?.({
                     capability: waiter.capability,
@@ -741,15 +763,15 @@ export class ApprovalCoordinator {
   }
 
   /**
-   * Whether an app-wide Task grant of this Task covers this desktop-control run: one given under
-   * the current policy epoch, not expired, for the app the run is confined to by the executable's
-   * own records (`desktopAppGrantCovering`).
+   * The app-wide Task grant of this Task that covers this desktop-control run, or `null`: one given
+   * under the current policy epoch, not expired, for the app the run is confined to by the
+   * executable's own records (`desktopAppGrantCovering`).
    */
-  private desktopAppGrantCovers(request: ToolAuthorizationRequest): boolean {
+  private desktopAppGrantCovering(request: ToolAuthorizationRequest): DesktopAppGrantKey | null {
     const { taskId, policyEpoch } = request.context;
     const grants = this.desktopAppGrants.get(taskId);
-    if (grants === undefined || !validateExecutionSpec(request.input)) return false;
-    if (!desktopAppGrantEnvironmentAllows(request.input)) return false;
+    if (grants === undefined || !validateExecutionSpec(request.input)) return null;
+    if (!desktopAppGrantEnvironmentAllows(request.input)) return null;
     const now = Date.parse(this.options.now());
     const current = this.options.getCurrentPolicyEpoch(taskId);
     const live = [...grants.values()].filter(
@@ -758,12 +780,10 @@ export class ApprovalCoordinator {
         grant.policyEpoch === current &&
         Date.parse(grant.expiresAt) > now,
     );
-    return (
-      desktopAppGrantCovering(
-        request.input.argv,
-        live.map(({ key }) => key),
-        { taskId },
-      ) !== null
+    return desktopAppGrantCovering(
+      request.input.argv,
+      live.map(({ key }) => key),
+      { taskId },
     );
   }
 

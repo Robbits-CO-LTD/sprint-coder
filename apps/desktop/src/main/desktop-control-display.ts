@@ -256,6 +256,46 @@ const KNOWN_WINDOWS_PER_TASK = 200;
 const OUTPUT_MAX_CHARACTERS = 1_048_576;
 // Per Task, the windows its desktop-control runs reported, oldest first.
 const knownWindows = new Map<string, Map<string, KnownWindow>>();
+// Per Task, the window ids the executable found owned by another process than the one an app-wide
+// grant expected (`window_owner_mismatch`): no record names their owner for the rest of the Task.
+const distrustedWindows = new Map<string, Set<string>>();
+
+/**
+ * Notes every window id a run's output reports as no longer owned by the expected process, as the
+ * shipped executable reports it (`SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER`), also inside a
+ * batch. Output in any other shape notes nothing; noting more only means more cards.
+ */
+function distrustMovedWindows(taskId: string, stdout: string): void {
+  try {
+    if (stdout.length > OUTPUT_MAX_CHARACTERS || !stdout.includes('window_owner_mismatch')) return;
+    const found: string[] = [];
+    const walk = (value: unknown, depth: number): void => {
+      if (depth > 8 || typeof value !== 'object' || value === null) return;
+      if (Array.isArray(value)) {
+        for (const item of value) walk(item, depth + 1);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if (
+        record['kind'] === 'window_owner_mismatch' &&
+        typeof record['window_id'] === 'string' &&
+        WINDOW_ID.test(record['window_id'])
+      )
+        found.push(record['window_id']);
+      for (const item of Object.values(record)) walk(item, depth + 1);
+    };
+    walk(JSON.parse(stdout), 0);
+    if (found.length === 0) return;
+    const distrusted = distrustedWindows.get(taskId) ?? new Set<string>();
+    for (const id of found) distrusted.add(id);
+    distrustedWindows.delete(taskId);
+    distrustedWindows.set(taskId, distrusted);
+    if (distrustedWindows.size > KNOWN_TASKS)
+      distrustedWindows.delete(distrustedWindows.keys().next().value!);
+  } catch {
+    // Output that cannot be read notes nothing.
+  }
+}
 
 /**
  * Keeps the windows a finished desktop-control run of a Task reported (`launch` and
@@ -268,6 +308,7 @@ export function rememberDesktopControlWindows(
   argv: readonly string[],
   stdout: string,
 ): void {
+  distrustMovedWindows(taskId, stdout);
   try {
     const command = readDesktopControlCommand(argv);
     if (
@@ -344,9 +385,10 @@ export function desktopControlOwnerReader(
     lookup.stateRoot ?? desktopControlStateFolder(),
     lookup.taskId === undefined ? undefined : knownWindows.get(lookup.taskId),
   );
+  const distrusted = lookup.taskId === undefined ? undefined : distrustedWindows.get(lookup.taskId);
   return {
     part: (ref) => reader.partOwner(ref),
-    window: (id) => reader.windowOwner(id),
+    window: (id) => (distrusted?.has(id) === true ? null : reader.windowOwner(id)),
   };
 }
 
@@ -786,8 +828,10 @@ class SnapshotReader {
   }
 
   /**
-   * Known limit: the executable resolves a window id by its handle alone, so a handle reused by
-   * another app after the recorded window closed is not told apart unless a newer record disagrees.
+   * The records can be older than the window: a closed window's id can be reused by another app's.
+   * So a run an app-wide grant allows by window id also has the executable check the id's owner
+   * as it runs (`SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER`), and an id it found reused is
+   * distrusted for the rest of the Task.
    */
   windowOwner(id: string): DesktopControlOwner | null {
     if (!WINDOW_ID.test(id)) return null;

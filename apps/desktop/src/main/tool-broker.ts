@@ -69,6 +69,8 @@ export type ToolAuthorizationDecision = Readonly<{
   beforeExecute?: () => boolean;
   approvalDecision?: 'allow_once' | 'allow_task' | 'deny';
   userInputSelection?: number;
+  /** See `ToolExecutionControl.desktopControlExpectedWindowOwner`. */
+  desktopControlExpectedWindowOwner?: string;
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
@@ -426,6 +428,11 @@ export class ToolBroker {
           ...(authorization.userInputSelection === undefined
             ? {}
             : { userInputSelection: authorization.userInputSelection }),
+          ...(authorization.desktopControlExpectedWindowOwner === undefined
+            ? {}
+            : {
+                desktopControlExpectedWindowOwner: authorization.desktopControlExpectedWindowOwner,
+              }),
           ...(entry.supportsBackground
             ? { onBackgroundCompletion: observeBackgroundCompletion }
             : {}),

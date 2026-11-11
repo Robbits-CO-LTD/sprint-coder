@@ -24,6 +24,7 @@ import {
 } from './tool-broker';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
 import * as desktopControlModule from './desktop-control';
+import { rememberDesktopControlWindows } from './desktop-control-display';
 import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
@@ -2380,6 +2381,39 @@ describe('ApprovalCoordinator desktop control card', () => {
         );
         expect(read).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
         expect(harness.published).toHaveLength(1);
+        // Runs the grant allows carry the granted process for the executable to check window ids
+        // against; the run approved on its own card carries none.
+        expect(next.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
+        expect(read.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
+        expect(granted).not.toHaveProperty('desktopControlExpectedWindowOwner');
+
+        // A window id the executable found owned by another app is never allowed by the records
+        // again in this Task: the next run on it gets a card.
+        rememberDesktopControlWindows(
+          'task-1',
+          ['snapshot', '--window-id', 'w-1'],
+          JSON.stringify({
+            ok: false,
+            command: 'snapshot',
+            error: {
+              code: 'POLICY_DENIED',
+              details: { kind: 'window_owner_mismatch', window_id: 'w-1', found: 1 },
+            },
+          }),
+        );
+        const moved = harness.coordinator.authorizeTool(
+          request(await prepare(['snapshot', '--window-id', 'w-1']), 'app-moved'),
+        );
+        await viWaitFor(() => harness.published.length === 2);
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+        await expect(moved).resolves.toMatchObject({ decision: 'deny' });
+        harness.published.length = 1;
+        // Parts of the app stay allowed: the executable checks a ref's process itself.
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['click', '@scharmap:e1']), 'app-part'),
+          ),
+        ).resolves.toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
 
         // A policy change withdraws it before the run, and from later runs.
         harness.setPolicyEpoch(8);

@@ -703,6 +703,11 @@ export type RunOptions = Readonly<{
    * or one that only prints the bundled guides, help, the version or its own status.
    */
   desktopControlWorkspaceRoots?: readonly string[];
+  /**
+   * For a desktop-control run allowed by an app-wide Task grant: the `<pid>:<process instance>` a
+   * window id it names must still belong to (`desktopControlEnvironment`). Absent otherwise.
+   */
+  desktopControlExpectedWindowOwner?: string;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
   onBatch?: (chunks: readonly CommandOutputChunk[]) => void | Promise<void>;
@@ -895,7 +900,12 @@ export class CommandRunner {
       // Outside the sandbox the PATH also leaves out every folder inside the Workspace, so a bare
       // launch name cannot resolve to a file the agent wrote there.
       const envDelta = desktopControl
-        ? desktopControlEnvironment(spec.envDelta, options.desktopControlWorkspaceRoots ?? [])
+        ? desktopControlEnvironment(
+            spec.envDelta,
+            options.desktopControlWorkspaceRoots ?? [],
+            {},
+            options.desktopControlExpectedWindowOwner,
+          )
         : spec.envDelta;
       const commandEnvironment =
         process.platform === 'win32'
