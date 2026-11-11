@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, Deadline, DeliverySemantics, ErrorCode, ProcessId, RendererKind, WindowFilter,
     WindowInfo, system::launch_options::LaunchOptions, system::launch_result::LaunchResult,
@@ -36,9 +37,151 @@ pub(crate) fn launch_app_impl(
     if let Some(attached) = attached {
         return Ok(attached);
     }
+    let guard = ForegroundGuard::begin(options.activate);
     let (pid, token) = create_process(&executable, options, deadline)?;
     let window = observe_window(pid, &token, options, deadline)?;
+    if let Some(guard) = guard {
+        guard.finish(pid, window.as_ref());
+    }
     Ok(launch_result(id, pid, token, window))
+}
+
+/// Keeps a launch without `--activate` in the background.
+///
+/// A process started by a process that may set the foreground inherits that
+/// right, so the launched app's first window took the foreground and the
+/// user's keystrokes went to it. Starting the app hidden or minimized is not
+/// an answer, because later reads (snapshot, screenshot) need a shown window.
+/// So the foreground is locked while the app starts (`LockSetForegroundWindow`;
+/// Windows also drops the lock when this process exits), and the launched
+/// window is then placed just below the window that was in front before the
+/// launch. If the app still took the foreground in the moment between the
+/// unlock and the check, the foreground is handed back. If the foreground
+/// moved off that window while the lock held, the user moved it, so neither
+/// step runs (see `may_restore_foreground`).
+#[cfg(target_os = "windows")]
+struct ForegroundGuard {
+    prior: windows_sys::Win32::Foundation::HWND,
+    locked: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl ForegroundGuard {
+    fn begin(activate: bool) -> Option<Self> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, LSFW_LOCK, LockSetForegroundWindow,
+        };
+        if activate {
+            return None;
+        }
+        let prior = unsafe { GetForegroundWindow() };
+        let locked = unsafe { LockSetForegroundWindow(LSFW_LOCK) } != 0;
+        Some(Self { prior, locked })
+    }
+
+    fn finish(mut self, pid: ProcessId, window: Option<&WindowInfo>) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsIconic, IsWindow,
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+            SetForegroundWindow, SetWindowPos, WS_EX_TOPMOST,
+        };
+        let foreground_is_prior = unsafe { GetForegroundWindow() } == self.prior;
+        let prior_is_minimized = unsafe { IsIconic(self.prior) } != 0;
+        let may_restore = may_restore_foreground(foreground_is_prior, prior_is_minimized);
+        self.unlock();
+        if !may_restore {
+            return;
+        }
+        let prior = self.prior;
+        if prior.is_null() || unsafe { IsWindow(prior) } == 0 {
+            return;
+        }
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground != prior && window_pid(foreground) == Some(pid) {
+            unsafe { SetForegroundWindow(prior) };
+        }
+        let Some(window) = window else {
+            return;
+        };
+        let handle = super::window::window_ops::parse_handle(&window.id);
+        let prior_is_topmost =
+            unsafe { GetWindowLongW(prior, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
+        if handle.is_null() || handle == prior || prior_is_topmost {
+            return;
+        }
+        if window_pid(handle) == Some(pid) {
+            unsafe {
+                SetWindowPos(
+                    handle,
+                    prior,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_ASYNCWINDOWPOS
+                        | SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOACTIVATE
+                        | SWP_NOOWNERZORDER,
+                )
+            };
+        }
+    }
+
+    fn unlock(&mut self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{LSFW_UNLOCK, LockSetForegroundWindow};
+        if std::mem::take(&mut self.locked) {
+            unsafe { LockSetForegroundWindow(LSFW_UNLOCK) };
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        self.unlock();
+    }
+}
+
+/// Whether the guard may hand the foreground back and restack the launched
+/// window, read before the lock is dropped.
+///
+/// While the lock holds, no process can take the foreground on its own, so a
+/// foreground that moved off the prior window was moved by the user (a click
+/// or Alt, which also drops the lock) or by that window closing or minimizing;
+/// either way it is left alone. Without the lock a move cannot be told apart
+/// from the launched app taking the foreground, so it is left alone too: the
+/// lock fails only when this process may not set the foreground, and then the
+/// launched app cannot take it either, nor could it be handed back.
+/// A prior window minimized during the launch can stay the foreground, but it
+/// sits at the bottom of the z-order, so restacking below it would bury the
+/// launched window behind every other one; it is left alone like a closed one.
+#[cfg(any(target_os = "windows", test))]
+fn may_restore_foreground(foreground_is_prior: bool, prior_is_minimized: bool) -> bool {
+    foreground_is_prior && !prior_is_minimized
+}
+
+#[cfg(target_os = "windows")]
+fn window_pid(handle: windows_sys::Win32::Foundation::HWND) -> Option<ProcessId> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    if handle.is_null() {
+        return None;
+    }
+    let mut pid = 0_u32;
+    unsafe { GetWindowThreadProcessId(handle, &mut pid) };
+    (pid != 0).then(|| ProcessId::from(pid))
+}
+
+#[cfg(not(target_os = "windows"))]
+struct ForegroundGuard;
+
+#[cfg(not(target_os = "windows"))]
+impl ForegroundGuard {
+    fn begin(_activate: bool) -> Option<Self> {
+        None
+    }
+
+    fn finish(self, _pid: ProcessId, _window: Option<&WindowInfo>) {}
 }
 
 /// The window a launch actually caused, or `None`. A process that presents no
@@ -370,6 +513,27 @@ fn should_poll_after_first_observation(timeout_ms: u64) -> bool {
 #[cfg(test)]
 #[path = "launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod foreground_guard_tests {
+    use super::may_restore_foreground;
+
+    #[test]
+    fn a_foreground_that_stayed_on_the_prior_window_is_restored() {
+        assert!(may_restore_foreground(true, false));
+    }
+
+    #[test]
+    fn a_foreground_that_moved_off_the_prior_window_is_left_alone() {
+        assert!(!may_restore_foreground(false, false));
+    }
+
+    #[test]
+    fn a_minimized_prior_window_is_left_alone_even_while_it_is_the_foreground() {
+        assert!(!may_restore_foreground(true, true));
+        assert!(!may_restore_foreground(false, true));
+    }
+}
 
 #[cfg(all(test, target_os = "windows"))]
 #[path = "launch_lease_isolation_tests.rs"]
