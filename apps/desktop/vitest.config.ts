@@ -1,6 +1,6 @@
 import { relative } from 'node:path';
 import { BaseSequencer, type TestSpecification } from 'vitest/node';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Slow-file seconds from Windows CI run 37307810511. These are placement hints,
 // never a test allowlist: every new file receives a positive default weight.
@@ -140,6 +140,9 @@ const sequencer = ciSequencer(process.platform, process.env.CI);
 // explicit timeouts (35s / 65s), which take precedence over this default.
 export default defineConfig({
   test: {
+    // The desktop-control source kept in this repository carries its own upstream tests (Cargo
+    // and a browser script), which are not part of this suite.
+    exclude: [...configDefaults.exclude, 'desktop-control/**'],
     testTimeout: 20_000,
     hookTimeout: 20_000,
     // The Windows suite launches real Electron, PowerShell, cmd, Git, and SQLite child processes.
