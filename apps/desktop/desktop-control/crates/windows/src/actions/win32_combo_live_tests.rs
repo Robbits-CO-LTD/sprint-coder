@@ -286,3 +286,75 @@ fn set_value_naming_no_item_says_no_item_was_chosen() {
     }
     assert_eq!(host.notified(), 0);
 }
+
+/// The UI Automation elements of the box's list items, in list order, reached
+/// through the box the way a snapshot reaches them. The system proxy
+/// publishes the items only while the drop-down list is open, so the list is
+/// opened first (`CB_SHOWDROPDOWN`, which never activates a window); the
+/// select under test closes it again.
+fn list_items(host: &ComboHost) -> Vec<UIAElement> {
+    unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 1, 0) };
+    let client = automation_client().expect("client");
+    let walker = client.get_raw_view_walker().expect("walker");
+    // Only the box's own drop-down list is read: in the raw view the list's
+    // siblings are the desktop's windows, which this test must not walk.
+    let mut list = walker.get_first_child(&host.element().0).ok();
+    for _ in 0..4 {
+        match &list {
+            Some(node) if node.get_classname().ok().as_deref() == Some("ComboLBox") => break,
+            Some(node) => list = walker.get_next_sibling(node).ok(),
+            None => break,
+        }
+    }
+    let list = list.expect("the open list under the box");
+    let mut items = Vec::new();
+    let mut child = walker.get_first_child(&list).ok();
+    while let Some(current) = child {
+        assert!(items.len() < 64, "the list is small");
+        child = walker.get_next_sibling(&current).ok();
+        let element = UIAElement::from(current);
+        if crate::actions::select_search::selection_item_available(&element) {
+            items.push(element);
+        }
+    }
+    items
+}
+
+const CB_SHOWDROPDOWN: u32 = 0x014F;
+
+#[test]
+fn an_item_ref_selects_that_very_item_even_when_its_text_is_shared() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Alpha", "Twin", "Beta", "Twin"]);
+    let items = list_items(&host);
+    assert_eq!(items.len(), 4, "every list item is reachable");
+    let steps = select_steps(&items[3], "", deadline(5_000)).expect("select by item ref");
+    assert_eq!(steps[0].label(), WIN32_COMBO_SELECT_LABEL);
+    assert_eq!(steps[0].verified(), Some(true));
+    assert_eq!(host.selected(), 3, "the second Twin, not the first");
+    assert_eq!(host.notified(), 1);
+    let steps = select_steps(&items[1], "Twin", deadline(5_000)).expect("named self-match");
+    assert_eq!(steps[0].verified(), Some(true));
+    assert_eq!(host.selected(), 1, "the first Twin");
+    assert_eq!(host.notified(), 2);
+}
+
+#[test]
+fn a_click_on_an_item_ref_selects_that_very_item_even_when_its_text_is_shared() {
+    use crate::actions::dispatch::execute_action_impl;
+    use agent_desktop_core::{Action, actions::action_request::ActionRequest};
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Twin", "Alpha", "Twin"]);
+    let items = list_items(&host);
+    assert_eq!(items.len(), 3);
+    let lease = agent_desktop_core::InteractionLease::guarded(deadline(5_000), ()).expect("lease");
+    let result = execute_action_impl(
+        &items[2].clone().into_native_handle(),
+        ActionRequest::headless(Action::Click),
+        &lease,
+    )
+    .expect("click by item ref");
+    assert_eq!(result.steps[0].label(), WIN32_COMBO_SELECT_LABEL);
+    assert_eq!(host.selected(), 2);
+    assert_eq!(host.notified(), 1);
+}

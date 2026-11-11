@@ -43,7 +43,7 @@ mod imp {
     };
     use crate::actions::scroll::scroll_steps;
     use crate::actions::scroll_into_view::scroll_into_view_outcome;
-    use crate::actions::select::{select_steps, win32_combo_select};
+    use crate::actions::select::{select_steps, win32_combo_select_item};
     use crate::actions::select_search::selection_item_available;
     use crate::actions::toggle_state::{check_steps, toggle_steps, uncheck_steps};
     use crate::actions::value_write::{clear_steps, left_list_unchosen, set_value_steps};
@@ -211,7 +211,7 @@ mod imp {
         // box's own messages: the proxy's Invoke emulates a click that brings
         // the window to the front, and its Select never tells the owner.
         if selection_item_available(element)
-            && let Some(steps) = win32_combo_select(element, "", deadline)?
+            && let Some(steps) = win32_combo_select_item(element, deadline)?
         {
             return Ok(ActionResult::from_execution(&Action::Click, steps));
         }

@@ -115,8 +115,10 @@ mod imp {
     use crate::tree::walk::walker_source::parent_step;
     use agent_desktop_core::Deadline;
     use windows::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::HWND as HWND_SYS;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW, RealGetWindowClassW, SMTO_ABORTIFHUNG,
+        EnumChildWindows, EnumThreadWindows, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetParent,
+        GetWindowLongW, GetWindowThreadProcessId, RealGetWindowClassW, SMTO_ABORTIFHUNG,
         SendMessageTimeoutW, WM_COMMAND,
     };
 
@@ -152,9 +154,13 @@ mod imp {
             let hwnd: HWND = handle.into();
             let hwnd = hwnd.0 as isize;
             if hwnd != 0 {
-                match classify_class(&base_class_name(hwnd)) {
+                match window_class(hwnd) {
                     ComboClass::Box => return Ok(Some(Win32Combo { hwnd })),
-                    ComboClass::DropList => {}
+                    ComboClass::DropList => {
+                        if let Some(owner) = box_of_list(hwnd) {
+                            return Ok(Some(Win32Combo { hwnd: owner }));
+                        }
+                    }
                     ComboClass::Other => return Ok(None),
                 }
             }
@@ -164,6 +170,66 @@ mod imp {
             }
         }
         Ok(None)
+    }
+
+    #[repr(C)]
+    struct ComboBoxInfo {
+        size: u32,
+        item: [i32; 4],
+        button: [i32; 4],
+        button_state: u32,
+        combo: *mut std::ffi::c_void,
+        edit: *mut std::ffi::c_void,
+        list: *mut std::ffi::c_void,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetComboBoxInfo(combo: *mut std::ffi::c_void, info: *mut ComboBoxInfo) -> i32;
+    }
+
+    /// The box a drop-down list belongs to. The list is a child of the
+    /// desktop with no owner, and the UI Automation parent of a list item does
+    /// not always lead back to the box, so the box is found among the windows
+    /// of the list's thread: the one whose `GetComboBoxInfo` names this list.
+    fn box_of_list(list: isize) -> Option<isize> {
+        struct Search {
+            list: isize,
+            found: Option<isize>,
+        }
+        unsafe extern "system" fn visit_child(window: HWND_SYS, state: isize) -> i32 {
+            let search = unsafe { &mut *(state as *mut Search) };
+            if classify_class(&base_class_name(window as isize)) == ComboClass::Box {
+                let mut info = ComboBoxInfo {
+                    size: size_of::<ComboBoxInfo>() as u32,
+                    item: [0; 4],
+                    button: [0; 4],
+                    button_state: 0,
+                    combo: std::ptr::null_mut(),
+                    edit: std::ptr::null_mut(),
+                    list: std::ptr::null_mut(),
+                };
+                if unsafe { GetComboBoxInfo(window, &mut info) } != 0
+                    && info.list as isize == search.list
+                {
+                    search.found = Some(window as isize);
+                    return 0;
+                }
+            }
+            1
+        }
+        unsafe extern "system" fn visit_top(window: HWND_SYS, state: isize) -> i32 {
+            unsafe { EnumChildWindows(window, Some(visit_child), state) };
+            let search = unsafe { &*(state as *const Search) };
+            i32::from(search.found.is_none())
+        }
+        let thread = unsafe { GetWindowThreadProcessId(list as HWND_SYS, std::ptr::null_mut()) };
+        if thread == 0 {
+            return None;
+        }
+        let mut search = Search { list, found: None };
+        unsafe { EnumThreadWindows(thread, Some(visit_top), &mut search as *mut Search as isize) };
+        search.found
     }
 
     impl Win32Combo {
@@ -201,6 +267,23 @@ mod imp {
                 Some(ItemMatch::Ambiguous) => Err(ambiguous_item_error()),
                 Some(ItemMatch::Unique(index)) => self.select_index(index, deadline).map(Some),
             }
+        }
+
+        /// Whether `element` is the box itself rather than one of its parts.
+        pub(crate) fn is_box(&self, element: &UIAElement) -> bool {
+            element.0.get_native_window_handle().is_ok_and(|handle| {
+                let hwnd: HWND = handle.into();
+                hwnd.0 as isize == self.hwnd
+            })
+        }
+
+        /// The position the box currently holds, `None` when nothing is
+        /// selected.
+        pub(crate) fn selected_index(
+            &self,
+            deadline: Deadline,
+        ) -> Result<Option<usize>, AdapterError> {
+            Ok(usize::try_from(self.send(CB_GETCURSEL, 0, 0, deadline)?).ok())
         }
 
         /// Closes an open drop-down list, selects `index`, and sends the owner
@@ -299,6 +382,25 @@ mod imp {
         Ok(answer as isize)
     }
 
+    /// How a window takes part in a combo box. The drop-down list is told by
+    /// its own class name (`ComboLBox`; its base class is `ListBox`), the box
+    /// by the system class it is built on.
+    fn window_class(hwnd: isize) -> ComboClass {
+        let mut buffer = [0u16; 64];
+        let length = unsafe {
+            GetClassNameW(
+                hwnd as *mut std::ffi::c_void,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
+        };
+        let own = String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)]);
+        match classify_class(&own) {
+            ComboClass::DropList => ComboClass::DropList,
+            _ => classify_class(&base_class_name(hwnd)),
+        }
+    }
+
     /// The system class a window is built on: `RealGetWindowClassW` answers
     /// `ComboBox` for a toolkit's superclass of the box too, which runs the
     /// same window procedure and notifies its owner the same way.
@@ -345,6 +447,17 @@ mod imp {
             _text: &str,
             _deadline: Deadline,
         ) -> Result<Option<DeliveryOutcome>, AdapterError> {
+            Ok(None)
+        }
+
+        pub(crate) fn is_box(&self, _element: &UIAElement) -> bool {
+            false
+        }
+
+        pub(crate) fn selected_index(
+            &self,
+            _deadline: Deadline,
+        ) -> Result<Option<usize>, AdapterError> {
             Ok(None)
         }
 

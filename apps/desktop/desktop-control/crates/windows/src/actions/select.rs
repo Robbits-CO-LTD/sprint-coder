@@ -39,6 +39,25 @@ pub(crate) fn resolve_select_verification(
     }
 }
 
+/// The outcome recorded for closing a combo-box list after a select.
+///
+/// The action's summary ANDs the check of every delivered step, so the
+/// close's own check (the list is closed) is recorded only when the selection
+/// before it was verified. After an unverified or unobserved selection the
+/// close is recorded as delivered without a check, and the action stays
+/// unverified rather than borrowing the close's success.
+pub(crate) fn close_outcome(
+    selection_verified: Option<bool>,
+    delivered: bool,
+    closed: bool,
+) -> DeliveryOutcome {
+    match (delivered, selection_verified) {
+        (false, _) => DeliveryOutcome::NotDelivered,
+        (true, Some(true)) => DeliveryOutcome::from_delivery(true, closed),
+        (true, _) => DeliveryOutcome::DeliveredUnobserved,
+    }
+}
+
 /// Injected select plan flags — unit-test seam and live path.
 pub(crate) struct SelectPlan {
     pub(crate) self_match: bool,
@@ -70,7 +89,7 @@ mod imp {
     use super::{
         ActionStep, AdapterError, Cell, Deadline, DeliveryOutcome, ErrorCode, Instant, POLL_SLICE,
         RefCell, SELECT_LABEL, SelectOps, SelectPlan, UIAElement, VERIFY_TIMEOUT, build_step,
-        resolve_select_verification,
+        close_outcome, resolve_select_verification,
     };
     use crate::actions::chain::{after_delivery, capped_verification_end};
     use crate::actions::disclosure::{COLLAPSE_LABEL, EXPAND_LABEL, ExpandKind};
@@ -85,7 +104,7 @@ mod imp {
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::read_one;
     use crate::tree::walk::walker_source::parent_step;
-    use agent_desktop_core::{DeliverySemantics, LocatorField};
+    use agent_desktop_core::DeliverySemantics;
     use uiautomation::patterns::{UIExpandCollapsePattern, UISelectionItemPattern};
     use windows::Win32::UI::Accessibility::UIA_ComboBoxControlTypeId;
 
@@ -102,10 +121,17 @@ mod imp {
         if value.is_empty() && !is_item {
             return Err(value_required_error());
         }
-        if let Some(steps) = win32_combo_select(element, value, deadline)? {
+        let self_match = is_item && (value.is_empty() || name_matches(element, value));
+        // A ref to the item itself keeps that item's identity; only a name
+        // given to the box has to be unique in it.
+        let win32 = if self_match {
+            win32_combo_select_item(element, deadline)?
+        } else {
+            win32_combo_select(element, value, deadline)?
+        };
+        if let Some(steps) = win32 {
             return Ok(steps);
         }
-        let self_match = is_item && (value.is_empty() || name_matches(element, value));
         let listed = if self_match {
             None
         } else {
@@ -176,16 +202,17 @@ mod imp {
                 select_item: &mut select_item,
             },
         )?;
-        if let Some(step) = close_open_list(element, deadline) {
+        let selection_verified = steps.last().and_then(ActionStep::verified);
+        if let Some(step) = close_open_list(element, selection_verified, deadline) {
             steps.push(step);
         }
         Ok(steps)
     }
 
-    /// Chooses the item in the standard Win32 combo box `element` is, or
-    /// belongs to. `None` when there is no such box, or the box keeps no item
-    /// text, so the caller goes on with UI Automation. An empty `value` means
-    /// the item `element` itself.
+    /// Chooses the item named `value` in the standard Win32 combo box
+    /// `element` is, or belongs to. The name must be unique in the box.
+    /// `None` when there is no such box, or the box keeps no item text, so
+    /// the caller goes on with UI Automation.
     pub(crate) fn win32_combo_select(
         element: &UIAElement,
         value: &str,
@@ -194,30 +221,73 @@ mod imp {
         let Some(combo) = owning_combo(element, deadline)? else {
             return Ok(None);
         };
-        let text = if value.is_empty() {
-            match read_one(element, TreeProperty::Name).text() {
-                LocatorField::Known(name) if !name.is_empty() => name,
-                _ => return Ok(None),
-            }
-        } else {
-            value.to_owned()
-        };
         Ok(combo
-            .select_text(&text, deadline)?
+            .select_text(value, deadline)?
             .map(|outcome| vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]))
     }
 
+    /// Chooses the item `element` itself in the list of the standard Win32
+    /// combo box it belongs to, keeping its identity: the item's own
+    /// SelectionItem moves the box to that item's position (without focus or
+    /// notification), and that position is then confirmed to the owner with
+    /// `CBN_SELCHANGE`. Two items with the same text never make this
+    /// ambiguous. Verified only when the item reports itself selected and the
+    /// box holds the position with its list closed. `None` when `element` is
+    /// not an item of such a box.
+    pub(crate) fn win32_combo_select_item(
+        element: &UIAElement,
+        deadline: Deadline,
+    ) -> Result<Option<Vec<ActionStep>>, AdapterError> {
+        let Some(combo) = owning_combo(element, deadline)? else {
+            return Ok(None);
+        };
+        if combo.is_box(element) {
+            return Ok(None);
+        }
+        let delivered = match element.0.get_pattern::<UISelectionItemPattern>() {
+            Ok(pattern) => match pattern.select() {
+                Ok(()) => classify_success()?,
+                Err(error) => classify_write("Select", WIN32_COMBO_SELECT_LABEL, &error)?,
+            },
+            Err(error) => classify_write("get_pattern", WIN32_COMBO_SELECT_LABEL, &error)?,
+        };
+        if !delivered {
+            return Ok(None);
+        }
+        let item_selected =
+            read_one(element, TreeProperty::SelectionItemIsSelected).flag() == Some(true);
+        let Some(index) = combo.selected_index(deadline).map_err(after_delivery)? else {
+            return Ok(Some(vec![build_step(
+                WIN32_COMBO_SELECT_LABEL,
+                DeliveryOutcome::DeliveredUnverified,
+            )]));
+        };
+        let outcome = combo
+            .select_index(index, deadline)
+            .map_err(after_delivery)?;
+        let outcome = if item_selected || outcome == DeliveryOutcome::NotDelivered {
+            outcome
+        } else {
+            DeliveryOutcome::DeliveredUnverified
+        };
+        Ok(Some(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]))
+    }
+
     /// Closes the combo box list `element` is, or whose item it is, when that
-    /// list is open. The close is reported as a step whose verification is
-    /// the list's state afterwards; `None` when no open combo-box list is
-    /// involved.
-    fn close_open_list(element: &UIAElement, deadline: Deadline) -> Option<ActionStep> {
+    /// list is open. The close is recorded as its own step; `None` when no
+    /// open combo-box list is involved. See [`close_outcome`] for how the
+    /// close's own check is reported.
+    fn close_open_list(
+        element: &UIAElement,
+        selection_verified: Option<bool>,
+        deadline: Deadline,
+    ) -> Option<ActionStep> {
         let combo = open_combo_box(element, deadline)?;
         let delivered = matches!(collapse_container(&combo), Ok(true));
         let closed = delivered && poll_collapsed(&combo, deadline);
         Some(build_step(
             COLLAPSE_LABEL,
-            DeliveryOutcome::from_delivery(delivered, closed),
+            close_outcome(selection_verified, delivered, closed),
         ))
     }
 
@@ -452,7 +522,7 @@ mod imp {
 pub(crate) use imp::select_steps;
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::win32_combo_select;
+pub(crate) use imp::win32_combo_select_item;
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use imp::select_judged_for;
