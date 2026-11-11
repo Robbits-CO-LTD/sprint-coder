@@ -385,10 +385,14 @@ export function desktopControlOwnerReader(
     lookup.stateRoot ?? desktopControlStateFolder(),
     lookup.taskId === undefined ? undefined : knownWindows.get(lookup.taskId),
   );
-  const distrusted = lookup.taskId === undefined ? undefined : distrustedWindows.get(lookup.taskId);
+  const { taskId } = lookup;
   return {
     part: (ref) => reader.partOwner(ref),
-    window: (id) => (distrusted?.has(id) === true ? null : reader.windowOwner(id)),
+    // Read when asked, so an id distrusted after the reader was made is not taken either.
+    window: (id) =>
+      taskId !== undefined && distrustedWindows.get(taskId)?.has(id) === true
+        ? null
+        : reader.windowOwner(id),
   };
 }
 

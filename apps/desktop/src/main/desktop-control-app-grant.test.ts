@@ -7,7 +7,10 @@ import {
   desktopAppGrantOffer,
   type DesktopAppGrantKey,
 } from './desktop-control-app-grant';
-import { rememberDesktopControlWindows } from './desktop-control-display';
+import {
+  desktopControlOwnerReader,
+  rememberDesktopControlWindows,
+} from './desktop-control-display';
 
 let stateRoot: string;
 const stools = 'stools';
@@ -73,6 +76,39 @@ const covers = (argv: string[], granted: DesktopAppGrantKey[]) =>
 const batch = (...entries: unknown[]) => ['batch', JSON.stringify(entries)];
 
 describe('desktop-control app-wide Task grant', () => {
+  it('stops naming a window the executable found reused, even for a reader made before', () => {
+    const reader = desktopControlOwnerReader({ stateRoot, taskId: 'task-reused' });
+    expect(reader.window('w-1')).toMatchObject({ pid: 100, app: 'charmap.exe' });
+    rememberDesktopControlWindows(
+      'task-reused',
+      ['batch', '[]'],
+      JSON.stringify({
+        ok: true,
+        command: 'batch',
+        data: {
+          results: [
+            {
+              ok: false,
+              error: {
+                code: 'POLICY_DENIED',
+                details: { kind: 'window_owner_mismatch', window_id: 'w-1', found: 1 },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(reader.window('w-1')).toBeNull();
+    expect(
+      desktopControlOwnerReader({ stateRoot, taskId: 'task-reused' }).window('w-1'),
+    ).toBeNull();
+    // Other Tasks, and the window's parts (checked by the executable itself), are unaffected.
+    expect(
+      desktopControlOwnerReader({ stateRoot, taskId: 'task-other' }).window('w-1'),
+    ).not.toBeNull();
+    expect(reader.part('@scharmap:e1')).toMatchObject({ pid: 100 });
+  });
+
   it('names the app by the process the executable recorded, never by the argv', () => {
     const charmap = offer(['click', '@scharmap:e1']);
     expect(charmap).toMatchObject({

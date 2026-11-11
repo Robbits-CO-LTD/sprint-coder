@@ -2381,11 +2381,11 @@ describe('ApprovalCoordinator desktop control card', () => {
         );
         expect(read).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
         expect(harness.published).toHaveLength(1);
-        // Runs the grant allows carry the granted process for the executable to check window ids
-        // against; the run approved on its own card carries none.
+        // Every run the grant allows carries the granted process for the executable to check window
+        // ids against, the card's own run included: its window may be reused while the card waits.
+        expect(granted.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
         expect(next.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
         expect(read.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
-        expect(granted).not.toHaveProperty('desktopControlExpectedWindowOwner');
 
         // A window id the executable found owned by another app is never allowed by the records
         // again in this Task: the next run on it gets a card.
@@ -2507,14 +2507,17 @@ describe('ApprovalCoordinator desktop control card', () => {
           }),
         ).toThrow('APPROVAL_DECISION_NOT_ALLOWED');
         harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
-        await asked;
-        // Nothing was granted for the app.
+        // A run allowed on its card, not by the app-wide grant, carries no expected owner.
+        expect(await asked).not.toHaveProperty('desktopControlExpectedWindowOwner');
+        // Nothing was granted for the app; 「Task中許可」 of the exact command carries none either.
         harness.published.length = 0;
         const again = harness.coordinator.authorizeTool(
           request(await prepare(['click', '@scharmap:e2']), 'again'),
         );
-        harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'deny'));
-        await expect(again).resolves.toMatchObject({ decision: 'deny' });
+        harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_task'));
+        const exact = await again;
+        expect(exact).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(exact).not.toHaveProperty('desktopControlExpectedWindowOwner');
       });
     });
   });

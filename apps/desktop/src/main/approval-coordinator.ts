@@ -413,14 +413,17 @@ export class ApprovalCoordinator {
       desktopControl && perCallSubject === undefined && validateExecutionSpec(request.input)
         ? desktopControlApprovalAction(request.input.argv, { taskId: request.context.taskId })
         : undefined;
-    // Offered only beside 「Task中許可」, for a run the app-wide grant could cover.
-    const desktopAppGrant =
+    // Offered only beside 「Task中許可」, for a run the app-wide grant could cover, and only for an
+    // app whose process the executable can be told to check window ids against.
+    const offered =
       desktopAction?.allowTaskGrant === true &&
       !desktopForeground &&
       validateExecutionSpec(request.input) &&
       desktopAppGrantEnvironmentAllows(request.input)
         ? desktopAppGrantOffer(request.input.argv, { taskId: request.context.taskId })
         : null;
+    const desktopAppGrant =
+      offered !== null && desktopControlExpectedWindowOwner(offered) !== null ? offered : null;
     const specDigest = facts.specDigest;
     const resource = facts.resourceSet;
     const operation = facts.operation;
@@ -590,11 +593,19 @@ export class ApprovalCoordinator {
         command.decision !== 'allow_task' ||
         waiter === undefined ||
         waiter.desktopAppGrant === null ||
+        desktopControlExpectedWindowOwner(waiter.desktopAppGrant) === null ||
         !isDesktopControlCall(waiter.request) ||
         isForegroundDesktopControlCall(waiter.request))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const appScope = command.grantScope === 'app';
+    // The card's own run is allowed under the app-wide grant too, so the executable checks each
+    // window id it names against the granted process as it runs, like every later run under it: the
+    // window can close and its id be reused by another app while the card waits.
+    const appWindowOwner =
+      appScope && waiter?.desktopAppGrant != null
+        ? desktopControlExpectedWindowOwner(waiter.desktopAppGrant)
+        : null;
     // Approved one call at a time (Issue #546). Refused before anything is recorded, whether or not
     // this process still holds the waiter, so no Task grant can come out of such a card.
     if (
@@ -684,6 +695,7 @@ export class ApprovalCoordinator {
       ...(selectedUserInput !== undefined
         ? { userInputSelection: selectedUserInput }
         : { approvalDecision: command.decision }),
+      ...(appWindowOwner === null ? {} : { desktopControlExpectedWindowOwner: appWindowOwner }),
       ...(userInputRequest && waiter !== undefined
         ? {
             beforeExecute: () =>
@@ -719,7 +731,11 @@ export class ApprovalCoordinator {
                       true)
                   );
                 // The run this card was raised for, under the app-wide grant just given.
-                if (appScope) return this.desktopAppGrantCovering(waiter.request) !== null;
+                if (appScope)
+                  return (
+                    appWindowOwner !== null &&
+                    this.desktopAppGrantCovering(waiter.request)?.id === waiter.desktopAppGrant?.id
+                  );
                 if (
                   this.options.revalidateTaskGrant?.({
                     capability: waiter.capability,
