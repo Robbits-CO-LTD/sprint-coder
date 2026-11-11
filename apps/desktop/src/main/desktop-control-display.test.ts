@@ -133,6 +133,26 @@ describe('desktop-control approval description', () => {
       textRole: 'select',
       target: { role: '選択欄' },
     });
+    // Without a value, the ref is the option itself: the card names that part, not a choice in it.
+    for (const argv of [
+      ['select', '@s1abc:e2'],
+      ['select', '@s1abc:e2', ''],
+    ]) {
+      const action = describeArgv(argv);
+      expect(action).toMatchObject({
+        kind: 'input',
+        title: 'この項目を選びます',
+        target: { resolved: true, role: '選択欄', name: 'フォント(F):' },
+      });
+      expect(action.text).toBeUndefined();
+      expect(action.textRole).toBeUndefined();
+    }
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([{ command: 'select', args: { ref_id: '@s1abc:e2' } }]),
+      ]).steps,
+    ).toMatchObject([{ title: 'この項目を選びます', target: { role: '選択欄' } }]);
     expect(describeArgv(['expand', '@s1abc:e3'])).toMatchObject({ title: 'メニューを開きます' });
     expect(describeArgv(['snapshot', '--app', 'charmap'])).toMatchObject({
       kind: 'read',
@@ -140,6 +160,34 @@ describe('desktop-control approval description', () => {
       mode: 'read',
       target: { resolved: true, app: 'charmap' },
     });
+    // A read below one part names that part and its app, as a ref operation does.
+    for (const argv of [
+      ['snapshot', '--root', '@s1abc:e2', '--max-depth', '30'],
+      ['find', '--root=@s1abc:e2', '--role', 'listitem'],
+    ])
+      expect(describeArgv(argv), argv.join(' ')).toMatchObject({
+        kind: 'read',
+        target: {
+          resolved: true,
+          app: 'charmap.exe',
+          window: '文字コード表',
+          role: '選択欄',
+          name: 'フォント(F):',
+        },
+        openDetails: false,
+      });
+    expect(describeArgv(['snapshot', '--root', '@snothere:e1']).target).toMatchObject({
+      resolved: false,
+      reference: '@snothere:e1',
+    });
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([{ command: 'find', args: { root: '@s1abc:e2', role: 'listitem' } }]),
+      ]).steps,
+    ).toMatchObject([
+      { title: '部品を探します', target: { role: '選択欄', name: 'フォント(F):' } },
+    ]);
     expect(describeArgv(['launch', 'charmap'])).toMatchObject({
       kind: 'launch',
       title: 'アプリを起動します',
@@ -194,7 +242,22 @@ describe('desktop-control approval description', () => {
     expect(describeArgv(['status'])).toMatchObject({ title: '状態を確かめます', mode: 'read' });
     expect(describeArgv(['skills', 'get', 'desktop'])).toMatchObject({ title: '説明書を読みます' });
     expect(describeArgv(['snapshot', '--app', 'charmap']).notes).toEqual([]);
-    expect(describeArgv(['minimize', '--app', 'charmap']).notes).toEqual([]);
+    // Minimizing brings another window forward, which is why it always asks.
+    expect(describeArgv(['minimize', '--app', 'charmap']).notes).toEqual([
+      '窓を最小化します。最小化すると、次の窓が手前に来ます。',
+    ]);
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([
+          { command: 'expand', args: { ref_id: '@s1abc:e3' } },
+          { command: 'minimize', args: { window_id: 'w-62263518' } },
+        ]),
+      ]).notes,
+    ).toEqual([
+      '窓を最小化します。最小化すると、次の窓が手前に来ます。',
+      '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。',
+    ]);
     expect(describeArgv(['launch', 'charmap']).notes).toEqual([
       '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。',
     ]);

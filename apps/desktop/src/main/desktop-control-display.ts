@@ -243,6 +243,12 @@ const LAUNCH_NOTE =
   '起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。';
 const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
+// Minimizing hands the front to another window, so it is never covered by an app-wide grant.
+const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';
+// `select <ref>` without a value chooses the part the ref names itself, not an option inside it.
+const SELECT_ITEM_TITLE = 'この項目を選びます';
+// Reads that take `--root` (`root` in a batch) read only below that part.
+const ROOT_COMMANDS = new Set(['snapshot', 'find']);
 const BEHIND_NOTE =
   '対象の窓を前面に出さずに操作します。操作の結果、アプリが自分で窓を手前に出すことがあります。';
 // Foreground commands that only bring a window to the front (`launch` with `--activate`).
@@ -483,7 +489,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
           ? 'foreground'
           : displayMode(desktopControlBatchEntryMode(command, args)),
         {
-          ref: stringField(args, 'ref_id'),
+          ref: stringField(args, ROOT_COMMANDS.has(command) ? 'root' : 'ref_id'),
           windowId: stringField(args, 'window_id'),
           app: stringField(args, 'app'),
           // Not read from a batch entry, so a drag in one is never shown as explained.
@@ -526,7 +532,9 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
       command,
       mode,
       {
-        ref: REF_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--from'),
+        ref: REF_COMMANDS.has(command)
+          ? read.positionals[0]
+          : read.options.get(ROOT_COMMANDS.has(command) ? '--root' : '--from'),
         windowId: read.options.get('--window-id'),
         app: APP_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--app'),
         destination: command === 'drag' ? read.options.get('--to') : undefined,
@@ -565,6 +573,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
+  if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
   if (mode === 'foreground') {
     // Only bringing a window to the front, without `--headed`, takes no mouse or keyboard.
     const frontOnly =
@@ -605,7 +614,9 @@ function describeStep(
   { ref, windowId, app, destination, text }: StepArguments,
   snapshots: SnapshotReader,
 ): { step: DesktopActionStep; cut: boolean; unexplained: boolean } {
-  const [kind, title] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
+  const [kind, heading] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
+  const title =
+    command === 'select' && (text === undefined || text === '') ? SELECT_ITEM_TITLE : heading;
   const target =
     ref !== undefined && ref !== ''
       ? snapshots.part(ref)
