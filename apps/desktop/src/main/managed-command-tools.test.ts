@@ -446,7 +446,12 @@ describe('desktop control Workspace roots', () => {
       policyEpoch: 1,
     };
     broker.startTurn(owner, 'grok');
-    const path = 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe';
+    // An absolute path outside the Workspace as this OS reads one, since the replaced arguments
+    // are judged again with the checks of an absolute path.
+    const path =
+      process.platform === 'win32'
+        ? 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe'
+        : '/opt/RabbitMail/rabbitmail-desktop';
     const desktop = vi
       .spyOn(desktopControlModule, 'isDesktopControlExecutable')
       .mockReturnValue(true);

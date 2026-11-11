@@ -34,6 +34,7 @@ export function configureStartMenuShortcutReader(reader: ShortcutLinkReader | nu
 export function startMenuShortcuts(
   environment: Readonly<Record<string, string | undefined>> = process.env,
   now: number = Date.now(),
+  listFolder: FolderLister = (folder) => readdirSync(folder, { withFileTypes: true }),
 ): readonly StartMenuShortcut[] | null {
   const reader = configuredReader;
   if (reader === null) return null;
@@ -42,22 +43,36 @@ export function startMenuShortcuts(
   const shortcuts: StartMenuShortcut[] = [];
   for (const base of [environment['ProgramData'], environment['APPDATA']]) {
     if (base === undefined || !/^[a-z]:[\\/]/iu.test(base)) continue;
-    walk(win32.join(base, 'Microsoft', 'Windows', 'Start Menu', 'Programs'), 0, reader, shortcuts);
+    walk(
+      win32.join(base, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+      0,
+      reader,
+      listFolder,
+      shortcuts,
+    );
   }
   cached = { at: now, shortcuts };
   return shortcuts;
 }
 
+/** The entries of one folder, as `readdirSync` with `withFileTypes` gives them; throws when unreadable. */
+export type FolderLister = (folder: string) => readonly Readonly<{
+  name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}>[];
+
 function walk(
   folder: string,
   depth: number,
   reader: ShortcutLinkReader,
+  listFolder: FolderLister,
   shortcuts: StartMenuShortcut[],
 ): void {
   if (depth > MAX_DEPTH) return;
   let entries;
   try {
-    entries = readdirSync(folder, { withFileTypes: true });
+    entries = listFolder(folder);
   } catch {
     return;
   }
@@ -65,7 +80,7 @@ function walk(
     if (shortcuts.length >= MAX_SHORTCUTS) return;
     const path = win32.join(folder, entry.name);
     // Links to folders are not followed: only the folders themselves are read.
-    if (entry.isDirectory()) walk(path, depth + 1, reader, shortcuts);
+    if (entry.isDirectory()) walk(path, depth + 1, reader, listFolder, shortcuts);
     else if (entry.isFile() && entry.name.toLowerCase().endsWith('.lnk')) {
       try {
         const link = reader(path);
