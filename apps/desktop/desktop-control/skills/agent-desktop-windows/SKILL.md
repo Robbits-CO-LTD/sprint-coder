@@ -62,6 +62,13 @@ observation, actions and capture there fail or return nothing.
   `win+x`, `win+e`, `ctrl+shift+esc` and their modifier supersets are refused
   without `--force`. In combos, `cmd` and `meta` are the Windows key, so
   `meta+c` is a shell shortcut. Write `ctrl+c` to copy.
+- **Symbol keys.** `plus`, `minus`, `asterisk`, `slash`, `equal`, `period`
+  and `comma` name `+ - * / = . ,`. Every one except `+` can also be written
+  as the character itself (`press -`, `press ctrl+=`). `+` joins modifiers
+  and a key, so the `+` key is always `plus` (`press plus`, `press ctrl+plus`).
+  The key is pressed as the active keyboard layout produces the character,
+  Shift included. Typing 7+8= into a calculator is `press 7`, `press plus`,
+  `press 8`, `press equal`.
 - **`type` needs `--headed`.** It is keystroke synthesis through `SendInput`,
   so a strict-headless `type` returns `POLICY_DENIED`. Use `set-value`, or pass
   `--headed`. It ends `delivered_unverified` (`verification_scope:

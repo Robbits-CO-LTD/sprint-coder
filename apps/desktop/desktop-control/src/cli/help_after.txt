@@ -25,6 +25,9 @@ RESULTS AND RETRIES
 
 KEY COMBOS
   Keys: return, escape, tab, space, delete, up, down, left, right, f1-f12
+  Symbols (Windows): plus, minus, asterisk, slash, equal, period, comma.
+  + joins a combo, so the + key is plus (ctrl+plus); - * / = . , also work
+  as themselves.
   Modifiers: cmd, ctrl, alt, shift. Use cmd+c on macOS and ctrl+c on Windows,
   where cmd and meta map to the Windows key.
 

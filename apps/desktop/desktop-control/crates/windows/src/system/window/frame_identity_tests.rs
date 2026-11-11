@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Windows-only: drives the frame-identity seam against the live desktop's
 //! real `ApplicationFrameHost` population (A26-8) at the predicate and
 //! listing level - the phantom-frame exclusion, the untouched ordinary
@@ -164,4 +165,71 @@ fn has_core_window_child(frame: WindowHandle) -> bool {
     let mut found = false;
     unsafe { EnumChildWindows(frame, Some(callback), &mut found as *mut bool as isize) };
     found
+}
+
+/// `attributed_owner` is the rule `list-windows` reports: an ordinary
+/// window is attributed to its own process, and every frame carrying a
+/// hosted application to that application.
+#[test]
+fn the_attributed_owner_is_the_hosted_application_or_the_window_s_own_process() {
+    bootstrap();
+    let fixture = HostedFixture::spawn().expect("a fixture host starts");
+    let handle = fixture.handle() as WindowHandle;
+    assert_eq!(
+        super::attributed_owner(handle),
+        Some(ProcessId::from(fixture.process_id())),
+        "an ordinary window is attributed to its own process"
+    );
+    // The visitor only collects: it runs across an FFI boundary.
+    let mut frames = Vec::new();
+    enumerate_top_level(|window| {
+        frames.push(window.handle);
+        true
+    })
+    .expect("enumeration succeeds");
+    let mut hosted_frames = 0;
+    for frame in frames {
+        if let Some(hosted) = hosted_application_pid(frame) {
+            hosted_frames += 1;
+            assert_eq!(super::attributed_owner(frame), Some(hosted));
+            assert_ne!(live_window_owner(frame), Some(hosted));
+        }
+    }
+    if hosted_frames == 0 {
+        eprintln!("skip hosted leg: no frame hosts an application on the desktop right now");
+    }
+}
+
+/// The app inventory names the same process for a hosted frame that
+/// `list-windows` does, with the same process instance, so a command that
+/// resolves a listed window's app through the inventory (`press
+/// --window-id`) finds it. The frame host's own pid is not what the
+/// inventory reports for that frame.
+#[test]
+fn the_app_inventory_lists_the_application_a_hosted_frame_is_listed_as() {
+    bootstrap();
+    let listed = list_windows_live(&WindowFilter::default(), deadline(15_000))
+        .expect("the listing succeeds");
+    let hosted: Vec<_> = listed
+        .iter()
+        .filter(|window| hosted_application_pid(parse_handle(&window.id)) == Some(window.pid))
+        .collect();
+    if hosted.is_empty() {
+        eprintln!(
+            "skip: no listed window is a frame hosting an application right now (open the Calculator to run this leg)"
+        );
+        return;
+    }
+    let apps =
+        crate::system::app_ops::list_apps_live(deadline(15_000)).expect("the inventory succeeds");
+    for window in hosted {
+        assert!(
+            apps.iter().any(|app| app.pid == window.pid
+                && app.process_instance == window.process_instance
+                && app.name.eq_ignore_ascii_case(&window.app)),
+            "the inventory lists the hosted application {} (pid {}) its frame is listed as",
+            window.app,
+            u32::from(window.pid)
+        );
+    }
 }

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 /// The virtual key a name resolves to, dropping the layout modifiers the
@@ -211,4 +212,73 @@ fn a_named_key_carries_no_layout_modifier() {
 
     assert_eq!(resolved.vk, VK_RETURN);
     assert!(resolved.layout_modifier_vks().is_empty());
+}
+
+/// Each symbol name resolves to the key the active layout produces the
+/// symbol with - the same answer `VkKeyScanW` gives for the character - and
+/// the character itself (every symbol but `+`, which joins a combo) resolves
+/// to the same key with the same layout modifiers.
+#[cfg(target_os = "windows")]
+#[test]
+fn symbol_names_and_characters_resolve_through_the_active_layout() {
+    for (name, symbol) in [
+        ("plus", '+'),
+        ("minus", '-'),
+        ("asterisk", '*'),
+        ("slash", '/'),
+        ("equal", '='),
+        ("period", '.'),
+        ("comma", ','),
+    ] {
+        let Some(scan) = imp::vk_key_scan(symbol) else {
+            assert!(
+                resolve_key(name).is_err(),
+                "{name}: a symbol the layout cannot produce is refused, not guessed"
+            );
+            continue;
+        };
+        let by_name = resolve_key(name).unwrap_or_else(|_| panic!("{name} resolves"));
+        assert_eq!(by_name, resolved_from_scan(scan), "{name}");
+        if symbol != '+' {
+            let by_character =
+                resolve_key(&symbol.to_string()).unwrap_or_else(|_| panic!("{symbol} resolves"));
+            assert_eq!(
+                by_character, by_name,
+                "{symbol} and {name} are the same key"
+            );
+        }
+    }
+}
+
+/// The ASCII value of a symbol is an unrelated virtual key (`+` is
+/// `VK_EXECUTE`), so a symbol never resolves to it.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_symbol_never_resolves_to_its_ascii_value_as_a_virtual_key() {
+    for name in ["plus", "asterisk", "slash", "equal", "period", "comma"] {
+        if let Ok(resolved) = resolve_key(name) {
+            let symbol = symbol_character(name).expect("a symbol name");
+            assert_ne!(resolved.vk, symbol as u16, "{name}");
+        }
+    }
+}
+
+#[test]
+fn unlisted_punctuation_and_misspelled_symbol_names_stay_unknown() {
+    for key in ["!", "#", "equals", "pluss", "+"] {
+        let error = resolve_key(key).expect_err("not in the vocabulary");
+        assert_eq!(error.code, ErrorCode::InvalidArgs, "{key}");
+    }
+}
+
+#[test]
+fn the_unknown_key_suggestion_lists_the_symbol_names() {
+    let suggestion = unknown_key_error("hyperkey")
+        .suggestion
+        .expect("a suggestion");
+    for name in [
+        "plus", "minus", "asterisk", "slash", "equal", "period", "comma",
+    ] {
+        assert!(suggestion.contains(name), "{name}");
+    }
 }
