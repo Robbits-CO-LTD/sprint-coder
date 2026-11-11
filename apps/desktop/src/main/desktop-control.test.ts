@@ -6,7 +6,9 @@ import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlStateFolder,
   isDesktopControlExecutable,
+  isShippedDesktopControlPath,
   resolveDesktopControlCommand,
   runsOutsideCommandSandbox,
 } from './desktop-control';
@@ -93,7 +95,7 @@ describe('desktop-control run environment', () => {
         platform: 'win32',
         realpath: (path) => path,
       }),
-    ).toEqual({ Path: '' });
+    ).toEqual({ Path: '', AGENT_DESKTOP_HOME: desktopControlStateFolder() });
   });
 
   it('drops any entry with a quote unread, and rebuilds PATH from the normalized folders', () => {
@@ -118,6 +120,7 @@ describe('desktop-control run environment', () => {
     // The quoted `;` splits into `"C:\outside` and `F:\work\app\bin"`: both carry a quote.
     expect(filtered).toEqual({
       PATH: ['C:\\Windows\\System32', 'C:\\Tools\\forward', 'D:\\'].join(';'),
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
     });
   });
 
@@ -132,7 +135,12 @@ describe('desktop-control run environment', () => {
         ['F:\\work\\app'],
         { platform: 'win32', realpath: (path) => path },
       ),
-    ).toEqual({ Path: 'C:\\one', PATH: 'C:\\two', OTHER: 'F:\\work\\app' });
+    ).toEqual({
+      Path: 'C:\\one',
+      PATH: 'C:\\two',
+      OTHER: 'F:\\work\\app',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
   });
 
   it('judges a PATH folder by where it really is', () => {
@@ -144,7 +152,10 @@ describe('desktop-control run environment', () => {
         realpath: (path) => (path === 'C:\\linked' ? 'F:\\work\\app\\bin' : path),
       },
     );
-    expect(filtered).toEqual({ PATH: 'C:\\other' });
+    expect(filtered).toEqual({
+      PATH: 'C:\\other',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
   });
 });
 
@@ -358,8 +369,35 @@ describe('desktop-control arguments outside the command sandbox', () => {
   const roots = ['C:\\work\\repo'];
   const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
   const refused = (argv: string[]) => desktopControlArgvRefusal(argv, roots, lookup);
+  const batch = (entries: unknown) => ['batch', JSON.stringify(entries)];
   const BATCH_MENU =
     '[{"command":"expand","args":{"ref_id":"@s1:e3"}},{"command":"snapshot","args":{"window_id":"w1"}}]';
+
+  it('refuses a point given both as a part and as coordinates, and takes either one alone', () => {
+    const both = '部品の指定と座標の指定は、どちらか片方だけにする';
+    for (const argv of [
+      ['--headed', 'drag', '--from', '@s1:e1', '--from-xy', '1,1', '--to', '@s1:e2'],
+      ['--headed', 'drag', '--from', '@s1:e1', '--to', '@s1:e2', '--to-xy=2,2'],
+      ['--headed', 'hover', '@s1:e1', '--xy', '1,1'],
+      batch([{ command: 'drag', args: { from: '@s1:e1', from_xy: '1,1', to: '@s1:e2' } }]),
+      batch([{ command: 'drag', args: { from: '@s1:e1', to: '@s1:e2', toXy: '2,2' } }]),
+      batch([{ command: 'hover', args: { ref_id: '@s1:e1', xy: '1,1' } }]),
+    ])
+      expect(refused(argv)).toContain(both);
+    expect(refused(['drag', '--from', '@s1:e1', '--to', '@s1:e2', '--to-xy', '2,2'])).toBe(
+      'デスクトップ操作の実行を拒否した: drag の --to と --to-xy は同時に指定できない（部品の指定と座標の指定は、どちらか片方だけにする）。',
+    );
+    for (const argv of [
+      ['--headed', 'drag', '--from', '@s1:e1', '--to', '@s1:e2'],
+      ['--headed', 'drag', '--from-xy', '1,1', '--to-xy', '2,2'],
+      ['--headed', 'drag', '--from', '@s1:e1', '--to-xy', '2,2'],
+      ['--headed', 'hover', '@s1:e1'],
+      ['--headed', 'hover', '--xy', '1,1'],
+      batch([{ command: 'drag', args: { from: '@s1:e1', to_xy: '2,2' } }]),
+      batch([{ command: 'hover', args: { ref_id: '@s1:e1' } }]),
+    ])
+      expect(refused(argv)).toBeNull();
+  });
 
   // Every form the agent used on the real desktop, and a few more ordinary ones.
   it.each([
@@ -584,5 +622,17 @@ describe('desktop-control runs that touch no other app', () => {
     [['trace']],
   ])('%j keeps the card', (argv) => {
     expect(desktopControlArgvIsInert(argv)).toBe(false);
+  });
+});
+
+describe('shipped desktop-control path', () => {
+  it('recognizes a recorded command of the shipped binary only, for the timeline', () => {
+    expect(isShippedDesktopControlPath(PACKAGED, packaged)).toBe(true);
+    expect(isShippedDesktopControlPath(PACKAGED.toUpperCase(), packaged)).toBe(true);
+    expect(isShippedDesktopControlPath('C:\\Windows\\System32\\cmd.exe', packaged)).toBe(false);
+    // A shipped file whose bytes are not the pinned ones is not it.
+    expect(isShippedDesktopControlPath(PACKAGED, { ...packaged, contentDigest: digests({}) })).toBe(
+      false,
+    );
   });
 });

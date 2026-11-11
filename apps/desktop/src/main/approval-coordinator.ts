@@ -25,7 +25,13 @@ import type {
   ApprovalRequestInput,
   ApprovalResolutionInput,
 } from './persistence';
-import { desktopControlArgvIsInert, isDesktopControlExecutable } from './desktop-control';
+import {
+  desktopControlArgvIsInert,
+  desktopControlArgvMode,
+  isDesktopControlExecutable,
+} from './desktop-control';
+import { desktopControlApprovalAction } from './desktop-control-display';
+import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-characters';
 import { executionSpecContentDigest } from './command-runner';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
@@ -218,6 +224,10 @@ export class ApprovalCoordinator {
     const revalidators: (() => boolean)[] = [];
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
+    const desktopControl = isDesktopControlCall(request);
+    // A desktop-control run that takes the foreground, the cursor or the keyboard is decided on its
+    // own card every time: no Task grant covers it, including one given before this rule.
+    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
     for (const evaluation of evaluations) {
       // The policy engine never allows a per-call capability, and if it ever did, the person would
       // still be asked: only their decision on this call's card covers this call.
@@ -225,9 +235,9 @@ export class ApprovalCoordinator {
       // covered by a preset or policy allow either: the person decides it on its own card. The one
       // allow that is their decision is the Task grant they gave on such a card, which the policy
       // engine matches only for the exact same ExecutionSpec (executable identity, argv, cwd, env).
-      const desktopControl = isDesktopControlCall(request);
       const desktopTaskGrant =
         desktopControl &&
+        !desktopForeground &&
         evaluation.decision.decision === 'allow' &&
         evaluation.decision.reason === 'remembered_grant';
       // A desktop-control run that only prints the bundled guides, help, the version or its own
@@ -309,9 +319,13 @@ export class ApprovalCoordinator {
     const perCallSubject = perCall ? perCallApprovalSubject(request, capability) : undefined;
     if (perCallSubject === null)
       return { decision: 'deny', reason: 'per_call_approval_subject_unbound' };
-    // A per-call capability never reuses a Task grant, including one left by an earlier version.
+    const desktopControl = isDesktopControlCall(request);
+    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
+    // A per-call capability never reuses a Task grant, including one left by an earlier version,
+    // and neither does a desktop-control run that uses the foreground.
     if (
       !perCall &&
+      !desktopForeground &&
       this.options.persistence.hasTaskGrant?.({
         taskId: request.context.taskId,
         requestDigest,
@@ -373,6 +387,11 @@ export class ApprovalCoordinator {
         target: perCallSubject?.label ?? displayTarget(request.input),
         impact: request.entry.sideEffect,
         execution: perCallSubject?.execution ?? safeApprovalExecution(request),
+        // What the run does, for the card only. Nothing decides on it: it is built after the
+        // decisions above, and a part it cannot name is shown as not confirmed.
+        ...(desktopControl && perCallSubject === undefined && validateExecutionSpec(request.input)
+          ? { desktopAction: desktopControlApprovalAction(request.input.argv) }
+          : {}),
       },
       ...ephemeralApprovalExecution(request),
       challenge,
@@ -495,7 +514,11 @@ export class ApprovalCoordinator {
     if (
       command.decision === 'allow_task' &&
       ((waiter !== undefined && requiresPerCallHumanApproval(waiter.capability)) ||
-        (current.capability !== undefined && requiresPerCallHumanApproval(current.capability)))
+        (current.capability !== undefined && requiresPerCallHumanApproval(current.capability)) ||
+        // A desktop-control run that uses the foreground is allowed one run at a time.
+        (waiter !== undefined &&
+          isDesktopControlCall(waiter.request) &&
+          isForegroundDesktopControlCall(waiter.request)))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
@@ -945,30 +968,6 @@ function skillDraftApprovalInput(input: unknown): {
  */
 const APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS = 500;
 const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
-/**
- * Characters the card would not show as themselves, so the person would approve text they did not
- * read. Control characters (other than tab, line feed, and carriage return) and format characters
- * draw as nothing or reorder what is drawn; line and paragraph separators, private-use, and
- * unassigned codepoints have no reliable glyph.
- *
- * `\p{Cf}` rather than a hand-picked list: the Unicode Tag block (U+E0000-U+E007F) spells a whole
- * sentence in invisible codepoints, which would then sit in Project memory and be read by every
- * later Turn, and a single U+200B inside a token is enough to hide it from the secret scanner. ZWJ
- * is a format character, so an emoji joined by it is refused, which is accepted.
- *
- * Combining marks as a whole stay allowed, since NFD Japanese depends on them.
- * The ones that never draw are refused through Unicode's Default_Ignorable_Code_Point rather than a
- * list of names, which kept missing some (the Khmer inherent vowels U+17B4 and U+17B5, for one):
- * each hides a token from the secret scanner as U+200B does, and a run of variation selectors
- * carries one byte apiece. Only the two a card needs to draw are allowed, and only where they draw
- * something. U+FE0E or U+FE0F must follow an emoji and choose its form, and after a keycap base
- * (0-9, #, *) only as part of a keycap with U+20E3; anywhere else it draws nothing, so it could
- * split a secret or carry one bit per character. One ideographic variation selector may follow a
- * Han character, which Japanese names need. Either repeated, or out of those places, is refused.
- */
-const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
-  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}|(?![\uFE0E\uFE0F\u{E0100}-\u{E01EF}])\p{Default_Ignorable_Code_Point}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Emoji})[\uFE0E\uFE0F]|(?<=[0-9#*])[\uFE0E\uFE0F](?!\u20E3)|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
-
 function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
   if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
     return `approval_content_not_displayable: the approval card target is longer than ${APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS} characters`;
@@ -1019,6 +1018,18 @@ export function isInertDesktopControlCall(request: ToolAuthorizationRequest): bo
     isDesktopControlCall(request) &&
     validateExecutionSpec(request.input) &&
     desktopControlArgvIsInert(request.input.argv)
+  );
+}
+
+/**
+ * Whether this desktop-control call takes the foreground, the cursor or the keyboard, or may close
+ * an app (see `desktopControlArgvMode`), judged on the argv sealed into its ExecutionSpec. Such a
+ * run is decided on its own card every time.
+ */
+function isForegroundDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    validateExecutionSpec(request.input) &&
+    desktopControlArgvMode(request.input.argv) === 'foreground'
   );
 }
 

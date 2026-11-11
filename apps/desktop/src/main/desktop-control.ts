@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { posix, resolve, win32 } from 'node:path';
+import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, posix, resolve, win32 } from 'node:path';
 import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
+import { applyWindowsAcl } from './native-file-publication';
 
 /**
  * Sprint Coder's desktop control is the desktop-control executable that ships with the app: one
@@ -84,6 +86,19 @@ export function isDesktopControlExecutable(
 }
 
 /**
+ * Whether a recorded command ran the shipped desktop-control binary, for the timeline only: its
+ * path is the shipped file, whose bytes are checked against the pin. A recorded command keeps no
+ * content digest, so this decides nothing about running; the run itself was judged on its bytes.
+ */
+export function isShippedDesktopControlPath(
+  executable: string,
+  lookup: DesktopControlLookup = {},
+): boolean {
+  const native = resolveDesktopControlCommand(lookup);
+  return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
+}
+
+/**
  * Whether one approved command may run outside the command sandbox: only the shipped
  * desktop-control binary (see `isDesktopControlExecutable`), judged on the digest of the image
  * about to start, and only when it does not live inside any root of the Turn's Workspace. Desktop
@@ -120,8 +135,17 @@ export function desktopControlEnvironment(
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
   const separator = windows ? ';' : ':';
+  // The run always gets the folder the approval card reads its snapshots from, whether that is
+  // Sprint Coder's own or the binary's default, and never one the caller chose in any letter case:
+  // otherwise a refmap the agent wrote elsewhere could name a different part on the card than the
+  // one the run operates. The binary finds its default from HOME or USERPROFILE, which the caller
+  // may also set, so the default is passed explicitly too.
+  const filtered = Object.entries(environment).filter(
+    ([key]) => (windows ? key.toUpperCase() : key) !== DESKTOP_CONTROL_STATE_VARIABLE,
+  );
+  filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
   return Object.fromEntries(
-    Object.entries(environment).map(([key, value]) => {
+    filtered.map(([key, value]) => {
       if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
       const seen = new Set<string>();
       const kept: string[] = [];
@@ -143,6 +167,60 @@ export function desktopControlEnvironment(
       return [key, kept.join(separator)];
     }),
   );
+}
+
+/** The variable the desktop-control binary 1.2.0 reads its state folder from (an absolute path). */
+const DESKTOP_CONTROL_STATE_VARIABLE = 'AGENT_DESKTOP_HOME';
+let configuredStateRoot: string | null = null;
+
+/**
+ * Sets the folder, under Sprint Coder's own data, where every desktop-control run outside the
+ * sandbox keeps its snapshots. The approval card reads the names of the parts a ref points at from
+ * there (`desktop-control-display.ts`). Called once at startup; until then, and in tests, runs keep
+ * the binary's default folder in the user's home and the card reads that one.
+ *
+ * The binary refuses a state folder whose DACL grants anyone but the user, SYSTEM and
+ * Administrators any access, even read (checked on 1.2.0). A folder under a drive root inherits
+ * Authenticated Users and Users, so the folder is made private on every start, which also repairs
+ * one an earlier version left inheriting. When that cannot be done, the folder is not used at all
+ * and runs are pointed at the default folder of `desktopControlStateFolder`, the one the card then
+ * reads, so the run and the card never read different folders.
+ */
+export function configureDesktopControlStateRoot(
+  root: string | null,
+  makePrivate: (folder: string) => void = (folder) =>
+    applyWindowsAcl(folder, 'directory', 'secure'),
+): void {
+  configuredStateRoot = null;
+  // Desktop control ships for Windows only, the one place its folder can be checked here.
+  if (root === null || process.platform !== 'win32' || !win32.isAbsolute(root)) return;
+  const folder = win32.normalize(root);
+  try {
+    mkdirSync(folder, { recursive: true });
+    makePrivate(folder);
+  } catch {
+    return;
+  }
+  configuredStateRoot = folder;
+}
+
+/** The configured state folder, or `null` for the binary's default. */
+export function desktopControlStateRoot(): string | null {
+  return configuredStateRoot;
+}
+
+/**
+ * The folder a desktop-control run outside the sandbox keeps its state in, and the one its approval
+ * card reads: the configured one, or else Sprint Coder's own inherited variable (an absolute path
+ * with a drive letter), then the binary's folder in the home. `desktopControlEnvironment` passes
+ * this to every run, so the run never looks anywhere else.
+ */
+export function desktopControlStateFolder(): string {
+  if (configuredStateRoot !== null) return configuredStateRoot;
+  const inherited = process.env[DESKTOP_CONTROL_STATE_VARIABLE];
+  if (inherited !== undefined && /^[a-z]:[\\/]/iu.test(inherited))
+    return win32.normalize(inherited);
+  return join(homedir(), '.agent-desktop');
 }
 
 function comparisonKey(path: string, lookup: DesktopControlLookup): string {
@@ -316,6 +394,8 @@ type ReadArgv = Readonly<{
   global: boolean;
   separated: boolean;
   positionals: readonly string[];
+  /** Every option given, by name, with its value (`''` for a flag); a repeated one keeps the last. */
+  options: ReadonlyMap<string, string>;
 }>;
 
 const GLOBAL_OPTION_NAMES = new Set(
@@ -331,6 +411,7 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
   let global = false;
   let separated = false;
   const positionals: string[] = [];
+  const given = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
     if (separated) {
@@ -350,10 +431,13 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
       else if (options.values.has(name)) {
         if (!token.includes('=') && (index += 1) >= argv.length)
           return refusal(`${name} に値が無い`);
+        given.set(name, token.includes('=') ? token.slice(name.length + 1) : argv[index]!);
+        continue;
       } else if (!options.flags.has(token))
         return refusal(
           `${token} を判定できない（${key ?? command ?? 'デスクトップ操作'} で使える option だけにする）`,
         );
+      given.set(name, '');
       continue;
     }
     if (command === undefined) {
@@ -373,7 +457,7 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
     if (spec === undefined) return refusal(`${key} を判定できない`);
     options = parseOptions(spec);
   }
-  return { command, key, help, global, separated, positionals };
+  return { command, key, help, global, separated, positionals, options: given };
 }
 
 // Commands that only print what is compiled into the binary or its own state, and touch no other
@@ -449,6 +533,196 @@ export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
   );
 }
 
+/**
+ * How a desktop-control run meets the person's own use of the desktop, judged on the sealed argv.
+ * `inert` prints only what the binary carries (see `desktopControlArgvIsInert`); `read` only reads
+ * the screen; `background` operates an app through its accessibility interface without taking the
+ * foreground, the cursor or the keyboard; `foreground` uses one of those, or may close an app the
+ * person has open. Anything not known to be weaker is `foreground`.
+ */
+export type DesktopControlMode = 'inert' | 'read' | 'background' | 'foreground';
+
+const MODE_STRENGTH: Readonly<Record<DesktopControlMode, number>> = {
+  inert: 0,
+  read: 1,
+  background: 2,
+  foreground: 3,
+};
+
+// Checked on the desktop-control binary 1.2.0 (`--help` and its Windows guide): ref actions are
+// semantic accessibility calls without `--headed`, except type, focus and the multi- and
+// right-clicks, which are physical or take focus; `press` goes to the foreground queue; and
+// `focus-window`, `restore`, `maximize` and `launch --activate` bring a window to the front. Every
+// command of `COMMAND_OPTIONS` is listed here, and the table is tested to stay complete.
+const COMMAND_MODES: Readonly<Record<string, Exclude<DesktopControlMode, 'inert'>>> = {
+  snapshot: 'read',
+  find: 'read',
+  screenshot: 'read',
+  get: 'read',
+  is: 'read',
+  'list-windows': 'read',
+  'list-displays': 'read',
+  'list-apps': 'read',
+  'list-surfaces': 'read',
+  'list-notifications': 'read',
+  wait: 'read',
+  status: 'read',
+  permissions: 'read',
+  version: 'read',
+  help: 'read',
+  'skills list': 'read',
+  'skills get': 'read',
+  'skills path': 'read',
+  'skills help': 'read',
+  'session list': 'read',
+  'session help': 'read',
+  'cursor-overlay help': 'read',
+  click: 'background',
+  'set-value': 'background',
+  clear: 'background',
+  select: 'background',
+  toggle: 'background',
+  check: 'background',
+  uncheck: 'background',
+  expand: 'background',
+  collapse: 'background',
+  scroll: 'background',
+  'scroll-to': 'background',
+  launch: 'background',
+  minimize: 'background',
+  'move-window': 'background',
+  'resize-window': 'background',
+  'clipboard-set': 'background',
+  'clipboard-clear': 'background',
+  'dismiss-notification': 'background',
+  'dismiss-all-notifications': 'background',
+  'notification-action': 'background',
+  'session start': 'background',
+  'session end': 'background',
+  'session gc': 'background',
+  'cursor-overlay enable': 'background',
+  'cursor-overlay disable': 'background',
+  // `batch` takes the strongest mode of its entries (`desktopControlArgvMode`).
+  batch: 'background',
+  'double-click': 'foreground',
+  'triple-click': 'foreground',
+  'right-click': 'foreground',
+  type: 'foreground',
+  focus: 'foreground',
+  press: 'foreground',
+  'key-down': 'foreground',
+  'key-up': 'foreground',
+  hover: 'foreground',
+  drag: 'foreground',
+  'mouse-move': 'foreground',
+  'mouse-click': 'foreground',
+  'mouse-down': 'foreground',
+  'mouse-up': 'foreground',
+  'mouse-wheel': 'foreground',
+  'focus-window': 'foreground',
+  maximize: 'foreground',
+  restore: 'foreground',
+  'close-app': 'foreground',
+};
+
+/** The commands the mode table leaves out (none), for its completeness test. */
+export function desktopControlCommandsWithoutMode(): string[] {
+  return Object.keys(COMMAND_OPTIONS).filter((command) => !Object.hasOwn(COMMAND_MODES, command));
+}
+
+/**
+ * How this run meets the person's use of the desktop (see `DesktopControlMode`). Any `--headed`
+ * run is `foreground`, and so is anything this cannot read, including a batch whose JSON it cannot
+ * read. A batch is as strong as its strongest entry.
+ */
+export function desktopControlArgvMode(argv: readonly string[]): DesktopControlMode {
+  if (desktopControlArgvIsInert(argv)) return 'inert';
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string' || argv.some((token) => optionName(token) === '--headed'))
+    return 'foreground';
+  // Help or version with a shared option prints and exits like the inert form.
+  if (read.help.length > 0 || read.command === undefined) return 'read';
+  const command = read.command;
+  if (command === 'launch')
+    return argv.some((token) => optionName(token) === '--activate') ? 'foreground' : 'background';
+  if (command === 'batch') return batchMode(read.positionals);
+  return commandMode(command);
+}
+
+function batchMode(positionals: readonly string[]): DesktopControlMode {
+  const entries = readBatchEntries(positionals);
+  if (entries === null || entries.length === 0) return 'foreground';
+  let strongest: DesktopControlMode = 'read';
+  for (const { command, args } of entries) {
+    const mode = desktopControlBatchEntryMode(command, args);
+    if (MODE_STRENGTH[mode] > MODE_STRENGTH[strongest]) strongest = mode;
+  }
+  return strongest;
+}
+
+/** The mode of one batch entry on its own; a `--headed` batch makes every entry `foreground`. */
+export function desktopControlBatchEntryMode(
+  command: string,
+  args: Readonly<Record<string, unknown>>,
+): Exclude<DesktopControlMode, 'inert'> {
+  if (command === 'launch')
+    return args['activate'] === undefined || args['activate'] === false
+      ? 'background'
+      : 'foreground';
+  if (command === 'batch' || WITH_SUBCOMMANDS.has(command)) return 'foreground';
+  return commandMode(command);
+}
+
+function commandMode(command: string): Exclude<DesktopControlMode, 'inert'> {
+  return Object.hasOwn(COMMAND_MODES, command) ? COMMAND_MODES[command]! : 'foreground';
+}
+
+/** The entries of a batch argument, or `null` when they are not the shape `batch` takes. */
+export function readBatchEntries(
+  positionals: readonly string[],
+): { command: string; args: Readonly<Record<string, unknown>> }[] | null {
+  if (positionals.length !== 1) return null;
+  let entries: unknown;
+  try {
+    entries = JSON.parse(positionals[0]!);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(entries)) return null;
+  const read: { command: string; args: Readonly<Record<string, unknown>> }[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+    const { command, args } = entry as Record<string, unknown>;
+    if (typeof command !== 'string') return null;
+    if (args !== undefined && (typeof args !== 'object' || args === null || Array.isArray(args)))
+      return null;
+    read.push({ command, args: (args ?? {}) as Record<string, unknown> });
+  }
+  return read;
+}
+
+/**
+ * The arguments as the desktop-control binary reads them, for the approval card's description.
+ * `null` when they are refused.
+ */
+export function readDesktopControlCommand(argv: readonly string[]): {
+  command: string | undefined;
+  positionals: readonly string[];
+  /** Option values by name, in the order given (`--app=x` and `--app x` both read as `x`). */
+  options: ReadonlyMap<string, string>;
+  /** Whether help or the version was asked for, which only prints and exits. */
+  help: boolean;
+} | null {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string') return null;
+  return {
+    command: read.command,
+    positionals: read.positionals,
+    options: read.options,
+    help: read.help.length > 0,
+  };
+}
+
 /** Why the desktop-control binary must not run with these arguments, or `null` when it may. */
 export function desktopControlArgvRefusal(
   argv: readonly string[],
@@ -470,6 +744,42 @@ export function desktopControlArgvRefusal(
     return positionals.length === 1
       ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
       : refusal('batch には JSON の配列を 1 つだけ渡す');
+  return pointChoiceRefusal(
+    key,
+    Object.hasOwn(POINT_CHOICES, key) ? POINT_CHOICES[key]! : [],
+    (name) => (name === '' ? positionals.length > 0 : read.options.has(name)),
+  );
+}
+
+// Commands of the desktop-control binary 1.2.0 that take one point either as a part or as
+// coordinates (`<command> --help`): the part's option (`''` for the first positional, the ref)
+// and the coordinates' option. Given both, which one the binary uses is up to the binary, and the
+// card names only the part, so that is refused. In a batch, the same by argument name.
+const POINT_CHOICES: Readonly<Record<string, readonly (readonly [string, string])[]>> = {
+  hover: [['', '--xy']],
+  drag: [
+    ['--from', '--from-xy'],
+    ['--to', '--to-xy'],
+  ],
+};
+const BATCH_POINT_CHOICES: Readonly<Record<string, readonly (readonly [string, string])[]>> = {
+  hover: [['ref_id', 'xy']],
+  drag: [
+    ['from', 'from_xy'],
+    ['to', 'to_xy'],
+  ],
+};
+
+function pointChoiceRefusal(
+  label: string,
+  choices: readonly (readonly [string, string])[],
+  given: (name: string) => boolean,
+): string | null {
+  for (const [part, coordinates] of choices)
+    if (given(part) && given(coordinates))
+      return refusal(
+        `${label} の ${part === '' ? 'ref' : part} と ${coordinates} は同時に指定できない（部品の指定と座標の指定は、どちらか片方だけにする）`,
+      );
   return null;
 }
 
@@ -550,6 +860,15 @@ function batchRefusal(
     }
     const keyRefusal = refusedBatchKey(fields);
     if (keyRefusal !== null) return keyRefusal;
+    // Compared without letter case or separators, as the refused names are.
+    const plain = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/gu, '');
+    const keys = new Set(Object.keys(fields).map(plain));
+    const pointRefusal = pointChoiceRefusal(
+      `batch の中の ${command}`,
+      Object.hasOwn(BATCH_POINT_CHOICES, command) ? BATCH_POINT_CHOICES[command]! : [],
+      (name) => keys.has(plain(name)),
+    );
+    if (pointRefusal !== null) return pointRefusal;
   }
   return null;
 }
