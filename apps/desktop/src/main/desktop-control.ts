@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
+import { startMenuShortcuts, type StartMenuShortcut } from './desktop-control-start-menu';
 import { applyWindowsAcl } from './native-file-publication';
 import { secureLogger } from './secure-logger';
 
@@ -32,6 +33,12 @@ export type DesktopControlLookup = Readonly<{
   /** The SHA-256 (hex) sealed in the file's `.sha256` manifest, or `null` when there is none. */
   sealedDigest?: (path: string) => string | null;
   realpath?: (path: string) => string;
+  /** The Start menu's shortcuts for `launch <name>`, or `null` when they are not read. */
+  startMenuShortcuts?: () => readonly StartMenuShortcut[] | null;
+  /** Whether the path is an existing regular file. */
+  isFile?: (path: string) => boolean;
+  /** The environment the paths of shortcuts and the system folders are read with. */
+  environment?: Readonly<Record<string, string | undefined>>;
 }>;
 
 /**
@@ -452,6 +459,8 @@ type ReadArgv = Readonly<{
   global: boolean;
   separated: boolean;
   positionals: readonly string[];
+  /** Where each positional sits in the argv. */
+  positionalIndexes: readonly number[];
   /** Every option given, by name, with its value (`''` for a flag); a repeated one keeps the last. */
   options: ReadonlyMap<string, string>;
 }>;
@@ -469,11 +478,13 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
   let global = false;
   let separated = false;
   const positionals: string[] = [];
+  const positionalIndexes: number[] = [];
   const given = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
     if (separated) {
       positionals.push(token);
+      positionalIndexes.push(index);
       continue;
     }
     if (token === '--') {
@@ -508,6 +519,7 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
       command = `${command} ${token}`;
     } else {
       positionals.push(token);
+      positionalIndexes.push(index);
       continue;
     }
     key = command;
@@ -515,7 +527,7 @@ function readDesktopControlArgv(argv: readonly string[]): ReadArgv | string {
     if (spec === undefined) return refusal(`${key} を判定できない`);
     options = parseOptions(spec);
   }
-  return { command, key, help, global, separated, positionals, options: given };
+  return { command, key, help, global, separated, positionals, positionalIndexes, options: given };
 }
 
 // Commands that only print what is compiled into the binary or its own state, and touch no other
@@ -981,6 +993,216 @@ function batchRefusal(
     if (keyTarget !== null) return keyTarget;
   }
   return null;
+}
+
+/**
+ * `launch <name>` with the name looked up in the Start menu, for arguments
+ * `desktopControlArgvRefusal` accepts. The desktop-control binary starts a bare name only from
+ * the Windows system folders, so a name it would not find there is replaced by the absolute path
+ * of the one `.exe` the Start menu's shortcuts of that name point to, before any card exists: the
+ * card shows that path and the run starts it, never the name. In a batch, each `launch` the same.
+ *
+ * `null` when nothing is replaced (an absolute path, a name in the system folders, no Start menu
+ * read, or not Windows), the replaced arguments, or why the name is refused: no shortcut of that
+ * name (with similar names to try), shortcuts to different executables, or a target that the
+ * checks of an absolute path refuse. Only a shortcut without arguments to an existing `.exe` at an
+ * absolute path counts, so a shortcut cannot pass what `--arg` may not.
+ */
+export function desktopControlLaunchByName(
+  argv: readonly string[],
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup = {},
+): { argv: readonly string[] } | { refusal: string } | null {
+  if ((lookup.platform ?? process.platform) !== 'win32') return null;
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string' || read.help.length > 0 || read.positionals.length !== 1)
+    return null;
+  const index = read.positionalIndexes[0]!;
+  if (read.key === 'launch') {
+    const found = launchNameTarget(read.positionals[0]!, workspaceRoots, lookup);
+    if (found === null || 'refusal' in found) return found;
+    return { argv: argv.map((token, at) => (at === index ? found.path : token)) };
+  }
+  if (read.key !== 'batch') return null;
+  const entries = readBatchEntries(read.positionals);
+  if (entries === null) return null;
+  let replaced = false;
+  const next: { command: string; args: Readonly<Record<string, unknown>> }[] = [];
+  for (const entry of entries) {
+    const app = entry.args['app'];
+    if (entry.command !== 'launch' || typeof app !== 'string') {
+      next.push(entry);
+      continue;
+    }
+    const found = launchNameTarget(app, workspaceRoots, lookup);
+    if (found !== null && 'refusal' in found) return found;
+    if (found !== null) replaced = true;
+    next.push(found === null ? entry : { ...entry, args: { ...entry.args, app: found.path } });
+  }
+  if (!replaced) return null;
+  const json = JSON.stringify(next);
+  return { argv: argv.map((token, at) => (at === index ? json : token)) };
+}
+
+/** Up to how many similar names or executables a refusal lists. */
+const LAUNCH_NAME_LIST_MAX = 5;
+
+function launchNameTarget(
+  name: string,
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup,
+): { path: string } | { refusal: string } | null {
+  // A path is judged as it is; a drive-relative `C:x` is refused by the binary.
+  if (/[\\/]/u.test(name) || /^[a-z]:/iu.test(name) || name.trim() === '') return null;
+  const environment = lookup.environment ?? process.env;
+  const isFile = lookup.isFile ?? regularFile;
+  if (inSystemFolders(name, environment, isFile)) return null;
+  const shortcuts = (lookup.startMenuShortcuts ?? (() => startMenuShortcuts(environment)))();
+  if (shortcuts === null) return null;
+  const wanted = name.trim().toLowerCase();
+  const matching = shortcuts.filter((shortcut) => shortcut.name.trim().toLowerCase() === wanted);
+  const targets = new Map<string, string>();
+  for (const shortcut of matching) {
+    const path = shortcutExecutable(shortcut, environment, isFile);
+    if (path !== null) targets.set(comparisonKey(path, lookup), path);
+  }
+  const shown = name.trim();
+  if (targets.size === 1) {
+    const path = [...targets.values()][0]!;
+    const reason = launchTargetRefusal(path, workspaceRoots, lookup);
+    return reason === null ? { path } : { refusal: reason };
+  }
+  if (targets.size > 1)
+    return {
+      refusal: refusal(
+        `スタートメニューの「${shown}」が違う実行ファイルを指している（${[...targets.values()].slice(0, LAUNCH_NAME_LIST_MAX).join('、')}）。起動するものの絶対パスで launch する`,
+      ),
+    };
+  if (matching.length > 0)
+    return {
+      refusal: refusal(
+        `スタートメニューの「${shown}」は、引数の無い .exe へのショートカットではないので使えない。実行ファイルの絶対パスで launch する`,
+      ),
+    };
+  const similar = similarLaunchNames(
+    wanted,
+    shortcuts,
+    workspaceRoots,
+    lookup,
+    environment,
+    isFile,
+  );
+  return {
+    refusal: refusal(
+      similar.length > 0
+        ? `「${shown}」という名前のアプリが、Windows の標準のフォルダーにもスタートメニューにも無い（スタートメニューにある似た名前: ${similar.join('、')}）。そのどれかの名前か、実行ファイルの絶対パスで launch する`
+        : `「${shown}」という名前のアプリが、Windows の標準のフォルダーにもスタートメニューにも無い（似た名前も無い）。実行ファイルの絶対パスで launch する`,
+    ),
+  };
+}
+
+/** Whether the binary finds this bare name in the system folders (as its `resolve_executable`). */
+function inSystemFolders(
+  name: string,
+  environment: Readonly<Record<string, string | undefined>>,
+  isFile: (path: string) => boolean,
+): boolean {
+  const root =
+    environmentValue(environment, 'SystemRoot') ?? environmentValue(environment, 'WINDIR');
+  if (root === undefined || !/^[a-z]:[\\/]/iu.test(root)) return false;
+  const file = win32.extname(name) === '' ? `${name}.exe` : name;
+  return [win32.join(root, 'System32', file), win32.join(root, file)].some((path) => isFile(path));
+}
+
+/** The absolute path of the `.exe` a shortcut without arguments points to, or `null`. */
+function shortcutExecutable(
+  shortcut: StartMenuShortcut,
+  environment: Readonly<Record<string, string | undefined>>,
+  isFile: (path: string) => boolean,
+): string | null {
+  if (shortcut.args.trim() !== '') return null;
+  let unknown = false;
+  const expanded = shortcut.target.trim().replace(/%([^%]+)%/gu, (_, variable: string) => {
+    const value = environmentValue(environment, variable);
+    if (value === undefined) unknown = true;
+    return value ?? '';
+  });
+  if (unknown || expanded.includes('%') || /[\p{Cc}"]/u.test(expanded)) return null;
+  if (!/^[a-z]:[\\/]/iu.test(expanded)) return null;
+  const path = win32.normalize(expanded);
+  if (win32.extname(path).toLowerCase() !== '.exe' || !isFile(path)) return null;
+  return path;
+}
+
+/** The names of usable Start menu shortcuts that look like the name asked for, closest first. */
+function similarLaunchNames(
+  wanted: string,
+  shortcuts: readonly StartMenuShortcut[],
+  workspaceRoots: readonly string[],
+  lookup: DesktopControlLookup,
+  environment: Readonly<Record<string, string | undefined>>,
+  isFile: (path: string) => boolean,
+): string[] {
+  // Only a name that would launch one executable is offered.
+  const scored = new Map<string, { name: string; score: number; targets: Set<string> }>();
+  for (const shortcut of shortcuts) {
+    const name = shortcut.name.trim().replace(/\p{Cc}/gu, '');
+    const lower = name.toLowerCase();
+    if (name === '' || name.length > 80) continue;
+    const distance = editDistance(wanted, lower);
+    const contains = lower.includes(wanted) || wanted.includes(lower);
+    if (!contains && distance > Math.max(2, Math.floor(wanted.length / 3))) continue;
+    const path = shortcutExecutable(shortcut, environment, isFile);
+    if (path === null || launchTargetRefusal(path, workspaceRoots, lookup) !== null) continue;
+    const entry = scored.get(lower) ?? {
+      name,
+      score: contains ? distance - 1_000 : distance,
+      targets: new Set<string>(),
+    };
+    entry.targets.add(comparisonKey(path, lookup));
+    scored.set(lower, entry);
+  }
+  return [...scored.values()]
+    .filter(({ targets }) => targets.size === 1)
+    .sort((a, b) => a.score - b.score || a.name.localeCompare(b.name))
+    .slice(0, LAUNCH_NAME_LIST_MAX)
+    .map(({ name }) => name);
+}
+
+function editDistance(a: string, b: string): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, at) => at);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1)
+      current[j] = Math.min(
+        previous[j]! + 1,
+        current[j - 1]! + 1,
+        previous[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    previous = current;
+  }
+  return previous[b.length]!;
+}
+
+/** A variable by name in any letter case, as Windows reads them. */
+function environmentValue(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  const exact = environment[name];
+  if (exact !== undefined) return exact;
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(environment))
+    if (key.toLowerCase() === lower && value !== undefined) return value;
+  return undefined;
+}
+
+function regularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function refusedBatchKey(value: unknown): string | null {

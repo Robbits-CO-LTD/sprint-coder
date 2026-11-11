@@ -147,6 +147,13 @@ describe('desktop-control approval description', () => {
       target: { resolved: true, app: 'charmap' },
       notes: ['起動した窓は、今使っている窓の後ろに置きます。一瞬だけ手前に見えることがあります。'],
     });
+    // A name the Start menu answered reaches the card as the executable's absolute path.
+    expect(
+      describeArgv(['launch', 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe']),
+    ).toMatchObject({
+      kind: 'launch',
+      target: { resolved: true, app: 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe' },
+    });
     expect(describeArgv(['close-app', 'charmap'])).toMatchObject({
       kind: 'close',
       title: 'アプリを閉じます',

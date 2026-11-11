@@ -338,7 +338,7 @@ function renderDesktopControl(command: string): string[] {
   return [
     'Sprint Coder のデスクトップ操作:',
     `- 起動中のデスクトップアプリは、shell のコマンドで ${cli} を実行して見て操作できる。この実行ファイルは Sprint Coder に同梱のデスクトップ操作の道具。この実行ファイルが出す説明書（skills の文書）の中の agent-desktop は、この実行ファイルのこと。初めて使う前に ${cli} skills get desktop と ${cli} skills get platform を実行し、その手順に従う。説明書（skills）・status・version・--help は、--headed などを付けなければ承認なしで実行できる。同じ Task で既に読んでいれば読み直さない。`,
-    `- アプリを起動する時は ${cli} launch <アプリ名> を使う（--activate は付けない）。アプリの実行ファイルを直接実行しない。`,
+    `- アプリを起動する時は ${cli} launch <アプリ名> を使う（--activate は付けない）。アプリの実行ファイルを直接実行しない。アプリ名には、Windows の標準のフォルダーにある名前（calc・charmap など）か、スタートメニューに出ているアプリの名前をそのまま渡す（Sprint Coder が実行ファイルの絶対パスに引き直す）。スタートメニューやアプリのフォルダーを自分で探さない。`,
     '- launch に渡せるのはアプリ名（または Workspace の外の絶対パス）と --no-attach・--timeout だけで、--arg・--env・--cwd、端末・shell・設定の道具、mcp・open-system-surface・clipboard-get・trace、--trace・--screenshot・--stdin・--force、help に無い option は拒否される。ファイルはアプリの中の操作で開く。',
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',
     '- 操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない。文字は set-value、選択は select、メニューは expand か click で入れる。前面を使う操作（--headed、focus-window、restore、maximize、press、type、focus など）は利用者がはっきり頼んだ時だけ使う。裏の操作が失敗しても前面の操作で取り返さず、できなかったと報告する。最小化した窓は操作できない（restore は前面を使う）。',

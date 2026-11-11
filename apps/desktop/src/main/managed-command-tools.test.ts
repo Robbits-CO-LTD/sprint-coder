@@ -405,6 +405,92 @@ describe('desktop control Workspace roots', () => {
     }
   });
 
+  it('seals a launch by name with the Start menu path before the card, and runs that path', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-launch-name-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary } = createCommandBoundary(workspace);
+    const result: CommandResult = {
+      executionId: 'execution',
+      exitCode: 0,
+      signal: null,
+      canceled: false,
+      termination: 'natural',
+      durationMs: 1,
+      outputBytes: 0,
+      truncated: false,
+    };
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run').mockResolvedValue(result);
+    // What the card is raised for: the input the authorizer sees.
+    const carded: unknown[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      (request) => {
+        carded.push(request.input);
+        return {
+          decision: 'allow',
+          reason: 'test',
+          beforeExecute: () => true,
+          approvalDecision: 'allow_once',
+        };
+      },
+    );
+    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-launch-name',
+      turnId: 'turn-launch-name',
+      workspaceId: 'workspace-launch-name',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const path = 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe';
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    const byName = vi
+      .spyOn(desktopControlModule, 'desktopControlLaunchByName')
+      .mockImplementation((argv) =>
+        argv[1] === 'RabbitMail'
+          ? { argv: ['launch', path] }
+          : argv[1] === 'Missing'
+            ? { refusal: 'デスクトップ操作の実行を拒否した: 見つからない。' }
+            : null,
+      );
+    try {
+      await broker.dispatch({
+        ...owner,
+        callId: 'launch-name',
+        providerName: 'run_command',
+        input: { executable: process.execPath, argv: ['launch', 'RabbitMail'], purpose: 'open' },
+      });
+      expect(carded).toEqual([expect.objectContaining({ argv: ['launch', path] })]);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ argv: ['launch', path] }),
+        expect.anything(),
+      );
+      expect(run.mock.calls[0]![0]).toBe(carded[0]);
+
+      // A name the Start menu does not settle is refused before any card.
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'launch-missing',
+          providerName: 'run_command',
+          input: { executable: process.execPath, argv: ['launch', 'Missing'], purpose: 'open' },
+        }),
+      ).rejects.toThrow('見つからない');
+      expect(carded).toHaveLength(1);
+    } finally {
+      desktop.mockRestore();
+      byName.mockRestore();
+      run.mockRestore();
+      await broker.dispose();
+    }
+  });
+
   it.skipIf(
     process.platform !== 'win32' || desktopControlModule.resolveDesktopControlCommand() === null,
   )(
