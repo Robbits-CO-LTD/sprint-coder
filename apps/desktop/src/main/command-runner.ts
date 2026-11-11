@@ -55,6 +55,7 @@ import {
   terminateOwnedJob,
   WINDOWS_JOB_WRAPPER,
   windowsJobWrapperCommand,
+  windowsJobWrapperDetached,
 } from './windows-process-job';
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
@@ -955,7 +956,7 @@ export class CommandRunner {
             stdio: windows
               ? ['pipe', 'pipe', 'pipe', 'pipe']
               : ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
-            detached: !windows,
+            detached: windows ? windowsJobWrapperDetached(desktopControl) : true,
             windowsHide: true,
           },
         );

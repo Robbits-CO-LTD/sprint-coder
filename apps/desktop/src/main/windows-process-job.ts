@@ -43,6 +43,17 @@ export function releaseOwnedJob(jobId: string, commandImage: string): boolean {
   return operation(jobId, commandImage);
 }
 
+/**
+ * Whether the host Job wrapper starts detached. An attached child also joins the Job that Node and
+ * Electron keep for every attached child (kill on close, so it ends when Sprint Coder exits), and
+ * the owned Job nests inside it, so every process the command starts is in that Job as well.
+ * Only the approved desktop-control run starts outside it, so an app its `launch` started and
+ * `releaseOwnedJob` left running outlives Sprint Coder. Every other command stays in it.
+ */
+export function windowsJobWrapperDetached(desktopControl: boolean): boolean {
+  return desktopControl;
+}
+
 /** Keeps ownership after termination so callers can confirm that every member exited. */
 export function terminateRetainedOwnedJob(jobId: string): boolean {
   const operation = addon().terminateRetainedOwnedJob;
