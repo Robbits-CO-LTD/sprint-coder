@@ -232,9 +232,12 @@ mod imp {
     /// combo box it belongs to, keeping its identity: the item's own
     /// SelectionItem moves the box to that item's position (without focus or
     /// notification), and that position is then confirmed to the owner with
-    /// `CBN_SELCHANGE`. Two items with the same text never make this
+    /// `CBN_SELCHANGE`, so two items with the same text do not make this
     /// ambiguous. Verified only when the item reports itself selected and the
-    /// box holds the position with its list closed. `None` when `element` is
+    /// box holds the position with its list closed. Limit: when closing the
+    /// list leaves the item count and the positions of the same-named items
+    /// unchanged but swaps those items, text cannot tell, and the result can
+    /// still be reported verified. `None` when `element` is
     /// not an item of such a box.
     pub(crate) fn win32_combo_select_item(
         element: &UIAElement,

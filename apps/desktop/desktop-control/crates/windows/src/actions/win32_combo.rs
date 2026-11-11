@@ -110,7 +110,8 @@ pub(crate) fn search_start(index: usize) -> usize {
 /// name apart, so the position is trusted only when the close changed
 /// nothing it could have: the item count, and the positions of every item
 /// carrying the name, are the same before and after, and the position is one
-/// of them.
+/// of them. Same-named items that swap places while all of that stays the
+/// same cannot be told apart, and pass.
 pub(crate) fn position_still_names_item(
     index: usize,
     count_before: isize,
