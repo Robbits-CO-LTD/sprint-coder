@@ -97,12 +97,12 @@ describe('desktop-control approval card', () => {
       target: { resolved: true, app: 'charmap' },
       text: undefined,
       textRole: undefined,
-      notes: ['新しい窓が手前に出ることがあります。'],
+      notes: ['起動した窓は、今使っている窓の後ろに開きます。'],
     } as DesktopAction);
     expect(launch).toContain('アプリ「charmap」');
     // A launch gets no mark: its window can come up in front.
     expect(launch).not.toContain('desktop-approval-mode');
-    expect(launch).toContain('新しい窓が手前に出ることがあります。');
+    expect(launch).toContain('起動した窓は、今使っている窓の後ろに開きます。');
     expect(launch).not.toContain('入れる文字');
 
     const read = card({
@@ -485,6 +485,26 @@ describe('desktop-control history and timeline', () => {
     );
     expect(row).toContain(
       'ドラッグします 文字コード表（charmap.exe） の入力欄「コピーする文字」 → 文字コード表（charmap.exe） のボタン（名前なし）',
+    );
+  });
+
+  it('says where a part sits when its window has others of the same name', () => {
+    const html = card({
+      ...typing,
+      title: 'クリックします',
+      text: undefined,
+      textRole: undefined,
+      target: {
+        resolved: true,
+        app: 'RabbitMail.exe',
+        window: 'RabbitMail',
+        role: 'ボタン',
+        name: '閉じる',
+        within: { role: 'ダイアログ', name: '終了の確認' },
+      },
+    } as DesktopAction);
+    expect(html).toContain(
+      'RabbitMail（RabbitMail.exe） のダイアログ「終了の確認」のボタン「閉じる」',
     );
   });
 

@@ -23,15 +23,18 @@ import {
  * — so a part that cannot be named is shown as not confirmed and the card stays as it is.
  *
  * The app, window and part names are read only from the snapshot a ref belongs to, in the state
- * folder desktop-control runs keep (`desktopControlStateFolder`). They are text the app chose, so
- * they are cut short and invisible characters are shown as their code points. The part's value
- * (what a field holds) is never read out.
+ * folder desktop-control runs keep (`desktopControlStateFolder`), and, for a window id no snapshot
+ * names, from what the Task's earlier runs reported (`rememberDesktopControlWindows`). They are
+ * text the app chose, so they are cut short and invisible characters are shown as their code
+ * points. The part's value (what a field holds) is never read out.
  */
 export type DesktopControlDisplayLookup = Readonly<{
   /** The state folder; by default the one the runs use (`desktopControlStateFolder`). */
   stateRoot?: string;
   /** False to leave the snapshots unread, for a summary that names no part. */
   names?: boolean;
+  /** The Task whose earlier runs' windows may name a window id. */
+  taskId?: string;
 }>;
 
 type Kind = DesktopActionStep['kind'];
@@ -151,8 +154,8 @@ const NO_TARGET_COMMANDS = new Set([
   'cursor-overlay enable',
   'cursor-overlay disable',
 ]);
-// Semantic operations on a part. They take no mouse or keyboard, but the accessibility call can
-// bring the part's window to the front (seen with set-value and expand).
+// Semantic operations on a part. Without `--headed` they take no mouse or keyboard and leave the
+// part's window where it is, behind the one the person is using.
 const PART_OPERATIONS = new Set([
   'click',
   'set-value',
@@ -234,18 +237,90 @@ const WINDOW_ID = /^w-[A-Za-z0-9-]{1,64}$/u;
 
 const FOREGROUND_NOTE =
   '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。';
-const LAUNCH_NOTE = '新しい窓が手前に出ることがあります。';
+// Bringing a window to the front without `--headed` takes no mouse or keyboard.
+const FRONT_NOTE = '対象の窓が前面に出ます。';
+const LAUNCH_NOTE = '起動した窓は、今使っている窓の後ろに開きます。';
+const LAUNCH_FRONT_NOTE = '起動した窓が前面に出ます。';
 const CLOSE_NOTE = '開いているアプリを閉じます。';
-const RAISE_NOTE = '対象の窓が手前に出ることがあります。';
+const BEHIND_NOTE = '対象の窓は前面に出ません。';
+// Foreground commands that only bring a window to the front (`launch` with `--activate`).
+const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'launch']);
 const TEXT_CUT_NOTE =
   '入れる文字が長いため、途中までを表示しています。全文は「詳細（実行内容）」で確かめてください。';
+
+type KnownWindow = Readonly<{ app: unknown; title: unknown }>;
+const KNOWN_TASKS = 50;
+const KNOWN_WINDOWS_PER_TASK = 200;
+const OUTPUT_MAX_CHARACTERS = 1_048_576;
+// Per Task, the windows its desktop-control runs reported, oldest first.
+const knownWindows = new Map<string, Map<string, KnownWindow>>();
+
+/**
+ * Keeps the windows a finished desktop-control run of a Task reported (`launch` and
+ * `list-windows`), so that a later card of the same Task can name a window no snapshot has read
+ * yet, such as the one a launch just opened. Read from what the shipped executable printed, never
+ * from the agent's arguments; output in any other shape is ignored. For the card only.
+ */
+export function rememberDesktopControlWindows(
+  taskId: string,
+  argv: readonly string[],
+  stdout: string,
+): void {
+  try {
+    const command = readDesktopControlCommand(argv);
+    if (
+      command === null ||
+      command.help ||
+      (command.command !== 'launch' && command.command !== 'list-windows') ||
+      stdout.length > OUTPUT_MAX_CHARACTERS
+    )
+      return;
+    const output = JSON.parse(stdout) as { ok?: unknown; command?: unknown; data?: unknown };
+    if (
+      typeof output !== 'object' ||
+      output === null ||
+      output.ok !== true ||
+      output.command !== command.command
+    )
+      return;
+    const data = output.data as { window?: unknown } | null | undefined;
+    const windows: unknown[] =
+      command.command === 'list-windows'
+        ? Array.isArray(data)
+          ? data
+          : []
+        : typeof data === 'object' && data !== null && !Array.isArray(data)
+          ? [data.window]
+          : [];
+    const known = knownWindows.get(taskId) ?? new Map<string, KnownWindow>();
+    for (const window of windows) {
+      if (typeof window !== 'object' || window === null) continue;
+      const { id, app_name: app, title } = window as Record<string, unknown>;
+      if (typeof id !== 'string' || !WINDOW_ID.test(id)) continue;
+      known.delete(id);
+      known.set(id, { app, title });
+      if (known.size > KNOWN_WINDOWS_PER_TASK) known.delete(known.keys().next().value!);
+    }
+    if (known.size === 0) return;
+    knownWindows.delete(taskId);
+    knownWindows.set(taskId, known);
+    if (knownWindows.size > KNOWN_TASKS) knownWindows.delete(knownWindows.keys().next().value!);
+  } catch {
+    // Output that cannot be read names no window.
+  }
+}
 
 export function desktopControlApprovalAction(
   argv: readonly string[],
   lookup: DesktopControlDisplayLookup = {},
 ): DesktopApprovalAction {
   try {
-    const snapshots = new SnapshotReader(lookup.stateRoot ?? desktopControlStateFolder());
+    const snapshots = new SnapshotReader(
+      lookup.stateRoot ?? desktopControlStateFolder(),
+      lookup.names === false || lookup.taskId === undefined
+        ? undefined
+        : knownWindows.get(lookup.taskId),
+    );
     if (lookup.names === false) snapshots.disable();
     const action = describe(argv, snapshots);
     return desktopApprovalActionSchema.parse(action);
@@ -353,13 +428,12 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     }
   }
   const all = [head, ...(steps ?? [])];
-  const partOperation =
-    read !== null &&
-    (read.command === 'batch'
-      ? (readBatchEntries(read.positionals) ?? []).some(({ command }) =>
-          PART_OPERATIONS.has(command),
-        )
-      : !read.help && read.command !== undefined && PART_OPERATIONS.has(read.command));
+  const commands =
+    read === null || read.help || read.command === undefined
+      ? []
+      : read.command === 'batch'
+        ? (readBatchEntries(read.positionals) ?? []).map(({ command }) => command)
+        : [read.command];
   if (
     all.some(
       ({ target, destination }) =>
@@ -368,10 +442,23 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     )
   )
     openDetails = true;
-  if (mode === 'background' && partOperation) notes.unshift(RAISE_NOTE);
-  if (all.some(({ kind }) => kind === 'launch')) notes.unshift(LAUNCH_NOTE);
+  if (mode === 'background' && commands.some((command) => PART_OPERATIONS.has(command)))
+    notes.unshift(BEHIND_NOTE);
+  if (all.some((step) => step.kind === 'launch' && step.mode !== 'foreground'))
+    notes.unshift(LAUNCH_NOTE);
+  if (all.some((step) => step.kind === 'launch' && step.mode === 'foreground'))
+    notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
-  if (mode === 'foreground') notes.unshift(FOREGROUND_NOTE);
+  if (mode === 'foreground') {
+    // Only bringing a window to the front, without `--headed`, takes no mouse or keyboard.
+    const frontOnly =
+      read !== null &&
+      !read.options.has('--headed') &&
+      commands.length > 0 &&
+      commands.every((command) => FRONT_ONLY_COMMANDS.has(command));
+    if (!frontOnly) notes.unshift(FOREGROUND_NOTE);
+    else if (commands.some((command) => command !== 'launch')) notes.unshift(FRONT_NOTE);
+  }
   return {
     ...head,
     ...(steps === undefined ? {} : { steps }),
@@ -486,14 +573,47 @@ type RefmapEntry = Readonly<{
   source_app?: unknown;
   source_window_id?: unknown;
   source_window_title?: unknown;
+  /** Child indexes from the snapshot's root (or `root_ref`) down to the part. */
+  path?: unknown;
+  root_ref?: unknown;
+  path_is_absolute?: unknown;
 }>;
+
+const PATH_MAX = 256;
+
+/** The part's place in its snapshot's tree, or `null` when it is not in the shape refmaps use. */
+function treePath(entry: RefmapEntry): readonly number[] | null {
+  const { path } = entry;
+  if (!Array.isArray(path) || path.length === 0 || path.length > PATH_MAX) return null;
+  return path.every((index) => Number.isSafeInteger(index) && (index as number) >= 0)
+    ? (path as number[])
+    : null;
+}
+
+/** Whether `inner` sits below `outer` in the same tree of the same window. */
+function contains(outer: RefmapEntry, inner: RefmapEntry): boolean {
+  const outerPath = treePath(outer);
+  const innerPath = treePath(inner);
+  return (
+    outerPath !== null &&
+    innerPath !== null &&
+    outerPath.length < innerPath.length &&
+    outer.source_window_id === inner.source_window_id &&
+    outer.root_ref === inner.root_ref &&
+    outer.path_is_absolute === inner.path_is_absolute &&
+    outerPath.every((index, at) => innerPath[at] === index)
+  );
+}
 
 /** Reads snapshots only, synchronously and within bounds; anything unexpected reads as nothing. */
 class SnapshotReader {
   private readonly cache = new Map<string, Readonly<Record<string, RefmapEntry>> | null>();
   private disabled = false;
 
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly known?: ReadonlyMap<string, KnownWindow>,
+  ) {}
 
   disable(): void {
     this.disabled = true;
@@ -503,28 +623,62 @@ class SnapshotReader {
     const unresolved = { resolved: false, reference: visible(ref, NAME_MAX).text };
     const match = QUALIFIED_REF.exec(ref);
     if (match === null) return unresolved;
-    const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
-    if (entry === undefined || typeof entry !== 'object' || entry === null) return unresolved;
+    const entries = this.refmap(match[1]!);
+    const entry = entries?.[`@${match[2]!}`];
+    if (entries === null || entry === undefined || typeof entry !== 'object' || entry === null)
+      return unresolved;
     const app = textField(entry.source_app, NAME_MAX);
     const window = textField(entry.source_window_title, NAME_MAX);
     const name = textField(entry.name, NAME_MAX);
-    const role =
-      typeof entry.role === 'string' && Object.hasOwn(ROLES, entry.role)
-        ? ROLES[entry.role]!
-        : '部品';
     if (app === undefined && window === undefined) return unresolved;
     const windowId =
       typeof entry.source_window_id === 'string' && WINDOW_ID.test(entry.source_window_id)
         ? entry.source_window_id
         : undefined;
+    const within = name === undefined ? undefined : SnapshotReader.within(entries, entry);
     return {
       resolved: true,
       ...(app === undefined ? {} : { app }),
       ...(window === undefined ? {} : { window }),
-      role: role.slice(0, ROLE_MAX),
+      role: roleText(entry.role),
       ...(name === undefined ? {} : { name }),
+      ...(within === undefined ? {} : { within }),
       ...(windowId === undefined ? {} : { windowId }),
     };
+  }
+
+  /**
+   * Where a part sits, when its window has other parts of the same role and name (three 「閉じる」
+   * buttons): the nearest named part of the snapshot that holds it but not every one of the others.
+   * A snapshot records only the parts it gives a ref, so a dialog or group with none is not found,
+   * and then nothing is added.
+   */
+  private static within(
+    entries: Readonly<Record<string, RefmapEntry>>,
+    entry: RefmapEntry,
+  ): { role: string; name: string } | undefined {
+    const all = Object.values(entries).filter(
+      (other): other is RefmapEntry => typeof other === 'object' && other !== null,
+    );
+    const name = (value: unknown) => (typeof value === 'string' ? value.trim() : undefined);
+    const twins = all.filter(
+      (other) =>
+        other !== entry &&
+        other.source_window_id === entry.source_window_id &&
+        other.role === entry.role &&
+        name(other.name) === name(entry.name),
+    );
+    if (twins.length === 0) return undefined;
+    let nearest: RefmapEntry | undefined;
+    for (const outer of all) {
+      if (textField(outer.name, NAME_MAX) === undefined || !contains(outer, entry)) continue;
+      if (twins.every((twin) => contains(outer, twin))) continue;
+      if (nearest === undefined || treePath(outer)!.length > treePath(nearest)!.length)
+        nearest = outer;
+    }
+    return nearest === undefined
+      ? undefined
+      : { role: roleText(nearest.role), name: textField(nearest.name, NAME_MAX)! };
   }
 
   window(id: string): DesktopActionTarget {
@@ -538,14 +692,15 @@ class SnapshotReader {
         const app = textField(entry.source_app, NAME_MAX);
         const window = textField(entry.source_window_title, NAME_MAX);
         if (app === undefined && window === undefined) continue;
-        return {
-          resolved: true,
-          ...(app === undefined ? {} : { app }),
-          ...(window === undefined ? {} : { window }),
-          role: '窓',
-          windowId: id,
-        };
+        return windowTarget(id, app, window);
       }
+    }
+    // A window no snapshot names yet, as an earlier run of the Task reported it.
+    const known = this.known?.get(id);
+    if (known !== undefined) {
+      const app = textField(known.app, NAME_MAX);
+      const window = textField(known.title, NAME_MAX);
+      if (app !== undefined || window !== undefined) return windowTarget(id, app, window);
     }
     return unresolved;
   }
@@ -596,6 +751,27 @@ class SnapshotReader {
     this.cache.set(snapshot, entries);
     return entries;
   }
+}
+
+function windowTarget(
+  windowId: string,
+  app: string | undefined,
+  window: string | undefined,
+): DesktopActionTarget {
+  return {
+    resolved: true,
+    ...(app === undefined ? {} : { app }),
+    ...(window === undefined ? {} : { window }),
+    role: '窓',
+    windowId,
+  };
+}
+
+function roleText(role: unknown): string {
+  return (typeof role === 'string' && Object.hasOwn(ROLES, role) ? ROLES[role]! : '部品').slice(
+    0,
+    ROLE_MAX,
+  );
 }
 
 function textField(value: unknown, max: number): string | undefined {

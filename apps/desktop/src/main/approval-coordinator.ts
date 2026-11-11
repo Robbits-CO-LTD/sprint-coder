@@ -390,7 +390,11 @@ export class ApprovalCoordinator {
         // What the run does, for the card only. Nothing decides on it: it is built after the
         // decisions above, and a part it cannot name is shown as not confirmed.
         ...(desktopControl && perCallSubject === undefined && validateExecutionSpec(request.input)
-          ? { desktopAction: desktopControlApprovalAction(request.input.argv) }
+          ? {
+              desktopAction: desktopControlApprovalAction(request.input.argv, {
+                taskId: request.context.taskId,
+              }),
+            }
           : {}),
       },
       ...ephemeralApprovalExecution(request),

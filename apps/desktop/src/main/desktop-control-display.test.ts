@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { desktopApprovalActionSchema } from '@sprint-coder/contracts';
-import { desktopControlApprovalAction } from './desktop-control-display';
+import {
+  desktopControlApprovalAction,
+  rememberDesktopControlWindows,
+} from './desktop-control-display';
 
 let stateRoot: string;
 
@@ -41,6 +44,24 @@ beforeAll(() => {
   });
   writeRefmap('suntitled', {
     '@e1': { role: 'window', source_app: 'untitled.exe', source_window_id: 'w-777' },
+  });
+  // Three 「閉じる」 buttons: on the title bar, in a dialog, and in a group with no name.
+  const mail = {
+    source_app: 'RabbitMail.exe',
+    source_window_id: 'w-4242',
+    source_window_title: 'RabbitMail',
+  };
+  writeRefmap('smail', {
+    '@e1': { ...mail, role: 'button', name: '閉じる', path: [0, 2] },
+    '@e2': { ...mail, role: 'dialog', name: '終了の確認', path: [1] },
+    '@e3': { ...mail, role: 'group', path: [1, 0] },
+    '@e4': { ...mail, role: 'button', name: '閉じる', path: [1, 0, 3] },
+    '@e5': { ...mail, role: 'group', name: '本文', path: [2] },
+    '@e6': { ...mail, role: 'button', name: '閉じる', path: [2, 1] },
+    '@e7': { ...mail, role: 'button', name: '送信', path: [2, 0] },
+    // Under a different root, so not inside 「本文」 at all.
+    '@e8': { ...mail, role: 'button', name: '保存', path: [2, 5], root_ref: '@e9' },
+    '@e10': { ...mail, role: 'button', name: '保存', path: [3] },
   });
   writeRefmap('snotepad', {
     '@e1': {
@@ -90,7 +111,7 @@ describe('desktop-control approval description', () => {
       textRole: 'enter',
       allowTaskGrant: true,
       // No mouse or keyboard, but the call can bring the window to the front.
-      notes: ['対象の窓が手前に出ることがあります。'],
+      notes: ['対象の窓は前面に出ません。'],
       openDetails: false,
     });
     // What the field holds is never read out.
@@ -122,7 +143,7 @@ describe('desktop-control approval description', () => {
       title: 'アプリを起動します',
       mode: 'background',
       target: { resolved: true, app: 'charmap' },
-      notes: ['新しい窓が手前に出ることがあります。'],
+      notes: ['起動した窓は、今使っている窓の後ろに開きます。'],
     });
     expect(describeArgv(['close-app', 'charmap'])).toMatchObject({
       kind: 'close',
@@ -166,14 +187,14 @@ describe('desktop-control approval description', () => {
     expect(describeArgv(['snapshot', '--app', 'charmap']).notes).toEqual([]);
     expect(describeArgv(['minimize', '--app', 'charmap']).notes).toEqual([]);
     expect(describeArgv(['launch', 'charmap']).notes).toEqual([
-      '新しい窓が手前に出ることがあります。',
+      '起動した窓は、今使っている窓の後ろに開きます。',
     ]);
     expect(
       describeArgv([
         'batch',
         JSON.stringify([{ command: 'expand', args: { ref_id: '@s1abc:e3' } }]),
       ]).notes,
-    ).toEqual(['対象の窓が手前に出ることがあります。']);
+    ).toEqual(['対象の窓は前面に出ません。']);
     // A foreground run already says the window comes to the front.
     expect(describeArgv(['--headed', 'click', '@s1abc:e1']).notes).toEqual([
       '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
@@ -371,6 +392,111 @@ describe('desktop-control approval description', () => {
       windowId: 'w-777',
     });
     expect(untitled.openDetails).toBe(true);
+  });
+
+  it('says where a part sits when its window has others of the same name', () => {
+    expect(describeArgv(['click', '@smail:e4']).target).toEqual({
+      resolved: true,
+      app: 'RabbitMail.exe',
+      window: 'RabbitMail',
+      role: 'ボタン',
+      name: '閉じる',
+      within: { role: 'ダイアログ', name: '終了の確認' },
+      windowId: 'w-4242',
+    });
+    expect(describeArgv(['click', '@smail:e6']).target?.within).toEqual({
+      role: 'まとまり',
+      name: '本文',
+    });
+    // On the title bar, held by no named part the snapshot records: shown as before.
+    expect(describeArgv(['click', '@smail:e1']).target?.within).toBeUndefined();
+    // The only part of its name, and twins in different trees, are shown as before.
+    expect(describeArgv(['click', '@smail:e7']).target?.within).toBeUndefined();
+    expect(describeArgv(['click', '@smail:e8']).target?.within).toBeUndefined();
+    expect(describeArgv(['click', '@s1abc:e1']).target?.within).toBeUndefined();
+  });
+
+  it('names a window an earlier run of the same Task reported, from its output', () => {
+    const task = 'task-windows';
+    const argv = ['snapshot', '--window-id', 'w-9001'];
+    expect(describeArgv(argv).target).toEqual({ resolved: false, reference: 'w-9001' });
+    rememberDesktopControlWindows(
+      task,
+      ['launch', 'RabbitMail'],
+      JSON.stringify({
+        version: '2.6',
+        ok: true,
+        command: 'launch',
+        data: {
+          app: 'RabbitMail',
+          pid: 1,
+          window: { id: 'w-9001', title: 'RabbitMail', app_name: 'RabbitMail.exe' },
+        },
+      }),
+    );
+    rememberDesktopControlWindows(
+      task,
+      ['list-windows'],
+      JSON.stringify({
+        ok: true,
+        command: 'list-windows',
+        data: [{ id: 'w-9002', title: '無題 - メモ帳', app_name: 'Notepad.exe' }],
+      }),
+    );
+    const look = (args: readonly string[], taskId?: string) =>
+      desktopControlApprovalAction(args, {
+        stateRoot,
+        ...(taskId === undefined ? {} : { taskId }),
+      });
+    expect(look(argv, task)).toMatchObject({
+      target: {
+        resolved: true,
+        app: 'RabbitMail.exe',
+        window: 'RabbitMail',
+        role: '窓',
+        windowId: 'w-9001',
+      },
+      openDetails: false,
+    });
+    expect(look(['focus-window', '--window-id', 'w-9002'], task).target).toMatchObject({
+      resolved: true,
+      window: '無題 - メモ帳',
+    });
+    // Another Task, a timeline row, and a card with no Task do not use it.
+    expect(look(argv, 'task-other').target).toMatchObject({ resolved: false });
+    expect(look(argv).target).toMatchObject({ resolved: false });
+    expect(
+      desktopControlApprovalAction(argv, { stateRoot, taskId: task, names: false }).target,
+    ).toMatchObject({ resolved: false });
+
+    // Output that is not what the run's own command prints is ignored.
+    const window = { id: 'w-9003', title: '偽物', app_name: 'x.exe' };
+    for (const [runArgv, output] of [
+      [['list-windows'], { ok: false, command: 'list-windows', data: [window] }],
+      [['list-windows'], { ok: true, command: 'launch', data: { window } }],
+      [['snapshot'], { ok: true, command: 'snapshot', data: [window] }],
+      [['list-windows'], { ok: true, command: 'list-windows', data: [{ ...window, id: '../x' }] }],
+    ] as const)
+      rememberDesktopControlWindows(task, runArgv, JSON.stringify(output));
+    rememberDesktopControlWindows(task, ['list-windows'], 'not json');
+    expect(look(['focus-window', '--window-id', 'w-9003'], task).target).toMatchObject({
+      resolved: false,
+    });
+  });
+
+  it('says a window comes to the front only where it does', () => {
+    expect(describeArgv(['launch', 'charmap', '--activate']).notes).toEqual([
+      '起動した窓が前面に出ます。',
+    ]);
+    expect(describeArgv(['focus-window', '--window-id', 'w-5903576']).notes).toEqual([
+      '対象の窓が前面に出ます。',
+    ]);
+    expect(describeArgv(['--headed', 'focus-window', '--window-id', 'w-5903576']).notes).toEqual([
+      '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
+    ]);
+    expect(describeArgv(['press', 'return', '--app', 'charmap']).notes).toEqual([
+      '窓が前面に出て、マウスとキーボードを使います。入力中は触らないでください。',
+    ]);
   });
 
   it('cuts long names and shows invisible characters as code points', () => {
