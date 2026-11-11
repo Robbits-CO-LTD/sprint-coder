@@ -125,6 +125,60 @@ export function resetSandboxOutput(root) {
   rmSync(join(root, 'apps/desktop/sandbox-runner/build/Release'), { recursive: true, force: true });
 }
 
+const DESKTOP_CONTROL_RELEASE = 'apps/desktop/desktop-control/build/Release';
+
+/** @param {string} root */
+function desktopControlPath(root) {
+  return join(root, DESKTOP_CONTROL_RELEASE, 'sprint-coder-desktop-control.exe');
+}
+
+/**
+ * The cached desktop-control build is a regular file whose bytes match its own seal.
+ * @param {string} root
+ */
+export function desktopControlCacheValid(root) {
+  try {
+    const executable = desktopControlPath(root);
+    for (const path of [executable, `${executable}.sha256`]) {
+      const entry = lstatSync(path);
+      if (!entry.isFile() || entry.isSymbolicLink()) return false;
+    }
+    const expected = readFileSync(`${executable}.sha256`, 'utf8').trim();
+    const actual = createHash('sha256').update(readFileSync(executable)).digest('hex');
+    return /^[a-f0-9]{64}$/u.test(expected) && expected === actual;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The executable starts and reports its version.
+ * @param {string} root
+ */
+export function desktopControlProbeValid(root) {
+  try {
+    const probe = spawnSync(desktopControlPath(root), ['--version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+    });
+    return !probe.error && probe.status === 0 && /\d+\.\d+\.\d+/u.test(probe.stdout);
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} root */
+export function resetDesktopControlOutput(root) {
+  for (const directory of ['apps/desktop/desktop-control', 'apps/desktop/desktop-control/build']) {
+    const path = join(root, directory);
+    if (existsSync(path) && lstatSync(path).isSymbolicLink())
+      throw new Error('Unexpected CI desktop-control build directory');
+  }
+  rmSync(join(root, DESKTOP_CONTROL_RELEASE), { recursive: true, force: true });
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = process.cwd();
   switch (process.argv[2]) {
@@ -163,6 +217,21 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.stdout.write('Sandbox digest and executable protocol validated.\n');
       break;
     }
+    case 'check-desktop-control':
+      process.stdout.write(
+        `valid=${desktopControlCacheValid(root) && desktopControlProbeValid(root)}\n`,
+      );
+      break;
+    case 'reset-desktop-control':
+      resetDesktopControlOutput(root);
+      break;
+    case 'assert-desktop-control':
+      if (!desktopControlCacheValid(root))
+        throw new Error('CI desktop-control seal validation failed');
+      if (!desktopControlProbeValid(root))
+        throw new Error('CI desktop-control executable probe failed');
+      process.stdout.write('Desktop-control seal and executable validated.\n');
+      break;
     default:
       throw new Error('Unknown CI cache validation command');
   }

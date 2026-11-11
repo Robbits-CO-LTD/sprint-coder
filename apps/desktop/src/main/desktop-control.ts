@@ -2,20 +2,21 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
-import { desktopControlPin } from './desktop-control-pins';
+import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
 import { applyWindowsAcl } from './native-file-publication';
 
 /**
- * Sprint Coder's desktop control is the bundled desktop-control binary that ships with the app:
- * one native CLI, pinned by its SHA-256 in `desktop-control-pins.ts`. The agent runs it through
- * its ordinary shell tool, so the command approval and Stop that already cover every shell command
- * cover it too.
+ * Sprint Coder's desktop control is the desktop-control executable that ships with the app: one
+ * native CLI built from the source in this repository, sealed by the SHA-256 its build (and, in
+ * a package, the signing step) wrote to the `.sha256` manifest beside it (see
+ * `desktop-control-build.ts`). The agent runs it through its ordinary shell tool, so the command
+ * approval and Stop that already cover every shell command cover it too.
  *
  * Only the shipped copy is used: the packaged app's resources, or, in a development run, the
- * package in the repository's node_modules. No environment variable or PATH lookup can point it
- * elsewhere. A file whose bytes are not the pinned ones is not the desktop-control binary, and
- * then the guidance is left out entirely. Windows only for now (see `desktop-control-pins.ts`);
- * elsewhere this is always `null`.
+ * build output in the repository. No environment variable or PATH lookup can point it
+ * elsewhere. A file whose bytes are not the sealed ones is not the desktop-control executable,
+ * and then the guidance is left out entirely. Windows x64 only for now; elsewhere this is always
+ * `null`.
  */
 export type DesktopControlLookup = Readonly<{
   platform?: NodeJS.Platform;
@@ -23,48 +24,65 @@ export type DesktopControlLookup = Readonly<{
   /** Whether this is the packaged app; otherwise a development run from the repository. */
   packaged?: boolean;
   resourcesPath?: string;
-  /** The repository root whose node_modules holds the package in a development run. */
+  /** The repository root whose desktop-control build output is used in a development run. */
   repositoryRoot?: string;
   /** SHA-256 (hex) of the file's current bytes, or `null` when it is not a readable file. */
   contentDigest?: (path: string) => string | null;
+  /** The SHA-256 (hex) sealed in the file's `.sha256` manifest, or `null` when there is none. */
+  sealedDigest?: (path: string) => string | null;
   realpath?: (path: string) => string;
 }>;
 
-export function resolveDesktopControlCommand(lookup: DesktopControlLookup = {}): string | null {
+/** The shipped file and the digest it is sealed with, when its bytes are the sealed ones. */
+function shippedDesktopControl(
+  lookup: DesktopControlLookup,
+): Readonly<{ path: string; digest: string }> | null {
   const platform = lookup.platform ?? process.platform;
-  if (platform !== 'win32') return null;
-  const pin = desktopControlPin(platform, lookup.arch ?? process.arch);
-  if (pin === null) return null;
+  if (!desktopControlSupported(platform, lookup.arch ?? process.arch)) return null;
   const packaged = lookup.packaged ?? __dirname.includes('app.asar');
   let candidate: string;
   if (packaged) {
     const resources = lookup.resourcesPath ?? process.resourcesPath;
     if (typeof resources !== 'string' || !win32.isAbsolute(resources)) return null;
-    candidate = win32.join(resources, pin.shipped);
+    candidate = win32.join(resources, DESKTOP_CONTROL_EXECUTABLE);
   } else {
     // `.vite/build` (the built main) and `src/main` (tests) are both four levels below the root.
     const root = lookup.repositoryRoot ?? resolve(__dirname, '..', '..', '..', '..');
-    candidate = win32.join(root, 'node_modules', 'agent-desktop', 'bin', pin.file);
+    candidate = win32.join(
+      root,
+      'apps',
+      'desktop',
+      'desktop-control',
+      'build',
+      'Release',
+      DESKTOP_CONTROL_EXECUTABLE,
+    );
   }
-  return (lookup.contentDigest ?? cachedFileDigest)(candidate) === pin.sha256 ? candidate : null;
+  const digest = (lookup.sealedDigest ?? sealedFileDigest)(candidate);
+  if (digest === null || !/^[a-f0-9]{64}$/u.test(digest)) return null;
+  return (lookup.contentDigest ?? cachedFileDigest)(candidate) === digest
+    ? { path: candidate, digest }
+    : null;
+}
+
+export function resolveDesktopControlCommand(lookup: DesktopControlLookup = {}): string | null {
+  return shippedDesktopControl(lookup)?.path ?? null;
 }
 
 /**
- * Whether a sealed executable is the shipped desktop-control binary: its content digest (the bytes
- * that were sealed, or that are about to start) equals the pin, and it is the shipped file. The
- * path alone never qualifies, so a file that only resolves to the shipped location cannot borrow
- * its trust.
+ * Whether a sealed executable is the shipped desktop-control executable: its content digest (the
+ * bytes that were sealed, or that are about to start) equals the shipped file's sealed digest, and
+ * it is the shipped file. The path alone never qualifies, so a file that only resolves to the
+ * shipped location cannot borrow its trust.
  */
 export function isDesktopControlExecutable(
   executable: string,
   contentDigest: string | null,
   lookup: DesktopControlLookup = {},
 ): boolean {
-  const platform = lookup.platform ?? process.platform;
-  const pin = desktopControlPin(platform, lookup.arch ?? process.arch);
-  if (pin === null || contentDigest !== pin.sha256) return false;
-  const native = resolveDesktopControlCommand(lookup);
-  return native !== null && comparisonKey(executable, lookup) === comparisonKey(native, lookup);
+  const shipped = shippedDesktopControl(lookup);
+  if (shipped === null || contentDigest !== shipped.digest) return false;
+  return comparisonKey(executable, lookup) === comparisonKey(shipped.path, lookup);
 }
 
 /**
@@ -886,6 +904,16 @@ function cachedFileDigest(path: string): string | null {
     const digest = createHash('sha256').update(readFileSync(path)).digest('hex');
     digestCache.set(path, { version, digest });
     return digest;
+  } catch {
+    return null;
+  }
+}
+
+function sealedFileDigest(path: string): string | null {
+  try {
+    const manifest = `${path}.sha256`;
+    if (!statSync(manifest).isFile()) return null;
+    return readFileSync(manifest, 'utf8').trim();
   } catch {
     return null;
   }

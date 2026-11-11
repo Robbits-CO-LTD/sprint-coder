@@ -106,7 +106,7 @@ npm start
 
 ### デスクトップアプリの操作
 
-Sprint CoderのAIは、起動中のデスクトップアプリを見て操作できます。今はWindowsだけです。操作の道具はアプリに同梱しているので、入れる必要はありません。同梱の実行ファイルは中身（SHA-256）で固定していて、中身が違えば使いません。同梱している第三者の部品のライセンスは[License](#license)の節にあります。
+Sprint CoderのAIは、起動中のデスクトップアプリを見て操作できます。今はWindowsだけです。操作の道具はアプリに同梱しているので、入れる必要はありません。同梱の実行ファイルは、このrepoに取り込んだソースからbuildしたもので、build（と署名）の時に記録した中身（SHA-256）と違えば使いません。同梱している第三者の部品のライセンスは[License](#license)の節にあります。
 
 書き込みのできるAIが通常のコマンドとして実行するので、コマンドの承認とStopがそのまま効きます。他のアプリの窓が見えるよう、この実行ファイルだけはコマンドの囲い（sandbox）の外で動きます。そのため、説明書の表示や状態の確認のように、ほかのアプリにも画面にも触れないコマンドは確認なしで実行し、画面を読む・操作するコマンドは、アクセスの設定（フルアクセスを含む）に関わらず毎回承認カードで確かめ、カードで許可した時だけ囲いの外で動きます（「Task中許可」は、まったく同じコマンドにだけ効きます）。アクセスの設定がコマンドを許さない時は、どちらも実行しません。キー入力はどの窓にも届くので、安全の境界はこのカードです。カードを出す前に、明らかに危ない形（ファイルを読み書きする option、`launch` の `--arg`・`--env`・`--cwd`、クリップボードの読み取り、端末・shell・設定の道具の起動など）は補助として拒否します。
 
@@ -179,6 +179,8 @@ npm start
 | `npm run format:check`        | Prettierによる形式チェック                       |
 | `npm test`                    | Vitestのunit / integration testを実行            |
 | `npm run test:provider-smoke` | opt-inの実Provider smoke testを実行              |
+
+Windows x64でデスクトップ操作を`npm start`の開発版で使うには、先に`npm run build:desktop-control`を1回実行します（Rustのtoolchainが必要。約1分）。buildしていない開発版では、デスクトップ操作は無効のまま起動します。`npm run package` / `npm run make`は、このbuildを自動で行います。
 
 UI・E2E・ユーザー操作は、開発エージェントのComputer Useで実アプリ・ブラウザを操作して確認します。[検証チェックリストと記録方法](docs/testing/computer-use/README.md)から変更に関係するケースを選びます。単体・結合テストはVitestを維持します。
 
@@ -253,7 +255,7 @@ Issue、改善提案、Pull Requestを歓迎します。大きな変更は、先
 
 Sprint Coderはソース公開型（source-available）のソフトウェアです。OSIの定義するオープンソースではありません。通常の利用・改変は許可されますが、本ソフトウェアを利用して競合製品・サービスを他者へ提供することは、有料・無料を問わず許可されません。許諾範囲は[ライセンス原文](LICENSE)に従います。
 
-この変更は、変更前にMITで公開された版・コードに対する既存の許諾を撤回しません。該当するMITの著作権表示・許諾文はLICENSE末尾に保持しています。同梱する第三者コード・フォント・ロゴなどは、それぞれのライセンスと利用条件に従います。デスクトップ操作に同梱する [agent-desktop](https://github.com/vercel-labs/agent-desktop)（vercel-labs、Apache-2.0）のライセンス全文は [docs/licenses/agent-desktop-license.txt](docs/licenses/agent-desktop-license.txt) にあり、アプリの resources にも入れています（アプリの中では、同じ中身の実行ファイルを `sprint-coder-desktop-control.exe` という名前で入れています）。
+この変更は、変更前にMITで公開された版・コードに対する既存の許諾を撤回しません。該当するMITの著作権表示・許諾文はLICENSE末尾に保持しています。同梱する第三者コード・フォント・ロゴなどは、それぞれのライセンスと利用条件に従います。デスクトップ操作の実行ファイルは、[agent-desktop](https://github.com/vercel-labs/agent-desktop)（vercel-labs、Apache-2.0）1.2.0 のソースを [apps/desktop/desktop-control](apps/desktop/desktop-control) に取り込んでbuildしたもので、アプリの中では `sprint-coder-desktop-control.exe` という名前で入れています。ライセンス全文は [docs/licenses/agent-desktop-license.txt](docs/licenses/agent-desktop-license.txt) にあり、アプリの resources にも入れています。取り込んだ版と、変えたファイルの一覧は [VENDORED.md](apps/desktop/desktop-control/VENDORED.md) にあります。
 
 ---
 

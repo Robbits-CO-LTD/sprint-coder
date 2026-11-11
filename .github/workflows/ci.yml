@@ -371,6 +371,9 @@ jobs:
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
 
+      - name: Build Windows desktop control
+        uses: ./.github/actions/prepare-desktop-control
+
       - name: Test Windows sandbox working directory and access boundary
         if: runner.os == 'Windows' && matrix.shard == '1/5'
         shell: pwsh
@@ -610,6 +613,8 @@ jobs:
         uses: ./.github/actions/install-electron
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
+      - name: Build Windows desktop control
+        uses: ./.github/actions/prepare-desktop-control
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -667,6 +672,8 @@ jobs:
         uses: ./.github/actions/install-electron
       - name: Build managed sandbox runner
         uses: ./.github/actions/prepare-sandbox
+      - name: Build Windows desktop control
+        uses: ./.github/actions/prepare-desktop-control
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0

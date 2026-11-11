@@ -262,6 +262,10 @@ jobs:
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
 
+      # Builds only on Windows x64 (the only target that ships desktop control).
+      - name: Build desktop control
+        run: npm run build:desktop-control
+
       - name: Rebuild native modules for Electron ABI
         working-directory: apps/desktop
         run: node ../../build-better-sqlite3.mjs

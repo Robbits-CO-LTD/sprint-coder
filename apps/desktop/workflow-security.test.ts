@@ -8,6 +8,7 @@ const workflowFiles = [
   '.github/actions/install-deps/action.yml',
   '.github/actions/install-electron/action.yml',
   '.github/actions/prepare-sandbox/action.yml',
+  '.github/actions/prepare-desktop-control/action.yml',
   '.github/workflows/release-beta.yml',
   '.github/workflows/node-libuv-watch.yml',
 ] as const;

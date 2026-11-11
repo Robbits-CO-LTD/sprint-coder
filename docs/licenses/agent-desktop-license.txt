@@ -1,9 +1,14 @@
 agent-desktop 1.2.0
 https://github.com/vercel-labs/agent-desktop
+Source: tag v1.2.0, commit 2b0a7334fc111730454b726e6800aa41cdafc093
 
-Sprint Coder ships the unmodified agent-desktop-win32-x64.exe from the agent-desktop 1.2.0 npm
-package for its desktop control. agent-desktop is licensed under the Apache License, Version 2.0,
-reproduced in full below. The upstream project has no NOTICE file.
+Sprint Coder's desktop control is built from the agent-desktop 1.2.0 source, copied into this
+repository at apps/desktop/desktop-control (only the parts the Windows command-line build needs)
+and built there; the packaged app ships that build as sprint-coder-desktop-control.exe. The files
+Sprint Coder has changed, and what was left out, are listed in
+apps/desktop/desktop-control/VENDORED.md; further changes are made in this repository and recorded
+there. agent-desktop is licensed under the Apache License, Version 2.0, reproduced in full below
+(the same text as apps/desktop/desktop-control/LICENSE). The upstream project has no NOTICE file.
 
 
                                  Apache License

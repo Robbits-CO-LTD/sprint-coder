@@ -1,0 +1,35 @@
+name: Prepare verified desktop-control build
+description: Reuse the cached Windows desktop-control build or build it from the source in this repository; other hosts build nothing.
+runs:
+  using: composite
+  steps:
+    - name: Check Rust build settings
+      id: compiler
+      if: runner.os == 'Windows'
+      shell: bash
+      run: node ci-cache.mjs compiler >> "$GITHUB_OUTPUT"
+    - name: Restore desktop-control build
+      id: desktop-control
+      if: runner.os == 'Windows' && steps.compiler.outputs.cacheable == 'true'
+      uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: apps/desktop/desktop-control/build/Release
+        # The source pins its own toolchain (rust-toolchain.toml, part of the hashed folder).
+        key: desktop-control-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/desktop-control/**', '!apps/desktop/desktop-control/build/**', '!apps/desktop/desktop-control/target/**', 'build-desktop-control.mjs', 'ci-cache.mjs', '.github/actions/prepare-desktop-control/action.yml', '.cargo/config*', 'apps/.cargo/config*', 'apps/desktop/.cargo/config*') }}
+    - name: Validate restored desktop-control build
+      id: validation
+      if: steps.desktop-control.outputs.cache-hit == 'true'
+      shell: bash
+      run: node ci-cache.mjs check-desktop-control >> "$GITHUB_OUTPUT"
+    - name: Build desktop-control on cache miss or invalid output
+      if: runner.os == 'Windows' && (steps.desktop-control.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true')
+      shell: pwsh
+      run: |
+        node ci-cache.mjs reset-desktop-control
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        npm run build:desktop-control
+        exit $LASTEXITCODE
+    - name: Verify desktop-control seal and executable
+      if: runner.os == 'Windows'
+      shell: bash
+      run: node ci-cache.mjs assert-desktop-control
