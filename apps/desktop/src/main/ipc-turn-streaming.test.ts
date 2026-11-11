@@ -92,6 +92,35 @@ it('uses get-only reasoning for the Mock sink and late CLI events even while run
   expect(vi.getTimerCount()).toBe(0);
 });
 
+it('cancels the unanswered cards before a CLI Turn that ended moves to synthesizing (issue #1170)', async () => {
+  const { router } = fixture();
+  const order: string[] = [];
+  const handleRuntimeFailure = vi.fn();
+  Object.assign(router, {
+    approvalCoordinator: {
+      cancelUnansweredForTurn: vi.fn((taskId: string, turnId: string) =>
+        order.push(`cancel:${taskId}:${turnId}`),
+      ),
+    },
+    persistence: {
+      changeStage: vi.fn((_taskId: string, _turnId: string, stage: string) => {
+        order.push(`stage:${stage}`);
+        return { type: 'stage.changed', stage };
+      }),
+    },
+    publish: vi.fn(),
+    handleRuntimeFailure,
+  });
+
+  router.handleRuntimeEvent('codex', 'task', 'turn', { type: 'stage', stage: 'executing' });
+  router.handleRuntimeEvent('codex', 'task', 'turn', { type: 'stage', stage: 'synthesizing' });
+  await vi.waitFor(() => expect(order).toHaveLength(3));
+
+  // Only the end of the Turn withdraws cards, and it does so before the stage is persisted.
+  expect(order).toEqual(['stage:executing', 'cancel:task:turn', 'stage:synthesizing']);
+  expect(handleRuntimeFailure).not.toHaveBeenCalled();
+});
+
 it('checks captured watcher-group validity before reading files after replace, release or dispose', () => {
   const { resources, router, pushFileEdit } = fixture();
   const callbacks: Array<(path: string) => void> = [];

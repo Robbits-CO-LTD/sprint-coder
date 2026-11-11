@@ -1232,6 +1232,7 @@ function turnApprovalFixture(persistence: SqlitePersistenceClient, taskId: strin
   });
   broker.startTurn({ taskId, turnId, workspaceId: null, policyEpoch: 0 }, 'mock');
   return {
+    coordinator,
     published,
     lifecycle,
     executions: () => executions,
@@ -8775,6 +8776,64 @@ if (runsWithElectronAbi)
       expect(
         inspection.prepare('SELECT approval_id FROM permission_one_time_permits').all(),
       ).toEqual([{ approval_id: leaderCard.id }]);
+      expect(inspection.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual({
+        count: 0,
+      });
+      inspection.close();
+      persistence.close();
+    });
+
+    it('cancels the cards a CLI left unanswered when it ends its Turn, and completes the Turn (issue #1170)', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const fixture = turnApprovalFixture(persistence, task.id, turn.turnId);
+      const stage = () => persistence.snapshot(task.id).activeTurn?.stage;
+      const first = fixture.call('call-1');
+      const second = fixture.call('call-2');
+      const cardOne = await fixture.cardFor('call-1');
+      const cardTwo = await fixture.cardFor('call-2');
+      expect(stage()).toBe('waiting_approval');
+      // What the CLI's `turn/completed` used to run into while both cards waited.
+      expect(() => persistence.changeStage(task.id, turn.turnId, 'synthesizing')).toThrow(
+        'Invalid turn transition: waiting_approval -> synthesizing',
+      );
+
+      fixture.coordinator.cancelUnansweredForTurn(task.id, turn.turnId);
+
+      // Each waiting call is told its card was canceled and never runs.
+      for (const call of [first, second])
+        await expect(call).rejects.toThrow('Tool authorization deny: approval_canceled');
+      expect(fixture.executions()).toBe(0);
+      for (const card of [cardOne, cardTwo])
+        expect(persistence.getApproval(task.id, card.id)).toMatchObject({
+          state: 'canceled',
+          decision: null,
+          revision: 1,
+        });
+      // The cancellations reach the screen, and the cards cannot be decided afterwards.
+      expect(
+        fixture.published
+          .filter(({ event }) => event?.type === 'approval.canceled')
+          .map(({ event }) => event?.approvalId),
+      ).toEqual([cardOne.id, cardTwo.id]);
+      expect(() => fixture.decide(cardOne, 'allow_once')).toThrow();
+      expect(stage()).toBe('executing');
+
+      persistence.changeStage(task.id, turn.turnId, 'synthesizing');
+      expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+        type: 'turn.completed',
+        state: 'completed',
+      });
+      expect(canceledApprovalIds(persistence, task.id)).toEqual([cardOne.id, cardTwo.id]);
+      for (const callId of ['call-1', 'call-2'])
+        expect(
+          fixture.lifecycle.filter((event) => event.callId === callId).map(({ state }) => state),
+        ).toEqual(['requested', 'prepared', 'awaiting_approval', 'denied']);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT COUNT(*) AS count FROM permission_one_time_permits').get(),
+      ).toEqual({ count: 0 });
       expect(inspection.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual({
         count: 0,
       });

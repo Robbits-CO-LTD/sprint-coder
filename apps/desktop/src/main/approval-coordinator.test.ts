@@ -1406,6 +1406,60 @@ describe('ApprovalCoordinator cancellation of an aborted call', () => {
     expect(executions()).toBe(1);
   });
 
+  it("cancels every unanswered card of a Turn its CLI ended, and only that Turn's (issue #1170)", async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    broker.startTurn({ ...toolContext, turnId: 'turn-2' }, 'mock');
+    const first = dispatchFetch(broker, 'call-1', 'https://one.test');
+    const second = dispatchFetch(broker, 'call-2', 'https://two.test');
+    const otherTurn = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-2',
+      callId: 'call-1',
+      providerName: 'approval_fetch',
+      input: { origin: 'https://other.test' },
+    });
+    await viWaitFor(() => harness.published.length === 3);
+    const [cardOne, cardTwo, otherCard] = harness.published as [
+      StoredApproval,
+      StoredApproval,
+      StoredApproval,
+    ];
+
+    harness.coordinator.cancelUnansweredForTurn('task-1', 'turn-1');
+
+    for (const call of [first, second])
+      await expect(call).rejects.toThrow('Tool authorization deny: approval_canceled');
+    for (const card of [cardOne, cardTwo]) {
+      expect(harness.persistence.approvals.get(card.id)).toMatchObject({
+        state: 'canceled',
+        decision: null,
+        revision: 1,
+      });
+      // Committed before it is published, and never decidable afterwards.
+      expect(harness.persistence.timeline.filter((entry) => entry.endsWith(`:${card.id}`))).toEqual(
+        [
+          `committed:${card.id}`,
+          `published:${card.id}`,
+          `cancel-attempt:${card.id}`,
+          `canceled:${card.id}`,
+          `published:${card.id}`,
+        ],
+      );
+      expect(() => harness.coordinator.resolve(resolveCommand(card, 'allow_once'))).toThrow();
+    }
+    expect(harness.persistence.grants).toEqual([]);
+    expect(executions()).toBe(0);
+    // Another Turn's card is not touched.
+    expect(harness.persistence.approvals.get(otherCard.id)).toMatchObject({ state: 'pending' });
+    harness.coordinator.resolve(resolveCommand(otherCard, 'allow_once'));
+    await expect(otherTurn).resolves.toEqual({ ok: true });
+    expect(executions()).toBe(1);
+  });
+
   it('refuses a late allow once the cancellation committed first', async () => {
     const harness = createHarness();
     const { broker, executions } = createBroker(

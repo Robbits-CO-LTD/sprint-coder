@@ -8093,9 +8093,14 @@ export class IpcRouter {
         if (this.canceledRuntimeTurns.has(turnId)) return;
         if (this.turnRuntimes.get(turnId) !== kind) return;
         if (runtimeEvent.type === 'heartbeat') return;
-        if (runtimeEvent.type === 'stage')
+        if (runtimeEvent.type === 'stage') {
+          // `synthesizing` is the CLI saying its Turn is over. A card still waiting at that point
+          // belongs to a call the CLI no longer waits for (issue #1170): cancel it, so its call never
+          // runs and the Turn leaves `waiting_approval`, instead of failing the Turn on the transition.
+          if (runtimeEvent.stage === 'synthesizing')
+            this.approvalCoordinator.cancelUnansweredForTurn(taskId, turnId);
           this.publish(this.persistence.changeStage(taskId, turnId, runtimeEvent.stage));
-        else if (runtimeEvent.type === 'reasoning')
+        } else if (runtimeEvent.type === 'reasoning')
           this.pushReasoning(taskId, turnId, runtimeEvent.text);
         else if (runtimeEvent.type === 'delta')
           this.publish(
