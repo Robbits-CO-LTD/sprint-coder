@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::super::*;
 use super::{
     KillOnDrop, copy_probe_binary, copy_system_exe, deadline, full_image_path, matching_pids,
@@ -28,6 +29,49 @@ fn scratch_launch_returns_window_for_created_process() {
         "returned window pid must belong to the probe notepad process"
     );
     assert!(window.process_instance.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A launch without `--activate` must not take the foreground or cover the
+/// window that was in front. **Invert-verified**: without `ForegroundGuard`
+/// the probe's window lands above the window that was in front (and takes the
+/// foreground when this process may set it), and this fails.
+#[test]
+fn a_background_launch_keeps_the_foreground_and_stays_below_it() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDNEXT, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW, WS_EX_TOPMOST,
+    };
+    let _lock = NOTEPAD_LAUNCH_LOCK.lock().expect("notepad lock");
+    crate::tree::fixture::bootstrap();
+    let dir = scratch_dir("background");
+    let probe = copy_probe_binary(&dir, "launchprobe_host_background.exe");
+    let prior = unsafe { GetForegroundWindow() };
+    let result = launch_app_impl(
+        probe.to_str().expect("utf8 path"),
+        &probe_launch_options(false, 8_000),
+        deadline(10_000),
+    )
+    .expect("launch probe");
+    let _guard = KillOnDrop(result.pid);
+    let window = result.window.expect("the probe presents a window");
+    let handle = crate::system::window::window_ops::parse_handle(&window.id);
+    assert_ne!(
+        unsafe { GetForegroundWindow() },
+        handle,
+        "a background launch must not hand the foreground to the launched window"
+    );
+    let prior_is_topmost =
+        unsafe { GetWindowLongW(prior, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
+    if !prior.is_null() && !prior_is_topmost {
+        let mut below = unsafe { GetWindow(prior, GW_HWNDNEXT) };
+        while !below.is_null() && below != handle {
+            below = unsafe { GetWindow(below, GW_HWNDNEXT) };
+        }
+        assert_eq!(
+            below, handle,
+            "the launched window must sit below the window that was in front"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
