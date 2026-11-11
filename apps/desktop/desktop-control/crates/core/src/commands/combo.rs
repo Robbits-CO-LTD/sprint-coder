@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{AdapterError, AppError, KeyCombo, Modifier, adapter::PlatformAdapter};
 
 /// Refuses `combo` when the platform adapter reports it as dangerous, unless
@@ -41,7 +42,12 @@ pub fn parse_combo(s: &str) -> Result<KeyCombo, AppError> {
         .last()
         .copied()
         .filter(|k| !k.is_empty())
-        .ok_or_else(|| AppError::invalid_input("Empty key combo"))?
+        .ok_or_else(|| {
+            AppError::invalid_input_with_suggestion(
+                "Empty key combo",
+                "'+' joins modifiers and a key; press the + key as 'plus' (for example 'ctrl+plus')",
+            )
+        })?
         .to_string();
     let mut modifiers = Vec::new();
 

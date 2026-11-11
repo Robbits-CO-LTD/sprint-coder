@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{parse_combo, parse_combo_normalized};
 use crate::Modifier;
 
@@ -89,4 +90,35 @@ fn bare_uppercase_letter_means_the_shifted_key() {
             .modifiers
             .is_empty()
     );
+}
+
+#[test]
+fn a_bare_plus_is_refused_with_a_suggestion_naming_plus() {
+    for raw in ["+", "ctrl++"] {
+        let err = parse_combo_normalized(raw).expect_err("+ joins a combo, it is not a key");
+        assert_eq!(err.code(), "INVALID_ARGS", "{raw}");
+        let crate::AppError::Adapter(adapter) = err else {
+            panic!("an adapter error");
+        };
+        assert!(
+            adapter
+                .suggestion
+                .as_deref()
+                .is_some_and(|suggestion| suggestion.contains("'plus'")),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn symbol_keys_parse_with_and_without_modifiers() {
+    let plus = parse_combo_normalized("ctrl+plus").expect("ctrl+plus");
+    assert_eq!(plus.key, "plus");
+    assert_eq!(plus.modifiers, vec![Modifier::Ctrl]);
+    let minus = parse_combo_normalized("ctrl+-").expect("ctrl+-");
+    assert_eq!(minus.key, "-");
+    assert_eq!(minus.modifiers, vec![Modifier::Ctrl]);
+    let equal = parse_combo_normalized("=").expect("=");
+    assert_eq!(equal.key, "=");
+    assert!(equal.modifiers.is_empty());
 }

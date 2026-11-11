@@ -161,7 +161,7 @@ pub(crate) struct ScrollArgs {
 pub(crate) struct PressArgs {
     #[arg(
         value_name = "COMBO",
-        help = "Key combo: return, escape, cmd+c, shift+tab ..."
+        help = "Key combo: return, escape, cmd+c, shift+tab ... The + key is plus (ctrl+plus); minus, asterisk, slash, equal, period, comma also name - * / = . ,"
     )]
     pub combo: String,
     #[arg(

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::ProcessId;
 
 #[cfg(target_os = "windows")]
@@ -48,6 +49,16 @@ pub(crate) fn hosted_application_pid(
     _handle: super::window_enum::WindowHandle,
 ) -> Option<ProcessId> {
     None
+}
+
+/// The process a top-level window is attributed to: the hosted application's
+/// when the window is a frame carrying one (`hosted_application_pid`),
+/// otherwise the window's own live owner. `list-windows`, the app inventory
+/// and the foreground gate of key delivery all read a window's process
+/// through this one rule, so a window listed as a hosted application is the
+/// same application in every one of them. `None` when neither can be read.
+pub(crate) fn attributed_owner(handle: super::window_enum::WindowHandle) -> Option<ProcessId> {
+    hosted_application_pid(handle).or_else(|| super::window_identity::live_window_owner(handle))
 }
 
 /// The first child `CoreWindow` whose owning process differs from the
