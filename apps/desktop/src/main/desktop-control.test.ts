@@ -9,6 +9,7 @@ import {
   desktopControlStateFolder,
   isDesktopControlExecutable,
   isShippedDesktopControlPath,
+  reportDesktopControlAvailability,
   resolveDesktopControlCommand,
   runsOutsideCommandSandbox,
 } from './desktop-control';
@@ -290,6 +291,62 @@ describe('desktop-control lookup', () => {
       expect(resolveDesktopControlCommand()?.toLowerCase()).toBe(REPOSITORY_BUILD.toLowerCase());
     },
   );
+});
+
+describe('desktop-control startup report', () => {
+  const BUILD = 'apps/desktop/desktop-control/build/Release/sprint-coder-desktop-control.exe';
+  const FIX = 'Run `npm run build:desktop-control` at the repository root, then restart.';
+  const reported = (lookup: Parameters<typeof reportDesktopControlAvailability>[0]) => {
+    const messages: string[] = [];
+    reportDesktopControlAvailability(lookup, (message) => messages.push(message));
+    return messages;
+  };
+
+  it('says nothing when the sealed build is there, or where desktop control is not built', () => {
+    expect(reported(packaged)).toEqual([]);
+    expect(reported(development)).toEqual([]);
+    const none = { contentDigest: () => null, sealedDigest: () => null };
+    for (const platform of ['darwin', 'linux'] as const)
+      expect(reported({ ...development, ...none, platform })).toEqual([]);
+    expect(reported({ ...development, ...none, arch: 'arm64' })).toEqual([]);
+  });
+
+  it('tells a development run why it is off and how to build it', () => {
+    const missing = (exe: string | null, seal: string | null) =>
+      reported({ ...development, contentDigest: () => exe, sealedDigest: () => seal });
+    expect(missing(null, null)).toEqual([
+      `Desktop control is off: the executable has not been built (${BUILD} and its .sha256 manifest are missing). ${FIX}`,
+    ]);
+    expect(missing(null, SEALED)).toEqual([
+      `Desktop control is off: ${BUILD} is missing or unreadable. ${FIX}`,
+    ]);
+    expect(missing(SEALED, null)).toEqual([
+      `Desktop control is off: the .sha256 manifest beside ${BUILD} is missing. ${FIX}`,
+    ]);
+    expect(missing(SEALED, 'not-a-digest')).toEqual([
+      `Desktop control is off: the .sha256 manifest beside ${BUILD} does not hold a SHA-256 digest. ${FIX}`,
+    ]);
+    expect(missing(OTHER, SEALED)).toEqual([
+      `Desktop control is off: the bytes of ${BUILD} do not match the SHA-256 in its .sha256 manifest. ${FIX}`,
+    ]);
+  });
+
+  it('tells a packaged app only why, without the development build command or a full path', () => {
+    const messages = [
+      ...reported({ ...packaged, contentDigest: () => null, sealedDigest: () => null }),
+      ...reported({ ...packaged, contentDigest: () => OTHER }),
+      ...reported({ ...packaged, resourcesPath: '' }),
+    ];
+    expect(messages).toEqual([
+      'Desktop control is off: resources\\sprint-coder-desktop-control.exe and its .sha256 manifest are missing.',
+      'Desktop control is off: the bytes of resources\\sprint-coder-desktop-control.exe do not match the SHA-256 in its .sha256 manifest.',
+      "Desktop control is off: the app's resources folder is unknown.",
+    ]);
+    for (const message of messages) {
+      expect(message).not.toContain('npm');
+      expect(message).not.toContain(RESOURCES);
+    }
+  });
 });
 
 describe('desktop control outside the command sandbox', () => {

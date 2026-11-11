@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, posix, resolve, win32 } from 'node:path';
 import { DESKTOP_CONTROL_EXECUTABLE, desktopControlSupported } from './desktop-control-build';
 import { applyWindowsAcl } from './native-file-publication';
+import { secureLogger } from './secure-logger';
 
 /**
  * Sprint Coder's desktop control is the desktop-control executable that ships with the app: one
@@ -33,36 +34,92 @@ export type DesktopControlLookup = Readonly<{
   realpath?: (path: string) => string;
 }>;
 
+/**
+ * Where the shipped file should be: `null` where desktop control is not built, and `''` in a
+ * packaged app whose resources folder is unknown.
+ */
+function shippedCandidate(lookup: DesktopControlLookup): Readonly<{
+  path: string;
+  packaged: boolean;
+}> | null {
+  const platform = lookup.platform ?? process.platform;
+  if (!desktopControlSupported(platform, lookup.arch ?? process.arch)) return null;
+  const packaged = lookup.packaged ?? __dirname.includes('app.asar');
+  if (packaged) {
+    const resources = lookup.resourcesPath ?? process.resourcesPath;
+    if (typeof resources !== 'string' || !win32.isAbsolute(resources))
+      return { path: '', packaged };
+    return { path: win32.join(resources, DESKTOP_CONTROL_EXECUTABLE), packaged };
+  }
+  // `.vite/build` (the built main) and `src/main` (tests) are both four levels below the root.
+  const root = lookup.repositoryRoot ?? resolve(__dirname, '..', '..', '..', '..');
+  return {
+    path: win32.join(root, ...DEVELOPMENT_BUILD_FOLDER, DESKTOP_CONTROL_EXECUTABLE),
+    packaged,
+  };
+}
+
+/** The build output in the repository that a development run uses. */
+const DEVELOPMENT_BUILD_FOLDER = ['apps', 'desktop', 'desktop-control', 'build', 'Release'];
+
 /** The shipped file and the digest it is sealed with, when its bytes are the sealed ones. */
 function shippedDesktopControl(
   lookup: DesktopControlLookup,
 ): Readonly<{ path: string; digest: string }> | null {
-  const platform = lookup.platform ?? process.platform;
-  if (!desktopControlSupported(platform, lookup.arch ?? process.arch)) return null;
-  const packaged = lookup.packaged ?? __dirname.includes('app.asar');
-  let candidate: string;
-  if (packaged) {
-    const resources = lookup.resourcesPath ?? process.resourcesPath;
-    if (typeof resources !== 'string' || !win32.isAbsolute(resources)) return null;
-    candidate = win32.join(resources, DESKTOP_CONTROL_EXECUTABLE);
-  } else {
-    // `.vite/build` (the built main) and `src/main` (tests) are both four levels below the root.
-    const root = lookup.repositoryRoot ?? resolve(__dirname, '..', '..', '..', '..');
-    candidate = win32.join(
-      root,
-      'apps',
-      'desktop',
-      'desktop-control',
-      'build',
-      'Release',
-      DESKTOP_CONTROL_EXECUTABLE,
-    );
-  }
+  const candidate = shippedCandidate(lookup)?.path ?? '';
+  if (candidate === '') return null;
   const digest = (lookup.sealedDigest ?? sealedFileDigest)(candidate);
-  if (digest === null || !/^[a-f0-9]{64}$/u.test(digest)) return null;
+  if (digest === null || !SHA256.test(digest)) return null;
   return (lookup.contentDigest ?? cachedFileDigest)(candidate) === digest
     ? { path: candidate, digest }
     : null;
+}
+
+const SHA256 = /^[a-f0-9]{64}$/u;
+
+/**
+ * Why desktop control is off on a platform it is built for, for the startup log, or `null` when it
+ * is on or not built for this platform at all. A development run is told how to build it; a
+ * packaged app only why, since its copy comes with the app. Names no full path: the file is named
+ * by where it lives.
+ */
+export function desktopControlUnavailableReason(lookup: DesktopControlLookup = {}): string | null {
+  const candidate = shippedCandidate(lookup);
+  if (candidate === null || shippedDesktopControl(lookup) !== null) return null;
+  const where = candidate.packaged
+    ? `resources\\${DESKTOP_CONTROL_EXECUTABLE}`
+    : [...DEVELOPMENT_BUILD_FOLDER, DESKTOP_CONTROL_EXECUTABLE].join('/');
+  let reason: string;
+  if (candidate.path === '') reason = "the app's resources folder is unknown";
+  else {
+    const sealed = (lookup.sealedDigest ?? sealedFileDigest)(candidate.path);
+    const content = (lookup.contentDigest ?? cachedFileDigest)(candidate.path);
+    if (content === null && sealed === null)
+      reason = candidate.packaged
+        ? `${where} and its .sha256 manifest are missing`
+        : `the executable has not been built (${where} and its .sha256 manifest are missing)`;
+    else if (content === null) reason = `${where} is missing or unreadable`;
+    else if (sealed === null) reason = `the .sha256 manifest beside ${where} is missing`;
+    else if (!SHA256.test(sealed))
+      reason = `the .sha256 manifest beside ${where} does not hold a SHA-256 digest`;
+    else reason = `the bytes of ${where} do not match the SHA-256 in its .sha256 manifest`;
+  }
+  return candidate.packaged
+    ? `Desktop control is off: ${reason}.`
+    : `Desktop control is off: ${reason}. Run \`npm run build:desktop-control\` at the repository root, then restart.`;
+}
+
+/**
+ * Logs once at startup why desktop control is off, on Windows x64 only (see
+ * `desktopControlUnavailableReason`); otherwise logs nothing.
+ */
+export function reportDesktopControlAvailability(
+  lookup: DesktopControlLookup = {},
+  warn: (message: string) => void = (message) =>
+    secureLogger.warn(message, undefined, { event: 'system.desktop_control.unavailable' }),
+): void {
+  const reason = desktopControlUnavailableReason(lookup);
+  if (reason !== null) warn(reason);
 }
 
 export function resolveDesktopControlCommand(lookup: DesktopControlLookup = {}): string | null {
