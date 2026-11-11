@@ -92,19 +92,36 @@ pub(crate) fn selchange_wparam(control_id: i32) -> usize {
 
 /// Whether a commit landed on the requested item: the box holds the position
 /// it was given, its list is closed, and the item at that position carries
-/// the requested text (compared as `CB_FINDSTRINGEXACT` compares, ignoring
-/// case). A position alone is not enough: the owner may change the items when
-/// told of the close or of the selection.
-pub(crate) fn holds_requested(
-    held: isize,
+/// the requested text (`carries`, asked of the box with `CB_FINDSTRINGEXACT`).
+/// A position alone is not enough: the owner may change the items when told
+/// of the close or of the selection.
+pub(crate) fn holds_requested(held: isize, index: usize, dropped: isize, carries: bool) -> bool {
+    usize::try_from(held).ok() == Some(index) && dropped == 0 && carries
+}
+
+/// The `wParam` that makes `CB_FINDSTRINGEXACT` start its search at `index`:
+/// the search begins after the item it names, and -1 means the top.
+pub(crate) fn search_start(index: usize) -> usize {
+    index.checked_sub(1).unwrap_or(usize::MAX)
+}
+
+/// Whether the position an item's own Select gave the box still names that
+/// item after the list was closed. Text alone cannot tell items with the same
+/// name apart, so the position is trusted only when the close changed
+/// nothing it could have: the item count, and the positions of every item
+/// carrying the name, are the same before and after, and the position is one
+/// of them.
+pub(crate) fn position_still_names_item(
     index: usize,
-    dropped: isize,
-    held_text: Option<&str>,
-    requested: &str,
+    count_before: isize,
+    count_after: isize,
+    named_before: &[usize],
+    named_after: &[usize],
 ) -> bool {
-    usize::try_from(held).ok() == Some(index)
-        && dropped == 0
-        && held_text.is_some_and(|text| text.to_lowercase() == requested.to_lowercase())
+    count_before >= 0
+        && count_before == count_after
+        && named_before == named_after
+        && named_before.contains(&index)
 }
 
 /// The outcome of choosing an item by its own ref once the item's own Select
@@ -142,7 +159,7 @@ mod imp {
     use super::{
         AdapterError, ComboClass, DeliverySemantics, ErrorCode, ItemMatch, MAX_CLIMB,
         ambiguous_item_error, classify_class, classify_matches, holds_requested, keeps_item_text,
-        missing_item_error, selchange_wparam,
+        missing_item_error, search_start, selchange_wparam,
     };
     use crate::actions::chain::{DeliveryOutcome, after_delivery};
     use crate::tree::automation::automation_client;
@@ -162,8 +179,7 @@ mod imp {
     const CB_SETCURSEL: u32 = 0x014E;
     const CB_SHOWDROPDOWN: u32 = 0x014F;
     const CB_GETDROPPEDSTATE: u32 = 0x0157;
-    const CB_GETLBTEXT: u32 = 0x0148;
-    const CB_GETLBTEXTLEN: u32 = 0x0149;
+    const CB_GETCOUNT: u32 = 0x0146;
     /// One message never waits longer than this, whatever the action budget.
     const MESSAGE_CAP_MS: u64 = 2_000;
 
@@ -325,24 +341,63 @@ mod imp {
             Ok(())
         }
 
-        /// The text of the item at `index`, `None` when there is none.
-        pub(crate) fn text_at(
+        /// Whether the box keeps the text of its items.
+        pub(crate) fn keeps_text(&self) -> bool {
+            keeps_item_text(unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32)
+        }
+
+        /// Whether the item at `index` carries `text`. The box is asked to
+        /// search from `index` for the text this process passes in; the item
+        /// text is never copied out, so the target cannot choose how much is
+        /// written into this process.
+        pub(crate) fn carries(
             &self,
             index: usize,
+            text: &str,
             deadline: Deadline,
-        ) -> Result<Option<String>, AdapterError> {
-            let length = self.send(CB_GETLBTEXTLEN, index, 0, deadline)?;
-            let Ok(length) = usize::try_from(length) else {
-                return Ok(None);
-            };
-            let mut buffer = vec![0u16; length + 1];
-            let copied = self.send(CB_GETLBTEXT, index, buffer.as_mut_ptr() as isize, deadline)?;
-            let Ok(copied) = usize::try_from(copied) else {
-                return Ok(None);
-            };
-            Ok(Some(String::from_utf16_lossy(
-                &buffer[..copied.min(length)],
-            )))
+        ) -> Result<bool, AdapterError> {
+            if !self.keeps_text() {
+                return Ok(false);
+            }
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let found = self.send(
+                CB_FINDSTRINGEXACT,
+                search_start(index),
+                wide.as_ptr() as isize,
+                deadline,
+            )?;
+            Ok(usize::try_from(found).ok() == Some(index))
+        }
+
+        /// The number of items, negative when the box will not say.
+        pub(crate) fn item_count(&self, deadline: Deadline) -> Result<isize, AdapterError> {
+            self.send(CB_GETCOUNT, 0, 0, deadline)
+        }
+
+        /// The positions of every item carrying `text`, top to bottom.
+        pub(crate) fn positions_of(
+            &self,
+            text: &str,
+            deadline: Deadline,
+        ) -> Result<Vec<usize>, AdapterError> {
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let limit = usize::try_from(self.item_count(deadline)?).unwrap_or(0);
+            let mut positions = Vec::new();
+            let mut start = usize::MAX;
+            while positions.len() < limit {
+                let found =
+                    self.send(CB_FINDSTRINGEXACT, start, wide.as_ptr() as isize, deadline)?;
+                let Ok(found) = usize::try_from(found) else {
+                    break;
+                };
+                if positions.contains(&found) {
+                    break;
+                }
+                positions.push(found);
+                start = found;
+            }
+            positions.sort_unstable();
+            Ok(positions)
         }
 
         /// Whether `element` is the box itself rather than one of its parts.
@@ -383,13 +438,15 @@ mod imp {
             let dropped = self
                 .send(CB_GETDROPPEDSTATE, 0, 0, deadline)
                 .map_err(after_delivery)?;
-            let held_text = match usize::try_from(held) {
-                Ok(position) => self.text_at(position, deadline).map_err(after_delivery)?,
-                Err(_) => None,
+            let carries = match usize::try_from(held) {
+                Ok(position) => self
+                    .carries(position, requested, deadline)
+                    .map_err(after_delivery)?,
+                Err(_) => false,
             };
             Ok(DeliveryOutcome::from_delivery(
                 true,
-                holds_requested(held, index, dropped, held_text.as_deref(), requested),
+                holds_requested(held, index, dropped, carries),
             ))
         }
 
@@ -543,12 +600,20 @@ mod imp {
             Ok(())
         }
 
-        pub(crate) fn text_at(
+        pub(crate) fn keeps_text(&self) -> bool {
+            false
+        }
+
+        pub(crate) fn item_count(&self, _deadline: Deadline) -> Result<isize, AdapterError> {
+            Ok(-1)
+        }
+
+        pub(crate) fn positions_of(
             &self,
-            _index: usize,
+            _text: &str,
             _deadline: Deadline,
-        ) -> Result<Option<String>, AdapterError> {
-            Ok(None)
+        ) -> Result<Vec<usize>, AdapterError> {
+            Ok(Vec::new())
         }
 
         pub(crate) fn commit(

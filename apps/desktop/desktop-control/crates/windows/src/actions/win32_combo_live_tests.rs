@@ -40,7 +40,7 @@ static NOTIFIED: std::sync::Mutex<Vec<(isize, usize)>> = std::sync::Mutex::new(V
 static INSERT_ON_CLOSEUP: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 const CBN_CLOSEUP: usize = 8;
 const CB_INSERTSTRING: u32 = 0x014A;
-const CB_GETLBTEXT: u32 = 0x0148;
+const CB_FINDSTRINGEXACT: u32 = 0x0158;
 const INSERTED: &str = "Aardvark";
 static NEXT_TOP: AtomicUsize = AtomicUsize::new(0);
 
@@ -87,11 +87,15 @@ struct ComboHost {
 
 impl ComboHost {
     fn create(items: &[&'static str]) -> Self {
+        Self::create_styled(items, CBS_HASSTRINGS)
+    }
+
+    fn create_styled(items: &[&'static str], style: u32) -> Self {
         let class_name = unique_class_name();
         let (ready, answer) = mpsc::channel();
         let thread_class = class_name.clone();
         let items = items.to_vec();
-        let pump = std::thread::spawn(move || host(&thread_class, &items, ready));
+        let pump = std::thread::spawn(move || host(&thread_class, &items, style, ready));
         let (owner, combo) = answer.recv().expect("host").expect("host window");
         Self {
             owner,
@@ -137,6 +141,7 @@ impl Drop for ComboHost {
 fn host(
     class_name: &str,
     items: &[&'static str],
+    style: u32,
     ready: mpsc::Sender<Result<(isize, isize), String>>,
 ) {
     if let Err(error) = register_class_with_proc(class_name, owner_proc) {
@@ -171,7 +176,7 @@ fn host(
             0,
             combo_class.as_ptr(),
             empty.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST | style,
             8,
             8,
             200,
@@ -385,18 +390,22 @@ impl ComboHost {
             .push(self.owner);
     }
 
-    fn selected_text(&self) -> String {
-        let index = self.selected();
-        let mut buffer = [0u16; 64];
-        let length = unsafe {
+    /// Whether the selected item carries `text`, asked of the box with the
+    /// same search the code under test uses.
+    fn selected_is(&self, text: &str) -> bool {
+        let Ok(index) = usize::try_from(self.selected()) else {
+            return false;
+        };
+        let text = wide(text);
+        let found = unsafe {
             SendMessageW(
                 self.combo as HWND,
-                CB_GETLBTEXT,
-                index as usize,
-                buffer.as_mut_ptr() as LPARAM,
+                CB_FINDSTRINGEXACT,
+                index.checked_sub(1).unwrap_or(usize::MAX),
+                text.as_ptr() as LPARAM,
             )
         };
-        String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)])
+        usize::try_from(found).ok() == Some(index)
     }
 }
 
@@ -413,7 +422,7 @@ fn a_name_is_looked_up_again_when_closing_the_list_changes_the_items() {
         2,
         "Beta moved down when Aardvark was added"
     );
-    assert_eq!(host.selected_text(), "Beta");
+    assert!(host.selected_is("Beta"));
     assert_eq!(steps[0].verified(), Some(true));
     assert_eq!(host.notified(), 1);
 }
@@ -428,10 +437,81 @@ fn an_item_ref_is_never_verified_on_an_item_that_moved_into_its_place() {
     let steps = select_steps(&items[1], "", deadline(5_000)).expect("select by item ref");
     assert_eq!(steps[0].label(), WIN32_COMBO_SELECT_LABEL);
     assert!(
-        steps[0].verified() != Some(true) || host.selected_text() == "Beta",
+        steps[0].verified() != Some(true) || host.selected_is("Beta"),
         "verified only when the box really holds Beta"
     );
-    if host.selected_text() != "Beta" {
+    if !host.selected_is("Beta") {
         assert_eq!(host.notified(), 0, "a different item is never confirmed");
     }
+}
+
+#[test]
+fn the_check_of_an_item_reads_no_text_out_of_the_box() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Alpha", "Beta", "Twin", "Twin"]);
+    let element = host.element();
+    let combo = crate::actions::win32_combo::owning_combo(&element, deadline(5_000))
+        .expect("climb")
+        .expect("the box");
+    let check = |index, text| combo.carries(index, text, deadline(5_000)).expect("ask");
+    assert!(check(0, "alpha"), "the first item, compared ignoring case");
+    assert!(check(1, "Beta"));
+    assert!(!check(1, "Alpha"));
+    assert!(
+        check(3, "Twin"),
+        "the second twin is found at its own position"
+    );
+    assert!(!check(9, "Twin"), "no item there");
+    assert_eq!(
+        combo
+            .positions_of("Twin", deadline(5_000))
+            .expect("positions"),
+        vec![2, 3]
+    );
+}
+
+#[test]
+fn an_item_ref_does_not_confirm_a_twin_that_moved_into_its_place() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&["Twin", "Twin"]);
+    host.insert_on_closeup();
+    let items = list_items(&host);
+    assert_eq!(items.len(), 2);
+    let steps = select_steps(&items[1], "", deadline(5_000)).expect("select by item ref");
+    assert_eq!(steps[0].label(), WIN32_COMBO_SELECT_LABEL);
+    assert_ne!(
+        steps[0].verified(),
+        Some(true),
+        "after Aardvark was added, position 1 is the first Twin"
+    );
+    assert_eq!(
+        host.notified(),
+        0,
+        "no other item is confirmed to the owner"
+    );
+}
+
+#[test]
+fn an_owner_drawn_box_without_item_text_is_left_to_ui_automation() {
+    const CBS_OWNERDRAWFIXED: u32 = 0x0010;
+    ensure_test_apartment();
+    let host = ComboHost::create_styled(&["Alpha", "Beta"], CBS_OWNERDRAWFIXED);
+    unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 1, 0) };
+    let element = host.element();
+    let combo = crate::actions::win32_combo::owning_combo(&element, deadline(5_000))
+        .expect("climb")
+        .expect("the box");
+    assert!(!combo.keeps_text());
+    let items = list_items(&host);
+    assert_eq!(items.len(), 2, "the proxy publishes the owner-drawn items");
+    for item in items {
+        assert!(
+            crate::actions::select::win32_combo_select_item(&item, deadline(5_000))
+                .expect("item path")
+                .is_none(),
+            "the Win32 path never takes a box it cannot check by text"
+        );
+    }
+    assert_eq!(host.notified(), 0);
+    unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 0, 0) };
 }

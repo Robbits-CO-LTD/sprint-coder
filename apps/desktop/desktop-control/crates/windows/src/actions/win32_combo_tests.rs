@@ -1,6 +1,7 @@
 use super::{
     ComboClass, ItemMatch, after_item_select, ambiguous_item_error, classify_class,
-    classify_matches, holds_requested, keeps_item_text, missing_item_error, selchange_wparam,
+    classify_matches, holds_requested, keeps_item_text, missing_item_error,
+    position_still_names_item, search_start, selchange_wparam,
 };
 use crate::actions::chain::DeliveryOutcome;
 use agent_desktop_core::{DeliveryDisposition, ErrorCode};
@@ -68,19 +69,38 @@ fn errors_never_echo_the_requested_text() {
 
 #[test]
 fn a_commit_is_verified_only_on_the_requested_item() {
-    assert!(holds_requested(2, 2, 0, Some("Beta"), "beta"));
+    assert!(holds_requested(2, 2, 0, true));
     assert!(
-        !holds_requested(1, 1, 0, Some("Alpha"), "Beta"),
+        !holds_requested(1, 1, 0, false),
         "the position held, but another item moved into it"
     );
-    assert!(!holds_requested(2, 2, 0, None, "Beta"));
-    assert!(!holds_requested(1, 2, 0, Some("Beta"), "Beta"));
-    assert!(
-        !holds_requested(2, 2, 1, Some("Beta"), "Beta"),
-        "list still open"
-    );
+    assert!(!holds_requested(1, 2, 0, true));
+    assert!(!holds_requested(-1, 0, 0, true));
+    assert!(!holds_requested(2, 2, 1, true), "list still open");
 }
 
+#[test]
+fn a_search_starts_at_the_item_it_checks() {
+    assert_eq!(search_start(0), usize::MAX, "-1 searches from the top");
+    assert_eq!(search_start(1), 0);
+    assert_eq!(search_start(305), 304);
+}
+
+#[test]
+fn a_position_is_trusted_only_when_closing_changed_nothing_it_could() {
+    assert!(position_still_names_item(1, 2, 2, &[0, 1], &[0, 1]));
+    assert!(position_still_names_item(3, 4, 4, &[3], &[3]));
+    assert!(
+        !position_still_names_item(1, 2, 3, &[0, 1], &[1, 2]),
+        "an item was added: position 1 may now be the other twin"
+    );
+    assert!(
+        !position_still_names_item(1, 3, 3, &[0, 1], &[1, 2]),
+        "same count, but the named items moved"
+    );
+    assert!(!position_still_names_item(2, 3, 3, &[0, 1], &[0, 1]));
+    assert!(!position_still_names_item(0, -1, -1, &[0], &[0]));
+}
 #[test]
 fn a_failure_after_the_items_own_select_is_still_a_delivery() {
     assert_eq!(

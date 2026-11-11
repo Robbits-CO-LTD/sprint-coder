@@ -99,7 +99,9 @@ mod imp {
         selection_item_available,
     };
     use crate::actions::value_write::gated_pattern_value_equals;
-    use crate::actions::win32_combo::{WIN32_COMBO_SELECT_LABEL, after_item_select, owning_combo};
+    use crate::actions::win32_combo::{
+        WIN32_COMBO_SELECT_LABEL, after_item_select, owning_combo, position_still_names_item,
+    };
     use crate::tree::automation::automation_client;
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::read_one;
@@ -241,9 +243,17 @@ mod imp {
         let Some(combo) = owning_combo(element, deadline)? else {
             return Ok(None);
         };
-        if combo.is_box(element) {
+        // A box that keeps no item text cannot be checked by name; it is
+        // left to the UI Automation path before anything is changed.
+        if combo.is_box(element) || !combo.keeps_text() {
             return Ok(None);
         }
+        let Some(item_name) = (match read_one(element, TreeProperty::Name).text() {
+            LocatorField::Known(name) if !name.is_empty() => Some(name),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
         let delivered = match element.0.get_pattern::<UISelectionItemPattern>() {
             Ok(pattern) => match pattern.select() {
                 Ok(()) => classify_success()?,
@@ -256,30 +266,35 @@ mod imp {
         }
         let item_selected =
             read_one(element, TreeProperty::SelectionItemIsSelected).flag() == Some(true);
-        let item_name = match read_one(element, TreeProperty::Name).text() {
-            LocatorField::Known(name) if !name.is_empty() => Some(name),
-            _ => None,
-        };
         // The item's own Select put the box on the item's position. Closing
-        // the list notifies the owner, which may change the items then, so
-        // the position is confirmed to the owner only when it carries this
-        // item's text both before and after the close.
+        // the list notifies the owner, which may change the items then. Text
+        // cannot tell items with the same name apart, so the position is
+        // confirmed to the owner only when the close changed neither the item
+        // count nor the positions of the items carrying this name.
         let index = combo.selected_index(deadline).map_err(after_delivery)?;
-        let text_at = |index: Option<usize>| match index {
-            Some(index) => combo.text_at(index, deadline).map_err(after_delivery),
-            None => Ok(None),
-        };
-        let before = text_at(index)?;
+        let count_before = combo.item_count(deadline).map_err(after_delivery)?;
+        let named_before = combo
+            .positions_of(&item_name, deadline)
+            .map_err(after_delivery)?;
         combo.close_list(deadline).map_err(after_delivery)?;
-        let after = text_at(index)?;
-        let carries = |text: &Option<String>, name: &str| {
-            text.as_deref()
-                .is_some_and(|text| text.to_lowercase() == name.to_lowercase())
-        };
-        let commit = match (index, item_name) {
-            (Some(index), Some(name)) if carries(&before, &name) && carries(&after, &name) => combo
-                .commit(index, &name, deadline)
-                .map_err(after_delivery)?,
+        let count_after = combo.item_count(deadline).map_err(after_delivery)?;
+        let named_after = combo
+            .positions_of(&item_name, deadline)
+            .map_err(after_delivery)?;
+        let commit = match index {
+            Some(index)
+                if position_still_names_item(
+                    index,
+                    count_before,
+                    count_after,
+                    &named_before,
+                    &named_after,
+                ) =>
+            {
+                combo
+                    .commit(index, &item_name, deadline)
+                    .map_err(after_delivery)?
+            }
             _ => DeliveryOutcome::DeliveredUnverified,
         };
         Ok(Some(vec![build_step(
