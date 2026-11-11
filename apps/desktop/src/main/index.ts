@@ -64,6 +64,7 @@ import {
 } from '@sprint-coder/contracts';
 import {
   applyWindowControl,
+  disabledChromiumFeatures,
   isWindowControlAction,
   presentWindow,
   restoreWindow,
@@ -83,6 +84,9 @@ let shutdownCommitted = false;
 let shutdownInFlight = false;
 
 if (process.platform === 'win32') app.setAppUserModelId('com.squirrel.SprintCoder.SprintCoder');
+const disabledFeatures = disabledChromiumFeatures(process.platform);
+if (disabledFeatures.length > 0)
+  app.commandLine.appendSwitch('disable-features', disabledFeatures.join(','));
 
 protocol.registerSchemesAsPrivileged([
   {
