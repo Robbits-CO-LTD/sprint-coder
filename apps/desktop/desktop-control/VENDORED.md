@@ -24,6 +24,18 @@ Windows 用の CLI の build に要る部分だけ。
 
 macOS は今は無効なので入れていない。Mac に対応する時に、その時の upstream から入れ直す。
 
+## 取り込んだ後に消したもの
+
+build にも同梱にも使わないファイル（2026-11-11）。
+
+- `src/visual_debug/viewer_filter.test.js`（upstream の JS の試験。`src/visual_debug/render.rs` が `include_str!` で埋め込むのは `viewer_filter.js` などで、これは読まれない）
+
+参照を調べて残したもの:
+
+- `skills` の macOS・Linux・FFI の分: `crates/core/src/commands/skills.rs` が OS を問わず `include_str!` で埋め込み、Windows 版でも `skills get macos` などで表示されるので、消すには `.rs` を変える必要がある。
+- `crates/core/examples`、`crates/windows/examples`: build（`cargo build --release`）には入らないが、`cargo test` は compile する。`uia_tree_dump.rs` は `crates/windows/src/tree/testdata/` の試験の資料を作る道具。
+- Rust の試験（`*_tests.rs`、`src/tests`、`testdata`）: これからソースを直す時の守りなので残す。
+
 ## 変えたファイル（Apache License 2.0 の 4 条 b）
 
 `skills` は 1 つも変えていない。変えたのは次のファイルだけ。
