@@ -8107,6 +8107,77 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps a desktop-control card description through storage, and older rows without one', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const desktopAction = {
+        kind: 'input' as const,
+        title: '文字を入力します',
+        mode: 'background' as const,
+        target: {
+          resolved: true,
+          app: 'charmap.exe',
+          window: '文字コード表',
+          role: '入力欄',
+          name: 'コピーする文字(A):',
+        },
+        text: 'ABC',
+        textRole: 'enter' as const,
+        allowTaskGrant: true,
+        notes: [],
+        openDetails: false,
+      };
+      const input = approvalRequest(task.id, turn.turnId, {
+        display: {
+          target: 'C:\\desktop-control.exe',
+          impact: 'process',
+          execution: '{"argv":["set-value","@s1:e1","ABC"]}',
+          desktopAction,
+        },
+      });
+      const requested = persistence.requestApproval(input);
+      expect(requested.approval.desktopAction).toEqual(desktopAction);
+      expect(
+        (requested.event as { approval: { desktopAction?: unknown } }).approval.desktopAction,
+      ).toEqual(desktopAction);
+      // The same request again is the same card, not a conflict.
+      expect(persistence.requestApproval(input).approval.id).toBe(requested.approval.id);
+      // A different description of the same call is a different request.
+      expect(() =>
+        persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, {
+            display: { ...input.display, desktopAction: { ...desktopAction, text: 'XYZ' } },
+          }),
+        ),
+      ).toThrow(OperationConflictError);
+      expect(persistence.listPendingApprovals(task.id)[0]?.desktopAction).toEqual(desktopAction);
+
+      // A row written before the description existed reads as the plain card, and so does a
+      // description that no longer reads as one.
+      const second = approvalRequest(task.id, turn.turnId, {
+        id: 'approval-2',
+        itemId: 'item-2',
+        callId: 'call-2',
+        challenge: 'challenge-2',
+      });
+      persistence.requestApproval(second);
+      expect(persistence.getApproval(task.id, 'approval-2')).not.toHaveProperty('desktopAction');
+      persistence.close();
+      const edit = new Database(path);
+      edit
+        .prepare('UPDATE approvals SET display_json = ? WHERE id = ?')
+        .run(
+          JSON.stringify({ ...input.display, desktopAction: { kind: 'made-up' } }),
+          'approval-1',
+        );
+      edit.close();
+      const reopened = new SqlitePersistenceClient(path, verifyTestNativeSession);
+      expect(reopened.getApproval(task.id, 'approval-1')).not.toHaveProperty('desktopAction');
+      expect(reopened.getApproval(task.id, 'approval-1').target).toBe('C:\\desktop-control.exe');
+      reopened.close();
+    });
+
     it('keeps live-only approval detail out of the row, the event, and every later read', () => {
       // A stdin write is approved on its exact characters, which can be a password or a token. The
       // card needs all of them; nothing durable may keep any of them (Issue #473).

@@ -2677,7 +2677,8 @@ body.is-resizing-sidebar iframe {
   color: var(--success);
 }
 .command-card--failed .command-card__status,
-.command-card--interrupted .command-card__status {
+.command-card--interrupted .command-card__status,
+.command-card--exited .command-card__status.is-failure {
   color: var(--danger);
 }
 .command-card__risk {
@@ -2706,6 +2707,17 @@ body.is-resizing-sidebar iframe {
   margin: 4px 0;
   color: var(--text-secondary);
   font-size: 11px;
+}
+.command-card__fact--wide {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+.command-card__details {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.command-card__details > summary {
+  cursor: pointer;
 }
 .command-card__fact code {
   overflow-wrap: anywhere;
@@ -2894,6 +2906,49 @@ body.is-resizing-sidebar iframe {
 }
 .approval-card__actions .danger {
   color: var(--danger);
+}
+/* Desktop control: a run that takes the person's mouse and keyboard carries the danger edge. */
+.approval-card--foreground {
+  border-color: var(--danger-line);
+}
+.approval-card__mode {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.approval-card__mode.is-background {
+  color: var(--info);
+  background: var(--info-wash);
+}
+.approval-card__mode.is-foreground {
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+.approval-card__steps {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+  padding-left: 20px;
+}
+.approval-card__steps li > strong {
+  font-size: 12.5px;
+}
+.approval-card__steps .approval-card__mode {
+  margin-left: 8px;
+}
+.approval-card__steps .approval-card__facts {
+  margin: 4px 0 0;
+}
+.approval-card__details {
+  margin: 8px 0 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.approval-card__details > summary {
+  cursor: pointer;
 }
 
 .approval-audit {

@@ -194,7 +194,21 @@ describe('prompt context compiler', () => {
     );
     expect(compiled.content.match(/agent-desktop/gu)).toHaveLength(1);
     expect(compiled.content).toContain(`${JSON.stringify(command)} skills get desktop`);
-    expect(compiled.content).toContain('文字の入力は、まず set-value');
+    // Background only: the person keeps their mouse, keyboard and foreground window.
+    expect(compiled.content).toContain(
+      '操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない',
+    );
+    expect(compiled.content).toContain(
+      '文字は set-value、選択は select、メニューは expand か click',
+    );
+    expect(compiled.content).toContain('利用者がはっきり頼んだ時だけ使う');
+    expect(compiled.content).toContain('裏の操作が失敗しても前面の操作で取り返さず');
+    expect(compiled.content).toContain('最小化した窓は操作できない');
+    expect(compiled.content).toContain('（--activate は付けない）');
+    // Nothing recommends taking the foreground any more.
+    expect(compiled.content).not.toContain('窓を前面に出し');
+    expect(compiled.content).not.toContain('--headed type');
+    expect(compiled.content).not.toContain('--activate・');
     expect(compiled.content).toContain('list-windows で id を調べて --window-id を付け');
     expect(compiled.content).toContain('同じ Task で既に読んでいれば読み直さない');
     // The guides and status checks need no card, which the agent can count on.

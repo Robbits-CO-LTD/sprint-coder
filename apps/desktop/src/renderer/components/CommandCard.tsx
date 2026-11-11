@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CommandOutputRecord } from '../types/sprint-coder';
+import type { ApprovalSummary, CommandOutputRecord } from '../types/sprint-coder';
+import { desktopActionSummary, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
 import type { CommandCardState } from '../store/appStore';
 import {
   commandDurationMs,
@@ -13,8 +14,19 @@ const OVERSCAN = 8;
 
 const RISK_LABEL = { low: '低リスク', medium: '中リスク', high: '高リスク' } as const;
 
-export function CommandCard({ taskId, card }: { taskId: string; card: CommandCardState }) {
+export function CommandCard({
+  taskId,
+  card,
+  desktopAction: approvalAction,
+}: {
+  taskId: string;
+  card: CommandCardState;
+  /** The approval card's description of this desktop-control run, when it had one: it names the
+   * part. Without one (a run that needed no card) the row uses Main's own description. */
+  desktopAction?: NonNullable<ApprovalSummary['desktopAction']> | undefined;
+}) {
   const { command, tail } = card;
+  const desktopAction = approvalAction ?? command.desktopAction;
   const [expanded, setExpanded] = useState(false);
   const [outputs, setOutputs] = useState<CommandOutputRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
@@ -96,6 +108,26 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
   );
   const visibleLines = fullLines.slice(firstVisible, lastVisible);
   const duration = commandDurationMs(command, now);
+  const commandFacts = (
+    <>
+      <div className="command-card__fact">
+        <span>cwd</span>
+        <code>{command.cwd}</code>
+      </div>
+      <div className="command-card__fact">
+        <span>argv</span>
+        <code>{exactCommand}</code>
+        <button
+          type="button"
+          className="command-card__copy"
+          onClick={() => void navigator.clipboard.writeText(exactCommand)}
+          aria-label="コマンドをコピー"
+        >
+          Copy
+        </button>
+      </div>
+    </>
+  );
 
   function toggleExpanded(): void {
     if (expanded) {
@@ -137,34 +169,63 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
       aria-label="コマンド実行"
     >
       <header className="command-card__head">
-        <span className="command-card__kind">Command</span>
-        <span className="command-card__status">{commandStatus(command)}</span>
-        <span className={`command-card__risk risk-${command.risk}`}>
-          {RISK_LABEL[command.risk]}
+        <span className="command-card__kind">
+          {desktopAction === undefined ? 'Command' : 'デスクトップ操作'}
         </span>
+        <span
+          className={`command-card__status${
+            command.state === 'exited' && command.exitCode !== 0 ? ' is-failure' : ''
+          }`}
+        >
+          {commandStatus(command)}
+        </span>
+        {desktopAction === undefined ? (
+          <span className={`command-card__risk risk-${command.risk}`}>
+            {RISK_LABEL[command.risk]}
+          </span>
+        ) : (
+          <span className="command-card__risk" data-testid="command-desktop-title">
+            {desktopAction.title}
+          </span>
+        )}
         <span className="command-card__duration" data-testid="command-duration">
           {formatDuration(duration)}
         </span>
       </header>
-      <div className="command-card__body">
-        <p className="command-card__purpose">{command.purpose}</p>
-        <div className="command-card__fact">
-          <span>cwd</span>
-          <code>{command.cwd}</code>
+      {desktopAction === undefined ? (
+        <div className="command-card__body">
+          <p className="command-card__purpose">{command.purpose}</p>
+          {commandFacts}
         </div>
-        <div className="command-card__fact">
-          <span>argv</span>
-          <code>{exactCommand}</code>
-          <button
-            type="button"
-            className="command-card__copy"
-            onClick={() => void navigator.clipboard.writeText(exactCommand)}
-            aria-label="コマンドをコピー"
-          >
-            Copy
-          </button>
+      ) : (
+        <div className="command-card__body">
+          {desktopAction.target === undefined ? null : (
+            <p className="command-card__purpose">{desktopTargetText(desktopAction.target)}</p>
+          )}
+          {desktopAction.destination === undefined ? null : (
+            <p className="command-card__purpose">
+              移動先: {desktopTargetText(desktopAction.destination)}
+            </p>
+          )}
+          {desktopAction.text === undefined ? null : (
+            <div className="command-card__fact command-card__fact--wide">
+              <span>{desktopTextLabel(desktopAction)}</span>
+              <code>「{desktopAction.text}」</code>
+            </div>
+          )}
+          {/* The summary is named with the heading, target and start time, so each row's
+              details read apart. */}
+          <details className="command-card__details">
+            <summary
+              aria-label={`詳細（実行内容） ${desktopActionSummary(desktopAction)} ${startedLabel(command.createdAt)}`}
+            >
+              詳細（実行内容）
+            </summary>
+            <p className="command-card__purpose">AI の説明: {command.purpose}</p>
+            {commandFacts}
+          </details>
         </div>
-      </div>
+      )}
 
       {expanded ? (
         <div className="command-card__expanded">
@@ -241,6 +302,11 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
       ) : null}
     </section>
   );
+}
+
+function startedLabel(createdAt: string): string {
+  const time = new Date(createdAt);
+  return Number.isNaN(time.getTime()) ? '' : `${time.toLocaleTimeString('ja-JP')} 開始`;
 }
 
 function commandStatus(command: CommandCardState['command']): string {

@@ -314,6 +314,7 @@ import {
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
+import { configureDesktopControlStateRoot } from './desktop-control';
 import {
   promptWriteAccess,
   relativizeWorkspacePath,
@@ -1137,6 +1138,8 @@ export class IpcRouter {
     // Before any approval can be raised: digests over approval content are keyed by a per-install
     // secret that lives only in this directory, never in SQLite (Issue #473).
     configureApprovalDigestKey(app.getPath('userData'));
+    // Desktop-control runs keep their snapshots here, where the approval card reads part names.
+    configureDesktopControlStateRoot(join(app.getPath('userData'), 'desktop-control'));
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),

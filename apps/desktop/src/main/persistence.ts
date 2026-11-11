@@ -87,6 +87,8 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
   approvalSummarySchema,
+  desktopApprovalActionSchema,
+  type DesktopApprovalAction,
   commandSummarySchema,
   executionResolutionSchema,
   modelSelectionSchema,
@@ -315,6 +317,8 @@ import {
 } from './edit-saga';
 import { assertStableSingleLinkFile } from './stable-file-snapshot';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
+import { isShippedDesktopControlPath } from './desktop-control';
+import { desktopControlApprovalAction } from './desktop-control-display';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -4836,7 +4840,13 @@ export type ApprovalRequestInput = {
   sandboxProfile: SandboxProfile;
   risk: 'low' | 'medium' | 'high';
   reasonUntrusted: string;
-  display: { target: string; impact: string; execution: string };
+  display: {
+    target: string;
+    impact: string;
+    execution: string;
+    /** A desktop-control run's own card. Display only; kept in `display_json`. */
+    desktopAction?: DesktopApprovalAction;
+  };
   /**
    * Live-only card detail. It is attached to the returned approval and event after both have been
    * written, so it never reaches `display_json` or the persisted `approval.requested` payload.
@@ -16250,11 +16260,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           input.sandboxProfile,
           input.risk,
           sanitizeApprovalText(input.reasonUntrusted, 500),
-          JSON.stringify({
-            target: sanitizeApprovalText(input.display.target, 500),
-            impact: sanitizeApprovalText(input.display.impact, 500),
-            execution: sanitizeApprovalText(input.display.execution, 100_000),
-          }),
+          JSON.stringify(sanitizedApprovalDisplay(input.display)),
           sha256(input.challenge),
           new Date(input.expiresAt).toISOString(),
           new Date(input.requestedAt).toISOString(),
@@ -21433,6 +21439,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       target: display.target,
       impact: display.impact,
       execution: display.execution,
+      ...(display.desktopAction === undefined ? {} : { desktopAction: display.desktopAction }),
       risk: row.risk,
       capability: row.capability,
       challenge,
@@ -23330,6 +23337,7 @@ export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary 
     target: approval.target,
     impact: approval.impact,
     execution: approval.execution,
+    ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
     risk: approval.risk,
     capability: approval.capability,
     challenge: approval.challenge,
@@ -23358,6 +23366,7 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     cwd: spec.cwdIdentity.canonicalPath,
     envDelta: { ...spec.envDelta },
     purpose: row.purpose,
+    ...commandDesktopAction(spec),
     risk: row.risk,
     state: row.state,
     pid: row.pid,
@@ -23369,6 +23378,20 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
   });
+}
+
+/**
+ * What a desktop-control command did, for its timeline row: only for the shipped binary, and
+ * without reading any snapshot (the part names are on its approval card, when it had one).
+ */
+function commandDesktopAction(spec: ExecutionSpec): { desktopAction?: DesktopApprovalAction } {
+  try {
+    return isShippedDesktopControlPath(spec.absoluteExecutable)
+      ? { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function validateApprovalRequest(input: ApprovalRequestInput): void {
@@ -23400,11 +23423,9 @@ function validateApprovalRequest(input: ApprovalRequestInput): void {
   parseResourceSet(JSON.stringify(input.resource));
 }
 
-function parseApprovalDisplay(value: string): {
-  target: string;
-  impact: string;
-  execution: string;
-} {
+type ApprovalDisplay = ApprovalRequestInput['display'];
+
+function parseApprovalDisplay(value: string): ApprovalDisplay {
   const parsed = JSON.parse(value) as Record<string, unknown>;
   if (
     typeof parsed.target !== 'string' ||
@@ -23412,10 +23433,29 @@ function parseApprovalDisplay(value: string): {
     typeof parsed.execution !== 'string'
   )
     throw new Error('Invalid approval display projection');
+  // Older rows have no desktop-control card and show the plain one, as does a card that no longer
+  // reads as one.
+  return sanitizedApprovalDisplay({
+    target: parsed.target,
+    impact: parsed.impact,
+    execution: parsed.execution,
+    ...(parsed.desktopAction === undefined
+      ? {}
+      : { desktopAction: parsed.desktopAction as DesktopApprovalAction }),
+  });
+}
+
+/** The display as it is stored and compared: bounded text, and a desktop card only when valid. */
+function sanitizedApprovalDisplay(display: ApprovalDisplay): ApprovalDisplay {
+  const desktopAction =
+    display.desktopAction === undefined
+      ? undefined
+      : desktopApprovalActionSchema.safeParse(display.desktopAction);
   return {
-    target: sanitizeApprovalText(parsed.target, 500),
-    impact: sanitizeApprovalText(parsed.impact, 500),
-    execution: sanitizeApprovalText(parsed.execution, 100_000),
+    target: sanitizeApprovalText(display.target, 500),
+    impact: sanitizeApprovalText(display.impact, 500),
+    execution: sanitizeApprovalText(display.execution, 100_000),
+    ...(desktopAction?.success === true ? { desktopAction: desktopAction.data } : {}),
   };
 }
 
@@ -23476,11 +23516,7 @@ function approvalRequestDigest(input: ApprovalRequestInput): string {
       sandboxProfile: input.sandboxProfile,
       risk: input.risk,
       reason: sanitizeApprovalText(input.reasonUntrusted, 500),
-      display: {
-        target: sanitizeApprovalText(input.display.target, 500),
-        impact: sanitizeApprovalText(input.display.impact, 500),
-        execution: sanitizeApprovalText(input.display.execution, 100_000),
-      },
+      display: sanitizedApprovalDisplay(input.display),
     }),
   );
 }
@@ -23510,6 +23546,7 @@ function persistedApprovalRequestDigest(approval: PersistedApproval): string {
         target: approval.target,
         impact: approval.impact,
         execution: approval.execution,
+        ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
       },
     }),
   );
