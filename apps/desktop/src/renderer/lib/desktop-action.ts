@@ -28,7 +28,10 @@ export function desktopTargetText(target: NonNullable<DesktopStep['target']>): s
     return target.app === undefined ? '対象を確かめられません' : `アプリ「${target.app}」`;
   const place = target.window ?? target.app ?? '';
   // A part without a name is said to have none, so it is not taken for the window's only one.
-  const part = `${target.role ?? '部品'}${target.name === undefined ? '（名前なし）' : `「${target.name}」`}`;
+  // Where it sits, when the window has others of the same name (a dialog's 「閉じる」).
+  const within =
+    target.within === undefined ? '' : `${target.within.role}「${target.within.name}」の`;
+  const part = `${within}${target.role ?? '部品'}${target.name === undefined ? '（名前なし）' : `「${target.name}」`}`;
   return target.window === undefined ? `${place} の${part}${id}` : `${place}${app} の${part}${id}`;
 }
 
@@ -45,9 +48,8 @@ export function desktopTextLabel(step: Pick<DesktopStep, 'textRole'>): string {
 }
 
 /**
- * The mark beside the heading. A background run takes no mouse or keyboard, which is all that can
- * be said of it: the window it acts on, or a launched one, may still come to the front. A launch
- * gets no mark, and a read none.
+ * The mark beside the heading. A background run takes no mouse or keyboard and leaves its window
+ * behind the one in use; the card's notes say so. A launch gets no mark, and a read none.
  */
 export function desktopModeLabel(step: Pick<DesktopStep, 'mode' | 'kind'>): string | null {
   if (step.mode === 'foreground') return '前面を使います';

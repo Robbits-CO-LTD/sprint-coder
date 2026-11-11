@@ -310,7 +310,8 @@ function outsideWorkspaceRoots(
 // since keystrokes reach whatever window has focus. This check only drops the plainly dangerous forms
 // before a card exists: an option or command it does not know, a file path to read or write, the
 // clipboard's contents, a long-lived server (`mcp`), a launch that passes arguments, environment
-// or a working directory to the app, and — as a convenience, never a boundary — launching a
+// or a working directory to the app, keys or text sent without naming the window or part they go
+// to (they would reach whatever is in front), and — as a convenience, never a boundary — launching a
 // terminal, shell, script host or settings tool by name.
 const GLOBAL_OPTIONS =
   '--session= --agent-id= -w= --wait-for= --wait-for-gone= --wait-timeout= -v --verbose --headed';
@@ -801,6 +802,12 @@ export function desktopControlArgvRefusal(
     return positionals.length === 1
       ? batchRefusal(positionals[0]!, workspaceRoots, lookup)
       : refusal('batch には JSON の配列を 1 つだけ渡す');
+  const keyTarget = keyTargetRefusal(key, (name) =>
+    name === ''
+      ? (positionals[0] ?? '').trim() !== ''
+      : (read.options.get(name) ?? '').trim() !== '',
+  );
+  if (keyTarget !== null) return keyTarget;
   return pointChoiceRefusal(
     key,
     Object.hasOwn(POINT_CHOICES, key) ? POINT_CHOICES[key]! : [],
@@ -826,6 +833,46 @@ const BATCH_POINT_CHOICES: Readonly<Record<string, readonly (readonly [string, s
     ['to', 'to_xy'],
   ],
 };
+
+// Commands of the desktop-control binary 1.2.0 that send keys or text, and the options that name
+// where they go (`''` for the first positional, the ref; `<command> --help`). Without one, the
+// keys reach whichever window is in front, which may be the one the person is using, so that is
+// refused. `key-down` and `key-up` take no target at all. In a batch, the same by argument name.
+const KEY_TARGETS: Readonly<Record<string, readonly string[]>> = {
+  press: ['--window-id', '--app'],
+  type: [''],
+  'key-down': [],
+  'key-up': [],
+};
+const BATCH_KEY_TARGETS: Readonly<Record<string, readonly string[]>> = {
+  press: ['window_id', 'app'],
+  type: ['ref_id'],
+  'key-down': [],
+  'key-up': [],
+};
+
+function keyTargetRefusal(
+  label: string,
+  given: (name: string) => boolean,
+  batch = false,
+): string | null {
+  if (!Object.hasOwn(KEY_TARGETS, label)) return null;
+  const targets = (batch ? BATCH_KEY_TARGETS : KEY_TARGETS)[label]!;
+  if (targets.some((name) => given(name))) return null;
+  const command = batch ? `batch の中の ${label}` : label;
+  const press = batch ? 'window_id か app' : '--window-id か --app';
+  if (targets.length === 0)
+    return refusal(
+      `${command} は対象の窓を指定できない（キーはいちばん手前の窓に届くため、代わりに press を ${press} と使う）`,
+    );
+  if (label === 'type')
+    return refusal(
+      `${command} の対象の部品が無い（文字はいちばん手前の窓に届くため、snapshot で得た ref で対象の部品を指定する）`,
+    );
+  return refusal(
+    `${command} の対象の窓が無い（キーはいちばん手前の窓に届くため、${press} で対象の窓を指定する）`,
+  );
+}
 
 function pointChoiceRefusal(
   label: string,
@@ -926,6 +973,12 @@ function batchRefusal(
       (name) => keys.has(plain(name)),
     );
     if (pointRefusal !== null) return pointRefusal;
+    const keyTarget = keyTargetRefusal(
+      command,
+      (name) => typeof fields[name] === 'string' && fields[name].trim() !== '',
+      true,
+    );
+    if (keyTarget !== null) return keyTarget;
   }
   return null;
 }

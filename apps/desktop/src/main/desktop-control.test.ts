@@ -498,7 +498,9 @@ describe('desktop-control arguments outside the command sandbox', () => {
     [['--headed', 'type', '@s1:e2', 'hello']],
     [['type', '@s1:e2', '--', '-5']],
     [['click', '@s1:e5', '--headed']],
-    [['press', 'return']],
+    [['press', 'return', '--app', 'notepad']],
+    [['--headed', 'press', '7', '--window-id', 'w-1']],
+    [['batch', '[{"command":"press","args":{"combo":"return","window_id":"w-1"}}]']],
     [['--headed', 'mouse-click', '--xy', '100,200']],
     [['--headed', 'mouse-click', '--xy=-100,50', '--button', 'right']],
     [['--session', 's1', 'list-windows']],
@@ -587,6 +589,22 @@ describe('desktop-control arguments outside the command sandbox', () => {
     [['batch', '[{"command":"snapshot","extra":1}]'], '形を判定できない'],
     [['batch', '[1]'], '形を判定できない'],
     [['batch', '[]', 'second'], 'JSON の配列を 1 つだけ'],
+    // Keys or text that name no window or part reach whatever is in front.
+    [
+      ['press', '7', '--headed'],
+      'press の対象の窓が無い（キーはいちばん手前の窓に届くため、--window-id か --app で対象の窓を指定する）',
+    ],
+    [['press', 'return'], 'press の対象の窓が無い'],
+    [['press', 'return', '--app', ' '], 'press の対象の窓が無い'],
+    [['--headed', 'type'], 'type の対象の部品が無い'],
+    [['key-down', 'shift'], 'key-down は対象の窓を指定できない'],
+    [['--session', 's1', 'key-up', 'shift'], 'key-up は対象の窓を指定できない'],
+    [
+      ['batch', '[{"command":"press","args":{"combo":"7"}}]'],
+      'batch の中の press の対象の窓が無い（キーはいちばん手前の窓に届くため、window_id か app で対象の窓を指定する）',
+    ],
+    [['batch', '[{"command":"type","args":{"text":"x"}}]'], 'batch の中の type の対象の部品が無い'],
+    [['batch', '[{"command":"key-down","args":{"key":"shift"}}]'], 'batch の中の key-down は'],
   ])('refuses %j', (argv, reason) => {
     const refusal = refused(argv);
     expect(refusal).toMatch(/^デスクトップ操作の実行を拒否した: .+。$/u);

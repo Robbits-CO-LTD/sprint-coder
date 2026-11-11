@@ -24,6 +24,7 @@ import {
   type CommandOutputChunk,
   type CommandResult,
 } from './command-runner';
+import { rememberDesktopControlWindows } from './desktop-control-display';
 import { readWindowsExecutableFileVersion } from './windows-pe-version';
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
@@ -547,6 +548,12 @@ export function registerCommandRunnerTool(
         desktopControlArgvIsInert(spec.argv)
           ? desktopControlRoots.get(spec)
           : undefined;
+      // The windows a desktop-control run reported, as the executable printed them, name those
+      // windows on the Task's later cards (display only).
+      const rememberWindows = (): void => {
+        if (roots !== undefined)
+          rememberDesktopControlWindows(_context.taskId, spec.argv, toolOutput.stdout);
+      };
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),
         ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
@@ -714,6 +721,7 @@ export function registerCommandRunnerTool(
         command.publish(persisted.event);
         if (completed.result === null)
           throw new Error(completed.error ?? 'Managed command failed before completion');
+        rememberWindows();
         return {
           ...completed.result,
           ...toolOutput,
@@ -724,6 +732,7 @@ export function registerCommandRunnerTool(
         const result = await commandRunner.run(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
+        rememberWindows();
         return {
           ...result,
           ...toolOutput,
