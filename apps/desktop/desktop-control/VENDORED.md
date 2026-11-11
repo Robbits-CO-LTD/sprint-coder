@@ -38,7 +38,7 @@ build にも同梱にも使わないファイル（2026-11-11）。
 
 ## 変えたファイル（Apache License 2.0 の 4 条 b）
 
-`skills` は 1 つも変えていない。変えたのは次のファイルだけ。
+`skills` は 1 つも変えていない。変えた・足したのは次のファイルだけ。
 
 | ファイル | 変えた点 |
 | --- | --- |
@@ -47,7 +47,9 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `Cargo.lock` | 上の 2 つの変更に合わせて、cargo が自動で落とした分だけ（`cargo update` はしていない）。macOS・Linux・FFI の 3 つの crate と、それらだけが使っていた 64 の package が消えた（追加・版の変更は無し）。残った 99 の package の版と checksum は元のまま |
 | `crates/windows/src/tree/automation.rs` | 1 行目に変更の注記を足した。UI Automation の client を作る所（`create_bounded_client`）で `SetAutoSetFocus(false)` を呼ぶようにした（失敗したら client を作らずにエラーを返す。そのための `auto_set_focus_error` を足した）。既定の有効のままだと、`set-value`・`clear`・`click`・`toggle`・`expand`・`select` などの pattern の呼び出しが、対象にキーボードのフォーカスを移し、対象の窓を前面に出していた。`focus`・`focus-window`・`--headed` の入力は、自分で前面に出すので変わらない |
 | `crates/windows/src/tree/automation_tests.rs` | 1 行目に変更の注記を足した。配る client の `AutoSetFocus` が切れていることを確かめる試験 `the_shipped_client_does_not_move_focus_before_pattern_calls` を足した |
-| `crates/windows/src/system/launch.rs` | 1 行目に変更の注記を足した。`--activate` を付けない `launch` で、起動したアプリが前面を取り、前面の窓の上に重なっていた（Windows では `--activate` が使われていなかった）。`ForegroundGuard` を足し、起動の間は `LockSetForegroundWindow` で前面を固定し（このプロセスが終われば Windows が解く）、窓が見つかったら固定を解いて、起動の前に前面だった窓のすぐ下へ `SetWindowPos`（`SWP_NOACTIVATE`。起動先が止まっていても待たないよう `SWP_ASYNCWINDOWPOS` も付ける）で置く。固定を解いた直後に起動したアプリが前面を取っていたら、前の窓へ戻す。ただし固定を解く前に前面が前の窓から変わっていたら（利用者のクリックや Alt+Tab、前の窓が閉じた・最小化された）、戻すことも並べ替えることもしない。固定が取れなかった時も同じ（利用者の操作と区別できないため。固定が取れないのはこのプロセスに前面を変える権利が無い時で、起動したアプリも自分から前面を取れず、前の窓へ戻すこともできない）。前の窓が最小化されている時は、前面のまま残っていても、戻すことも並べ替えることもしない（並べ替えると、起動した窓がすべての窓の後ろに沈むため）。この判断を `may_restore_foreground` に切り出し、その unit test を同じファイルに足した。`--activate` の時は何もしない |
+| `crates/windows/src/system/launch.rs` | 1 行目に変更の注記を足した。`--activate` を付けない `launch` で、起動したアプリが前面を取り、前面の窓の上に重なっていた（Windows では `--activate` が使われていなかった）。`ForegroundGuard` を足し、起動の間は `LockSetForegroundWindow` で前面を固定し（このプロセスが終われば Windows が解く）、窓が見つかったら固定を解いて、起動の前に前面だった窓のすぐ下へ `SetWindowPos`（`SWP_NOACTIVATE`。起動先が止まっていても待たないよう `SWP_ASYNCWINDOWPOS` も付ける）で置く。固定を解いた直後に起動したアプリが前面を取っていたら、前の窓へ戻す。ただし固定を解く前に前面が前の窓から変わっていたら（利用者のクリックや Alt+Tab、前の窓が閉じた・最小化された）、戻すことも並べ替えることもしない。固定が取れなかった時も同じ（利用者の操作と区別できないため。固定が取れないのはこのプロセスに前面を変える権利が無い時で、起動したアプリも自分から前面を取れず、前の窓へ戻すこともできない）。前の窓が最小化されている時は、前面のまま残っていても、戻すことも並べ替えることもしない（並べ替えると、起動した窓がすべての窓の後ろに沈むため）。この判断を `may_restore_foreground` に切り出し、その unit test を同じファイルに足した。`--activate` の時は何もしない。また、起動したプロセスが自分では窓を出さずに終わる時（電卓の `calc.exe` は、shell に packaged の電卓を起動させてすぐ終わり、窓は親子の関係の無い `CalculatorApp.exe` が出す）、そのプロセスの窓を期限（既定 30 秒）まで待ち続け、その間ずっと前面を固定していた。新しい処理（`observe_launched_window`）では、起動したプロセスが動いている間は今までどおり自分の窓だけを待ち、終わった後は、そのプロセスの子孫（下の `launch_handoff.rs`）の窓だけを受け取り、生きている子孫が無ければすぐに窓なしで返して、`suggestion` に「窓は別のプロセスが出した可能性がある。`list-windows` で探す」を入れる。同じ頃に現れただけの別のアプリの窓は受け取らない。このため `CreateProcessW` が返したプロセスの handle を閉じずに持つ（pid の再利用を防ぐ）。`ForegroundGuard` の並べ替えと前面の戻しは、起動したプロセスの窓だけでなく、結び付けた子孫の窓（shell が枠で包む app なら、枠の中の app のプロセス）にも効くようにした（`window_is_owned_by`） |
+| `crates/windows/src/system/launch_handoff.rs`（新しく足した） | 起動したプロセスが終わった後に、そのプロセスが起動したと証明できるプロセス（子孫）を探す。ToolHelp の親の pid と、作られた時刻が親の生きていた間にあることで結び付け、親の handle を持って pid の再利用を防ぐ。子孫の窓は、`process_instance` が一致するものだけを受け取る |
+| `crates/windows/src/system/launch_handoff_tests.rs`（新しく足した） | 上の試験。時刻での親子の判断、窓の受け取り（別のプロセス・instance の違う窓は受け取らない）、実物の `cmd.exe` で「子を残さずに終わる」「子を起動して終わる」の 2 つを確かめる |
 | `crates/windows/src/system/launch_live_tests.rs` | 1 行目に変更の注記を足した。`--activate` を付けない起動で、起動した窓が前面にならず、前面だった窓より下にあることを確かめる試験 `a_background_launch_keeps_the_foreground_and_stays_below_it` を足した（並べ替えは非同期なので、順番は最大 2 秒、50 ms ごとに見直して確かめる） |
 
 ## build と試験
