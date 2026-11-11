@@ -21,6 +21,7 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { GraphRenderService } from './graph-render';
+import { reportDesktopControlAvailability } from './desktop-control';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
@@ -175,6 +176,7 @@ if (squirrelStartup || !hasLock) {
         return workspace.roots.find((root) => root.rootId === rootId) ?? null;
       });
       await persistence.reconcileProjectFolderIdentities(projectFolderIdentity);
+      reportDesktopControlAvailability();
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
