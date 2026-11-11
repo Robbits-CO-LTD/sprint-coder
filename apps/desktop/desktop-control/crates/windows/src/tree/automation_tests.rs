@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 const E_ACCESSDENIED_HRESULT: i32 = 0x8007_0005_u32 as i32;
@@ -280,6 +281,22 @@ mod windows_only {
             unsafe { bounded.ConnectionTimeout() }.expect("a connection timeout is set"),
             crate::tree::automation::CONNECTION_TIMEOUT_MS
         );
+    }
+
+    /// Desktop control (desktop-control) addition: the shipped client has
+    /// AutoSetFocus off, so a pattern call such as ValuePattern.SetValue does
+    /// not move keyboard focus or the foreground window to its target.
+    #[test]
+    fn the_shipped_client_does_not_move_focus_before_pattern_calls() {
+        use windows::Win32::UI::Accessibility::{IUIAutomation, IUIAutomation2};
+        use windows::core::Interface;
+        bootstrap();
+        let client = automation_client().expect("a client");
+        let raw: IUIAutomation = client.as_ref().clone();
+        let bounded: IUIAutomation2 = raw.cast().expect("IUIAutomation2");
+
+        let auto_set_focus = unsafe { bounded.AutoSetFocus() }.expect("AutoSetFocus is readable");
+        assert!(!auto_set_focus.as_bool());
     }
 
     /// The race Greptile named: a target that answers the pump probe and then
