@@ -759,6 +759,18 @@ export class ApprovalCoordinator {
     return result.approval;
   }
 
+  /**
+   * The Runtime finished its Turn while cards of that Turn were still unanswered — a CLI does not
+   * have to wait for a tool call it issued (issue #1170). Nobody can use those decisions any more, so
+   * each card is canceled exactly as for an aborted call: no decision, no permit or grant, the call
+   * is told `approval_canceled` and never runs, the cancellation is published so the card leaves the
+   * screen, and once no card is pending the Turn leaves `waiting_approval` for `executing`.
+   */
+  cancelUnansweredForTurn(taskId: string, turnId: string): void {
+    for (const [id, waiter] of [...this.waiters.entries()])
+      if (waiter.taskId === taskId && waiter.turnId === turnId) this.cancelForAbortedCall(id);
+  }
+
   turnEnded(taskId: string, turnId: string, reason: 'canceled' | 'finished'): void {
     const ended = this.options.persistence.endTurnApprovals?.(taskId, turnId, reason);
     const ids =

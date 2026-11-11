@@ -34,12 +34,19 @@ export function describeRecovery(recovery: DatabaseRecovery | null): string | nu
   return parts.length === 0 ? null : parts.join(' / ');
 }
 
-/** A connection failure worth surfacing, or null for ordinary idle/running states. */
+/**
+ * A connection failure worth surfacing, or null for ordinary idle/running states. A failure that
+ * names its Task is the reason that one Turn failed, so it is shown only in that Task: another Task
+ * whose Runtime has not failed must not read it as its own (issue #1170).
+ */
 export function describeConnection(
   status: RuntimeStatus | null,
   fallbackKind: RuntimeStatus['kind'],
+  selectedTaskId?: string | null,
 ): { tone: 'failed'; text: string } | null {
   if (status?.state !== 'failed') return null;
+  if (status.taskId !== null && selectedTaskId !== undefined && status.taskId !== selectedTaskId)
+    return null;
   const kind = status?.kind ?? fallbackKind;
   const label = RUNTIME_LABEL[kind];
   return {
@@ -59,9 +66,10 @@ export function SurfaceFooter({ variant = 'main' }: { variant?: 'main' | 'node' 
   const acknowledgeRecovery = useAppStore((s) => s.acknowledgeRecovery);
   const runtimeStatus = useAppStore((s) => s.runtimeStatus);
   const runtimeKind = useAppStore((s) => s.runtime.kind);
+  const selectedTaskId = useAppStore((s) => s.selectedTaskId);
 
   const recoveryText = recoveryAcknowledged ? null : describeRecovery(recovery);
-  const connection = describeConnection(runtimeStatus, runtimeKind);
+  const connection = describeConnection(runtimeStatus, runtimeKind, selectedTaskId);
 
   if (recoveryText === null && connection === null) return null;
 

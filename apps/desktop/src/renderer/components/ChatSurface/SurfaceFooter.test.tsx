@@ -129,6 +129,26 @@ describe('describeConnection', () => {
     ).toEqual({ tone: 'failed', text: 'Codex: 接続が失われました' });
   });
 
+  it("shows a Turn's failure only in its own Task (issue #1170)", () => {
+    const failed = {
+      kind: 'codex' as const,
+      state: 'failed' as const,
+      taskId: 't1',
+      turnId: 'turn-1',
+      diagnosticId: null,
+      errorCode: 'RUNTIME_PROTOCOL_ERROR',
+      userMessage: 'Runtime Hostから無効なイベントを受信しました。',
+    };
+    expect(describeConnection(failed, 'codex', 't1')).toEqual({
+      tone: 'failed',
+      text: 'Codex: Runtime Hostから無効なイベントを受信しました。',
+    });
+    expect(describeConnection(failed, 'codex', 't2')).toBeNull();
+    expect(describeConnection(failed, 'codex', null)).toBeNull();
+    // A failure that names no Task is not about any one Task, and stays visible everywhere.
+    expect(describeConnection({ ...failed, taskId: null }, 'codex', 't2')).not.toBeNull();
+  });
+
   it('prefers the status kind over the selected kind', () => {
     // A failure that arrives just after the user switched Runtime must still name the Runtime that
     // actually failed.
