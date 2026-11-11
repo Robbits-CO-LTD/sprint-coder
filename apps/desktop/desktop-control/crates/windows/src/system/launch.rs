@@ -38,12 +38,83 @@ pub(crate) fn launch_app_impl(
         return Ok(attached);
     }
     let guard = ForegroundGuard::begin(options.activate);
-    let (pid, token) = create_process(&executable, options, deadline)?;
-    let window = observe_window(pid, &token, options, deadline)?;
+    let (pid, token, process) = create_process(&executable, options, deadline)?;
+    let lineage = launch_handoff::Lineage::new(pid, &token, process);
+    let observed = observe_launched_window(pid, &token, lineage, options, deadline)?;
     if let Some(guard) = guard {
-        guard.finish(pid, window.as_ref());
+        guard.finish(&observed.owners, observed.window.as_ref());
     }
-    Ok(launch_result(id, pid, token, window))
+    let mut result = launch_result(id, pid, token, observed.window);
+    if observed.exited_without_window {
+        result.suggestion = Some(launch_handoff::EXITED_WITHOUT_WINDOW.to_string());
+    }
+    Ok(result)
+}
+
+/// What watching a fresh launch found: the window, if one can be tied to the
+/// launch; the processes that may own it (the launched one, then any
+/// descendant once it exited); and whether the launched process exited with
+/// no window tied to it.
+struct LaunchObservation {
+    window: Option<WindowInfo>,
+    owners: Vec<ProcessId>,
+    exited_without_window: bool,
+}
+
+/// [`observe_window`] for a process this launch created. While the process
+/// runs, only its own window counts, exactly as before. Once it has exited, a
+/// window of a live descendant counts instead (see `launch_handoff`), and with
+/// no live descendant the watch ends at once instead of at the deadline.
+fn observe_launched_window(
+    pid: ProcessId,
+    process_instance: &str,
+    mut lineage: launch_handoff::Lineage,
+    options: &LaunchOptions,
+    deadline: Deadline,
+) -> Result<LaunchObservation, AdapterError> {
+    let mut poll_interval = Duration::from_millis(50);
+    loop {
+        if let Some(window) = observe_window_once(pid, process_instance, deadline)? {
+            return Ok(LaunchObservation {
+                window: Some(window),
+                owners: vec![pid],
+                exited_without_window: false,
+            });
+        }
+        let exited = lineage.launched_has_exited();
+        if exited {
+            lineage.refresh();
+            let live = lineage.live_descendants();
+            if live.is_empty() {
+                return Ok(LaunchObservation {
+                    window: None,
+                    owners: lineage.pids(),
+                    exited_without_window: true,
+                });
+            }
+            let window =
+                launch_handoff::descendant_window(&live, deadline).map_err(after_launch)?;
+            if window.is_some() {
+                return Ok(LaunchObservation {
+                    window,
+                    owners: lineage.pids(),
+                    exited_without_window: false,
+                });
+            }
+        }
+        if !should_poll_after_first_observation(options.timeout_ms)
+            || deadline.remaining().is_zero()
+        {
+            return Ok(LaunchObservation {
+                window: None,
+                owners: lineage.pids(),
+                exited_without_window: exited,
+            });
+        }
+        let remaining = deadline.remaining();
+        std::thread::sleep(poll_interval.min(remaining));
+        poll_interval = (poll_interval * 3 / 2).min(Duration::from_millis(250));
+    }
 }
 
 /// Keeps a launch without `--activate` in the background.
@@ -79,7 +150,9 @@ impl ForegroundGuard {
         Some(Self { prior, locked })
     }
 
-    fn finish(mut self, pid: ProcessId, window: Option<&WindowInfo>) {
+    /// `owners` are the processes the launch is tied to: the launched one,
+    /// and its descendants when the window came from one of them.
+    fn finish(mut self, owners: &[ProcessId], window: Option<&WindowInfo>) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsIconic, IsWindow,
             SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
@@ -97,7 +170,7 @@ impl ForegroundGuard {
             return;
         }
         let foreground = unsafe { GetForegroundWindow() };
-        if foreground != prior && window_pid(foreground) == Some(pid) {
+        if foreground != prior && window_is_owned_by(foreground, owners) {
             unsafe { SetForegroundWindow(prior) };
         }
         let Some(window) = window else {
@@ -109,7 +182,7 @@ impl ForegroundGuard {
         if handle.is_null() || handle == prior || prior_is_topmost {
             return;
         }
-        if window_pid(handle) == Some(pid) {
+        if window_is_owned_by(handle, owners) {
             unsafe {
                 SetWindowPos(
                     handle,
@@ -172,6 +245,19 @@ fn window_pid(handle: windows_sys::Win32::Foundation::HWND) -> Option<ProcessId>
     (pid != 0).then(|| ProcessId::from(pid))
 }
 
+/// Whether a top-level window belongs to one of `owners`: by the thread that
+/// owns it, or, for a frame the shell hosts an app in, by the hosted app's
+/// process (the pid the window inventory reports for that frame).
+#[cfg(target_os = "windows")]
+fn window_is_owned_by(handle: windows_sys::Win32::Foundation::HWND, owners: &[ProcessId]) -> bool {
+    let owned = |pid: Option<ProcessId>| pid.is_some_and(|pid| owners.contains(&pid));
+    owned(window_pid(handle))
+        || (!handle.is_null()
+            && owned(super::window::frame_identity::hosted_application_pid(
+                handle,
+            )))
+}
+
 #[cfg(not(target_os = "windows"))]
 struct ForegroundGuard;
 
@@ -181,7 +267,7 @@ impl ForegroundGuard {
         None
     }
 
-    fn finish(self, _pid: ProcessId, _window: Option<&WindowInfo>) {}
+    fn finish(self, _owners: &[ProcessId], _window: Option<&WindowInfo>) {}
 }
 
 /// The window a launch actually caused, or `None`. A process that presents no
@@ -322,7 +408,7 @@ fn create_process(
     executable: &Path,
     options: &LaunchOptions,
     deadline: Deadline,
-) -> Result<(ProcessId, String), AdapterError> {
+) -> Result<(ProcessId, String, launch_handoff::Process), AdapterError> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
@@ -380,10 +466,10 @@ fn create_process(
         )));
     }
     let pid = ProcessId::from(information.dwProcessId);
-    unsafe {
-        CloseHandle(information.hThread);
-        CloseHandle(information.hProcess);
-    }
+    unsafe { CloseHandle(information.hThread) };
+    // Kept, not closed: holding it keeps the pid from being reused while the
+    // launch tells its descendants apart (see `launch_handoff`).
+    let process = launch_handoff::Process::from_handle(information.hProcess);
     let token = process_identity::token_for_pid(pid)
         .map_err(after_launch)?
         .ok_or_else(|| {
@@ -395,7 +481,7 @@ fn create_process(
                 .with_details(serde_json::json!({ "pid": pid, "complete": false })),
             )
         })?;
-    Ok((pid, token))
+    Ok((pid, token, process))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -403,7 +489,7 @@ fn create_process(
     _executable: &Path,
     _options: &LaunchOptions,
     _deadline: Deadline,
-) -> Result<(ProcessId, String), AdapterError> {
+) -> Result<(ProcessId, String, launch_handoff::Process), AdapterError> {
     Err(AdapterError::not_supported("launch_app"))
 }
 
@@ -541,3 +627,6 @@ mod launch_lease_isolation_tests;
 
 #[path = "launch_attach.rs"]
 pub(crate) mod launch_attach;
+
+#[path = "launch_handoff.rs"]
+mod launch_handoff;
