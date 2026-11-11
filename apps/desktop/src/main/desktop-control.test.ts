@@ -8,6 +8,7 @@ import {
   desktopControlArgvRefusal,
   desktopControlEnvironment,
   desktopControlExpectedWindowOwner,
+  desktopControlLaunchByName,
   desktopControlStateFolder,
   isDesktopControlExecutable,
   isShippedDesktopControlPath,
@@ -743,5 +744,172 @@ describe('shipped desktop-control path', () => {
     expect(isShippedDesktopControlPath(PACKAGED, { ...packaged, contentDigest: digests({}) })).toBe(
       false,
     );
+  });
+});
+
+describe('desktop-control launch by a Start menu name', () => {
+  const roots = ['C:\\work\\repo'];
+  const RABBIT = 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe';
+  const files = new Set(
+    [
+      'C:\\Windows\\System32\\calc.exe',
+      'C:\\Windows\\System32\\charmap.exe',
+      RABBIT,
+      'C:\\Program Files\\Other\\other.exe',
+      'C:\\Program Files\\Viewer\\viewer.exe',
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'C:\\work\\repo\\build\\tool.exe',
+      'C:\\Program Files\\Script\\run.cmd',
+      'C:\\Program Files\\Rabbit Notes\\notes.exe',
+    ].map((path) => path.toLowerCase()),
+  );
+  const shortcut = (name: string, target: string, args = '') => ({ name, target, args });
+  const start = [
+    shortcut('RabbitMail', RABBIT),
+    // The same executable for all users and for this user is one target.
+    shortcut('rabbitmail ', '%ProgramFiles%\\RabbitMail\\rabbitmail-desktop.exe'),
+    shortcut('Rabbit Notes', 'C:\\Program Files\\Rabbit Notes\\notes.exe'),
+    shortcut('Twice', 'C:\\Program Files\\Other\\other.exe'),
+    shortcut('Twice', 'C:\\Program Files\\Viewer\\viewer.exe'),
+    shortcut('With Arguments', 'C:\\Program Files\\Other\\other.exe', '--profile x'),
+    shortcut('Script', 'C:\\Program Files\\Script\\run.cmd'),
+    shortcut('Chained', 'C:\\Users\\me\\Desktop\\RabbitMail.lnk'),
+    shortcut('Folder', 'C:\\Program Files\\RabbitMail'),
+    shortcut('Web', 'https://example.test/'),
+    shortcut('Unknown Variable', '%NOT_SET%\\other.exe'),
+    shortcut('Missing File', 'C:\\Program Files\\Gone\\gone.exe'),
+    shortcut(
+      'Windows PowerShell',
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    ),
+    shortcut('Workspace Tool', 'C:\\work\\repo\\build\\tool.exe'),
+  ];
+  const lookup = {
+    platform: 'win32' as const,
+    realpath: (path: string) => path,
+    environment: { SystemRoot: 'C:\\Windows', PROGRAMFILES: 'C:\\Program Files' },
+    isFile: (path: string) => files.has(path.toLowerCase()),
+    startMenuShortcuts: () => start,
+  };
+  const byName = (
+    argv: string[],
+    given: Parameters<typeof desktopControlLaunchByName>[2] = lookup,
+  ) => desktopControlLaunchByName(argv, roots, given);
+  const refusalOf = (argv: string[]) => {
+    const result = byName(argv);
+    return result !== null && 'refusal' in result ? result.refusal : null;
+  };
+
+  it('replaces a name that one Start menu executable answers with its absolute path', () => {
+    expect(byName(['launch', 'RabbitMail'])).toEqual({ argv: ['launch', RABBIT] });
+    // Letter case and surrounding spaces do not matter; the options stay where they were.
+    expect(byName(['launch', '--timeout', '5000', ' rabbitmail ', '--no-attach'])).toEqual({
+      argv: ['launch', '--timeout', '5000', RABBIT, '--no-attach'],
+    });
+    expect(byName(['launch', '--activate', 'RabbitMail'])).toEqual({
+      argv: ['launch', '--activate', RABBIT],
+    });
+    // The replaced arguments pass every check of an absolute path.
+    expect(desktopControlArgvRefusal(['launch', RABBIT], roots, lookup)).toBeNull();
+  });
+
+  it('keeps names of the system folders and absolute paths as they are', () => {
+    for (const argv of [
+      ['launch', 'calc'],
+      ['launch', 'charmap.exe'],
+      ['launch', RABBIT],
+      ['launch', 'C:\\Program Files\\Other\\other.exe'],
+      ['list-windows', '--app', 'RabbitMail'],
+      ['launch', '--help'],
+    ])
+      expect(byName(argv)).toBeNull();
+  });
+
+  it('does nothing off Windows or when the Start menu is not read', () => {
+    expect(byName(['launch', 'RabbitMail'], { ...lookup, platform: 'darwin' })).toBeNull();
+    expect(
+      byName(['launch', 'RabbitMail'], { ...lookup, startMenuShortcuts: () => null }),
+    ).toBeNull();
+  });
+
+  it('refuses a name it cannot find, naming similar Start menu apps', () => {
+    expect(refusalOf(['launch', 'RabbitMale'])).toBe(
+      'デスクトップ操作の実行を拒否した: 「RabbitMale」という名前のアプリが、Windows の標準のフォルダーにもスタートメニューにも無い（スタートメニューにある似た名前: RabbitMail）。そのどれかの名前か、実行ファイルの絶対パスで launch する。',
+    );
+    expect(refusalOf(['launch', 'Rabbit'])).toContain('似た名前: RabbitMail、Rabbit Notes）');
+    // Shortcuts that could not be launched are not offered.
+    expect(refusalOf(['launch', 'Twise'])).not.toContain('Twice');
+    expect(refusalOf(['launch', 'Windows PowerShel'])).not.toContain('Windows PowerShell');
+    expect(refusalOf(['launch', 'zzzzzzzz'])).toBe(
+      'デスクトップ操作の実行を拒否した: 「zzzzzzzz」という名前のアプリが、Windows の標準のフォルダーにもスタートメニューにも無い（似た名前も無い）。実行ファイルの絶対パスで launch する。',
+    );
+    const many = Array.from({ length: 8 }, (_, at) =>
+      shortcut(`Rabbit ${at}`, 'C:\\Program Files\\Rabbit Notes\\notes.exe'),
+    );
+    const listed = byName(['launch', 'Rabbit'], { ...lookup, startMenuShortcuts: () => many });
+    expect(listed).toMatchObject({ refusal: expect.stringContaining('Rabbit 4）') });
+    expect(listed).not.toMatchObject({ refusal: expect.stringContaining('Rabbit 5') });
+  });
+
+  it('refuses a name whose shortcuts point to different executables', () => {
+    expect(refusalOf(['launch', 'Twice'])).toBe(
+      'デスクトップ操作の実行を拒否した: スタートメニューの「Twice」が違う実行ファイルを指している（C:\\Program Files\\Other\\other.exe、C:\\Program Files\\Viewer\\viewer.exe）。起動するものの絶対パスで launch する。',
+    );
+  });
+
+  it('uses no shortcut with arguments, or to anything but an existing .exe at an absolute path', () => {
+    for (const name of [
+      'With Arguments',
+      'Script',
+      'Chained',
+      'Folder',
+      'Web',
+      'Unknown Variable',
+      'Missing File',
+    ])
+      expect(refusalOf(['launch', name])).toBe(
+        `デスクトップ操作の実行を拒否した: スタートメニューの「${name}」は、引数の無い .exe へのショートカットではないので使えない。実行ファイルの絶対パスで launch する。`,
+      );
+  });
+
+  it('judges the executable a shortcut points to as an absolute path, by its own name', () => {
+    expect(refusalOf(['launch', 'Windows PowerShell'])).toBe(
+      'デスクトップ操作の実行を拒否した: powershell.exe は起動できない（端末・shell・設定の道具）。',
+    );
+    expect(refusalOf(['launch', 'Workspace Tool'])).toBe(
+      'デスクトップ操作の実行を拒否した: launch で Workspace の中の実行ファイルは起動できない。',
+    );
+  });
+
+  it('replaces each launch of a batch the same way, and refuses the batch on any refusal', () => {
+    const batch = (entries: unknown) => ['batch', JSON.stringify(entries)];
+    expect(
+      byName([
+        'batch',
+        '--stop-on-error',
+        JSON.stringify([
+          { command: 'launch', args: { app: 'RabbitMail', no_attach: true } },
+          { command: 'launch', args: { app: 'calc' } },
+          { command: 'list-windows', args: { app: 'RabbitMail' } },
+        ]),
+      ]),
+    ).toEqual({
+      argv: [
+        'batch',
+        '--stop-on-error',
+        JSON.stringify([
+          { command: 'launch', args: { app: RABBIT, no_attach: true } },
+          { command: 'launch', args: { app: 'calc' } },
+          { command: 'list-windows', args: { app: 'RabbitMail' } },
+        ]),
+      ],
+    });
+    expect(byName(batch([{ command: 'launch', args: { app: 'calc' } }]))).toBeNull();
+    expect(byName(batch([{ command: 'launch', args: { app: 'Twice' } }]))).toMatchObject({
+      refusal: expect.stringContaining('違う実行ファイル'),
+    });
+    expect(
+      byName(batch([{ command: 'launch', args: { app: 'Windows PowerShell' } }])),
+    ).toMatchObject({ refusal: expect.stringContaining('powershell.exe は起動できない') });
   });
 });

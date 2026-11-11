@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     SELECT_LABEL, SelectOps, SelectPlan, push_order, resolve_select_verification, select_judged_for,
 };
@@ -201,5 +202,45 @@ fn container_value_verification_outranks_is_selected() {
         resolve_select_verification(Some(None), Some(true)),
         Some(true),
         "a withheld container value falls back to the is-selected read"
+    );
+}
+
+#[test]
+fn a_closed_list_never_makes_an_unverified_selection_look_verified() {
+    use super::close_outcome;
+    use crate::actions::chain::build_step;
+    use crate::actions::disclosure::COLLAPSE_LABEL;
+    use agent_desktop_core::{Action, ActionResult, DeliverySemantics};
+
+    let summary = |selection: DeliveryOutcome, closed: bool| {
+        let verified = build_step(SELECT_LABEL, selection).verified();
+        let steps = vec![
+            build_step(SELECT_LABEL, selection),
+            build_step(COLLAPSE_LABEL, close_outcome(verified, true, closed)),
+        ];
+        ActionResult::from_execution(&Action::Select("v".into()), steps).disposition()
+    };
+    assert_eq!(
+        summary(DeliveryOutcome::DeliveredUnobserved, true),
+        DeliverySemantics::delivered_unverified(),
+        "an unobserved selection stays unverified after a successful close"
+    );
+    assert_eq!(
+        summary(DeliveryOutcome::DeliveredUnverified, true),
+        DeliverySemantics::delivered_unverified()
+    );
+    assert_eq!(
+        summary(DeliveryOutcome::DeliveredVerified, true),
+        DeliverySemantics::delivered_verified(),
+        "a verified selection with a closed list is verified, as before"
+    );
+    assert_eq!(
+        summary(DeliveryOutcome::DeliveredVerified, false),
+        DeliverySemantics::delivered_unverified(),
+        "a list left open is still reported"
+    );
+    assert_eq!(
+        close_outcome(Some(true), false, false),
+        DeliveryOutcome::NotDelivered
     );
 }

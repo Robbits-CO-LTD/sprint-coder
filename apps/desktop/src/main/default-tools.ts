@@ -12,6 +12,7 @@ import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } f
 import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
+  desktopControlLaunchByName,
   isDesktopControlExecutable,
 } from './desktop-control';
 import {
@@ -467,14 +468,16 @@ export function registerCommandRunnerTool(
           : undefined;
       if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
         throw new Error('CommandRunner Turn Workspace identity is incomplete');
-      const spec = await prepareExecutionSpec({
-        rootId: root.rootId,
-        workspacePath: root.path,
-        ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-        executable: request.executable,
-        argv: request.argv,
-        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-      });
+      const prepareSpec = (argv: readonly string[]) =>
+        prepareExecutionSpec({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          executable: request.executable,
+          argv: [...argv],
+          ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+        });
+      let spec = await prepareSpec(request.argv);
       await rejectWindowsSandboxedNodeTestIsolationWithVersion(
         spec.absoluteExecutable,
         spec.argv,
@@ -487,11 +490,28 @@ export function registerCommandRunnerTool(
         spec.absoluteExecutable,
         executionSpecContentDigest(spec),
       );
-      const desktopControlRefusal = desktopControl
+      let desktopControlRefusal = desktopControl
         ? desktopControlArgvRefusal(spec.argv, roots)
         : null;
       if (desktopControlRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      // A `launch <name>` the binary would not find in the system folders is sealed with the
+      // absolute path the Start menu names instead, before the card exists, so the card shows and
+      // the run starts that path. The new spec is judged again as the first one was.
+      const byName = desktopControl ? desktopControlLaunchByName(spec.argv, roots) : null;
+      if (byName !== null && 'refusal' in byName)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', byName.refusal);
+      if (byName !== null) {
+        spec = await prepareSpec(byName.argv);
+        if (!isDesktopControlExecutable(spec.absoluteExecutable, executionSpecContentDigest(spec)))
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'デスクトップ操作の実行ファイルが準備の途中で変わった。',
+          );
+        desktopControlRefusal = desktopControlArgvRefusal(spec.argv, roots);
+        if (desktopControlRefusal !== null)
+          throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      }
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,

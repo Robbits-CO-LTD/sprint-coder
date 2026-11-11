@@ -315,6 +315,7 @@ import {
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import { configureDesktopControlStateRoot } from './desktop-control';
+import { configureStartMenuShortcutReader } from './desktop-control-start-menu';
 import {
   promptWriteAccess,
   relativizeWorkspacePath,
@@ -1140,6 +1141,9 @@ export class IpcRouter {
     configureApprovalDigestKey(app.getPath('userData'));
     // Desktop-control runs keep their snapshots here, where the approval card reads part names.
     configureDesktopControlStateRoot(join(app.getPath('userData'), 'desktop-control'));
+    // `launch <name>` of desktop control looks the name up in the Start menu's shortcuts.
+    if (process.platform === 'win32')
+      configureStartMenuShortcutReader((path) => shell.readShortcutLink(path));
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
