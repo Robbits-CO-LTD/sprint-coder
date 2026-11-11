@@ -3,9 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlExpectedWindowOwner,
   desktopControlLaunchByName,
   desktopControlStateFolder,
   isDesktopControlExecutable,
@@ -158,6 +160,38 @@ describe('desktop-control run environment', () => {
       PATH: 'C:\\other',
       AGENT_DESKTOP_HOME: desktopControlStateFolder(),
     });
+  });
+
+  it('always drops the expected window owner the caller chose, and sets only the one Main gives', () => {
+    const chosen = {
+      SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER: '1:windows-proc-v1:1:1',
+      sprint_coder_desktop_expected_window_owner: '2:windows-proc-v1:2:2',
+      Sprint_Coder_Desktop_Expected_Window_Owner: '3:windows-proc-v1:3:3',
+      OTHER: 'kept',
+    };
+    const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+    expect(desktopControlEnvironment(chosen, [], lookup)).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
+    expect(
+      desktopControlEnvironment(chosen, [], lookup, '64724:windows-proc-v1:13438878845:5256581'),
+    ).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+      [DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE]: '64724:windows-proc-v1:13438878845:5256581',
+    });
+    expect(desktopControlExpectedWindowOwner({ pid: 64724, instance: 'windows-proc-v1:1:2' })).toBe(
+      '64724:windows-proc-v1:1:2',
+    );
+    for (const owner of [
+      { pid: 0, instance: 'windows-proc-v1:1:2' },
+      { pid: 2 ** 32, instance: 'windows-proc-v1:1:2' },
+      { pid: 1.5, instance: 'windows-proc-v1:1:2' },
+      { pid: 1, instance: '' },
+      { pid: 1, instance: 'windows proc' },
+    ])
+      expect(desktopControlExpectedWindowOwner(owner)).toBeNull();
   });
 });
 

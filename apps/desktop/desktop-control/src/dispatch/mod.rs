@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 mod app_window;
 mod clipboard;
 mod cursor_overlay;
@@ -11,6 +12,7 @@ mod parse;
 mod session;
 mod system;
 mod trace;
+mod window_owner;
 
 #[cfg(test)]
 mod test_support;
@@ -35,6 +37,8 @@ pub(crate) fn dispatch(
     permission_report: &PermissionReport,
     context: &CommandContext,
 ) -> Result<Value, AppError> {
+    // Before anything is read or done, and for every step of a batch, which comes through here.
+    window_owner::check(&cmd, adapter)?;
     let read_only = !cmd.is_mutating();
     let stdin = crate::cli_args::stdin::input(&mut cmd).is_some();
     let result = dispatch_command(cmd, adapter, permission_report, context)

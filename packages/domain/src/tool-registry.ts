@@ -116,6 +116,11 @@ export type ToolExecutionControl = Readonly<{
   signal?: AbortSignal;
   authorizationDecision?: string;
   userInputSelection?: number;
+  /**
+   * For a desktop-control run allowed by an app-wide Task grant: the `<pid>:<process instance>`
+   * any window id it names must still belong to when the executable runs.
+   */
+  desktopControlExpectedWindowOwner?: string;
 }>;
 
 export type ToolResourceClaim = Readonly<{

@@ -295,6 +295,7 @@ type AppState = {
     approvalId: string,
     decision: ApprovalDecision,
     userInputSelection?: number,
+    grantScope?: 'app',
   ): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(projectId?: string): Promise<TaskSummary | null>;
@@ -1702,6 +1703,7 @@ export const useAppStore = create<AppState>((set, get) => {
       approvalId: string,
       decision: ApprovalDecision,
       userInputSelection?: number,
+      grantScope?: 'app',
     ) {
       if (!window.sprintCoder || typeof window.sprintCoder.approvals?.resolve !== 'function')
         return;
@@ -1716,6 +1718,7 @@ export const useAppStore = create<AppState>((set, get) => {
           approvalId,
           decision,
           ...(userInputSelection === undefined ? {} : { userInputSelection }),
+          ...(grantScope === undefined ? {} : { grantScope }),
           expectedRevision: approval.revision,
           expectedPolicyEpoch: approval.policyEpoch,
           challenge: approval.challenge,

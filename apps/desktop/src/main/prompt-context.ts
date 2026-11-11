@@ -343,6 +343,7 @@ function renderDesktopControl(command: string): string[] {
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',
     '- 操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない。文字は set-value、選択は select、メニューは expand か click で入れる。前面を使う操作（--headed、focus-window、restore、maximize、press、type、focus など）は利用者がはっきり頼んだ時だけ使う。裏の操作が失敗しても前面の操作で取り返さず、できなかったと報告する。最小化した窓は操作できない（restore は前面を使う）。',
     '- 同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付け、利用者が元から開いていた窓には触らない。',
+    '- 操作の対象は ref か --window-id で指定する。利用者は承認カードで「このアプリは Task 中許可」を選べ、そのアプリへの読み取りと裏の操作は確認なしで進むが、対象を確かめられない実行・前面を使う操作・起動・終了は毎回確認になる。許可の有無で操作の進め方は変えない。',
     '- メニューが click で開かない時は expand を使い、開いた直後の中身は batch で expand と snapshot を続けて読む（batch の引数は [{"command":"expand","args":{"ref_id":"<ref>"}},{"command":"snapshot","args":{"window_id":"<id>"}}] の形）。',
     '- 端末（cmd・PowerShell・Windows Terminal・Terminal など）の窓を開くこと・操作すること、OS の設定アプリ、UAC・ログイン・パスワードの画面や欄、Sprint Coder 自身の窓の操作はしない。頼まれても断る。',
     '- コマンドの実行が目的なら、端末の窓を開かずに通常のコマンドの道具で実行する。',

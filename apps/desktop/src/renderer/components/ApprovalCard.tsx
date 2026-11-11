@@ -6,7 +6,7 @@ import { desktopModeLabel, desktopTargetText, desktopTextLabel } from '../lib/de
 type ApprovalCardProps = {
   approval: ApprovalSummary;
   busy: boolean;
-  onDecision: (decision: ApprovalDecision, userInputSelection?: number) => void;
+  onDecision: (decision: ApprovalDecision, userInputSelection?: number, grantScope?: 'app') => void;
 };
 
 export function ApprovalCard(props: ApprovalCardProps) {
@@ -209,6 +209,8 @@ function DesktopControlApprovalCard({
   const targetId = `${ids}-target`;
   const labelledBy = action.target === undefined ? headingId : `${headingId} ${targetId}`;
   const badge = desktopModeLabel(action);
+  // Offered by Main beside 「Task中許可」 only; Main refuses it for a card that did not offer it.
+  const appGrant = action.allowTaskGrant ? action.appGrant : undefined;
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -294,6 +296,15 @@ function DesktopControlApprovalCard({
           </div>
         </dl>
       </details>
+      {appGrant === undefined ? null : (
+        <p
+          id={`${ids}-app-note`}
+          className="approval-card__note"
+          data-testid="desktop-approval-app-grant-note"
+        >
+          {desktopAppGrantNote(appGrant.app)}
+        </p>
+      )}
       <div className="approval-card__actions">
         <button
           type="button"
@@ -318,6 +329,19 @@ function DesktopControlApprovalCard({
             Task中許可
           </button>
         ) : null}
+        {appGrant === undefined ? null : (
+          <button
+            data-testid="approval-allow-app-task"
+            type="button"
+            id={`${ids}-app`}
+            aria-labelledby={`${ids}-app ${labelledBy}`}
+            aria-describedby={`${ids}-app-note`}
+            disabled={busy}
+            onClick={() => onDecision('allow_task', undefined, 'app')}
+          >
+            このアプリは Task 中許可
+          </button>
+        )}
         <button
           className="danger"
           data-testid="approval-deny"
@@ -337,6 +361,11 @@ function DesktopControlApprovalCard({
       ) : null}
     </section>
   );
+}
+
+/** What 「このアプリは Task 中許可」 allows, and what it leaves on its own card. */
+function desktopAppGrantNote(app: string): string {
+  return `この Task の間、「${app}」のすべての窓（前から開いていた窓も含む）で、読み取りと、裏での操作（押す・値を入れる・選ぶ・窓の移動や大きさの変更など）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。`;
 }
 
 function badgeFor(step: Pick<DesktopAction, 'mode' | 'kind'>) {

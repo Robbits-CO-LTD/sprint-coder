@@ -65,6 +65,7 @@ export class ManagedCommandSessions {
       | 'onChunk'
       | 'onBatch'
       | 'desktopControlWorkspaceRoots'
+      | 'desktopControlExpectedWindowOwner'
     > = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
@@ -102,6 +103,9 @@ export class ManagedCommandSessions {
         ...(hooks.desktopControlWorkspaceRoots === undefined
           ? {}
           : { desktopControlWorkspaceRoots: hooks.desktopControlWorkspaceRoots }),
+        ...(hooks.desktopControlExpectedWindowOwner === undefined
+          ? {}
+          : { desktopControlExpectedWindowOwner: hooks.desktopControlExpectedWindowOwner }),
         onStarted: (startedProcess) => {
           const { executionId } = startedProcess;
           session.executionId = executionId;

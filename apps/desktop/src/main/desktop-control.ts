@@ -195,6 +195,7 @@ export function desktopControlEnvironment(
   environment: Readonly<Record<string, string>>,
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup = {},
+  expectedWindowOwner?: string,
 ): Readonly<Record<string, string>> {
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
@@ -204,10 +205,16 @@ export function desktopControlEnvironment(
   // otherwise a refmap the agent wrote elsewhere could name a different part on the card than the
   // one the run operates. The binary finds its default from HOME or USERPROFILE, which the caller
   // may also set, so the default is passed explicitly too.
+  // The owner a window id must still belong to is set by Main alone, for a run allowed by an
+  // app-wide Task grant (`expectedWindowOwner`); one the caller chose, in any letter case, is
+  // always dropped.
+  const owned = [DESKTOP_CONTROL_STATE_VARIABLE, DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE];
   const filtered = Object.entries(environment).filter(
-    ([key]) => (windows ? key.toUpperCase() : key) !== DESKTOP_CONTROL_STATE_VARIABLE,
+    ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
   );
   filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
+  if (expectedWindowOwner !== undefined)
+    filtered.push([DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE, expectedWindowOwner]);
   return Object.fromEntries(
     filtered.map(([key, value]) => {
       if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
@@ -235,6 +242,27 @@ export function desktopControlEnvironment(
 
 /** The variable the desktop-control binary 1.2.0 reads its state folder from (an absolute path). */
 const DESKTOP_CONTROL_STATE_VARIABLE = 'AGENT_DESKTOP_HOME';
+/**
+ * The variable the shipped desktop-control executable reads the expected owner of a window id
+ * from (`src/dispatch/window_owner.rs`), as `<pid>:<process instance>`. With it, every command that
+ * names a window id fails before reading or doing anything unless that window belongs to exactly
+ * that process instance right now.
+ */
+export const DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE =
+  'SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER';
+
+/** That variable's value for a process, or `null` when it cannot be written in that form. */
+export function desktopControlExpectedWindowOwner(owner: {
+  pid: number;
+  instance: string;
+}): string | null {
+  return Number.isSafeInteger(owner.pid) &&
+    owner.pid > 0 &&
+    owner.pid <= 0xffff_ffff &&
+    /^[A-Za-z0-9:._-]{1,128}$/u.test(owner.instance)
+    ? `${owner.pid}:${owner.instance}`
+    : null;
+}
 let configuredStateRoot: string | null = null;
 
 /**
@@ -927,18 +955,25 @@ function launchTargetRefusal(
   }
   // A convenience for an obvious mistake, not a boundary: the card is.
   const base = app.split(/[\\/]/u).pop() ?? '';
+  if (desktopControlNamesTool(base))
+    return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
+  return null;
+}
+
+/**
+ * Whether an app or file name (no folder) names a terminal, shell, script host or settings tool,
+ * the kind `launch` refuses by name. Also used to keep such an app out of an app-wide Task grant.
+ */
+export function desktopControlNamesTool(base: string): boolean {
   const lower = base.toLowerCase();
   const extension = /\.[a-z0-9-]+$/u.exec(lower)?.[0] ?? '';
   const stem = ['.exe', '.com', '.app'].includes(extension)
     ? lower.slice(0, -extension.length)
     : lower;
   const names = [stem, ...stem.split('.')].map((name) => name.replace(/[^a-z0-9]/gu, ''));
-  if (
-    REFUSED_LAUNCH_EXTENSIONS.has(extension) ||
-    names.some((name) => REFUSED_LAUNCH_NAMES.has(name))
-  )
-    return refusal(`${base} は起動できない（端末・shell・設定の道具）`);
-  return null;
+  return (
+    REFUSED_LAUNCH_EXTENSIONS.has(extension) || names.some((name) => REFUSED_LAUNCH_NAMES.has(name))
+  );
 }
 
 function batchRefusal(

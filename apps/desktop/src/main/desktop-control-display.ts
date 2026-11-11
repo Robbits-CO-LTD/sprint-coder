@@ -250,12 +250,52 @@ const FRONT_ONLY_COMMANDS = new Set(['focus-window', 'restore', 'maximize', 'lau
 const TEXT_CUT_NOTE =
   '入れる文字が長いため、途中までを表示しています。全文は「詳細（実行内容）」で確かめてください。';
 
-type KnownWindow = Readonly<{ app: unknown; title: unknown }>;
+type KnownWindow = Readonly<{ app: unknown; title: unknown; pid: unknown; instance: unknown }>;
 const KNOWN_TASKS = 50;
 const KNOWN_WINDOWS_PER_TASK = 200;
 const OUTPUT_MAX_CHARACTERS = 1_048_576;
 // Per Task, the windows its desktop-control runs reported, oldest first.
 const knownWindows = new Map<string, Map<string, KnownWindow>>();
+// Per Task, the window ids the executable found owned by another process than the one an app-wide
+// grant expected (`window_owner_mismatch`): no record names their owner for the rest of the Task.
+const distrustedWindows = new Map<string, Set<string>>();
+
+/**
+ * Notes every window id a run's output reports as no longer owned by the expected process, as the
+ * shipped executable reports it (`SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER`), also inside a
+ * batch. Output in any other shape notes nothing; noting more only means more cards.
+ */
+function distrustMovedWindows(taskId: string, stdout: string): void {
+  try {
+    if (stdout.length > OUTPUT_MAX_CHARACTERS || !stdout.includes('window_owner_mismatch')) return;
+    const found: string[] = [];
+    const walk = (value: unknown, depth: number): void => {
+      if (depth > 8 || typeof value !== 'object' || value === null) return;
+      if (Array.isArray(value)) {
+        for (const item of value) walk(item, depth + 1);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      if (
+        record['kind'] === 'window_owner_mismatch' &&
+        typeof record['window_id'] === 'string' &&
+        WINDOW_ID.test(record['window_id'])
+      )
+        found.push(record['window_id']);
+      for (const item of Object.values(record)) walk(item, depth + 1);
+    };
+    walk(JSON.parse(stdout), 0);
+    if (found.length === 0) return;
+    const distrusted = distrustedWindows.get(taskId) ?? new Set<string>();
+    for (const id of found) distrusted.add(id);
+    distrustedWindows.delete(taskId);
+    distrustedWindows.set(taskId, distrusted);
+    if (distrustedWindows.size > KNOWN_TASKS)
+      distrustedWindows.delete(distrustedWindows.keys().next().value!);
+  } catch {
+    // Output that cannot be read notes nothing.
+  }
+}
 
 /**
  * Keeps the windows a finished desktop-control run of a Task reported (`launch` and
@@ -268,6 +308,7 @@ export function rememberDesktopControlWindows(
   argv: readonly string[],
   stdout: string,
 ): void {
+  distrustMovedWindows(taskId, stdout);
   try {
     const command = readDesktopControlCommand(argv);
     if (
@@ -297,10 +338,16 @@ export function rememberDesktopControlWindows(
     const known = knownWindows.get(taskId) ?? new Map<string, KnownWindow>();
     for (const window of windows) {
       if (typeof window !== 'object' || window === null) continue;
-      const { id, app_name: app, title } = window as Record<string, unknown>;
+      const {
+        id,
+        app_name: app,
+        title,
+        pid,
+        process_instance: instance,
+      } = window as Record<string, unknown>;
       if (typeof id !== 'string' || !WINDOW_ID.test(id)) continue;
       known.delete(id);
-      known.set(id, { app, title });
+      known.set(id, { app, title, pid, instance });
       if (known.size > KNOWN_WINDOWS_PER_TASK) known.delete(known.keys().next().value!);
     }
     if (known.size === 0) return;
@@ -310,6 +357,73 @@ export function rememberDesktopControlWindows(
   } catch {
     // Output that cannot be read names no window.
   }
+}
+
+/**
+ * The process a part or window belongs to, as the desktop-control executable recorded it: its pid,
+ * the process instance (which tells a reused pid apart) and its executable's name.
+ */
+export type DesktopControlOwner = Readonly<{ pid: number; instance: string; app: string }>;
+
+/**
+ * Reads which process the parts and windows of desktop-control runs belong to, from the same
+ * records the card names them from: the snapshots the executable wrote in the state folder, and
+ * the windows the Task's earlier runs printed (`rememberDesktopControlWindows`). Never from the
+ * agent's arguments. `null` whenever a record is missing, malformed or the records disagree.
+ */
+export type DesktopControlOwnerReader = Readonly<{
+  /** The owner of the part a qualified ref (`@<snapshot id>:eN`) names. */
+  part(ref: string): DesktopControlOwner | null;
+  /** The one owner every record of this window id agrees on. */
+  window(id: string): DesktopControlOwner | null;
+}>;
+
+export function desktopControlOwnerReader(
+  lookup: Pick<DesktopControlDisplayLookup, 'stateRoot' | 'taskId'> = {},
+): DesktopControlOwnerReader {
+  const reader = new SnapshotReader(
+    lookup.stateRoot ?? desktopControlStateFolder(),
+    lookup.taskId === undefined ? undefined : knownWindows.get(lookup.taskId),
+  );
+  const { taskId } = lookup;
+  return {
+    part: (ref) => reader.partOwner(ref),
+    // Read when asked, so an id distrusted after the reader was made is not taken either.
+    window: (id) =>
+      taskId !== undefined && distrustedWindows.get(taskId)?.has(id) === true
+        ? null
+        : reader.windowOwner(id),
+  };
+}
+
+/** Whether two owners are the same process instance of the same executable. */
+export function sameDesktopControlOwner(
+  left: DesktopControlOwner,
+  right: DesktopControlOwner,
+): boolean {
+  return (
+    left.pid === right.pid &&
+    left.instance === right.instance &&
+    left.app.toLowerCase() === right.app.toLowerCase()
+  );
+}
+
+const PROCESS_INSTANCE = /^[A-Za-z0-9:._-]{1,128}$/u;
+// Other control characters are refused with the invisible ones (`UNDISPLAYABLE`).
+const APP_NAME = /^[^\t\n\r\\/:*?"<>|]{1,255}$/u;
+const UNDISPLAYABLE = new RegExp(APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.source, 'u');
+
+function ownerOf(pid: unknown, instance: unknown, app: unknown): DesktopControlOwner | null {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (typeof instance !== 'string' || !PROCESS_INSTANCE.test(instance)) return null;
+  if (
+    typeof app !== 'string' ||
+    app.trim() === '' ||
+    !APP_NAME.test(app) ||
+    UNDISPLAYABLE.test(app)
+  )
+    return null;
+  return { pid, instance, app };
 }
 
 export function desktopControlApprovalAction(
@@ -570,6 +684,8 @@ function visible(value: string, max: number, multiline = false): { text: string;
 }
 
 type RefmapEntry = Readonly<{
+  pid?: unknown;
+  process_instance?: unknown;
   role?: unknown;
   name?: unknown;
   source_app?: unknown;
@@ -705,6 +821,36 @@ class SnapshotReader {
       if (app !== undefined || window !== undefined) return windowTarget(id, app, window);
     }
     return unresolved;
+  }
+
+  partOwner(ref: string): DesktopControlOwner | null {
+    const match = QUALIFIED_REF.exec(ref);
+    if (match === null) return null;
+    const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
+    if (typeof entry !== 'object' || entry === null) return null;
+    return ownerOf(entry.pid, entry.process_instance, entry.source_app);
+  }
+
+  /**
+   * The records can be older than the window: a closed window's id can be reused by another app's.
+   * So a run an app-wide grant allows by window id also has the executable check the id's owner
+   * as it runs (`SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER`), and an id it found reused is
+   * distrusted for the rest of the Task.
+   */
+  windowOwner(id: string): DesktopControlOwner | null {
+    if (!WINDOW_ID.test(id)) return null;
+    const owners: (DesktopControlOwner | null)[] = [];
+    for (const snapshot of this.recentSnapshots())
+      for (const entry of Object.values(this.refmap(snapshot) ?? {}))
+        if (typeof entry === 'object' && entry !== null && entry.source_window_id === id)
+          owners.push(ownerOf(entry.pid, entry.process_instance, entry.source_app));
+    const known = this.known?.get(id);
+    if (known !== undefined) owners.push(ownerOf(known.pid, known.instance, known.app));
+    const [first] = owners;
+    if (first === undefined || first === null) return null;
+    return owners.every((owner) => owner !== null && sameDesktopControlOwner(owner, first))
+      ? first
+      : null;
   }
 
   private recentSnapshots(): string[] {

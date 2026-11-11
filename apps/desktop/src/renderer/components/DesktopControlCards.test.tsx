@@ -143,6 +143,47 @@ describe('desktop-control approval card', () => {
     expect(html).toContain('approval-deny');
   });
 
+  it('offers 「このアプリは Task 中許可」 only when Main offered it beside 「Task中許可」', async () => {
+    const offered = { ...typing, appGrant: { app: 'charmap.exe' } };
+    const html = card(offered);
+    expect(html).toContain('このアプリは Task 中許可');
+    expect(html).toContain(
+      'この Task の間、「charmap.exe」のすべての窓（前から開いていた窓も含む）で、読み取りと、裏での操作（押す・値を入れる・選ぶ・窓の移動や大きさの変更など）を確認なしで進めます。キー入力、窓を前に出す操作、アプリの起動と終了、画面全体を読む操作は、毎回確認します。',
+    );
+    // The existing choices stay.
+    expect(html).toContain('approval-allow-once');
+    expect(html).toContain('approval-allow-task');
+    expect(html).toContain('approval-deny');
+    expect(card(typing)).not.toContain('approval-allow-app-task');
+    expect(card({ ...offered, mode: 'foreground', allowTaskGrant: false })).not.toContain(
+      'approval-allow-app-task',
+    );
+
+    const decisions: unknown[][] = [];
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <ApprovalCard
+          approval={{ ...base, desktopAction: offered }}
+          busy={false}
+          onDecision={(...args) => decisions.push(args)}
+        />,
+      ),
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="approval-allow-app-task"]',
+    )!;
+    expect(
+      document.getElementById(button.getAttribute('aria-describedby')!)?.textContent,
+    ).toContain('「charmap.exe」のすべての窓');
+    await act(async () => button.click());
+    container.querySelector<HTMLButtonElement>('[data-testid="approval-allow-task"]')!.click();
+    expect(decisions).toEqual([['allow_task', undefined, 'app'], ['allow_task']]);
+    await act(async () => root.unmount());
+  });
+
   it('opens the details when the target could not be confirmed', () => {
     const html = card({
       ...typing,

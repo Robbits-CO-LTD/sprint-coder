@@ -577,6 +577,10 @@ export function registerCommandRunnerTool(
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),
         ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
+        // Set only by an app-wide Task grant, for the executable to check window ids against.
+        ...(roots === undefined || control.desktopControlExpectedWindowOwner === undefined
+          ? {}
+          : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
         },
