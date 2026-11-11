@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Write-path classifier for UIA mutation failures.
 //!
 //! Every Windows write turns its `UiaFailure` into a delivery outcome only
@@ -169,7 +170,7 @@ fn platform_hresult(api: &str, operation: &str, hresult: i32) -> String {
 /// `value_write_gate_tests.rs` so a 13th action file needs one edit, not
 /// three.
 #[cfg(test)]
-pub(crate) fn action_scan_sources() -> [(&'static str, &'static str); 12] {
+pub(crate) fn action_scan_sources() -> [(&'static str, &'static str); 13] {
     [
         ("actions/mutation.rs", include_str!("mutation.rs")),
         (
@@ -186,6 +187,7 @@ pub(crate) fn action_scan_sources() -> [(&'static str, &'static str); 12] {
         ("actions/select.rs", include_str!("select.rs")),
         ("actions/select_search.rs", include_str!("select_search.rs")),
         ("actions/scroll.rs", include_str!("scroll.rs")),
+        ("actions/win32_combo.rs", include_str!("win32_combo.rs")),
     ]
 }
 

@@ -1,6 +1,8 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! `execute_action` match over every `Action` variant.
 //!
-//! Click routes through the Invoke + Legacy chain. SetValue / Clear route
+//! Click routes through the Invoke + Legacy chain, except on an item of a
+//! standard Win32 combo box's list, which `win32_combo` chooses. SetValue / Clear route
 //! through `value_write`. Toggle / Check / Uncheck and Expand / Collapse route
 //! through `toggle_state` and `disclosure`. Select and Scroll route through
 //! their dedicated modules. SetFocus routes through `focus`.
@@ -41,9 +43,10 @@ mod imp {
     };
     use crate::actions::scroll::scroll_steps;
     use crate::actions::scroll_into_view::scroll_into_view_outcome;
-    use crate::actions::select::select_steps;
+    use crate::actions::select::{select_steps, win32_combo_select_item};
+    use crate::actions::select_search::selection_item_available;
     use crate::actions::toggle_state::{check_steps, toggle_steps, uncheck_steps};
-    use crate::actions::value_write::{clear_steps, set_value_steps};
+    use crate::actions::value_write::{clear_steps, left_list_unchosen, set_value_steps};
     use crate::tree::element::{UIAElement, uia_element};
     use crate::tree::live_read::corroborate_verified_process;
     use crate::tree::properties::property_ids::TreeProperty;
@@ -109,7 +112,17 @@ mod imp {
             }
             Action::SetValue(value) => {
                 let steps = set_value_steps(element, value, request.policy, deadline)?;
-                Ok(ActionResult::from_execution(&request.action, steps))
+                let unchosen = left_list_unchosen(&steps);
+                let mut result = ActionResult::from_execution(&request.action, steps);
+                if unchosen {
+                    let mut details = match result.details.take() {
+                        Some(serde_json::Value::Object(details)) => details,
+                        _ => serde_json::Map::new(),
+                    };
+                    details.insert("list_selection".into(), "not_chosen".into());
+                    result = result.with_details(details.into());
+                }
+                Ok(result)
             }
             Action::Clear => {
                 let steps = clear_steps(element, request.policy, deadline)?;
@@ -194,6 +207,14 @@ mod imp {
         policy: InteractionPolicy,
         deadline: Deadline,
     ) -> Result<ActionResult, AdapterError> {
+        // An item of a standard Win32 combo box's list is chosen with the
+        // box's own messages: the proxy's Invoke emulates a click that brings
+        // the window to the front, and its Select never tells the owner.
+        if selection_item_available(element)
+            && let Some(steps) = win32_combo_select_item(element, deadline)?
+        {
+            return Ok(ActionResult::from_execution(&Action::Click, steps));
+        }
         let steps = click_chain_judged_for(
             deadline,
             policy,

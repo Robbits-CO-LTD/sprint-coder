@@ -1,0 +1,660 @@
+//! Choosing an item in a standard Win32 combo box so that its owner hears of it.
+//!
+//! The UI Automation proxy for the system `ComboBox` class writes a selection
+//! with `CB_SETCURSEL` / `CB_SELECTSTRING` (`SelectionItem.Select`,
+//! `Value.SetValue`). Neither message sends `CBN_SELCHANGE`, so the box shows
+//! the new item while the dialog that owns it never learns of the change and
+//! nothing the item controls happens. Invoking an item of the open drop-down
+//! list instead goes through the proxy's click emulation, which brings the
+//! window to the front and moves the keyboard focus into it.
+//!
+//! This module chooses the item with the box's own messages and then sends
+//! the owner the notifications a keyboard selection sends (`CBN_SELENDOK`,
+//! then `CBN_SELCHANGE`).
+//! An open drop-down list is closed first with `CB_SHOWDROPDOWN`, which the box
+//! reports to its owner as a dismissed list, as Esc would. No input is
+//! synthesized and neither the focus nor the foreground window changes.
+//!
+//! The box is recognised by the system class its window is built on
+//! (`RealGetWindowClassW`), so a toolkit's superclass of `ComboBox` counts
+//! too. The selection is never written through the box's UI Automation
+//! provider here, so the owner hears of it exactly once, whichever provider
+//! serves the box. Owner-drawn boxes that keep no item text
+//! (`CBS_OWNERDRAW*` without `CBS_HASSTRINGS`) cannot be matched by name here
+//! and are left to the UI Automation path.
+
+use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
+
+use crate::actions::chain::DeliveryOutcome;
+
+pub(crate) const WIN32_COMBO_SELECT_LABEL: &str = "Win32ComboBox.SelectAndNotify";
+
+/// Ancestors climbed from an item to its box: item, list, box, plus one spare.
+const MAX_CLIMB: usize = 4;
+
+const CBS_OWNERDRAWFIXED: u32 = 0x0010;
+const CBS_OWNERDRAWVARIABLE: u32 = 0x0020;
+const CBS_HASSTRINGS: u32 = 0x0200;
+const CBN_SELCHANGE: u16 = 1;
+const CBN_SELENDOK: u16 = 9;
+const CBS_TYPE_MASK: u32 = 0x0003;
+const CBS_DROPDOWNLIST: u32 = 0x0003;
+
+/// What a window class says about the climb from an element to its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComboClass {
+    /// The box itself.
+    Box,
+    /// The drop-down list of a box; the box is further up.
+    DropList,
+    /// Any other window: the element does not belong to a Win32 combo box.
+    Other,
+}
+
+pub(crate) fn classify_class(class: &str) -> ComboClass {
+    if class.eq_ignore_ascii_case("ComboBox") {
+        ComboClass::Box
+    } else if class.eq_ignore_ascii_case("ComboLBox") {
+        ComboClass::DropList
+    } else {
+        ComboClass::Other
+    }
+}
+
+/// Whether the box keeps the text of its items, which is what
+/// `CB_FINDSTRINGEXACT` compares.
+pub(crate) fn keeps_item_text(style: u32) -> bool {
+    style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE) == 0 || style & CBS_HASSTRINGS != 0
+}
+
+/// How many items carry the requested text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemMatch {
+    Missing,
+    Unique(usize),
+    Ambiguous,
+}
+
+/// `first` is `CB_FINDSTRINGEXACT` from the top; `again` is the same search
+/// started after `first`, which wraps round to `first` when it is the only one.
+pub(crate) fn classify_matches(first: isize, again: isize) -> ItemMatch {
+    let Ok(index) = usize::try_from(first) else {
+        return ItemMatch::Missing;
+    };
+    if again < 0 || again == first {
+        ItemMatch::Unique(index)
+    } else {
+        ItemMatch::Ambiguous
+    }
+}
+
+/// The `WM_COMMAND` `wParam`s that tell the owner of a selection, in the order
+/// the box sends them when a person picks an item with the keyboard:
+/// `CBN_SELENDOK` (toolkits run their "selection committed" handlers on it),
+/// then `CBN_SELCHANGE`.
+pub(crate) fn selection_notifications(control_id: i32) -> [usize; 2] {
+    let low = usize::from(control_id as u16);
+    [
+        (usize::from(CBN_SELENDOK) << 16) | low,
+        (usize::from(CBN_SELCHANGE) << 16) | low,
+    ]
+}
+
+/// Whether the style is a drop-down list (`CBS_DROPDOWNLIST`), which holds
+/// only its items and takes no free text.
+pub(crate) fn is_drop_down_list(style: u32) -> bool {
+    style & CBS_TYPE_MASK == CBS_DROPDOWNLIST
+}
+
+/// Whether a commit landed on the requested item: the box holds the position
+/// it was given, its list is closed, and the item at that position carries
+/// the requested text (`carries`, asked of the box with `CB_FINDSTRINGEXACT`).
+/// A position alone is not enough: the owner may change the items when told
+/// of the close or of the selection.
+pub(crate) fn holds_requested(held: isize, index: usize, dropped: isize, carries: bool) -> bool {
+    usize::try_from(held).ok() == Some(index) && dropped == 0 && carries
+}
+
+/// The `wParam` that makes `CB_FINDSTRINGEXACT` start its search at `index`:
+/// the search begins after the item it names, and -1 means the top.
+pub(crate) fn search_start(index: usize) -> usize {
+    index.checked_sub(1).unwrap_or(usize::MAX)
+}
+
+/// Whether the position an item's own Select gave the box still names that
+/// item after the list was closed. Text alone cannot tell items with the same
+/// name apart, so the position is trusted only when the close changed
+/// nothing it could have: the item count, and the positions of every item
+/// carrying the name, are the same before and after, and the position is one
+/// of them. Same-named items that swap places while all of that stays the
+/// same cannot be told apart, and pass.
+pub(crate) fn position_still_names_item(
+    index: usize,
+    count_before: isize,
+    count_after: isize,
+    named_before: &[usize],
+    named_after: &[usize],
+) -> bool {
+    count_before >= 0
+        && count_before == count_after
+        && named_before == named_after
+        && named_before.contains(&index)
+}
+
+/// The outcome of choosing an item by its own ref once the item's own Select
+/// has landed. The box's selection has already moved by then, so a commit
+/// that reports nothing delivered is still a delivery whose result is
+/// unknown, never "nothing happened" - the same disposition an error after
+/// that point gets. An item that did not report itself selected is never
+/// verified.
+pub(crate) fn after_item_select(item_selected: bool, commit: DeliveryOutcome) -> DeliveryOutcome {
+    match commit {
+        DeliveryOutcome::NotDelivered => DeliveryOutcome::DeliveredUnverified,
+        DeliveryOutcome::DeliveredVerified if !item_selected => {
+            DeliveryOutcome::DeliveredUnverified
+        }
+        other => other,
+    }
+}
+
+pub(crate) fn missing_item_error(chars: usize) -> AdapterError {
+    AdapterError::new(
+        ErrorCode::ElementNotFound,
+        format!("No item of the combo box matched the requested value ({chars} chars)"),
+    )
+    .with_disposition(DeliverySemantics::not_delivered())
+    .with_suggestion("Use find or snapshot to inspect the available items.")
+}
+
+pub(crate) fn ambiguous_item_error() -> AdapterError {
+    AdapterError::ambiguous_target("Multiple items of the combo box share the requested text")
+        .with_details(serde_json::json!({ "kind": "ambiguous_select_value" }))
+}
+
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::{
+        AdapterError, ComboClass, DeliverySemantics, ErrorCode, ItemMatch, MAX_CLIMB,
+        ambiguous_item_error, classify_class, classify_matches, holds_requested, is_drop_down_list,
+        keeps_item_text, missing_item_error, search_start, selection_notifications,
+    };
+    use crate::actions::chain::{DeliveryOutcome, after_delivery};
+    use crate::tree::automation::automation_client;
+    use crate::tree::element::UIAElement;
+    use crate::tree::walk::walker_source::parent_step;
+    use agent_desktop_core::Deadline;
+    use windows::Win32::Foundation::HWND;
+    use windows_sys::Win32::Foundation::HWND as HWND_SYS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, EnumThreadWindows, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetParent,
+        GetWindowLongW, GetWindowThreadProcessId, RealGetWindowClassW, SMTO_ABORTIFHUNG,
+        SendMessageTimeoutW, WM_COMMAND,
+    };
+
+    const CB_FINDSTRINGEXACT: u32 = 0x0158;
+    const CB_GETCURSEL: u32 = 0x0147;
+    const CB_SETCURSEL: u32 = 0x014E;
+    const CB_SHOWDROPDOWN: u32 = 0x014F;
+    const CB_GETDROPPEDSTATE: u32 = 0x0157;
+    const CB_GETCOUNT: u32 = 0x0146;
+    /// One message never waits longer than this, whatever the action budget.
+    const MESSAGE_CAP_MS: u64 = 2_000;
+
+    /// A standard Win32 combo box, by window handle.
+    pub(crate) struct Win32Combo {
+        hwnd: isize,
+    }
+
+    /// The Win32 combo box `element` is, or belongs to (its edit part, its
+    /// drop-down list, or an item of that list). `None` for anything else.
+    pub(crate) fn owning_combo(
+        element: &UIAElement,
+        deadline: Deadline,
+    ) -> Result<Option<Win32Combo>, AdapterError> {
+        let client = automation_client()?;
+        let Ok(walker) = client.get_raw_view_walker() else {
+            return Ok(None);
+        };
+        let mut current = element.clone();
+        for _ in 0..MAX_CLIMB {
+            deadline.ensure_remaining()?;
+            let Ok(handle) = current.0.get_native_window_handle() else {
+                return Ok(None);
+            };
+            let hwnd: HWND = handle.into();
+            let hwnd = hwnd.0 as isize;
+            if hwnd != 0 {
+                match window_class(hwnd) {
+                    ComboClass::Box => return Ok(Some(Win32Combo { hwnd })),
+                    ComboClass::DropList => {
+                        if let Some(owner) = box_of_list(hwnd) {
+                            return Ok(Some(Win32Combo { hwnd: owner }));
+                        }
+                    }
+                    ComboClass::Other => return Ok(None),
+                }
+            }
+            match parent_step(&walker, &current) {
+                Ok(Some(parent)) => current = parent,
+                Ok(None) | Err(()) => return Ok(None),
+            }
+        }
+        Ok(None)
+    }
+
+    #[repr(C)]
+    struct ComboBoxInfo {
+        size: u32,
+        item: [i32; 4],
+        button: [i32; 4],
+        button_state: u32,
+        combo: *mut std::ffi::c_void,
+        edit: *mut std::ffi::c_void,
+        list: *mut std::ffi::c_void,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetComboBoxInfo(combo: *mut std::ffi::c_void, info: *mut ComboBoxInfo) -> i32;
+    }
+
+    /// The box a drop-down list belongs to. The list is a child of the
+    /// desktop with no owner, and the UI Automation parent of a list item does
+    /// not always lead back to the box, so the box is found among the windows
+    /// of the list's thread: the one whose `GetComboBoxInfo` names this list.
+    fn box_of_list(list: isize) -> Option<isize> {
+        struct Search {
+            list: isize,
+            found: Option<isize>,
+        }
+        unsafe extern "system" fn visit_child(window: HWND_SYS, state: isize) -> i32 {
+            let search = unsafe { &mut *(state as *mut Search) };
+            if classify_class(&base_class_name(window as isize)) == ComboClass::Box {
+                let mut info = ComboBoxInfo {
+                    size: size_of::<ComboBoxInfo>() as u32,
+                    item: [0; 4],
+                    button: [0; 4],
+                    button_state: 0,
+                    combo: std::ptr::null_mut(),
+                    edit: std::ptr::null_mut(),
+                    list: std::ptr::null_mut(),
+                };
+                if unsafe { GetComboBoxInfo(window, &mut info) } != 0
+                    && info.list as isize == search.list
+                {
+                    search.found = Some(window as isize);
+                    return 0;
+                }
+            }
+            1
+        }
+        unsafe extern "system" fn visit_top(window: HWND_SYS, state: isize) -> i32 {
+            unsafe { EnumChildWindows(window, Some(visit_child), state) };
+            let search = unsafe { &*(state as *const Search) };
+            i32::from(search.found.is_none())
+        }
+        let thread = unsafe { GetWindowThreadProcessId(list as HWND_SYS, std::ptr::null_mut()) };
+        if thread == 0 {
+            return None;
+        }
+        let mut search = Search { list, found: None };
+        unsafe { EnumThreadWindows(thread, Some(visit_top), &mut search as *mut Search as isize) };
+        search.found
+    }
+
+    impl Win32Combo {
+        /// Which item carries `text`, or `None` when the box keeps no item
+        /// text to compare against.
+        pub(crate) fn find_item(
+            &self,
+            text: &str,
+            deadline: Deadline,
+        ) -> Result<Option<ItemMatch>, AdapterError> {
+            let style = unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32;
+            if !keeps_item_text(style) {
+                return Ok(None);
+            }
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let text_ptr = wide.as_ptr() as isize;
+            let first = self.send(CB_FINDSTRINGEXACT, usize::MAX, text_ptr, deadline)?;
+            if first < 0 {
+                return Ok(Some(ItemMatch::Missing));
+            }
+            let again = self.send(CB_FINDSTRINGEXACT, first as usize, text_ptr, deadline)?;
+            Ok(Some(classify_matches(first, again)))
+        }
+
+        /// Chooses the item carrying `text` and tells the owner, or `None`
+        /// when the box keeps no item text.
+        pub(crate) fn select_text(
+            &self,
+            text: &str,
+            deadline: Deadline,
+        ) -> Result<Option<DeliveryOutcome>, AdapterError> {
+            let missing = || missing_item_error(text.chars().count());
+            match self.find_item(text, deadline)? {
+                None => return Ok(None),
+                Some(ItemMatch::Missing) => return Err(missing()),
+                Some(ItemMatch::Ambiguous) => return Err(ambiguous_item_error()),
+                Some(ItemMatch::Unique(_)) => {}
+            }
+            // Closing the list notifies the owner, which may add or reorder
+            // items then, so the position is looked up again afterwards.
+            self.close_list(deadline)?;
+            match self.find_item(text, deadline)? {
+                None | Some(ItemMatch::Missing) => Err(missing()),
+                Some(ItemMatch::Ambiguous) => Err(ambiguous_item_error()),
+                Some(ItemMatch::Unique(index)) => self.commit(index, text, deadline).map(Some),
+            }
+        }
+
+        /// Closes an open drop-down list. The box tells its owner
+        /// (`CBN_CLOSEUP`), and the owner may change the items in reply, so a
+        /// position read before this may no longer name the same item.
+        pub(crate) fn close_list(&self, deadline: Deadline) -> Result<(), AdapterError> {
+            if self.send(CB_GETDROPPEDSTATE, 0, 0, deadline)? != 0 {
+                self.send(CB_SHOWDROPDOWN, 0, 0, deadline)?;
+            }
+            Ok(())
+        }
+
+        /// Whether the box keeps the text of its items.
+        pub(crate) fn keeps_text(&self) -> bool {
+            keeps_item_text(unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32)
+        }
+
+        /// Whether the item at `index` carries `text`. The box is asked to
+        /// search from `index` for the text this process passes in; the item
+        /// text is never copied out, so the target cannot choose how much is
+        /// written into this process.
+        pub(crate) fn carries(
+            &self,
+            index: usize,
+            text: &str,
+            deadline: Deadline,
+        ) -> Result<bool, AdapterError> {
+            if !self.keeps_text() {
+                return Ok(false);
+            }
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let found = self.send(
+                CB_FINDSTRINGEXACT,
+                search_start(index),
+                wide.as_ptr() as isize,
+                deadline,
+            )?;
+            Ok(usize::try_from(found).ok() == Some(index))
+        }
+
+        /// The number of items, negative when the box will not say.
+        pub(crate) fn item_count(&self, deadline: Deadline) -> Result<isize, AdapterError> {
+            self.send(CB_GETCOUNT, 0, 0, deadline)
+        }
+
+        /// The positions of every item carrying `text`, top to bottom.
+        pub(crate) fn positions_of(
+            &self,
+            text: &str,
+            deadline: Deadline,
+        ) -> Result<Vec<usize>, AdapterError> {
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let limit = usize::try_from(self.item_count(deadline)?).unwrap_or(0);
+            let mut positions = Vec::new();
+            let mut start = usize::MAX;
+            while positions.len() < limit {
+                let found =
+                    self.send(CB_FINDSTRINGEXACT, start, wide.as_ptr() as isize, deadline)?;
+                let Ok(found) = usize::try_from(found) else {
+                    break;
+                };
+                if positions.contains(&found) {
+                    break;
+                }
+                positions.push(found);
+                start = found;
+            }
+            positions.sort_unstable();
+            Ok(positions)
+        }
+
+        /// Whether `element` is the box itself rather than one of its parts.
+        pub(crate) fn is_box(&self, element: &UIAElement) -> bool {
+            element.0.get_native_window_handle().is_ok_and(|handle| {
+                let hwnd: HWND = handle.into();
+                hwnd.0 as isize == self.hwnd
+            })
+        }
+
+        /// The position the box currently holds, `None` when nothing is
+        /// selected.
+        pub(crate) fn selected_index(
+            &self,
+            deadline: Deadline,
+        ) -> Result<Option<usize>, AdapterError> {
+            Ok(usize::try_from(self.send(CB_GETCURSEL, 0, 0, deadline)?).ok())
+        }
+
+        /// Selects `index` in the closed box and sends the owner
+        /// `CBN_SELCHANGE`. Verified only when the box then holds `index`
+        /// with its list closed and the item there carries `requested`.
+        pub(crate) fn commit(
+            &self,
+            index: usize,
+            requested: &str,
+            deadline: Deadline,
+        ) -> Result<DeliveryOutcome, AdapterError> {
+            let selected = self.send(CB_SETCURSEL, index, 0, deadline)?;
+            if usize::try_from(selected).ok() != Some(index) {
+                return Ok(DeliveryOutcome::NotDelivered);
+            }
+            self.notify_selection_change(deadline)
+                .map_err(after_delivery)?;
+            let held = self
+                .send(CB_GETCURSEL, 0, 0, deadline)
+                .map_err(after_delivery)?;
+            let dropped = self
+                .send(CB_GETDROPPEDSTATE, 0, 0, deadline)
+                .map_err(after_delivery)?;
+            let carries = match usize::try_from(held) {
+                Ok(position) => self
+                    .carries(position, requested, deadline)
+                    .map_err(after_delivery)?,
+                Err(_) => false,
+            };
+            Ok(DeliveryOutcome::from_delivery(
+                true,
+                holds_requested(held, index, dropped, carries),
+            ))
+        }
+
+        fn notify_selection_change(&self, deadline: Deadline) -> Result<(), AdapterError> {
+            let window = self.window();
+            let owner = unsafe { GetParent(window) };
+            if owner.is_null() {
+                return Err(AdapterError::new(
+                    ErrorCode::ActionFailed,
+                    "The combo box has no owner window to notify of the selection",
+                ));
+            }
+            let id = unsafe { GetDlgCtrlID(window) };
+            // In the order the box itself notifies a keyboard selection:
+            // `CBN_SELENDOK` (the selection is to be processed), then
+            // `CBN_SELCHANGE`.
+            for wparam in selection_notifications(id) {
+                send_timeout(owner as isize, WM_COMMAND, wparam, self.hwnd, deadline)?;
+            }
+            Ok(())
+        }
+
+        /// Whether the box takes free text (`CBS_DROPDOWN`, `CBS_SIMPLE`)
+        /// rather than only its items (`CBS_DROPDOWNLIST`).
+        pub(crate) fn accepts_free_text(&self) -> bool {
+            !is_drop_down_list(unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32)
+        }
+
+        fn send(
+            &self,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            deadline: Deadline,
+        ) -> Result<isize, AdapterError> {
+            send_timeout(self.hwnd, message, wparam, lparam, deadline)
+        }
+
+        fn window(&self) -> *mut std::ffi::c_void {
+            self.hwnd as *mut std::ffi::c_void
+        }
+    }
+
+    fn send_timeout(
+        hwnd: isize,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        deadline: Deadline,
+    ) -> Result<isize, AdapterError> {
+        deadline.ensure_remaining()?;
+        let timeout = deadline.remaining_ms().clamp(1, MESSAGE_CAP_MS);
+        let mut answer: usize = 0;
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                hwnd as *mut std::ffi::c_void,
+                message,
+                wparam,
+                lparam,
+                SMTO_ABORTIFHUNG,
+                u32::try_from(timeout).unwrap_or(u32::MAX),
+                &mut answer,
+            )
+        };
+        if sent == 0 {
+            return Err(AdapterError::new(
+                ErrorCode::AppUnresponsive,
+                "The combo box did not answer a window message in time",
+            )
+            .with_platform_detail(format!("SendMessageTimeoutW(0x{message:04X}) failed"))
+            .with_disposition(DeliverySemantics::uncertain()));
+        }
+        Ok(answer as isize)
+    }
+
+    /// How a window takes part in a combo box. The drop-down list is told by
+    /// its own class name (`ComboLBox`; its base class is `ListBox`), the box
+    /// by the system class it is built on.
+    fn window_class(hwnd: isize) -> ComboClass {
+        let mut buffer = [0u16; 64];
+        let length = unsafe {
+            GetClassNameW(
+                hwnd as *mut std::ffi::c_void,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
+        };
+        let own = String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)]);
+        match classify_class(&own) {
+            ComboClass::DropList => ComboClass::DropList,
+            _ => classify_class(&base_class_name(hwnd)),
+        }
+    }
+
+    /// The system class a window is built on: `RealGetWindowClassW` answers
+    /// `ComboBox` for a toolkit's superclass of the box too, which runs the
+    /// same window procedure and notifies its owner the same way.
+    fn base_class_name(hwnd: isize) -> String {
+        let mut buffer = [0u16; 64];
+        let length = unsafe {
+            RealGetWindowClassW(
+                hwnd as *mut std::ffi::c_void,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+        String::from_utf16_lossy(&buffer[..usize::try_from(length).unwrap_or(0)])
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod imp {
+    use super::{AdapterError, ItemMatch};
+    use crate::actions::chain::DeliveryOutcome;
+    use crate::tree::element::UIAElement;
+    use agent_desktop_core::Deadline;
+
+    pub(crate) struct Win32Combo;
+
+    pub(crate) fn owning_combo(
+        _element: &UIAElement,
+        _deadline: Deadline,
+    ) -> Result<Option<Win32Combo>, AdapterError> {
+        Ok(None)
+    }
+
+    impl Win32Combo {
+        pub(crate) fn find_item(
+            &self,
+            _text: &str,
+            _deadline: Deadline,
+        ) -> Result<Option<ItemMatch>, AdapterError> {
+            Ok(None)
+        }
+
+        pub(crate) fn select_text(
+            &self,
+            _text: &str,
+            _deadline: Deadline,
+        ) -> Result<Option<DeliveryOutcome>, AdapterError> {
+            Ok(None)
+        }
+
+        pub(crate) fn is_box(&self, _element: &UIAElement) -> bool {
+            false
+        }
+
+        pub(crate) fn selected_index(
+            &self,
+            _deadline: Deadline,
+        ) -> Result<Option<usize>, AdapterError> {
+            Ok(None)
+        }
+
+        pub(crate) fn close_list(&self, _deadline: Deadline) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        pub(crate) fn keeps_text(&self) -> bool {
+            false
+        }
+
+        pub(crate) fn item_count(&self, _deadline: Deadline) -> Result<isize, AdapterError> {
+            Ok(-1)
+        }
+
+        pub(crate) fn positions_of(
+            &self,
+            _text: &str,
+            _deadline: Deadline,
+        ) -> Result<Vec<usize>, AdapterError> {
+            Ok(Vec::new())
+        }
+
+        pub(crate) fn commit(
+            &self,
+            _index: usize,
+            _requested: &str,
+            _deadline: Deadline,
+        ) -> Result<DeliveryOutcome, AdapterError> {
+            Ok(DeliveryOutcome::NotDelivered)
+        }
+    }
+}
+
+pub(crate) use imp::owning_combo;
+
+#[cfg(test)]
+#[path = "win32_combo_tests.rs"]
+mod tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "win32_combo_live_tests.rs"]
+mod live_tests;

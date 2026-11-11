@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use clap::Parser;
 use serde::Deserialize;
 
@@ -111,7 +112,13 @@ pub(crate) struct SelectArgs {
         help = "Qualified ref from snapshot (@<snapshot_id>:eN)"
     )]
     pub ref_id: String,
-    #[arg(value_name = "VALUE", help = "Option to select")]
+    #[arg(
+        value_name = "VALUE",
+        default_value = "",
+        hide_default_value = true,
+        help = "Option to select; omit it when REF is the option itself"
+    )]
+    #[serde(default)]
     pub value: String,
     #[arg(
         long = "timeout-ms",

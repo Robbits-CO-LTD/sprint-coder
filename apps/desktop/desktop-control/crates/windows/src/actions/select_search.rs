@@ -1,4 +1,6 @@
-//! Bounded SelectionItem descendant search and scroll-to-realize (A19-7).
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+//! Bounded SelectionItem descendant search and scroll-to-realize (A19-7),
+//! with an ItemContainer lookup tried before the walk.
 
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 
@@ -39,6 +41,31 @@ pub(crate) fn drive_realize_scrolls(
     Ok(())
 }
 
+/// What the provider's second search, started after the first hit, ended in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NextListed {
+    /// The search finished: no further item carries the name.
+    End,
+    /// The provider handed back the first hit again.
+    Same,
+    /// Another item carries the name.
+    Other,
+    /// The provider failed (an error, a timeout): uniqueness is unknown.
+    Failed,
+}
+
+/// Whether the provider's first hit is proven to be the only item with the
+/// name. A duplicate is `AMBIGUOUS_TARGET`; a failed second search proves
+/// nothing, so it answers `false` and the caller goes on with the walk,
+/// which stops on duplicates and on failed reads itself.
+pub(crate) fn listed_item_is_unique(next: NextListed) -> Result<bool, AdapterError> {
+    match next {
+        NextListed::End | NextListed::Same => Ok(true),
+        NextListed::Other => accept_selection_match(true).map(|()| false),
+        NextListed::Failed => Ok(false),
+    }
+}
+
 /// Second same-name SelectionItem is `AMBIGUOUS_TARGET`, never a silent pick.
 pub(crate) fn accept_selection_match(already_found: bool) -> Result<(), AdapterError> {
     if already_found {
@@ -57,8 +84,8 @@ pub(crate) fn accept_selection_match(already_found: bool) -> Result<(), AdapterE
 mod imp {
     use super::{
         AdapterError, Deadline, ErrorCode, MAX_REALIZE_SCROLLS, MAX_SELECT_DEPTH, MAX_SELECT_NODES,
-        RealizeScrollStep, UIAElement, accept_selection_match, drive_realize_scrolls,
-        select_node_budget_has_room,
+        NextListed, RealizeScrollStep, UIAElement, accept_selection_match, drive_realize_scrolls,
+        listed_item_is_unique, select_node_budget_has_room,
     };
     use crate::actions::mutation::{classify_success, classify_write};
     use crate::actions::scroll::SCROLL_LABEL;
@@ -71,8 +98,15 @@ mod imp {
     use crate::tree::walk::walker::TreeSource;
     use crate::tree::walk::walker_source::{UiaTreeSource, same_element};
     use agent_desktop_core::LocatorField;
-    use uiautomation::patterns::UIScrollPattern;
-    use uiautomation::types::ScrollAmount;
+    use uiautomation::UIElement;
+    use uiautomation::patterns::{
+        UIItemContainerPattern, UIScrollPattern, UIVirtualizedItemPattern,
+    };
+    use uiautomation::types::{ScrollAmount, UIProperty};
+    use uiautomation::variants::Variant;
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomationElement, IUIAutomationItemContainerPattern, UIA_PROPERTY_ID,
+    };
 
     pub(crate) fn find_named_selection_item(
         root: &UIAElement,
@@ -113,6 +147,65 @@ mod imp {
             }
         }
         Ok(found)
+    }
+
+    /// Asks `container`'s ItemContainer provider for the item named `value`.
+    ///
+    /// The provider answers from its item collection in one call, including
+    /// items a virtualizing list has not realized, so neither the list's
+    /// popup nor a scroll is needed. A second query that starts after the hit
+    /// finds a duplicate, which is `AMBIGUOUS_TARGET` as in the walk.
+    /// `Ok(None)` - the container does not publish the pattern, the provider
+    /// has no item with that exact name, its answer does not pass
+    /// [`name_matches`], or the second search failed so uniqueness is
+    /// unknown - sends the caller to the walk.
+    pub(crate) fn find_listed_item(
+        container: &UIAElement,
+        value: &str,
+        deadline: Deadline,
+    ) -> Result<Option<UIAElement>, AdapterError> {
+        deadline.ensure_remaining()?;
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let Ok(pattern) = container.0.get_pattern::<UIItemContainerPattern>() else {
+            return Ok(None);
+        };
+        let raw: &IUIAutomationItemContainerPattern = pattern.as_ref();
+        let name = Variant::from(value);
+        let property: UIA_PROPERTY_ID = UIProperty::Name.into();
+        let Ok(first) = (unsafe {
+            raw.FindItemByProperty(None::<&IUIAutomationElement>, property, name.as_ref())
+        }) else {
+            return Ok(None);
+        };
+        let found = UIAElement::from(UIElement::from(first.clone()));
+        // A virtualized item publishes its name only once realized.
+        if let Ok(virtualized) = found.0.get_pattern::<UIVirtualizedItemPattern>() {
+            let _ = virtualized.realize();
+        }
+        if !selection_item_available(&found) || !name_matches(&found, value) {
+            return Ok(None);
+        }
+        deadline.ensure_remaining()?;
+        let next = match unsafe { raw.FindItemByProperty(&first, property, name.as_ref()) } {
+            Ok(next) => {
+                let client = automation_client()?;
+                let next = UIAElement::from(UIElement::from(next));
+                if same_element(&client, &found, &next) {
+                    NextListed::Same
+                } else {
+                    NextListed::Other
+                }
+            }
+            // A finished search hands back no element with a success code.
+            Err(error) if error.code().is_ok() => NextListed::End,
+            Err(_) => NextListed::Failed,
+        };
+        if !listed_item_is_unique(next)? {
+            return Ok(None);
+        }
+        Ok(Some(found))
     }
 
     pub(crate) fn scroll_to_realize(
@@ -243,6 +336,14 @@ mod imp {
         Ok(None)
     }
 
+    pub(crate) fn find_listed_item(
+        _container: &UIAElement,
+        _value: &str,
+        _deadline: Deadline,
+    ) -> Result<Option<UIAElement>, AdapterError> {
+        Ok(None)
+    }
+
     pub(crate) fn scroll_to_realize(
         _element: &UIAElement,
         _deadline: Deadline,
@@ -261,14 +362,15 @@ mod imp {
 }
 
 pub(crate) use imp::{
-    find_named_selection_item, name_matches, scroll_to_realize, selection_item_available,
+    find_listed_item, find_named_selection_item, name_matches, scroll_to_realize,
+    selection_item_available,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SELECT_DEPTH, MAX_SELECT_NODES, RealizeScrollStep, accept_selection_match,
-        drive_realize_scrolls, select_node_budget_has_room,
+        MAX_SELECT_DEPTH, MAX_SELECT_NODES, NextListed, RealizeScrollStep, accept_selection_match,
+        drive_realize_scrolls, listed_item_is_unique, select_node_budget_has_room,
     };
     use agent_desktop_core::{AdapterError, ErrorCode};
     use std::cell::Cell;
@@ -362,6 +464,19 @@ mod tests {
             },
         )
         .expect_err("ambiguous");
+        assert_eq!(error.code, ErrorCode::AmbiguousTarget);
+    }
+
+    #[test]
+    fn a_failed_second_listed_search_never_proves_the_hit_unique() {
+        assert_eq!(listed_item_is_unique(NextListed::End).ok(), Some(true));
+        assert_eq!(listed_item_is_unique(NextListed::Same).ok(), Some(true));
+        assert_eq!(
+            listed_item_is_unique(NextListed::Failed).ok(),
+            Some(false),
+            "a provider failure leaves uniqueness unknown: the walk decides"
+        );
+        let error = listed_item_is_unique(NextListed::Other).expect_err("duplicate");
         assert_eq!(error.code, ErrorCode::AmbiguousTarget);
     }
 }
