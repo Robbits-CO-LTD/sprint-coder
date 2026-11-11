@@ -1,4 +1,6 @@
-//! Bounded SelectionItem descendant search and scroll-to-realize (A19-7).
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+//! Bounded SelectionItem descendant search and scroll-to-realize (A19-7),
+//! with an ItemContainer lookup tried before the walk.
 
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 
@@ -71,8 +73,15 @@ mod imp {
     use crate::tree::walk::walker::TreeSource;
     use crate::tree::walk::walker_source::{UiaTreeSource, same_element};
     use agent_desktop_core::LocatorField;
-    use uiautomation::patterns::UIScrollPattern;
-    use uiautomation::types::ScrollAmount;
+    use uiautomation::UIElement;
+    use uiautomation::patterns::{
+        UIItemContainerPattern, UIScrollPattern, UIVirtualizedItemPattern,
+    };
+    use uiautomation::types::{ScrollAmount, UIProperty};
+    use uiautomation::variants::Variant;
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomationElement, IUIAutomationItemContainerPattern, UIA_PROPERTY_ID,
+    };
 
     pub(crate) fn find_named_selection_item(
         root: &UIAElement,
@@ -113,6 +122,53 @@ mod imp {
             }
         }
         Ok(found)
+    }
+
+    /// Asks `container`'s ItemContainer provider for the item named `value`.
+    ///
+    /// The provider answers from its item collection in one call, including
+    /// items a virtualizing list has not realized, so neither the list's
+    /// popup nor a scroll is needed. A second query that starts after the hit
+    /// finds a duplicate, which is `AMBIGUOUS_TARGET` as in the walk.
+    /// `Ok(None)` - the container does not publish the pattern, the provider
+    /// has no item with that exact name, or its answer does not pass
+    /// [`name_matches`] - sends the caller to the walk.
+    pub(crate) fn find_listed_item(
+        container: &UIAElement,
+        value: &str,
+        deadline: Deadline,
+    ) -> Result<Option<UIAElement>, AdapterError> {
+        deadline.ensure_remaining()?;
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let Ok(pattern) = container.0.get_pattern::<UIItemContainerPattern>() else {
+            return Ok(None);
+        };
+        let raw: &IUIAutomationItemContainerPattern = pattern.as_ref();
+        let name = Variant::from(value);
+        let property: UIA_PROPERTY_ID = UIProperty::Name.into();
+        let Ok(first) = (unsafe {
+            raw.FindItemByProperty(None::<&IUIAutomationElement>, property, name.as_ref())
+        }) else {
+            return Ok(None);
+        };
+        let found = UIAElement::from(UIElement::from(first.clone()));
+        if !selection_item_available(&found) || !name_matches(&found, value) {
+            return Ok(None);
+        }
+        deadline.ensure_remaining()?;
+        if let Ok(next) = unsafe { raw.FindItemByProperty(&first, property, name.as_ref()) } {
+            let client = automation_client()?;
+            let next = UIAElement::from(UIElement::from(next));
+            if !same_element(&client, &found, &next) {
+                accept_selection_match(true)?;
+            }
+        }
+        if let Ok(virtualized) = found.0.get_pattern::<UIVirtualizedItemPattern>() {
+            let _ = virtualized.realize();
+        }
+        Ok(Some(found))
     }
 
     pub(crate) fn scroll_to_realize(
@@ -243,6 +299,14 @@ mod imp {
         Ok(None)
     }
 
+    pub(crate) fn find_listed_item(
+        _container: &UIAElement,
+        _value: &str,
+        _deadline: Deadline,
+    ) -> Result<Option<UIAElement>, AdapterError> {
+        Ok(None)
+    }
+
     pub(crate) fn scroll_to_realize(
         _element: &UIAElement,
         _deadline: Deadline,
@@ -261,7 +325,8 @@ mod imp {
 }
 
 pub(crate) use imp::{
-    find_named_selection_item, name_matches, scroll_to_realize, selection_item_available,
+    find_listed_item, find_named_selection_item, name_matches, scroll_to_realize,
+    selection_item_available,
 };
 
 #[cfg(test)]

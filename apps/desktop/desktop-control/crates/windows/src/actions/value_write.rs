@@ -1,4 +1,10 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! ValuePattern / RangeValuePattern writes for `SetValue` and `Clear`.
+//!
+//! On a standard Win32 combo box, a value that names one of its items is
+//! chosen through `win32_combo` instead, so the box's owner is told; any other
+//! value is written as text with a skipped `Win32ComboBox.SelectAndNotify`
+//! step saying that no item was chosen.
 //!
 //! Verification re-reads route through [`gated_pattern_value_equals`] /
 //! [`gated_pattern_range_equals`] so an `IsPassword` element never calls
@@ -39,8 +45,9 @@ mod imp {
         DeliverySemantics, ErrorCode, InteractionPolicy, RANGE_LABEL, SetValuePlan, UIAElement,
         VALUE_LABEL, VALUE_WRITE_CHAIN, execute_chain,
     };
-    use crate::actions::chain::{after_delivery, gated};
+    use crate::actions::chain::{after_delivery, build_step, gated};
     use crate::actions::mutation::{classify_success, classify_write};
+    use crate::actions::win32_combo::{ItemMatch, WIN32_COMBO_SELECT_LABEL, owning_combo};
     use crate::tree::properties::element_properties::ElementProperties;
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::property_outcome::PropertyOutcome;
@@ -53,8 +60,28 @@ mod imp {
         policy: InteractionPolicy,
         deadline: Deadline,
     ) -> Result<Vec<ActionStep>, AdapterError> {
+        // A standard Win32 combo box: a value that names one of its items is
+        // chosen the way `select` chooses it, so the owner hears of it. Any
+        // other value is written as text and the steps say that no item was
+        // chosen.
+        let mut uncommitted = None;
+        if let Some(combo) = owning_combo(element, deadline)? {
+            match combo.find_item(value, deadline)? {
+                Some(ItemMatch::Unique(index)) => {
+                    let outcome = combo.select_index(index, deadline)?;
+                    return Ok(vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]);
+                }
+                Some(ItemMatch::Missing | ItemMatch::Ambiguous) => {
+                    uncommitted = Some(build_step(
+                        WIN32_COMBO_SELECT_LABEL,
+                        DeliveryOutcome::NotDelivered,
+                    ));
+                }
+                None => {}
+            }
+        }
         let parsed = parse_finite_f64(value);
-        set_value_judged_for(
+        let mut steps = set_value_judged_for(
             deadline,
             policy,
             SetValuePlan {
@@ -67,7 +94,18 @@ mod imp {
                 Some(target) => invoke_range_set(element, target),
                 None => Ok(DeliveryOutcome::NotDelivered),
             },
-        )
+        )?;
+        steps.extend(uncommitted);
+        Ok(steps)
+    }
+
+    /// Whether `steps` record a combo-box write that left the list's
+    /// selection unchosen: the text was written, no item was selected.
+    pub(crate) fn left_list_unchosen(steps: &[ActionStep]) -> bool {
+        steps.iter().any(|step| {
+            step.label() == WIN32_COMBO_SELECT_LABEL
+                && matches!(step.outcome, agent_desktop_core::ActionStepOutcome::Skipped)
+        })
     }
 
     pub(crate) fn clear_steps(
@@ -339,6 +377,9 @@ mod imp {
 }
 
 pub(crate) use imp::{clear_steps, set_value_steps};
+
+#[cfg(target_os = "windows")]
+pub(crate) use imp::left_list_unchosen;
 
 #[allow(unused_imports)]
 pub(crate) use imp::{gated_pattern_value_equals, gated_value_compare};

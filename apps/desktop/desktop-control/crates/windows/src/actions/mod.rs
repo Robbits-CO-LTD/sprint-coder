@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 pub(crate) mod chain;
 pub(crate) mod disclosure;
 pub(crate) mod dispatch;
@@ -15,3 +16,4 @@ pub(crate) mod select;
 pub(crate) mod select_search;
 pub(crate) mod toggle_state;
 pub(crate) mod value_write;
+pub(crate) mod win32_combo;

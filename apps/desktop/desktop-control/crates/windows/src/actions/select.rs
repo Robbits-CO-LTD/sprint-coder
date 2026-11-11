@@ -1,12 +1,19 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! SelectionItemPattern select with bounded descendant search (A19-7).
 //!
-//! Self-match uses SelectionItem on the target; otherwise a walker DFS
-//! finds a named SelectionItem. Collapsed ExpandCollapse containers expand
-//! first and best-effort collapse after failure. Descendant search always
-//! scroll-to-realizes (A18-1), re-searching after every scroll step and
-//! retaining the first match so an intermediate or below-fold duplicate still
-//! surfaces as AMBIGUOUS_TARGET. Container Value verification routes through
-//! the IsPassword-gated value helpers.
+//! Self-match uses SelectionItem on the target; an empty value means the
+//! target item itself. A standard Win32 combo box (or an item of its list) is
+//! chosen through `win32_combo`, which tells the box's owner of the change.
+//! Otherwise a container that publishes ItemContainer is asked for the named
+//! item first, and the item is selected without opening the list; failing
+//! that, a walker DFS finds a named SelectionItem. Collapsed ExpandCollapse
+//! containers expand first and best-effort collapse after failure; after a
+//! successful select an open combo-box list is closed and the close is
+//! recorded as its own step. Descendant search always scroll-to-realizes
+//! (A18-1), re-searching after every scroll step and retaining the first match
+//! so an intermediate or below-fold duplicate still surfaces as
+//! AMBIGUOUS_TARGET. Container Value verification routes through the
+//! IsPassword-gated value helpers.
 
 use agent_desktop_core::{ActionStep, AdapterError, Deadline, ErrorCode};
 use std::cell::{Cell, RefCell};
@@ -66,24 +73,45 @@ mod imp {
         resolve_select_verification,
     };
     use crate::actions::chain::{after_delivery, capped_verification_end};
-    use crate::actions::disclosure::{EXPAND_LABEL, ExpandKind};
+    use crate::actions::disclosure::{COLLAPSE_LABEL, EXPAND_LABEL, ExpandKind};
     use crate::actions::mutation::{classify_success, classify_write};
     use crate::actions::select_search::{
-        find_named_selection_item, name_matches, scroll_to_realize, selection_item_available,
+        find_listed_item, find_named_selection_item, name_matches, scroll_to_realize,
+        selection_item_available,
     };
     use crate::actions::value_write::gated_pattern_value_equals;
+    use crate::actions::win32_combo::{WIN32_COMBO_SELECT_LABEL, owning_combo};
+    use crate::tree::automation::automation_client;
     use crate::tree::properties::property_ids::TreeProperty;
     use crate::tree::properties::read_one;
-    use agent_desktop_core::DeliverySemantics;
+    use crate::tree::walk::walker_source::parent_step;
+    use agent_desktop_core::{DeliverySemantics, LocatorField};
     use uiautomation::patterns::{UIExpandCollapsePattern, UISelectionItemPattern};
+    use windows::Win32::UI::Accessibility::UIA_ComboBoxControlTypeId;
+
+    /// Ancestors searched for the combo box an item's list belongs to.
+    const MAX_LIST_CLIMB: usize = 3;
+    const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
     pub(crate) fn select_steps(
         element: &UIAElement,
         value: &str,
         deadline: Deadline,
     ) -> Result<Vec<ActionStep>, AdapterError> {
-        let self_match = selection_item_available(element) && name_matches(element, value);
-        let needs_expand = is_collapsed_container(element);
+        let is_item = selection_item_available(element);
+        if value.is_empty() && !is_item {
+            return Err(value_required_error());
+        }
+        if let Some(steps) = win32_combo_select(element, value, deadline)? {
+            return Ok(steps);
+        }
+        let self_match = is_item && (value.is_empty() || name_matches(element, value));
+        let listed = if self_match {
+            None
+        } else {
+            find_listed_item(element, value, deadline)?
+        };
+        let needs_expand = listed.is_none() && is_collapsed_container(element);
         let expanded = Cell::new(false);
         let mut expand = || {
             deadline.ensure_remaining()?;
@@ -96,7 +124,12 @@ mod imp {
                 let _ = collapse_container(element);
             }
         };
-        let found_holder = RefCell::new(self_match.then(|| element.clone()));
+        let pre_found = self_match || listed.is_some();
+        let found_holder = RefCell::new(if self_match {
+            Some(element.clone())
+        } else {
+            listed
+        });
         let mut find = || {
             let prior = found_holder.borrow().clone();
             match find_named_selection_item(element, value, deadline, prior.as_ref())? {
@@ -126,10 +159,12 @@ mod imp {
                 .ok_or_else(|| not_found_chars(value.chars().count()))?;
             delivered_select(element, target, value, deadline)
         };
-        select_judged_for(
+        let mut steps = select_judged_for(
             deadline,
             SelectPlan {
-                self_match,
+                // An item the container's ItemContainer provider already
+                // named is selected directly, like a self-match.
+                self_match: pre_found,
                 needs_expand,
                 value_chars: value.chars().count(),
             },
@@ -140,6 +175,111 @@ mod imp {
                 realize: &mut realize,
                 select_item: &mut select_item,
             },
+        )?;
+        if let Some(step) = close_open_list(element, deadline) {
+            steps.push(step);
+        }
+        Ok(steps)
+    }
+
+    /// Chooses the item in the standard Win32 combo box `element` is, or
+    /// belongs to. `None` when there is no such box, or the box keeps no item
+    /// text, so the caller goes on with UI Automation. An empty `value` means
+    /// the item `element` itself.
+    pub(crate) fn win32_combo_select(
+        element: &UIAElement,
+        value: &str,
+        deadline: Deadline,
+    ) -> Result<Option<Vec<ActionStep>>, AdapterError> {
+        let Some(combo) = owning_combo(element, deadline)? else {
+            return Ok(None);
+        };
+        let text = if value.is_empty() {
+            match read_one(element, TreeProperty::Name).text() {
+                LocatorField::Known(name) if !name.is_empty() => name,
+                _ => return Ok(None),
+            }
+        } else {
+            value.to_owned()
+        };
+        Ok(combo
+            .select_text(&text, deadline)?
+            .map(|outcome| vec![build_step(WIN32_COMBO_SELECT_LABEL, outcome)]))
+    }
+
+    /// Closes the combo box list `element` is, or whose item it is, when that
+    /// list is open. The close is reported as a step whose verification is
+    /// the list's state afterwards; `None` when no open combo-box list is
+    /// involved.
+    fn close_open_list(element: &UIAElement, deadline: Deadline) -> Option<ActionStep> {
+        let combo = open_combo_box(element, deadline)?;
+        let delivered = matches!(collapse_container(&combo), Ok(true));
+        let closed = delivered && poll_collapsed(&combo, deadline);
+        Some(build_step(
+            COLLAPSE_LABEL,
+            DeliveryOutcome::from_delivery(delivered, closed),
+        ))
+    }
+
+    fn open_combo_box(element: &UIAElement, deadline: Deadline) -> Option<UIAElement> {
+        let walker = automation_client().ok()?.get_raw_view_walker().ok()?;
+        let mut current = element.clone();
+        for _ in 0..=MAX_LIST_CLIMB {
+            if deadline.is_expired() {
+                return None;
+            }
+            if is_combo_box(&current) {
+                return is_expanded(&current).then_some(current);
+            }
+            current = parent_step(&walker, &current).ok().flatten()?;
+        }
+        None
+    }
+
+    fn is_combo_box(element: &UIAElement) -> bool {
+        read_one(element, TreeProperty::ControlType).number() == Some(UIA_ComboBoxControlTypeId.0)
+    }
+
+    fn is_expanded(element: &UIAElement) -> bool {
+        read_expand_kind(element) == Some(ExpandKind::Expanded)
+    }
+
+    fn read_expand_kind(element: &UIAElement) -> Option<ExpandKind> {
+        if read_one(element, TreeProperty::ExpandCollapseAvailable).flag() != Some(true) {
+            return None;
+        }
+        read_one(element, TreeProperty::ExpandCollapseState)
+            .number()
+            .and_then(ExpandKind::from_i32)
+    }
+
+    fn poll_collapsed(element: &UIAElement, deadline: Deadline) -> bool {
+        let Ok(end) = capped_verification_end(deadline, CLOSE_TIMEOUT) else {
+            return false;
+        };
+        loop {
+            if read_expand_kind(element) == Some(ExpandKind::Collapsed) {
+                return true;
+            }
+            if Instant::now() >= end {
+                return false;
+            }
+            match deadline.remaining_slice(POLL_SLICE) {
+                Ok(slice) => std::thread::sleep(slice),
+                Err(_) => return false,
+            }
+        }
+    }
+
+    fn value_required_error() -> AdapterError {
+        AdapterError::new(
+            ErrorCode::InvalidArgs,
+            "select needs the name of the item to choose when the ref is a list or combo box",
+        )
+        .with_disposition(DeliverySemantics::not_delivered())
+        .with_suggestion(
+            "Pass the item's name: select <list or combo box ref> <item name>. \
+             To choose an item by its own ref, pass that item's ref with no name: select <item ref>.",
         )
     }
 
@@ -208,7 +348,9 @@ mod imp {
     ) -> Result<Option<bool>, AdapterError> {
         deadline.ensure_remaining()?;
         let end = capped_verification_end(deadline, VERIFY_TIMEOUT)?;
-        let container_value_available = value_available(container);
+        // An empty value selects the target itself; there is no requested
+        // text for the container to hold.
+        let container_value_available = !value.is_empty() && value_available(container);
         loop {
             let verified = verify_once(container, target, value, container_value_available)?;
             if verified == Some(true) {
@@ -252,13 +394,11 @@ mod imp {
         }
     }
 
-    fn collapse_container(element: &UIAElement) -> Result<(), AdapterError> {
+    /// Best-effort collapse; `Ok(true)` when the provider accepted it.
+    fn collapse_container(element: &UIAElement) -> Result<bool, AdapterError> {
         match element.0.get_pattern::<UIExpandCollapsePattern>() {
-            Ok(pattern) => {
-                let _ = pattern.collapse();
-                Ok(())
-            }
-            Err(_) => Ok(()),
+            Ok(pattern) => Ok(pattern.collapse().is_ok()),
+            Err(_) => Ok(false),
         }
     }
 
@@ -310,6 +450,9 @@ mod imp {
 }
 
 pub(crate) use imp::select_steps;
+
+#[cfg(target_os = "windows")]
+pub(crate) use imp::win32_combo_select;
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use imp::select_judged_for;
