@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode};
 
 #[path = "automation_classify.rs"]
@@ -197,6 +198,16 @@ mod imp {
             client
                 .SetTransactionTimeout(super::TRANSACTION_TIMEOUT_MS)
                 .map_err(|error| unbounded_client_error(error.code().0))?;
+            // Desktop control (desktop-control) change: UI Automation's client
+            // defaults to AutoSetFocus on, so a pattern call such as
+            // ValuePattern.SetValue first moves keyboard focus - and with it
+            // the foreground window - to the target. Semantic actions must
+            // leave the user's foreground window and focus alone; the paths
+            // that are meant to take focus (`focus`, `focus-window`, headed
+            // input) do so explicitly and are not affected by this setting.
+            client
+                .SetAutoSetFocus(false)
+                .map_err(|error| auto_set_focus_error(error.code().0))?;
         }
         let automation: IUIAutomation = client.into();
         Ok(UIAutomation::from(automation))
@@ -209,6 +220,16 @@ mod imp {
         )
         .with_suggestion(
             "This build does not provide CUIAutomation8; observation is refused rather than run against a client that cannot time out",
+        )
+    }
+
+    fn auto_set_focus_error(hresult: i32) -> AdapterError {
+        uia_failure_error(
+            UiaFailure::Hresult(hresult),
+            "turn off AutoSetFocus on the UI Automation client",
+        )
+        .with_suggestion(
+            "The client could not be kept from moving focus; actions are refused rather than run against one that would take the foreground window",
         )
     }
 
