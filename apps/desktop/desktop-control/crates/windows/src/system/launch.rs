@@ -56,7 +56,9 @@ pub(crate) fn launch_app_impl(
 /// Windows also drops the lock when this process exits), and the launched
 /// window is then placed just below the window that was in front before the
 /// launch. If the app still took the foreground in the moment between the
-/// unlock and the check, the foreground is handed back.
+/// unlock and the check, the foreground is handed back. If the foreground
+/// moved off that window while the lock held, the user moved it, so neither
+/// step runs (see `may_restore_foreground`).
 #[cfg(target_os = "windows")]
 struct ForegroundGuard {
     prior: windows_sys::Win32::Foundation::HWND,
@@ -79,10 +81,16 @@ impl ForegroundGuard {
 
     fn finish(mut self, pid: ProcessId, window: Option<&WindowInfo>) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsWindow, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOOWNERZORDER, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, WS_EX_TOPMOST,
+            GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, IsWindow, SWP_ASYNCWINDOWPOS,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetForegroundWindow,
+            SetWindowPos, WS_EX_TOPMOST,
         };
+        let foreground_is_prior = unsafe { GetForegroundWindow() } == self.prior;
+        let may_restore = may_restore_foreground(self.locked, foreground_is_prior);
         self.unlock();
+        if !may_restore {
+            return;
+        }
         let prior = self.prior;
         if prior.is_null() || unsafe { IsWindow(prior) } == 0 {
             return;
@@ -109,7 +117,11 @@ impl ForegroundGuard {
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                    SWP_ASYNCWINDOWPOS
+                        | SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOACTIVATE
+                        | SWP_NOOWNERZORDER,
                 )
             };
         }
@@ -128,6 +140,19 @@ impl Drop for ForegroundGuard {
     fn drop(&mut self) {
         self.unlock();
     }
+}
+
+/// Whether the guard may hand the foreground back and restack the launched
+/// window, read before the lock is dropped.
+///
+/// While the lock holds, no process can take the foreground on its own, so a
+/// foreground that moved off the prior window was moved by the user (a click
+/// or Alt, which also drops the lock) or by that window closing or minimizing;
+/// either way it is left alone. Without the lock that cannot be told apart
+/// from the launched app taking the foreground, so the guard still restores.
+#[cfg(any(target_os = "windows", test))]
+fn may_restore_foreground(locked: bool, foreground_is_prior: bool) -> bool {
+    !locked || foreground_is_prior
 }
 
 #[cfg(target_os = "windows")]
@@ -482,6 +507,27 @@ fn should_poll_after_first_observation(timeout_ms: u64) -> bool {
 #[cfg(test)]
 #[path = "launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod foreground_guard_tests {
+    use super::may_restore_foreground;
+
+    #[test]
+    fn a_locked_foreground_that_stayed_on_the_prior_window_is_restored() {
+        assert!(may_restore_foreground(true, true));
+    }
+
+    #[test]
+    fn a_foreground_the_user_moved_while_locked_is_left_alone() {
+        assert!(!may_restore_foreground(true, false));
+    }
+
+    #[test]
+    fn without_the_lock_the_guard_still_restores() {
+        assert!(may_restore_foreground(false, true));
+        assert!(may_restore_foreground(false, false));
+    }
+}
 
 #[cfg(all(test, target_os = "windows"))]
 #[path = "launch_lease_isolation_tests.rs"]

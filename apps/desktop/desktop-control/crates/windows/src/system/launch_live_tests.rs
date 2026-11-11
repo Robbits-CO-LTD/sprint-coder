@@ -63,10 +63,18 @@ fn a_background_launch_keeps_the_foreground_and_stays_below_it() {
     let prior_is_topmost =
         unsafe { GetWindowLongW(prior, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
     if !prior.is_null() && !prior_is_topmost {
-        let mut below = unsafe { GetWindow(prior, GW_HWNDNEXT) };
-        while !below.is_null() && below != handle {
-            below = unsafe { GetWindow(below, GW_HWNDNEXT) };
-        }
+        // The restack is queued (`SWP_ASYNCWINDOWPOS`), so give it a moment.
+        let settle = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let below = loop {
+            let mut below = unsafe { GetWindow(prior, GW_HWNDNEXT) };
+            while !below.is_null() && below != handle {
+                below = unsafe { GetWindow(below, GW_HWNDNEXT) };
+            }
+            if below == handle || std::time::Instant::now() >= settle {
+                break below;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         assert_eq!(
             below, handle,
             "the launched window must sit below the window that was in front"
