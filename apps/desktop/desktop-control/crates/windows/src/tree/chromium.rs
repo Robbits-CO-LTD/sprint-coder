@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, LocatorStats, ObservationRequest, ObservationRoot};
 
 use super::element::UIAElement;
@@ -38,6 +39,75 @@ pub(crate) fn is_chromium_root(root: &UIAElement) -> bool {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn is_chromium_root(_root: &UIAElement) -> bool {
     false
+}
+
+/// The class of the window Chromium draws web content into. An Electron
+/// window holds it as a child of its own `Chrome_WidgetWin_1` top level; a
+/// WebView2 control holds it under a `Chrome_WidgetWin_1` child of the host
+/// application's top level, whose own class is the host's (a Tauri window
+/// measured `Tauri Window`, with the content nested nine levels down).
+const CHROMIUM_CONTENT_CLASS: &str = "Chrome_RenderWidgetHostHWND";
+
+/// Whether the root's tree is of Chromium provenance: a Chromium top level
+/// ([`is_chromium_root`]), or a window that holds Chromium web content in a
+/// child window (WebView2 in a Tauri, WinForms or WPF window).
+///
+/// The child windows are listed with `EnumChildWindows` and read with
+/// `GetClassNameW`, neither of which sends the target a message, so a busy
+/// target cannot hold this up. An element that is not a window (a drill-down
+/// root) keeps the class read alone.
+#[cfg(target_os = "windows")]
+pub(crate) fn has_chromium_provenance(root: &UIAElement) -> bool {
+    is_chromium_root(root) || holds_chromium_content(root)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn has_chromium_provenance(_root: &UIAElement) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn holds_chromium_content(root: &UIAElement) -> bool {
+    use windows::Win32::Foundation::HWND;
+    let Ok(handle) = root.0.get_native_window_handle() else {
+        return false;
+    };
+    let handle: HWND = handle.into();
+    !handle.0.is_null() && has_child_window_of_class(handle.0, CHROMIUM_CONTENT_CLASS)
+}
+
+/// Whether any window below `parent` has the class `class`. Stops at the
+/// first match.
+#[cfg(target_os = "windows")]
+pub(crate) fn has_child_window_of_class(parent: *mut std::ffi::c_void, class: &str) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+
+    struct Search {
+        class: Vec<u16>,
+        found: bool,
+    }
+    unsafe extern "system" fn visit(window: HWND, state: isize) -> i32 {
+        // SAFETY: `state` is the `Search` the caller below keeps alive for the
+        // whole enumeration.
+        let search = unsafe { &mut *(state as *mut Search) };
+        let mut buffer = [0u16; 256];
+        // SAFETY: `buffer` is writable for the length passed.
+        let length = unsafe { GetClassNameW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
+        if length > 0 && buffer[..length as usize] == search.class[..] {
+            search.found = true;
+            return 0;
+        }
+        1
+    }
+    let mut search = Search {
+        class: class.encode_utf16().collect(),
+        found: false,
+    };
+    // SAFETY: `visit` only reads the window it is given and writes `search`,
+    // which outlives this call.
+    unsafe { EnumChildWindows(parent, Some(visit), &mut search as *mut Search as isize) };
+    search.found
 }
 
 /// Whether a full-depth walk of a detected-Chromium root landed on the shell
@@ -252,3 +322,7 @@ mod tests {
         assert!(!activation_eligible(element_root, &request));
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "chromium_provenance_tests.rs"]
+mod provenance_tests;
