@@ -4,6 +4,7 @@ import { ToolAuthorizationDeniedError, ToolInputSchemaMismatchError } from './to
 import { WorkspaceToolRejection } from './provider-workspace-tools';
 import { WorkspacePatchRejection } from './workspace-patch-tool';
 import { CommandRunnerError } from './command-runner';
+import { DesktopControlQueueError } from './desktop-control-queue';
 import { ManagedStdinRejection } from './managed-command-stdin';
 import { SkillSettingsError } from './skill-settings-service';
 import { clipPublicMessage } from './zod-issue-message';
@@ -100,6 +101,10 @@ export function providerWorkspaceToolFailure(error: unknown): string {
   if (error instanceof WorkspacePatchRejection)
     return providerToolErrorContent('PATCH_REJECTED', error.message);
   if (error instanceof CommandRunnerError)
+    return providerToolErrorContent(error.code, error.message);
+  // A desktop operation that did not get its turn was not run: the model is told so, and that it
+  // may run it again (`desktop-control-queue.ts`). The message names no path or id.
+  if (error instanceof DesktopControlQueueError)
     return providerToolErrorContent(error.code, error.message);
   // The stdin cap has to reach the model verbatim: the message tells it how to split the write so
   // it can retry instead of seeing an opaque failure (Issue #473).
