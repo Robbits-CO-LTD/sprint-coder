@@ -314,6 +314,9 @@ function recordedOwner(
   let found: DesktopControlOwner | null = null;
   for (const { kind, value } of targets) {
     if (!(kind === 'ref' ? REF : WINDOW).test(value)) return null;
+    // A standard menu item runs an app command (保存・削除・終了 among them) that no part on screen
+    // shows, so it is decided on its own card every time, never by the app-wide grant.
+    if (kind === 'ref' && reader.menuPart(value)) return null;
     const owner = kind === 'ref' ? reader.part(value) : reader.window(value);
     if (owner === null) return null;
     if (found !== null && !sameDesktopControlOwner(found, owner)) return null;

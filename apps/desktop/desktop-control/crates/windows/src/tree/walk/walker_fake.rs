@@ -196,6 +196,7 @@ pub(crate) fn ref_entry(role: &str) -> RefEntry {
             unique_at_capture: false,
             ancestors: Vec::new(),
             in_view: None,
+            in_menu: None,
         },
         geometry: agent_desktop_core::RefGeometry {
             bounds_space: None,

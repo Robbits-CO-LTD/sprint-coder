@@ -4,20 +4,25 @@
 //! A standard menu bar opens only while its window is in front, so its items
 //! are not in the accessibility tree of a window behind others, and opening
 //! it from behind fails. The platform can still read the menu's items without
-//! opening it; this surface presents that read. It is read only: the items
-//! carry no refs and no actions, and nothing is sent to the application
-//! (the messages an open menu would send first, which let an application
-//! update the items, change what some applications hold, so the read leaves
-//! them out and says the states may be stale).
+//! opening it; this surface presents that read, and nothing is sent to the
+//! application while reading (the messages an open menu would send first,
+//! which let an application update the items, change what some applications
+//! hold, so the read leaves them out and says the states may be stale).
+//!
+//! An item that can be run - one that opens no submenu, is enabled under
+//! enabled menus, can be read, sends a command, and is the only item of its
+//! name in each menu on its way down - gets a ref proven in the menu
+//! (`refs::ref_menu`), which only `click` runs.
 
 use serde_json::{Value, json};
 
 use crate::{
     AccessibilityNode, AdapterError, AppError, ErrorCode, NodeDescriptor, NodeIdentity,
-    NodePresentation, TreeOptions, WindowInfo,
+    NodePresentation, RefMenuProof, RefMenuStep, TreeOptions, WindowInfo,
     actions::action::Action,
     adapter::PlatformAdapter,
-    refs::{RefEntry, RefMap},
+    context::CommandContext,
+    refs::{RefEntry, RefMap, ref_menu},
 };
 
 /// One item of a native menu, as the application set it.
@@ -33,9 +38,16 @@ pub struct NativeMenuItem {
     pub radio: bool,
     /// The application draws the item itself, so its text cannot be read.
     pub owner_drawn: bool,
+    /// The command identifier the item sends when chosen (0 when it sends
+    /// none, and meaningless for an item that opens a submenu).
+    pub command_id: u32,
+    /// The menu holding the item reports its items by position
+    /// (`MNS_NOTIFYBYPOS`) instead of sending their commands.
+    pub in_notify_by_position_menu: bool,
     /// The items of the submenu the item opens, when it opens one.
     pub submenu: Option<Vec<NativeMenuItem>>,
-    /// The item opens a submenu the read did not reach (its limits ran out).
+    /// The item opens a submenu the read did not reach (its limits ran out,
+    /// or the read was of one level only).
     pub submenu_unread: bool,
 }
 
@@ -61,7 +73,7 @@ pub enum MenuBarKind {
     Unknown,
 }
 
-pub(crate) const MENU_BAR_HINT: &str = "These are the window's standard menu items, read from the menu itself without opening it or sending anything to the application. They carry no refs: running a menu item is not available yet. Enabled and checked states are as the application last set them; some applications update them, or change the items, only when the menu is opened, so the open menu can differ.";
+pub(crate) const MENU_BAR_HINT: &str = "These are the window's standard menu items, read from the menu itself without opening it or sending anything to the application. An item with a ref runs with click <ref>: the application receives the item's command as if a person chose it, and the window stays where it is. Before sending, the menu is read again the way an opening menu is (the application is told the menu opens, so it can update it), and the item must still be there by the same names, enabled and sending the same command; otherwise nothing is sent. Items without a ref cannot be run this way (a submenu, a disabled item, or one whose hint says why). Enabled and checked states here are as the application last set them, so the open menu can differ.";
 
 const MENU_BAR_DEPTH_HINT: &str = "Some submenus were cut at the depth limit, so their items are not listed; each carries children_count. Run snapshot --surface menubar again with a larger --max-depth (up to 50).";
 
@@ -97,11 +109,33 @@ pub fn menu_item_shortcut(text: &str) -> Option<String> {
     (!shortcut.is_empty()).then(|| shortcut.to_owned())
 }
 
+/// The window the refs of a read belong to, and the map they are added to.
+pub(crate) struct MenuRefs<'a> {
+    pub(crate) window: &'a WindowInfo,
+    pub(crate) refmap: &'a mut RefMap,
+}
+
+struct Walk<'r, 'w> {
+    max_depth: u8,
+    count: usize,
+    refs: Option<&'r mut MenuRefs<'w>>,
+}
+
 /// The presented tree of a menu bar: a `menubar` root over its items, cut at
-/// `max_depth` levels below the root, and how many items it holds.
-pub(crate) fn build_tree(bar: &NativeMenuBar, max_depth: u8) -> (AccessibilityNode, usize) {
-    let mut count = 0;
-    let children = items_to_nodes(&bar.items, 1, max_depth, &mut count);
+/// `max_depth` levels below the root, and how many items it holds. With
+/// `refs`, every item that can be run gets a ref in `refs.refmap`.
+pub(crate) fn build_tree(
+    bar: &NativeMenuBar,
+    max_depth: u8,
+    refs: Option<&mut MenuRefs<'_>>,
+) -> (AccessibilityNode, usize) {
+    let mut walk = Walk {
+        max_depth,
+        count: 0,
+        refs,
+    };
+    let mut path = Vec::new();
+    let children = items_to_nodes(&bar.items, 1, &mut walk, &mut path);
     let root = AccessibilityNode {
         ref_id: None,
         role: "menubar".to_owned(),
@@ -111,30 +145,38 @@ pub(crate) fn build_tree(bar: &NativeMenuBar, max_depth: u8) -> (AccessibilityNo
         subtree_truncated: false,
         children,
     };
-    (root, count)
+    (root, walk.count)
 }
 
-fn items_to_nodes(
-    items: &[NativeMenuItem],
+/// An ancestor on the way down: the item, the menu holding it, and its
+/// position there.
+type Step<'b> = (&'b NativeMenuItem, &'b [NativeMenuItem], u32);
+
+fn items_to_nodes<'b>(
+    items: &'b [NativeMenuItem],
     depth: u8,
-    max_depth: u8,
-    count: &mut usize,
+    walk: &mut Walk<'_, '_>,
+    path: &mut Vec<Step<'b>>,
 ) -> Vec<AccessibilityNode> {
-    items
-        .iter()
-        .filter(|item| !item.separator)
-        .map(|item| {
-            *count += 1;
-            item_node(item, depth, max_depth, count)
-        })
-        .collect()
+    let mut nodes = Vec::new();
+    for (position, item) in items.iter().enumerate() {
+        if item.separator {
+            continue;
+        }
+        walk.count += 1;
+        let position = u32::try_from(position).unwrap_or(u32::MAX);
+        nodes.push(item_node(item, items, position, depth, walk, path));
+    }
+    nodes
 }
 
-fn item_node(
-    item: &NativeMenuItem,
+fn item_node<'b>(
+    item: &'b NativeMenuItem,
+    siblings: &'b [NativeMenuItem],
+    position: u32,
     depth: u8,
-    max_depth: u8,
-    count: &mut usize,
+    walk: &mut Walk<'_, '_>,
+    path: &mut Vec<Step<'b>>,
 ) -> AccessibilityNode {
     let text = item.text.as_deref().filter(|_| !item.owner_drawn);
     let name = text.map(menu_item_name).filter(|name| !name.is_empty());
@@ -146,20 +188,38 @@ fn item_node(
     if item.checked {
         states.push(crate::tree::state::CHECKED.to_owned());
     }
-    let opens_submenu = item.submenu.is_some() || item.submenu_unread;
+    let opens_submenu = ref_menu::opens_submenu(item);
     if opens_submenu {
         states.push(crate::tree::state::HASPOPUP.to_owned());
     }
-    let hint = if name.is_none() {
-        Some(OWNER_DRAWN_HINT.to_owned())
+    let ancestors: Vec<(&NativeMenuItem, &[NativeMenuItem])> = path
+        .iter()
+        .map(|(ancestor, menu, _)| (*ancestor, *menu))
+        .collect();
+    let reason = ref_menu::unrunnable_reason(item, siblings, &ancestors);
+    let mut hints: Vec<String> = Vec::new();
+    if name.is_none() {
+        hints.push(OWNER_DRAWN_HINT.to_owned());
     } else if item.submenu_unread {
-        Some(UNREAD_HINT.to_owned())
-    } else {
-        shortcut.map(|shortcut| format!("Shortcut: {shortcut}"))
-    };
+        hints.push(UNREAD_HINT.to_owned());
+    } else if let Some(shortcut) = &shortcut {
+        hints.push(format!("Shortcut: {shortcut}."));
+    }
+    if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+        hints.push(reason.to_owned());
+    }
+    let mut ref_id = None;
+    if reason.is_none()
+        && let (Some(refs), Some(name)) = (walk.refs.as_deref_mut(), name.as_ref())
+    {
+        ref_id = allocate(refs, item, name, shortcut.clone(), position, path, &states);
+    }
     let (children, children_count) = match &item.submenu {
-        Some(submenu) if depth < max_depth => {
-            (items_to_nodes(submenu, depth + 1, max_depth, count), None)
+        Some(submenu) if depth < walk.max_depth => {
+            path.push((item, siblings, position));
+            let children = items_to_nodes(submenu, depth + 1, walk, path);
+            path.pop();
+            (children, None)
         }
         Some(submenu) => {
             let shown = submenu.iter().filter(|child| !child.separator).count();
@@ -167,16 +227,22 @@ fn item_node(
         }
         None => (Vec::new(), None),
     };
+    let available_actions = if ref_id.is_some() {
+        vec![crate::actions::capability::CLICK.to_owned()]
+    } else {
+        Vec::new()
+    };
     AccessibilityNode {
-        ref_id: None,
+        ref_id,
         role: "menuitem".to_owned(),
         identity: NodeIdentity {
             name,
             ..NodeIdentity::default()
         },
         presentation: NodePresentation {
-            hint,
+            hint: (!hints.is_empty()).then(|| hints.join(" ")),
             states,
+            available_actions,
             descriptors: NodeDescriptor {
                 subrole: item.radio.then(|| "radio".to_owned()),
                 ..NodeDescriptor::default()
@@ -189,14 +255,84 @@ fn item_node(
     }
 }
 
-/// Reads the menu bar of the window `app`/`window_id` name and presents it
-/// in the snapshot envelope, with no refs and nothing saved.
+/// Adds the ref of a runnable item, or `None` when the entry cannot be
+/// recorded (a window without a process instance, a field past its limit).
+fn allocate(
+    refs: &mut MenuRefs<'_>,
+    item: &NativeMenuItem,
+    name: &str,
+    shortcut: Option<String>,
+    position: u32,
+    path: &[Step<'_>],
+    states: &[String],
+) -> Option<String> {
+    let mut steps = Vec::with_capacity(path.len() + 1);
+    for (ancestor, _, at) in path {
+        steps.push(RefMenuStep {
+            name: ref_menu::item_name(ancestor)?,
+            position: *at,
+            submenu: true,
+        });
+    }
+    steps.push(RefMenuStep {
+        name: name.to_owned(),
+        position,
+        submenu: false,
+    });
+    let window = refs.window;
+    let entry = RefEntry {
+        process: crate::RefProcess {
+            pid: window.pid,
+            process_instance: window.process_instance.clone(),
+        },
+        identity: crate::RefEntryIdentity {
+            role: "menuitem".to_owned(),
+            name: Some(name.to_owned()),
+            in_menu: Some(RefMenuProof {
+                steps: steps.clone(),
+                command_id: item.command_id,
+                shortcut,
+            }),
+            ..crate::RefEntryIdentity::default()
+        },
+        geometry: crate::RefGeometry {
+            bounds: None,
+            bounds_hash: None,
+            bounds_space: None,
+        },
+        capabilities: crate::RefCapabilities {
+            states: states.to_vec(),
+            available_actions: vec![crate::actions::capability::CLICK.to_owned()],
+        },
+        source: crate::RefSource {
+            source_app: Some(window.app.clone()),
+            source_window_id: Some(window.id.clone()),
+            source_window_title: Some(window.title.clone()),
+            source_window_bounds_hash: window.bounds.as_ref().and_then(crate::Rect::bounds_hash),
+            source_surface: crate::SnapshotSurface::Menubar,
+            renderer_accessibility_forced: false,
+        },
+        scope: crate::RefScope {
+            root_ref: None,
+            path_is_absolute: false,
+            path: steps
+                .iter()
+                .map(|step| usize::try_from(step.position).unwrap_or(usize::MAX))
+                .collect(),
+        },
+    };
+    refs.refmap.try_allocate(entry).ok()
+}
+
+/// Reads the menu bar of the window `app`/`window_id` name, presents it in
+/// the snapshot envelope, and saves the refs of its runnable items.
 pub(crate) fn run(
     adapter: &dyn PlatformAdapter,
     opts: &TreeOptions,
     app: Option<&str>,
     window_id: Option<&str>,
     timeout_ms: u64,
+    context: &CommandContext,
 ) -> Result<Value, AppError> {
     let deadline = crate::Deadline::after(timeout_ms)?;
     let windows = super::surface_windows(
@@ -209,22 +345,51 @@ pub(crate) fn run(
     let (window, bar) = super::window_capture::first_surface_owner(windows, |window| {
         Ok(adapter.read_menu_bar(window, deadline)?)
     })?;
-    Ok(present(&window, &bar, opts.max_depth))
+    let mut result = capture(&window, &bar, opts.max_depth);
+    if !result.refmap.is_empty() {
+        let store = crate::refs::refs_store::RefStore::for_session(context.session_id())?;
+        let snapshot_id = result.save_refmap(&store)?;
+        crate::trace::trace_artifacts::copy_refmap_if_full(
+            context,
+            &store,
+            &snapshot_id,
+            &result.refmap,
+        )?;
+        result.bind_snapshot_id(snapshot_id);
+        super::emit_snapshot_saved(context, &result)?;
+    }
+    Ok(present(&result))
 }
 
-pub(crate) fn present(window: &WindowInfo, bar: &NativeMenuBar, max_depth: u8) -> Value {
-    let (tree, nodes_observed) = build_tree(bar, max_depth);
-    let result = super::SnapshotResult {
+/// The snapshot of a menu bar read, with the refs of its runnable items.
+pub(crate) fn capture(
+    window: &WindowInfo,
+    bar: &NativeMenuBar,
+    max_depth: u8,
+) -> super::SnapshotResult {
+    let mut refmap = RefMap::new();
+    let (tree, nodes_observed) = build_tree(
+        bar,
+        max_depth,
+        Some(&mut MenuRefs {
+            window,
+            refmap: &mut refmap,
+        }),
+    );
+    super::SnapshotResult {
         tree,
-        refmap: RefMap::new(),
+        refmap,
         window: window.clone(),
         snapshot_id: None,
         complete: bar.complete,
         nodes_observed,
         identity_unproven: None,
         visible_scope: false,
-    };
-    let mut body = match crate::commands::snapshot::format_snapshot_fields(&result, None, None) {
+    }
+}
+
+pub(crate) fn present(result: &super::SnapshotResult) -> Value {
+    let mut body = match crate::commands::snapshot::format_snapshot_fields(result, None, None) {
         Ok(body) => body,
         Err(_) => json!({}),
     };
@@ -236,11 +401,12 @@ pub(crate) fn present(window: &WindowInfo, bar: &NativeMenuBar, max_depth: u8) -
     body
 }
 
-/// The guidance added to a click or an expand that failed on a menu item:
-/// when the item is one of the window's standard menu bar items, that its
-/// items can be read without opening it; when the window has no standard
-/// menu bar, that this menu cannot be opened from behind the window. The
-/// error's code, message and delivery are kept as they are.
+/// The guidance added to a click or an expand that failed on a menu item of
+/// the window's accessibility tree: when the item is one of the window's
+/// standard menu bar items, that its items can be read and run without
+/// opening it; when the window has no standard menu bar, that this menu
+/// cannot be opened from behind the window. The error's code, message and
+/// delivery are kept as they are.
 pub(crate) fn annotate_action_error(
     adapter: &dyn PlatformAdapter,
     entry: &RefEntry,
@@ -249,6 +415,7 @@ pub(crate) fn annotate_action_error(
 ) -> AdapterError {
     if !matches!(action, Action::Click | Action::Expand)
         || entry.identity.role != "menuitem"
+        || entry.identity.in_menu.is_some()
         || !matches!(
             error.code,
             ErrorCode::PolicyDenied | ErrorCode::ActionFailed | ErrorCode::ActionNotSupported
@@ -271,16 +438,14 @@ pub(crate) fn annotate_action_error(
     let (kind, hint) = match adapter.menu_bar_kind(entry, deadline) {
         MenuBarKind::StandardItem => (
             "standard",
-            match entry.source.source_window_id.as_deref() {
-                Some(id) => format!(
-                    "This is an item of the window's standard menu bar, which opens only while the window is in front. Its items can be read without opening it: snapshot --surface menubar --window-id {id}."
-                ),
-                None => "This is an item of the window's standard menu bar, which opens only while the window is in front. Its items can be read without opening it: snapshot --surface menubar.".to_owned(),
-            },
+            format!(
+                "This is an item of the window's standard menu bar, which opens only while the window is in front. Its items can be read and run without opening it: snapshot --surface menubar --window-id {}, then click the item's ref.",
+                entry.source.source_window_id.as_deref().unwrap_or("<id>")
+            ),
         ),
         MenuBarKind::NotStandard => (
             "not_standard",
-            "This menu is not a standard Windows menu (the window has no menu bar of its own), so it cannot be opened from behind the window. Opening it needs an operation that brings the window to the front.".to_owned(),
+            "This menu is not a standard Windows menu (the window has no menu bar of its own), so it cannot be opened or run from behind the window. Opening it needs an operation that brings the window to the front.".to_owned(),
         ),
         MenuBarKind::Unknown => return error,
     };
@@ -300,4 +465,4 @@ pub(crate) fn annotate_action_error(
 
 #[cfg(test)]
 #[path = "menu_bar_tests.rs"]
-mod tests;
+pub(crate) mod tests;

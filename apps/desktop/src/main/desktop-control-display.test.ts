@@ -63,6 +63,44 @@ beforeAll(() => {
     '@e8': { ...mail, role: 'button', name: '保存', path: [2, 5], root_ref: '@e9' },
     '@e10': { ...mail, role: 'button', name: '保存', path: [3] },
   });
+  // Items of a standard menu bar, as `snapshot --surface menubar` records them.
+  const menuApp = {
+    role: 'menuitem',
+    source_app: 'menuapp.exe',
+    source_window_id: 'w-6622478',
+    source_window_title: 'menu 試験アプリ',
+    source_surface: 'menubar',
+  };
+  writeRefmap('smenu', {
+    '@e1': {
+      ...menuApp,
+      name: '上書き保存(S)',
+      path: [0, 1],
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '上書き保存(S)', position: 1, submenu: false },
+        ],
+        command_id: 1002,
+        shortcut: 'Ctrl+S',
+      },
+    },
+    '@e2': {
+      ...menuApp,
+      name: '孫 1(1)',
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '入れ子(N)', position: 5, submenu: true },
+          { name: '孫(G)', position: 1, submenu: true },
+          { name: '孫 1(1)', position: 0, submenu: false },
+        ],
+        command_id: 1211,
+      },
+    },
+    // A record the card cannot read is shown without a name.
+    '@e3': { ...menuApp, name: '終了(X)', proven_in_menu: { steps: 'x' } },
+  });
   writeRefmap('snotepad', {
     '@e1': {
       role: 'document',
@@ -93,6 +131,47 @@ const describeArgv = (argv: readonly string[]) => {
 };
 
 describe('desktop-control approval description', () => {
+  it('names a standard menu item by its place in the menu, and never offers the Task grant', () => {
+    const action = describeArgv(['click', '@smenu:e1']);
+    expect(action).toMatchObject({
+      kind: 'operate',
+      title: 'メニューの項目を実行します',
+      mode: 'background',
+      allowTaskGrant: false,
+      target: {
+        resolved: true,
+        app: 'menuapp.exe',
+        window: 'menu 試験アプリ',
+        role: 'メニューの項目',
+        name: 'ファイル > 上書き保存（Ctrl+S）',
+      },
+    });
+    expect(action.notes[0]).toContain('毎回確かめます');
+    expect(describeArgv(['click', '@smenu:e2']).target).toMatchObject({
+      name: 'ファイル > 入れ子 > 孫 > 孫 1',
+    });
+    // Unreadable: no name, so the card opens its details.
+    const broken = describeArgv(['click', '@smenu:e3']);
+    expect(broken.target).not.toHaveProperty('name');
+    expect(broken.openDetails).toBe(true);
+    expect(broken.allowTaskGrant).toBe(false);
+    // In a batch too, and beside other steps.
+    const batch = describeArgv([
+      'batch',
+      JSON.stringify([
+        { command: 'snapshot', args: { window_id: 'w-6622478', surface: 'menubar' } },
+        { command: 'click', args: { ref_id: '@smenu:e1' } },
+      ]),
+    ]);
+    expect(batch.allowTaskGrant).toBe(false);
+    expect(batch.steps?.[1]).toMatchObject({
+      title: 'メニューの項目を実行します',
+      target: { name: 'ファイル > 上書き保存（Ctrl+S）' },
+    });
+    // A plain click elsewhere keeps the grant.
+    expect(describeArgv(['click', '@s1abc:e3']).allowTaskGrant).toBe(true);
+  });
+
   it('names the app, window and part a ref points at, and the text it enters', () => {
     const action = describeArgv(['set-value', '@s1abc:e1', 'ABC']);
     expect(action).toMatchObject({

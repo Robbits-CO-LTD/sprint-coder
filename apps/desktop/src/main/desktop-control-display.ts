@@ -249,6 +249,10 @@ const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓
 const SELECT_ITEM_TITLE = 'この項目を選びます';
 // `snapshot --surface menubar` reads the window's menu bar without opening it.
 const MENU_BAR_TITLE = 'メニューバーの項目を読みます';
+// `click` on a menu item ref runs the app's command for that item, without opening the menu.
+const MENU_RUN_TITLE = 'メニューの項目を実行します';
+const MENU_NOTE =
+  'アプリのメニューの項目を、メニューを開かずに実行します。保存・削除・終了などの項目もあるので、項目の名前を確かめてください。メニューの項目の実行は、毎回確かめます。';
 // Reads that take `--root` (`root` in a batch) read only below that part.
 const ROOT_COMMANDS = new Set(['snapshot', 'find']);
 const BEHIND_NOTE =
@@ -384,6 +388,8 @@ export type DesktopControlOwnerReader = Readonly<{
   part(ref: string): DesktopControlOwner | null;
   /** The one owner every record of this window id agrees on. */
   window(id: string): DesktopControlOwner | null;
+  /** Whether the ref names an item of a window's standard menu bar. */
+  menuPart(ref: string): boolean;
 }>;
 
 export function desktopControlOwnerReader(
@@ -396,6 +402,7 @@ export function desktopControlOwnerReader(
   const { taskId } = lookup;
   return {
     part: (ref) => reader.partOwner(ref),
+    menuPart: (ref) => reader.menuPart(ref),
     // Read when asked, so an id distrusted after the reader was made is not taken either.
     window: (id) =>
       taskId !== undefined && distrustedWindows.get(taskId)?.has(id) === true
@@ -472,6 +479,8 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   const read = readDesktopControlCommand(argv);
   const notes: string[] = [];
   let openDetails = false;
+  // A run naming a standard menu item ref, which runs an app command; never granted for the Task.
+  let menuItems = false;
   let steps: DesktopActionStep[] | undefined;
   let stepsOmitted: number | undefined;
   let head: DesktopActionStep;
@@ -506,6 +515,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
       ),
     );
     steps = described.map(({ step }) => step);
+    if (described.some(({ menu }) => menu)) menuItems = true;
     if (described.some(({ unexplained }) => unexplained)) openDetails = true;
     // The same in a batch, by argument name (`xy`, `from_xy`, `to_xy` …).
     if (
@@ -547,6 +557,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
       snapshots,
     );
     head = described.step;
+    if (described.menu) menuItems = true;
     if (described.unexplained) openDetails = true;
     // A point given as coordinates is not what the card names, even beside a part.
     if (COORDINATE_OPTIONS.some((option) => read.options.has(option))) openDetails = true;
@@ -578,6 +589,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
   if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
+  if (menuItems) notes.unshift(MENU_NOTE);
   if (mode === 'foreground') {
     // Only bringing a window to the front, without `--headed`, takes no mouse or keyboard.
     const frontOnly =
@@ -592,7 +604,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     ...head,
     ...(steps === undefined ? {} : { steps }),
     ...(stepsOmitted === undefined ? {} : { stepsOmitted }),
-    allowTaskGrant: mode !== 'foreground',
+    allowTaskGrant: mode !== 'foreground' && !menuItems,
     notes,
     openDetails,
   };
@@ -619,14 +631,18 @@ function describeStep(
   mode: Mode,
   { ref, windowId, app, destination, text, surface }: StepArguments,
   snapshots: SnapshotReader,
-): { step: DesktopActionStep; cut: boolean; unexplained: boolean } {
+): { step: DesktopActionStep; cut: boolean; unexplained: boolean; menu: boolean } {
   const [kind, heading] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
+  // Any command naming a menu item ref; the executable runs it only for `click`.
+  const menu = ref !== undefined && ref !== '' && snapshots.menuPart(ref);
   const title =
     command === 'select' && (text === undefined || text === '')
       ? SELECT_ITEM_TITLE
       : command === 'snapshot' && surface === 'menubar'
         ? MENU_BAR_TITLE
-        : heading;
+        : menu && command === 'click'
+          ? MENU_RUN_TITLE
+          : heading;
   const target =
     ref !== undefined && ref !== ''
       ? snapshots.part(ref)
@@ -658,6 +674,7 @@ function describeStep(
     },
     cut: shown?.cut === true,
     unexplained,
+    menu,
   };
 }
 
@@ -716,7 +733,39 @@ type RefmapEntry = Readonly<{
   path?: unknown;
   root_ref?: unknown;
   path_is_absolute?: unknown;
+  /** Set for an item of a window's standard menu bar (`snapshot --surface menubar`). */
+  proven_in_menu?: unknown;
 }>;
+
+const MENU_STEPS_MAX = 16;
+
+/**
+ * How a person names a standard menu item: its menus from the bar down, as the menu shows them
+ * without the access key 「(F)」, and its shortcut, e.g. 「ファイル > 上書き保存（Ctrl+S）」.
+ * `undefined` when the record is not in the shape the executable writes.
+ */
+function menuLabel(proof: unknown): string | undefined {
+  if (typeof proof !== 'object' || proof === null) return undefined;
+  const { steps, shortcut } = proof as { steps?: unknown; shortcut?: unknown };
+  if (!Array.isArray(steps) || steps.length === 0 || steps.length > MENU_STEPS_MAX)
+    return undefined;
+  const names: string[] = [];
+  for (const step of steps) {
+    const name =
+      typeof step === 'object' && step !== null ? (step as { name?: unknown }).name : undefined;
+    if (typeof name !== 'string') return undefined;
+    const shown = name.replace(/\([A-Za-z0-9]\)/gu, '').trim();
+    if (shown === '') return undefined;
+    names.push(shown);
+  }
+  const keys =
+    typeof shortcut === 'string' && shortcut.trim() !== '' ? `（${shortcut.trim()}）` : '';
+  return textField(`${names.join(' > ')}${keys}`, NAME_MAX);
+}
+
+function isMenuEntry(entry: RefmapEntry): boolean {
+  return Object.hasOwn(entry, 'proven_in_menu');
+}
 
 const PATH_MAX = 256;
 
@@ -768,13 +817,16 @@ class SnapshotReader {
       return unresolved;
     const app = textField(entry.source_app, NAME_MAX);
     const window = textField(entry.source_window_title, NAME_MAX);
-    const name = textField(entry.name, NAME_MAX);
+    const menu = isMenuEntry(entry);
+    // A menu item is named by its whole place in the menu; one whose record cannot be read is
+    // shown without a name, which opens the card's details.
+    const name = menu ? menuLabel(entry.proven_in_menu) : textField(entry.name, NAME_MAX);
     if (app === undefined && window === undefined) return unresolved;
     const windowId =
       typeof entry.source_window_id === 'string' && WINDOW_ID.test(entry.source_window_id)
         ? entry.source_window_id
         : undefined;
-    const within = name === undefined ? undefined : SnapshotReader.within(entries, entry);
+    const within = name === undefined || menu ? undefined : SnapshotReader.within(entries, entry);
     return {
       resolved: true,
       ...(app === undefined ? {} : { app }),
@@ -842,6 +894,18 @@ class SnapshotReader {
       if (app !== undefined || window !== undefined) return windowTarget(id, app, window);
     }
     return unresolved;
+  }
+
+  /**
+   * Whether a qualified ref names an item of a window's standard menu bar, which runs the app's
+   * command for that item. Read from the record alone; a ref whose record cannot be read is not
+   * one, and is refused elsewhere for that.
+   */
+  menuPart(ref: string): boolean {
+    const match = QUALIFIED_REF.exec(ref);
+    if (match === null) return false;
+    const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
+    return typeof entry === 'object' && entry !== null && isMenuEntry(entry);
   }
 
   partOwner(ref: string): DesktopControlOwner | null {

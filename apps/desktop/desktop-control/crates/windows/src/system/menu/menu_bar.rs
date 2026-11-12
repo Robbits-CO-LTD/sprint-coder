@@ -35,6 +35,9 @@ pub(crate) struct RawItem {
     pub(crate) ftype: u32,
     pub(crate) fstate: u32,
     pub(crate) has_bitmap: bool,
+    /// The item's identifier (wID): the command it sends, or, for an item
+    /// that opens a submenu, a value with no meaning.
+    pub(crate) id: u32,
 }
 
 const MFT_BITMAP: u32 = 0x0004;
@@ -61,6 +64,8 @@ pub(crate) fn item_from_raw(raw: &RawItem) -> NativeMenuItem {
         disabled: raw.fstate & MFS_DISABLED != 0,
         checked: raw.fstate & MFS_CHECKED != 0,
         radio: raw.ftype & MFT_RADIOCHECK != 0,
+        command_id: raw.id,
+        in_notify_by_position_menu: false,
         submenu: None,
         submenu_unread: false,
     }
@@ -97,15 +102,16 @@ mod live {
     use super::*;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetMenu, GetMenuItemCount, GetMenuItemInfoW, GetWindowThreadProcessId, HMENU, IsMenu,
-        IsWindow, MENUITEMINFOW, MIIM_BITMAP, MIIM_FTYPE, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU,
+        GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW, GetWindowThreadProcessId, HMENU,
+        IsMenu, IsWindow, MENUINFO, MENUITEMINFOW, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID, MIIM_STATE,
+        MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_NOTIFYBYPOS,
     };
 
     use crate::system::window::window_ops::parse_window_id;
 
     /// The bar of the window `window_id` names, when that window still
     /// belongs to process `pid`.
-    fn bar_of(window_id: &str, pid: u32) -> Result<Option<HMENU>, AdapterError> {
+    pub(crate) fn bar_of(window_id: &str, pid: u32) -> Result<Option<HMENU>, AdapterError> {
         let handle = parse_window_id(window_id)? as HWND;
         let mut owner = 0u32;
         // SAFETY: plain reads of a window handle that may be stale; both
@@ -129,7 +135,7 @@ mod live {
     fn read_raw(menu: HMENU, position: u32) -> Option<(RawItem, HMENU)> {
         let mut info: MENUITEMINFOW = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<MENUITEMINFOW>() as u32;
-        info.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP;
+        info.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP | MIIM_ID;
         // SAFETY: the first call has a null buffer and only reports the text's
         // length in `cch`.
         if unsafe { GetMenuItemInfoW(menu, position, 1, &mut info) } == 0 {
@@ -155,6 +161,7 @@ mod live {
                 ftype: info.fType,
                 fstate: info.fState,
                 has_bitmap: !info.hbmpItem.is_null(),
+                id: info.wID,
             },
             info.hSubMenu,
         ))
@@ -166,7 +173,44 @@ mod live {
         complete: bool,
     }
 
+    /// Whether the menu reports its items by position (`MNS_NOTIFYBYPOS`)
+    /// instead of sending their commands; an unreadable style counts as yes.
+    pub(crate) fn notifies_by_position(menu: HMENU) -> bool {
+        let mut info: MENUINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<MENUINFO>() as u32;
+        info.fMask = MIM_STYLE;
+        // SAFETY: a plain read into a sized struct.
+        let read = unsafe { GetMenuInfo(menu, &mut info) };
+        read == 0 || info.dwStyle & MNS_NOTIFYBYPOS != 0
+    }
+
+    /// One level of a menu: each item without its submenu (an item that
+    /// opens one is marked `submenu_unread`), with the submenu's handle;
+    /// `None` when an item cannot be read or the menu is longer than any read
+    /// takes.
+    pub(crate) fn read_level(menu: HMENU) -> Option<Vec<(NativeMenuItem, HMENU)>> {
+        // SAFETY: as in `read_menu`.
+        let count = usize::try_from(unsafe { GetMenuItemCount(menu) }).ok()?;
+        if count > MAX_ITEMS_PER_MENU {
+            return None;
+        }
+        let notify = notifies_by_position(menu);
+        let mut items = Vec::with_capacity(count);
+        for position in 0..count {
+            let (raw, submenu) = read_raw(menu, position as u32)?;
+            let mut item = item_from_raw(&raw);
+            item.in_notify_by_position_menu = notify;
+            if !submenu.is_null() {
+                item.submenu_unread = true;
+                item.command_id = 0;
+            }
+            items.push((item, submenu));
+        }
+        Some(items)
+    }
+
     fn read_menu(menu: HMENU, depth: usize, budget: &mut Budget) -> Vec<NativeMenuItem> {
+        let notify = notifies_by_position(menu);
         // SAFETY: `menu` came from `GetMenu` or `GetMenuItemInfoW`; a menu
         // destroyed meanwhile answers -1.
         let count = unsafe { GetMenuItemCount(menu) };
@@ -186,7 +230,9 @@ mod live {
                 continue;
             };
             let mut item = item_from_raw(&raw);
+            item.in_notify_by_position_menu = notify;
             if !submenu.is_null() {
+                item.command_id = 0;
                 if depth + 1 >= MAX_MENU_DEPTH || budget.left == 0 || budget.deadline.is_expired() {
                     item.submenu_unread = true;
                     budget.complete = false;
@@ -248,7 +294,7 @@ mod live {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use live::{menu_bar_kind, read_menu_bar};
+pub(crate) use live::{bar_of, menu_bar_kind, read_level, read_menu_bar};
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn read_menu_bar(
