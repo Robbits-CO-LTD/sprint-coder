@@ -169,23 +169,6 @@ mod imp {
         Ok(request)
     }
 
-    /// The request for `set` over an element's children in the raw view, so
-    /// one `BuildUpdatedCache` on a parent returns its whole child list, in
-    /// the raw view walker's order, with those properties.
-    pub fn build_children_cache_request(
-        client: &UIAutomation,
-        set: &[TreeProperty],
-    ) -> Result<UICacheRequest, AdapterError> {
-        let request = build_cache_request(client, TreeScope::Children, set)?;
-        let raw_view = client.create_true_condition().map_err(|error| {
-            uia_failure_error(failure_of(&error), "create the raw view condition")
-        })?;
-        request
-            .set_tree_filter(raw_view)
-            .map_err(|error| uia_failure_error(failure_of(&error), "set the cache tree filter"))?;
-        Ok(request)
-    }
-
     fn build_cache_request(
         client: &UIAutomation,
         scope: TreeScope,
@@ -234,8 +217,7 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 pub use imp::{
-    build_children_cache_request, build_set_cache_request, build_subtree_cache_request,
-    build_walk_cache_request, policy_for_root,
+    build_set_cache_request, build_subtree_cache_request, build_walk_cache_request, policy_for_root,
 };
 
 #[cfg(test)]
