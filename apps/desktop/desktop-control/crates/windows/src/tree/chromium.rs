@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, LocatorStats, ObservationRequest, ObservationRoot};
 
 use super::element::UIAElement;
@@ -211,6 +212,7 @@ mod tests {
                     description: None,
                     native_id: None,
                     unique_at_capture: false,
+                    ancestors: Vec::new(),
                 },
                 geometry: agent_desktop_core::RefGeometry {
                     bounds_space: None,

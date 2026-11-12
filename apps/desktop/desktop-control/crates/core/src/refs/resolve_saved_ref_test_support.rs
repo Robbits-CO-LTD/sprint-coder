@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::sync::{
     Mutex,
     atomic::{AtomicU32, Ordering},
@@ -195,6 +196,22 @@ pub(super) fn capture(root: AccessibilityNode, name: &str) -> RefEntry {
         .filter_map(|index| refmap.get(&format!("@e{index}")).cloned())
         .find(|entry| entry.identity.name.as_deref() == Some(name))
         .expect("the captured element has a ref")
+}
+
+/// Every entry one capture of `root` publishes, in allocation order.
+pub(super) fn capture_all(root: AccessibilityNode) -> Vec<RefEntry> {
+    let mut refmap = RefMap::new();
+    let observed = crate::adapter::observed_tree(&ObservationRoot::Window(&window()), root.clone())
+        .expect("the fixture observes");
+    let proof = crate::refs::ref_capture_proof::CaptureProof::new(&observed);
+    let config = RefAllocConfig {
+        capture: Some(&proof),
+        ..config_without_uniqueness()
+    };
+    allocate_refs(root, &mut refmap, &config).unwrap();
+    (1..=refmap.len())
+        .filter_map(|index| refmap.get(&format!("@e{index}")).cloned())
+        .collect()
 }
 
 fn config_without_uniqueness() -> RefAllocConfig<'static> {

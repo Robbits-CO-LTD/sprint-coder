@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::refs::refs_test_support::HomeGuard;
 pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
@@ -14,6 +15,7 @@ pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,
@@ -252,6 +254,7 @@ fn test_save_load_roundtrip_with_home_override() {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

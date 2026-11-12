@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde_json::json;
 
 use crate::{
@@ -306,10 +307,22 @@ fn saved_ref_node(
 
 fn unique_live_match(entry: &RefEntry, observed: &ObservedTree) -> Result<usize, AdapterError> {
     let predicate = FullPredicate::of_entry(entry);
+    let ancestors = &entry.identity.ancestors;
+    let parents = (!ancestors.is_empty()).then(|| crate::refs::ref_ancestry::parents(observed));
     let mut found = None;
     let mut incomplete = !observed.is_exhaustive();
     for (index, node) in observed.nodes.iter().enumerate() {
-        match predicate.compare(&LivePredicate::observed(&node.evidence)) {
+        let mut verdict = predicate.compare(&LivePredicate::observed(&node.evidence));
+        // An entry proven together with its ancestors matches only under them.
+        if let Some(parents) = &parents
+            && verdict != IdentityMatch::NoMatch
+        {
+            verdict = crate::refs::ref_full_predicate::conjunction(
+                verdict,
+                crate::refs::ref_ancestry::ancestors_match(ancestors, observed, parents, index),
+            );
+        }
+        match verdict {
             IdentityMatch::Match if found.is_some() => return Err(ambiguous_live_match(entry)),
             IdentityMatch::Match => found = Some(index),
             IdentityMatch::Unknown => incomplete = true,
@@ -393,6 +406,10 @@ mod window_tests;
 #[cfg(test)]
 #[path = "resolve_saved_ref_context_tests.rs"]
 mod context_tests;
+
+#[cfg(test)]
+#[path = "resolve_saved_ref_ancestry_tests.rs"]
+mod ancestry_tests;
 
 #[cfg(test)]
 #[path = "resolve_saved_ref_test_support.rs"]

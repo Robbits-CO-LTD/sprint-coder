@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{live_actions, live_bounds, live_element, live_state, live_value, read_live_element};
 use crate::tree::automation::root_from_hwnd;
 use crate::tree::element::UIAElement;
@@ -249,6 +250,7 @@ fn blank_secure_entry(fixture: &HostedFixture) -> RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: false,
+            ancestors: Vec::new(),
         },
         geometry: agent_desktop_core::RefGeometry {
             bounds_space: None,

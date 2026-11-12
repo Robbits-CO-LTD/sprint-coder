@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::AppError;
 pub(crate) use crate::RefEntry;
 use serde::{Deserialize, Serialize};
@@ -363,6 +364,7 @@ pub(crate) mod ref_alloc_options;
 pub(crate) mod ref_alloc_scope;
 pub(crate) mod ref_alloc_source;
 pub(crate) mod ref_allocation;
+pub(crate) mod ref_ancestry;
 pub(crate) mod ref_capabilities;
 pub(crate) mod ref_capture_proof;
 pub(crate) mod ref_entry;

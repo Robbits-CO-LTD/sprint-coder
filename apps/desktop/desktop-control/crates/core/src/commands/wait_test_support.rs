@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{ActionOps, InputOps, ObservationOps, PlatformAdapter, SystemOps};
 use crate::commands::wait::{WaitArgs, WaitModeArgs, WaitPredicateArgs};
 use crate::commands::wait_element::{ElementWaitInput, wait_for_element};
@@ -172,6 +173,7 @@ fn save_ref_in_store(store: RefStore, states: Vec<String>) -> String {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,
