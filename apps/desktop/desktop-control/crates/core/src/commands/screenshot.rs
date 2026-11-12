@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AdapterError, AppError, Deadline, ErrorCode,
     adapter::{PlatformAdapter, ScreenshotTarget, WindowFilter},
@@ -159,7 +160,7 @@ fn missing_window_error(
         ErrorCode::WindowNotFound,
         format!("Window '{window_id}' was not found"),
     )
-    .with_suggestion("Run 'list-windows' to refresh window IDs, then retry.")
+    .with_suggestion(crate::snapshot::WINDOW_GONE_SUGGESTION)
     .unsent()
     .into()
 }

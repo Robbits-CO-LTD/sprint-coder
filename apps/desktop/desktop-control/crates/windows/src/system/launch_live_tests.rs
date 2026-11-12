@@ -29,6 +29,7 @@ fn scratch_launch_returns_window_for_created_process() {
         "returned window pid must belong to the probe notepad process"
     );
     assert!(window.process_instance.is_some());
+    assert!(window.new_instance && !window.attached, "{window:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -83,28 +84,33 @@ fn a_background_launch_keeps_the_foreground_and_stays_below_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Arguments reach only a process this launch creates, so a launch with
+/// them starts a new instance even beside a running one, and says so.
 #[test]
-fn attach_true_reuses_single_running_instance() {
+fn a_launch_with_arguments_starts_a_new_instance_beside_the_running_one() {
     let _lock = NOTEPAD_LAUNCH_LOCK.lock().expect("notepad lock");
     crate::tree::fixture::bootstrap();
-    let dir = scratch_dir("notepad-attach");
-    let probe = copy_probe_binary(&dir, "launchprobe_host_attach.exe");
-    let image = "launchprobe_host_attach.exe";
-    let _first = start_windowed_probe(&probe);
-    let before = matching_pids(image);
-    assert_eq!(
-        before.len(),
-        1,
-        "fixture must leave exactly one probe notepad"
-    );
-    let window = launch_app_impl(
+    let dir = scratch_dir("args-new-instance");
+    let probe = copy_probe_binary(&dir, "launchprobe_host_args.exe");
+    let image = "launchprobe_host_args.exe";
+    let first = start_windowed_probe(&probe);
+    assert_eq!(matching_pids(image), vec![first.0]);
+    let launched = launch_app_impl(
         probe.to_str().expect("utf8 path"),
         &probe_launch_options(true, 8_000),
         deadline(10_000),
     )
-    .expect("attach");
-    assert_eq!(window.pid, before[0]);
-    assert_eq!(matching_pids(image).len(), 1);
+    .expect("launch a second instance");
+    let _second = KillOnDrop(launched.pid);
+    assert_ne!(launched.pid, first.0);
+    assert!(launched.new_instance, "{launched:?}");
+    assert!(!launched.attached, "{launched:?}");
+    let window = launched
+        .window
+        .as_ref()
+        .expect("the new instance presents a window");
+    assert_eq!(window.pid, launched.pid);
+    assert_eq!(matching_pids(image).len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -144,34 +150,73 @@ fn attach_true_does_not_reuse_same_basename_from_another_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--no-attach` starts a new instance even while the same executable runs,
+/// instead of refusing; the result proves the window is the new process's.
 #[test]
-fn attach_false_fails_naming_running_pid() {
+fn no_attach_starts_a_new_instance_beside_the_running_one() {
     let _lock = NOTEPAD_LAUNCH_LOCK.lock().expect("notepad lock");
     crate::tree::fixture::bootstrap();
     let dir = scratch_dir("notepad-noattach");
     let probe = copy_probe_binary(&dir, "launchprobe_host_noattach.exe");
     let image = "launchprobe_host_noattach.exe";
-    let _running = start_windowed_probe(&probe);
-    let running_pid = matching_pids(image)
-        .into_iter()
-        .next()
-        .expect("probe notepad running");
-    let error = launch_app_impl(
+    let running = start_windowed_probe(&probe);
+    let launched = launch_app_impl(
         probe.to_str().expect("utf8 path"),
-        &LaunchOptions {
-            attach_if_running: false,
-            ..Default::default()
-        },
+        &probe_launch_options(false, 8_000),
         deadline(10_000),
     )
-    .expect_err("no-attach must fail");
-    assert_eq!(error.code, ErrorCode::ActionFailed);
+    .expect("no-attach launches a new instance");
+    let _second = KillOnDrop(launched.pid);
+    assert_ne!(launched.pid, running.0);
+    assert!(launched.new_instance && !launched.attached, "{launched:?}");
     assert_eq!(
-        error.disposition.delivery(),
-        DeliveryDisposition::NotDelivered
+        launched.window.as_ref().map(|window| window.pid),
+        Some(launched.pid)
     );
-    let details = error.details.expect("details");
-    assert_eq!(details["pid"], u32::from(running_pid));
+    assert_eq!(matching_pids(image).len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A started process that exits without a window while the same executable
+/// runs is reported as passed to that running instance (`attached`), never
+/// as a new instance; without one running it is not called attached.
+#[test]
+fn a_started_process_that_exits_beside_a_running_one_is_reported_attached() {
+    let dir = scratch_dir("handoff");
+    let probe = copy_system_exe("ping.exe", &dir, "launchprobe_handoff.exe");
+    let quick = || LaunchOptions {
+        args: vec!["-n".into(), "1".into(), "127.0.0.1".into()],
+        attach_if_running: false,
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let alone = launch_app_impl(
+        probe.to_str().expect("utf8 path"),
+        &quick(),
+        deadline(10_000),
+    )
+    .expect("a process that exits is a successful launch");
+    assert!(!alone.attached && !alone.new_instance, "{alone:?}");
+    assert_eq!(
+        alone.suggestion.as_deref(),
+        Some(launch_handoff::EXITED_WITHOUT_WINDOW)
+    );
+
+    let running = start_named_windowless(&probe, &["-n", "60", "127.0.0.1"]);
+    let handed = launch_app_impl(
+        probe.to_str().expect("utf8 path"),
+        &quick(),
+        deadline(10_000),
+    )
+    .expect("a process that exits is a successful launch");
+    assert_ne!(handed.pid, running.0);
+    assert!(handed.attached && !handed.new_instance, "{handed:?}");
+    assert!(handed.window.is_none());
+    assert_eq!(
+        handed.suggestion.as_deref(),
+        Some(launch_attach::HANDED_OFF)
+    );
+    drop(running);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -193,6 +238,8 @@ fn attach_true_windowless_does_not_launch_second_process() {
         Deadline::after(1_000).expect("deadline"),
     )
     .expect("attaching to a windowless process is a successful launch, not a failure");
+    assert!(result.attached && !result.new_instance, "{result:?}");
+    assert_eq!(result.suggestion.as_deref(), Some(launch_attach::ATTACHED));
     assert!(
         result.window.is_none(),
         "a windowless process reports no window rather than an error: {result:?}"

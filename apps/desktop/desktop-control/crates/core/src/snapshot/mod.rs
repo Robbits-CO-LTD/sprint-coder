@@ -248,6 +248,13 @@ fn windows_for_app(
     Ok(adapter.list_windows(&filter, deadline)?)
 }
 
+/// The guidance for a window id that names no window any more. A window can
+/// close on its own, and the one a launch reports is sometimes a splash
+/// screen the app closes once its main window opens.
+pub(crate) const WINDOW_GONE_SUGGESTION: &str = "Run 'list-windows' to see the windows open now \
+     and retry with a current ID. A window can close on its own: the one a launch reported may \
+     have been a splash screen replaced by the app's main window.";
+
 pub(crate) fn resolve_window(
     adapter: &dyn PlatformAdapter,
     app_name: Option<&str>,
@@ -268,7 +275,7 @@ pub(crate) fn resolve_window(
                     crate::ErrorCode::WindowNotFound,
                     format!("No window with id {wid}"),
                 )
-                .with_suggestion("Run 'list-windows' to see available window IDs.")
+                .with_suggestion(WINDOW_GONE_SUGGESTION)
                 .unsent(),
             )
         })

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
 use crate::system::launch_options::LaunchOptions;
 use crate::{AdapterError, AppError, AppInfo, InteractionLease, ProcessId, RendererKind};
@@ -58,6 +59,8 @@ impl SystemOps for CdpAdapter {
             cdp: None,
             renderer: self.renderer,
             suggestion: None,
+            attached: false,
+            new_instance: false,
         })
     }
 

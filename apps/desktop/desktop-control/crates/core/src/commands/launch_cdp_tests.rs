@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::cdp_test_support::{CdpAdapter, adapter_error, empty_cdp_adapter};
 use super::*;
 use crate::system::launch_options::LaunchOptions;
@@ -364,6 +365,8 @@ impl crate::adapter::SystemOps for SuggestingAdapter {
             cdp: None,
             renderer: Some(RendererKind::Chromium),
             suggestion: Some("adapter guidance".into()),
+            attached: false,
+            new_instance: false,
         })
     }
 }

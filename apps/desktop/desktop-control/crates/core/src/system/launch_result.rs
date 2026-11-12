@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -32,4 +33,18 @@ pub struct LaunchResult {
     /// when there is nothing more useful to say than the fields already do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// `true` when this launch reached an instance of the app that was
+    /// already running instead of one it started: it attached to that
+    /// instance (`pid` names it), or the process it started passed the
+    /// launch to it and exited (a single-instance app; `pid` names the
+    /// exited process). Windows of that instance may be ones the user
+    /// already had open, not ones this launch opened.
+    #[serde(default)]
+    pub attached: bool,
+    /// `true` only when `window` is proven to belong to a process this
+    /// launch created: the started process, or a descendant tied to it.
+    /// `false` proves nothing new, which is not the same as nothing having
+    /// started: a started process may still be running without a window.
+    #[serde(default)]
+    pub new_instance: bool,
 }
