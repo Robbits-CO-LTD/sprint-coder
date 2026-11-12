@@ -119,6 +119,7 @@ pub(crate) fn ref_entry(
             native_id: identifier,
             unique_at_capture: false,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds,

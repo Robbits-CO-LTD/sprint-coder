@@ -30,6 +30,11 @@ mod imp {
     #[derive(Debug)]
     pub struct BudgetExpired;
 
+    /// The provider's runtime identifier of a node, when it publishes one.
+    pub fn runtime_id_of(node: &UIAElement) -> Option<Vec<i32>> {
+        node.0.get_runtime_id().ok().filter(|id| !id.is_empty())
+    }
+
     /// Whether two proxies address the same element.
     ///
     /// UI Automation hands back a new `IUIAutomationElement` per query, so
@@ -293,9 +298,69 @@ mod imp {
         /// Whether enumeration steps fetch no properties: a path descent only
         /// needs the siblings it steps over to be counted, never read.
         plain_navigation: bool,
+        /// Whether this source walks the visible elements only; its evidence
+        /// then carries each node's runtime identifier for the view proof.
+        visible: bool,
+    }
+
+    /// A walker over the elements the window shows: the raw view without every
+    /// element its provider reports offscreen, and without what lies below
+    /// such an element. The condition is evaluated by the provider's side of
+    /// UI Automation, so the offscreen siblings a step skips cost no call of
+    /// their own; one step is bounded by the sibling count it skips (on a
+    /// Chromium page of 5,000 rows, a whole walk of the 19 visible rows took
+    /// about 0.2 s with no single call above a few tens of milliseconds).
+    fn visible_view_walker(client: &UIAutomation) -> Result<UITreeWalker, AdapterError> {
+        use uiautomation::types::UIProperty;
+        use uiautomation::variants::Variant;
+        use windows::Win32::UI::Accessibility::IUIAutomation;
+        let onscreen = client
+            .create_property_condition(UIProperty::IsOffscreen, Variant::from(false), None)
+            .map_err(|error| uia_error(&error, "build the onscreen condition"))?;
+        let automation: &IUIAutomation = client.as_ref();
+        // SAFETY: `automation` is this thread's live client and `onscreen` a
+        // condition it built.
+        unsafe { automation.CreateTreeWalker(onscreen.as_ref()) }
+            .map(UITreeWalker::from)
+            .map_err(|error| {
+                AdapterError::new(
+                    agent_desktop_core::ErrorCode::ActionFailed,
+                    "Could not open the onscreen view tree walker",
+                )
+                .with_platform_detail(format!("HRESULT {:#010x}", error.code().0))
+            })
     }
 
     impl UiaTreeSource {
+        /// A source that walks only the elements the window shows (see
+        /// [`visible_view_walker`]), node by node with the walk set: no
+        /// subtree prefetch, so no single call has to build a large answer.
+        /// Child indices count positions in that view.
+        pub fn for_visible_root(root: &UIAElement) -> Result<Self, AdapterError> {
+            let mut source = Self::for_root(root)?;
+            source.walker = visible_view_walker(&source.client)?;
+            source.visible = true;
+            Ok(source)
+        }
+
+        /// [`Self::for_descent`] in the view [`Self::for_visible_root`] walks,
+        /// so a path recorded in that view lands where it was recorded.
+        pub fn for_visible_descent(root: &UIAElement) -> Result<Self, AdapterError> {
+            let mut source = Self::for_visible_root(root)?;
+            source.plain_navigation = true;
+            Ok(source)
+        }
+
+        /// Runs `call` with the client's per-call bound lowered to what is left
+        /// of `deadline` (`with_transaction_timeout`).
+        pub fn bounded_by<T>(
+            &self,
+            deadline: agent_desktop_core::Deadline,
+            call: impl FnOnce() -> T,
+        ) -> Option<T> {
+            with_transaction_timeout(&self.client, deadline, call)
+        }
+
         /// A source for descending a stored child-index path: the siblings it
         /// steps over are navigated without fetching their properties (each
         /// step is still one bounded call, as before), and the caller reads the
@@ -419,6 +484,7 @@ mod imp {
                 subtree_prefetched: std::cell::Cell::new(false),
                 properties: &TreeProperty::WALK_SET,
                 plain_navigation: false,
+                visible: false,
             })
         }
 
@@ -531,11 +597,11 @@ mod imp {
             let failed = u64::try_from(errors.len()).unwrap_or(u64::MAX);
             let label = read_label(node, self.reads_cache());
             let vocabulary = walk_vocabulary(&properties, &label);
-            (
-                properties.clone(),
-                properties.locator_evidence(vocabulary),
-                failed,
-            )
+            let mut evidence = properties.locator_evidence(vocabulary);
+            if self.visible {
+                evidence.ref_evidence.runtime_id = runtime_id_of(node);
+            }
+            (properties.clone(), evidence, failed)
         }
 
         fn is_web_wrapper(
@@ -576,6 +642,22 @@ mod imp {
 
         pub fn for_descent(root: &UIAElement) -> Result<Self, AdapterError> {
             Self::for_root(root)
+        }
+
+        pub fn for_visible_root(root: &UIAElement) -> Result<Self, AdapterError> {
+            Self::for_root(root)
+        }
+
+        pub fn for_visible_descent(root: &UIAElement) -> Result<Self, AdapterError> {
+            Self::for_root(root)
+        }
+
+        pub fn bounded_by<T>(
+            &self,
+            _deadline: agent_desktop_core::Deadline,
+            call: impl FnOnce() -> T,
+        ) -> Option<T> {
+            Some(call())
         }
 
         pub fn prepare_root(&self, root: &UIAElement) -> Result<UIAElement, AdapterError> {
@@ -649,6 +731,9 @@ pub(crate) use imp::{count_within, prefetch_shares};
 #[cfg(target_os = "windows")]
 pub(crate) use imp::with_transaction_timeout;
 
+#[cfg(target_os = "windows")]
+pub(crate) use imp::runtime_id_of;
+
 /// The depth from which a walk covers the whole tree below its root: the
 /// deepest a walk descends (`DEFAULT_MAX_RAW_DEPTH`), which is also the depth
 /// a whole-window observation (snapshot capture proof, saved-ref resolution)
@@ -667,6 +752,23 @@ pub fn walk_uia_subtree(
     budget: WalkBudget,
 ) -> Result<WalkOutcome, AdapterError> {
     walk_uia_subtree_for(root, root_source, budget, false)
+}
+
+/// Walks only the elements the window shows (`UiaTreeSource::for_visible_root`),
+/// with every call bounded by what is left of the walk's deadline.
+pub fn walk_uia_visible_subtree(
+    root: &UIAElement,
+    root_source: &ObservationRoot<'_>,
+    budget: WalkBudget,
+) -> Result<WalkOutcome, AdapterError> {
+    let source = UiaTreeSource::for_visible_root(root)?;
+    let prepared = source.prepare_root(root)?;
+    let deadline = budget.deadline;
+    source
+        .bounded_by(deadline, || {
+            walk_from_root(&source, &prepared, root_source, budget)
+        })
+        .unwrap_or_else(|| Err(deadline.timeout_error()))
 }
 
 /// [`walk_uia_subtree`] for an observation that may only resolve a saved ref

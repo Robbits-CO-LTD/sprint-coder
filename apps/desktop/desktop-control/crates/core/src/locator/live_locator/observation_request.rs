@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AdapterError, Deadline, ErrorCode, adapter::TreeOptions, locator::LocatorQuery,
     snapshot::snapshot_surface::SnapshotSurface,
@@ -36,6 +37,11 @@ pub struct ObservationMode {
     /// The read only resolves a saved ref: it needs identity evidence and the
     /// child structure, never geometry or actions, so an adapter may skip them.
     pub identity_only: bool,
+    /// Read only the elements the window shows: an element its provider
+    /// reports offscreen is skipped with everything below it. An adapter that
+    /// honours this marks the tree it returns (`ObservedTree::mark_visible_scope`);
+    /// one that cannot read this way must fail rather than return a whole tree.
+    pub visible_only: bool,
 }
 
 impl ObservationRequest {
@@ -82,6 +88,7 @@ impl ObservationRequest {
                 skeleton: options.skeleton,
                 force_renderer_accessibility: options.force_renderer_accessibility,
                 identity_only: false,
+                visible_only: false,
             },
         }
     }

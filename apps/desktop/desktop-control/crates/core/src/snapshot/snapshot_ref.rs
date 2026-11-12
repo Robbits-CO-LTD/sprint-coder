@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AccessibilityNode, AppError, WindowInfo,
     adapter::{PlatformAdapter, TreeOptions},
@@ -81,6 +82,7 @@ pub fn run_from_ref_with_context(
         path_prefix,
         observed,
     } = capture;
+    let visible_scope = observed.is_visible_scope();
     let capture_proof =
         crate::refs::ref_capture_proof::CaptureProof::new(&observed).rooted_at(&path_prefix);
 
@@ -141,9 +143,10 @@ pub fn run_from_ref_with_context(
         refmap,
         window,
         snapshot_id: Some(active_snapshot_id),
-        complete: true,
+        complete: !visible_scope,
         nodes_observed,
         identity_unproven: None,
+        visible_scope,
     })
 }
 

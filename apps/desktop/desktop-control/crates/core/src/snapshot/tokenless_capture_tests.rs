@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::sync::atomic::Ordering;
 
 use super::tokenless_capture_support::*;
@@ -52,7 +53,11 @@ fn a_whole_window_read_cut_short_keeps_the_complete_shallow_tree() {
     adapter.fault_whole_read(cut_short);
 
     let captured = snapshot(&adapter);
-    assert_eq!(adapter.captures(), 2);
+    // The whole read, the read of the visible elements a cut-short read may
+    // fall back to (this adapter cannot read that way, so it proves nothing),
+    // and the shallow walk.
+    assert_eq!(adapter.captures(), 3);
+    assert!(!captured.visible_scope);
     assert!(captured.complete, "the shallow walk finished");
     assert_eq!(
         captured.identity_unproven.as_deref(),
@@ -196,5 +201,56 @@ fn a_deep_capture_cut_short_is_flagged_as_unproven() {
     assert_eq!(
         captured.identity_unproven.as_deref(),
         Some("the window read was cut short")
+    );
+}
+
+#[test]
+fn a_cut_short_read_of_a_window_with_a_view_presents_the_visible_elements() {
+    let _guard = HomeGuard::new();
+    let adapter = CaptureAdapter::new(anchored_window());
+    adapter.fault_whole_read(cut_short);
+    adapter.serve_view();
+
+    let captured = snapshot(&adapter);
+    assert!(captured.visible_scope);
+    assert!(!captured.complete, "a view is never the whole window");
+    assert!(captured.identity_unproven.is_none());
+    assert!(
+        entries(&captured.refmap)
+            .iter()
+            .all(|entry| !entry.identity.unique_at_capture && entry.identity.ancestors.is_empty())
+    );
+}
+
+#[test]
+fn a_deadline_shorter_than_the_default_never_falls_back_to_the_view() {
+    let _guard = HomeGuard::new();
+    let adapter = CaptureAdapter::new(anchored_window());
+    adapter.fault_whole_read(cut_short);
+    adapter.serve_view();
+
+    let captured = snapshot_within(&adapter, crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS - 1);
+    assert!(!captured.visible_scope);
+    assert_eq!(
+        captured.identity_unproven.as_deref(),
+        Some("the whole-window read was cut short")
+    );
+    // The whole read and the shallow walk; no read of the view.
+    assert_eq!(adapter.captures(), 2);
+}
+
+#[test]
+fn a_whole_window_that_reads_in_time_keeps_the_whole_window_proof() {
+    let _guard = HomeGuard::new();
+    let adapter = CaptureAdapter::new(anchored_window());
+    adapter.serve_view();
+
+    let captured = snapshot(&adapter);
+    assert!(!captured.visible_scope);
+    assert_eq!(adapter.captures(), 1);
+    assert!(
+        entries(&captured.refmap)
+            .iter()
+            .all(|entry| entry.identity.in_view.is_none())
     );
 }

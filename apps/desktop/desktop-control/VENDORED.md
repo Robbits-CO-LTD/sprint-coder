@@ -109,6 +109,30 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/windows/src/tree/chromium_provenance_tests.rs`（新しく足した） | 上の判定の試験。message-only の窓で、3 段下の子孫の `Chrome_RenderWidgetHostHWND` を見つけること、持たない窓・名前の頭だけが同じ class の窓を見つけないこと |
 | `crates/windows/src/tree/walk/walker_source.rs`（2 回目） | 木の読み取りの Chromium 由来の判定に `has_chromium_provenance` を使う。WebView2 の窓でも、名前の無い通り抜けの入れ子を深さに数えず、一括の取得をせず部品ごとに読む（Electron の窓と同じ）。`with_transaction_timeout` を crate の中で使えるようにした（先祖の読み取りで使う） |
 | `skills/agent-desktop-windows/references/chromium-and-electron.md` | 名前も動作も無い通り抜けの入れ子は、Electron の窓と WebView2 の窓では深さに数えないので、既定の深さから始める、と足した |
+| `crates/core/src/refs/ref_view.rs`（新しく足した） | 見えている範囲の証明（#1197）。部品が多く、窓全体を期限内に読めない窓で、画面に見えている部品だけを読んで ref を証明した記録（`proven_in_view`）を、操作の時に同じ読み方で読み直して確かめる。範囲の中でちょうど 1 つが当たることに加え、当たった部品の、見えている範囲の中での経路・UI Automation の `RuntimeId`・画面の位置と大きさ（誤差なし）が、記録と同じ時だけ通す。違えば古い ref のエラー（`details.kind` は `saved_ref_view_changed`。「snapshot を取り直す」案内付き）。位置と大きさの読めない時は unknown。操作の直前の確認で、生きている部品の位置と大きさも確かめる（`confirm_live_bounds`） |
+| `crates/core/src/refs/ref_view_tests.rs`（新しく足した） | 上の試験。取り込みが見えている範囲の証明だけを付け、`unique_at_capture`・上の階の `proven_with_ancestors` を付けないこと。窓全体で読んだ時は今までどおり。見分けの付かない行は未証明。`RuntimeId` か面積が無い部品・element token のある部品には付けないこと。ほかの証明と並んだ記録は拒否。古い読み方では未証明に見えること。読み込みの検査。解決: 変わらない範囲は通る（窓全体の読み取りをしない）、窓全体の読み取りでは判定しない、スクロール・範囲の外・行の挿入（経路）・同じ位置の別の部品（`RuntimeId`）・範囲の中の双子・着地の後の移動は止まる。`land_saved_ref` は近道をしない |
+| `crates/core/src/refs/ref_entry_identity.rs`（2 回目） | `in_view`（保存の key は `proven_in_view`）と、その型 `RefViewProof`（範囲の中の経路・画面の位置と大きさ・`RuntimeId`・見分けに使った先祖）を足した。先祖はこの中に置き、上の階の `ancestors` は空のまま（古い版が先祖付きの証明と読まないように） |
+| `crates/core/src/refs/ref_ancestry.rs`（2 回目） | 証明の種類に `InView` を足した（`unique_at_capture` なし・上の階の先祖なし・`in_view` あり。ほかの組み合わせで `in_view` があれば未証明）。記録した先祖を、見えている範囲の証明の中からも読む `recorded_ancestors` を足し、`confirm_handle_ancestors` が使う |
+| `crates/core/src/refs/refs_validate.rs`（2 回目） | 見えている範囲の証明の形の検査（経路の深さ 256 まで、位置と大きさが正しく面積がある、`RuntimeId` が 1〜32 個、先祖は今までと同じ上限）を足した |
+| `crates/core/src/refs/ref_capture_proof.rs`（2 回目） | 観察が見えている範囲だけの時は、同じ 2 つの規則（部品自身の条件、近い先祖）をその範囲の中で数え、`in_view` として記録する（`establish_in_view`）。`unique_at_capture` は立てず、`proves_node` は常に偽（skeleton の anchor も証明しない）。element token のある部品には付けない |
+| `crates/core/src/refs/resolve_saved_ref.rs`（2 回目） | 見えている範囲で証明した記録は、`visible_only` の読み取りで照合し、窓全体の照合に流さない（返った観察が見えている範囲でなければ拒否）。当たった部品を `ref_view::confirm_matched` で確かめる。着地した部品の位置と大きさも確かめる。`land_saved_ref` の近道は使わない。element token と並んだ記録は拒否。先祖は `recorded_ancestors` から読む。`observe_visible_window` を足した |
+| `crates/core/src/refs/ref_root_read.rs` | 1 行目に変更の注記を足した。element token と見えている範囲の証明が並んだ記録の根は拒否する |
+| `crates/core/src/refs/mod.rs`・`crates/core/src/lib.rs`（2 回目） | `ref_view` と `RefViewProof` の公開を足した |
+| `crates/core/src/snapshot/window_capture.rs` | 1 行目に変更の注記を足した。窓全体の読み取りが時間切れ・打ち切りで終わり、かつ snapshot の期限が既定（3 秒）以上の時だけ、見えている部品だけの読み取り（`observe_visible_window`）に切り替える（`view_fallback_allowed`。`--timeout-ms` を短くしても切り替わらない）。見えている範囲の読み取りには残りの期限の 3 分の 2 だけを使う。対応しない窓（`ACTION_NOT_SUPPORTED`）は今までどおり浅い読み取りへ。対応する窓で読み切れなかった時は、時間切れの呼び出しが相手を忙しくしたままにし得るので、それ以上の読み取りを始めず、打ち切られた窓全体の読み取りを未証明のまま返す（5 万行の page で、今までと同じ部品 30・ref 11 の未証明の結果） |
+| `crates/core/src/snapshot/mod.rs`・`snapshot_ref.rs` | 1 行目に変更の注記を足した。結果に `visible_scope` を足し、見えている範囲の結果は `complete` を偽にする |
+| `crates/core/src/commands/snapshot.rs`・`snapshot_tests.rs` | 1 行目に変更の注記を足した。見えている範囲の結果に `scope: "visible"` と、スクロールの後は読み直す、という `scope_hint` を付ける。その試験 |
+| `crates/core/src/snapshot/tokenless_capture_tests.rs` | 1 行目に変更の注記を足した。打ち切りの後に見えている範囲の読み取りを 1 回試すので、読み取りの回数の期待を 3 にした（その adapter は対応しないので証明しない）。見えている範囲に切り替わること、既定より短い期限では切り替わらないこと、窓全体を読めた時は今までどおりであることの試験を足した |
+| `crates/core/src/snapshot/tokenless_capture_support.rs` | 1 行目に変更の注記を足した。試験の adapter に、見えている範囲の読み取りを返す設定（`serve_view`）と、期限を指定する `snapshot_within` を足した |
+| `crates/core/src/wait/deadline.rs` | 1 行目に変更の注記を足した。期限の全体の長さを返す `span` を足した |
+| `crates/core/src/locator/live_locator/observation_request.rs`・`observed_tree.rs`・`test_support.rs` | 1 行目に変更の注記を足した。観察の要求に `visible_only` を、観察に「見えている範囲だけを読んだ」印（`mark_visible_scope`。adapter だけが付ける）を足した |
+| `crates/core/src/locator/live_locator/locator_ref_evidence.rs` | 1 行目に変更の注記を足した。`runtime_id`（見えている範囲の読み取りだけが入れる）を足した |
+| `crates/core/src/actionability/live.rs`（2 回目） | 操作の直前の確認で、見えている範囲で証明した記録は、生きている部品の位置と大きさも確かめる |
+| `crates/windows/src/tree/walk/walker_source.rs`（3 回目） | 見えている部品だけをたどる walker（`IsOffscreen == false` の条件の tree walker。条件は相手の側の UI Automation が評価する）と、それを使う `for_visible_root`・`for_visible_descent`・`walk_uia_visible_subtree`（一括の取得なし、部品ごと、各呼び出しを残りの期限で抑える）を足した。その読み取りでは各部品の `RuntimeId` を証拠に入れる |
+| `crates/windows/src/tree/observe.rs`（2 回目） | `visible_only` の要求は Chromium 由来の窓（`has_chromium_provenance`）だけで受け、見えている部品だけを読み、結果に印を付ける。それ以外の窓は `ACTION_NOT_SUPPORTED`。この読み取りは小さいのが正しいので、Chromium の起動前の殻の判定はしない |
+| `crates/windows/src/tree/resolve/resolve_anchor.rs`（2 回目） | 見えている範囲で証明した記録の経路は、同じ見え方で下り、着いた部品の `RuntimeId` が記録と違えば古い ref として止める |
+| `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md` | `scope: "visible"` の意味と、スクロールの後は snapshot し直すこと、を足した |
+| `crates/core/examples/locator_benchmark/fixture_builder.rs`、`crates/core/src/adapter/live_element.rs`、`crates/core/src/adapter/test_support.rs`、`crates/core/src/commands/find_live_test_support.rs`、`crates/core/src/locator/live_locator/observed_tree_tests.rs`、`crates/core/src/locator/live_locator/selected_hydration_tests.rs`、`crates/core/src/refs/ref_capture_proof_tests.rs`、`crates/windows/src/tree/live_read_gate_tests.rs`、`crates/windows/src/tree/live_read_states_complete_tests.rs`、`crates/windows/src/tree/properties/element_properties.rs`、`crates/windows/src/tree/resolve/resolve_anchor_tests.rs` | 1 行目に変更の注記を足した（無かったものだけ）。`LocatorRefEvidence` の literal に `runtime_id: None` を足しただけ |
+| 上の `ancestors: Vec::new()` を足したファイルの全部（`crates/windows/src/tree/walk/walker_enumerate.rs` を除く） | `RefEntryIdentity` の literal に `in_view: None` を足しただけ |
 
 ## build と試験
 

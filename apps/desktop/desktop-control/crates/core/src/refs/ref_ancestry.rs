@@ -41,8 +41,14 @@ pub(crate) enum Proof {
     /// `unique_at_capture` unset, so a reader that ignores the ancestors sees
     /// an unproven entry).
     WithAncestors,
+    /// Among the elements the window showed only (`RefEntryIdentity::in_view`,
+    /// stored with `unique_at_capture` unset and no top-level ancestors).
+    /// Resolution holds it to the same view, its path and its bounds
+    /// (`ref_view`), never to the whole-window rule.
+    InView,
     /// Not proven, or recorded inconsistently (`unique_at_capture` set and
-    /// ancestors present): refused either way.
+    /// ancestors present, or a view proof next to either other proof):
+    /// refused either way.
     None,
 }
 
@@ -50,10 +56,21 @@ pub(crate) fn proof_of(entry: &RefEntry) -> Proof {
     match (
         entry.identity.unique_at_capture,
         entry.identity.ancestors.is_empty(),
+        entry.identity.in_view.is_some(),
     ) {
-        (true, true) => Proof::Own,
-        (false, false) => Proof::WithAncestors,
+        (true, true, false) => Proof::Own,
+        (false, false, false) => Proof::WithAncestors,
+        (false, true, true) => Proof::InView,
         _ => Proof::None,
+    }
+}
+
+/// The ancestors an entry's proof recorded: those of a view proof, which are
+/// kept inside it, or the entry's own list.
+pub(crate) fn recorded_ancestors(entry: &RefEntry) -> &[RefAncestorIdentity] {
+    match &entry.identity.in_view {
+        Some(view) => &view.ancestors,
+        None => &entry.identity.ancestors,
     }
 }
 
@@ -72,7 +89,7 @@ pub(crate) fn confirm_handle_ancestors(
     handle: &crate::NativeHandle,
     deadline: crate::Deadline,
 ) -> Result<(), crate::AdapterError> {
-    let recorded = &entry.identity.ancestors;
+    let recorded = recorded_ancestors(entry);
     if recorded.is_empty() {
         return Ok(());
     }

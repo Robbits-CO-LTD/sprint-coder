@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{fixture::Fixture, fixture_node::FixtureNode};
 use agent_desktop_core::{
     AdapterError, ElementIdentifier, EvidenceRequirements, IdentifierEvidence, IdentifierKind,
@@ -154,6 +155,7 @@ fn node_evidence(node: &FixtureNode, requirements: EvidenceRequirements) -> Loca
                 LocatorField::Unknown
             },
             descriptors: Default::default(),
+            runtime_id: None,
         },
     }
 }

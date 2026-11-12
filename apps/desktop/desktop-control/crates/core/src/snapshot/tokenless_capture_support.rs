@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::sync::{
     Mutex,
     atomic::{AtomicU32, Ordering},
@@ -25,6 +26,9 @@ pub(super) struct CaptureAdapter {
     pub(super) strict: AtomicU32,
     anchors: Mutex<Vec<RefEntry>>,
     whole_read: Mutex<Option<WholeReadFault>>,
+    /// Whether a read of the visible elements is served (as a Chromium-hosted
+    /// window is); otherwise such a read is refused as not supported.
+    view: std::sync::atomic::AtomicBool,
 }
 
 impl CaptureAdapter {
@@ -37,11 +41,16 @@ impl CaptureAdapter {
             strict: AtomicU32::new(0),
             anchors: Mutex::new(Vec::new()),
             whole_read: Mutex::new(None),
+            view: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     pub(super) fn fault_whole_read(&self, fault: WholeReadFault) {
         *self.whole_read.lock().expect("the fault locks") = Some(fault);
+    }
+
+    pub(super) fn serve_view(&self) {
+        self.view.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn show(&self, tree: AccessibilityNode) {
@@ -76,6 +85,21 @@ impl ObservationOps for CaptureAdapter {
                 self.captures.fetch_add(1, Ordering::SeqCst);
                 let tree = self.tree.lock().expect("the fixture tree locks").clone();
                 let tree = cut(tree, 0, request.max_logical_depth);
+                if request.observation_mode.visible_only {
+                    if !self.view.load(Ordering::SeqCst) {
+                        return Err(AdapterError::new(
+                            crate::ErrorCode::ActionNotSupported,
+                            "this fixture reads no view of visible elements",
+                        ));
+                    }
+                    let mut observed = crate::adapter::observed_tree(&root, tree)?;
+                    for (index, node) in observed.nodes.iter_mut().enumerate() {
+                        let index = i32::try_from(index).unwrap_or(i32::MAX);
+                        node.evidence.ref_evidence.runtime_id = Some(vec![42, index]);
+                    }
+                    observed.mark_visible_scope();
+                    return Ok(observed);
+                }
                 let fault = *self.whole_read.lock().expect("the fault locks");
                 let tree = match fault {
                     Some(fault)
@@ -258,6 +282,21 @@ pub(super) fn snapshot(adapter: &CaptureAdapter) -> crate::snapshot::SnapshotRes
         Some("Fixture"),
         None,
         Deadline::standard().expect("a standard deadline"),
+    )
+    .expect("the window snapshots")
+}
+
+/// [`snapshot`] under a deadline of `timeout_ms`.
+pub(super) fn snapshot_within(
+    adapter: &CaptureAdapter,
+    timeout_ms: u64,
+) -> crate::snapshot::SnapshotResult {
+    crate::snapshot::build(
+        adapter,
+        &skeleton_opts(),
+        Some("Fixture"),
+        None,
+        Deadline::after(timeout_ms).expect("a deadline"),
     )
     .expect("the window snapshots")
 }

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, Deadline, PlatformAdapter, RefEntry, WindowInfo,
     adapter::NativeHandle,
@@ -25,6 +26,9 @@ pub(crate) fn read_saved_root<T>(
     stands_alone: impl FnOnce(&T) -> bool,
 ) -> Result<RootRead<T>, AppError> {
     if element_token(entry).is_some() {
+        if entry.identity.in_view.is_some() {
+            return Err(crate::refs::ref_view::view_unavailable(entry).into());
+        }
         let window = recorded_window(adapter, entry, deadline)?;
         let handle = adapter.resolve_element_strict(entry, deadline)?;
         let subtree = read_subtree(&window, &handle)?;
