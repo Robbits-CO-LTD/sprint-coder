@@ -18,7 +18,8 @@ import { secureLogger } from './secure-logger';
  * id as variables (`desktopControlEnvironment`), and the agent may not choose either
  * (`desktopControlSessionArgvRefusal`). The Leader runs as agent `leader`; a Team Worker the
  * Leader marked for desktop control (`markDesktopControlWorker`) runs as its own agent, with its
- * role and an accent of its own on its cursor. The session ends when the Task is archived and when Sprint Coder quits; the cursors'
+ * role and an accent of its own on its cursor. The session ends when the Task is archived (and the
+ * Task's marks are forgotten) and when Sprint Coder quits; the cursors'
  * renderer also ends by itself when Main exits.
  *
  * A session keeps its snapshots below its own folder, so the approval card and the app-wide Task
@@ -227,6 +228,9 @@ export function markDesktopControlWorker(
   role: string,
   live?: ReadonlySet<string>,
 ): { worker: DesktopControlWorker } | { refusal: string } {
+  // A run that names no Worker carries the empty id, so the empty id never holds a mark.
+  if (workerId === '')
+    return { refusal: 'Worker を特定できないので、デスクトップ操作の道具を渡しません。' };
   const workers = desktopWorkers.get(taskId) ?? new Map<string, DesktopControlWorker>();
   if (live !== undefined)
     for (const id of [...workers.keys()]) if (id !== workerId && !live.has(id)) workers.delete(id);
@@ -256,7 +260,7 @@ export function desktopControlWorker(
   taskId: string,
   workerId: string,
 ): DesktopControlWorker | undefined {
-  return teamCursors ? desktopWorkers.get(taskId)?.get(workerId) : undefined;
+  return teamCursors && workerId !== '' ? desktopWorkers.get(taskId)?.get(workerId) : undefined;
 }
 
 /**
@@ -300,8 +304,12 @@ export function desktopControlSessionReadScope(
   return { stateRoot: join(desktopControlStateFolder(), 'sessions', id) };
 }
 
-/** Ends the Task's session, if it has one (when the Task is archived). */
+/**
+ * Ends the Task's session, if it has one, and forgets which of its Workers were marked for desktop
+ * control (when the Task is archived), so no mark outlives the Task's session.
+ */
 export async function endDesktopControlSession(taskId: string): Promise<void> {
+  desktopWorkers.delete(taskId);
   const entry = sessions.get(taskId);
   if (entry === undefined) return;
   sessions.delete(taskId);

@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamCoordinator } from './team-coordinator';
-import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
+import {
+  BUILTIN_CLAUDE_CONNECTION_ID,
+  BUILTIN_CODEX_CONNECTION_ID,
+  BUILTIN_GROK_CONNECTION_ID,
+} from './connection-identity';
+import type { AgentRecord } from './persistence';
+import {
+  ProviderAwareTeamWorkerRuntime,
+  type ProviderTeamWorkerRuntimeDeps,
+} from './provider-team-worker-runtime';
 import {
   configureDesktopControlTeamCursors,
   desktopControlWorker,
@@ -33,7 +42,7 @@ type HireInput = {
 /** A Team that hires whoever is asked for, numbering them in order; `workers` is its state. */
 function team() {
   let next = 0;
-  const workers: { id: string; state: string }[] = [];
+  const workers: ({ id: string; state: string } & NonNullable<HireInput['modelSelection']>)[] = [];
   const state = { team: 'active' };
   const hired = (input: HireInput) => {
     const worker = {
@@ -198,6 +207,96 @@ describe('the Leader’s desktop mark on a hire', () => {
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       desktopControl: false,
     });
+  });
+
+  it('marks a Worker exactly when the Worker runtime hands it to the CLI runtime', async () => {
+    configureDesktopControlTeamCursors(true);
+    const cli = vi.fn(async () => ({ pid: 1 }));
+    const runtime = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: cli, execute: vi.fn(), stop: vi.fn() },
+    } as unknown as ProviderTeamWorkerRuntimeDeps);
+    const selections: (HireInput['modelSelection'] | undefined)[] = [
+      // No Connection named: the default CLI.
+      undefined,
+      { connectionId: null, requestedProvider: null, requestedModel: null },
+      {
+        connectionId: BUILTIN_CODEX_CONNECTION_ID,
+        requestedProvider: 'openai',
+        requestedModel: 'm',
+      },
+      {
+        connectionId: BUILTIN_CLAUDE_CONNECTION_ID,
+        requestedProvider: 'anthropic',
+        requestedModel: 'm',
+      },
+      { connectionId: BUILTIN_GROK_CONNECTION_ID, requestedProvider: 'xai', requestedModel: 'm' },
+      // A built-in CLI's Connection with another provider, and an API Connection.
+      { connectionId: BUILTIN_CODEX_CONNECTION_ID, requestedProvider: 'xai', requestedModel: 'm' },
+      { connectionId: 'connection-api-1', requestedProvider: 'openai', requestedModel: 'm' },
+    ];
+    for (const modelSelection of selections) {
+      resetDesktopControlSessions();
+      configureDesktopControlTeamCursors(true);
+      cli.mockClear();
+      const coordinator = team();
+      const hired = await hire(coordinator, {
+        desktopControl: true,
+        ...(modelSelection === undefined ? {} : { modelSelection }),
+      });
+      const worker = coordinator.workers.at(-1)!;
+      await runtime.start({
+        id: worker.id,
+        modelSelection: {
+          connectionId: worker.connectionId,
+          requestedProvider: worker.requestedProvider,
+          requestedModel: worker.requestedModel,
+        },
+      } as unknown as AgentRecord);
+      const onCli = cli.mock.calls.length === 1;
+      expect({ modelSelection, marked: hired['desktopControl'] }).toEqual({
+        modelSelection,
+        marked: onCli,
+      });
+      expect(desktopControlWorker('task-1', worker.id) !== undefined).toBe(onCli);
+    }
+  });
+
+  it('judges a hire that names no Connection by the selection the Worker inherits, and counts only CLI Workers', async () => {
+    configureDesktopControlTeamCursors(true);
+    // As Main stores a hire that names no Connection (`persistence.ts`): with the Leader's selection.
+    let inherited: NonNullable<HireInput['modelSelection']> = {
+      connectionId: 'connection-api-1',
+      requestedProvider: 'openai',
+      requestedModel: 'gpt-test',
+    };
+    const coordinator = team();
+    const hireWorker = coordinator.hireWorker as unknown as ReturnType<typeof vi.fn>;
+    const original = hireWorker.getMockImplementation()!;
+    hireWorker.mockImplementation(async (input: HireInput) =>
+      original({ ...input, modelSelection: input.modelSelection ?? inherited }),
+    );
+    for (let index = 0; index < 4; index += 1)
+      await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+        desktopControl: false,
+        desktopControlNote: 'この種類の Worker は、デスクトップ操作を実行できません。',
+      });
+    const apiWorkers = coordinator.workers.map(({ id }) => id);
+    // The refused API Workers, still at work, hold no place: three CLI Workers still fit, and a
+    // fourth does not.
+    inherited = {
+      connectionId: BUILTIN_GROK_CONNECTION_ID,
+      requestedProvider: 'xai',
+      requestedModel: 'grok-test',
+    };
+    for (let index = 0; index < 3; index += 1)
+      await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+        desktopControl: true,
+      });
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: false,
+      desktopControlNote: expect.stringContaining('同時に 3 人まで'),
+    });
+    for (const id of apiWorkers) expect(desktopControlWorker('task-1', id)).toBeUndefined();
   });
 
   it('tells only a marked Worker, and the Leader with the cursors on, how to share the desktop', () => {
