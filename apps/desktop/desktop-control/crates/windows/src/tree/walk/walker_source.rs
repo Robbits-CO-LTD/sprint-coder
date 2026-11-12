@@ -414,7 +414,7 @@ mod imp {
                 client,
                 walker,
                 cache,
-                chromium_provenance: crate::tree::chromium::is_chromium_root(root),
+                chromium_provenance: crate::tree::chromium::has_chromium_provenance(root),
                 subtree: None,
                 subtree_prefetched: std::cell::Cell::new(false),
                 properties: &TreeProperty::WALK_SET,

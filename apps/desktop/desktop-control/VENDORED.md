@@ -87,6 +87,10 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `src/cli/help_after.txt` | `--help` の KEY COMBOS に、記号のキーの名前（Windows）と、`+` のキーは `plus` であることを足した |
 | `skills/agent-desktop-windows/SKILL.md` | 「Symbol keys」の項を足した（記号のキーの名前、`+` は `plus`、配列どおりに押すこと、電卓に 7+8= を打つ例） |
 | `skills/agent-desktop/references/commands-interaction.md` | キーの名前の行に、記号のキーの名前は OS ごとに違うので platform の説明書を読む、と足した |
+| `crates/windows/src/tree/chromium.rs` | 1 行目に変更の注記を足した。木の読み取りが Chromium 由来と見なす窓（`has_chromium_provenance`）に、窓の class が `Chrome_WidgetWin_1` の窓に加えて、子孫の窓に Chromium が Web の中身を描く窓（class `Chrome_RenderWidgetHostHWND`）を持つ窓を足した（WebView2 を使う Tauri・WinForms・WPF の窓。窓の外側の class はそのアプリのもので、Tauri は `Tauri Window`）。子孫の窓は `EnumChildWindows` と `GetClassNameW` で見る（相手に message を送らない）。WebView2 の窓は今まで Chromium 由来と見なされず、中身の上の名前の無い入れ子もすべて深さに数えられ（Tauri の窓で、中身の document が深さ 9、その中のボタンが深さ 13）、既定の深さ（10）では中身の部品が出なかった。Chromium の初回の読み取りを待つ判定（`is_chromium_root`）は変えていない |
+| `crates/windows/src/tree/chromium_provenance_tests.rs`（新しく足した） | 上の判定の試験。message-only の窓で、3 段下の子孫の `Chrome_RenderWidgetHostHWND` を見つけること、持たない窓・名前の頭だけが同じ class の窓を見つけないこと |
+| `crates/windows/src/tree/walk/walker_source.rs`（2 回目） | 木の読み取りの Chromium 由来の判定に `has_chromium_provenance` を使う。WebView2 の窓でも、名前の無い通り抜けの入れ子を深さに数えず、一括の取得をせず部品ごとに読む（Electron の窓と同じ） |
+| `skills/agent-desktop-windows/references/chromium-and-electron.md` | 名前も動作も無い通り抜けの入れ子は、Electron の窓と WebView2 の窓では深さに数えないので、既定の深さから始める、と足した |
 
 ## build と試験
 
