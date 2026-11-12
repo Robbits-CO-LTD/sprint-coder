@@ -731,6 +731,12 @@ describe('desktop control Workspace roots', () => {
     const outsideLink = join(linkBase, 'outside-link');
     for (const link of [linkedRoot, outsideLink])
       symlinkSync(realWorktree, link, process.platform === 'win32' ? 'junction' : 'dir');
+    // A link inside the worktree to a folder outside every root: as written, it is in the worktree.
+    const elsewhere = join(linkBase, 'elsewhere');
+    await mkdir(elsewhere);
+    await writeFile(join(elsewhere, 'outside.exe'), '');
+    const insideLink = join(realWorktree, 'to-elsewhere');
+    symlinkSync(elsewhere, insideLink, process.platform === 'win32' ? 'junction' : 'dir');
     // Main's binding of each call: these call ids are a Worker's, any other the Leader's.
     const workers = new Map<string, { workerId: string; roots: readonly string[] }>([
       ['marked', { workerId: 'agent-1', roots: [worktree] }],
@@ -875,14 +881,28 @@ describe('desktop control Workspace roots', () => {
         ['linked', linkedRoot, join(realWorktree, 'tool.exe')],
         ['real', realWorktree, join(outsideLink, 'app.exe')],
         ['real', realWorktree, join(outsideLink, 'tool.exe')],
+        ['real', realWorktree, join(insideLink, 'outside.exe')],
+        ['linked', linkedRoot, join(linkedRoot, 'to-elsewhere', 'outside.exe')],
       ] as const) {
-        await expect(dispatch(who, ['launch', inside])).rejects.toThrow(
-          'Workspace の中の実行ファイルは起動できない',
-        );
-        expect(
-          desktopControlModule.desktopControlArgvRefusal(['launch', inside], [workspace, root]),
-        ).toContain('Workspace の中の実行ファイルは起動できない');
+        for (const argv of [
+          ['launch', inside],
+          ['batch', JSON.stringify([{ command: 'launch', args: { app: inside } }])],
+        ]) {
+          await expect(dispatch(who, argv)).rejects.toThrow(
+            'Workspace の中の実行ファイルは起動できない',
+          );
+          expect(desktopControlModule.desktopControlArgvRefusal(argv, [workspace, root])).toContain(
+            'Workspace の中の実行ファイルは起動できない',
+          );
+        }
       }
+      // The folder the inner link points at is itself outside every root, named by its own path.
+      expect(
+        desktopControlModule.desktopControlArgvRefusal(
+          ['launch', join(elsewhere, 'outside.exe')],
+          [workspace, realWorktree],
+        ),
+      ).toBeNull();
       expect(authorize).not.toHaveBeenCalled();
       expect(run).not.toHaveBeenCalled();
       // A Worker whose mark is gone by the time its run would start never runs, least of all as
@@ -900,12 +920,30 @@ describe('desktop control Workspace roots', () => {
       expect(run).not.toHaveBeenCalled();
       expect([...commandRows.values()].at(-1)?.state).toBe('failed');
       markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
+      // Nor does one whose binding lost its Workspace by then (`managedWorkerOf` reads it as an
+      // unknown Worker), though the Worker it was prepared for still holds its mark.
+      workers.set('rebound', { workerId: 'agent-1', roots: [worktree] });
+      authorize.mockImplementationOnce(() => {
+        workers.set('rebound', { workerId: '', roots: [] });
+        return {
+          decision: 'allow' as const,
+          reason: 'test',
+          beforeExecute: () => true,
+          approvalDecision: 'allow_once' as const,
+        };
+      });
+      await expect(dispatch('rebound', ['click', '@s1:e1'])).rejects.toThrow('任されていません');
+      expect(run).not.toHaveBeenCalled();
+      expect([...commandRows.values()].at(-1)?.state).toBe('failed');
+      expect(sideEffects.filter((id) => id.startsWith('rebound:'))).toEqual([]);
       authorize.mockClear();
       // Refused before any card: an unmarked or unbound Worker, a background run, a session the
       // Worker chose, and every other executable.
       for (const [who, argv, extra, reason] of [
         ['unmarked', ['click', '@s1:e1'], {}, '任されていません'],
         ['unbound', ['click', '@s1:e1'], {}, '任されていません'],
+        ['unbound', ['snapshot', '-i'], {}, '任されていません'],
+        ['unbound', ['status'], {}, '任されていません'],
         ['marked', ['click', '@s1:e1'], { background: true }, 'background'],
         ['marked', ['--session', 'x', 'click', '@s1:e1'], {}, '--session'],
       ] as const)

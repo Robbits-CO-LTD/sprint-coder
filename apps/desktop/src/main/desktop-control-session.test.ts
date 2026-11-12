@@ -343,6 +343,66 @@ describe('the Team Workers marked for desktop control', () => {
   });
 });
 
+describe('a Worker marked again, and the marks of an archived Task', () => {
+  it('keeps the first mark of a Worker marked again, and styles its cursor only once, as first named', async () => {
+    configureDesktopControlTeamCursors(true);
+    const first = markDesktopControlWorker('task-1', 'agent-a', '画面の確認係');
+    const { run, calls, id } = ownRuns();
+    const worker = desktopControlWorker('task-1', 'agent-a')!;
+    await expect(ensureDesktopControlSession('task-1', run, worker)).resolves.toEqual({
+      id,
+      agentId: 'agent-a',
+    });
+    // Marked again with another role, while at work and while not known to be: the same mark, the
+    // same label and accent, and no second place in the bound.
+    expect(markDesktopControlWorker('task-1', 'agent-a', 'renamed')).toEqual(first);
+    expect(markDesktopControlWorker('task-1', 'agent-a', 'renamed', new Set(['agent-a']))).toEqual(
+      first,
+    );
+    expect(desktopControlWorker('task-1', 'agent-a')).toBe(worker);
+    await ensureDesktopControlSession('task-1', run, desktopControlWorker('task-1', 'agent-a'));
+    expect(
+      calls.filter(({ argv }) => argv[0] === 'cursor-overlay').map(({ argv }) => argv.join(' ')),
+    ).toEqual([
+      'cursor-overlay enable --label Leader --accent #2563EB --linger-ms 30000',
+      'cursor-overlay enable --label 画面の確認係 --accent #16A34A --linger-ms 30000',
+    ]);
+    for (const other of ['agent-b', 'agent-c'])
+      expect(markDesktopControlWorker('task-1', other, other)).toHaveProperty('worker');
+    expect(markDesktopControlWorker('task-1', 'agent-d', 'd')).toHaveProperty('refusal');
+  });
+
+  it('never marks the empty Worker id, which a run that names no Worker carries', () => {
+    configureDesktopControlTeamCursors(true);
+    expect(markDesktopControlWorker('task-1', '', 'nobody')).toHaveProperty('refusal');
+    expect(desktopControlWorker('task-1', '')).toBeUndefined();
+    // It took no place in the bound either.
+    for (const id of ['agent-a', 'agent-b', 'agent-c'])
+      expect(markDesktopControlWorker('task-1', id, id)).toHaveProperty('worker');
+  });
+
+  it('forgets every mark of a Task when the Task is archived, with or without its session', async () => {
+    configureDesktopControlTeamCursors(true);
+    for (const id of ['a', 'b', 'c']) markDesktopControlWorker('task-1', id, id);
+    markDesktopControlWorker('task-2', 'a', 'a');
+    markDesktopControlWorker('task-3', 'a', 'a');
+    const { run } = ownRuns();
+    await ensureDesktopControlSession('task-1', run, desktopControlWorker('task-1', 'a'));
+    await endDesktopControlSession('task-1');
+    expect(run).toHaveBeenLastCalledWith(['session', 'end', expect.any(String)]);
+    for (const id of ['a', 'b', 'c']) expect(desktopControlWorker('task-1', id)).toBeUndefined();
+    // A Task that never started a session loses its marks too.
+    await endDesktopControlSession('task-2');
+    expect(desktopControlWorker('task-2', 'a')).toBeUndefined();
+    // Another Task keeps its own.
+    expect(desktopControlWorker('task-3', 'a')).toMatchObject({ workerId: 'a', colorIndex: 0 });
+    // The archived Task's places are free again, from the first accent.
+    expect(markDesktopControlWorker('task-1', 'd', 'd')).toMatchObject({
+      worker: { workerId: 'd', colorIndex: 0 },
+    });
+  });
+});
+
 describe('the desktop Workers of a Task at once', () => {
   it('drops the marks of Workers no longer at work, and gives the freed accent to the next', () => {
     for (const id of ['a', 'b', 'c']) markDesktopControlWorker('task-1', id, id);

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -2191,6 +2191,60 @@ describe('desktop control outside the command sandbox', () => {
       runnerPath.mockRestore();
     }
   }, 15_000);
+
+  it('refuses a launch into a Worker’s worktree through a link before it starts, with the roots it is given', async () => {
+    const root = await workspace();
+    // A Worker's worktree, a root given through a link to it (a junction on Windows, a symlink
+    // elsewhere), a link from outside every root into it, and a link inside it to a folder outside.
+    const base = await workspace();
+    const realWorktree = join(base, 'real-worktree');
+    const elsewhere = join(base, 'elsewhere');
+    await mkdir(realWorktree);
+    await mkdir(elsewhere);
+    await writeFile(join(realWorktree, 'tool.exe'), '');
+    await writeFile(join(elsewhere, 'outside.exe'), '');
+    const kind = process.platform === 'win32' ? 'junction' : 'dir';
+    const linkedRoot = join(base, 'linked-worktree');
+    const outsideLink = join(base, 'outside-link');
+    symlinkSync(realWorktree, linkedRoot, kind);
+    symlinkSync(realWorktree, outsideLink, kind);
+    symlinkSync(elsewhere, join(realWorktree, 'to-elsewhere'), kind);
+    // Judged on the sealed argv alone: the run never starts, so any executable that seals will do.
+    const executable = process.platform === 'darwin' ? '/bin/sh' : process.execPath;
+    const judge = vi.spyOn(desktopControlModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
+    try {
+      const runner = new CommandRunner({ sandboxed: true });
+      for (const [worktree, inside] of [
+        [linkedRoot, join(linkedRoot, 'app.exe')],
+        [linkedRoot, join(realWorktree, 'app.exe')],
+        [linkedRoot, join(linkedRoot, 'tool.exe')],
+        [linkedRoot, join(realWorktree, 'tool.exe')],
+        [linkedRoot, join(linkedRoot, 'to-elsewhere', 'outside.exe')],
+        [realWorktree, join(outsideLink, 'app.exe')],
+        [realWorktree, join(outsideLink, 'tool.exe')],
+        [realWorktree, join(realWorktree, 'to-elsewhere', 'outside.exe')],
+      ] as const)
+        for (const argv of [
+          ['launch', inside],
+          ['batch', JSON.stringify([{ command: 'launch', args: { app: inside } }])],
+        ]) {
+          const beforeSpawn = vi.fn();
+          await expect(
+            runner.run(await prepareExecutionSpec({ workspacePath: root, executable, argv }), {
+              desktopControlWorkspaceRoots: [root, worktree],
+              beforeSpawn,
+            }),
+          ).rejects.toThrow('Workspace の中の実行ファイルは起動できない');
+          expect(beforeSpawn).not.toHaveBeenCalled();
+        }
+      expect(judge).toHaveBeenCalled();
+      expect(runnerPath).not.toHaveBeenCalled();
+    } finally {
+      judge.mockRestore();
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
 
   it.skipIf(process.platform !== 'win32')(
     'lets only a desktop-control run leave the apps it started running, with a PATH outside the Workspace',
