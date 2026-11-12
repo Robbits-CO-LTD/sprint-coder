@@ -505,3 +505,34 @@ fn a_shallow_window_read_whole_is_not_depth_limited() {
     assert!(body.get("depth_limited").is_none());
     assert!(body.get("depth_hint").is_none());
 }
+
+#[test]
+fn a_minimized_window_is_named_in_the_payload() {
+    let mut result = crate::snapshot::SnapshotResult {
+        tree: crate::adapter::minimal_accessibility_node("window", "Fixture"),
+        refmap: crate::RefMap::new(),
+        window: WindowInfo {
+            id: "w-1".into(),
+            title: "Fixture".into(),
+            app: "Fixture".into(),
+            pid: crate::ProcessId::new(1),
+            process_instance: None,
+            bounds: None,
+            state: crate::WindowState::default(),
+        },
+        snapshot_id: None,
+        complete: true,
+        nodes_observed: 1,
+        identity_unproven: None,
+        visible_scope: false,
+    };
+    let unknown = format_snapshot_fields(&result, None, None).unwrap();
+    assert!(unknown["window"].get("minimized").is_none());
+    result.window.state.minimized = Some(false);
+    let shown = format_snapshot_fields(&result, None, None).unwrap();
+    assert!(shown["window"].get("minimized").is_none());
+    result.window.state.minimized = Some(true);
+    let minimized = format_snapshot_fields(&result, None, None).unwrap();
+    assert_eq!(minimized["window"]["minimized"], true);
+    assert_eq!(minimized["window"]["id"], "w-1");
+}
