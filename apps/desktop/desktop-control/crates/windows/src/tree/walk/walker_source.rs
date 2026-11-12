@@ -379,7 +379,13 @@ mod imp {
             calling: std::time::Duration,
         ) -> Result<UIAElement, AdapterError> {
             if let Some(request) = &self.subtree {
-                let small = count_within(&self.walker, root, limit, deadline.capped(counting));
+                // One navigation may not wait past the counting share either:
+                // the client's own bound is far longer than that share.
+                let count = deadline.capped(counting);
+                let small = with_transaction_timeout(&self.client, count, || {
+                    count_within(&self.walker, root, limit, count)
+                })
+                .flatten();
                 let call = deadline.capped(calling);
                 let prefetched = small.and_then(|_| {
                     with_transaction_timeout(&self.client, call, || {
