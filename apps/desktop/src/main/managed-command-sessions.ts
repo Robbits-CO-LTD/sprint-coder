@@ -21,6 +21,11 @@ export type ManagedCommandSnapshot = Readonly<{
   error: string | null;
 }>;
 
+export type ManagedCommandRun = (
+  spec: ExecutionSpec,
+  options: RunOptions,
+) => Promise<CommandResult>;
+
 export type ManagedCommandIdentity = Readonly<{
   sessionId: string;
   executable: string;
@@ -67,7 +72,13 @@ export class ManagedCommandSessions {
       | 'desktopControlWorkspaceRoots'
       | 'desktopControlExpectedWindowOwner'
       | 'desktopControlSession'
-    > = {},
+    > & {
+      /**
+       * Given only for a desktop-control run in the Task's session (`desktop-control-queue.ts`):
+       * how the runner's run of this session's process is to be made. Absent, the runner runs it.
+       */
+      wrapRun?: (run: ManagedCommandRun) => ManagedCommandRun;
+    } = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
     if (this.sessions.size >= this.maxSessions) this.evictTerminal();
@@ -97,7 +108,11 @@ export class ManagedCommandSessions {
     const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
     hooks.signal?.addEventListener('abort', abortFromCaller, { once: true });
     if (hooks.signal?.aborted) abortFromCaller();
-    session.completion = this.runner
+    const runner: { run: ManagedCommandRun } =
+      hooks.wrapRun === undefined
+        ? this.runner
+        : { run: hooks.wrapRun((runSpec, options) => this.runner.run(runSpec, options)) };
+    session.completion = runner
       .run(spec, {
         signal: session.controller.signal,
         ...(hooks.beforeSpawn === undefined ? {} : { beforeSpawn: hooks.beforeSpawn }),

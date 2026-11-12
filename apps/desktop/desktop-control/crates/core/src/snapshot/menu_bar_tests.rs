@@ -265,7 +265,55 @@ fn an_item_without_a_command_under_a_disabled_menu_or_reported_by_position_gets_
     assert!(hint(&tree.children[0].children[0]).contains("sends no command"));
     assert!(hint(&tree.children[0].children[1]).contains("sends no command"));
     assert!(hint(&tree.children[1].children[0]).contains("menu is disabled"));
-    assert!(hint(&tree.children[2].children[0]).contains("by position"));
+    // Its menu reports by position, the bar above it by command.
+    assert!(hint(&tree.children[2].children[0]).contains("different ways"));
+}
+
+/// A bar that reports chosen items by position, with every submenu reporting
+/// so too (`MNS_NOTIFYBYPOS` applied to the submenus): its items get refs
+/// that record it. One whose menu's style could not be read gets none.
+#[test]
+fn an_item_of_a_menu_reporting_by_position_throughout_records_it_in_its_ref() {
+    let by_position = |item: NativeMenuItem| NativeMenuItem {
+        in_notify_by_position_menu: true,
+        ..item
+    };
+    let bar = NativeMenuBar {
+        items: vec![
+            by_position(submenu(
+                "ファイル(&F)",
+                vec![
+                    by_position(item("開く(&O)", 1001)),
+                    NativeMenuItem {
+                        notify_style_unread: true,
+                        ..item("読めない(&U)", 1002)
+                    },
+                ],
+            )),
+            by_position(item("直下(&T)", 1003)),
+        ],
+        complete: true,
+        window_disabled: false,
+    };
+    let (tree, refmap) = with_refs(&bar, 10);
+    let open = entry_of(&refmap, &tree.children[0].children[0]);
+    assert!(open.identity.in_menu.as_ref().unwrap().by_position);
+    let top = entry_of(&refmap, &tree.children[1]);
+    assert!(top.identity.in_menu.as_ref().unwrap().by_position);
+    let unread = &tree.children[0].children[1];
+    assert!(unread.ref_id.is_none());
+    assert!(
+        unread
+            .presentation
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("could not be read")
+    );
+    // A menu that sends commands records nothing of it.
+    let (tree, refmap) = with_refs(&sample_bar(), 10);
+    let save = entry_of(&refmap, &tree.children[0].children[0]);
+    assert!(!save.identity.in_menu.as_ref().unwrap().by_position);
 }
 
 #[test]

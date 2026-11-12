@@ -80,6 +80,14 @@ pub struct RefEntryIdentity {
 pub struct RefMenuProof {
     pub steps: Vec<RefMenuStep>,
     pub command_id: u32,
+    /// The menus on the item's way report a chosen item by its position
+    /// (`MNS_NOTIFYBYPOS`): running it hands over `WM_MENUCOMMAND` with the
+    /// item's live position and menu instead of `WM_COMMAND` with its command.
+    /// A run requires the live menus to report the same way. An older reader
+    /// that does not know the key refuses such an item all the same: it
+    /// refuses every item of a menu that reports by position.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_position: bool,
     /// The shortcut the item's text showed, for naming it to a person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcut: Option<String>,

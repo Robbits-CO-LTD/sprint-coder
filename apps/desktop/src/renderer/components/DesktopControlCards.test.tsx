@@ -219,6 +219,39 @@ describe('desktop-control approval card', () => {
     expect(html).toContain('画面を読みます');
   });
 
+  it('shows a shortened menu item name whole beside the app and window, in each step', () => {
+    const menuTarget = (file: string) => ({
+      resolved: true,
+      app: 'menuapp.exe',
+      window: 'menu 試験アプリ',
+      role: 'メニューの項目',
+      name: `… > 1 C:\\Users\\someone\\長い…\\${file}`,
+      fullName: `ファイル(F) > 最近使ったファイル(R) > 1 C:\\Users\\someone\\${'長い名前'.repeat(40)}\\${file}`,
+    });
+    const run = {
+      kind: 'operate',
+      title: 'メニューの項目を実行します',
+      mode: 'background',
+    } as const;
+    const html = card({
+      ...run,
+      target: menuTarget('a.txt'),
+      steps: [
+        { ...run, target: menuTarget('a.txt') },
+        { ...run, target: menuTarget('b.txt') },
+        { ...run, target: menuTarget('c.txt') },
+      ],
+      allowTaskGrant: false,
+      notes: [],
+      openDetails: true,
+    });
+    // The app and window come first, whatever the item's name.
+    expect(html).toContain('menu 試験アプリ（menuapp.exe） のメニューの項目「… &gt; 1 C:');
+    expect(html.match(/desktop-approval-full-name/gu)).toHaveLength(4);
+    for (const file of ['a.txt', 'b.txt', 'c.txt'])
+      expect(html).toContain(`${'長い名前'.repeat(40)}\\${file}</dd>`);
+  });
+
   it('names each button and the card with its heading and target, so two cards read apart', async () => {
     const container = document.createElement('div');
     document.body.append(container);

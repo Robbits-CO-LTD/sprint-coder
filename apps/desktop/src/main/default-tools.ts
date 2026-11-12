@@ -28,6 +28,7 @@ import {
   type DesktopControlOwnRun,
   type DesktopControlWorker,
 } from './desktop-control-session';
+import { DesktopControlQueueError, queuedDesktopControlRun } from './desktop-control-queue';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -860,9 +861,30 @@ export function registerCommandRunnerTool(
         };
         if (backgroundSpecs.has(spec)) persistBackground();
         let started: Awaited<ReturnType<ManagedCommandSessions['start']>>;
+        // The session keeps only a failure's message; a run that did not get its turn is told to
+        // the agent as that (`providerWorkspaceToolFailure`), so its own error is kept here.
+        let notRun: DesktopControlQueueError | undefined;
         try {
-          started = await sessions.start(spec, owner, hooks, sessionId);
-        } catch (error) {
+          started = await sessions.start(
+            spec,
+            owner,
+            desktopSession === undefined
+              ? hooks
+              : {
+                  ...hooks,
+                  wrapRun: (run) => {
+                    const queued = queuedDesktopControlRun(_context.taskId, run);
+                    return (runSpec, options) =>
+                      queued(runSpec, options).catch((error: unknown) => {
+                        if (error instanceof DesktopControlQueueError) notRun = error;
+                        throw error;
+                      });
+                  },
+                },
+            sessionId,
+          );
+        } catch (caught) {
+          const error = notRun ?? caught;
           const current = command.persistence.getCommand(commandId);
           if (
             current.state === 'prepared' ||
@@ -990,7 +1012,14 @@ export function registerCommandRunnerTool(
         };
       }
       try {
-        const result = await commandRunner.run(spec, hooks);
+        // A run in the Task's session waits for its turn, and may run once more when it was not
+        // delivered (`desktop-control-queue.ts`); every other run is as it always was.
+        const result =
+          desktopSession === undefined
+            ? await commandRunner.run(spec, hooks)
+            : await queuedDesktopControlRun(_context.taskId, (runSpec, options) =>
+                commandRunner.run(runSpec, options),
+              )(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
         rememberWindows();

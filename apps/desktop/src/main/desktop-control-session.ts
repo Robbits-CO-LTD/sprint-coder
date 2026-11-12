@@ -5,6 +5,7 @@ import {
   desktopControlStateFolder,
   type DesktopControlSessionVariables,
 } from './desktop-control';
+import { endDesktopControlQueue, endDesktopControlQueues } from './desktop-control-queue';
 import { secureLogger } from './secure-logger';
 
 /**
@@ -309,6 +310,8 @@ export function desktopControlSessionReadScope(
  * control (when the Task is archived), so no mark outlives the Task's session.
  */
 export async function endDesktopControlSession(taskId: string): Promise<void> {
+  // The runs still waiting for their turn in it do not start (`desktop-control-queue.ts`).
+  endDesktopControlQueue(taskId);
   desktopWorkers.delete(taskId);
   const entry = sessions.get(taskId);
   if (entry === undefined) return;
@@ -318,6 +321,7 @@ export async function endDesktopControlSession(taskId: string): Promise<void> {
 
 /** Ends every Task's session, waiting a few seconds at most (when Sprint Coder quits). */
 export async function endDesktopControlSessions(): Promise<void> {
+  endDesktopControlQueues();
   const entries = [...sessions.values()];
   sessions.clear();
   if (entries.length === 0) return;
@@ -355,4 +359,5 @@ export function resetDesktopControlSessions(): void {
   collected = null;
   sessions.clear();
   desktopWorkers.clear();
+  endDesktopControlQueues();
 }
