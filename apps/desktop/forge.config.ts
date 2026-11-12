@@ -6,7 +6,15 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { createHash } from 'node:crypto';
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
@@ -55,6 +63,7 @@ const runtimeModuleFiles = [
 ] as const;
 export const NATIVE_ASAR_UNPACK_GLOB = '*.{node,dylib,dll,wasm,so,so.*}';
 const appIconPath = resolve(__dirname, 'assets', 'sprint-coder-icon');
+const bundledNodeEntitlements = join(__dirname, 'entitlements.node.plist');
 export const DMG_BACKGROUND_PATH = resolve(__dirname, 'assets', 'dmg-background.png');
 export const DMG_WINDOW_SIZE = { width: 658, height: 498 } as const;
 export const DMG_ICON_SIZE = 112;
@@ -73,13 +82,25 @@ const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] 
 const windowsSign = resolveWindowsSignOptions(process.env);
 const BUNDLED_NODE_VERSION = '22.23.3';
 const BUNDLED_NODE_SHA256 = '9C9245166B4A8E182E0B797DA9C20136117FF24368EAFF1FEC8343A123C8DB0E';
+const MAC_BUNDLED_NODE_SHA256 = {
+  arm64: '68f4d07ca49e0500cc135c7e0a445093e228e42e126ac22306d045f0a8c2636b',
+  x64: 'fdb8d4da9332c2c99c3b2ae4bad4672bfef225ecd603e656cd1378b3644583a2',
+} as const;
+const MAC_BUNDLED_NODE_LICENSE_SHA256 =
+  'c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4';
 const BUNDLED_NODE_SIGNER_SUBJECT =
   'CN=OpenJS Foundation, O=OpenJS Foundation, L=San Francisco, S=California, C=US';
 const BUNDLED_NODE_SIGNER_ISSUER =
   'CN=Microsoft ID Verified CS EOC CA 03, O=Microsoft Corporation, C=US';
 const BUNDLED_NODE_SIGNER_THUMBPRINT = '5A2C440219B027EF812E24A1E15F671D7CD379DE';
 
+function macBundledNodeResources(): [string, string] {
+  const nodeExecutable = realpathSync(process.execPath);
+  return [nodeExecutable, resolve(nodeExecutable, '..', '..', 'LICENSE')];
+}
+
 function bundledNodeResources(): string[] {
+  if (process.platform === 'darwin') return macBundledNodeResources();
   if (process.platform !== 'win32') return [];
   const nodeExecutable = process.execPath;
   return [nodeExecutable, join(resolve(nodeExecutable, '..'), 'LICENSE')];
@@ -185,7 +206,32 @@ function resealMacAppBundle(appPath: string): void {
   );
 }
 
-export function verifyBundledNodeResources(): void {
+export function verifyBundledNodeResources(architecture: string = process.arch): void {
+  if (process.platform === 'darwin') {
+    if (
+      process.versions.node !== BUNDLED_NODE_VERSION ||
+      process.arch !== architecture ||
+      (architecture !== 'arm64' && architecture !== 'x64')
+    ) {
+      throw new Error(
+        `macOS packages must be built with official Node ${BUNDLED_NODE_VERSION} for ${architecture}, got ${process.version} (${process.arch})`,
+      );
+    }
+    const [nodeExecutable, nodeLicense] = macBundledNodeResources();
+    if (
+      lstatSync(nodeExecutable).isFile() &&
+      lstatSync(nodeLicense, { throwIfNoEntry: false })?.isFile() &&
+      createHash('sha256').update(readFileSync(nodeExecutable)).digest('hex') ===
+        MAC_BUNDLED_NODE_SHA256[architecture] &&
+      createHash('sha256').update(readFileSync(nodeLicense)).digest('hex') ===
+        MAC_BUNDLED_NODE_LICENSE_SHA256
+    ) {
+      return;
+    }
+    throw new Error(
+      `Use the official Node ${BUNDLED_NODE_VERSION} macOS distribution with its LICENSE to build this package`,
+    );
+  }
   if (process.platform !== 'win32') return;
   if (process.versions.node !== BUNDLED_NODE_VERSION)
     throw new Error(
@@ -293,6 +339,10 @@ function copyHoistedRuntimeModules(buildPath: string): void {
   }
 }
 
+function isPackagedMacNode(path: string): boolean {
+  return path.endsWith('/Contents/Resources/node');
+}
+
 function signAdhocBundle(appPath: string): void {
   const targets: string[] = [];
   const visit = (directory: string): void => {
@@ -317,6 +367,11 @@ function signAdhocBundle(appPath: string): void {
   targets.push(appPath);
   const entitlements = join(__dirname, 'entitlements.ad-hoc.plist');
   for (const target of targets) {
+    const targetEntitlements = target.endsWith('.app')
+      ? entitlements
+      : isPackagedMacNode(target)
+        ? bundledNodeEntitlements
+        : null;
     execFileSync(
       '/usr/bin/codesign',
       [
@@ -326,7 +381,7 @@ function signAdhocBundle(appPath: string): void {
         '--timestamp=none',
         '--sign',
         '-',
-        ...(target.endsWith('.app') ? ['--entitlements', entitlements] : []),
+        ...(targetEntitlements === null ? [] : ['--entitlements', targetEntitlements]),
         target,
       ],
       { stdio: 'inherit' },
@@ -358,6 +413,8 @@ const config: ForgeConfig = {
       : {
           osxSign: {
             identity: macCodeSignIdentity,
+            optionsForFile: (file) =>
+              isPackagedMacNode(file) ? { entitlements: bundledNodeEntitlements } : {},
           },
         }),
     ...(windowsSign === undefined ? {} : { windowsSign }),
@@ -389,7 +446,7 @@ const config: ForgeConfig = {
   hooks: {
     prePackage: async (_forgeConfig, platform, arch) => {
       assertNativePackagingHost(platform);
-      if (platform === 'win32') verifyBundledNodeResources();
+      verifyBundledNodeResources(arch);
       // The resources above were chosen for the build host's architecture.
       if (desktopControlSupported(platform, arch)) {
         if (arch !== process.arch)
@@ -437,6 +494,13 @@ const config: ForgeConfig = {
           ['--verify', '--deep', '--strict', '--verbose=2', appPath],
           { stdio: 'inherit' },
         );
+        const nodeVersion = execFileSync(
+          join(appPath, 'Contents', 'Resources', 'node'),
+          ['-p', 'process.version'],
+          { encoding: 'utf8', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } },
+        ).trim();
+        if (nodeVersion !== `v${BUNDLED_NODE_VERSION}`)
+          throw new Error(`Unexpected packaged Node version: ${nodeVersion}`);
       }
     },
     postMake: async (_forgeConfig, makeResults) => {
