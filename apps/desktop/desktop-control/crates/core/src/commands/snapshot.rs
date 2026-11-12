@@ -78,6 +78,26 @@ pub fn execute(
 
     let opts = tree_options(&args);
 
+    if args.surface == SnapshotSurface::Menubar {
+        if context.wait_selector().is_some() {
+            return Err(AppError::invalid_input_with_suggestion(
+                "--wait-for cannot be combined with --surface menubar",
+                "Read the menu bar with snapshot --surface menubar alone: the read opens nothing, so there is nothing to wait for.",
+            ));
+        }
+        match snapshot::menu_bar::run(
+            adapter,
+            &opts,
+            args.app.as_deref(),
+            args.window_id.as_deref(),
+            args.timeout_ms
+                .unwrap_or(snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS),
+        ) {
+            Err(AppError::Adapter(error)) if error.is_default_not_supported("read_menu_bar") => {}
+            result => return result,
+        }
+    }
+
     if let Some(root) = args.root_ref {
         return format_result(snapshot_ref::run_from_ref_with_context(
             adapter,

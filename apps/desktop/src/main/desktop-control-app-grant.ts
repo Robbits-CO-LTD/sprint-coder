@@ -77,21 +77,27 @@ type CliCommand = Readonly<{
   /** Options whose value is a ref or a window id. */
   refs?: readonly string[];
   windows?: readonly string[];
+  /** Options covered only with this one value. */
+  only?: Readonly<Record<string, string>>;
 }>;
 
 const REF_TIMEOUT = '--timeout-ms=';
+// `--surface menubar` reads the named window's own menu bar from the menu itself, without opening
+// it or sending the app anything (desktop-control 1.2.0 as changed in this repo, #1200).
+const MENU_BAR_ONLY = { '--surface': 'menubar' } as const;
 const SCOPE = { windows: ['--window-id'] } as const;
 // Checked on the desktop-control binary 1.2.0 (`<command> --help`), rebuilt from this repo's source
 // after #1182, where `select` takes its value only when the ref is not the option itself (`select
-// <ref> [value]`; a batch entry may leave out `value` too). `--surface` is left out: its
-// other values read the shell, not the app. So are `--app`, the shared `--wait-for` options and
-// `--session`, which reads its refs from another folder.
+// <ref> [value]`; a batch entry may leave out `value` too). `--surface` is covered only as
+// `menubar` on `snapshot`: its other values read the shell, not the app. `--app`, the shared
+// `--wait-for` options and `--session`, which reads its refs from another folder, are left out.
 const CLI_COMMANDS: Readonly<Record<string, CliCommand>> = {
   snapshot: {
     options:
-      '--window-id= --root= --max-depth= --include-bounds -i --interactive-only --compact --skeleton --timeout-ms= --force-electron-a11y',
+      '--window-id= --root= --max-depth= --include-bounds -i --interactive-only --compact --skeleton --timeout-ms= --force-electron-a11y --surface=',
     positionals: [0, 0],
     refs: ['--root'],
+    only: MENU_BAR_ONLY,
     ...SCOPE,
   },
   find: {
@@ -129,6 +135,8 @@ type BatchCommand = Readonly<{
   keys: string;
   refs?: readonly string[];
   windows?: readonly string[];
+  /** Keys covered only with this one value. */
+  only?: Readonly<Record<string, string>>;
 }>;
 
 const REF_KEYS = 'ref_id timeout_ms';
@@ -136,8 +144,9 @@ const BATCH_SCOPE = { windows: ['window_id'] } as const;
 // The same, by the argument names a batch entry takes (the binary refuses any other name).
 const BATCH_COMMANDS: Readonly<Record<string, BatchCommand>> = {
   snapshot: {
-    keys: 'window_id root max_depth include_bounds interactive_only compact skeleton timeout_ms force_electron_a11y',
+    keys: 'window_id root max_depth include_bounds interactive_only compact skeleton timeout_ms force_electron_a11y surface',
     refs: ['root'],
+    only: { surface: 'menubar' },
     ...BATCH_SCOPE,
   },
   find: {
@@ -184,6 +193,8 @@ function runTargets(argv: readonly string[]): Target[] | null {
   const { options, positionals } = parsed;
   if (positionals.length < spec.positionals[0] || positionals.length > spec.positionals[1])
     return null;
+  for (const [name, value] of Object.entries(spec.only ?? {}))
+    if (options.has(name) && options.get(name) !== value) return null;
   const targets: Target[] = [];
   if (spec.ref === true) targets.push({ kind: 'ref', value: positionals[0]! });
   for (const [kind, names] of [
@@ -220,6 +231,8 @@ function batchTargets(argv: readonly string[]): Target[] | null {
     if (spec === undefined) return null;
     const keys = new Set(spec.keys.split(' '));
     if (Object.keys(args).some((key) => !keys.has(key))) return null;
+    for (const [key, value] of Object.entries(spec.only ?? {}))
+      if (args[key] !== undefined && args[key] !== value) return null;
     const before = targets.length;
     for (const [kind, names] of [
       ['ref', spec.refs],

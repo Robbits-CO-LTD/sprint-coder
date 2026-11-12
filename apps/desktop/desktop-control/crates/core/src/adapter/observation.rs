@@ -201,6 +201,29 @@ pub trait ObservationOps: Send + Sync {
         Err(AdapterError::not_supported("resolve_shell_surface"))
     }
 
+    /// Reads a window's own menu bar from the platform's native menu, without
+    /// opening it and without sending the application anything, for the
+    /// `menubar` snapshot surface. An adapter that reads no native menu answers
+    /// with this default.
+    fn read_menu_bar(
+        &self,
+        _window: &WindowInfo,
+        _deadline: Deadline,
+    ) -> Result<crate::snapshot::menu_bar::NativeMenuBar, AdapterError> {
+        Err(AdapterError::not_supported("read_menu_bar"))
+    }
+
+    /// What the window a saved menu item ref belongs to says about it: one of
+    /// its standard menu bar items, a window with no standard menu bar, or
+    /// nothing known. Used only to add guidance to an action that failed.
+    fn menu_bar_kind(
+        &self,
+        _entry: &RefEntry,
+        _deadline: Deadline,
+    ) -> crate::snapshot::menu_bar::MenuBarKind {
+        crate::snapshot::menu_bar::MenuBarKind::Unknown
+    }
+
     fn get_live_value(
         &self,
         _handle: &NativeHandle,

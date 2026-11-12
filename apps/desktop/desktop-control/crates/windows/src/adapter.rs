@@ -106,6 +106,24 @@ impl ObservationOps for WindowsAdapter {
     /// process token before answering and fails retryable when an essential
     /// slot could not be read, and a dead provider token never satisfies
     /// completeness (A14-9).
+    /// The window's own Win32 menu bar, read from its `HMENU` without opening
+    /// it (`system::menu::menu_bar`).
+    fn read_menu_bar(
+        &self,
+        window: &WindowInfo,
+        deadline: Deadline,
+    ) -> Result<agent_desktop_core::NativeMenuBar, AdapterError> {
+        crate::system::menu::menu_bar::read_menu_bar(window, deadline)
+    }
+
+    fn menu_bar_kind(
+        &self,
+        entry: &RefEntry,
+        _deadline: Deadline,
+    ) -> agent_desktop_core::MenuBarKind {
+        crate::system::menu::menu_bar::menu_bar_kind(entry)
+    }
+
     fn get_live_value(
         &self,
         handle: &NativeHandle,

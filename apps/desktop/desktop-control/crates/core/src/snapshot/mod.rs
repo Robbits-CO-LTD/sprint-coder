@@ -370,6 +370,7 @@ pub(crate) fn emit_snapshot_saved(
 }
 
 pub mod hints;
+pub mod menu_bar;
 pub mod snapshot_ref;
 pub mod snapshot_surface;
 #[cfg(test)]

@@ -154,6 +154,34 @@ describe('desktop-control app-wide Task grant', () => {
     expect(covers(['click', '@scharmap:e1'], [])).toBe(false);
   });
 
+  it('covers and offers reading the named window’s own menu bar, and no other surface', () => {
+    const charmap = offer(['click', '@scharmap:e1'])!;
+    for (const argv of [
+      ['snapshot', '--surface', 'menubar', '--window-id', 'w-1'],
+      ['snapshot', '--window-id', 'w-1', '--surface=menubar', '--max-depth', '3'],
+      batch({ command: 'snapshot', args: { window_id: 'w-1', surface: 'menubar' } }),
+    ]) {
+      expect(offer(argv)?.id, argv.join(' ')).toBe(charmap.id);
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(true);
+    }
+    // Another app's window is that app's, not the granted one's.
+    expect(covers(['snapshot', '--surface', 'menubar', '--window-id', 'w-2'], [charmap])).toBe(
+      false,
+    );
+    for (const argv of [
+      // No window, or another surface.
+      ['snapshot', '--surface', 'menubar'],
+      ['snapshot', '--surface', 'menu', '--window-id', 'w-1'],
+      ['snapshot', '--surface', 'taskbar', '--window-id', 'w-1'],
+      ['snapshot', '--surface', 'menubar', '--surface', 'taskbar', '--window-id', 'w-1'],
+      batch({ command: 'snapshot', args: { window_id: 'w-1', surface: 'menu' } }),
+      batch({ command: 'snapshot', args: { window_id: 'w-1', surface: 1 } }),
+    ]) {
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
+      expect(offer(argv), argv.join(' ')).toBeNull();
+    }
+  });
+
   it('covers and offers a select without a value, where the ref is the option itself', () => {
     const charmap = offer(['click', '@scharmap:e1'])!;
     expect(offer(['select', '@scharmap:e2'])?.id).toBe(charmap.id);
