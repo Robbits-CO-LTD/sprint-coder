@@ -38,6 +38,7 @@ pub(crate) fn ref_entry_from_node(
                 .filter(|id| !id.value.trim().is_empty()),
             unique_at_capture: false,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds,

@@ -373,6 +373,7 @@ fn an_unproven_capture_is_flagged_in_the_payload() {
         complete: true,
         nodes_observed: 1,
         identity_unproven: None,
+        visible_scope: false,
     };
     let proven = format_snapshot_fields(&result, None, None).unwrap();
     assert!(proven.get("identity_unproven").is_none());
@@ -389,6 +390,19 @@ fn an_unproven_capture_is_flagged_in_the_payload() {
     let unproven = format_snapshot_fields(&result, None, None).unwrap();
     assert_eq!(unproven["identity_unproven"], true);
     assert_eq!(unproven["complete"], true);
+    assert!(unproven.get("scope").is_none());
+
+    result.identity_unproven = None;
+    result.complete = false;
+    result.visible_scope = true;
+    let visible = format_snapshot_fields(&result, None, None).unwrap();
+    assert_eq!(visible["scope"], "visible");
+    assert_eq!(visible["truncated"], true);
+    assert!(
+        visible["scope_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("snapshot"))
+    );
 }
 
 #[test]

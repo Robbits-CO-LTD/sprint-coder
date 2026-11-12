@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AccessibilityNode, AppError, WindowInfo,
     adapter::{PlatformAdapter, TreeOptions, WindowFilter},
@@ -23,6 +24,10 @@ pub struct SnapshotResult {
     /// Set when the whole-window read that proves tokenless refs failed or was
     /// cut short; it says why, and those refs are refused when used.
     pub identity_unproven: Option<String>,
+    /// Set when the capture read only the elements the window showed, because
+    /// the whole window could not be read within the deadline: the tree and its
+    /// refs cover that view, and the refs stop once the view scrolls or changes.
+    pub visible_scope: bool,
 }
 
 impl SnapshotResult {
@@ -52,7 +57,10 @@ pub fn build(
         window_capture::capture_window(adapter, opts, window, deadline)
     })?;
     let identity_unproven = capture.identity_unproven.clone();
+    let visible_scope = capture.visible_scope;
     let (raw_tree, complete, nodes_observed, observed) = capture.into_parts()?;
+    // A view of the visible elements is never the whole window.
+    let complete = complete && !visible_scope;
     let capture_proof = crate::refs::ref_capture_proof::CaptureProof::new(&observed);
 
     let mut refmap = RefMap::new();
@@ -90,6 +98,7 @@ pub fn build(
         complete,
         nodes_observed,
         identity_unproven,
+        visible_scope,
     })
 }
 

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, ErrorCode,
     adapter::{PlatformAdapter, WindowFilter},
@@ -254,6 +255,7 @@ fn wait_for_text(
                     if expected_count.is_some() {
                         body["count"] = json!(matches.len());
                     }
+                    super::snapshot::annotate_visible_scope(&mut body, &result);
                     return Ok(body);
                 }
             }

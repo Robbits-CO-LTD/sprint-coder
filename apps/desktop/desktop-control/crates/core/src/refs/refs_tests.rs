@@ -16,6 +16,7 @@ pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
             native_id: None,
             unique_at_capture: true,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,
@@ -255,6 +256,7 @@ fn test_save_load_roundtrip_with_home_override() {
             native_id: None,
             unique_at_capture: true,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

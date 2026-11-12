@@ -49,6 +49,15 @@ node count through the whole settle. Do not park another window over the target
 during launch and settle. If the count looks frozen at a small number, bring the
 target to the foreground or minimize the covering windows, then snapshot again.
 
+## Very Long Lists Read Only What Is On Screen
+
+Chromium keeps every row of a long web list in the tree, also the rows scrolled
+out of view. A window with thousands of rows cannot be read whole within the
+default 3 s, so the snapshot reads only the elements on screen and says so with
+`"scope": "visible"`. Its refs act only while the view is unchanged. Scroll,
+snapshot again, then act on the new refs. Rows that read the same (same name,
+same text) are still refused as ambiguous.
+
 ## WPF: Reading Too Early Binds the Wrong Provider
 
 A UIA client that reads a WPF window before its automation peer exists binds the

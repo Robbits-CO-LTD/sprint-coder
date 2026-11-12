@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{DEFAULT_LIMIT, FindArgs};
 use crate::{
     AdapterError, AppError, LocatorQuery,
@@ -90,6 +91,12 @@ fn rooted_resolution(
 ) -> Result<LocatorResolution, AppError> {
     let (_, local_root_ref) = crate::refs::ref_token::resolve_ref_target(root_ref)?;
     let entry = crate::commands::helpers::load_ref_entry(root_ref, context)?;
+    // A root proven among the visible elements is read in that view only, so a
+    // count, a first or a last match under it would silently leave out what is
+    // scrolled out of view. Refused before anything is read, not answered.
+    if entry.identity.in_view.is_some() {
+        return Err(crate::refs::ref_view::rooted_find_unsupported(&entry).into());
+    }
     crate::locator::live_locator::resolve_query_from(adapter, query, request, |deadline| {
         let read = read_saved_root(
             adapter,

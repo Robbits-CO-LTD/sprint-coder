@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AdapterError, WindowInfo,
     adapter::{ActionOps, InputOps, NativeHandle, ObservationOps, SystemOps, WindowFilter},
@@ -118,6 +119,7 @@ impl LiveFindAdapter {
                 bounds: LocatorField::Absent,
                 available_actions: LocatorField::Known(Vec::new()),
                 descriptors: Default::default(),
+                runtime_id: None,
             },
         }
     }

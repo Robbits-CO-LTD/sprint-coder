@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     IdentifierEvidence, LocatorEvidence, LocatorField, LocatorRefEvidence, LocatorStats,
     ObservationSource, ObservedNode, ObservedTree,
@@ -34,6 +35,7 @@ pub(crate) fn evidence(role: &str, name: Option<&str>) -> LocatorEvidence {
             bounds: LocatorField::Absent,
             available_actions: LocatorField::Known(Vec::new()),
             descriptors: Default::default(),
+            runtime_id: None,
         },
     }
 }
@@ -76,6 +78,7 @@ pub(crate) fn tree(
         stats: LocatorStats::default(),
         structurally_complete,
         logical_depths,
+        visible_scope: false,
     }
 }
 

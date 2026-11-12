@@ -112,6 +112,9 @@ fn observe(target: &LiveCheckTarget<'_>) -> Result<ActionabilityEvidence, Adapte
         target.handle,
         target.deadline,
     )?;
+    // An entry proven among the elements the window showed is held to the
+    // screen rectangle it was recorded at, right before the action.
+    crate::refs::ref_view::confirm_live_bounds(target.entry, live.bounds)?;
     Ok(ActionabilityEvidence {
         nonspatial: target.adapter.is_nonspatial_target(target.handle),
         state: live.state,
@@ -186,6 +189,7 @@ fn live_evidence(live: &LiveElement) -> LocatorEvidence {
             window_bounds: LocatorField::Absent,
             available_actions: LocatorField::Known(live.available_actions.clone()),
             descriptors: Default::default(),
+            runtime_id: None,
         },
     }
 }
