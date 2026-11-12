@@ -26,7 +26,9 @@
 //!   first, and an unread or failed `IsPassword` keeps it closed.
 //! - A range equal to the field's name is not taken as content, for the same
 //!   label-for-empty reason.
-//! - A range longer than the evidence bound is not truncated into a value.
+//! - A range longer than the evidence bound is not truncated into a value,
+//!   and a read that reached the read limit (which providers count in UTF-16
+//!   units, not scalars) is not returned as if it were the whole value.
 //!
 //! Only the reads that answer a question - `get`, `wait --value` - use it. The
 //! post-action check of `set-value` does not need it: `set-value` writes
@@ -73,10 +75,31 @@ fn password_flag_read_false(properties: &ElementProperties) -> bool {
     }
 }
 
-/// The document range's text as the field's value, or `None` when it is the
-/// field's own name (what a provider answers for an empty field) or too long
-/// to carry as evidence.
+/// How much of the document range is asked for, in UTF-16 code units.
+///
+/// `GetText`'s limit is counted by the provider, and WPF counts UTF-16 code
+/// units while the evidence bound counts scalar values. `MAX_EVIDENCE_CHARS`
+/// scalars are at most twice as many units, so a range within the bound always
+/// fits under this limit, and one more unit tells "all of it" from "cut".
+pub(crate) const READ_LIMIT_UNITS: usize = super::properties::MAX_EVIDENCE_CHARS * 2 + 1;
+
+/// Whether a range read with [`READ_LIMIT_UNITS`] may have been cut by the
+/// limit: it reached the limit, so the provider may have stopped there. Such a
+/// read is never a complete value. A provider that counts scalars instead
+/// returns at least as many units when it reaches the limit, and a cut inside
+/// a surrogate pair still counts as reaching it (the lone half is decoded as
+/// one replacement unit), so either way the read is refused.
+pub(crate) fn reached_read_limit(text: &str) -> bool {
+    text.encode_utf16().count() >= READ_LIMIT_UNITS
+}
+
+/// The document range's text as the field's value, or `None` when it may have
+/// been cut by the read limit, is the field's own name (what a provider
+/// answers for an empty field), or is too long to carry as evidence.
 pub(crate) fn value_from_document_text(text: String, name: Option<&str>) -> Option<String> {
+    if reached_read_limit(&text) {
+        return None;
+    }
     if name.is_some_and(|name| !name.is_empty() && name == text) {
         return None;
     }
@@ -88,10 +111,9 @@ pub(crate) fn value_from_document_text(text: String, name: Option<&str>) -> Opti
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::{text_stands_in_for_value, value_from_document_text};
+    use super::{READ_LIMIT_UNITS, text_stands_in_for_value, value_from_document_text};
     use crate::tree::element::uia_element;
     use crate::tree::live_read::{LiveRead, corroborate_verified_process};
-    use crate::tree::properties::MAX_EVIDENCE_CHARS;
     use agent_desktop_core::{AdapterError, Deadline, NativeHandle};
     use uiautomation::patterns::UITextPattern;
 
@@ -113,7 +135,7 @@ mod imp {
         let Ok(range) = pattern.get_document_range() else {
             return Ok(None);
         };
-        let limit = i32::try_from(MAX_EVIDENCE_CHARS + 1).unwrap_or(i32::MAX);
+        let limit = i32::try_from(READ_LIMIT_UNITS).unwrap_or(i32::MAX);
         let Ok(text) = range.get_text(limit) else {
             return Ok(None);
         };

@@ -1,5 +1,6 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
+use crate::tree::properties::MAX_EVIDENCE_CHARS;
 
 fn flag(value: bool) -> PropertyOutcome {
     PropertyOutcome::Known(PropertyValue::Flag(value))
@@ -152,4 +153,64 @@ fn the_document_text_is_the_value_unless_it_is_the_name_or_too_long() {
     assert_eq!(value_from_document_text("x".into(), None), Some("x".into()));
     let long = "a".repeat(super::super::properties::MAX_EVIDENCE_CHARS + 1);
     assert_eq!(value_from_document_text(long, None), None);
+}
+
+/// The review's case: a field holding `"😀" * 1023 + "abcd"`. A provider that
+/// counts the read limit in UTF-16 units and stops at it hands back a prefix;
+/// that prefix reaches the limit and is refused, never returned as the value.
+#[test]
+fn a_read_cut_at_the_unit_limit_is_not_returned_as_the_value() {
+    let content = format!("{}abcd", "\u{1F600}".repeat(1023));
+    // The old limit (MAX_EVIDENCE_CHARS + 1 = 2049 units) cut the final `d`.
+    let old_cut: String =
+        String::from_utf16(&content.encode_utf16().take(2049).collect::<Vec<_>>())
+            .expect("cut between pairs");
+    assert_eq!(old_cut.chars().count(), 1026);
+    // Read with the new limit, the same content is complete and returned.
+    assert!(!reached_read_limit(&content));
+    assert_eq!(
+        value_from_document_text(content.clone(), None),
+        Some(content)
+    );
+    // Content past the new limit, cut at it, is refused.
+    let long = format!("{}abcd", "\u{1F600}".repeat(MAX_EVIDENCE_CHARS));
+    let cut: Vec<u16> = long.encode_utf16().take(READ_LIMIT_UNITS).collect();
+    let cut = String::from_utf16(&cut).expect("ends after a whole pair");
+    assert!(reached_read_limit(&cut));
+    assert_eq!(value_from_document_text(cut, None), None);
+}
+
+/// Exactly `MAX_EVIDENCE_CHARS` emoji is `2 * MAX_EVIDENCE_CHARS` units, one
+/// under the limit: all of it was read, and it is within the bound.
+#[test]
+fn a_full_bound_of_surrogate_pairs_is_read_whole() {
+    let text = "\u{1F600}".repeat(MAX_EVIDENCE_CHARS);
+    assert!(!reached_read_limit(&text));
+    assert_eq!(value_from_document_text(text.clone(), None), Some(text));
+}
+
+/// A provider counting scalars stops at `READ_LIMIT_UNITS` scalars, which is
+/// at least that many units, and one scalar past the bound is refused anyway.
+#[test]
+fn past_the_scalar_bound_or_at_a_scalar_counted_limit_is_refused() {
+    let ascii = "a".repeat(MAX_EVIDENCE_CHARS + 1);
+    assert!(!reached_read_limit(&ascii));
+    assert_eq!(value_from_document_text(ascii, None), None);
+    let scalar_cut = "\u{1F600}".repeat(READ_LIMIT_UNITS);
+    assert_eq!(value_from_document_text(scalar_cut, None), None);
+}
+
+/// A cut inside a surrogate pair leaves a lone half, decoded as one
+/// replacement unit: the read still reached the limit and is refused.
+#[test]
+fn a_cut_inside_a_surrogate_pair_is_refused() {
+    let units: Vec<u16> = "\u{1F600}"
+        .repeat(MAX_EVIDENCE_CHARS + 1)
+        .encode_utf16()
+        .take(READ_LIMIT_UNITS)
+        .collect();
+    assert!(char::decode_utf16(units.iter().copied()).any(|unit| unit.is_err()));
+    let lossy = String::from_utf16_lossy(&units);
+    assert!(reached_read_limit(&lossy));
+    assert_eq!(value_from_document_text(lossy, None), None);
 }
