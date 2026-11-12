@@ -425,18 +425,18 @@ mod imp {
         confirm_unchanged(hwnd, bar, &chain, proof)
             .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
         let expected = super::expected_check(item.checked, item.radio);
-        // The last checks before the command: the opening messages may have
-        // taken the time left, or the application may have opened a dialog
-        // that disabled the window meanwhile.
+        // The menu, once more, right before the command.
+        confirm_unchanged(hwnd, bar, &chain, proof)
+            .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
+        // The last checks before the command, after every read: the messages
+        // and the re-reads may have taken the time left, or the application
+        // may have opened a dialog that disabled the window meanwhile.
         deadline
             .ensure_remaining()
             .map_err(|error| error.with_disposition(DeliverySemantics::not_delivered()))?;
         if !enabled(hwnd) {
             return Err(window_disabled(hwnd));
         }
-        // And the menu, once more, right before the command.
-        confirm_unchanged(hwnd, bar, &chain, proof)
-            .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
         let wparam = proof.command_id as usize;
         // SAFETY: hands a message to the window's thread and returns at once;
         // no pointer is passed.
