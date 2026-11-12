@@ -2335,6 +2335,74 @@ describe('desktop control outside the command sandbox', () => {
   );
 
   it.skipIf(process.platform !== 'win32')(
+    'places a desktop-control run in Main’s session only when Main gives one, and judges its options again',
+    async () => {
+      const root = await workspace();
+      const script = [
+        'const found = Object.entries(process.env).filter(([key]) => /^agent_desktop_(session|agent_id)$/iu.test(key));',
+        'process.stdout.write(JSON.stringify(found));',
+      ].join('\n');
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const scopeCheck = vi.spyOn(desktopControlModule, 'desktopControlScopeOptionRefusal');
+      const run = async (session?: { id: string; agentId: string }) => {
+        const chunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(
+            await prepareTestExecutionSpec({
+              workspacePath: root,
+              executable: process.execPath,
+              argv: ['-e', script],
+            }),
+            {
+              desktopControlWorkspaceRoots: [root],
+              ...(session === undefined ? {} : { desktopControlSession: session }),
+              onChunk: (chunk) => void chunks.push(chunk),
+            },
+          ),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        return JSON.parse(chunks.map(({ text }) => text).join('')) as [string, string][];
+      };
+      try {
+        expect(await run()).toEqual([]);
+        expect(scopeCheck).not.toHaveBeenCalled();
+        expect(Object.fromEntries(await run({ id: 'run-1', agentId: 'leader' }))).toEqual({
+          AGENT_DESKTOP_SESSION: 'run-1',
+          AGENT_DESKTOP_AGENT_ID: 'leader',
+        });
+        expect(scopeCheck).toHaveBeenCalledOnce();
+        // Options that would leave the session never start.
+        scopeCheck.mockReturnValueOnce('refused for the test');
+        const beforeSpawn = vi.fn();
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(
+            await prepareTestExecutionSpec({
+              workspacePath: root,
+              executable: process.execPath,
+              argv: ['-e', script],
+            }),
+            {
+              desktopControlWorkspaceRoots: [root],
+              desktopControlSession: { id: 'run-1', agentId: 'leader' },
+              beforeSpawn,
+            },
+          ),
+        ).rejects.toThrow('refused for the test');
+        expect(beforeSpawn).not.toHaveBeenCalled();
+      } finally {
+        judge.mockRestore();
+        argvCheck.mockRestore();
+        scopeCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
     'Stop still ends a running desktop-control command and everything it started',
     async () => {
       const root = await workspace();

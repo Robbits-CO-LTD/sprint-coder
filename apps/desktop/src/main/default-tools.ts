@@ -13,8 +13,15 @@ import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlLaunchByName,
+  desktopControlSessionArgvRefusal,
   isDesktopControlExecutable,
+  type DesktopControlSessionVariables,
 } from './desktop-control';
+import {
+  desktopControlTeamCursors,
+  ensureDesktopControlSession,
+  type DesktopControlOwnRun,
+} from './desktop-control-session';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -423,6 +430,38 @@ export async function rejectWindowsSandboxedNodeTestIsolationWithVersion(
   rejectWindowsSandboxedNodeTestIsolation(absoluteExecutable, argv, { sandboxed, nodeVersion });
 }
 
+/**
+ * Main's own runs of the shipped desktop-control executable for the Task's session (see
+ * `desktop-control-session.ts`): prepared and sealed as the agent's run was, in the same Workspace
+ * root, judged again on the sealed bytes, and started by the same runner, which checks the bytes and
+ * the argv once more and runs it outside the sandbox only as the shipped executable.
+ */
+function desktopControlOwnRun(
+  runner: CommandRunner,
+  prepare: (argv: readonly string[]) => Promise<ExecutionSpec>,
+  roots: readonly string[],
+): DesktopControlOwnRun {
+  return async (argv, session) => {
+    const spec = await prepare(argv);
+    if (!isDesktopControlExecutable(spec.absoluteExecutable, executionSpecContentDigest(spec)))
+      throw new CommandRunnerError(
+        'EXECUTION_SPEC_INVALID',
+        'デスクトップ操作の実行ファイルが準備の途中で変わった。',
+      );
+    let stdout = '';
+    const result = await runner.run(spec, {
+      desktopControlWorkspaceRoots: roots,
+      ...(session === undefined ? {} : { desktopControlSession: session }),
+      onBatch: (chunks) => {
+        for (const chunk of chunks) if (chunk.stream === 'stdout') stdout += chunk.text;
+      },
+    });
+    if (result.canceled || result.exitCode !== 0)
+      throw new Error(`desktop control ${argv.slice(0, 2).join(' ')} exited ${result.exitCode}`);
+    return stdout;
+  };
+}
+
 export function registerCommandRunnerTool(
   broker: ToolBroker,
   commandRunner: CommandRunner,
@@ -436,6 +475,12 @@ export function registerCommandRunnerTool(
   const resourceKeys = new WeakMap<object, string>();
   // The Turn's Workspace roots, kept only for a call prepared as the shipped desktop control.
   const desktopControlRoots = new WeakMap<object, readonly string[]>();
+  // For such a call, how Main prepares its own runs of the same executable in the same Workspace
+  // root (`session start` and the like, for the Task's session).
+  const desktopControlOwnSpecs = new WeakMap<
+    object,
+    (argv: readonly string[]) => Promise<ExecutionSpec>
+  >();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -512,6 +557,14 @@ export function registerCommandRunnerTool(
         if (desktopControlRefusal !== null)
           throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
       }
+      // With the Task's cursors on, Main places the runs in its own session and keeps that
+      // session, so the agent may not choose one, nor start, end or switch sessions and cursors.
+      const sessionRefusal =
+        desktopControl && desktopControlTeamCursors()
+          ? desktopControlSessionArgvRefusal(spec.argv)
+          : null;
+      if (sessionRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', sessionRefusal);
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,
@@ -525,6 +578,8 @@ export function registerCommandRunnerTool(
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
       if (desktopControl) desktopControlRoots.set(spec, roots);
+      if (desktopControl && desktopControlTeamCursors())
+        desktopControlOwnSpecs.set(spec, prepareSpec);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -568,6 +623,43 @@ export function registerCommandRunnerTool(
         desktopControlArgvIsInert(spec.argv)
           ? desktopControlRoots.get(spec)
           : undefined;
+      // With the Task's cursors on, a run that reads or operates the desktop runs in the Task's
+      // session as the Leader, and Main starts that session first when the Task has none yet. A
+      // run whose session cannot be started does not start at all.
+      let desktopSession: DesktopControlSessionVariables | undefined;
+      const prepareOwn = desktopControlOwnSpecs.get(spec);
+      if (
+        roots !== undefined &&
+        prepareOwn !== undefined &&
+        commandRunner.isSandboxed &&
+        desktopControlTeamCursors() &&
+        !desktopControlArgvIsInert(spec.argv)
+      ) {
+        try {
+          desktopSession = await ensureDesktopControlSession(
+            _context.taskId,
+            desktopControlOwnRun(commandRunner, prepareOwn, roots),
+          );
+        } catch (error) {
+          const current = command.persistence.getCommand(commandId);
+          if (current.state === 'prepared') {
+            const persisted = command.persistence.completeCommand({
+              commandId,
+              state: 'failed',
+              exitCode: null,
+              signal: null,
+              outputBytes: 0,
+              truncated: false,
+              finishedAt: new Date().toISOString(),
+            });
+            command.publish(persisted.event);
+          }
+          throw new Error(
+            `デスクトップ操作の準備（カーソルの表示）に失敗したため、実行しなかった: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+      }
       // The windows a desktop-control run reported, as the executable printed them, name those
       // windows on the Task's later cards (display only).
       const rememberWindows = (): void => {
@@ -581,6 +673,7 @@ export function registerCommandRunnerTool(
         ...(roots === undefined || control.desktopControlExpectedWindowOwner === undefined
           ? {}
           : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
+        ...(desktopSession === undefined ? {} : { desktopControlSession: desktopSession }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
         },

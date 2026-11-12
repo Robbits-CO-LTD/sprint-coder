@@ -32,6 +32,7 @@ import {
   isDesktopControlExecutable,
 } from './desktop-control';
 import { desktopControlApprovalAction } from './desktop-control-display';
+import { desktopControlSessionReadScope } from './desktop-control-session';
 import {
   desktopAppGrantCovering,
   desktopAppGrantOffer,
@@ -409,18 +410,33 @@ export class ApprovalCoordinator {
     const approvalId = randomUUID();
     const challenge = `${randomUUID()}${randomUUID()}`;
     const facts = approvalFactsForTool(request, capability);
+    // Where the parts this run names are read from: Main's own session of the Task when the run
+    // will run in it, and nowhere while that session's snapshots cannot be read yet.
+    const readScope =
+      desktopControl && validateExecutionSpec(request.input)
+        ? desktopControlSessionReadScope(request.context.taskId, request.input.argv)
+        : {};
     const desktopAction =
       desktopControl && perCallSubject === undefined && validateExecutionSpec(request.input)
-        ? desktopControlApprovalAction(request.input.argv, { taskId: request.context.taskId })
+        ? desktopControlApprovalAction(
+            request.input.argv,
+            readScope === null
+              ? { taskId: request.context.taskId, names: false }
+              : { taskId: request.context.taskId, ...readScope },
+          )
         : undefined;
     // Offered only beside 「Task中許可」, for a run the app-wide grant could cover, and only for an
     // app whose process the executable can be told to check window ids against.
     const offered =
       desktopAction?.allowTaskGrant === true &&
       !desktopForeground &&
+      readScope !== null &&
       validateExecutionSpec(request.input) &&
       desktopAppGrantEnvironmentAllows(request.input)
-        ? desktopAppGrantOffer(request.input.argv, { taskId: request.context.taskId })
+        ? desktopAppGrantOffer(request.input.argv, {
+            taskId: request.context.taskId,
+            ...readScope,
+          })
         : null;
     const desktopAppGrant =
       offered !== null && desktopControlExpectedWindowOwner(offered) !== null ? offered : null;
@@ -800,6 +816,8 @@ export class ApprovalCoordinator {
     const grants = this.desktopAppGrants.get(taskId);
     if (grants === undefined || !validateExecutionSpec(request.input)) return null;
     if (!desktopAppGrantEnvironmentAllows(request.input)) return null;
+    const readScope = desktopControlSessionReadScope(taskId, request.input.argv);
+    if (readScope === null) return null;
     const now = Date.parse(this.options.now());
     const current = this.options.getCurrentPolicyEpoch(taskId);
     const live = [...grants.values()].filter(
@@ -811,7 +829,7 @@ export class ApprovalCoordinator {
     return desktopAppGrantCovering(
       request.input.argv,
       live.map(({ key }) => key),
-      { taskId },
+      { taskId, ...readScope },
     );
   }
 
