@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{image_stem, is_agent_desktop_image};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,24 @@ fn the_installed_binary_is_recognised_with_and_without_its_extension() {
     )));
     assert!(is_agent_desktop_image(&under_build_tree("agent-desktop")));
     assert!(is_agent_desktop_image(Path::new("agent-desktop.exe")));
+}
+
+/// The name Sprint Coder ships the binary under passes both guards too, or
+/// the shipped binary never starts a renderer and refuses the one it reaches.
+#[test]
+fn the_bundled_binary_is_recognised_in_any_case() {
+    assert!(is_agent_desktop_image(&under_build_tree(
+        "sprint-coder-desktop-control.exe"
+    )));
+    assert!(is_agent_desktop_image(&under_build_tree(
+        "Sprint-Coder-Desktop-Control.EXE"
+    )));
+    assert!(!is_agent_desktop_image(&under_build_tree(
+        "sprint-coder-desktop-control-old.exe"
+    )));
+    assert!(!is_agent_desktop_image(&under_build_tree(
+        "sprint-coder.exe"
+    )));
 }
 
 /// `QueryFullProcessImageNameW` reports whatever case the file system holds,

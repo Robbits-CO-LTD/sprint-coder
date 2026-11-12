@@ -906,6 +906,7 @@ export class CommandRunner {
             options.desktopControlWorkspaceRoots ?? [],
             {},
             options.desktopControlExpectedWindowOwner,
+            { image: spec.absoluteExecutable, hostPid: process.pid },
           )
         : spec.envDelta;
       const commandEnvironment =

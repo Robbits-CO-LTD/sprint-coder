@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The renderer: one process, one window, one pipe, for as long as its
 //! session lasts.
 //!
@@ -40,11 +41,18 @@ fn run(_session_id: &str, _agent_id: Option<&str>) -> Result<(), AdapterError> {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::pipe_name;
-    use crate::system::cursor_overlay::{framing, server, surface_host};
+    use crate::system::cursor_overlay::{framing, host_watch, server, surface_host};
     use agent_desktop_core::{AdapterError, ErrorCode};
 
     pub(super) fn run(session_id: &str, agent_id: Option<&str>) -> Result<(), AdapterError> {
         crate::system::runtime::dpi::ensure_per_monitor_v2()?;
+
+        // Opened first, while the host is still waiting on the command that
+        // started this process, so its id cannot yet name anything else.
+        let host = host_watch::HostWatch::from_env();
+        if host.host_gone() {
+            return Ok(());
+        }
 
         let root = agent_desktop_core::session::agent_desktop_dir()
             .map_err(|error| AdapterError::new(ErrorCode::InvalidArgs, error.to_string()))?;
@@ -56,9 +64,9 @@ mod imp {
             Err(server::ClaimError::Failed(error)) => return Err(error),
         };
 
-        let mut host = surface_host::SurfaceHost::create(session_id.to_owned())?;
+        let mut surface = surface_host::SurfaceHost::create(session_id.to_owned())?;
 
-        serve(&listener, &mut host, session_id, agent_id)
+        serve(&listener, &mut surface, &host, session_id, agent_id)
     }
 
     /// Whether this renderer is the one a control is addressed to.
@@ -84,9 +92,14 @@ mod imp {
     ///
     /// A `Disable` never settles: the process is about to exit, and there is
     /// nothing left to draw onto.
+    ///
+    /// An idle renderer also ends when the host that started its CLI has
+    /// exited (`host_watch`), so a session the agent never ended does not
+    /// keep a renderer after the host is gone.
     fn serve(
         listener: &server::Listener,
         host: &mut surface_host::SurfaceHost,
+        watch: &host_watch::HostWatch,
         session_id: &str,
         agent_id: Option<&str>,
     ) -> Result<(), AdapterError> {
@@ -112,7 +125,7 @@ mod imp {
                 }
                 server::Accepted::Idle => {
                     host.rest();
-                    if host.session_finished() {
+                    if watch.host_gone() || host.session_finished() {
                         return Ok(());
                     }
                 }
