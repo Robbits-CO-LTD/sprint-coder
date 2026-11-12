@@ -423,6 +423,7 @@ fn a_minimized_window_is_named_in_the_payload() {
         complete: true,
         nodes_observed: 1,
         identity_unproven: None,
+        visible_scope: false,
     };
     let unknown = format_snapshot_fields(&result, None, None).unwrap();
     assert!(unknown["window"].get("minimized").is_none());
