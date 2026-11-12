@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Surface-root resolution tests: the per-surface match arms, and the live
 //! advertise/resolve/emit equality the shell kinds and `Menu` were added
 //! under.
@@ -272,6 +273,11 @@ mod shell_surfaces {
         stage_and_assert_menu(&advertised, &mut covered);
 
         for kind in &advertised {
+            // The menu bar is read from the window's own menu by `snapshot`,
+            // not rooted through `surface_root` (`system::menu::menu_bar`).
+            if *kind == SnapshotSurface::Menubar {
+                continue;
+            }
             if skipped.contains(kind) {
                 eprintln!(
                     "advertised surface '{}' skipped: its precondition was declined, \

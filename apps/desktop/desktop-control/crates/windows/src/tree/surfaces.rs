@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode, ObservationRoot, SnapshotSurface};
 use serde_json::json;
 
@@ -61,6 +62,18 @@ pub(crate) fn surface_root(
                 })?;
             root_from_hwnd(location.root_handle(), deadline)
         }
+        // The menu bar is read from the window's own menu by `snapshot`; no
+        // UI Automation element roots it, so a command that would walk it
+        // (`find`, `wait`) is refused plainly.
+        (ObservationRoot::Window(_), SnapshotSurface::Menubar) => Err(AdapterError::new(
+            ErrorCode::InvalidArgs,
+            "The menubar surface is read only by snapshot",
+        )
+        .with_suggestion(
+            "Run snapshot --surface menubar --window-id <id> to read the window's menu bar, \
+             or use --surface window.",
+        )
+        .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())),
         (ObservationRoot::Window(window), SnapshotSurface::StartMenu)
         | (ObservationRoot::Window(window), SnapshotSurface::Taskbar)
         | (ObservationRoot::Window(window), SnapshotSurface::SystemTray)

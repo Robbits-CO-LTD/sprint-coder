@@ -160,6 +160,22 @@ describe('desktop-control approval description', () => {
       mode: 'read',
       target: { resolved: true, app: 'charmap' },
     });
+    // The window's own menu bar, read without opening it.
+    expect(describeArgv(['snapshot', '--surface', 'menubar', '--app', 'charmap'])).toMatchObject({
+      kind: 'read',
+      title: 'メニューバーの項目を読みます',
+      mode: 'read',
+      target: { resolved: true, app: 'charmap' },
+    });
+    expect(
+      describeArgv([
+        'batch',
+        JSON.stringify([{ command: 'snapshot', args: { app: 'charmap', surface: 'menubar' } }]),
+      ]).steps,
+    ).toMatchObject([{ title: 'メニューバーの項目を読みます' }]);
+    expect(describeArgv(['snapshot', '--surface', 'menu', '--app', 'charmap'])).toMatchObject({
+      title: '画面を読みます',
+    });
     // A read below one part names that part and its app, as a ref operation does.
     for (const argv of [
       ['snapshot', '--root', '@s1abc:e2', '--max-depth', '30'],

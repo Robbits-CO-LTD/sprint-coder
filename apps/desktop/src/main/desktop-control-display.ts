@@ -247,6 +247,8 @@ const CLOSE_NOTE = '開いているアプリを閉じます。';
 const MINIMIZE_NOTE = '窓を最小化します。最小化すると、次の窓が手前に来ます。';
 // `select <ref>` without a value chooses the part the ref names itself, not an option inside it.
 const SELECT_ITEM_TITLE = 'この項目を選びます';
+// `snapshot --surface menubar` reads the window's menu bar without opening it.
+const MENU_BAR_TITLE = 'メニューバーの項目を読みます';
 // Reads that take `--root` (`root` in a batch) read only below that part.
 const ROOT_COMMANDS = new Set(['snapshot', 'find']);
 const BEHIND_NOTE =
@@ -498,6 +500,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
             textArgument(command) === undefined
               ? undefined
               : stringField(args, textArgument(command)![1]),
+          surface: stringField(args, 'surface'),
         },
         snapshots,
       ),
@@ -539,6 +542,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
         app: APP_COMMANDS.has(command) ? read.positionals[0] : read.options.get('--app'),
         destination: command === 'drag' ? read.options.get('--to') : undefined,
         text: text === undefined ? undefined : read.positionals[text[0]],
+        surface: read.options.get('--surface'),
       },
       snapshots,
     );
@@ -601,6 +605,8 @@ type StepArguments = Readonly<{
   /** The ref a drag drops on. */
   destination: string | undefined;
   text: string | undefined;
+  /** The surface a `snapshot` reads. */
+  surface: string | undefined;
 }>;
 
 /**
@@ -611,12 +617,16 @@ type StepArguments = Readonly<{
 function describeStep(
   command: string,
   mode: Mode,
-  { ref, windowId, app, destination, text }: StepArguments,
+  { ref, windowId, app, destination, text, surface }: StepArguments,
   snapshots: SnapshotReader,
 ): { step: DesktopActionStep; cut: boolean; unexplained: boolean } {
   const [kind, heading] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
   const title =
-    command === 'select' && (text === undefined || text === '') ? SELECT_ITEM_TITLE : heading;
+    command === 'select' && (text === undefined || text === '')
+      ? SELECT_ITEM_TITLE
+      : command === 'snapshot' && surface === 'menubar'
+        ? MENU_BAR_TITLE
+        : heading;
   const target =
     ref !== undefined && ref !== ''
       ? snapshots.part(ref)

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The advertise/resolve/emit equality's third leg, and the two-questions
 //! design for a kind this build does not root.
 //!
@@ -99,6 +100,34 @@ fn quick_settings_is_a_kind_table_refusal_and_never_an_advertised_surface() {
         refusal.code,
         ErrorCode::PlatformNotSupported,
         "a surface_root arm for quick-settings landed without being advertised"
+    );
+}
+
+/// The menu bar is advertised but read from the window's own menu by
+/// `snapshot`, so a command that would walk it through UI Automation (`find`,
+/// `wait`) is refused plainly instead of rooting at something else.
+#[test]
+fn the_menu_bar_is_advertised_but_never_rooted_through_ui_automation() {
+    assert!(
+        WindowsAdapter::new()
+            .supported_surfaces()
+            .contains(&SnapshotSurface::Menubar)
+    );
+    assert!(!SURFACE_ROOT_RESOLVABLE.contains(&SnapshotSurface::Menubar));
+    let refusal = match surface_root(
+        ObservationRoot::Window(&unrootable_window_info()),
+        SnapshotSurface::Menubar,
+        deadline(),
+    ) {
+        Ok(_) => panic!("the menu bar surface must not root a UI Automation element"),
+        Err(refusal) => refusal,
+    };
+    assert_eq!(refusal.code, ErrorCode::InvalidArgs);
+    assert!(
+        refusal
+            .suggestion
+            .unwrap_or_default()
+            .contains("snapshot --surface menubar")
     );
 }
 

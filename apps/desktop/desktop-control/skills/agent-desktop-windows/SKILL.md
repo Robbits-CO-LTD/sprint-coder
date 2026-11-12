@@ -29,7 +29,7 @@ observation, actions and capture there fail or return nothing.
 
 | Group | Commands | Status on Windows |
 |-------|----------|-------------------|
-| Observation | `snapshot`, `find`, `get`, `is`, `screenshot` | Works. Surfaces are `window`, `focused`, a Chromium modal as `sheet`, and an open application menu as `menu` |
+| Observation | `snapshot`, `find`, `get`, `is`, `screenshot` | Works. Surfaces are `window`, `focused`, a Chromium modal as `sheet`, an open application menu as `menu`, and a window's standard menu bar as `menubar` (`snapshot` only, read without opening it) |
 | Surfaces | `list-surfaces` | Works. Lists `window`, `focused` and `sheet` per process, plus `menu` with `item_count` while a menu is open |
 | Shell surfaces | `open-system-surface` | Works for `start-menu`, `taskbar`, `system-tray`, `system-tray-overflow` and `action-center`, and returns the window `snapshot --surface <kind>` reads. `quick-settings` returns `INVALID_ARGS` naming `action-center` |
 | Ref interaction | `click`, `right-click`, `type`, `set-value`, `clear`, `select`, `toggle`, `check`, `uncheck`, `expand`, `collapse`, `scroll`, `scroll-to` | Works, semantic in headless and `--headed` mode. `right-click` and `type` need `--headed` and return `POLICY_DENIED` headless |
@@ -93,8 +93,24 @@ observation, actions and capture there fail or return nothing.
 - **Notifications:** `list-notifications` with the Action Center closed needs
   `--headed`. Single-item `dismiss-notification` and `notification-action` need
   `--headed` and `--expected-app` or `--expected-title` for the entry at INDEX.
-- **Surfaces:** an open or context menu is the `menu` surface. Windows does
-  not advertise a `menubar` surface.
+- **Surfaces:** an open or context menu is the `menu` surface.
+- **A standard menu bar (File, Edit, ...) opens only while its window is in
+  front.** From behind, `expand` and `click` on its items fail
+  (`ACTION_FAILED` or `POLICY_DENIED`), and their error's `suggestion` and
+  `details.menu_bar: "standard"` say so. Read every item without opening the
+  menu with `snapshot --surface menubar --window-id <id>`: names (with `&`
+  removed, as UI Automation names them), the shortcut as `hint`, and
+  `disabled`, `checked` and `haspopup` states, `subrole: "radio"` for a radio
+  item. Nothing is sent to the app, so states are as the app last set them,
+  and some apps (7-Zip File Manager, for one) change the items only when the
+  menu opens. The items carry no refs: running one from there is not
+  available yet. An item the app draws itself has no name and says so in
+  `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no
+  standard menu bar: `snapshot --surface menubar` returns `ELEMENT_NOT_FOUND`
+  (`details.kind: "no_standard_menu_bar"`), a failed `expand` or `click` on
+  its menu items carries `details.menu_bar: "not_standard"`, and opening
+  those menus needs an operation that brings the window to the front.
+  `find` and `wait` do not take `--surface menubar`.
 - **Commands that raise shell chrome take the foreground.** Strict headless
   refuses them with `POLICY_DENIED` before anything is raised.
 - **Stateful actions run once, then verify by re-reading.** `delivered_verified`
