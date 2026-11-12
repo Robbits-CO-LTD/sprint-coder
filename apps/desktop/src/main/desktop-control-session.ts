@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
+  DESKTOP_CONTROL_LABEL_MAX,
   DESKTOP_CONTROL_LEADER_ACCENT,
   DESKTOP_CONTROL_LEADER_LABEL,
   DESKTOP_CONTROL_WORKER_ACCENTS,
@@ -83,7 +84,7 @@ const DESKTOP_CONTROL_WORKERS = Math.min(
   DESKTOP_CONTROL_WORKERS_DEFAULT,
   DESKTOP_CONTROL_WORKERS_MAX,
 );
-const LABEL_MAX = 24;
+const LABEL_MAX = DESKTOP_CONTROL_LABEL_MAX;
 
 /** A Worker the Leader marked for desktop control: the cursor it draws, and how it is named. */
 export type DesktopControlWorker = Readonly<{

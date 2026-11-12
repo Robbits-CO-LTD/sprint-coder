@@ -477,12 +477,21 @@ export const workerActivityEntrySchema = z
 export type WorkerActivityEntry = z.infer<typeof workerActivityEntrySchema>;
 
 /**
+ * The most characters (code points) a desktop-control cursor's label holds; Main cuts a longer role
+ * to it. One code point is at most two UTF-16 units, which is how the schema below counts.
+ */
+export const DESKTOP_CONTROL_LABEL_MAX = 24;
+
+/**
  * A Team Worker's desktop-control mark, as its cursor names it (its role) and colors it (the place
  * of its color in `DESKTOP_CONTROL_WORKER_ACCENTS`).
  */
 export const desktopControlMarkSchema = z
   .object({
-    label: z.string().min(1).max(40),
+    label: z
+      .string()
+      .min(1)
+      .max(DESKTOP_CONTROL_LABEL_MAX * 2),
     colorIndex: z.number().int().min(0).max(31),
   })
   .strict();

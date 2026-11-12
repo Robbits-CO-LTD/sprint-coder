@@ -4,6 +4,7 @@ import {
   DESKTOP_CONTROL_LEADER_ACCENT,
   DESKTOP_CONTROL_LEADER_LABEL,
   DESKTOP_CONTROL_WORKER_ACCENTS as SHARED_WORKER_ACCENTS,
+  desktopControlMarkSchema,
   desktopControlWorkerAccent,
 } from '@sprint-coder/contracts';
 import {
@@ -303,6 +304,19 @@ describe('the Team Workers marked for desktop control', () => {
       expect(desktopControlAgentId(id)).toMatch(/^w-[a-f0-9]{24}$/u);
     expect(desktopControlAgentId('a b')).toBe(desktopControlAgentId('a b'));
     expect(desktopControlWorkerLabel('a\nb\tc', 0)).toBe('a b c');
+  });
+
+  it('never makes a label the Team’s contract refuses, whatever the role holds', () => {
+    // A role of characters outside the basic plane is twice as long in UTF-16 units as in
+    // characters; the contract counts units, the label counts characters.
+    for (const role of ['😀'.repeat(21), '😀'.repeat(24), '😀'.repeat(100), '係'.repeat(100), ' '])
+      expect(() =>
+        desktopControlMarkSchema.parse({
+          label: desktopControlWorkerLabel(role, 0),
+          colorIndex: 0,
+        }),
+      ).not.toThrow();
+    expect(Array.from(desktopControlWorkerLabel('😀'.repeat(100), 0))).toHaveLength(24);
   });
 
   it('styles a Worker’s cursor once per session, as that Worker', async () => {
