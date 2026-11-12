@@ -343,7 +343,16 @@ export type CommandToolBoundary = Readonly<{
    * The Team Worker that made this call (by the Turn and the call id the broker sees), from Main's
    * own binding of the Worker's Turn; `undefined` for a call of the Leader itself.
    */
-  workerFor?(turnId: string, callId: string): Readonly<{ workerId: string }> | undefined;
+  workerFor?(
+    turnId: string,
+    callId: string,
+  ):
+    | Readonly<{
+        workerId: string;
+        /** Every root the Worker's own Turn reads and writes (its isolated worktree included). */
+        roots: readonly string[];
+      }>
+    | undefined;
 }>;
 
 export const APPROVAL_PROBE_TOOL = createToolDefinition({
@@ -537,7 +546,17 @@ export function registerCommandRunnerTool(
         spec.argv,
         commandRunner.isSandboxed,
       );
-      const roots = workspace.roots.map(({ path }) => path);
+      // A Team Worker's call reaches this tool under its parent's Turn, whose Workspace is not all
+      // the agent can write: the Worker's own roots (its isolated worktree) are too. Every check
+      // that keeps desktop control away from files the agent wrote (a `launch` target, the Start
+      // menu's target, the run's PATH, the executable itself) uses both, from here to the runner.
+      const caller = command.workerFor?.(context.turnId, control.callId);
+      const roots = [
+        ...new Set([
+          ...workspace.roots.map(({ path }) => path),
+          ...(caller === undefined ? [] : caller.roots),
+        ]),
+      ];
       // Judged on the bytes sealed into this ExecutionSpec, as the card and the run are. Refused
       // before a card exists, so nothing the person could approve would escape the sandbox.
       const desktopControl = isDesktopControlExecutable(
@@ -546,7 +565,6 @@ export function registerCommandRunnerTool(
       );
       // A Team Worker runs only the shipped desktop-control executable, judged on the sealed bytes,
       // in the foreground of its call, and only when the Leader marked it for desktop control.
-      const caller = command.workerFor?.(context.turnId, control.callId);
       let worker: DesktopControlWorker | undefined;
       if (caller !== undefined) {
         if (!desktopControl)

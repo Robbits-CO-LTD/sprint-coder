@@ -4510,9 +4510,22 @@ export class IpcRouter {
    * own binding of the Worker's Turn; `undefined` for any other call. A Worker call with no bound
    * agent reads as an unknown Worker (`''`), which nothing is granted to.
    */
-  private managedWorkerOf(turnId: string, callId: string): { workerId: string } | undefined {
-    const call = this.managedWorkerCall.get(JSON.stringify([turnId, callId]));
-    return call === undefined ? undefined : { workerId: call.workerId ?? '' };
+  private managedWorkerOf(
+    turnId: string,
+    callId: string,
+  ): { workerId: string; roots: readonly string[] } | undefined {
+    // Read as possibly unbound, so a binding without its Workspace is refused, never trusted.
+    const call: Readonly<{ workerId?: string; workspace?: EffectiveWorkspaceSet }> | undefined =
+      this.managedWorkerCall.get(JSON.stringify([turnId, callId]));
+    if (call === undefined) return undefined;
+    // The Worker's own roots as Main bound them for its Turn (its isolated worktree among them):
+    // the agent can write there, so desktop control must not start anything inside. A Worker whose
+    // roots Main cannot tell reads as an unknown Worker, which nothing is granted to.
+    if (call.workspace === undefined) return { workerId: '', roots: [] };
+    return {
+      workerId: call.workerId ?? '',
+      roots: call.workspace.roots.map(({ path }) => path),
+    };
   }
 
   private readManagedTeamResult<T>(

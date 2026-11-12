@@ -205,20 +205,31 @@ function taskSession(taskId: string, run: DesktopControlOwnRun): TaskSession {
  * why it is not marked: the Task already has as many desktop Workers as it may hold at once. Kept
  * in memory only: after a restart no Worker is marked, which only takes the tool away. Marking the
  * same Worker again keeps its first mark.
+ *
+ * Given the Team's Workers that are still at work (`live`), the marks of every other Worker (one
+ * that finished, failed, was stopped, or whose Team ended) are dropped first, so the bound counts
+ * Workers at once rather than ever, and a freed accent goes to the next Worker. Without it, no mark
+ * is dropped, which only refuses more.
  */
 export function markDesktopControlWorker(
   taskId: string,
   workerId: string,
   role: string,
+  live?: ReadonlySet<string>,
 ): { worker: DesktopControlWorker } | { refusal: string } {
   const workers = desktopWorkers.get(taskId) ?? new Map<string, DesktopControlWorker>();
+  if (live !== undefined)
+    for (const id of [...workers.keys()]) if (id !== workerId && !live.has(id)) workers.delete(id);
   const known = workers.get(workerId);
   if (known !== undefined) return { worker: known };
   if (workers.size >= DESKTOP_CONTROL_WORKERS)
     return {
       refusal: `デスクトップ操作を任せられる Worker は、同時に ${DESKTOP_CONTROL_WORKERS} 人までです。この Worker にはデスクトップ操作の道具を渡しません。`,
     };
-  const colorIndex = workers.size;
+  // The first accent no Worker at work holds.
+  const held = new Set([...workers.values()].map(({ colorIndex }) => colorIndex));
+  let colorIndex = 0;
+  while (held.has(colorIndex)) colorIndex += 1;
   const worker: DesktopControlWorker = Object.freeze({
     workerId,
     agentId: desktopControlAgentId(workerId),

@@ -699,6 +699,9 @@ describe('desktop control Workspace roots', () => {
     const registry = new ToolRegistry();
     registry.register(COMMAND_RUNNER_TOOL);
     const { boundary } = createCommandBoundary(workspace);
+    // The Worker's isolated worktree: outside the parent's Workspace, and writable by the Worker.
+    const worktree = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-worktree-'));
+    roots.push(worktree);
     // Main's binding of each call: these call ids are a Worker's, any other the Leader's.
     const workers = new Map([
       ['marked', 'agent-1'],
@@ -709,7 +712,7 @@ describe('desktop control Workspace roots', () => {
       ...boundary,
       workerFor: (_turnId: string, callId: string) => {
         const workerId = workers.get(callId.split(':')[0]!);
-        return workerId === undefined ? undefined : { workerId };
+        return workerId === undefined ? undefined : { workerId, roots: [worktree] };
       },
     } as CommandToolBoundary;
     const runner = new CommandRunner({ sandboxed: true });
@@ -779,6 +782,48 @@ describe('desktop control Workspace roots', () => {
         ['click @s1:e1', 'agent-1'],
         ['click @s1:e2', 'agent-1'],
         ['click @s1:e3', 'leader'],
+      ]);
+      // A Worker's run is kept from its own worktree as well as from the parent's Workspace.
+      expect(run.mock.calls.at(-2)![1]?.desktopControlWorkspaceRoots).toEqual([
+        workspace,
+        worktree,
+      ]);
+      expect(run.mock.calls.at(-1)![1]?.desktopControlWorkspaceRoots).toEqual([workspace]);
+      run.mockClear();
+      authorize.mockClear();
+      // `launch`: an executable in the Worker's worktree or in the parent's Workspace is refused
+      // before any card, and so would the runner refuse it with the roots it is given; one
+      // outside both goes on to its card, for the Worker as for the Leader.
+      const outside =
+        process.platform === 'win32'
+          ? ['C:\\Windows\\System32\\charmap.exe', 'C:\\Program Files\\RabbitMail\\rabbitmail.exe']
+          : ['/usr/bin/xcalc', '/opt/RabbitMail/rabbitmail'];
+      for (const inside of [join(worktree, 'app.exe'), join(workspace, 'app.exe')]) {
+        await expect(dispatch('marked', ['launch', inside])).rejects.toThrow(
+          'Workspace の中の実行ファイルは起動できない',
+        );
+        expect(
+          desktopControlModule.desktopControlArgvRefusal(['launch', inside], [workspace, worktree]),
+        ).toContain('Workspace の中の実行ファイルは起動できない');
+      }
+      // Without the Worker's roots, its worktree would read as outside: what the fix closes.
+      expect(
+        desktopControlModule.desktopControlArgvRefusal(
+          ['launch', join(worktree, 'app.exe')],
+          [workspace],
+        ),
+      ).toBeNull();
+      expect(authorize).not.toHaveBeenCalled();
+      for (const path of outside) {
+        await dispatch('marked', ['launch', path]);
+        await dispatch('leader', ['launch', path]);
+      }
+      expect(authorize).toHaveBeenCalledTimes(4);
+      expect(run.mock.calls.map(([spec]) => spec.argv[0])).toEqual([
+        'launch',
+        'launch',
+        'launch',
+        'launch',
       ]);
       run.mockClear();
       authorize.mockClear();

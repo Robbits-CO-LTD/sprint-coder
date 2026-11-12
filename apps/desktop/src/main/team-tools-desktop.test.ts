@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamCoordinator } from './team-coordinator';
+import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import {
   configureDesktopControlTeamCursors,
   desktopControlWorker,
@@ -19,24 +20,44 @@ import {
 
 afterEach(() => resetDesktopControlSessions());
 
-/** A Team that hires whoever is asked for, numbering them in order. */
+type HireInput = {
+  role: string;
+  writeCapable: boolean;
+  modelSelection?: {
+    connectionId: string | null;
+    requestedProvider: string | null;
+    requestedModel: string | null;
+  };
+};
+
+/** A Team that hires whoever is asked for, numbering them in order; `workers` is its state. */
 function team() {
   let next = 0;
-  const hired = (input: { role: string; writeCapable: boolean }) => ({
-    id: `agent-${(next += 1)}`,
-    role: input.role,
-    state: 'ready',
-    parentAgentId: null,
-    depth: 1,
-    canDelegate: false,
-    writeCapable: input.writeCapable,
-    managerPolicy: null,
-  });
+  const workers: { id: string; state: string }[] = [];
+  const state = { team: 'active' };
+  const hired = (input: HireInput) => {
+    const worker = {
+      id: `agent-${(next += 1)}`,
+      role: input.role,
+      state: 'ready',
+      parentAgentId: null,
+      depth: 1,
+      canDelegate: false,
+      writeCapable: input.writeCapable,
+      managerPolicy: null,
+      connectionId: input.modelSelection?.connectionId ?? null,
+      requestedProvider: input.modelSelection?.requestedProvider ?? null,
+      requestedModel: input.modelSelection?.requestedModel ?? null,
+    };
+    workers.push(worker);
+    return worker;
+  };
   const coordinator = {
-    hireWorker: vi.fn(async (input: { role: string; writeCapable: boolean }) => hired(input)),
-    hireWorkerAs: vi.fn(async (input: { role: string; writeCapable: boolean }) => hired(input)),
+    hireWorker: vi.fn(async (input: HireInput) => hired(input)),
+    hireWorkerAs: vi.fn(async (input: HireInput) => hired(input)),
+    get: () => ({ team: { state: state.team }, workers }),
   } as unknown as TeamCoordinator;
-  return coordinator;
+  return Object.assign(coordinator, { workers, state });
 }
 
 const hire = (
@@ -103,6 +124,76 @@ describe('the Leader’s desktop mark on a hire', () => {
     expect(plain).not.toHaveProperty('desktopControl');
     for (const id of ['agent-5', 'agent-6', 'agent-7'])
       expect(desktopControlWorker('task-1', id)).toBeUndefined();
+  });
+
+  it('counts the Workers at work, not every Worker ever marked, and reuses a freed accent', async () => {
+    configureDesktopControlTeamCursors(true);
+    const coordinator = team();
+    for (let index = 1; index <= 3; index += 1)
+      await hire(coordinator, { desktopControl: true, role: `担当${index}` });
+    // While three are at work, a fourth is refused.
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: false,
+    });
+    // One finishes (or fails, or is stopped): the next one gets its place and its accent.
+    coordinator.workers.find(({ id }) => id === 'agent-2')!.state = 'done';
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      workerId: 'agent-5',
+      desktopControl: true,
+    });
+    expect(desktopControlWorker('task-1', 'agent-5')).toMatchObject({ colorIndex: 1 });
+    expect(desktopControlWorker('task-1', 'agent-2')).toBeUndefined();
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: false,
+    });
+    for (const id of ['agent-1', 'agent-3'])
+      coordinator.workers.find((w) => w.id === id)!.state = id === 'agent-1' ? 'stopped' : 'failed';
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: true,
+    });
+    // A Team that ended frees every place.
+    coordinator.state.team = 'completed';
+    for (let index = 0; index < 3; index += 1)
+      await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+        desktopControl: true,
+      });
+  });
+
+  it('marks only a Worker that runs on a CLI', async () => {
+    configureDesktopControlTeamCursors(true);
+    const coordinator = team();
+    const api = await hire(coordinator, {
+      desktopControl: true,
+      modelSelection: {
+        connectionId: 'connection-api-1',
+        requestedProvider: 'openai',
+        requestedModel: 'gpt-test',
+      },
+    });
+    expect(api).toMatchObject({
+      ok: true,
+      desktopControl: false,
+      desktopControlNote: 'この種類の Worker は、デスクトップ操作を実行できません。',
+    });
+    expect(desktopControlWorker('task-1', api['workerId'] as string)).toBeUndefined();
+    await expect(
+      hire(coordinator, {
+        desktopControl: true,
+        modelSelection: {
+          connectionId: BUILTIN_CODEX_CONNECTION_ID,
+          requestedProvider: 'openai',
+          requestedModel: 'gpt-test',
+        },
+      }),
+    ).resolves.toMatchObject({ desktopControl: true });
+    // The API Worker holds no place: two more fit beside the CLI one, and the next is refused.
+    await hire(coordinator, { desktopControl: true });
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: true,
+    });
+    await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
+      desktopControl: false,
+    });
   });
 
   it('tells only a marked Worker, and the Leader with the cursors on, how to share the desktop', () => {

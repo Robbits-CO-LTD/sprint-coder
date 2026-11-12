@@ -3754,14 +3754,29 @@ describe('Main image attachment dispatch boundary', () => {
           this: unknown,
           turnId: string,
           callId: string,
-        ) => { workerId: string } | undefined;
+        ) => { workerId: string; roots: readonly string[] } | undefined;
         const calls = router['managedWorkerCall'] as Map<string, unknown>;
-        calls.set(JSON.stringify(['turn-parent', 'call-1']), { workerId: 'worker-1' });
-        calls.set(JSON.stringify(['turn-parent', 'call-2']), {});
+        // With the roots of the Worker's own Turn (its isolated worktree), bound by Main.
+        const worktree = { roots: [{ rootId: 'root-w', path: 'C:\\worktrees\\worker-1' }] };
+        calls.set(JSON.stringify(['turn-parent', 'call-1']), {
+          workerId: 'worker-1',
+          workspace: worktree,
+        });
+        calls.set(JSON.stringify(['turn-parent', 'call-2']), { workspace: worktree });
+        // A binding without its Workspace is an unknown Worker, which nothing is granted to.
+        calls.set(JSON.stringify(['turn-parent', 'call-4']), { workerId: 'worker-1' });
         expect(managedWorkerOf.call(router, 'turn-parent', 'call-1')).toEqual({
           workerId: 'worker-1',
+          roots: ['C:\\worktrees\\worker-1'],
         });
-        expect(managedWorkerOf.call(router, 'turn-parent', 'call-2')).toEqual({ workerId: '' });
+        expect(managedWorkerOf.call(router, 'turn-parent', 'call-2')).toEqual({
+          workerId: '',
+          roots: ['C:\\worktrees\\worker-1'],
+        });
+        expect(managedWorkerOf.call(router, 'turn-parent', 'call-4')).toEqual({
+          workerId: '',
+          roots: [],
+        });
         expect(managedWorkerOf.call(router, 'turn-parent', 'call-3')).toBeUndefined();
       } finally {
         resetDesktopControlSessions();

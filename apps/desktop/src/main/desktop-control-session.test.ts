@@ -301,3 +301,22 @@ describe('the Team Workers marked for desktop control', () => {
     expect(run).toHaveBeenCalledTimes(6);
   });
 });
+
+describe('the desktop Workers of a Task at once', () => {
+  it('drops the marks of Workers no longer at work, and gives the freed accent to the next', () => {
+    for (const id of ['a', 'b', 'c']) markDesktopControlWorker('task-1', id, id);
+    expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'b', 'c', 'd']))).toEqual({
+      refusal: expect.stringContaining('同時に 3 人まで'),
+    });
+    expect(markDesktopControlWorker('task-1', 'd', 'd', new Set(['a', 'c', 'd']))).toMatchObject({
+      worker: { workerId: 'd', colorIndex: 1 },
+    });
+    configureDesktopControlTeamCursors(true);
+    expect(desktopControlWorker('task-1', 'b')).toBeUndefined();
+    expect(desktopControlWorker('task-1', 'a')).toMatchObject({ colorIndex: 0 });
+    // Without knowing who is at work, nothing is dropped (only refusing more).
+    expect(markDesktopControlWorker('task-1', 'e', 'e')).toMatchObject({
+      refusal: expect.any(String),
+    });
+  });
+});

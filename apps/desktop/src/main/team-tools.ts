@@ -28,6 +28,7 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import { builtinRuntimeForModelSelection } from './connection-identity';
 import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   DESKTOP_CONTROL_WORKERS_DEFAULT,
@@ -767,11 +768,19 @@ async function executeWaitReports(
  * What a hire that asked for desktop control (`desktopControl: true`) reports back: whether the
  * Worker got it, and why not. Only the Leader marks, only a leaf Worker, and only as many Workers
  * as the Task may hold at once; the mark only shows the Worker the command tool, whose runs still
- * get their cards (the boundary).
+ * get their cards (the boundary). Only a Worker that runs on a CLI (Codex, Claude or Grok) can run
+ * a command at all; an API Worker is never marked, so it holds no place in the bound either.
  */
 function desktopControlHireResult(
+  coordinator: TeamCoordinator,
   taskId: string,
-  worker: Readonly<{ id: string; role: string }>,
+  worker: Readonly<{
+    id: string;
+    role: string;
+    connectionId: string | null;
+    requestedProvider: string | null;
+    requestedModel: string | null;
+  }>,
   agentKind: 'worker' | 'manager',
   requesterAgentId: string | undefined,
 ): { desktopControl: boolean; desktopControlNote?: string } {
@@ -785,10 +794,68 @@ function desktopControlHireResult(
       desktopControl: false,
       desktopControlNote: 'デスクトップ操作は、Manager には任せられません。',
     };
-  const marked = markDesktopControlWorker(taskId, worker.id, worker.role);
+  if (!runsOnCli(worker))
+    return {
+      desktopControl: false,
+      desktopControlNote: 'この種類の Worker は、デスクトップ操作を実行できません。',
+    };
+  const marked = markDesktopControlWorker(
+    taskId,
+    worker.id,
+    worker.role,
+    workersAtWork(coordinator, taskId),
+  );
   return 'refusal' in marked
     ? { desktopControl: false, desktopControlNote: marked.refusal }
     : { desktopControl: true };
+}
+
+/**
+ * Whether the Worker runs on a built-in CLI, as the Team's Worker runtime decides it
+ * (`ProviderAwareTeamWorkerRuntime`): no Connection (the default CLI) or a built-in CLI's
+ * Connection. Anything it cannot read counts as not.
+ */
+function runsOnCli(
+  worker: Readonly<{
+    connectionId: string | null;
+    requestedProvider: string | null;
+    requestedModel: string | null;
+  }>,
+): boolean {
+  if (worker.connectionId === null) return true;
+  try {
+    return (
+      builtinRuntimeForModelSelection({
+        connectionId: worker.connectionId,
+        requestedProvider: worker.requestedProvider,
+        requestedModel: worker.requestedModel,
+      } as ModelSelection) !== null
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Task's Workers still at work: not done, failed or stopped, in a Team that has not ended.
+ * `undefined` when the Team cannot be read, which keeps every mark (only refusing more).
+ */
+function workersAtWork(
+  coordinator: TeamCoordinator,
+  taskId: string,
+): ReadonlySet<string> | undefined {
+  try {
+    const team = coordinator.get(taskId);
+    if (team === null) return new Set();
+    if (team.team.state === 'completed' || team.team.state === 'failed') return new Set();
+    return new Set(
+      team.workers
+        .filter(({ state }) => state !== 'done' && state !== 'failed' && state !== 'stopped')
+        .map(({ id }) => id),
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 /** The single execution path for every team tool call, shared by BOTH the mock ToolBroker
@@ -925,7 +992,13 @@ export async function executeTeamTool(
               ? 0
               : Math.max(0, worker.managerPolicy.maxDelegationDepth - worker.depth),
           ...(request.desktopControl === true
-            ? desktopControlHireResult(taskId, worker, request.agentKind, options.requesterAgentId)
+            ? desktopControlHireResult(
+                coordinator,
+                taskId,
+                worker,
+                request.agentKind,
+                options.requesterAgentId,
+              )
             : {}),
         };
       } catch (error) {
