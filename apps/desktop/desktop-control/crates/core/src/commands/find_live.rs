@@ -91,6 +91,12 @@ fn rooted_resolution(
 ) -> Result<LocatorResolution, AppError> {
     let (_, local_root_ref) = crate::refs::ref_token::resolve_ref_target(root_ref)?;
     let entry = crate::commands::helpers::load_ref_entry(root_ref, context)?;
+    // A root proven among the visible elements is read in that view only, so a
+    // count, a first or a last match under it would silently leave out what is
+    // scrolled out of view. Refused before anything is read, not answered.
+    if entry.identity.in_view.is_some() {
+        return Err(crate::refs::ref_view::rooted_find_unsupported(&entry).into());
+    }
     crate::locator::live_locator::resolve_query_from(adapter, query, request, |deadline| {
         let read = read_saved_root(
             adapter,
@@ -113,12 +119,6 @@ fn rooted_resolution(
             RootRead::Subtree(tree) => Ok(ObservedObservation::whole(tree)),
             RootRead::Window(window_read) => {
                 let (_, tree, index) = *window_read;
-                // A root proven among the visible elements is read in that view
-                // only, so a count or a last match under it would silently leave
-                // out what is scrolled out of view. Refused, not answered.
-                if tree.is_visible_scope() {
-                    return Err(crate::refs::ref_view::rooted_find_unsupported(&entry).into());
-                }
                 ObservedObservation::under(tree, index)
             }
         }

@@ -587,35 +587,46 @@ fn a_find_rooted_at_a_view_proven_entry_is_refused() {
         .unwrap()
         .save_new_snapshot(&stored)
         .unwrap();
-    let args = FindArgs {
-        app: None,
-        window_id: None,
-        root: Some(format!("@{snapshot}:e1")),
-        surface: crate::SnapshotSurface::Window,
-        filter: FindFilterArgs {
-            role: Some("button".into()),
-            name: None,
-            description: None,
-            native_id: None,
-            value: None,
-            text: None,
-            exact: false,
-        },
-        states: Vec::new(),
-        timeout_ms: None,
-        selection: FindSelectionArgs {
-            count: true,
-            first: false,
-            last: false,
-            nth: None,
-            limit: None,
-        },
-    };
-    let error = execute(args, &adapter, &crate::CommandContext::default())
-        .expect_err("a rooted find over a view is refused");
-    assert!(
-        format!("{error:?}").contains("rooted_find_in_view_unsupported"),
-        "{error:?}"
-    );
+    let root = format!("@{snapshot}:e1");
+    // (count, first, last)
+    for (count, first, last) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+        (false, false, false),
+    ] {
+        let args = FindArgs {
+            app: None,
+            window_id: None,
+            root: Some(root.clone()),
+            surface: crate::SnapshotSurface::Window,
+            filter: FindFilterArgs {
+                role: Some("button".into()),
+                name: None,
+                description: None,
+                native_id: None,
+                value: None,
+                text: None,
+                exact: false,
+            },
+            states: Vec::new(),
+            timeout_ms: None,
+            selection: FindSelectionArgs {
+                count,
+                first,
+                last,
+                nth: None,
+                limit: None,
+            },
+        };
+        let error = execute(args, &adapter, &crate::CommandContext::default())
+            .expect_err("a rooted find over a view is refused");
+        assert!(
+            format!("{error:?}").contains("rooted_find_in_view_unsupported"),
+            "{error:?}"
+        );
+    }
+    // Refused before anything is read.
+    assert_eq!(adapter.view_reads.load(Ordering::SeqCst), 0);
     assert_eq!(adapter.whole_reads.load(Ordering::SeqCst), 0);
 }
