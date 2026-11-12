@@ -38,6 +38,7 @@ const CBS_HASSTRINGS: u32 = 0x0200;
 const CBN_SELCHANGE: u16 = 1;
 const CBN_SELENDOK: u16 = 9;
 const CBS_TYPE_MASK: u32 = 0x0003;
+const CBS_SIMPLE: u32 = 0x0001;
 const CBS_DROPDOWNLIST: u32 = 0x0003;
 
 /// What a window class says about the climb from an element to its box.
@@ -106,13 +107,36 @@ pub(crate) fn is_drop_down_list(style: u32) -> bool {
     style & CBS_TYPE_MASK == CBS_DROPDOWNLIST
 }
 
+/// Whether the box's list counts as closed for a commit: `CB_GETDROPPEDSTATE`
+/// says so, or the box is `CBS_SIMPLE`, whose list is always shown (the
+/// message answers TRUE for it) and is never closed or reopened.
+pub(crate) fn list_settled(style: u32, dropped: isize) -> bool {
+    dropped == 0 || style & CBS_TYPE_MASK == CBS_SIMPLE
+}
+
 /// Whether a commit landed on the requested item: the box holds the position
-/// it was given, its list is closed, and the item at that position carries
-/// the requested text (`carries`, asked of the box with `CB_FINDSTRINGEXACT`).
-/// A position alone is not enough: the owner may change the items when told
-/// of the close or of the selection.
-pub(crate) fn holds_requested(held: isize, index: usize, dropped: isize, carries: bool) -> bool {
-    usize::try_from(held).ok() == Some(index) && dropped == 0 && carries
+/// it was given, its list is closed ([`list_settled`]), and the item at that
+/// position carries the requested text (`carries`, asked of the box with
+/// `CB_FINDSTRINGEXACT`). A position alone is not enough: the owner may
+/// change the items when told of the close or of the selection.
+pub(crate) fn holds_requested(held: isize, index: usize, settled: bool, carries: bool) -> bool {
+    usize::try_from(held).ok() == Some(index) && settled && carries
+}
+
+/// The text handed to the box's messages, as a NUL-terminated wide string.
+/// The box reads it only up to the first NUL, so a value with a NUL inside
+/// would be searched for, chosen and checked as its first part only (`Beta`
+/// for `Beta\0x`); such a value is refused before anything is sent.
+pub(crate) fn item_text_wide(text: &str) -> Result<Vec<u16>, AdapterError> {
+    if text.contains('\0') {
+        return Err(AdapterError::new(
+            ErrorCode::InvalidArgs,
+            "The item name contains a NUL character, which a combo box item cannot carry",
+        )
+        .with_disposition(DeliverySemantics::not_delivered())
+        .with_suggestion("Pass the item's name without NUL characters."));
+    }
+    Ok(text.encode_utf16().chain(std::iter::once(0)).collect())
 }
 
 /// The `wParam` that makes `CB_FINDSTRINGEXACT` start its search at `index`:
@@ -176,7 +200,8 @@ mod imp {
     use super::{
         AdapterError, ComboClass, DeliverySemantics, ErrorCode, ItemMatch, MAX_CLIMB,
         ambiguous_item_error, classify_class, classify_matches, holds_requested, is_drop_down_list,
-        keeps_item_text, missing_item_error, search_start, selection_notifications,
+        item_text_wide, keeps_item_text, list_settled, missing_item_error, search_start,
+        selection_notifications,
     };
     use crate::actions::chain::{DeliveryOutcome, after_delivery};
     use crate::tree::automation::automation_client;
@@ -314,7 +339,7 @@ mod imp {
             if !keeps_item_text(style) {
                 return Ok(None);
             }
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide = item_text_wide(text)?;
             let text_ptr = wide.as_ptr() as isize;
             let first = self.send(CB_FINDSTRINGEXACT, usize::MAX, text_ptr, deadline)?;
             if first < 0 {
@@ -376,7 +401,7 @@ mod imp {
             if !self.keeps_text() {
                 return Ok(false);
             }
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide = item_text_wide(text)?;
             let found = self.send(
                 CB_FINDSTRINGEXACT,
                 search_start(index),
@@ -397,7 +422,7 @@ mod imp {
             text: &str,
             deadline: Deadline,
         ) -> Result<Vec<usize>, AdapterError> {
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let wide = item_text_wide(text)?;
             let limit = usize::try_from(self.item_count(deadline)?).unwrap_or(0);
             let mut positions = Vec::new();
             let mut start = usize::MAX;
@@ -461,9 +486,10 @@ mod imp {
                     .map_err(after_delivery)?,
                 Err(_) => false,
             };
+            let style = unsafe { GetWindowLongW(self.window(), GWL_STYLE) } as u32;
             Ok(DeliveryOutcome::from_delivery(
                 true,
-                holds_requested(held, index, dropped, carries),
+                holds_requested(held, index, list_settled(style, dropped), carries),
             ))
         }
 

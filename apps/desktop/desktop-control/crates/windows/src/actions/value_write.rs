@@ -49,6 +49,7 @@ mod imp {
     };
     use crate::actions::chain::{after_delivery, build_step, gated};
     use crate::actions::mutation::{classify_success, classify_write};
+    use crate::actions::select_search::selection_item_available;
     use crate::actions::win32_combo::{
         ItemMatch, WIN32_COMBO_SELECT_LABEL, ambiguous_item_error, missing_item_error, owning_combo,
     };
@@ -68,8 +69,16 @@ mod imp {
         // chosen the way `select` chooses it, so the owner hears of it. Any
         // other value is written as text and the steps say that no item was
         // chosen.
+        // Only the box (or a part of it that is not an item) is written this
+        // way: a value given to an item's ref never chooses another item of
+        // the box by name.
         let mut uncommitted = None;
-        if let Some(combo) = owning_combo(element, deadline)? {
+        let combo = if selection_item_available(element) {
+            None
+        } else {
+            owning_combo(element, deadline)?
+        };
+        if let Some(combo) = combo {
             match combo.find_item(value, deadline)? {
                 Some(ItemMatch::Unique(_)) => {
                     // The position is looked up again once the list is closed.

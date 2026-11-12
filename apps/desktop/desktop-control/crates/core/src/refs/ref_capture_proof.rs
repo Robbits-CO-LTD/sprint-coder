@@ -140,12 +140,15 @@ impl<'a> CaptureProof<'a> {
         let ancestors = if self.counts_once(entry, index) {
             Some(Vec::new())
         } else if self.whole_window {
+            // Here an empty list would read as "unique by its own predicate",
+            // which `counts_once` just denied: only a non-empty list proves.
             self.ancestry
                 .borrow_mut()
                 .get_or_insert_with(|| {
                     crate::refs::ref_ancestry::AncestryProver::new(self.observed)
                 })
                 .prove(entry, index)
+                .filter(|ancestors| !ancestors.is_empty())
         } else {
             None
         };

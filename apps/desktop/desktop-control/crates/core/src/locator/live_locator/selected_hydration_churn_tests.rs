@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::test_support::window;
 use super::{
     IdentifierEvidence, LocatorField, LocatorMaterialization, LocatorResolveRequest,
@@ -280,4 +281,152 @@ fn moved_bounds() -> Rect {
         x: 40.0,
         ..button_bounds()
     }
+}
+
+/// Two rows, A and B, each holding a "Delete" button: the button's own
+/// predicate matches twice, so the match is proven by its row.
+struct TwinRowsAdapter {
+    /// The row the landed button sits under when hydration reads its ancestors.
+    landed_row: &'static str,
+    ancestor_reads: AtomicUsize,
+}
+
+fn delete_button(bounds: Rect) -> super::LocatorEvidence {
+    let mut evidence = super::test_support::evidence("button", Some("Delete"));
+    evidence.states = LocatorField::Unknown;
+    evidence.ref_evidence.bounds = LocatorField::Known(bounds);
+    evidence.ref_evidence.available_actions = LocatorField::Unknown;
+    evidence
+}
+
+impl ObservationOps for TwinRowsAdapter {
+    fn observe_tree(
+        &self,
+        root: ObservationRoot<'_>,
+        _request: &ObservationRequest,
+    ) -> Result<ObservedTree, AdapterError> {
+        match root {
+            ObservationRoot::Window(_) => Ok(super::test_support::tree(
+                vec![
+                    super::test_support::node(
+                        0,
+                        super::test_support::evidence("window", None),
+                        vec![1, 3],
+                        &[],
+                    ),
+                    super::test_support::node(
+                        1,
+                        super::test_support::evidence("group", Some("A")),
+                        vec![2],
+                        &[0],
+                    ),
+                    super::test_support::node(
+                        2,
+                        delete_button(button_bounds()),
+                        Vec::new(),
+                        &[0, 0],
+                    ),
+                    super::test_support::node(
+                        3,
+                        super::test_support::evidence("group", Some("B")),
+                        vec![4],
+                        &[1],
+                    ),
+                    super::test_support::node(
+                        4,
+                        delete_button(moved_bounds()),
+                        Vec::new(),
+                        &[1, 0],
+                    ),
+                ],
+                vec![0],
+                true,
+            )),
+            ObservationRoot::Element { .. } => {
+                let mut evidence = super::test_support::evidence("button", Some("Delete"));
+                evidence.ref_evidence.bounds = LocatorField::Known(button_bounds());
+                evidence.ref_evidence.available_actions =
+                    LocatorField::Known(vec![crate::actions::capability::CLICK.into()]);
+                let mut tree = super::test_support::tree(
+                    vec![super::test_support::node(0, evidence, Vec::new(), &[])],
+                    vec![0],
+                    true,
+                );
+                tree.source = ObservationSource::from_root(&root, crate::SnapshotSurface::Window);
+                Ok(tree)
+            }
+        }
+    }
+
+    fn resolve_locator_anchor(
+        &self,
+        _entry: &crate::RefEntry,
+        _deadline: crate::Deadline,
+    ) -> Result<NativeHandle, AdapterError> {
+        Ok(NativeHandle::null())
+    }
+
+    fn read_ancestor_evidence(
+        &self,
+        _entry: &crate::RefEntry,
+        _handle: &NativeHandle,
+        _count: usize,
+        _deadline: crate::Deadline,
+    ) -> Result<Vec<super::LocatorEvidence>, AdapterError> {
+        self.ancestor_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![super::test_support::evidence(
+            "group",
+            Some(self.landed_row),
+        )])
+    }
+}
+
+impl ActionOps for TwinRowsAdapter {}
+impl InputOps for TwinRowsAdapter {}
+impl SystemOps for TwinRowsAdapter {}
+
+fn delete_query() -> LocatorQuery {
+    LocatorQuery {
+        identity: crate::IdentityPredicate {
+            role: Some("button".into()),
+            name: Some("Delete".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_match_proven_by_its_row_is_hydrated_only_under_that_row() {
+    let adapter = TwinRowsAdapter {
+        landed_row: "A",
+        ancestor_reads: AtomicUsize::new(0),
+    };
+    let resolution = resolve_query(
+        &adapter,
+        &delete_query(),
+        ObservationRoot::Window(&window()),
+        &selected_request(),
+    )
+    .expect("row A's Delete still sits under row A");
+    let entry = resolution.refmap.unwrap().get("@e1").unwrap().clone();
+    assert_eq!(
+        crate::refs::ref_ancestry::proof_of(&entry),
+        crate::refs::ref_ancestry::Proof::WithAncestors
+    );
+    assert_eq!(adapter.ancestor_reads.load(Ordering::SeqCst), 1);
+
+    let moved = TwinRowsAdapter {
+        landed_row: "B",
+        ancestor_reads: AtomicUsize::new(0),
+    };
+    let error = resolve_query(
+        &moved,
+        &delete_query(),
+        ObservationRoot::Window(&window()),
+        &selected_request(),
+    )
+    .err()
+    .expect("row B's Delete in row A's place is not described as row A's");
+    assert_eq!(error.code(), "STALE_REF");
 }

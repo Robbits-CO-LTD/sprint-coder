@@ -8,7 +8,9 @@
 //! call - with the label reads that follow it - runs with the client's
 //! transaction timeout lowered to what remains of the deadline, so a target
 //! that stops answering cannot hold the read past the command's deadline. At
-//! most as many levels are read as the entry recorded ancestors.
+//! most as many levels are read as the entry recorded ancestors. An entry
+//! proven among the visible elements (`proven_in_view`) is read in that view,
+//! the one its ancestors were recorded in.
 
 use agent_desktop_core::{AdapterError, Deadline, LocatorEvidence, NativeHandle, RefEntry};
 
@@ -42,9 +44,16 @@ pub(crate) fn read_ancestor_evidence(
     let element = crate::tree::element::uia_element(handle)?;
     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
     let client = automation_client()?;
-    let walker = client
-        .get_raw_view_walker()
-        .map_err(|error| uia_error(&error, "open the raw view tree walker"))?;
+    // The ancestors are read in the view they were recorded in: a view proof
+    // recorded them among the visible elements, where an offscreen container
+    // between the element and its visible ancestors is not a level.
+    let walker = if entry.identity.in_view.is_some() {
+        crate::tree::walk::walker_source::visible_view_walker(&client)?
+    } else {
+        client
+            .get_raw_view_walker()
+            .map_err(|error| uia_error(&error, "open the raw view tree walker"))?
+    };
     let request = build_set_cache_request(&client, &TreeProperty::IDENTITY_SET)?;
     let mut ancestors = Vec::with_capacity(count);
     let mut current = element.clone();

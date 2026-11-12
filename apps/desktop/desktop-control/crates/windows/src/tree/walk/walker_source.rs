@@ -4,6 +4,58 @@ use agent_desktop_core::{AdapterError, ObservationRoot};
 use super::walker::{WalkBudget, WalkOutcome, walk_from_root};
 use crate::tree::element::UIAElement;
 
+/// One navigation answer while counting a tree.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) enum CountStep<N> {
+    Node(N),
+    /// No such child or sibling.
+    End,
+    /// The call failed or had no time left: the count proves nothing.
+    Failed,
+}
+
+/// Counts `root` and the nodes below it, up to `limit`, within `deadline`.
+/// `None` when the tree is larger, a step fails, or the deadline passes,
+/// including during the last navigation: a count whose last answer came
+/// after the deadline does not license what the caller would do next.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn count_nodes<N>(
+    root: N,
+    limit: usize,
+    deadline: agent_desktop_core::Deadline,
+    mut first_child: impl FnMut(&N) -> CountStep<N>,
+    mut next_sibling: impl FnMut(&N) -> CountStep<N>,
+) -> Option<usize> {
+    let mut count = 1usize;
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        // Checked before every navigation, leaves included: a run of slow
+        // "no child" answers must not outlast the counting share.
+        if deadline.is_expired() {
+            return None;
+        }
+        let mut child = match first_child(&node) {
+            CountStep::Node(child) => child,
+            CountStep::End => continue,
+            CountStep::Failed => return None,
+        };
+        loop {
+            count += 1;
+            if count > limit || deadline.is_expired() {
+                return None;
+            }
+            let next = next_sibling(&child);
+            pending.push(child);
+            match next {
+                CountStep::Node(sibling) => child = sibling,
+                CountStep::End => break,
+                CountStep::Failed => return None,
+            }
+        }
+    }
+    (!deadline.is_expired()).then_some(count)
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use crate::tree::automation::{UiaFailure, automation_client, failure_of, uia_error};
@@ -205,48 +257,45 @@ mod imp {
     }
 
     /// Counts the raw tree below `root` with plain navigation (no properties)
-    /// up to `limit`, within `deadline`. `None` when the tree is larger, the
-    /// deadline passes, or a step fails: the caller then walks per node.
+    /// up to `limit`, within `deadline` (see [`super::count_nodes`]). Each
+    /// navigation is one call bounded by what is left of `deadline` when it
+    /// starts, so a call begun near the end of the counting share cannot run
+    /// on for the share's whole length.
     pub(crate) fn count_within(
+        client: &UIAutomation,
         walker: &UITreeWalker,
         root: &UIAElement,
         limit: usize,
         deadline: Deadline,
     ) -> Option<usize> {
-        let mut count = 1usize;
-        let mut pending = vec![root.0.clone()];
-        while let Some(node) = pending.pop() {
-            // Checked before every navigation, leaves included: a run of slow
-            // "no child" answers must not outlast the counting share.
-            if deadline.is_expired() {
-                return None;
-            }
-            let mut child = match walker.get_first_child(&node) {
-                Ok(child) => child,
-                Err(error) if failure_of(&error).is_exhaustion() => continue,
-                Err(_) => return None,
-            };
-            loop {
-                count += 1;
-                if count > limit || deadline.is_expired() {
-                    return None;
-                }
-                let next = walker.get_next_sibling(&child);
-                pending.push(child);
-                match next {
-                    Ok(sibling) => child = sibling,
-                    Err(error) if failure_of(&error).is_exhaustion() => break,
-                    Err(_) => return None,
-                }
-            }
-        }
-        Some(count)
+        let step = |answer: Option<uiautomation::Result<uiautomation::UIElement>>| match answer {
+            Some(Ok(node)) => super::CountStep::Node(node),
+            Some(Err(error)) if failure_of(&error).is_exhaustion() => super::CountStep::End,
+            Some(Err(_)) | None => super::CountStep::Failed,
+        };
+        super::count_nodes(
+            root.0.clone(),
+            limit,
+            deadline,
+            |node| {
+                step(with_transaction_timeout(client, deadline, || {
+                    walker.get_first_child(node)
+                }))
+            },
+            |node| {
+                step(with_transaction_timeout(client, deadline, || {
+                    walker.get_next_sibling(node)
+                }))
+            },
+        )
     }
 
     /// Runs one call with the client's transaction timeout lowered to the
-    /// deadline's remaining time, and puts the client's own bound back after.
-    /// `None` when there is no time left or the bound cannot be set, so the
-    /// call never runs longer than the deadline allows.
+    /// deadline's remaining time, and puts the bound the client had before
+    /// back after, also when the call panics. `None` when there is no time
+    /// left or the bound cannot be set, so the call never runs longer than the
+    /// deadline allows. A call nested in another keeps the outer bound as the
+    /// ceiling and leaves it in place when it returns.
     pub(crate) fn with_transaction_timeout<T>(
         client: &UIAutomation,
         deadline: Deadline,
@@ -254,24 +303,39 @@ mod imp {
     ) -> Option<T> {
         use windows::Win32::UI::Accessibility::{IUIAutomation, IUIAutomation2};
         use windows::core::Interface;
+
+        /// Puts the client's previous bound back when dropped.
+        struct Restore {
+            client: IUIAutomation2,
+            previous: u32,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the same live client on the same thread.
+                if unsafe { self.client.SetTransactionTimeout(self.previous) }.is_err() {
+                    tracing::warn!("could not restore the UI Automation transaction timeout");
+                }
+            }
+        }
+
+        let bounded: IUIAutomation2 = AsRef::<IUIAutomation>::as_ref(client).cast().ok()?;
+        // SAFETY: `bounded` is this thread's live client (COM is initialised for it).
+        let previous = unsafe { bounded.TransactionTimeout() }
+            .unwrap_or(crate::tree::automation::TRANSACTION_TIMEOUT_MS);
         let remaining = u32::try_from(deadline.remaining().as_millis())
             .unwrap_or(u32::MAX)
-            .min(crate::tree::automation::TRANSACTION_TIMEOUT_MS);
+            .min(crate::tree::automation::TRANSACTION_TIMEOUT_MS)
+            .min(if previous > 0 { previous } else { u32::MAX });
         if remaining == 0 {
             return None;
         }
-        let bounded: IUIAutomation2 = AsRef::<IUIAutomation>::as_ref(client).cast().ok()?;
-        // SAFETY: `bounded` is this thread's live client (COM is initialised for it).
-        unsafe { bounded.SetTransactionTimeout(remaining) }.ok()?;
-        let result = call();
         // SAFETY: the same live client on the same thread.
-        let restored = unsafe {
-            bounded.SetTransactionTimeout(crate::tree::automation::TRANSACTION_TIMEOUT_MS)
+        unsafe { bounded.SetTransactionTimeout(remaining) }.ok()?;
+        let _restore = Restore {
+            client: bounded,
+            previous,
         };
-        if restored.is_err() {
-            tracing::warn!("could not restore the UI Automation transaction timeout");
-        }
-        Some(result)
+        Some(call())
     }
 
     /// The production enumeration surface: the raw view walker, plus the cache
@@ -313,7 +377,7 @@ mod imp {
     /// their own; one step is bounded by the sibling count it skips (on a
     /// Chromium page of 5,000 rows, a whole walk of the 19 visible rows took
     /// about 0.2 s with no single call above a few tens of milliseconds).
-    fn visible_view_walker(client: &UIAutomation) -> Result<UITreeWalker, AdapterError> {
+    pub(crate) fn visible_view_walker(client: &UIAutomation) -> Result<UITreeWalker, AdapterError> {
         use uiautomation::types::UIProperty;
         use uiautomation::variants::Variant;
         use windows::Win32::UI::Accessibility::IUIAutomation;
@@ -448,12 +512,10 @@ mod imp {
         ) -> Result<UIAElement, AdapterError> {
             if let Some(request) = &self.subtree {
                 // One navigation may not wait past the counting share either:
-                // the client's own bound is far longer than that share.
+                // the client's own bound is far longer than that share, so
+                // each one is bounded by what is left of it (`count_within`).
                 let count = deadline.capped(counting);
-                let small = with_transaction_timeout(&self.client, count, || {
-                    count_within(&self.walker, root, limit, count)
-                })
-                .flatten();
+                let small = count_within(&self.client, &self.walker, root, limit, count);
                 let call = deadline.capped(calling);
                 let prefetched = small.and_then(|_| {
                     with_transaction_timeout(&self.client, call, || {
@@ -735,7 +797,7 @@ pub(crate) use imp::{count_within, prefetch_shares};
 pub(crate) use imp::with_transaction_timeout;
 
 #[cfg(target_os = "windows")]
-pub(crate) use imp::runtime_id_of;
+pub(crate) use imp::{runtime_id_of, visible_view_walker};
 
 /// The depth from which a walk covers the whole tree below its root: the
 /// deepest a walk descends (`DEFAULT_MAX_RAW_DEPTH`), which is also the depth

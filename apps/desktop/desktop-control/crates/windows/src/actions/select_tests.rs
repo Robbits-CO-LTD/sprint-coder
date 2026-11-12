@@ -216,7 +216,10 @@ fn a_closed_list_never_makes_an_unverified_selection_look_verified() {
         let verified = build_step(SELECT_LABEL, selection).verified();
         let steps = vec![
             build_step(SELECT_LABEL, selection),
-            build_step(COLLAPSE_LABEL, close_outcome(verified, true, closed)),
+            build_step(
+                COLLAPSE_LABEL,
+                close_outcome(verified, true, closed, Some(true)),
+            ),
         ];
         ActionResult::from_execution(&Action::Select("v".into()), steps).disposition()
     };
@@ -240,7 +243,27 @@ fn a_closed_list_never_makes_an_unverified_selection_look_verified() {
         "a list left open is still reported"
     );
     assert_eq!(
-        close_outcome(Some(true), false, false),
+        close_outcome(Some(true), false, false, None),
         DeliveryOutcome::NotDelivered
+    );
+}
+
+#[test]
+fn a_selection_the_app_puts_back_when_the_list_closes_is_not_verified() {
+    use super::close_outcome;
+    assert_eq!(
+        close_outcome(Some(true), true, true, Some(true)),
+        DeliveryOutcome::DeliveredVerified,
+        "the selection still held after the close"
+    );
+    assert_eq!(
+        close_outcome(Some(true), true, true, Some(false)),
+        DeliveryOutcome::DeliveredUnverified,
+        "the app changed the selection when told the list closed"
+    );
+    assert_eq!(
+        close_outcome(Some(true), true, true, None),
+        DeliveryOutcome::DeliveredUnverified,
+        "a selection that could not be read again is not verified"
     );
 }

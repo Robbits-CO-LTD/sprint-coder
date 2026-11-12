@@ -46,7 +46,9 @@ pub(crate) fn drive_realize_scrolls(
 pub(crate) enum NextListed {
     /// The search finished: no further item carries the name.
     End,
-    /// The provider handed back the first hit again.
+    /// The provider handed back the first hit again. A search started after
+    /// an item does not wrap round to it, so this provider ignored where the
+    /// search was to start, and its answer says nothing about duplicates.
     Same,
     /// Another item carries the name.
     Other,
@@ -55,14 +57,15 @@ pub(crate) enum NextListed {
 }
 
 /// Whether the provider's first hit is proven to be the only item with the
-/// name. A duplicate is `AMBIGUOUS_TARGET`; a failed second search proves
-/// nothing, so it answers `false` and the caller goes on with the walk,
-/// which stops on duplicates and on failed reads itself.
+/// name. A duplicate is `AMBIGUOUS_TARGET`; a failed second search, or one
+/// that handed back the first hit again, proves nothing, so it answers
+/// `false` and the caller goes on with the walk, which stops on duplicates
+/// and on failed reads itself.
 pub(crate) fn listed_item_is_unique(next: NextListed) -> Result<bool, AdapterError> {
     match next {
-        NextListed::End | NextListed::Same => Ok(true),
+        NextListed::End => Ok(true),
         NextListed::Other => accept_selection_match(true).map(|()| false),
-        NextListed::Failed => Ok(false),
+        NextListed::Same | NextListed::Failed => Ok(false),
     }
 }
 
@@ -470,7 +473,12 @@ mod tests {
     #[test]
     fn a_failed_second_listed_search_never_proves_the_hit_unique() {
         assert_eq!(listed_item_is_unique(NextListed::End).ok(), Some(true));
-        assert_eq!(listed_item_is_unique(NextListed::Same).ok(), Some(true));
+        assert_eq!(
+            listed_item_is_unique(NextListed::Same).ok(),
+            Some(false),
+            "a provider that ignores where to start hands back the first hit \
+             even when another item has the name: the walk decides"
+        );
         assert_eq!(
             listed_item_is_unique(NextListed::Failed).ok(),
             Some(false),

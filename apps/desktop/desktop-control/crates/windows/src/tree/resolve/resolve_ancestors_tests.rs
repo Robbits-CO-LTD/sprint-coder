@@ -89,3 +89,39 @@ fn the_read_gives_up_at_the_deadline() {
     };
     assert_eq!(error.code, ErrorCode::Timeout);
 }
+
+#[test]
+fn a_view_proof_reads_its_ancestors_in_the_view_of_visible_elements() {
+    ensure_test_apartment();
+    let fixture = HostedFixture::spawn().expect("the fixture host starts");
+    let (entry, path) = nested_entry(&fixture);
+    let handle = crate::tree::resolve::resolve_anchor::resolve_locator_anchor(&entry, deadline())
+        .expect("the nested element lands");
+    let raw = read_ancestor_evidence(&entry, &handle, 64, deadline()).expect("the raw chain");
+    let mut in_view = entry.clone();
+    in_view.identity.in_view = Some(agent_desktop_core::RefViewProof {
+        path: path.clone().into(),
+        bounds: agent_desktop_core::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        },
+        runtime_id: Vec::new(),
+        ancestors: Vec::new(),
+    });
+    let visible =
+        read_ancestor_evidence(&in_view, &handle, 64, deadline()).expect("the visible chain");
+    // The fixture shows every element, so both views hold the same levels, and
+    // the visible view's climb stops below the root as the raw one does.
+    assert_eq!(visible.len(), path.len() - 1);
+    assert_eq!(
+        visible
+            .iter()
+            .map(|ancestor| &ancestor.role)
+            .collect::<Vec<_>>(),
+        raw.iter()
+            .map(|ancestor| &ancestor.role)
+            .collect::<Vec<_>>()
+    );
+}
