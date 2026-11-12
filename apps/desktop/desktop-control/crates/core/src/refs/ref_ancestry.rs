@@ -349,7 +349,12 @@ impl<'a> AncestryProver<'a> {
             let group = self.build_group(&predicate);
             self.groups.insert(key.clone(), group);
         }
-        let mut group = self.groups.remove(&key).flatten()?;
+        let Some(mut group) = self.groups.remove(&key).flatten() else {
+            // Kept as `None`, so the next entry of the same predicate does not
+            // scan the whole window again and spend the work limit on it.
+            self.groups.insert(key, None);
+            return None;
+        };
         let answer = self.prove_in(&mut group, index);
         self.groups.insert(key, Some(group));
         answer
