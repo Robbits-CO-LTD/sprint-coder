@@ -112,7 +112,8 @@ observation, actions and capture there fail or return nothing.
   of the recorded name, enabled, with the last one sending the recorded
   command; otherwise nothing is sent and the click fails `STALE_REF` with
   `details.kind: "menu_item_changed"` and a `reason` (`missing`,
-  `ambiguous`, `disabled`, `command_changed`, ...): read the menu again. The
+  `ambiguous`, `disabled`, `command_changed`, `menu_replaced` when the app
+  swapped its menu while told it opens, ...): read the menu again. The
   result is `delivered_unverified`, except for an item with a check mark or
   a radio mark whose state changed as expected (`delivered_verified`,
   `details.verification_scope: "menu_check_state"`): confirm the effect with
