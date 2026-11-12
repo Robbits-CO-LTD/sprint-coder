@@ -403,6 +403,19 @@ fn absolute_cwd(cwd: &Path) -> Result<&Path, AdapterError> {
     )))
 }
 
+/// The working directory a launch without `--cwd` gives the app: the folder
+/// of its executable, as a shortcut without a working directory or a double
+/// click in Explorer does. Without it the app inherited this process's own
+/// directory (the caller's workspace), and apps that read files next to
+/// themselves by relative path failed to start. `None` (inherit, as before)
+/// when the executable has no absolute parent that is a directory.
+#[cfg(any(target_os = "windows", test))]
+fn default_cwd(executable: &Path) -> Option<&Path> {
+    executable
+        .parent()
+        .filter(|folder| folder.is_absolute() && folder.is_dir())
+}
+
 #[cfg(target_os = "windows")]
 fn create_process(
     executable: &Path,
@@ -420,7 +433,10 @@ fn create_process(
     let mut command_wide = to_wide_str(&command_line).map_err(before_launch)?;
     let cwd_wide = match &options.cwd {
         Some(cwd) => Some(to_wide(absolute_cwd(cwd)?).map_err(before_launch)?),
-        None => None,
+        None => match default_cwd(executable) {
+            Some(folder) => Some(to_wide(folder).map_err(before_launch)?),
+            None => None,
+        },
     };
     let env_block = child_environment_block(
         &options.env,
