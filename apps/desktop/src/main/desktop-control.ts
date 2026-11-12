@@ -196,6 +196,7 @@ export function desktopControlEnvironment(
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup = {},
   expectedWindowOwner?: string,
+  cursorRenderer?: DesktopControlCursorRenderer,
 ): Readonly<Record<string, string>> {
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
@@ -208,13 +209,23 @@ export function desktopControlEnvironment(
   // The owner a window id must still belong to is set by Main alone, for a run allowed by an
   // app-wide Task grant (`expectedWindowOwner`); one the caller chose, in any letter case, is
   // always dropped.
-  const owned = [DESKTOP_CONTROL_STATE_VARIABLE, DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE];
+  // The cursor renderer's image and host are set by Main alone too (`cursorRenderer`).
+  const owned = [
+    DESKTOP_CONTROL_STATE_VARIABLE,
+    DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
+    DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
+    DESKTOP_CONTROL_HOST_PID_VARIABLE,
+  ];
   const filtered = Object.entries(environment).filter(
     ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
   );
   filtered.push([DESKTOP_CONTROL_STATE_VARIABLE, desktopControlStateFolder()]);
   if (expectedWindowOwner !== undefined)
     filtered.push([DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE, expectedWindowOwner]);
+  if (cursorRenderer !== undefined) {
+    filtered.push([DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE, cursorRenderer.image]);
+    filtered.push([DESKTOP_CONTROL_HOST_PID_VARIABLE, String(cursorRenderer.hostPid)]);
+  }
   return Object.fromEntries(
     filtered.map(([key, value]) => {
       if ((windows ? key.toUpperCase() : key) !== 'PATH') return [key, value];
@@ -250,6 +261,26 @@ const DESKTOP_CONTROL_STATE_VARIABLE = 'AGENT_DESKTOP_HOME';
  */
 export const DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE =
   'SPRINT_CODER_DESKTOP_EXPECTED_WINDOW_OWNER';
+
+/**
+ * The variables the shipped executable reads when it starts the cursor overlay's renderer
+ * (`crates/windows/src/system/cursor_overlay/renderer_image.rs` and `host_watch.rs`). A run starts
+ * from a private copy of the executable that is deleted when it returns, and the owned Job ends
+ * every member running that copy (`releaseOwnedJob`), so the renderer is started from the approved
+ * executable instead, only when its bytes equal the copy's. It is outside what the release ends,
+ * stays drawn between runs, and ends on `session end` and `cursor-overlay disable`, and by itself
+ * when the process named by the host variable (Sprint Coder's Main) exits. A Stop of the run that
+ * started it ends it with the rest of that run's Job.
+ */
+export const DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE = 'SPRINT_CODER_DESKTOP_CONTROL_IMAGE';
+export const DESKTOP_CONTROL_HOST_PID_VARIABLE = 'SPRINT_CODER_DESKTOP_HOST_PID';
+
+export type DesktopControlCursorRenderer = Readonly<{
+  /** The approved desktop-control executable (not the private copy the run starts from). */
+  image: string;
+  /** The process whose exit ends the renderer. */
+  hostPid: number;
+}>;
 
 /** That variable's value for a process, or `null` when it cannot be written in that form. */
 export function desktopControlExpectedWindowOwner(owner: {

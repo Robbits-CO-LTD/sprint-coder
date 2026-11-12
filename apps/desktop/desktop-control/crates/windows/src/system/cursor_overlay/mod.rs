@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The Windows cursor overlay: a detached renderer this process can reach.
 //!
 //! The CLI is stateless per invocation, so the thing that draws has to outlive
@@ -24,6 +25,7 @@ pub(crate) mod display_probe;
 pub(crate) mod fade;
 pub(crate) mod framing;
 pub(crate) mod geometry;
+pub(crate) mod host_watch;
 pub(crate) mod image_identity;
 pub(crate) mod label;
 pub(crate) mod monitors;
@@ -34,6 +36,7 @@ pub(crate) mod pipe_name;
 pub(crate) mod presentation;
 pub(crate) mod raster;
 pub(crate) mod render;
+pub(crate) mod renderer_image;
 pub(crate) mod retire;
 pub(crate) mod reveal;
 pub(crate) mod rounded;

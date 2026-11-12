@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Whether an image on disk is this tool's own binary.
 //!
 //! Two guards have to agree on that answer. The spawn guard refuses to fork a
@@ -13,15 +14,20 @@
 
 use std::path::Path;
 
-/// The file stem every image of this tool carries, with or without `.exe`.
+/// The file stem the upstream build carries, with or without `.exe`.
 pub(crate) const IMAGE_STEM: &str = "agent-desktop";
+
+/// The stem the same binary carries when Sprint Coder ships it.
+pub(crate) const BUNDLED_IMAGE_STEM: &str = "sprint-coder-desktop-control";
 
 /// Windows paths are case-insensitive, so `AGENT-DESKTOP.EXE` names the same
 /// image as `agent-desktop.exe` and has to pass the same guards. Only the
 /// final component counts: a build tree whose directories are named after the
 /// project is not itself the project's binary.
 pub(crate) fn is_agent_desktop_image(path: &Path) -> bool {
-    image_stem(path).is_some_and(|stem| stem.eq_ignore_ascii_case(IMAGE_STEM))
+    image_stem(path).is_some_and(|stem| {
+        stem.eq_ignore_ascii_case(IMAGE_STEM) || stem.eq_ignore_ascii_case(BUNDLED_IMAGE_STEM)
+    })
 }
 
 /// The stem a refusal names, so a reader is told what was found and not only
