@@ -125,9 +125,13 @@ observation, actions and capture there fail or return nothing.
   has disabled it) gets no refs (`window_disabled: true` on the snapshot), and
   a click on an earlier ref then fails `ACTION_FAILED`,
   `details.kind: "window_disabled"`, with nothing sent: finish the dialog
-  first. After the command is sent nothing more goes to the app; the check
-  mark is read from the menu itself, so an app that updates it only when
-  the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
+  first. The command is handed to the app's thread without waiting for it
+  (a command that opens a dialog returns at once), and ahead of anything a
+  later click sends, so the next menu click cannot change the menu before
+  this command runs; while that command shows a modal dialog, the next click
+  stops with `window_disabled`. After the command nothing more goes to the
+  app; the check mark is read from the menu itself, so an app that updates
+  it only when the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
   every other command refuses it with `ACTION_NOT_SUPPORTED`,
   `details.kind: "menu_item_ref"`. An item the app draws itself has no name
   and says so in `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no

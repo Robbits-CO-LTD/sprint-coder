@@ -1,6 +1,6 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Runs an item of a window's standard menu bar without opening the menu:
-//! the item's command is posted to the window as `WM_COMMAND`, as the menu
+//! the item's command is handed to the window as `WM_COMMAND`, as the menu
 //! itself does when a person chooses the item. The window stays where it is
 //! and takes neither the foreground nor the focus.
 //!
@@ -17,16 +17,29 @@
 //! Each popup told it opens is then told it closes (`WM_UNINITMENUPOPUP`, in
 //! reverse order), as a closing menu does before the chosen command arrives.
 //!
-//! The command is posted, not sent: a command that opens a modal dialog
-//! (an About box, a file dialog) does not return until the dialog closes, so
-//! a send would time out while the command runs. A posted command is queued
-//! but cannot be observed, so the result is `delivered_unverified`, except
+//! The command is handed over with `SendNotifyMessageW`: it reaches the
+//! window's thread as a sent message, without waiting for the answer. Not a
+//! plain send: a command that opens a modal dialog (an About box, a file
+//! dialog) does not return until the dialog closes, so a send would time out
+//! while the command runs (measured on msinfo32). Not a post: a thread handles
+//! the messages sent to it, in the order sent, before any posted to it, so a
+//! posted command still waiting in the queue of a busy application would be
+//! overtaken by the opening messages of the next menu click, and an
+//! application that renumbers its items when a menu opens would then read the
+//! identifier as another item's (measured with the test application kept busy:
+//! posted, `WM_INITMENU` of the next click arrived first; handed over this way,
+//! the command arrived first). The next click's first send then waits until
+//! this command's handler has returned; while it shows a modal dialog, the
+//! window is disabled, and that click stops before sending anything. A window
+//! of this program's own thread is refused: there the handler would run inside
+//! this call. A command handed over cannot be observed, so the result is
+//! `delivered_unverified`, except
 //! for an item that shows a check mark or a radio mark: its state is read
 //! again for a short while - from the menu only, sending the application
 //! nothing more (`read_check_quietly`) - and only a change to the expected
 //! state reports `delivered_verified`. Nothing is sent either when the window
 //! is disabled (a modal dialog it opened), when the closing messages fail, or
-//! when the deadline has passed by the time the command would be posted.
+//! when the deadline has passed by the time the command would be handed over.
 
 use agent_desktop_core::{
     ActionResult, ActionStep, AdapterError, Deadline, DeliverySemantics, ErrorCode,
@@ -68,8 +81,8 @@ mod imp {
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError, SetLastError};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        HMENU, IsIconic, PostMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND,
-        WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP,
+        GetWindowThreadProcessId, HMENU, IsIconic, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+        SendNotifyMessageW, WM_COMMAND, WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP,
     };
 
     use crate::system::menu::menu_bar::{bar_of, read_level};
@@ -138,6 +151,17 @@ mod imp {
             "window_id": format!("w-{hwnd}"),
             "retryable": false,
         }))
+        .with_disposition(DeliverySemantics::not_delivered())
+    }
+
+    /// The refusal for a window of this program's own thread, whose handler
+    /// would run inside the call that hands it the command.
+    fn same_thread() -> AdapterError {
+        AdapterError::new(
+            ErrorCode::ActionFailed,
+            "The window belongs to this program's own thread, so its menu is not run from here",
+        )
+        .with_details(serde_json::json!({ "kind": "menu_window_same_thread", "retryable": false }))
         .with_disposition(DeliverySemantics::not_delivered())
     }
 
@@ -246,12 +270,9 @@ mod imp {
     /// the application anything, down the recorded names; `None` when the
     /// menu no longer shows the item as recorded.
     ///
-    /// No message may follow the posted command: a message sent to a window
-    /// is handled before the messages posted to it, so an opening message
-    /// sent now would reach the application while the command still waits in
-    /// its queue, and an application that renumbers its items when a menu
-    /// opens (a list of recent files, for one) would then read the posted
-    /// identifier as another item's.
+    /// Nothing more is sent after the command: the check is read from the
+    /// menu alone, so this call adds no message the application handles
+    /// after the command.
     fn read_check_quietly(bar: HMENU, proof: &RefMenuProof) -> Option<bool> {
         let mut menu = bar;
         let last = proof.steps.len().checked_sub(1)?;
@@ -310,6 +331,14 @@ mod imp {
         if unsafe { IsIconic(hwnd as *mut std::ffi::c_void) } != 0 {
             return Err(crate::tree::minimized::minimized_window_error(hwnd));
         }
+        // SAFETY: a plain read of a window handle.
+        let thread = unsafe {
+            GetWindowThreadProcessId(hwnd as *mut std::ffi::c_void, std::ptr::null_mut())
+        };
+        // SAFETY: reads this thread's id.
+        if thread == unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() } {
+            return Err(same_thread());
+        }
         if !enabled(hwnd) {
             return Err(window_disabled(hwnd));
         }
@@ -330,16 +359,23 @@ mod imp {
             return Err(window_disabled(hwnd));
         }
         let wparam = proof.command_id as usize;
-        // SAFETY: posting a message to a window handle; no pointer is passed.
-        let posted = unsafe { PostMessageW(hwnd as *mut std::ffi::c_void, WM_COMMAND, wparam, 0) };
-        if posted == 0 {
+        // SAFETY: hands a message to the window's thread and returns at once;
+        // no pointer is passed.
+        let handed = unsafe {
+            SetLastError(0);
+            SendNotifyMessageW(hwnd as *mut std::ffi::c_void, WM_COMMAND, wparam, 0)
+        };
+        if handed == 0 {
             // SAFETY: reads this thread's last error.
             let code = unsafe { GetLastError() };
+            if code == ERROR_ACCESS_DENIED {
+                return Err(unresponsive(WM_COMMAND, code));
+            }
             return Err(AdapterError::new(
                 ErrorCode::ActionFailed,
-                "The menu item's command could not be posted to the window",
+                "The menu item's command could not be handed to the window",
             )
-            .with_platform_detail(format!("PostMessageW(WM_COMMAND) failed: {code}"))
+            .with_platform_detail(format!("SendNotifyMessageW(WM_COMMAND) failed: {code}"))
             .with_details(serde_json::json!({ "kind": "menu_command_not_posted" }))
             .with_disposition(DeliverySemantics::not_delivered()));
         }

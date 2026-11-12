@@ -2451,6 +2451,15 @@ describe('ApprovalCoordinator desktop control card', () => {
     }));
     const ungrantable: string[][] = [
       ['click', '@smenu:e1'],
+      // A menu item among a few steps the card shows in full.
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'snapshot', args: { window_id: 'w-1' } },
+          { command: 'click', args: { ref_id: '@scharmap:e1' } },
+          { command: 'click', args: { ref_id: '@smenu:e1' } },
+        ]),
+      ],
       ['click', '@SMENU:e1'],
       ['click', '@SCHARMAP:e1'],
       ['click', '@smenu:e1', '--session', 'other'],
