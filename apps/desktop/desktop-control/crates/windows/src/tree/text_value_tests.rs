@@ -214,3 +214,53 @@ fn a_cut_inside_a_surrogate_pair_is_refused() {
     assert!(reached_read_limit(&lossy));
     assert_eq!(value_from_document_text(lossy, None), None);
 }
+
+/// A field the Text pattern stands in for answers only with the Text read:
+/// a refused or failed read is no value, not the `Value` slot's default `""`.
+#[test]
+fn a_text_field_answers_with_its_text_read_or_no_value() {
+    let field = edit_without_value(Some(flag(false)));
+    assert_eq!(answered_value(&field, None, Some("".into())), None);
+    assert_eq!(answered_value(&field, None, None), None);
+    assert_eq!(
+        answered_value(&field, Some("visible".into()), Some("".into())),
+        Some("visible".into())
+    );
+}
+
+/// Every other field answers with its live `Value`, whatever the Text read
+/// says - on a secure field the Text never reaches the answer.
+#[test]
+fn any_other_field_answers_with_its_live_value() {
+    let with_value_pattern = ElementProperties::from_reads(vec![
+        (TreeProperty::ControlType, number(EDIT_CONTROL_TYPE)),
+        (TreeProperty::ValueAvailable, flag(true)),
+        (TreeProperty::Value, text("")),
+        (TreeProperty::IsPassword, flag(false)),
+    ]);
+    let secure = edit_without_value(Some(flag(true)));
+    let document = ElementProperties::from_reads(vec![
+        (TreeProperty::ControlType, number(50_030)),
+        (TreeProperty::ValueAvailable, flag(false)),
+        (TreeProperty::Value, text("")),
+        (TreeProperty::IsPassword, flag(false)),
+    ]);
+    for (label, properties) in [
+        ("value pattern", &with_value_pattern),
+        ("secure", &secure),
+        ("document", &document),
+    ] {
+        for live in [None, Some(String::new()), Some("live".to_string())] {
+            assert_eq!(
+                answered_value(properties, Some("not-a-real-secret".into()), live.clone()),
+                live,
+                "{label}"
+            );
+            assert_eq!(
+                answered_value(properties, None, live.clone()),
+                live,
+                "{label}"
+            );
+        }
+    }
+}

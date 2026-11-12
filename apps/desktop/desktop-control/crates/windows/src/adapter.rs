@@ -132,14 +132,18 @@ impl ObservationOps for WindowsAdapter {
         let read = crate::tree::live_read::read_live_element(handle, deadline)?;
         // An edit control that publishes no Value pattern: its visible text,
         // read through the Text pattern, gated on IsPassword
-        // (`tree::text_value`). Its `Value` slot holds only the default `""`,
-        // so a text read that failed or may have been cut is no value at all,
-        // never that default.
+        // (`tree::text_value`). `text_value` returns at once, without a
+        // cross-process call, on a field it does not apply to, and
+        // `answered_value` picks between the two reads.
         #[cfg(target_os = "windows")]
-        if crate::tree::text_value::text_stands_in_for_value(&read.properties) {
-            return crate::tree::text_value::text_value(handle, &read, deadline);
-        }
-        Ok(crate::tree::live_read::live_value(&read))
+        let text = crate::tree::text_value::text_value(handle, &read, deadline)?;
+        #[cfg(not(target_os = "windows"))]
+        let text = None;
+        Ok(crate::tree::text_value::answered_value(
+            &read.properties,
+            text,
+            crate::tree::live_read::live_value(&read),
+        ))
     }
 
     /// The Text pattern selection read, in UTF-16 code units, that `TypeText`

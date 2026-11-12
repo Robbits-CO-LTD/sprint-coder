@@ -62,6 +62,22 @@ pub(crate) fn text_stands_in_for_value(properties: &ElementProperties) -> bool {
         && properties.get(TreeProperty::ControlType).number() == Some(EDIT_CONTROL_TYPE)
 }
 
+/// The answer to a value read: on a field the Text pattern stands in for,
+/// the Text read and nothing else - a read that failed or may have been cut
+/// is no value, never the `Value` slot's default `""`; on every other field,
+/// the live `Value`, whatever the Text pattern said.
+pub(crate) fn answered_value(
+    properties: &ElementProperties,
+    text: Option<String>,
+    live_value: Option<String>,
+) -> Option<String> {
+    if text_stands_in_for_value(properties) {
+        text
+    } else {
+        live_value
+    }
+}
+
 /// `IsPassword` was actually answered and says "not secure". `Absent` is the
 /// provider saying it does not implement the property, which is a real
 /// answer; `Unknown`, a missing read and any non-false answer keep the gate
