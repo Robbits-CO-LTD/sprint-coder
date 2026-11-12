@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, ObservationRoot};
 
 use super::walker::{WalkBudget, WalkOutcome, walk_from_root};
@@ -9,8 +10,11 @@ mod imp {
     use crate::tree::element::UIAElement;
     use crate::tree::name_evidence::read_label;
     use crate::tree::properties::property_ids::TreeProperty;
-    use crate::tree::properties::{read_cached, read_live, read_one, rect_has_area};
-    use crate::tree::walk::cache::{build_walk_cache_request, policy_for_root};
+    use crate::tree::properties::{read_cached_set, read_live_set, read_one, rect_has_area};
+    use crate::tree::walk::cache::{
+        build_set_cache_request, build_subtree_cache_request, build_walk_cache_request,
+        policy_for_root,
+    };
     use crate::tree::walk::walker::{DEFAULT_MAX_RAW_DEPTH, NodeKey, TreeSource, walk_vocabulary};
     use agent_desktop_core::{AdapterError, Deadline, LocatorField, Rect};
     use uiautomation::UIAutomation;
@@ -151,6 +155,120 @@ mod imp {
             .map_err(|_| BudgetExpired)
     }
 
+    fn cached_array(
+        array: &windows::Win32::UI::Accessibility::IUIAutomationElementArray,
+    ) -> Result<Vec<UIAElement>, UiaFailure> {
+        let fault = |error: windows::core::Error| UiaFailure::Hresult(error.code().0);
+        // SAFETY: `array` is a live interface pointer the client returned on this thread.
+        let length = unsafe { array.Length() }.map_err(fault)?;
+        let mut elements = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        for index in 0..length {
+            // SAFETY: the same live array, and `index` is below the length it reported.
+            let element = unsafe { array.GetElement(index) }.map_err(fault)?;
+            elements.push(UIAElement::from(uiautomation::UIElement::from(element)));
+        }
+        Ok(elements)
+    }
+
+    /// The most nodes a whole-tree prefetch may cover. The prefetch is one
+    /// call the caller cannot stop: when it times out, the provider keeps
+    /// building the answer, and the reads that follow wait behind it. Measured
+    /// on a WinForms combo box with 20,000 items dropped down, a prefetch cut
+    /// at 0.3 s or 1 s still left the per-node walk unable to read the root
+    /// before a 5 s deadline, where the per-node walk alone returned a partial
+    /// tree in 4 s. So the tree is counted first, and only a tree this small
+    /// is prefetched (Character Map with its font list open is 387 nodes).
+    const PREFETCH_NODE_LIMIT: usize = 1_000;
+
+    /// The longest the count before a prefetch may take, and the longest the
+    /// prefetch itself may take (the 387-node tree above took about 0.1 s to
+    /// count and 0.1 s to fetch).
+    const PREFETCH_COUNT_CAP: std::time::Duration = std::time::Duration::from_millis(500);
+    const PREFETCH_CALL_CAP: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+    /// The time the count and the prefetch may each take out of `remaining`:
+    /// a quarter each at most, so the per-node walk a failed prefetch falls
+    /// back to keeps at least half of the deadline.
+    pub(crate) fn prefetch_shares(
+        remaining: std::time::Duration,
+    ) -> (std::time::Duration, std::time::Duration) {
+        let quarter = remaining / 4;
+        (
+            quarter.min(PREFETCH_COUNT_CAP),
+            quarter.min(PREFETCH_CALL_CAP),
+        )
+    }
+
+    /// Counts the raw tree below `root` with plain navigation (no properties)
+    /// up to `limit`, within `deadline`. `None` when the tree is larger, the
+    /// deadline passes, or a step fails: the caller then walks per node.
+    pub(crate) fn count_within(
+        walker: &UITreeWalker,
+        root: &UIAElement,
+        limit: usize,
+        deadline: Deadline,
+    ) -> Option<usize> {
+        let mut count = 1usize;
+        let mut pending = vec![root.0.clone()];
+        while let Some(node) = pending.pop() {
+            // Checked before every navigation, leaves included: a run of slow
+            // "no child" answers must not outlast the counting share.
+            if deadline.is_expired() {
+                return None;
+            }
+            let mut child = match walker.get_first_child(&node) {
+                Ok(child) => child,
+                Err(error) if failure_of(&error).is_exhaustion() => continue,
+                Err(_) => return None,
+            };
+            loop {
+                count += 1;
+                if count > limit || deadline.is_expired() {
+                    return None;
+                }
+                let next = walker.get_next_sibling(&child);
+                pending.push(child);
+                match next {
+                    Ok(sibling) => child = sibling,
+                    Err(error) if failure_of(&error).is_exhaustion() => break,
+                    Err(_) => return None,
+                }
+            }
+        }
+        Some(count)
+    }
+
+    /// Runs one call with the client's transaction timeout lowered to the
+    /// deadline's remaining time, and puts the client's own bound back after.
+    /// `None` when there is no time left or the bound cannot be set, so the
+    /// call never runs longer than the deadline allows.
+    fn with_transaction_timeout<T>(
+        client: &UIAutomation,
+        deadline: Deadline,
+        call: impl FnOnce() -> T,
+    ) -> Option<T> {
+        use windows::Win32::UI::Accessibility::{IUIAutomation, IUIAutomation2};
+        use windows::core::Interface;
+        let remaining = u32::try_from(deadline.remaining().as_millis())
+            .unwrap_or(u32::MAX)
+            .min(crate::tree::automation::TRANSACTION_TIMEOUT_MS);
+        if remaining == 0 {
+            return None;
+        }
+        let bounded: IUIAutomation2 = AsRef::<IUIAutomation>::as_ref(client).cast().ok()?;
+        // SAFETY: `bounded` is this thread's live client (COM is initialised for it).
+        unsafe { bounded.SetTransactionTimeout(remaining) }.ok()?;
+        let result = call();
+        // SAFETY: the same live client on the same thread.
+        let restored = unsafe {
+            bounded.SetTransactionTimeout(crate::tree::automation::TRANSACTION_TIMEOUT_MS)
+        };
+        if restored.is_err() {
+            tracing::warn!("could not restore the UI Automation transaction timeout");
+        }
+        Some(result)
+    }
+
     /// The production enumeration surface: the raw view walker, plus the cache
     /// request the provider class earned.
     pub struct UiaTreeSource {
@@ -163,9 +281,125 @@ mod imp {
         /// emptiness test would otherwise skip the anonymous `Group`/`Pane`
         /// containers native stacks are full of.
         chromium_provenance: bool,
+        /// The request for `properties` widened to the whole subtree, held
+        /// only by a whole-window walk.
+        subtree: Option<UICacheRequest>,
+        /// Whether the root was prepared with `subtree`, so every node this
+        /// walk reaches carries its child list in the cache.
+        subtree_prefetched: std::cell::Cell<bool>,
+        /// The properties each node is read for: the walk set, or the identity
+        /// set for a walk that only resolves a saved ref.
+        properties: &'static [TreeProperty],
+        /// Whether enumeration steps fetch no properties: a path descent only
+        /// needs the siblings it steps over to be counted, never read.
+        plain_navigation: bool,
     }
 
     impl UiaTreeSource {
+        /// A source for descending a stored child-index path: the siblings it
+        /// steps over are navigated without fetching their properties (each
+        /// step is still one bounded call, as before), and the caller reads the
+        /// landed element itself with `prepare_root`.
+        pub fn for_descent(root: &UIAElement) -> Result<Self, AdapterError> {
+            let mut source = Self::for_root(root)?;
+            source.plain_navigation = true;
+            Ok(source)
+        }
+
+        /// A source for a whole-window walk. A tree served by client-side
+        /// providers (`Skip`, such as Character Map's Win32 controls) may be
+        /// prepared with the subtree request (see [`Self::prepare_whole_root`]):
+        /// those reads run in this process, and with its font list open (387
+        /// nodes) the identity walk took 1.0 s per node and 0.09 s from one
+        /// subtree build, with the same tree and the same snapshot output.
+        ///
+        /// A tree served from the target's own process (`Batch`, such as WPF)
+        /// keeps the per-node walk. The subtree build there runs on the
+        /// target's UI thread, which keeps building after a timeout (a 20,000
+        /// item WPF list kept the target busy for over 40 s), and counting
+        /// the tree first is no cheaper there than walking it: on a 646-node
+        /// WPF window the count alone ran past its 0.5 s cap. A root of
+        /// Chromium provenance keeps the per-node walk and the walk set.
+        ///
+        /// `identity_only` reads each node for [`TreeProperty::IDENTITY_SET`]
+        /// alone.
+        pub fn for_whole_root(
+            root: &UIAElement,
+            identity_only: bool,
+        ) -> Result<Self, AdapterError> {
+            let mut source = Self::for_root(root)?;
+            if identity_only && !source.chromium_provenance {
+                source.properties = &TreeProperty::IDENTITY_SET;
+                if source.cache.is_some() {
+                    source.cache =
+                        Some(build_set_cache_request(&source.client, source.properties)?);
+                }
+            }
+            if !source.chromium_provenance && source.cache.is_none() {
+                source.subtree = Some(build_subtree_cache_request(
+                    &source.client,
+                    source.properties,
+                )?);
+            }
+            Ok(source)
+        }
+
+        /// Whether this walk's nodes carry their properties in the cache: the
+        /// per-node batched walk, or any walk whose root was prepared with the
+        /// subtree request.
+        fn reads_cache(&self) -> bool {
+            self.cache.is_some() || self.subtree_prefetched.get()
+        }
+
+        /// Prepares the root with its whole subtree in one call, so the walk
+        /// reads the structure and the properties from the cache instead of a
+        /// call per node. Only a tree counted at no more than
+        /// [`PREFETCH_NODE_LIMIT`] nodes is prefetched, and the count and the
+        /// call each get a capped share of the deadline (the client's
+        /// transaction timeout is lowered for the call alone). Anything else
+        /// falls back to [`Self::prepare_root`] and the per-node walk, with
+        /// at least half of the deadline still left for it (`prefetch_shares`).
+        pub fn prepare_whole_root(
+            &self,
+            root: &UIAElement,
+            deadline: agent_desktop_core::Deadline,
+        ) -> Result<UIAElement, AdapterError> {
+            let (counting, calling) = prefetch_shares(deadline.remaining());
+            self.prepare_whole_root_with(root, deadline, PREFETCH_NODE_LIMIT, counting, calling)
+        }
+
+        /// [`Self::prepare_whole_root`] with its limit and its two time shares
+        /// given, so a test can force each way out of the prefetch.
+        pub(crate) fn prepare_whole_root_with(
+            &self,
+            root: &UIAElement,
+            deadline: agent_desktop_core::Deadline,
+            limit: usize,
+            counting: std::time::Duration,
+            calling: std::time::Duration,
+        ) -> Result<UIAElement, AdapterError> {
+            if let Some(request) = &self.subtree {
+                // One navigation may not wait past the counting share either:
+                // the client's own bound is far longer than that share.
+                let count = deadline.capped(counting);
+                let small = with_transaction_timeout(&self.client, count, || {
+                    count_within(&self.walker, root, limit, count)
+                })
+                .flatten();
+                let call = deadline.capped(calling);
+                let prefetched = small.and_then(|_| {
+                    with_transaction_timeout(&self.client, call, || {
+                        root.0.build_updated_cache(request).ok()
+                    })
+                });
+                if let Some(Some(element)) = prefetched {
+                    self.subtree_prefetched.set(true);
+                    return Ok(UIAElement::from(element));
+                }
+            }
+            self.prepare_root(root)
+        }
+
         pub fn for_root(root: &UIAElement) -> Result<Self, AdapterError> {
             let client = automation_client()?;
             let walker = client
@@ -181,6 +415,10 @@ mod imp {
                 walker,
                 cache,
                 chromium_provenance: crate::tree::chromium::is_chromium_root(root),
+                subtree: None,
+                subtree_prefetched: std::cell::Cell::new(false),
+                properties: &TreeProperty::WALK_SET,
+                plain_navigation: false,
             })
         }
 
@@ -208,6 +446,20 @@ mod imp {
         pub(crate) fn chromium_provenance(&self) -> bool {
             self.chromium_provenance
         }
+
+        /// Whether the root was prepared with the subtree request.
+        #[cfg(test)]
+        pub(crate) fn prefetched(&self) -> bool {
+            self.subtree_prefetched.get()
+        }
+
+        /// Holds the subtree request whatever the provider class, so a test
+        /// can drive the prefetch on a small fixture of either class.
+        #[cfg(test)]
+        pub(crate) fn with_subtree_request(mut self) -> Result<Self, AdapterError> {
+            self.subtree = Some(build_subtree_cache_request(&self.client, self.properties)?);
+            Ok(self)
+        }
     }
 
     impl TreeSource for UiaTreeSource {
@@ -215,8 +467,10 @@ mod imp {
 
         fn first_child(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
             match &self.cache {
-                Some(request) => self.walker.get_first_child_build_cache(&node.0, request),
-                None => self.walker.get_first_child(&node.0),
+                Some(request) if !self.plain_navigation => {
+                    self.walker.get_first_child_build_cache(&node.0, request)
+                }
+                _ => self.walker.get_first_child(&node.0),
             }
             .map(UIAElement::from)
             .map_err(|error| failure_of(&error))
@@ -224,11 +478,33 @@ mod imp {
 
         fn next_sibling(&self, node: &UIAElement) -> Result<UIAElement, UiaFailure> {
             match &self.cache {
-                Some(request) => self.walker.get_next_sibling_build_cache(&node.0, request),
-                None => self.walker.get_next_sibling(&node.0),
+                Some(request) if !self.plain_navigation => {
+                    self.walker.get_next_sibling_build_cache(&node.0, request)
+                }
+                _ => self.walker.get_next_sibling(&node.0),
             }
             .map(UIAElement::from)
             .map_err(|error| failure_of(&error))
+        }
+
+        /// Only a walk whose root was prepared with the subtree request has
+        /// child lists in the cache; every node of that walk comes from the
+        /// cached tree, so a null list there is a real "no children" answer.
+        fn cached_children(
+            &self,
+            node: &UIAElement,
+        ) -> Option<Result<Vec<UIAElement>, UiaFailure>> {
+            use windows::Win32::UI::Accessibility::IUIAutomationElement;
+            if !self.subtree_prefetched.get() {
+                return None;
+            }
+            let element: &IUIAutomationElement = node.0.as_ref();
+            // SAFETY: `element` is a live interface pointer from this thread's client.
+            Some(match unsafe { element.GetCachedChildren() } {
+                Ok(array) => cached_array(&array),
+                Err(error) if error.code().is_ok() => Ok(Vec::new()),
+                Err(error) => Err(UiaFailure::Hresult(error.code().0)),
+            })
         }
 
         fn identity(&self, node: &UIAElement) -> NodeKey {
@@ -247,12 +523,13 @@ mod imp {
             agent_desktop_core::LocatorEvidence,
             u64,
         ) {
-            let (properties, errors) = match &self.cache {
-                Some(_) => read_cached(node),
-                None => read_live(node),
+            let (properties, errors) = if self.reads_cache() {
+                read_cached_set(node, self.properties)
+            } else {
+                read_live_set(node, self.properties)
             };
             let failed = u64::try_from(errors.len()).unwrap_or(u64::MAX);
-            let label = read_label(node, self.cache.is_some());
+            let label = read_label(node, self.reads_cache());
             let vocabulary = walk_vocabulary(&properties, &label);
             (
                 properties.clone(),
@@ -290,8 +567,27 @@ mod imp {
             Ok(Self)
         }
 
+        pub fn for_whole_root(
+            root: &UIAElement,
+            _identity_only: bool,
+        ) -> Result<Self, AdapterError> {
+            Self::for_root(root)
+        }
+
+        pub fn for_descent(root: &UIAElement) -> Result<Self, AdapterError> {
+            Self::for_root(root)
+        }
+
         pub fn prepare_root(&self, root: &UIAElement) -> Result<UIAElement, AdapterError> {
             Ok(root.clone())
+        }
+
+        pub fn prepare_whole_root(
+            &self,
+            root: &UIAElement,
+            _deadline: agent_desktop_core::Deadline,
+        ) -> Result<UIAElement, AdapterError> {
+            self.prepare_root(root)
         }
     }
 
@@ -347,6 +643,16 @@ pub(crate) use imp::{
     same_element, viewport_bounds,
 };
 
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) use imp::{count_within, prefetch_shares};
+
+/// The depth from which a walk covers the whole tree below its root: the
+/// deepest a walk descends (`DEFAULT_MAX_RAW_DEPTH`), which is also the depth
+/// a whole-window observation (snapshot capture proof, saved-ref resolution)
+/// asks for. Only such a walk prefetches the subtree, since a shallower walk
+/// would fetch nodes it never visits.
+const WHOLE_TREE_DEPTH: u8 = super::walker::DEFAULT_MAX_RAW_DEPTH;
+
 /// Walks a live UI Automation subtree from an arbitrary root element.
 ///
 /// The cache policy is chosen once, from the root's provider class, and the
@@ -357,6 +663,24 @@ pub fn walk_uia_subtree(
     root_source: &ObservationRoot<'_>,
     budget: WalkBudget,
 ) -> Result<WalkOutcome, AdapterError> {
+    walk_uia_subtree_for(root, root_source, budget, false)
+}
+
+/// [`walk_uia_subtree`] for an observation that may only resolve a saved ref
+/// (`identity_only`), whose nodes are read for the identity evidence alone.
+pub fn walk_uia_subtree_for(
+    root: &UIAElement,
+    root_source: &ObservationRoot<'_>,
+    budget: WalkBudget,
+    identity_only: bool,
+) -> Result<WalkOutcome, AdapterError> {
+    let whole =
+        budget.max_logical_depth >= WHOLE_TREE_DEPTH && budget.max_raw_depth >= WHOLE_TREE_DEPTH;
+    if whole {
+        let source = UiaTreeSource::for_whole_root(root, identity_only)?;
+        let prepared = source.prepare_whole_root(root, budget.deadline)?;
+        return walk_from_root(&source, &prepared, root_source, budget);
+    }
     let source = UiaTreeSource::for_root(root)?;
     let prepared = source.prepare_root(root)?;
     walk_from_root(&source, &prepared, root_source, budget)
@@ -365,3 +689,11 @@ pub fn walk_uia_subtree(
 #[cfg(test)]
 #[path = "walker_source_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "identity_set_tests.rs"]
+mod identity_set_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "walker_prefetch_tests.rs"]
+mod prefetch_tests;

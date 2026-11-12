@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The locator-anchor resolver: the path-only resolver core's selected-match
 //! hydration and stored-ref resolution both land on.
 //!
@@ -75,7 +76,7 @@ fn resolve_locator_anchor_once(
     }
 
     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
-    let source = UiaTreeSource::for_root(&root)?;
+    let source = UiaTreeSource::for_descent(&root)?;
     let prepared = source.prepare_root(&root)?;
     let budget = resolve_walk_budget(deadline);
 
@@ -89,6 +90,10 @@ fn resolve_locator_anchor_once(
     let Some(candidate) = landing else {
         return Err(stale_ref_error(entry));
     };
+    // The descent steps over siblings without reading them, so the landed
+    // element is read for its properties here, once; one that cannot be read
+    // keeps no cache and its role answers unknown, as any failed read does.
+    let candidate = source.prepare_root(&candidate).unwrap_or(candidate);
     let (_, evidence, _) = source.evidence(&candidate);
     anchor_role_verdict(entry, &evidence)?;
     Ok(crate::tree::resolve::into_verified_handle(candidate, entry))

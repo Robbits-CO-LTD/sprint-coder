@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, LocatorStats, ObservedSubtree};
 use serde_json::json;
 
@@ -209,6 +210,9 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
         raw_depth: u8,
         deadline: Deadline,
     ) -> ChildRead<S::Node> {
+        if let Some(cached) = self.source.cached_children(node) {
+            return self.read_cached_children(cached, raw_depth, deadline);
+        }
         let mut elements = Vec::new();
         let mut complete = true;
         match self.source.first_child(node) {
@@ -250,6 +254,52 @@ impl<'a, S: TreeSource> TreeWalk<'a, S> {
             }
         }
         ChildRead { elements, complete }
+    }
+
+    /// The same child list `read_children` would enumerate, taken from a list
+    /// the source already holds, under the same bounds: an expired deadline
+    /// keeps nothing and marks the list incomplete (the live loop checks the
+    /// deadline before it keeps its first child), a list longer than the
+    /// sibling cap keeps the cap's worth and marks it incomplete, and a fault
+    /// is recorded on the descent axis.
+    fn read_cached_children(
+        &mut self,
+        cached: Result<Vec<S::Node>, UiaFailure>,
+        raw_depth: u8,
+        deadline: Deadline,
+    ) -> ChildRead<S::Node> {
+        match cached {
+            Ok(elements) if elements.is_empty() => ChildRead {
+                elements,
+                complete: true,
+            },
+            Ok(_) if deadline.ensure_remaining().is_err() => {
+                self.note_deadline_exhausted();
+                ChildRead {
+                    elements: Vec::new(),
+                    complete: false,
+                }
+            }
+            Ok(mut elements) => {
+                let complete = elements.len() <= self.budget.max_siblings;
+                if !complete {
+                    self.stats.traversal.limits.child_hits += 1;
+                    elements.truncate(self.budget.max_siblings);
+                }
+                ChildRead { elements, complete }
+            }
+            Err(failure) if failure.is_exhaustion() => ChildRead {
+                elements: Vec::new(),
+                complete: true,
+            },
+            Err(failure) => {
+                self.record(failure, EnumerationAxis::FirstChild, raw_depth, 0);
+                ChildRead {
+                    elements: Vec::new(),
+                    complete: false,
+                }
+            }
+        }
     }
 
     fn visit_children(
@@ -364,3 +414,7 @@ fn retained_edge_certainty(prefix_certain: &mut bool, retained: bool) -> bool {
     *prefix_certain &= retained;
     edge_certain
 }
+
+#[cfg(test)]
+#[path = "walker_cached_children_tests.rs"]
+mod cached_children_tests;

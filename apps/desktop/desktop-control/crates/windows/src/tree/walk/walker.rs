@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, Deadline, ErrorCode, LocatorEvidence, LocatorField, LocatorStats,
     ObservationRoot, ObservationSource, ObservedTree,
@@ -81,6 +82,14 @@ pub trait TreeSource {
     /// Advances along a sibling list. `Err` whose failure `is_exhaustion()`
     /// ends the list; anything else is a genuine fault.
     fn next_sibling(&self, node: &Self::Node) -> Result<Self::Node, UiaFailure>;
+
+    /// The node's whole child list when the source already holds it, in the
+    /// order `first_child` / `next_sibling` would enumerate it. `None` means
+    /// the source holds no such list and the caller enumerates live; an empty
+    /// list is a real "no children" answer, and `Err` is a fault.
+    fn cached_children(&self, _node: &Self::Node) -> Option<Result<Vec<Self::Node>, UiaFailure>> {
+        None
+    }
 
     fn identity(&self, node: &Self::Node) -> NodeKey;
 
