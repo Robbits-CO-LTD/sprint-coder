@@ -39,7 +39,8 @@ a WebView2 control (a Tauri, WinForms or WPF window). Start with the default
 depth there.
 
 When a settled snapshot has refs but no operable controls, and its boundary
-nodes carry `children_count`, do not wait longer or raise `--timeout-ms`. Raise
+nodes carry `children_count` (the snapshot then reports `"depth_limited": true`),
+do not wait longer or raise `--timeout-ms`. Raise
 `--max-depth`, or drill into a boundary ref with `snapshot --root <ref>`.
 
 ## Covered Windows Hold First-Contact Counts Indefinitely

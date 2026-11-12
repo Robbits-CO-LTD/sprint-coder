@@ -132,6 +132,16 @@ pub(crate) fn annotate_visible_scope(body: &mut Value, result: &snapshot::Snapsh
     }
 }
 
+/// What a snapshot that cut containers at its depth limit tells its reader.
+const DEPTH_LIMIT_HINT: &str = "Some containers were cut at the depth limit, so their children are not listed; each carries children_count. Run snapshot again with a larger --max-depth (up to 50), or drill into a cut container with snapshot --root <ref>.";
+
+/// Whether any presented container had its children left out at the depth
+/// limit: such a node carries `children_count` but lists no children.
+fn has_depth_cut(node: &crate::AccessibilityNode) -> bool {
+    (node.children.is_empty() && node.children_count.is_some_and(|count| count > 0))
+        || node.children.iter().any(has_depth_cut)
+}
+
 fn format_result(result: snapshot::SnapshotResult) -> Result<Value, AppError> {
     format_snapshot_fields(&result, None, None)
 }
@@ -165,6 +175,10 @@ pub(crate) fn format_snapshot_fields(
     if !result.complete {
         body["truncated"] = json!(true);
         body["nodes_observed"] = json!(result.nodes_observed);
+    }
+    if has_depth_cut(&result.tree) {
+        body["depth_limited"] = json!(true);
+        body["depth_hint"] = json!(DEPTH_LIMIT_HINT);
     }
     if result.identity_unproven.is_some() {
         body["identity_unproven"] = json!(true);

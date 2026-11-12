@@ -147,6 +147,8 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/core/src/commands/snapshot.rs` | 1 行目に変更の注記を足した。snapshot の `window` に、窓が最小化されている時だけ `minimized: true` を足した（`list-windows` と同じ名前） |
 | `crates/core/src/commands/snapshot_tests.rs` | 1 行目に変更の注記を足した。上の `minimized` が、最小化の時だけ出ることの試験を足した |
 | `skills/agent-desktop-windows/SKILL.md`（2 回目） | 「A minimized one is not」の項を、道具の実際の動きに合わせて書き直した（snapshot は全部読めて `window` に `minimized: true` が出る、`is visible` は false、ref の操作は送る前に `window_minimized` で止まる、Electron・Chrome も同じ、UWP の電卓は最小化で止まり ref が無くなる、`restore --window-id` で戻して snapshot を取り直す） |
+| `crates/core/src/commands/snapshot.rs`・`snapshot_tests.rs`（2 回目） | 返す木に、深さの上限で子を省いた節（`children_count` があり子が無い）が 1 つでもあれば、`depth_limited: true` と、`--max-depth` を上げるか `--root` で掘る、という `depth_hint` を付ける（`complete` の意味は変えない）。その試験 |
+| `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md`（2 回目） | `depth_limited` の意味と、その時は `complete: true` でも下に部品があり得るので深さを上げるか `--root` で掘ること、を足した |
 
 ## build と試験
 

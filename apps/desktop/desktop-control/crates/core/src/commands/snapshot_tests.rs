@@ -405,6 +405,107 @@ fn an_unproven_capture_is_flagged_in_the_payload() {
     );
 }
 
+/// A window whose only button sits under twelve nested groups.
+struct DeepTreeAdapter;
+
+fn deep_tree() -> AccessibilityNode {
+    let mut node = crate::adapter::minimal_accessibility_node("button", "Deep");
+    for level in (0..12).rev() {
+        let mut group = crate::adapter::minimal_accessibility_node("group", &format!("G{level}"));
+        group.children = vec![node];
+        node = group;
+    }
+    let mut window = crate::adapter::minimal_accessibility_node("window", "Doc");
+    window.children = vec![node];
+    window
+}
+
+impl ObservationOps for DeepTreeAdapter {
+    fn observe_tree(
+        &self,
+        root: crate::locator::live_locator::ObservationRoot<'_>,
+        _request: &crate::locator::live_locator::ObservationRequest,
+    ) -> Result<crate::locator::live_locator::ObservedTree, AdapterError> {
+        crate::adapter::observed_tree(&root, deep_tree())
+    }
+
+    fn list_windows(
+        &self,
+        filter: &WindowFilter,
+        deadline: crate::Deadline,
+    ) -> Result<Vec<WindowInfo>, AdapterError> {
+        WaitSnapshotAdapter.list_windows(filter, deadline)
+    }
+}
+
+impl ActionOps for DeepTreeAdapter {}
+
+impl InputOps for DeepTreeAdapter {}
+
+impl SystemOps for DeepTreeAdapter {
+    fn supported_surfaces(&self) -> Vec<SnapshotSurface> {
+        vec![SnapshotSurface::Window]
+    }
+}
+
+fn deep_snapshot(max_depth: u8, interactive_only: bool) -> Value {
+    let args = SnapshotArgs {
+        max_depth,
+        interactive_only,
+        ..base_args()
+    };
+    let result = crate::snapshot::build(
+        &DeepTreeAdapter,
+        &tree_options(&args),
+        Some("FixtureApp"),
+        None,
+        crate::Deadline::standard().unwrap(),
+    )
+    .unwrap();
+    format_snapshot_fields(&result, None, None).unwrap()
+}
+
+#[test]
+fn a_snapshot_cut_at_its_depth_limit_says_so() {
+    for interactive_only in [false, true] {
+        let cut = deep_snapshot(8, interactive_only);
+        assert_eq!(cut["complete"], true, "the read itself finished");
+        assert_eq!(cut["depth_limited"], true);
+        assert!(
+            cut["depth_hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("--max-depth") && hint.contains("--root"))
+        );
+        assert!(cut.get("truncated").is_none());
+        assert!(
+            !cut.to_string().contains("\"Deep\""),
+            "the button lies below the cut"
+        );
+
+        let whole = deep_snapshot(20, interactive_only);
+        assert_eq!(whole["complete"], true);
+        assert!(whole.get("depth_limited").is_none());
+        assert!(whole.get("depth_hint").is_none());
+        assert!(whole.to_string().contains("\"Deep\""));
+    }
+}
+
+#[test]
+fn a_shallow_window_read_whole_is_not_depth_limited() {
+    let args = base_args();
+    let result = crate::snapshot::build(
+        &WaitSnapshotAdapter,
+        &tree_options(&args),
+        Some("FixtureApp"),
+        None,
+        crate::Deadline::standard().unwrap(),
+    )
+    .unwrap();
+    let body = format_snapshot_fields(&result, None, None).unwrap();
+    assert!(body.get("depth_limited").is_none());
+    assert!(body.get("depth_hint").is_none());
+}
+
 #[test]
 fn a_minimized_window_is_named_in_the_payload() {
     let mut result = crate::snapshot::SnapshotResult {
