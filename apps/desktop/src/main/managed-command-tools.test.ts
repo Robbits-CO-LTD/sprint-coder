@@ -18,6 +18,11 @@ import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
 import { CommandRunner, CommandRunnerError, type CommandResult } from './command-runner';
 import * as commandRunnerModule from './command-runner';
 import * as desktopControlModule from './desktop-control';
+import {
+  configureDesktopControlTeamCursors,
+  endDesktopControlSessions,
+  resetDesktopControlSessions,
+} from './desktop-control-session';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -551,6 +556,141 @@ describe('desktop control Workspace roots', () => {
     },
     60_000,
   );
+
+  it('with the Task’s cursors on, starts the Task’s session once and runs the Leader in it', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-session-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    const runner = new CommandRunner({ sandboxed: true });
+    let startExit = 0;
+    const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      if (spec.argv[0] === 'session' && spec.argv[1] === 'start')
+        await options.onBatch?.([
+          {
+            seq: 0,
+            stream: 'stdout',
+            text: JSON.stringify({ ok: true, data: { session_id: 'run-77' } }),
+            byteLength: 1,
+          },
+        ]);
+      return {
+        executionId: 'execution',
+        exitCode: spec.argv[1] === 'start' ? startExit : 0,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+    });
+    const authorize = vi.fn(() => ({
+      decision: 'allow' as const,
+      reason: 'test',
+      beforeExecute: () => true,
+      approvalDecision: 'allow_once' as const,
+    }));
+    const broker = new ToolBroker(registry, () => 1, authorize);
+    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-session',
+      turnId: 'turn-desktop-session',
+      workspaceId: 'workspace-desktop-session',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const dispatch = (callId: string, argv: string[]) =>
+      broker.dispatch({
+        ...owner,
+        callId,
+        providerName: 'run_command',
+        input: { executable: process.execPath, argv, purpose: 'desktop session' },
+      });
+    const calls = () =>
+      run.mock.calls.map(([spec, options]) => ({
+        argv: spec.argv,
+        session: options?.desktopControlSession,
+        roots: options?.desktopControlWorkspaceRoots,
+      }));
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    const leader = { id: 'run-77', agentId: 'leader' };
+    try {
+      // Off: the runs are exactly as before, `--session` included, and Main runs nothing itself.
+      await dispatch('off', ['--session', 'mine', 'list-windows']);
+      expect(calls()).toEqual([
+        { argv: ['--session', 'mine', 'list-windows'], session: undefined, roots: [workspace] },
+      ]);
+      run.mockClear();
+
+      configureDesktopControlTeamCursors(true);
+      // A run whose session cannot be started does not start, and its command is failed.
+      startExit = 1;
+      await expect(dispatch('no-session', ['list-windows'])).rejects.toThrow('実行しなかった');
+      expect(calls().map(({ argv }) => argv[0])).toEqual(['session', 'session']);
+      expect([...commandRows.values()].at(-1)?.state).toBe('failed');
+      run.mockClear();
+      startExit = 0;
+
+      await dispatch('first', ['list-windows']);
+      await dispatch('second', ['click', '@s1:e1']);
+      expect(calls()).toEqual([
+        {
+          argv: [
+            'session',
+            'start',
+            '--name',
+            'sprint-coder',
+            '--cursor',
+            '--multi-agent',
+            '--no-trace',
+          ],
+          session: undefined,
+          roots: [workspace],
+        },
+        {
+          argv: ['cursor-overlay', 'enable', '--label', 'Leader', '--accent', '#2563EB'],
+          session: leader,
+          roots: [workspace],
+        },
+        { argv: ['list-windows'], session: leader, roots: [workspace] },
+        { argv: ['click', '@s1:e1'], session: leader, roots: [workspace] },
+      ]);
+      // A run that only prints stays out of the session.
+      run.mockClear();
+      await dispatch('inert', ['status']);
+      expect(calls()).toEqual([{ argv: ['status'], session: undefined, roots: [workspace] }]);
+
+      // The agent may not choose a session or agent id, nor manage sessions or cursors itself.
+      run.mockClear();
+      authorize.mockClear();
+      for (const argv of [
+        ['click', '@s1:e1', '--session', 'run-77'],
+        ['--agent-id', 'w1', 'click', '@s1:e1'],
+        ['session', 'end'],
+        ['cursor-overlay', 'disable'],
+      ])
+        await expect(dispatch(`refused-${argv.join('-')}`, argv)).rejects.toThrow(
+          'デスクトップ操作の実行を拒否した',
+        );
+      expect(authorize).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+
+      // Quitting ends the Task's session through the same runner.
+      await endDesktopControlSessions();
+      expect(calls()).toEqual([
+        { argv: ['session', 'end', 'run-77'], session: undefined, roots: [workspace] },
+      ]);
+    } finally {
+      desktop.mockRestore();
+      resetDesktopControlSessions();
+      run.mockRestore();
+      await broker.dispose();
+    }
+  });
 
   it('refuses desktop-control arguments before a command or card exists', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-refusal-'));

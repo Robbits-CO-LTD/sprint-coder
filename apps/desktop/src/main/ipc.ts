@@ -315,6 +315,10 @@ import {
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import { configureDesktopControlStateRoot } from './desktop-control';
+import {
+  configureDesktopControlTeamCursors,
+  endDesktopControlSession,
+} from './desktop-control-session';
 import { configureStartMenuShortcutReader } from './desktop-control-start-menu';
 import {
   promptWriteAccess,
@@ -1141,6 +1145,9 @@ export class IpcRouter {
     configureApprovalDigestKey(app.getPath('userData'));
     // Desktop-control runs keep their snapshots here, where the approval card reads part names.
     configureDesktopControlStateRoot(join(app.getPath('userData'), 'desktop-control'));
+    // Hidden opt-in, read once here: each Task's desktop-control runs share one multi-agent
+    // session, so every agent of the Task draws its own cursor (desktop-control-session.ts).
+    configureDesktopControlTeamCursors(process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1');
     // `launch <name>` of desktop control looks the name up in the Start menu's shortcuts.
     if (process.platform === 'win32')
       configureStartMenuShortcutReader((path) => shell.readShortcutLink(path));
@@ -3097,10 +3104,19 @@ export class IpcRouter {
       IPC_CHANNELS.tasksSetArchived,
       taskArchivedInputSchema,
       taskSummarySchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.tasksSetArchived, () =>
-          this.persistence.setArchived(input.taskId, input.archived),
-        ).value,
+      (input, event, envelope) => {
+        const result = this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.tasksSetArchived,
+          () => this.persistence.setArchived(input.taskId, input.archived),
+        ).value;
+        // An archived Task's desktop-control session (and its cursors) ends; a later run of the
+        // Task starts a new one.
+        if (input.archived) void endDesktopControlSession(input.taskId);
+        return result;
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.tasksSetGoal,

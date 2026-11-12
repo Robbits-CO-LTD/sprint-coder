@@ -197,6 +197,7 @@ export function desktopControlEnvironment(
   lookup: DesktopControlLookup = {},
   expectedWindowOwner?: string,
   cursorRenderer?: DesktopControlCursorRenderer,
+  session?: DesktopControlSessionVariables,
 ): Readonly<Record<string, string>> {
   const windows = (lookup.platform ?? process.platform) === 'win32';
   const paths = windows ? win32 : posix;
@@ -210,11 +211,16 @@ export function desktopControlEnvironment(
   // app-wide Task grant (`expectedWindowOwner`); one the caller chose, in any letter case, is
   // always dropped.
   // The cursor renderer's image and host are set by Main alone too (`cursorRenderer`).
+  // So are the session and agent id of a run in Main's own session (`session`); without one, those
+  // variables are left exactly as they were.
   const owned = [
     DESKTOP_CONTROL_STATE_VARIABLE,
     DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
     DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
     DESKTOP_CONTROL_HOST_PID_VARIABLE,
+    ...(session === undefined
+      ? []
+      : [DESKTOP_CONTROL_SESSION_VARIABLE, DESKTOP_CONTROL_AGENT_ID_VARIABLE]),
   ];
   const filtered = Object.entries(environment).filter(
     ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
@@ -225,6 +231,10 @@ export function desktopControlEnvironment(
   if (cursorRenderer !== undefined) {
     filtered.push([DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE, cursorRenderer.image]);
     filtered.push([DESKTOP_CONTROL_HOST_PID_VARIABLE, String(cursorRenderer.hostPid)]);
+  }
+  if (session !== undefined) {
+    filtered.push([DESKTOP_CONTROL_SESSION_VARIABLE, session.id]);
+    filtered.push([DESKTOP_CONTROL_AGENT_ID_VARIABLE, session.agentId]);
   }
   return Object.fromEntries(
     filtered.map(([key, value]) => {
@@ -280,6 +290,22 @@ export type DesktopControlCursorRenderer = Readonly<{
   image: string;
   /** The process whose exit ends the renderer. */
   hostPid: number;
+}>;
+
+/**
+ * The variables the executable reads the session and the agent id of a run from (`--session` and
+ * `--agent-id` win over them, which is why those options are refused while Main sets these; see
+ * `desktopControlScopeOptionRefusal`). Set by Main alone, for a run in the multi-agent session it
+ * keeps for the Task (`desktop-control-session.ts`).
+ */
+export const DESKTOP_CONTROL_SESSION_VARIABLE = 'AGENT_DESKTOP_SESSION';
+export const DESKTOP_CONTROL_AGENT_ID_VARIABLE = 'AGENT_DESKTOP_AGENT_ID';
+
+export type DesktopControlSessionVariables = Readonly<{
+  /** The session Main started (`session start` printed it). */
+  id: string;
+  /** Whose cursor the run moves. */
+  agentId: string;
 }>;
 
 /** That variable's value for a process, or `null` when it cannot be written in that form. */
@@ -884,6 +910,49 @@ export function desktopControlArgvRefusal(
     Object.hasOwn(POINT_CHOICES, key) ? POINT_CHOICES[key]! : [],
     (name) => (name === '' ? positionals.length > 0 : read.options.has(name)),
   );
+}
+
+/**
+ * Why a run Main places in its own session must not run with these arguments, or `null`: an
+ * argv `--session` or `--agent-id` would win over the variables Main sets, so the run would leave
+ * Main's session (and the snapshots its card reads), or move another agent's cursor. Refused with
+ * a reason rather than removed, so the card's argv stays the argv that runs.
+ */
+export function desktopControlScopeOptionRefusal(argv: readonly string[]): string | null {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string') return null;
+  const given = ['--session', '--agent-id'].filter((name) => read.options.has(name));
+  return given.length === 0
+    ? null
+    : refusal(
+        `${given.join(' と ')} は付けない（Sprint Coder が、この Task の操作の記録とカーソルを自分で入れる）`,
+      );
+}
+
+// The commands that start, end or reclaim sessions or switch the cursors, which Main keeps for the
+// Task while it places runs in its own session.
+const SESSION_MANAGEMENT_COMMANDS = new Set([
+  'session start',
+  'session end',
+  'session gc',
+  'cursor-overlay enable',
+  'cursor-overlay disable',
+]);
+
+/**
+ * `desktopControlScopeOptionRefusal`, and for an argv the agent chose while Main keeps a session
+ * for the Task, why it may not start, end or reclaim sessions or switch the cursors itself: ending
+ * Main's session would stop every later run of the Task, and switching the cursors off stops every
+ * agent's. `null` when it may run.
+ */
+export function desktopControlSessionArgvRefusal(argv: readonly string[]): string | null {
+  const scoped = desktopControlScopeOptionRefusal(argv);
+  if (scoped !== null) return scoped;
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string' || read.help.length > 0 || read.key === undefined) return null;
+  return SESSION_MANAGEMENT_COMMANDS.has(read.key)
+    ? refusal(`${read.key} は使えない（操作の記録とカーソルは Sprint Coder が管理している）`)
+    : null;
 }
 
 // Commands of the desktop-control binary 1.2.0 that take one point either as a part or as

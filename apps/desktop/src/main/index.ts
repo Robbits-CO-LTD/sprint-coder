@@ -22,6 +22,7 @@ import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
 import { GraphRenderService } from './graph-render';
 import { reportDesktopControlAvailability } from './desktop-control';
+import { endDesktopControlSessions } from './desktop-control-session';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
@@ -372,6 +373,9 @@ async function restartToInstallUpdate(): Promise<'started' | 'busy' | 'shutdown_
 
 async function disposeApplicationResources(): Promise<void> {
   autoUpdateController?.stop();
+  // Before the runners are disposed: each Task's desktop-control session ends, which also stops its
+  // cursors (they end with Main anyway).
+  await endDesktopControlSessions();
   try {
     await router?.dispose();
   } catch (error) {

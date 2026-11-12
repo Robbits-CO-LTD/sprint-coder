@@ -31,7 +31,9 @@ import {
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlScopeOptionRefusal,
   runsOutsideCommandSandbox,
+  type DesktopControlSessionVariables,
 } from './desktop-control';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
@@ -709,6 +711,12 @@ export type RunOptions = Readonly<{
    * window id it names must still belong to (`desktopControlEnvironment`). Absent otherwise.
    */
   desktopControlExpectedWindowOwner?: string;
+  /**
+   * For a desktop-control run Main places in the multi-agent session it keeps for the Task: the
+   * session and agent id it runs as (`desktopControlEnvironment`). Absent otherwise, and the run's
+   * variables are then as they always were.
+   */
+  desktopControlSession?: DesktopControlSessionVariables;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
   onBatch?: (chunks: readonly CommandOutputChunk[]) => void | Promise<void>;
@@ -869,7 +877,10 @@ export class CommandRunner {
           options.desktopControlWorkspaceRoots,
         );
       const desktopControlRefusal = desktopControl
-        ? desktopControlArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? [])
+        ? (desktopControlArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? []) ??
+          (options.desktopControlSession === undefined
+            ? null
+            : desktopControlScopeOptionRefusal(spec.argv)))
         : null;
       if (desktopControlRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
@@ -907,6 +918,7 @@ export class CommandRunner {
             {},
             options.desktopControlExpectedWindowOwner,
             { image: spec.absoluteExecutable, hostPid: process.pid },
+            options.desktopControlSession,
           )
         : spec.envDelta;
       const commandEnvironment =

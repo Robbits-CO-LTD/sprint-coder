@@ -25,6 +25,11 @@ import {
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
 import * as desktopControlModule from './desktop-control';
 import { rememberDesktopControlWindows } from './desktop-control-display';
+import {
+  configureDesktopControlTeamCursors,
+  ensureDesktopControlSession,
+  resetDesktopControlSessions,
+} from './desktop-control-session';
 import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
@@ -2573,6 +2578,83 @@ describe('ApprovalCoordinator desktop control card', () => {
         expect(exact).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
         expect(exact).not.toHaveProperty('desktopControlExpectedWindowOwner');
       });
+    });
+
+    it('with the Task’s cursors on, names parts and grants the app only from Main’s own session of the Task', async () => {
+      const harness = createHarness();
+      configureDesktopControlTeamCursors(true);
+      try {
+        await withAppGrantState(async (prepare) => {
+          // The same snapshot id in Main's session names another app than the default folder.
+          const session = join(
+            desktopControlModule.desktopControlStateFolder(),
+            'sessions',
+            'run-5',
+            'snapshots',
+            'scharmap',
+          );
+          await mkdir(session, { recursive: true });
+          await writeFile(
+            join(session, 'refmap.json'),
+            JSON.stringify({
+              inner: {
+                '@e1': { ...part('mspaint.exe', 300, 'w-3'), name: 'Session OK' },
+                '@e2': part('mspaint.exe', 300, 'w-3'),
+              },
+            }),
+          );
+          // Before the Task has its session, the run's parts cannot be read, so none is named and
+          // the app is not offered.
+          const before = harness.coordinator.authorizeTool(
+            request(await prepare(['click', '@scharmap:e1']), 'session-before'),
+          );
+          const unnamed = await waitForPublished(harness);
+          expect(desktopActionOf(unnamed)).toMatchObject({
+            target: { resolved: false },
+            allowTaskGrant: true,
+          });
+          expect(desktopActionOf(unnamed)).not.toHaveProperty('appGrant');
+          harness.coordinator.resolve(resolveCommand(unnamed, 'deny'));
+          await expect(before).resolves.toMatchObject({ decision: 'deny' });
+
+          await ensureDesktopControlSession('task-1', async (argv) =>
+            argv[1] === 'start' ? JSON.stringify({ ok: true, data: { session_id: 'run-5' } }) : '',
+          );
+          harness.published.length = 0;
+          const first = harness.coordinator.authorizeTool(
+            request(await prepare(['click', '@scharmap:e1']), 'session-first'),
+          );
+          const approval = await waitForPublished(harness);
+          expect(desktopActionOf(approval)).toMatchObject({
+            target: { resolved: true, app: 'mspaint.exe', name: 'Session OK' },
+            appGrant: { app: 'mspaint.exe' },
+          });
+          harness.coordinator.resolve({
+            ...resolveCommand(approval, 'allow_task'),
+            grantScope: 'app',
+          });
+          await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+          // The app's next background run in the session needs no card.
+          const next = await harness.coordinator.authorizeTool(
+            request(await prepare(['set-value', '@scharmap:e2', 'ABC']), 'session-next'),
+          );
+          expect(next).toMatchObject({
+            decision: 'allow',
+            approvalDecision: 'allow_task',
+            desktopControlExpectedWindowOwner: '300:windows-proc-v1:300:1',
+          });
+          expect(harness.published).toHaveLength(1);
+          // The foreground still gets its card every time.
+          const typed = harness.coordinator.authorizeTool(
+            request(await prepare(['type', '@scharmap:e2', 'ABC']), 'session-type'),
+          );
+          await viWaitFor(() => harness.published.length === 2);
+          harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+          await expect(typed).resolves.toMatchObject({ decision: 'deny' });
+        });
+      } finally {
+        resetDesktopControlSessions();
+      }
     });
   });
 
