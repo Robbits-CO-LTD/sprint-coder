@@ -97,6 +97,10 @@ pub enum MenuMismatch {
     NotifyByPosition,
     /// The window has no menu bar now.
     NoMenuBar,
+    /// The application replaced its menu bar, or a submenu on the way, while
+    /// it was told the menu opens or closes: the menu that was matched is no
+    /// longer the one the window shows.
+    Replaced,
 }
 
 impl MenuMismatch {
@@ -109,6 +113,7 @@ impl MenuMismatch {
             Self::CommandChanged => "command_changed",
             Self::NotifyByPosition => "notify_by_position",
             Self::NoMenuBar => "no_menu_bar",
+            Self::Replaced => "menu_replaced",
         }
     }
 }

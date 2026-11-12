@@ -42,6 +42,80 @@ mod live {
     /// `WM_BUSY`: so the application is busy right when the command arrives.
     static BUSY_AFTER_CLOSING: AtomicUsize = AtomicUsize::new(0);
 
+    /// What a test window's application does to its menu while it is told the
+    /// menu opens or closes. The old menu is kept alive, never destroyed.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Change {
+        /// Replaces the bar on `WM_INITMENU`.
+        BarOnOpen(Variant),
+        /// Replaces the File submenu on its `WM_INITMENUPOPUP`.
+        SubmenuOnOpen(Variant),
+        /// Replaces the bar on `WM_UNINITMENUPOPUP`.
+        BarOnClose(Variant),
+        /// Disables the window on `WM_UNINITMENUPOPUP`, as a dialog it opens would.
+        DisableOnClose,
+    }
+
+    /// How 上書き保存 (1002) reads in the replacement File menu.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Variant {
+        Missing,
+        Disabled,
+        /// 1002 is another item, 全部削除.
+        OtherItem,
+    }
+
+    static CHANGES: Mutex<Vec<(usize, Change)>> = Mutex::new(Vec::new());
+
+    fn take_change(hwnd: usize, applies: impl Fn(Change) -> bool) -> Option<Change> {
+        let mut changes = CHANGES.lock().unwrap();
+        let at = changes
+            .iter()
+            .position(|(window, change)| *window == hwnd && applies(*change))?;
+        Some(changes.remove(at).1)
+    }
+
+    unsafe fn replacement_file(
+        variant: Variant,
+    ) -> windows_sys::Win32::UI::WindowsAndMessaging::HMENU {
+        // SAFETY: plain menu creation.
+        unsafe {
+            let file = CreatePopupMenu();
+            AppendMenuW(file, MF_STRING, 1001, wide("開く(&O)...\tCtrl+O").as_ptr());
+            match variant {
+                Variant::Missing => {}
+                Variant::Disabled => {
+                    AppendMenuW(
+                        file,
+                        MF_STRING | MF_GRAYED,
+                        1002,
+                        wide("上書き保存(&S)\tCtrl+S").as_ptr(),
+                    );
+                }
+                Variant::OtherItem => {
+                    AppendMenuW(file, MF_STRING, 1002, wide("全部削除(&D)").as_ptr());
+                }
+            }
+            file
+        }
+    }
+
+    unsafe fn replacement_bar(
+        variant: Variant,
+    ) -> windows_sys::Win32::UI::WindowsAndMessaging::HMENU {
+        // SAFETY: plain menu creation.
+        unsafe {
+            let bar = CreateMenu();
+            AppendMenuW(
+                bar,
+                MF_POPUP,
+                replacement_file(variant) as usize,
+                wide("ファイル(&F)").as_ptr(),
+            );
+            bar
+        }
+    }
+
     unsafe extern "system" fn procedure(
         hwnd: HWND,
         message: u32,
@@ -62,7 +136,94 @@ mod live {
                 .unwrap()
                 .push((hwnd as usize, message, wparam));
         }
+        // SAFETY: changes to this test's own window and menus, on its own thread.
+        unsafe {
+            let window = hwnd as usize;
+            match message {
+                WM_INITMENU => {
+                    if let Some(Change::BarOnOpen(variant)) =
+                        take_change(window, |change| matches!(change, Change::BarOnOpen(_)))
+                    {
+                        windows_sys::Win32::UI::WindowsAndMessaging::SetMenu(
+                            hwnd,
+                            replacement_bar(variant),
+                        );
+                    }
+                }
+                WM_INITMENUPOPUP => {
+                    if let Some(Change::SubmenuOnOpen(variant)) =
+                        take_change(window, |change| matches!(change, Change::SubmenuOnOpen(_)))
+                    {
+                        let bar = GetMenu(hwnd);
+                        // RemoveMenu keeps the old submenu alive, detached.
+                        windows_sys::Win32::UI::WindowsAndMessaging::RemoveMenu(
+                            bar,
+                            0,
+                            MF_BYPOSITION,
+                        );
+                        InsertMenuW(
+                            bar,
+                            0,
+                            MF_BYPOSITION | MF_POPUP | MF_STRING,
+                            replacement_file(variant) as usize,
+                            wide("ファイル(&F)").as_ptr(),
+                        );
+                    }
+                }
+                WM_UNINITMENUPOPUP => {
+                    match take_change(window, |change| {
+                        matches!(change, Change::BarOnClose(_) | Change::DisableOnClose)
+                    }) {
+                        Some(Change::BarOnClose(variant)) => {
+                            windows_sys::Win32::UI::WindowsAndMessaging::SetMenu(
+                                hwnd,
+                                replacement_bar(variant),
+                            );
+                        }
+                        Some(Change::DisableOnClose) => {
+                            windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, 0);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
         match message {
+            // 3001 opens a modal dialog after a moment: the window is disabled
+            // while a nested message loop runs, as a dialog's would.
+            WM_COMMAND if wparam == 3001 => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                // SAFETY: this test's own window and thread's messages.
+                unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, 0);
+                    let until = std::time::Instant::now() + std::time::Duration::from_millis(800);
+                    let mut message: MSG = std::mem::zeroed();
+                    while std::time::Instant::now() < until {
+                        while windows_sys::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                            &mut message,
+                            std::ptr::null_mut(),
+                            0,
+                            0,
+                            windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE,
+                        ) != 0
+                        {
+                            // A dialog's loop hands the end of the thread's loop back,
+                            // so the test window still closes when a test fails.
+                            if message.message
+                                == windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT
+                            {
+                                PostQuitMessage(0);
+                                return 0;
+                            }
+                            DispatchMessageW(&message);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, 1);
+                }
+                0
+            }
             WM_UNINITMENUPOPUP
                 if BUSY_AFTER_CLOSING
                     .compare_exchange(hwnd as usize, 0, Ordering::SeqCst, Ordering::SeqCst)
@@ -475,6 +636,74 @@ mod live {
         let error = run(&bare.info(), &save(&bare.info())).unwrap_err();
         assert_eq!(error.details.unwrap()["reason"], "no_menu_bar");
         bare.assert_nothing_sent();
+    }
+
+    fn change(remote: &Remote, change: Change) {
+        CHANGES.lock().unwrap().push((remote.hwnd, change));
+    }
+
+    /// The application swaps its menu (the bar, or the File submenu) while it
+    /// is told the menu opens or closes, and keeps the old one alive: matching
+    /// the detached menu would succeed, while the window shows one where
+    /// 上書き保存 is gone, disabled, or 1002 is another item. Nothing is sent.
+    #[test]
+    fn a_menu_the_application_replaced_while_told_is_never_run() {
+        for replaced in [
+            Change::BarOnOpen(Variant::Missing),
+            Change::BarOnOpen(Variant::Disabled),
+            Change::BarOnOpen(Variant::OtherItem),
+            Change::SubmenuOnOpen(Variant::Missing),
+            Change::SubmenuOnOpen(Variant::Disabled),
+            Change::SubmenuOnOpen(Variant::OtherItem),
+            Change::BarOnClose(Variant::OtherItem),
+        ] {
+            let remote = Remote::new(true);
+            let window = remote.info();
+            change(&remote, replaced);
+            let error = run(&window, &save(&window)).unwrap_err();
+            assert_eq!(error.code, ErrorCode::StaleRef, "{replaced:?}: {error:?}");
+            assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+            assert_eq!(
+                error.details.unwrap()["reason"],
+                "menu_replaced",
+                "{replaced:?}"
+            );
+            remote.assert_nothing_sent();
+        }
+    }
+
+    /// The window is checked once more right before the command: one disabled
+    /// by the closing messages (a dialog the application opened then) gets
+    /// nothing.
+    #[test]
+    fn a_window_disabled_while_the_menu_closes_gets_no_command() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        change(&remote, Change::DisableOnClose);
+        let error = run(&window, &save(&window)).unwrap_err();
+        assert_eq!(error.details.unwrap()["kind"], "window_disabled");
+        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+        remote.assert_nothing_sent();
+    }
+
+    /// A command that opens a modal dialog, handed over but not yet handled,
+    /// and at once the next click: its opening messages wait behind the
+    /// command, the dialog then disables the window, and the next click stops
+    /// before its own command.
+    #[test]
+    fn the_click_after_a_command_that_opens_a_dialog_runs_nothing() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        let about = entry(&window, &[("ヘルプ(H)", 1), ("バージョン情報(A)", 0)], 3001);
+        run(&window, &about).unwrap();
+        let error = run(&window, &save(&window)).unwrap_err();
+        assert!(
+            [ErrorCode::ActionFailed, ErrorCode::AppUnresponsive].contains(&error.code),
+            "{error:?}"
+        );
+        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        assert_eq!(remote.commands(1), vec![3001], "only the first command ran");
     }
 
     /// A window of the calling thread would run the handler inside the call
