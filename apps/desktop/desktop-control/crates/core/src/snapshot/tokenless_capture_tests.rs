@@ -250,7 +250,7 @@ fn a_long_deadline_with_little_left_never_falls_back_to_the_view() {
     adapter.serve_view();
 
     let started = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(8))
+        .checked_sub(std::time::Duration::from_millis(8_500))
         .expect("the clock is past its first seconds");
     let deadline = Deadline::at(started, 10_000).expect("a deadline");
     let captured =

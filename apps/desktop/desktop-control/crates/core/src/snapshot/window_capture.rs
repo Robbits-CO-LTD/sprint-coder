@@ -147,13 +147,14 @@ pub(crate) fn capture_window(
 /// span while little of it is left, so the span alone would let a late poll,
 /// whose whole-window read got only a fraction of a default one's time, switch
 /// a window that a default read proves whole. The read must have had most of
-/// what a default snapshot gives it.
+/// what a default snapshot gives it (measured: about 1.9 s of the 2.25 s, after
+/// the window listing; half the default leaves room for a slower listing).
 fn view_fallback_allowed(
     deadline: crate::Deadline,
     whole_read_budget: std::time::Duration,
 ) -> bool {
     let default = std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
-    deadline.span() >= default && whole_read_budget >= default * 3 / 5
+    deadline.span() >= default && whole_read_budget >= default / 2
 }
 
 /// How a read of the window's visible elements ended.
