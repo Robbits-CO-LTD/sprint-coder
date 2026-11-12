@@ -28,7 +28,7 @@ mod live {
         DestroyWindow, DispatchMessageW, EnableMenuItem, GetMenu, GetMessageW, GetSubMenu,
         InsertMenuW, MF_BYCOMMAND, MF_BYPOSITION, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_STRING, MSG,
         ModifyMenuW, PostMessageW, PostQuitMessage, RegisterClassW, WM_APP, WM_CLOSE, WM_COMMAND,
-        WM_DESTROY, WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP, WNDCLASSW,
+        WM_DESTROY, WM_INITMENU, WM_INITMENUPOPUP, WM_MENUCOMMAND, WM_UNINITMENUPOPUP, WNDCLASSW,
         WS_OVERLAPPEDWINDOW,
     };
 
@@ -54,7 +54,13 @@ mod live {
         BarOnClose(Variant),
         /// Disables the window on `WM_UNINITMENUPOPUP`, as a dialog it opens would.
         DisableOnClose,
+        /// Inserts 新規 at the top of the File menu on `WM_UNINITMENUPOPUP`,
+        /// which moves every item below it down by one.
+        InsertOnClose,
     }
+
+    /// The `lParam` (the menu) of every `WM_MENUCOMMAND` a test window handled.
+    static MENU_COMMAND_MENUS: Mutex<Vec<(usize, isize)>> = Mutex::new(Vec::new());
 
     /// How 上書き保存 (1002) reads in the replacement File menu.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,6 +133,7 @@ mod live {
             WM_INITMENUPOPUP,
             WM_UNINITMENUPOPUP,
             WM_COMMAND,
+            WM_MENUCOMMAND,
             WM_BUSY,
         ]
         .contains(&message)
@@ -135,6 +142,12 @@ mod live {
                 .lock()
                 .unwrap()
                 .push((hwnd as usize, message, wparam));
+        }
+        if message == WM_MENUCOMMAND {
+            MENU_COMMAND_MENUS
+                .lock()
+                .unwrap()
+                .push((hwnd as usize, lparam));
         }
         // SAFETY: changes to this test's own window and menus, on its own thread.
         unsafe {
@@ -172,8 +185,20 @@ mod live {
                 }
                 WM_UNINITMENUPOPUP => {
                     match take_change(window, |change| {
-                        matches!(change, Change::BarOnClose(_) | Change::DisableOnClose)
+                        matches!(
+                            change,
+                            Change::BarOnClose(_) | Change::DisableOnClose | Change::InsertOnClose
+                        )
                     }) {
+                        Some(Change::InsertOnClose) => {
+                            InsertMenuW(
+                                GetSubMenu(GetMenu(hwnd), 0),
+                                0,
+                                MF_BYPOSITION | MF_STRING,
+                                1000,
+                                wide("新規(&N)").as_ptr(),
+                            );
+                        }
                         Some(Change::BarOnClose(variant)) => {
                             windows_sys::Win32::UI::WindowsAndMessaging::SetMenu(
                                 hwnd,
@@ -385,10 +410,55 @@ mod live {
             }
         }
 
-        /// Asserts that no command reached the window.
+        /// The `WM_MENUCOMMAND`s this window handled - position and menu -
+        /// once `count` of them arrived or after a short wait.
+        fn menu_commands(&self, count: usize) -> Vec<(usize, isize)> {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
+            loop {
+                let positions: Vec<usize> = self
+                    .handled()
+                    .into_iter()
+                    .filter(|(message, _)| *message == WM_MENUCOMMAND)
+                    .map(|(_, wparam)| wparam)
+                    .collect();
+                if positions.len() >= count || std::time::Instant::now() > until {
+                    let menus: Vec<isize> = MENU_COMMAND_MENUS
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(hwnd, _)| *hwnd == self.hwnd)
+                        .map(|(_, menu)| *menu)
+                        .collect();
+                    return positions.into_iter().zip(menus).collect();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        /// Sets the style that makes the bar - and, with `submenus`, every
+        /// menu below it - report a chosen item by its position.
+        fn report_by_position(&self, submenus: bool) {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                MENUINFO, MIM_APPLYTOSUBMENUS, MIM_STYLE, MNS_NOTIFYBYPOS, SetMenuInfo,
+            };
+            // SAFETY: changes this test's own menu.
+            unsafe {
+                let mut info: MENUINFO = std::mem::zeroed();
+                info.cbSize = std::mem::size_of::<MENUINFO>() as u32;
+                info.fMask = MIM_STYLE | if submenus { MIM_APPLYTOSUBMENUS } else { 0 };
+                info.dwStyle = MNS_NOTIFYBYPOS;
+                assert_ne!(SetMenuInfo(GetMenu(self.handle()), &info), 0);
+            }
+        }
+
+        /// Asserts that neither a command nor a position reached the window.
         fn assert_nothing_sent(&self) {
             std::thread::sleep(std::time::Duration::from_millis(200));
             assert!(self.commands(0).is_empty(), "nothing may be handed over");
+            assert!(
+                self.menu_commands(0).is_empty(),
+                "no position may be handed over"
+            );
         }
     }
 
@@ -704,6 +774,81 @@ mod live {
         assert_eq!(error.disposition, DeliverySemantics::not_delivered());
         std::thread::sleep(std::time::Duration::from_millis(1_200));
         assert_eq!(remote.commands(1), vec![3001], "only the first command ran");
+    }
+
+    fn by_position(mut entry: RefEntry) -> RefEntry {
+        entry.identity.in_menu.as_mut().unwrap().by_position = true;
+        entry
+    }
+
+    /// A menu that reports a chosen item by position gets `WM_MENUCOMMAND`
+    /// with the item's position in its own menu and that menu, as the menu
+    /// itself sends it - never `WM_COMMAND`.
+    #[test]
+    fn an_item_of_a_menu_reporting_by_position_is_handed_its_position_and_menu() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        remote.report_by_position(true);
+        let result = run(&window, &by_position(save(&window))).unwrap();
+        assert_eq!(
+            result.disposition(),
+            DeliverySemantics::delivered_unverified()
+        );
+        assert_eq!(result.details.as_ref().unwrap()["menu_position"], 1);
+        assert_eq!(
+            remote.menu_commands(1),
+            vec![(1, remote.file_menu() as isize)]
+        );
+        assert!(remote.commands(0).is_empty(), "no WM_COMMAND is sent");
+        let handled: Vec<u32> = remote
+            .handled()
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect();
+        assert_eq!(
+            handled,
+            vec![
+                WM_INITMENU,
+                WM_INITMENUPOPUP,
+                WM_UNINITMENUPOPUP,
+                WM_MENUCOMMAND
+            ]
+        );
+    }
+
+    /// The ref says how the menu reported a chosen item when it was read; a
+    /// menu that reports otherwise now - or only partly by position, the bar
+    /// without its submenus - gets nothing, as either message could be taken
+    /// for something else.
+    #[test]
+    fn a_menu_reporting_otherwise_than_recorded_is_never_run() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        refused(&remote, &by_position(save(&window)), "notify_by_position");
+        remote.report_by_position(true);
+        refused(&remote, &save(&window), "notify_by_position");
+        let mixed = Remote::new(true);
+        mixed.report_by_position(false);
+        let window = mixed.info();
+        refused(&mixed, &save(&window), "notify_by_position");
+        refused(&mixed, &by_position(save(&window)), "notify_by_position");
+    }
+
+    /// The position is what the window is told, so an item the application
+    /// moves while the menu closes is never run by position; the same move
+    /// in a menu that sends commands runs the same command.
+    #[test]
+    fn an_item_moved_while_the_menu_closes_is_never_run_by_position() {
+        let remote = Remote::new(true);
+        let window = remote.info();
+        remote.report_by_position(true);
+        change(&remote, Change::InsertOnClose);
+        refused(&remote, &by_position(save(&window)), "menu_replaced");
+        let commands = Remote::new(true);
+        let window = commands.info();
+        change(&commands, Change::InsertOnClose);
+        run(&window, &save(&window)).unwrap();
+        assert_eq!(commands.commands(1), vec![1002]);
     }
 
     /// A window of the calling thread would run the handler inside the call

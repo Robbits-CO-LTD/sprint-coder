@@ -2,7 +2,12 @@
 //! Runs an item of a window's standard menu bar without opening the menu:
 //! the item's command is handed to the window as `WM_COMMAND`, as the menu
 //! itself does when a person chooses the item. The window stays where it is
-//! and takes neither the foreground nor the focus.
+//! and takes neither the foreground nor the focus. A menu that reports a
+//! chosen item by its position (`MNS_NOTIFYBYPOS`, on every menu on the way)
+//! gets `WM_MENUCOMMAND` instead, with the item's live position and its
+//! menu's handle, as such a menu sends it; the item is matched the same way,
+//! its command included, and must also stay at the position matched until the
+//! message is handed over.
 //!
 //! Nothing that runs the item is sent unless, at that moment, the window is
 //! the one the ref was read from (handle, owning process and its instance),
@@ -87,7 +92,8 @@ mod imp {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetMenu, GetWindowThreadProcessId, HMENU, IsIconic, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
-        SendNotifyMessageW, WM_COMMAND, WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP,
+        SendNotifyMessageW, WM_COMMAND, WM_INITMENU, WM_INITMENUPOPUP, WM_MENUCOMMAND,
+        WM_UNINITMENUPOPUP,
     };
 
     use crate::system::menu::menu_bar::{bar_of, read_level};
@@ -232,12 +238,19 @@ mod imp {
         unsafe { GetMenu(hwnd as *mut std::ffi::c_void) }
     }
 
-    /// The submenus on the way down and the last item, as the menu holds them
-    /// now from `bar` down the recorded names - read only, nothing is sent.
-    fn walk_quietly(
-        bar: HMENU,
-        proof: &RefMenuProof,
-    ) -> Result<(Vec<HMENU>, NativeMenuItem), MenuMismatch> {
+    /// The item the last recorded name matched, with the submenus it was
+    /// reached through and its position in its own menu.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Found {
+        item: NativeMenuItem,
+        chain: Vec<HMENU>,
+        position: usize,
+    }
+
+    /// The submenus on the way down, the last item and its position, as the
+    /// menu holds them now from `bar` down the recorded names - read only,
+    /// nothing is sent.
+    fn walk_quietly(bar: HMENU, proof: &RefMenuProof) -> Result<Found, MenuMismatch> {
         let mut chain = Vec::new();
         let mut menu = bar;
         let last = proof
@@ -248,11 +261,15 @@ mod imp {
         for (level, step) in proof.steps.iter().enumerate() {
             let items = read_level(menu).ok_or(MenuMismatch::Missing)?;
             let plain: Vec<NativeMenuItem> = items.iter().map(|(item, _)| item.clone()).collect();
-            let index = match_menu_step(&plain, step)?;
+            let index = match_menu_step(&plain, step, proof.by_position)?;
             let (item, submenu) = &items[index];
             if level == last {
                 confirm_menu_leaf(item, proof)?;
-                return Ok((chain, item.clone()));
+                return Ok(Found {
+                    item: item.clone(),
+                    chain,
+                    position: index,
+                });
             }
             if submenu.is_null() {
                 return Err(MenuMismatch::KindChanged);
@@ -272,13 +289,12 @@ mod imp {
     /// would succeed while the window shows another. So after each opening
     /// message, the window's bar must still be the one matched, and the item
     /// just opened must still open the submenu it was told about.
-    #[allow(clippy::type_complexity)]
     fn locate(
         hwnd: isize,
         bar: HMENU,
         proof: &RefMenuProof,
         deadline: Deadline,
-    ) -> Result<(Result<(NativeMenuItem, Vec<HMENU>), MenuMismatch>, Opened), AdapterError> {
+    ) -> Result<(Result<Found, MenuMismatch>, Opened), AdapterError> {
         let mut opened = Opened {
             hwnd,
             popups: Vec::new(),
@@ -296,14 +312,18 @@ mod imp {
                 return Ok((Err(MenuMismatch::Missing), opened));
             };
             let plain: Vec<NativeMenuItem> = items.iter().map(|(item, _)| item.clone()).collect();
-            let index = match match_menu_step(&plain, step) {
+            let index = match match_menu_step(&plain, step, proof.by_position) {
                 Ok(index) => index,
                 Err(mismatch) => return Ok((Err(mismatch), opened)),
             };
             let (item, submenu) = &items[index];
             if level == last {
                 return Ok((
-                    confirm_menu_leaf(item, proof).map(|_| (item.clone(), chain)),
+                    confirm_menu_leaf(item, proof).map(|_| Found {
+                        item: item.clone(),
+                        chain,
+                        position: index,
+                    }),
                     opened,
                 ));
             }
@@ -323,7 +343,7 @@ mod imp {
             let still = read_level(menu).and_then(|items| {
                 let plain: Vec<NativeMenuItem> =
                     items.iter().map(|(item, _)| item.clone()).collect();
-                match_menu_step(&plain, step)
+                match_menu_step(&plain, step, proof.by_position)
                     .ok()
                     .map(|again| items[again].1)
             });
@@ -344,26 +364,42 @@ mod imp {
     /// menu alone, so this call adds no message the application handles
     /// after the command.
     fn read_check_quietly(bar: HMENU, proof: &RefMenuProof) -> Option<bool> {
-        walk_quietly(bar, proof).ok().map(|(_, item)| item.checked)
+        walk_quietly(bar, proof)
+            .ok()
+            .map(|found| found.item.checked)
     }
 
     /// Whether the window still shows, right now, the menu that was matched:
     /// the same bar, the same submenus on the way down, and the item enabled
-    /// and sending the recorded command - read only, nothing is sent.
+    /// and sending the recorded command - read only, nothing is sent. For a
+    /// menu that reports by position, the item must also still sit where it
+    /// was matched: the position is what the window is told.
     fn confirm_unchanged(
         hwnd: isize,
         bar: HMENU,
-        chain: &[HMENU],
+        found: &Found,
         proof: &RefMenuProof,
     ) -> Result<(), MenuMismatch> {
         if bar_now(hwnd) != bar {
             return Err(MenuMismatch::Replaced);
         }
-        let (again, _) = walk_quietly(bar, proof)?;
-        if again != chain {
+        let again = walk_quietly(bar, proof)?;
+        if again.chain != found.chain || (proof.by_position && again.position != found.position) {
             return Err(MenuMismatch::Replaced);
         }
         Ok(())
+    }
+
+    /// The message that runs the item, as the menu itself would send it: the
+    /// item's command, or, in a menu that reports by position, the item's
+    /// position in its own menu and that menu's handle.
+    fn command_message(bar: HMENU, found: &Found, proof: &RefMenuProof) -> (u32, usize, isize) {
+        if proof.by_position {
+            let menu = found.chain.last().copied().unwrap_or(bar);
+            (WM_MENUCOMMAND, found.position, menu as isize)
+        } else {
+            (WM_COMMAND, proof.command_id as usize, 0)
+        }
     }
     pub(crate) fn run_menu_command(
         entry: &RefEntry,
@@ -377,7 +413,9 @@ mod imp {
             .as_ref()
             .ok_or_else(|| agent_desktop_core::menu_ref_refused(entry))?;
         // `WM_COMMAND` carries a 16-bit identifier; a larger one is not a command
-        // this message can send (a capture gives such an item no ref).
+        // this message can send (a capture gives such an item no ref). The same
+        // bound holds for a menu that reports by position, whose command is
+        // matched but not sent.
         if proof.command_id == 0 || proof.command_id > 0xFFFF {
             return Err(menu_mismatch_error(entry, MenuMismatch::CommandChanged));
         }
@@ -420,13 +458,14 @@ mod imp {
         };
         let (found, opened) = locate(hwnd, bar, proof, deadline)?;
         opened.close()?;
-        let (item, chain) = found.map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
+        let found = found.map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
         // The closing messages are handled by the application too.
-        confirm_unchanged(hwnd, bar, &chain, proof)
+        confirm_unchanged(hwnd, bar, &found, proof)
             .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
-        let expected = super::expected_check(item.checked, item.radio);
+        let expected = super::expected_check(found.item.checked, found.item.radio);
+        let (message, wparam, lparam) = command_message(bar, &found, proof);
         // The menu, once more, right before the command.
-        confirm_unchanged(hwnd, bar, &chain, proof)
+        confirm_unchanged(hwnd, bar, &found, proof)
             .map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
         // The last checks before the command, after every read: the messages
         // and the re-reads may have taken the time left, or the application
@@ -437,24 +476,26 @@ mod imp {
         if !enabled(hwnd) {
             return Err(window_disabled(hwnd));
         }
-        let wparam = proof.command_id as usize;
         // SAFETY: hands a message to the window's thread and returns at once;
-        // no pointer is passed.
+        // no pointer is passed (a menu handle is a value, not a pointer into
+        // this process).
         let handed = unsafe {
             SetLastError(0);
-            SendNotifyMessageW(hwnd as *mut std::ffi::c_void, WM_COMMAND, wparam, 0)
+            SendNotifyMessageW(hwnd as *mut std::ffi::c_void, message, wparam, lparam)
         };
         if handed == 0 {
             // SAFETY: reads this thread's last error.
             let code = unsafe { GetLastError() };
             if code == ERROR_ACCESS_DENIED {
-                return Err(unresponsive(WM_COMMAND, code));
+                return Err(unresponsive(message, code));
             }
             return Err(AdapterError::new(
                 ErrorCode::ActionFailed,
                 "The menu item's command could not be handed to the window",
             )
-            .with_platform_detail(format!("SendNotifyMessageW(WM_COMMAND) failed: {code}"))
+            .with_platform_detail(format!(
+                "SendNotifyMessageW(0x{message:04X}) failed: {code}"
+            ))
             .with_details(serde_json::json!({ "kind": "menu_command_not_handed" }))
             .with_disposition(DeliverySemantics::not_delivered()));
         }
@@ -474,12 +515,17 @@ mod imp {
         let step = ActionStep::succeeded(STEP_LABEL)
             .with_mechanism(StepMechanism::SemanticApi)
             .with_verified(verified);
+        let mut details = serde_json::json!({
+            "menu_command": proof.command_id,
+            "verification_scope": if verified { "menu_check_state" } else { "unavailable" },
+        });
+        if proof.by_position {
+            details["menu_message"] = serde_json::json!("WM_MENUCOMMAND");
+            details["menu_position"] = serde_json::json!(found.position);
+        }
         let mut result = ActionResult::delivered_unverified("click")
             .with_steps(vec![step])
-            .with_details(serde_json::json!({
-                "menu_command": proof.command_id,
-                "verification_scope": if verified { "menu_check_state" } else { "unavailable" },
-            }));
+            .with_details(details);
         if verified {
             result = result.with_verified_delivery();
         }

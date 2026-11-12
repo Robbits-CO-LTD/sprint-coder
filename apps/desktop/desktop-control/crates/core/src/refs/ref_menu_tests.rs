@@ -32,6 +32,7 @@ fn proof() -> RefMenuProof {
             step("上書き保存(S)", 1, false),
         ],
         command_id: 1002,
+        by_position: false,
         shortcut: Some("Ctrl+S".to_owned()),
     }
 }
@@ -58,14 +59,14 @@ fn a_level_is_matched_by_its_one_item_of_the_recorded_name_wherever_it_moved() {
         },
         item("上書き保存(&S)\tCtrl+S", 1002),
     ];
-    assert_eq!(match_step(&live, &recorded), Ok(3));
+    assert_eq!(match_step(&live, &recorded, false), Ok(3));
 }
 
 #[test]
 fn two_items_of_the_recorded_name_in_a_level_stop_the_match() {
     let live = vec![item("上書き保存(&S)", 1002), item("上書き保存(S)", 1009)];
     assert_eq!(
-        match_step(&live, &step("上書き保存(S)", 0, false)),
+        match_step(&live, &step("上書き保存(S)", 0, false), false),
         Err(MenuMismatch::Ambiguous)
     );
 }
@@ -74,7 +75,7 @@ fn two_items_of_the_recorded_name_in_a_level_stop_the_match() {
 fn a_missing_renamed_disabled_or_changed_item_stops_the_match() {
     let recorded = step("上書き保存(S)", 0, false);
     assert_eq!(
-        match_step(&[item("名前を付けて保存(&A)", 1002)], &recorded),
+        match_step(&[item("名前を付けて保存(&A)", 1002)], &recorded, false),
         Err(MenuMismatch::Missing)
     );
     assert_eq!(
@@ -83,16 +84,21 @@ fn a_missing_renamed_disabled_or_changed_item_stops_the_match() {
                 disabled: true,
                 ..item("上書き保存(&S)", 1002)
             }],
-            &recorded
+            &recorded,
+            false
         ),
         Err(MenuMismatch::Disabled)
     );
     assert_eq!(
-        match_step(&[opens("上書き保存(&S)")], &recorded),
+        match_step(&[opens("上書き保存(&S)")], &recorded, false),
         Err(MenuMismatch::KindChanged)
     );
     assert_eq!(
-        match_step(&[item("ファイル(&F)", 9)], &step("ファイル(F)", 0, true)),
+        match_step(
+            &[item("ファイル(&F)", 9)],
+            &step("ファイル(F)", 0, true),
+            false
+        ),
         Err(MenuMismatch::KindChanged)
     );
     assert_eq!(
@@ -101,7 +107,8 @@ fn a_missing_renamed_disabled_or_changed_item_stops_the_match() {
                 in_notify_by_position_menu: true,
                 ..item("上書き保存(&S)", 1002)
             }],
-            &recorded
+            &recorded,
+            false
         ),
         Err(MenuMismatch::NotifyByPosition)
     );
@@ -112,10 +119,94 @@ fn a_missing_renamed_disabled_or_changed_item_stops_the_match() {
                 owner_drawn: true,
                 ..item("上書き保存(&S)", 1002)
             }],
-            &recorded
+            &recorded,
+            false
         ),
         Err(MenuMismatch::Missing)
     );
+}
+
+/// An item recorded in a menu that reports by position matches only in a
+/// menu that still does, and one recorded by command only in a menu that
+/// still sends commands; a menu whose style cannot be read matches neither.
+#[test]
+fn a_level_must_report_a_chosen_item_the_way_it_did_at_capture() {
+    let recorded = step("上書き保存(S)", 0, false);
+    let by_position = NativeMenuItem {
+        in_notify_by_position_menu: true,
+        ..item("上書き保存(&S)", 1002)
+    };
+    assert_eq!(
+        match_step(std::slice::from_ref(&by_position), &recorded, true),
+        Ok(0)
+    );
+    assert_eq!(
+        match_step(&[item("上書き保存(&S)", 1002)], &recorded, true),
+        Err(MenuMismatch::NotifyByPosition)
+    );
+    for unread in [
+        NativeMenuItem {
+            notify_style_unread: true,
+            ..item("上書き保存(&S)", 1002)
+        },
+        NativeMenuItem {
+            notify_style_unread: true,
+            ..by_position
+        },
+    ] {
+        for recorded_by_position in [false, true] {
+            assert_eq!(
+                match_step(
+                    std::slice::from_ref(&unread),
+                    &recorded,
+                    recorded_by_position
+                ),
+                Err(MenuMismatch::NotifyByPosition)
+            );
+        }
+    }
+}
+
+#[test]
+fn every_menu_on_the_way_must_report_a_chosen_item_the_same_way() {
+    let bar = vec![opens("ファイル(&F)")];
+    let by_position = |item: NativeMenuItem| NativeMenuItem {
+        in_notify_by_position_menu: true,
+        ..item
+    };
+    let bar_by_position = vec![by_position(opens("ファイル(&F)"))];
+    let save = item("上書き保存(&S)", 1002);
+    assert_eq!(reports_by_position(&save, &[(&bar[0], &bar)]), Ok(false));
+    assert_eq!(
+        reports_by_position(
+            &by_position(save.clone()),
+            &[(&bar_by_position[0], &bar_by_position)]
+        ),
+        Ok(true)
+    );
+    // The bar reports by position and the submenu does not, or the other way
+    // round: which message the window expects is not certain.
+    assert!(reports_by_position(&save, &[(&bar_by_position[0], &bar_by_position)]).is_err());
+    assert!(reports_by_position(&by_position(save.clone()), &[(&bar[0], &bar)]).is_err());
+    let unread = NativeMenuItem {
+        notify_style_unread: true,
+        ..save.clone()
+    };
+    assert!(reports_by_position(&unread, &[(&bar[0], &bar)]).is_err());
+    // An item of the bar itself.
+    assert_eq!(reports_by_position(&by_position(save), &[]), Ok(true));
+}
+
+#[test]
+fn a_proof_by_position_is_stored_under_its_own_key_and_read_back() {
+    let mut entry = menu_entry();
+    let stored = serde_json::to_value(&entry).unwrap();
+    assert!(stored["proven_in_menu"].get("by_position").is_none());
+    entry.identity.in_menu.as_mut().unwrap().by_position = true;
+    let stored = serde_json::to_value(&entry).unwrap();
+    assert_eq!(stored["proven_in_menu"]["by_position"], true);
+    let read: RefEntry = serde_json::from_value(stored).unwrap();
+    assert!(read.identity.in_menu.unwrap().by_position);
 }
 
 #[test]
