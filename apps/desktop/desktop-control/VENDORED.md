@@ -135,6 +135,9 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md` | `scope: "visible"` の意味と、スクロールの後は snapshot し直すこと、を足した |
 | `crates/core/examples/locator_benchmark/fixture_builder.rs`、`crates/core/src/adapter/live_element.rs`、`crates/core/src/adapter/test_support.rs`、`crates/core/src/commands/find_live_test_support.rs`、`crates/core/src/locator/live_locator/observed_tree_tests.rs`、`crates/core/src/locator/live_locator/selected_hydration_tests.rs`、`crates/core/src/refs/ref_capture_proof_tests.rs`、`crates/windows/src/tree/live_read_gate_tests.rs`、`crates/windows/src/tree/live_read_states_complete_tests.rs`、`crates/windows/src/tree/properties/element_properties.rs`、`crates/windows/src/tree/resolve/resolve_anchor_tests.rs` | 1 行目に変更の注記を足した（無かったものだけ）。`LocatorRefEvidence` の literal に `runtime_id: None` を足しただけ |
 | 上の `ancestors: Vec::new()` を足したファイルの全部（`crates/windows/src/tree/walk/walker_enumerate.rs` を除く） | `RefEntryIdentity` の literal に `in_view: None` を足しただけ |
+| `crates/windows/src/system/launch.rs`（2 回目） | `--cwd` を付けない `launch` で、起動したアプリの作業フォルダーが、このプロセスの作業フォルダー（呼んだ側の Workspace）になっていた（`CreateProcessW` に NULL を渡していた）ため、自分のフォルダーからの相対パスでファイルを読むアプリ（OBS Studio など）が立ち上がらなかった。`default_cwd` を足し、`--cwd` が無い時は実行ファイルの親フォルダー（絶対パスで、実在する directory の時だけ。そうでなければ今までどおり）を作業フォルダーにする（エクスプローラーから起動した時と同じ）。`--cwd` がある時は今までどおり |
+| `crates/windows/src/system/launch_tests.rs` | 1 行目に変更の注記を足した。上の `default_cwd` の試験（実行ファイルのフォルダーを返す・フォルダーが無い時と相対パスの時は返さない）を足した |
+| `crates/windows/src/system/launch_live_tests.rs`（2 回目） | `--cwd` を付けずに `cmd.exe` の写しを起動し、作業フォルダーが写しを置いたフォルダーになることを確かめる試験 `cwd_defaults_to_the_folder_of_the_executable` を足した |
 
 ## build と試験
 
