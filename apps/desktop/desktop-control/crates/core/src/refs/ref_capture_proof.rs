@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -27,6 +28,7 @@ pub(crate) struct CaptureProof<'a> {
     buckets: [OnceLock<HashMap<LiveKey<'a>, usize>>; MASKS],
     unread: Vec<(u8, LivePredicate<'a>)>,
     whole_window: bool,
+    ancestry: std::cell::RefCell<Option<crate::refs::ref_ancestry::AncestryProver<'a>>>,
 }
 
 impl<'a> CaptureProof<'a> {
@@ -46,6 +48,7 @@ impl<'a> CaptureProof<'a> {
                     (bits != 0).then(|| (bits, LivePredicate::observed(&node.evidence)))
                 })
                 .collect(),
+            ancestry: std::cell::RefCell::new(None),
         }
     }
 
@@ -66,32 +69,53 @@ impl<'a> CaptureProof<'a> {
     /// the projection, which skips no child the observation kept even when the
     /// native indices have gaps.
     pub(crate) fn proves(&self, entry: &RefEntry, path: &[usize]) -> bool {
-        let Some(mut index) = self.start else {
-            return false;
-        };
-        let Some(prefix) = self
-            .observed
-            .nodes
-            .get(index)
-            .map(|node| node.path.as_slice())
-        else {
-            return false;
-        };
-        let Some(steps) = path.strip_prefix(prefix) else {
-            return false;
-        };
-        for step in steps {
-            match self
-                .observed
-                .nodes
-                .get(index)
-                .and_then(|node| node.children.get(*step))
-            {
-                Some(child) => index = *child as usize,
-                None => return false,
+        self.node_at(path)
+            .is_some_and(|index| self.proves_node(entry, index))
+    }
+
+    /// Marks `entry`, allocated at `path`, proven or not, as [`Self::establish`].
+    pub(crate) fn establish_at(&self, entry: &mut RefEntry, path: &[usize]) {
+        match self.node_at(path) {
+            Some(index) => self.establish(entry, index),
+            None => {
+                entry.identity.unique_at_capture = false;
+                entry.identity.ancestors = Vec::new();
             }
         }
-        self.proves_node(entry, index)
+    }
+
+    /// Marks `entry` proven when its own predicate proves it (as
+    /// [`Self::proves_node`]), or else when its predicate together with its
+    /// nearest ancestors matches this node and no other of the same complete
+    /// whole-window observation; those ancestors are then recorded on the
+    /// entry, and resolution requires them as well (`ref_ancestry`).
+    pub(crate) fn establish(&self, entry: &mut RefEntry, index: usize) {
+        entry.identity.ancestors = Vec::new();
+        entry.identity.unique_at_capture = self.proves_node(entry, index);
+        if entry.identity.unique_at_capture || !self.whole_window {
+            return;
+        }
+        let proven = self
+            .ancestry
+            .borrow_mut()
+            .get_or_insert_with(|| crate::refs::ref_ancestry::AncestryProver::new(self.observed))
+            .prove(entry, index);
+        if let Some(ancestors) = proven {
+            entry.identity.ancestors = ancestors;
+            // Left unset: an older reader that ignores the ancestors must see
+            // an unproven entry (see `RefEntryIdentity::ancestors`).
+            entry.identity.unique_at_capture = false;
+        }
+    }
+
+    fn node_at(&self, path: &[usize]) -> Option<usize> {
+        let mut index = self.start?;
+        let prefix = self.observed.nodes.get(index)?.path.as_slice();
+        let steps = path.strip_prefix(prefix)?;
+        for step in steps {
+            index = *self.observed.nodes.get(index)?.children.get(*step)? as usize;
+        }
+        Some(index)
     }
 
     /// Whether `entry` was proven unique at the node it was built from: the

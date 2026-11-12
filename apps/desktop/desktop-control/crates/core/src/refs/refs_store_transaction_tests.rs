@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::{RefCapabilities, RefEntryIdentity, RefGeometry, RefProcess, RefScope, RefSource};
 
@@ -15,6 +16,7 @@ fn entry(name: &str, root_ref: Option<&str>) -> crate::RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: RefGeometry {
             bounds_space: None,

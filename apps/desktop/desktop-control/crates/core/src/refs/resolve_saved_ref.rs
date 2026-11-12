@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde_json::json;
 
 use crate::{
@@ -60,7 +61,7 @@ pub(crate) fn land_saved_ref(
     deadline: Deadline,
 ) -> Result<NativeHandle, AdapterError> {
     if element_token(entry).is_none()
-        && entry.identity.unique_at_capture
+        && crate::refs::ref_ancestry::proof_of(entry) != crate::refs::ref_ancestry::Proof::None
         && let Ok(handle) = adapter.resolve_locator_anchor(entry, deadline)
     {
         let root = ObservationRoot::Element {
@@ -93,7 +94,9 @@ pub(crate) fn observe_saved_ref(
     identity_only: bool,
 ) -> Result<SavedRefMatch, AdapterError> {
     let token = element_token(entry);
-    if token.is_none() && !entry.identity.unique_at_capture {
+    if token.is_none()
+        && crate::refs::ref_ancestry::proof_of(entry) == crate::refs::ref_ancestry::Proof::None
+    {
         return Err(identity_not_unique(entry));
     }
     let window = recorded_window(adapter, entry, deadline)?;
@@ -157,7 +160,17 @@ fn confirm_landed(
         .and_then(|index| observed.nodes.get(*index as usize))
         .ok_or_else(|| AdapterError::internal("the landed element was not observed"))?;
     match FullPredicate::of_entry(entry).compare(&LivePredicate::observed(&landed.evidence)) {
-        IdentityMatch::Match => Ok(()),
+        IdentityMatch::Match => match root {
+            // An entry proven with its ancestors is held to them on the very
+            // element that landed, not only on the one the count picked.
+            ObservationRoot::Element { handle, .. } => {
+                crate::refs::ref_ancestry::confirm_handle_ancestors(
+                    adapter, entry, handle, deadline,
+                )
+            }
+            ObservationRoot::Window(_) if entry.identity.ancestors.is_empty() => Ok(()),
+            ObservationRoot::Window(_) => Err(identity_not_unique(entry)),
+        },
         IdentityMatch::Unknown => Err(identity_unknown_error(entry)),
         IdentityMatch::NoMatch => Err(absent(entry)),
     }
@@ -306,10 +319,22 @@ fn saved_ref_node(
 
 fn unique_live_match(entry: &RefEntry, observed: &ObservedTree) -> Result<usize, AdapterError> {
     let predicate = FullPredicate::of_entry(entry);
+    let ancestors = &entry.identity.ancestors;
+    let parents = (!ancestors.is_empty()).then(|| crate::refs::ref_ancestry::parents(observed));
     let mut found = None;
     let mut incomplete = !observed.is_exhaustive();
     for (index, node) in observed.nodes.iter().enumerate() {
-        match predicate.compare(&LivePredicate::observed(&node.evidence)) {
+        let mut verdict = predicate.compare(&LivePredicate::observed(&node.evidence));
+        // An entry proven together with its ancestors matches only under them.
+        if let Some(parents) = &parents
+            && verdict != IdentityMatch::NoMatch
+        {
+            verdict = crate::refs::ref_full_predicate::conjunction(
+                verdict,
+                crate::refs::ref_ancestry::ancestors_match(ancestors, observed, parents, index),
+            );
+        }
+        match verdict {
             IdentityMatch::Match if found.is_some() => return Err(ambiguous_live_match(entry)),
             IdentityMatch::Match => found = Some(index),
             IdentityMatch::Unknown => incomplete = true,
@@ -393,6 +418,10 @@ mod window_tests;
 #[cfg(test)]
 #[path = "resolve_saved_ref_context_tests.rs"]
 mod context_tests;
+
+#[cfg(test)]
+#[path = "resolve_saved_ref_ancestry_tests.rs"]
+mod ancestry_tests;
 
 #[cfg(test)]
 #[path = "resolve_saved_ref_test_support.rs"]

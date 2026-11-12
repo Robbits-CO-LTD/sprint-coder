@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::AccessibilityNode;
 use crate::refs::ref_capture_proof::CaptureProof;
 use crate::refs::ref_identity::has_meaningful_identity;
@@ -36,6 +37,7 @@ pub(crate) fn ref_entry_from_node(
                 .clone()
                 .filter(|id| !id.value.trim().is_empty()),
             unique_at_capture: false,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds,
@@ -263,6 +265,15 @@ impl<'a> AllocationPlan<'a> {
         self.capture
             .is_some_and(|capture| capture.proves(entry, path))
     }
+
+    /// Marks a published entry proven or not, recording the ancestors that
+    /// tell it apart when its own predicate matched more than one element.
+    fn establish(&self, entry: &mut RefEntry, path: &[usize]) {
+        match self.capture {
+            Some(capture) => capture.establish_at(entry, path),
+            None => entry.identity.unique_at_capture = false,
+        }
+    }
 }
 
 fn skeleton_anchor_entry(
@@ -292,7 +303,7 @@ fn allocate_refs_at_path(
             path,
         );
         entry.scope.path_is_absolute = config.scope.root_ref_id.is_some();
-        entry.identity.unique_at_capture = plan.proven(&entry, path);
+        plan.establish(&mut entry, path);
         entry.source.renderer_accessibility_forced = config.options.force_renderer_accessibility;
         if !config.options.include_bounds && has_meaningful_identity(&entry) {
             entry.geometry.bounds = None;

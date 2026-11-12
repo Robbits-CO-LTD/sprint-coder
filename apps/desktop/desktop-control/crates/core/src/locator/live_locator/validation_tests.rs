@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     EvidenceRequirements, LocatorMaterialization, LocatorResolveRequest, LocatorSelection,
     ObservationRequest, ObservationRoot, validate_query, validate_request,
@@ -145,6 +146,7 @@ fn element_root_derives_surface_with_relative_depth_budgets() {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

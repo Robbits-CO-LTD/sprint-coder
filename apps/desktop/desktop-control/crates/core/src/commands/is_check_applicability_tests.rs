@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 #[test]
@@ -16,6 +17,7 @@ fn action_availability_makes_toggle_and_expand_applicable() {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

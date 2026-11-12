@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::AdapterError;
 use crate::actions::action::Action;
@@ -44,6 +45,7 @@ pub(super) fn entry(pid: u32) -> RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

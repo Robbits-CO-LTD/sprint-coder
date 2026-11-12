@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AdapterError, Deadline, LocatorEvidence, ObservationRoot, ProcessId, RefEntry, WindowInfo,
     WindowState,
@@ -193,6 +194,7 @@ pub(crate) fn ref_entry(role: &str) -> RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: false,
+            ancestors: Vec::new(),
         },
         geometry: agent_desktop_core::RefGeometry {
             bounds_space: None,

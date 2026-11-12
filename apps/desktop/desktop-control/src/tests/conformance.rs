@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{ActionOps, InputOps, ObservationOps, PlatformAdapter, SystemOps};
 use agent_desktop_core::{
     ActionRequest, ActionResult, AdapterError, Deadline, ElementState, ErrorCode,
@@ -176,6 +177,7 @@ fn entry(bounds: Rect) -> RefEntry {
             description: None,
             native_id: None,
             unique_at_capture: false,
+            ancestors: Vec::new(),
         },
         geometry: RefGeometry {
             bounds_space: None,

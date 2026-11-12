@@ -242,7 +242,7 @@ mod imp {
     /// deadline's remaining time, and puts the client's own bound back after.
     /// `None` when there is no time left or the bound cannot be set, so the
     /// call never runs longer than the deadline allows.
-    fn with_transaction_timeout<T>(
+    pub(crate) fn with_transaction_timeout<T>(
         client: &UIAutomation,
         deadline: Deadline,
         call: impl FnOnce() -> T,
@@ -645,6 +645,9 @@ pub(crate) use imp::{
 
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) use imp::{count_within, prefetch_shares};
+
+#[cfg(target_os = "windows")]
+pub(crate) use imp::with_transaction_timeout;
 
 /// The depth from which a walk covers the whole tree below its root: the
 /// deepest a walk descends (`DEFAULT_MAX_RAW_DEPTH`), which is also the depth

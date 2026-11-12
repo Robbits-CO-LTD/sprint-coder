@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
 use crate::{
     Action, AdapterError, Direction,
@@ -138,6 +139,7 @@ fn snapshot_id() -> String {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

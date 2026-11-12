@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::adapter::TreeOptions;
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
@@ -121,6 +122,7 @@ fn save_refmap(source_app: Option<String>) -> String {
             description: None,
             native_id: None,
             unique_at_capture: true,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

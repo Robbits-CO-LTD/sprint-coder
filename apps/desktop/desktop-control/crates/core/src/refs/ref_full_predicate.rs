@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     ElementIdentifier, IdentityMatch, RefEntry,
     locator::live_locator::LocatorField,
@@ -23,6 +24,30 @@ pub(crate) struct FullPredicate<'a> {
 }
 
 impl<'a> FullPredicate<'a> {
+    /// The predicate one recorded ancestor is compared by: its name was
+    /// recorded already stable, so no value takes part.
+    pub(crate) fn of_ancestor(ancestor: &'a crate::RefAncestorIdentity) -> Self {
+        Self::of_fields(
+            &ancestor.role,
+            ancestor.name.as_deref(),
+            None,
+            ancestor.description.as_deref(),
+            ancestor.native_id.as_ref(),
+        )
+    }
+
+    /// [`Self::of_ancestor`] with the role taken from elsewhere, so a comparison
+    /// decides on the recorded name, description and identifier alone.
+    pub(crate) fn of_ancestor_as(ancestor: &'a crate::RefAncestorIdentity, role: &'a str) -> Self {
+        Self::of_fields(
+            role,
+            ancestor.name.as_deref(),
+            None,
+            ancestor.description.as_deref(),
+            ancestor.native_id.as_ref(),
+        )
+    }
+
     pub(crate) fn of_entry(entry: &'a RefEntry) -> Self {
         Self::of_fields(
             &entry.identity.role,
@@ -109,7 +134,7 @@ fn field_match(expected: Option<&str>, actual: &LocatorField<&str>) -> IdentityM
     }
 }
 
-fn conjunction(left: IdentityMatch, right: IdentityMatch) -> IdentityMatch {
+pub(crate) fn conjunction(left: IdentityMatch, right: IdentityMatch) -> IdentityMatch {
     match (left, right) {
         (IdentityMatch::NoMatch, _) | (_, IdentityMatch::NoMatch) => IdentityMatch::NoMatch,
         (IdentityMatch::Unknown, _) | (_, IdentityMatch::Unknown) => IdentityMatch::Unknown,

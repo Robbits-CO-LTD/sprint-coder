@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{LocatorEvidence, LocatorField, ObservationSource, ObservedTree};
 use crate::{
     adapter::SnapshotSurface,
@@ -27,7 +28,7 @@ pub(crate) fn materialize_refmap(
                 continue;
             }
             let mut entry = ref_entry(node, &tree.source, query);
-            entry.identity.unique_at_capture = proof.proves_node(&entry, index);
+            proof.establish(&mut entry, index);
             planned.push((index, entry));
         }
     }
@@ -117,6 +118,7 @@ pub(crate) fn ref_entry(
             description: node.evidence.description.meaningful_string(),
             native_id: identifier,
             unique_at_capture: false,
+            ancestors: Vec::new(),
         },
         geometry: crate::RefGeometry {
             bounds,
