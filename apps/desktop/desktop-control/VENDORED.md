@@ -109,6 +109,9 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/windows/src/tree/chromium_provenance_tests.rs`（新しく足した） | 上の判定の試験。message-only の窓で、3 段下の子孫の `Chrome_RenderWidgetHostHWND` を見つけること、持たない窓・名前の頭だけが同じ class の窓を見つけないこと |
 | `crates/windows/src/tree/walk/walker_source.rs`（2 回目） | 木の読み取りの Chromium 由来の判定に `has_chromium_provenance` を使う。WebView2 の窓でも、名前の無い通り抜けの入れ子を深さに数えず、一括の取得をせず部品ごとに読む（Electron の窓と同じ）。`with_transaction_timeout` を crate の中で使えるようにした（先祖の読み取りで使う） |
 | `skills/agent-desktop-windows/references/chromium-and-electron.md` | 名前も動作も無い通り抜けの入れ子は、Electron の窓と WebView2 の窓では深さに数えないので、既定の深さから始める、と足した |
+| `crates/windows/src/system/launch.rs`（2 回目） | `--cwd` を付けない `launch` で、起動したアプリの作業フォルダーが、このプロセスの作業フォルダー（呼んだ側の Workspace）になっていた（`CreateProcessW` に NULL を渡していた）ため、自分のフォルダーからの相対パスでファイルを読むアプリ（OBS Studio など）が立ち上がらなかった。`default_cwd` を足し、`--cwd` が無い時は実行ファイルの親フォルダー（絶対パスで、実在する directory の時だけ。そうでなければ今までどおり）を作業フォルダーにする（エクスプローラーから起動した時と同じ）。`--cwd` がある時は今までどおり |
+| `crates/windows/src/system/launch_tests.rs` | 1 行目に変更の注記を足した。上の `default_cwd` の試験（実行ファイルのフォルダーを返す・フォルダーが無い時と相対パスの時は返さない）を足した |
+| `crates/windows/src/system/launch_live_tests.rs`（2 回目） | `--cwd` を付けずに `cmd.exe` の写しを起動し、作業フォルダーが写しを置いたフォルダーになることを確かめる試験 `cwd_defaults_to_the_folder_of_the_executable` を足した |
 
 ## build と試験
 
