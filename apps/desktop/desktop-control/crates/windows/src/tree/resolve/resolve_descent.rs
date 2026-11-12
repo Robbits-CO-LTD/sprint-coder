@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The bounded sibling enumeration and child-index path descent the locator
 //! anchor drives.
 //!
@@ -70,6 +71,15 @@ pub(crate) fn read_children<S: TreeSource>(
     let limit = take
         .map(|take| take.min(budget.max_siblings))
         .unwrap_or(budget.max_siblings);
+    if let Some(Ok(mut listed)) = source.cached_children(element) {
+        // The whole list in one call; keeping its first `limit` entries is the
+        // same prefix the loop below keeps, under the same deadline check.
+        if !listed.is_empty() {
+            budget.deadline.ensure_remaining()?;
+        }
+        listed.truncate(limit);
+        return Ok(listed);
+    }
     let mut elements = Vec::new();
     let mut current = match source.first_child(element) {
         Ok(first) => first,

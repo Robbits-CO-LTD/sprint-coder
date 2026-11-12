@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::AdapterError;
 
 use super::properties::property_ids::TreeProperty;
@@ -151,7 +152,25 @@ mod imp {
     /// returned errors carry shape only and feed the walk's incompleteness
     /// accounting.
     pub fn read_live(element: &UIAElement) -> (ElementProperties, Vec<AdapterError>) {
-        read_with(element, live_read, None)
+        read_with(element, live_read, None, &TreeProperty::WALK_SET)
+    }
+
+    /// [`read_live`] limited to `set`; a property outside it is not read and
+    /// reports `Unknown`, the answer an unread property has.
+    pub fn read_live_set(
+        element: &UIAElement,
+        set: &[TreeProperty],
+    ) -> (ElementProperties, Vec<AdapterError>) {
+        read_with(element, live_read, None, set)
+    }
+
+    /// [`read_cached`] limited to `set`, for an element whose cache request
+    /// asked for exactly `set`.
+    pub fn read_cached_set(
+        element: &UIAElement,
+        set: &[TreeProperty],
+    ) -> (ElementProperties, Vec<AdapterError>) {
+        read_with(element, cached_read, None, set)
     }
 
     /// The same live read, bounded by an operation deadline consulted between
@@ -167,7 +186,7 @@ mod imp {
         element: &UIAElement,
         deadline: Deadline,
     ) -> (ElementProperties, Vec<AdapterError>) {
-        read_with(element, live_read, Some(deadline))
+        read_with(element, live_read, Some(deadline), &TreeProperty::WALK_SET)
     }
 
     /// Reads the walk property set from an element's cache.
@@ -177,7 +196,7 @@ mod imp {
     /// `Absent`, so a missing request entry cannot masquerade as a provider
     /// that does not implement the property.
     pub fn read_cached(element: &UIAElement) -> (ElementProperties, Vec<AdapterError>) {
-        read_with(element, cached_read, None)
+        read_with(element, cached_read, None, &TreeProperty::WALK_SET)
     }
 
     /// Reads one property live, for the cache policy's provider-class probe
@@ -236,11 +255,12 @@ mod imp {
         element: &UIAElement,
         read: impl Fn(&UIAElement, TreeProperty) -> Result<PropertyOutcome, AdapterError>,
         deadline: Option<Deadline>,
+        set: &[TreeProperty],
     ) -> (ElementProperties, Vec<AdapterError>) {
-        let mut reads = Vec::with_capacity(TreeProperty::WALK_SET.len());
+        let mut reads = Vec::with_capacity(set.len());
         let mut errors = Vec::new();
         let mut truncated = false;
-        for property in TreeProperty::WALK_SET {
+        for &property in set {
             if property.is_element_valued() {
                 continue;
             }
@@ -338,7 +358,9 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::{read_cached, read_live, read_live_bounded, read_one};
+pub use imp::{
+    read_cached, read_cached_set, read_live, read_live_bounded, read_live_set, read_one,
+};
 
 #[cfg(target_os = "windows")]
 pub(crate) use imp::rect_from_uia;

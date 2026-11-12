@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 /// The properties the walk reads, named independently of the UI Automation
 /// numbering.
 ///
@@ -176,6 +177,42 @@ impl TreeProperty {
         TreeProperty::LegacyAvailable,
         TreeProperty::LocalizedControlType,
         TreeProperty::AriaRole,
+    ];
+
+    /// The part of [`Self::WALK_SET`] a walk that only resolves a saved ref
+    /// reads: everything the evidence a saved ref is compared by is computed
+    /// from - the role (`ControlType` and the pattern availability and flags
+    /// `roles.rs` refines it with), the name (`Name`, the `LabeledBy`
+    /// relation, and `FullDescription`/`HelpText`, which also give the
+    /// description and the placeholder), the value (`Value`, with `ClassName`
+    /// for the rich edit terminator), the native identifier (`AutomationId`),
+    /// and `IsPassword`, the gate that withholds the text of a secure field.
+    ///
+    /// Geometry, state, actions and the MSAA bridge are not identity and are
+    /// left out. Measured on a WPF window whose open combo box lists 304
+    /// items (646 nodes), the whole-window read took 2.5 s with the walk set
+    /// and 0.7 s with this one; the four `LegacyIAccessible` reads alone were
+    /// 1.2 s of it. `identity_set_tests` pins that the identity evidence
+    /// computed from this set equals the one computed from the walk set.
+    pub const IDENTITY_SET: [TreeProperty; 18] = [
+        TreeProperty::Name,
+        TreeProperty::AutomationId,
+        TreeProperty::ClassName,
+        TreeProperty::HelpText,
+        TreeProperty::FullDescription,
+        TreeProperty::LabeledBy,
+        TreeProperty::Value,
+        TreeProperty::IsPassword,
+        TreeProperty::IsDialog,
+        TreeProperty::ValueIsReadOnly,
+        TreeProperty::ControlType,
+        TreeProperty::ToggleAvailable,
+        TreeProperty::ExpandCollapseAvailable,
+        TreeProperty::SelectionAvailable,
+        TreeProperty::ValueAvailable,
+        TreeProperty::WindowAvailable,
+        TreeProperty::GridItemAvailable,
+        TreeProperty::TableItemAvailable,
     ];
 
     pub fn is_value_bearing(self) -> bool {

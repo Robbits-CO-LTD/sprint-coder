@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::LocatorField;
 
 use crate::tree::properties::PropertyOutcome;
@@ -134,6 +135,62 @@ mod imp {
     /// among them, so the secure-field gate has its input in the same batch
     /// as the properties it gates and costs no second round trip.
     pub fn build_walk_cache_request(client: &UIAutomation) -> Result<UICacheRequest, AdapterError> {
+        build_cache_request(client, TreeScope::Element, &TreeProperty::WALK_SET)
+    }
+
+    /// [`build_walk_cache_request`] for a walk that reads only `set`.
+    pub fn build_set_cache_request(
+        client: &UIAutomation,
+        set: &[TreeProperty],
+    ) -> Result<UICacheRequest, AdapterError> {
+        build_cache_request(client, TreeScope::Element, set)
+    }
+
+    /// The request for `set` widened to the element's whole subtree in the
+    /// raw view, so one call to `BuildUpdatedCache` on a root fetches every
+    /// descendant with those properties, and the walk then reads the
+    /// structure from `GetCachedChildren` instead of a cross-process
+    /// `GetFirstChild`/`GetNextSibling` pair per node.
+    ///
+    /// The tree filter is the true condition, which is the raw view's own
+    /// condition, so the cached children are the children the raw view
+    /// walker enumerates; the default filter would be the control view.
+    pub fn build_subtree_cache_request(
+        client: &UIAutomation,
+        set: &[TreeProperty],
+    ) -> Result<UICacheRequest, AdapterError> {
+        let request = build_cache_request(client, TreeScope::Subtree, set)?;
+        let raw_view = client.create_true_condition().map_err(|error| {
+            uia_failure_error(failure_of(&error), "create the raw view condition")
+        })?;
+        request
+            .set_tree_filter(raw_view)
+            .map_err(|error| uia_failure_error(failure_of(&error), "set the cache tree filter"))?;
+        Ok(request)
+    }
+
+    /// The request for `set` over an element's children in the raw view, so
+    /// one `BuildUpdatedCache` on a parent returns its whole child list, in
+    /// the raw view walker's order, with those properties.
+    pub fn build_children_cache_request(
+        client: &UIAutomation,
+        set: &[TreeProperty],
+    ) -> Result<UICacheRequest, AdapterError> {
+        let request = build_cache_request(client, TreeScope::Children, set)?;
+        let raw_view = client.create_true_condition().map_err(|error| {
+            uia_failure_error(failure_of(&error), "create the raw view condition")
+        })?;
+        request
+            .set_tree_filter(raw_view)
+            .map_err(|error| uia_failure_error(failure_of(&error), "set the cache tree filter"))?;
+        Ok(request)
+    }
+
+    fn build_cache_request(
+        client: &UIAutomation,
+        scope: TreeScope,
+        set: &[TreeProperty],
+    ) -> Result<UICacheRequest, AdapterError> {
         let request = client
             .create_cache_request()
             .map_err(|error| uia_failure_error(failure_of(&error), "create a cache request"))?;
@@ -141,9 +198,9 @@ mod imp {
             .set_element_mode(ElementMode::Full)
             .map_err(|error| uia_failure_error(failure_of(&error), "set the cache element mode"))?;
         request
-            .set_tree_scope(TreeScope::Element)
+            .set_tree_scope(scope)
             .map_err(|error| uia_failure_error(failure_of(&error), "set the cache tree scope"))?;
-        for property in TreeProperty::WALK_SET {
+        for &property in set {
             request
                 .add_property(uia_property(property))
                 .map_err(|error| {
@@ -176,7 +233,10 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::{build_walk_cache_request, policy_for_root};
+pub use imp::{
+    build_children_cache_request, build_set_cache_request, build_subtree_cache_request,
+    build_walk_cache_request, policy_for_root,
+};
 
 #[cfg(test)]
 #[path = "cache_tests.rs"]
