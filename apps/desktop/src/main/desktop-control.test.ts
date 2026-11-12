@@ -166,7 +166,7 @@ describe('desktop-control run environment', () => {
 
   it('sets the cursor renderer image and host from Main alone, never the ones the caller chose', () => {
     const chosen = {
-      SPRINT_CODER_DESKTOP_CONTROL_IMAGE: 'C:\attacker\sprint-coder-desktop-control.exe',
+      SPRINT_CODER_DESKTOP_CONTROL_IMAGE: 'C:\\attacker\\sprint-coder-desktop-control.exe',
       sprint_coder_desktop_host_pid: '1',
       OTHER: 'kept',
     };
@@ -175,7 +175,7 @@ describe('desktop-control run environment', () => {
       OTHER: 'kept',
       AGENT_DESKTOP_HOME: desktopControlStateFolder(),
     });
-    const image = 'C:\Sprint Coder\resources\sprint-coder-desktop-control.exe';
+    const image = 'C:\\Sprint Coder\\resources\\sprint-coder-desktop-control.exe';
     expect(
       desktopControlEnvironment(chosen, [], lookup, undefined, { image, hostPid: 4242 }),
     ).toEqual({
