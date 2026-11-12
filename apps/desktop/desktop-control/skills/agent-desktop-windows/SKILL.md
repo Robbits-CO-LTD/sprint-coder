@@ -51,9 +51,18 @@ observation, actions and capture there fail or return nothing.
   `set-value @s8f3k2p9:e1 hi` fails `INVALID_ARGS`. Write
   `set-value '@s8f3k2p9:e1' hi`. cmd.exe and bash need no quoting.
 - **A window behind another window is drivable. A minimized one is not.**
-  Every element of a minimized window reports `offscreen` and ref actions
-  fail. Run `restore --app <image>` and snapshot again. Do not use
-  `focus-window` by reflex: it steals the user's foreground.
+  A minimized window still snapshots in full, and the snapshot's `window`
+  carries `minimized: true`. Its elements read `false` from `is visible`, and
+  ref actions such as `click`, `set-value`, `toggle`, `select` and `expand`
+  are refused before anything is sent: `ACTION_FAILED`,
+  `details.kind: "window_minimized"`, `delivery: not_delivered`. This holds
+  for Electron and Chrome too: a minimized Chromium page would run the click
+  handler but hold back the work it draws on screen until the window is
+  restored. A minimized hosted (UWP) app such as Calculator is suspended: its
+  snapshot has no refs, and a ref taken earlier returns `WINDOW_NOT_FOUND`.
+  Run `restore --window-id <id>` (or `restore --app <image>`) and snapshot
+  again before acting. Do not use `focus-window` by reflex: it steals the
+  user's foreground.
 - **No permission dialog exists.** `permissions` reports `automation` as
   `not_required`. Elevation boundaries are the only access control.
 - **Chromium and Electron apps read thin before they settle.** Pass a longer

@@ -179,6 +179,14 @@ impl ObservationOps for WindowsAdapter {
         Ok(crate::tree::live_read::live_bounds(&read))
     }
 
+    fn minimized_window_refusal(
+        &self,
+        handle: &NativeHandle,
+        deadline: Deadline,
+    ) -> Option<AdapterError> {
+        crate::tree::minimized::minimized_window_refusal(handle, deadline)
+    }
+
     fn hit_test(
         &self,
         handle: &NativeHandle,
