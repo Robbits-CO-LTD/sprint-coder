@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, AppInfo, AppPresentation, Deadline, ProcessId};
 
 use super::process_identity;
@@ -183,12 +184,19 @@ pub(crate) fn list_apps_live(deadline: Deadline) -> Result<Vec<AppInfo>, Adapter
 }
 
 /// The owner pid + token for a window, reusing the identity path.
+///
+/// The pid is the one `list-windows` reports for the same window
+/// (`attributed_owner`): a frame carrying a hosted application lists that
+/// application, so the app inventory lists it too. Reading the frame's own
+/// owner here left a hosted application (the packaged Calculator) out of the
+/// inventory, and every command that resolves a listed window's app through
+/// the inventory (`press --window-id`) refused it as not found.
 fn process_token_of(
     handle: super::window::window_enum::WindowHandle,
 ) -> Option<(ProcessId, Option<String>)> {
     #[cfg(target_os = "windows")]
     {
-        let pid = super::window::window_identity::live_window_owner(handle)?;
+        let pid = super::window::frame_identity::attributed_owner(handle)?;
         let token = process_identity::token_for_pid(pid).ok().flatten();
         Some((pid, token))
     }

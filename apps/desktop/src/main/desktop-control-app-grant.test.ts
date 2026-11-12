@@ -154,6 +154,25 @@ describe('desktop-control app-wide Task grant', () => {
     expect(covers(['click', '@scharmap:e1'], [])).toBe(false);
   });
 
+  it('covers and offers a select without a value, where the ref is the option itself', () => {
+    const charmap = offer(['click', '@scharmap:e1'])!;
+    expect(offer(['select', '@scharmap:e2'])?.id).toBe(charmap.id);
+    expect(offer(['select', '@scharmap:e2', '--timeout-ms', '2000'])?.id).toBe(charmap.id);
+    expect(covers(['select', '@scharmap:e2'], [charmap])).toBe(true);
+    expect(covers(batch({ command: 'select', args: { ref_id: '@scharmap:e2' } }), [charmap])).toBe(
+      true,
+    );
+    // Another app's part, with or without a value.
+    expect(covers(['select', '@snotepad:e1'], [charmap])).toBe(false);
+    expect(covers(['select', '@snotepad:e1', 'Arial'], [charmap])).toBe(false);
+    expect(covers(batch({ command: 'select', args: { ref_id: '@snotepad:e1' } }), [charmap])).toBe(
+      false,
+    );
+    // Still no more than a ref and one value, and never without the ref.
+    expect(offer(['select', '@scharmap:e2', 'Arial', 'extra'])).toBeNull();
+    expect(offer(['select'])).toBeNull();
+  });
+
   it('never covers or offers what uses the foreground, launches, closes or minimizes an app', () => {
     const charmap = offer(['click', '@scharmap:e1'])!;
     for (const argv of [

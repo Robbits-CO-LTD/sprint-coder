@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::time::{Duration, Instant};
 
 use agent_desktop_core::{
@@ -238,6 +239,13 @@ fn process_holds_keyboard_focus(_pid: ProcessId) -> Result<bool, AdapterError> {
     Ok(false)
 }
 
+/// The process the foreground window is attributed to, by the same rule
+/// `list-windows` and the app inventory use (`attributed_owner`): a frame
+/// carrying a hosted application is that application's window. The frame
+/// itself belongs to the frame host, so reading only its owner refused every
+/// key for a hosted application whose own frame was in front. A frame that
+/// hosts nothing, or hosts a different application, still names a different
+/// process and fails the gate.
 #[cfg(target_os = "windows")]
 fn foreground_process_id() -> Option<ProcessId> {
     use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -246,7 +254,7 @@ fn foreground_process_id() -> Option<ProcessId> {
     if foreground.is_null() {
         return None;
     }
-    super::window::window_identity::live_window_owner(foreground)
+    super::window::frame_identity::attributed_owner(foreground)
 }
 
 #[cfg(all(test, target_os = "windows"))]

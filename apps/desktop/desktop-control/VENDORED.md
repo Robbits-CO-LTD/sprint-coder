@@ -38,7 +38,7 @@ build にも同梱にも使わないファイル（2026-11-11）。
 
 ## 変えたファイル（Apache License 2.0 の 4 条 b）
 
-`skills` は 1 つも変えていない。変えた・足したのは次のファイルだけ。
+変えた・足したのは次のファイルだけ（`skills` は、表に書いた 2 つだけ）。
 
 | ファイル | 変えた点 |
 | --- | --- |
@@ -75,6 +75,18 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/windows/src/tree/resolve/resolve_anchor.rs` | 1 行目に変更の注記を足した。保存した経路の降下に `UiaTreeSource::for_descent` を使い、着いた部品は `prepare_root` で属性を読んでから role を確かめる（読めなければ cache なしのまま。role は Unknown になり、従来の読み取り失敗と同じ扱い） |
 | `crates/windows/src/tree/resolve/resolve_descent.rs` | 1 行目に変更の注記を足した。子の一覧を 1 回で取れた時は、その先頭から従来と同じ数だけを使う |
 | `crates/windows/src/system/launch_live_tests.rs` | 1 行目に変更の注記を足した。`--activate` を付けない起動で、起動した窓が前面にならず、前面だった窓より下にあることを確かめる試験 `a_background_launch_keeps_the_foreground_and_stays_below_it` を足した（並べ替えは非同期なので、順番は最大 2 秒、50 ms ごとに見直して確かめる） |
+| `crates/windows/src/system/window/frame_identity.rs` | 1 行目に変更の注記を足した。窓をどの process のものとするかの規則 `attributed_owner`（枠が中のアプリを持っていればそのアプリ、でなければ窓の持ち主）を足した。`list-windows` が既に使っている規則（`hosted_application_pid`）と同じで、下の 2 か所がこれを使う |
+| `crates/windows/src/system/window/frame_identity_tests.rs` | 1 行目に変更の注記を足した。`attributed_owner` が普通の窓では窓の持ち主、中のアプリを持つ枠ではそのアプリを返すこと、中のアプリを持つ枠として `list-windows` に出る窓のアプリが、同じ pid・process instance・名前で app の一覧にも出ることの試験を足した（その時その枠が無ければ飛ばす） |
+| `crates/windows/src/system/app_ops.rs` | 1 行目に変更の注記を足した。app の一覧（`list-apps`、と `press --window-id` などが窓のアプリを引く所）が、窓の process を `attributed_owner` で読むようにした。電卓のような枠の中のアプリは、`list-windows` では中のアプリ（`CalculatorApp.exe`）として出るのに、app の一覧では枠の持ち主（`ApplicationFrameHost.exe`）として出ていたため、`press --window-id` が `APP_NOT_FOUND` で失敗していた |
+| `crates/windows/src/system/key_dispatch.rs` | 1 行目に変更の注記を足した。キーを送る直前の「前面の窓が対象の process のものか」の確かめで、前面の窓の process を `attributed_owner` で読むようにした。枠は枠の持ち主の process のものなので、中のアプリへのキーが前面の確かめで必ず止まっていた。中のアプリを持たない枠・別のアプリを持つ枠は、今までどおり別の process と読まれて止まる。キーボードのフォーカスの確かめ（フォーカスのある窓の持ち主）は変えていない |
+| `crates/windows/src/input/keyboard/keyboard_map.rs` | 1 行目に変更の注記を足した。記号のキーの名前 `plus`・`minus`・`asterisk`・`slash`・`equal`・`period`・`comma` と、`+` 以外の記号そのもの（`-` `*` `/` `=` `.` `,`）を受け付けるようにした（`+` は組み合わせの区切りなので名前だけ）。押すキーは、その時のキーボードの配列でその文字を出すキー（Shift などを含む。`VkKeyScanW`）。配列に無い記号は、ASCII の値の仮想キー（`+` なら `VK_EXECUTE`）に落とさずに `INVALID_ARGS` で断る。知らないキーの時の候補の一覧に足した名前を載せた |
+| `crates/windows/src/input/keyboard/keyboard_map_tests.rs` | 1 行目に変更の注記を足した。記号の名前と文字が、配列で求めた同じキーに解かれること、ASCII の値の仮想キーにならないこと、一覧に無い記号・綴りの違う名前・`+` が断られること、候補の一覧に名前が載ることの試験を足した |
+| `crates/core/src/commands/combo.rs` | 1 行目に変更の注記を足した。`press +` などキーが空の組み合わせの `INVALID_ARGS`（`Empty key combo`）に、`+` のキーは `plus` と書く、という `suggestion` を付けた |
+| `crates/core/src/commands/combo_tests.rs` | 1 行目に変更の注記を足した。上の `suggestion` と、記号のキーを含む組み合わせの解釈の試験を足した |
+| `src/cli_args/actions.rs`（2 回目） | `press` の `COMBO` の説明に、記号のキーの名前を足した |
+| `src/cli/help_after.txt` | `--help` の KEY COMBOS に、記号のキーの名前（Windows）と、`+` のキーは `plus` であることを足した |
+| `skills/agent-desktop-windows/SKILL.md` | 「Symbol keys」の項を足した（記号のキーの名前、`+` は `plus`、配列どおりに押すこと、電卓に 7+8= を打つ例） |
+| `skills/agent-desktop/references/commands-interaction.md` | キーの名前の行に、記号のキーの名前は OS ごとに違うので platform の説明書を読む、と足した |
 
 ## build と試験
 

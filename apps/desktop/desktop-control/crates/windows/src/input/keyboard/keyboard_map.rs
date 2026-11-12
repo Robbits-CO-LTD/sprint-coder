@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Key-name to Windows virtual-key resolution.
 //!
 //! Key *names* are a shared contract with macOS: every name
@@ -123,7 +124,45 @@ pub(crate) fn resolve_key(key: &str) -> Result<ResolvedKey, AdapterError> {
     if let Some(resolved) = character_key(key) {
         return Ok(resolved);
     }
+    if let Some(symbol) = symbol_character(key) {
+        return resolve_symbol(key, symbol);
+    }
     Err(unknown_key_error(key))
+}
+
+/// The punctuation a key name or a single-character key produces. `+` joins
+/// a combo, so it is only reachable by name (`plus`, `ctrl+plus`); the other
+/// symbols are accepted either by name or as the character itself. The
+/// names follow the punctuation names the other platforms accept
+/// (`comma`, `period`).
+fn symbol_character(key: &str) -> Option<char> {
+    let symbol = match key {
+        "plus" => '+',
+        "minus" | "-" => '-',
+        "asterisk" | "*" => '*',
+        "slash" | "/" => '/',
+        "equal" | "=" => '=',
+        "period" | "." => '.',
+        "comma" | "," => ',',
+        _ => return None,
+    };
+    Some(symbol)
+}
+
+/// A symbol is pressed as the key the active layout produces it with, Shift
+/// included (on a Japanese layout `+` is Shift+`;`). There is no fixed
+/// virtual key to fall back to: the ASCII value of a symbol is an unrelated
+/// virtual key (`+` would be `VK_EXECUTE`), so a layout with no key for the
+/// symbol refuses the key instead of pressing another one.
+fn resolve_symbol(key: &str, symbol: char) -> Result<ResolvedKey, AdapterError> {
+    imp::vk_key_scan(symbol)
+        .map(resolved_from_scan)
+        .ok_or_else(|| {
+            AdapterError::new(
+                ErrorCode::InvalidArgs,
+                format!("Key '{key}' has no key on the active keyboard layout"),
+            )
+        })
 }
 
 fn named_key_vk(key: &str) -> Option<u16> {
@@ -203,7 +242,8 @@ fn fallback_ascii_vk(character: char) -> u16 {
 fn unknown_key_error(key: &str) -> AdapterError {
     AdapterError::new(ErrorCode::InvalidArgs, format!("Unknown key: '{key}'")).with_suggestion(
         "Valid keys: a-z, 0-9, return, escape, tab, space, delete, forwarddelete, home, end, \
-         pageup, pagedown, left, right, up, down, cmd, shift, alt, ctrl, f1-f12",
+         pageup, pagedown, left, right, up, down, cmd, shift, alt, ctrl, f1-f12, \
+         plus, minus (-), asterisk (*), slash (/), equal (=), period (.), comma (,)",
     )
 }
 

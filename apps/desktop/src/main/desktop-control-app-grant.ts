@@ -81,7 +81,9 @@ type CliCommand = Readonly<{
 
 const REF_TIMEOUT = '--timeout-ms=';
 const SCOPE = { windows: ['--window-id'] } as const;
-// Checked on the desktop-control binary 1.2.0 (`<command> --help`). `--surface` is left out: its
+// Checked on the desktop-control binary 1.2.0 (`<command> --help`), rebuilt from this repo's source
+// after #1182, where `select` takes its value only when the ref is not the option itself (`select
+// <ref> [value]`; a batch entry may leave out `value` too). `--surface` is left out: its
 // other values read the shell, not the app. So are `--app`, the shared `--wait-for` options and
 // `--session`, which reads its refs from another folder.
 const CLI_COMMANDS: Readonly<Record<string, CliCommand>> = {
@@ -111,7 +113,7 @@ const CLI_COMMANDS: Readonly<Record<string, CliCommand>> = {
   click: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
   'set-value': { options: REF_TIMEOUT, positionals: [2, 2], ref: true },
   clear: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
-  select: { options: REF_TIMEOUT, positionals: [2, 2], ref: true },
+  select: { options: REF_TIMEOUT, positionals: [1, 2], ref: true },
   toggle: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
   check: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
   uncheck: { options: REF_TIMEOUT, positionals: [1, 1], ref: true },
