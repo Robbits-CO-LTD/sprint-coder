@@ -76,7 +76,13 @@ fn resolve_locator_anchor_once(
     }
 
     let root = crate::tree::resolve::resolve_window_root(entry, deadline)?;
-    let source = UiaTreeSource::for_descent(&root)?;
+    // A path a view proof recorded counts positions among the visible elements,
+    // so it is descended in that view.
+    let source = if entry.identity.in_view.is_some() {
+        UiaTreeSource::for_visible_descent(&root)?
+    } else {
+        UiaTreeSource::for_descent(&root)?
+    };
     let prepared = source.prepare_root(&root)?;
     let budget = resolve_walk_budget(deadline);
 
@@ -96,6 +102,14 @@ fn resolve_locator_anchor_once(
     let candidate = source.prepare_root(&candidate).unwrap_or(candidate);
     let (_, evidence, _) = source.evidence(&candidate);
     anchor_role_verdict(entry, &evidence)?;
+    // A path in the view of visible elements lands only on the element the
+    // view proof recorded, never on another that moved into its place.
+    if let Some(view) = &entry.identity.in_view
+        && crate::tree::walk::walker_source::runtime_id_of(&candidate).as_ref()
+            != Some(&view.runtime_id)
+    {
+        return Err(stale_ref_error(entry));
+    }
     Ok(crate::tree::resolve::into_verified_handle(candidate, entry))
 }
 

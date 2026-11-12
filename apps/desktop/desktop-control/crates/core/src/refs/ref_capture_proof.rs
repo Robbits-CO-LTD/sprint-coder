@@ -28,6 +28,9 @@ pub(crate) struct CaptureProof<'a> {
     buckets: [OnceLock<HashMap<LiveKey<'a>, usize>>; MASKS],
     unread: Vec<(u8, LivePredicate<'a>)>,
     whole_window: bool,
+    /// The observation covers only the elements the window showed, so what
+    /// it proves holds in that view alone (`RefEntryIdentity::in_view`).
+    in_view: bool,
     ancestry: std::cell::RefCell<Option<crate::refs::ref_ancestry::AncestryProver<'a>>>,
 }
 
@@ -38,6 +41,7 @@ impl<'a> CaptureProof<'a> {
         Self {
             observed,
             whole_window,
+            in_view: observed.is_visible_scope(),
             start: observed.roots.first().map(|root| *root as usize),
             buckets: std::array::from_fn(|_| OnceLock::new()),
             unread: observed
@@ -80,6 +84,7 @@ impl<'a> CaptureProof<'a> {
             None => {
                 entry.identity.unique_at_capture = false;
                 entry.identity.ancestors = Vec::new();
+                entry.identity.in_view = None;
             }
         }
     }
@@ -91,6 +96,11 @@ impl<'a> CaptureProof<'a> {
     /// entry, and resolution requires them as well (`ref_ancestry`).
     pub(crate) fn establish(&self, entry: &mut RefEntry, index: usize) {
         entry.identity.ancestors = Vec::new();
+        entry.identity.in_view = None;
+        if self.in_view {
+            self.establish_in_view(entry, index);
+            return;
+        }
         entry.identity.unique_at_capture = self.proves_node(entry, index);
         if entry.identity.unique_at_capture || !self.whole_window {
             return;
@@ -105,6 +115,47 @@ impl<'a> CaptureProof<'a> {
             // Left unset: an older reader that ignores the ancestors must see
             // an unproven entry (see `RefEntryIdentity::ancestors`).
             entry.identity.unique_at_capture = false;
+        }
+    }
+
+    /// [`Self::establish`] over a view of the visible elements: the same two
+    /// rules (the entry's own predicate, then its nearest ancestors), counted
+    /// over that view only, recorded as a view proof with the element's path
+    /// in the view and its screen bounds. Never `unique_at_capture`, which
+    /// would stand for the whole window.
+    fn establish_in_view(&self, entry: &mut RefEntry, index: usize) {
+        entry.identity.unique_at_capture = false;
+        if crate::refs::ref_identity::element_token(entry).is_some() {
+            return;
+        }
+        let Some(node) = self.observed.nodes.get(index) else {
+            return;
+        };
+        let Some(bounds) = crate::refs::ref_view::view_bounds(&node.evidence) else {
+            return;
+        };
+        let Some(runtime_id) = crate::refs::ref_view::view_runtime_id(&node.evidence) else {
+            return;
+        };
+        let ancestors = if self.counts_once(entry, index) {
+            Some(Vec::new())
+        } else if self.whole_window {
+            self.ancestry
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    crate::refs::ref_ancestry::AncestryProver::new(self.observed)
+                })
+                .prove(entry, index)
+        } else {
+            None
+        };
+        if let Some(ancestors) = ancestors {
+            entry.identity.in_view = Some(crate::RefViewProof {
+                path: node.path.clone(),
+                bounds,
+                runtime_id,
+                ancestors,
+            });
         }
     }
 
@@ -123,6 +174,15 @@ impl<'a> CaptureProof<'a> {
     /// must match the entry's full predicate, no node may leave a recorded field
     /// unread, and that one node must be this one.
     pub(crate) fn proves_node(&self, entry: &RefEntry, index: usize) -> bool {
+        // A view of the visible elements never proves an element unique in
+        // the whole window.
+        !self.in_view && self.counts_once(entry, index)
+    }
+
+    /// Whether the observation is complete and exactly one of its nodes, this
+    /// one, matches the entry's full predicate with no node leaving a recorded
+    /// field unread.
+    fn counts_once(&self, entry: &RefEntry, index: usize) -> bool {
         if !self.whole_window {
             return false;
         }

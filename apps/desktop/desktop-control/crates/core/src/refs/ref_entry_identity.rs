@@ -37,6 +37,38 @@ pub struct RefEntryIdentity {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub ancestors: Vec<RefAncestorIdentity>,
+    /// Set when the element was proven unique only among the elements the
+    /// window showed (a capture that could not read the whole window in time;
+    /// see `ref_view`). Resolution then reads the same view again and requires
+    /// exactly one match there, at the recorded path and the recorded bounds.
+    ///
+    /// Stored under its own key, `proven_in_view`, with `unique_at_capture`
+    /// unset and `ancestors` empty (the ancestors that told it apart are kept
+    /// inside this record), so an older reader that does not know the key sees
+    /// an unproven entry and refuses it. An entry carrying this together with
+    /// either of the other proofs is inconsistent and is refused.
+    #[serde(
+        rename = "proven_in_view",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub in_view: Option<RefViewProof>,
+}
+
+/// What a proof over the window's visible elements recorded: where the element
+/// sat in that view, the screen rectangle it covered, its runtime identifier,
+/// and the ancestors that told it apart when its own predicate matched more
+/// than one visible element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefViewProof {
+    pub path: crate::refs::RefPath,
+    pub bounds: crate::Rect,
+    /// The provider's runtime identifier of the element (UI Automation's
+    /// `RuntimeId`), so that another element moved into the same place of
+    /// the view, reading the same, is not taken for it.
+    pub runtime_id: Vec<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestors: Vec<RefAncestorIdentity>,
 }
 
 /// One ancestor's identity fields, compared under the same rule as the

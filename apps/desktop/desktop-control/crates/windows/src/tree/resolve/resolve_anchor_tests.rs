@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::tree::element::UIAElement;
 use crate::tree::fixture::{HostedFixture, ensure_test_apartment};
@@ -223,6 +224,7 @@ fn locator_evidence(role: &str) -> LocatorEvidence {
             bounds: LocatorField::Absent,
             available_actions: LocatorField::Absent,
             descriptors: NodeDescriptor::default(),
+            runtime_id: None,
         },
     }
 }

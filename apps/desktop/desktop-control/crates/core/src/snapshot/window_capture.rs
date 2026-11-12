@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, WindowInfo,
     adapter::{PlatformAdapter, TreeOptions},
@@ -13,6 +14,9 @@ pub(crate) struct WindowCapture {
     /// Why the whole-window read that would prove this capture's tokenless
     /// refs failed or came back cut short, so those refs stay unproven.
     pub(crate) identity_unproven: Option<String>,
+    /// The observation holds only the elements the window showed (see
+    /// [`capture_window`]); its refs are proven in that view alone.
+    pub(crate) visible_scope: bool,
 }
 
 impl WindowCapture {
@@ -53,16 +57,51 @@ pub(crate) fn capture_window(
     let shallow = depth < crate::refs::resolve_saved_ref::WHOLE_WINDOW_DEPTH;
     let mut unproven = None;
     if shallow && !adapter.retains_element_tokens() {
-        let attempt = deadline.capped(deadline.remaining() * 3 / 4);
+        let budget = deadline.remaining() * 3 / 4;
+        let attempt = deadline.capped(budget);
         match whole_window(adapter, opts, window, attempt) {
             Ok(observed) => {
                 return Ok(WindowCapture {
                     observed,
                     presentation_depth: Some(depth),
                     identity_unproven: None,
+                    visible_scope: false,
                 });
             }
-            Err(reason) => unproven = Some(reason),
+            Err(failure) => {
+                if failure.ran_out && view_fallback_allowed(deadline, budget) {
+                    // A third stays for the shallow walk that answers when this
+                    // read cannot finish either.
+                    let share = deadline.capped(deadline.remaining() * 2 / 3);
+                    match visible_window(adapter, opts, window, share) {
+                        VisibleRead::Proven(observed) => {
+                            return Ok(WindowCapture {
+                                observed,
+                                presentation_depth: Some(depth),
+                                identity_unproven: None,
+                                visible_scope: true,
+                            });
+                        }
+                        // The read ran out on a window that is read this way:
+                        // a call cut short there can keep its provider busy, so
+                        // when the cut-short whole read left a tree, it is
+                        // presented, unproven, as a shallow walk would be, and
+                        // no further walk is started.
+                        VisibleRead::Failed => {
+                            if let Some(observed) = failure.partial {
+                                return Ok(WindowCapture {
+                                    observed,
+                                    presentation_depth: Some(depth),
+                                    identity_unproven: Some(failure.reason),
+                                    visible_scope: false,
+                                });
+                            }
+                        }
+                        VisibleRead::Unsupported => {}
+                    }
+                }
+                unproven = Some(failure.reason)
+            }
         }
     }
     let observed = observe_window(adapter, opts, window, deadline)?;
@@ -71,6 +110,7 @@ pub(crate) fn capture_window(
             observed,
             presentation_depth: None,
             identity_unproven: None,
+            visible_scope: false,
         });
     }
     let unproven = match unproven {
@@ -82,16 +122,67 @@ pub(crate) fn capture_window(
                     observed: whole,
                     presentation_depth: Some(depth),
                     identity_unproven: None,
+                    visible_scope: false,
                 });
             }
-            Err(reason) => reason,
+            Err(failure) => failure.reason,
         },
     };
     Ok(WindowCapture {
         observed,
         presentation_depth: None,
         identity_unproven: Some(unproven),
+        visible_scope: false,
     })
+}
+
+/// Whether a capture may fall back to the window's visible elements: only when
+/// the whole window could not be read within at least the default snapshot
+/// deadline. A caller that shortens the deadline cannot push a window that a
+/// default read proves whole onto the narrower proof; it gets the unproven
+/// shallow capture instead, as before.
+///
+/// `whole_read_budget` is the time the whole-window read was actually given.
+/// A deadline shared by several captures (a wait that polls) keeps its long
+/// span while little of it is left, so the span alone would let a late poll,
+/// whose whole-window read got only a fraction of a default one's time, switch
+/// a window that a default read proves whole. The read must have had most of
+/// what a default snapshot gives it (measured: about 1.9 s of the 2.25 s, after
+/// the window listing; half the default leaves room for a slower listing).
+fn view_fallback_allowed(
+    deadline: crate::Deadline,
+    whole_read_budget: std::time::Duration,
+) -> bool {
+    let default = std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
+    deadline.span() >= default && whole_read_budget >= default / 2
+}
+
+/// How a read of the window's visible elements ended.
+enum VisibleRead {
+    /// Complete, over the visible elements only.
+    Proven(ObservedTree),
+    /// The adapter does not read this window that way (only Chromium-hosted
+    /// windows are read so), and said so without reading.
+    Unsupported,
+    /// The read was attempted and did not complete.
+    Failed,
+}
+
+fn visible_window(
+    adapter: &dyn PlatformAdapter,
+    opts: &TreeOptions,
+    window: &WindowInfo,
+    deadline: crate::Deadline,
+) -> VisibleRead {
+    match crate::refs::resolve_saved_ref::observe_visible_window(adapter, opts, window, deadline) {
+        Ok(observed) if !observed.is_visible_scope() => VisibleRead::Unsupported,
+        Ok(observed) if observed.is_exhaustive() => VisibleRead::Proven(observed),
+        Ok(_) => VisibleRead::Failed,
+        Err(error) if error.code == crate::ErrorCode::ActionNotSupported => {
+            VisibleRead::Unsupported
+        }
+        Err(_) => VisibleRead::Failed,
+    }
 }
 
 pub(crate) fn first_surface_owner<T>(
@@ -113,19 +204,37 @@ pub(crate) fn first_surface_owner<T>(
     )
 }
 
+/// Why the whole-window read could not prove tokenless refs, and whether it
+/// ran out of time or room (the only failure a visible-element read may stand
+/// in for).
+struct WholeWindowFailure {
+    reason: String,
+    ran_out: bool,
+    /// What a read cut short did observe.
+    partial: Option<ObservedTree>,
+}
+
 /// The whole-window read that proves tokenless refs, or why it cannot.
 fn whole_window(
     adapter: &dyn PlatformAdapter,
     opts: &TreeOptions,
     window: &WindowInfo,
     deadline: crate::Deadline,
-) -> Result<ObservedTree, String> {
+) -> Result<ObservedTree, WholeWindowFailure> {
     match crate::refs::resolve_saved_ref::observe_whole_window(
         adapter, opts, window, deadline, None,
     ) {
         Ok(whole) if whole.is_exhaustive() => Ok(whole),
-        Ok(_) => Err("the whole-window read was cut short".to_owned()),
-        Err(error) => Err(error.message),
+        Ok(partial) => Err(WholeWindowFailure {
+            reason: "the whole-window read was cut short".to_owned(),
+            ran_out: true,
+            partial: Some(partial),
+        }),
+        Err(error) => Err(WholeWindowFailure {
+            ran_out: error.code == crate::ErrorCode::Timeout,
+            reason: error.message,
+            partial: None,
+        }),
     }
 }
 

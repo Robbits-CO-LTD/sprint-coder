@@ -152,6 +152,7 @@ pub(crate) fn minimal_ref_entry(role: &str, name: Option<&str>) -> crate::RefEnt
             native_id: None,
             unique_at_capture: true,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,
@@ -275,6 +276,7 @@ pub(crate) fn observed_tree(
                     .unwrap_or(LocatorField::Absent),
                 available_actions: LocatorField::Known(node.presentation.available_actions),
                 descriptors: node.presentation.descriptors.clone(),
+                runtime_id: None,
             },
         };
         let children = node.children.into_iter().map(subtree).collect();

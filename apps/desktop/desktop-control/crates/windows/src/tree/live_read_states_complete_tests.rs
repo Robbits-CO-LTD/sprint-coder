@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The states-completeness predicate's truth table, driven through
 //! `live_element` rather than the predicate directly so that a hardcoded
 //! `states_complete` cannot keep these cases green.
@@ -49,6 +50,7 @@ fn read_with(role: &str, reads: Vec<(TreeProperty, PropertyOutcome)>) -> LiveRea
                 bounds: LocatorField::Absent,
                 available_actions: LocatorField::Known(Vec::new()),
                 descriptors: NodeDescriptor::default(),
+                runtime_id: None,
             },
         },
     }

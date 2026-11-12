@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     ElementIdentifier, IdentifierEvidence, IdentifierKind, LocatorEvidence, LocatorField,
     LocatorRefEvidence,
@@ -233,6 +234,7 @@ impl ElementProperties {
                 bounds,
                 available_actions: vocabulary.available_actions,
                 descriptors: crate::tree::descriptor::descriptors(self),
+                runtime_id: None,
             },
         }
     }

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The essential-completeness gate is a pure predicate over the evidence, so
 //! it is pinned here without a UI Automation client and on every target,
 //! rather than beside the fixture-driven tests: any essential slot reading
@@ -41,6 +42,7 @@ fn complete_evidence() -> LocatorEvidence {
             }),
             available_actions: LocatorField::Known(vec!["click".to_string()]),
             descriptors: NodeDescriptor::default(),
+            runtime_id: None,
         },
     }
 }

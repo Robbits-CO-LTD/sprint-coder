@@ -236,6 +236,7 @@ fn entry() -> RefEntry {
             native_id: None,
             unique_at_capture: true,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

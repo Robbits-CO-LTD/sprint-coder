@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AdapterError, ErrorCode, LiveIdentity, LocatorEvidence, LocatorField, Rect,
     tree::element_state::ElementState,
@@ -66,6 +67,7 @@ mod tests {
                 bounds: LocatorField::Absent,
                 available_actions: LocatorField::Known(Vec::new()),
                 descriptors: Default::default(),
+                runtime_id: None,
             },
         }
     }

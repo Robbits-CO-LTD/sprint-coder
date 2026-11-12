@@ -381,6 +381,7 @@ pub(crate) mod ref_scope;
 pub(crate) mod ref_skeleton_anchors;
 pub(crate) mod ref_source;
 pub(crate) mod ref_token;
+pub(crate) mod ref_view;
 pub(crate) mod refs_lock;
 pub mod refs_store;
 #[cfg(test)]
