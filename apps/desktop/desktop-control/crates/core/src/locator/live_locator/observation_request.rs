@@ -38,7 +38,8 @@ pub struct ObservationMode {
     /// child structure, never geometry or actions, so an adapter may skip them.
     pub identity_only: bool,
     /// Read only the elements the window shows: an element its provider
-    /// reports offscreen is skipped with everything below it. An adapter that
+    /// reports offscreen is skipped (an onscreen element below it is shown
+    /// under the nearest onscreen ancestor). An adapter that
     /// honours this marks the tree it returns (`ObservedTree::mark_visible_scope`);
     /// one that cannot read this way must fail rather than return a whole tree.
     pub visible_only: bool,

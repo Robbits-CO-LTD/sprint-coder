@@ -57,7 +57,8 @@ pub(crate) fn capture_window(
     let shallow = depth < crate::refs::resolve_saved_ref::WHOLE_WINDOW_DEPTH;
     let mut unproven = None;
     if shallow && !adapter.retains_element_tokens() {
-        let attempt = deadline.capped(deadline.remaining() * 3 / 4);
+        let budget = deadline.remaining() * 3 / 4;
+        let attempt = deadline.capped(budget);
         match whole_window(adapter, opts, window, attempt) {
             Ok(observed) => {
                 return Ok(WindowCapture {
@@ -68,7 +69,7 @@ pub(crate) fn capture_window(
                 });
             }
             Err(failure) => {
-                if failure.ran_out && view_fallback_allowed(deadline) {
+                if failure.ran_out && view_fallback_allowed(deadline, budget) {
                     // A third stays for the shallow walk that answers when this
                     // read cannot finish either.
                     let share = deadline.capped(deadline.remaining() * 2 / 3);
@@ -83,8 +84,9 @@ pub(crate) fn capture_window(
                         }
                         // The read ran out on a window that is read this way:
                         // a call cut short there can keep its provider busy, so
-                        // no further walk is started; the cut-short whole read
-                        // is presented, unproven, as a shallow walk would be.
+                        // when the cut-short whole read left a tree, it is
+                        // presented, unproven, as a shallow walk would be, and
+                        // no further walk is started.
                         VisibleRead::Failed => {
                             if let Some(observed) = failure.partial {
                                 return Ok(WindowCapture {
@@ -139,9 +141,19 @@ pub(crate) fn capture_window(
 /// deadline. A caller that shortens the deadline cannot push a window that a
 /// default read proves whole onto the narrower proof; it gets the unproven
 /// shallow capture instead, as before.
-fn view_fallback_allowed(deadline: crate::Deadline) -> bool {
-    deadline.span()
-        >= std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS)
+///
+/// `whole_read_budget` is the time the whole-window read was actually given.
+/// A deadline shared by several captures (a wait that polls) keeps its long
+/// span while little of it is left, so the span alone would let a late poll,
+/// whose whole-window read got only a fraction of a default one's time, switch
+/// a window that a default read proves whole. The read must have had most of
+/// what a default snapshot gives it.
+fn view_fallback_allowed(
+    deadline: crate::Deadline,
+    whole_read_budget: std::time::Duration,
+) -> bool {
+    let default = std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
+    deadline.span() >= default && whole_read_budget >= default * 3 / 5
 }
 
 /// How a read of the window's visible elements ended.

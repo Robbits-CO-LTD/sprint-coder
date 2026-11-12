@@ -123,6 +123,15 @@ pub fn execute(
 /// reader about the refs it returns.
 const VISIBLE_SCOPE_HINT: &str = "The window has too many elements to read in time, so only the elements it shows on screen were read; elements scrolled out of view are omitted. These refs work only while the view stays as it is: after scrolling, or when the window changes, run snapshot again and use the new refs. If almost nothing is listed, the window is probably covered by another window, which makes it report its elements as off screen: bring it forward, then run snapshot again.";
 
+/// Marks a response built from a capture of the visible elements only, so its
+/// reader knows the refs hold in that view alone.
+pub(crate) fn annotate_visible_scope(body: &mut Value, result: &snapshot::SnapshotResult) {
+    if result.visible_scope {
+        body["scope"] = json!("visible");
+        body["scope_hint"] = json!(VISIBLE_SCOPE_HINT);
+    }
+}
+
 fn format_result(result: snapshot::SnapshotResult) -> Result<Value, AppError> {
     format_snapshot_fields(&result, None, None)
 }
@@ -155,10 +164,7 @@ pub(crate) fn format_snapshot_fields(
     if result.identity_unproven.is_some() {
         body["identity_unproven"] = json!(true);
     }
-    if result.visible_scope {
-        body["scope"] = json!("visible");
-        body["scope_hint"] = json!(VISIBLE_SCOPE_HINT);
-    }
+    annotate_visible_scope(&mut body, result);
     if let Some(ms) = elapsed_ms {
         body["elapsed_ms"] = json!(ms);
     }

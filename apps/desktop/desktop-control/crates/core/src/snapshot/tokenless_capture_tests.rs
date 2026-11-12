@@ -239,6 +239,31 @@ fn a_deadline_shorter_than_the_default_never_falls_back_to_the_view() {
     assert_eq!(adapter.captures(), 2);
 }
 
+/// A wait polls under one long deadline. Late in it, the whole-window read
+/// gets a fraction of the time a default snapshot gives it, so a cut there
+/// does not show that the window cannot be read whole: no fallback.
+#[test]
+fn a_long_deadline_with_little_left_never_falls_back_to_the_view() {
+    let _guard = HomeGuard::new();
+    let adapter = CaptureAdapter::new(anchored_window());
+    adapter.fault_whole_read(cut_short);
+    adapter.serve_view();
+
+    let started = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(8))
+        .expect("the clock is past its first seconds");
+    let deadline = Deadline::at(started, 10_000).expect("a deadline");
+    let captured =
+        crate::snapshot::build(&adapter, &skeleton_opts(), Some("Fixture"), None, deadline)
+            .expect("the window snapshots");
+    assert!(!captured.visible_scope);
+    assert_eq!(
+        captured.identity_unproven.as_deref(),
+        Some("the whole-window read was cut short")
+    );
+    assert_eq!(adapter.captures(), 2);
+}
+
 #[test]
 fn a_whole_window_that_reads_in_time_keeps_the_whole_window_proof() {
     let _guard = HomeGuard::new();

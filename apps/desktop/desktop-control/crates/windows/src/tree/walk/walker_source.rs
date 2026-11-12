@@ -304,8 +304,11 @@ mod imp {
     }
 
     /// A walker over the elements the window shows: the raw view without every
-    /// element its provider reports offscreen, and without what lies below
-    /// such an element. The condition is evaluated by the provider's side of
+    /// element its provider reports offscreen. As in any conditional view, an
+    /// onscreen element below a skipped one is shown under the nearest onscreen
+    /// ancestor, so a path here counts positions in this view only; capture and
+    /// resolution both walk it, which keeps their paths and counts in step. The
+    /// condition is evaluated by the provider's side of
     /// UI Automation, so the offscreen siblings a step skips cost no call of
     /// their own; one step is bounded by the sibling count it skips (on a
     /// Chromium page of 5,000 rows, a whole walk of the 19 visible rows took
@@ -755,7 +758,8 @@ pub fn walk_uia_subtree(
 }
 
 /// Walks only the elements the window shows (`UiaTreeSource::for_visible_root`),
-/// with every call bounded by what is left of the walk's deadline.
+/// with each call bounded by what was left of the walk's deadline when the walk
+/// began.
 pub fn walk_uia_visible_subtree(
     root: &UIAElement,
     root_source: &ObservationRoot<'_>,

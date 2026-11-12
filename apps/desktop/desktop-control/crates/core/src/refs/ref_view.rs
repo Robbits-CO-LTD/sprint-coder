@@ -119,10 +119,10 @@ pub(crate) fn view_unavailable(entry: &RefEntry) -> AdapterError {
 pub(crate) fn rooted_find_unsupported(entry: &RefEntry) -> AdapterError {
     AdapterError::new(
         crate::ErrorCode::ActionNotSupported,
-        "find --root does not accept a ref from a snapshot with scope \"visible\": only the          elements on screen can be read under it, so matches scrolled out of view would be missed",
+        "find --root does not accept a ref from a snapshot with scope \"visible\": only the elements on screen can be read under it, so matches scrolled out of view would be missed",
     )
     .with_suggestion(
-        "Run 'snapshot --root' with this ref to read what is on screen under it, or scroll and          run 'snapshot' again.",
+        "Run 'snapshot --root' with this ref to read what is on screen under it, or scroll and run 'snapshot' again.",
     )
     .with_details(json!({
         "kind": "rooted_find_in_view_unsupported",
