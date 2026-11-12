@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AccessibilityNode, AdapterError, AppInfo, Deadline, ErrorCode, Rect, SnapshotSurface,
     SurfaceInfo, WindowInfo,
@@ -159,6 +160,22 @@ pub trait ObservationOps: Send + Sync {
         _deadline: Deadline,
     ) -> Result<NativeHandle, AdapterError> {
         Err(AdapterError::not_supported("resolve_locator_anchor"))
+    }
+
+    /// The identity evidence of the element's nearest ancestors, nearest first,
+    /// read upward from `handle` and stopping below the root of the observation
+    /// `entry` was captured from: at most `count`, and fewer when that root is
+    /// reached first. A saved ref proven together with its ancestors is held to
+    /// them on the element it acts on (`refs::ref_ancestry`); an adapter without
+    /// this read cannot act on such a ref.
+    fn read_ancestor_evidence(
+        &self,
+        _entry: &RefEntry,
+        _handle: &NativeHandle,
+        _count: usize,
+        _deadline: Deadline,
+    ) -> Result<Vec<crate::LocatorEvidence>, AdapterError> {
+        Err(AdapterError::not_supported("read_ancestor_evidence"))
     }
 
     fn list_surfaces(

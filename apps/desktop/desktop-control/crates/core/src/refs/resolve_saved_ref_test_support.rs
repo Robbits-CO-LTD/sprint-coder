@@ -26,6 +26,10 @@ pub(super) struct RuleAdapter {
     pub(super) strict: AtomicU32,
     pub(super) anchors: AtomicU32,
     pub(super) anchored: Mutex<Option<RefEntry>>,
+    /// The tree the landed element's ancestors are read from, when it is no
+    /// longer the tree the whole-window count read (`observed`).
+    pub(super) ancestor_tree: Option<AccessibilityNode>,
+    pub(super) ancestor_reads: AtomicU32,
 }
 
 impl RuleAdapter {
@@ -40,6 +44,8 @@ impl RuleAdapter {
             strict: AtomicU32::new(0),
             anchors: AtomicU32::new(0),
             anchored: Mutex::new(None),
+            ancestor_tree: None,
+            ancestor_reads: AtomicU32::new(0),
         }
     }
 
@@ -135,6 +141,49 @@ impl ObservationOps for RuleAdapter {
         self.anchors.fetch_add(1, Ordering::SeqCst);
         *self.anchored.lock().unwrap() = Some(entry.clone());
         Ok(NativeHandle::new("anchor"))
+    }
+
+    /// The ancestors of the node at the landed anchor's path, in the tree the
+    /// landing saw: `ancestor_tree` when a test changed it after the count.
+    fn read_ancestor_evidence(
+        &self,
+        _entry: &RefEntry,
+        _handle: &NativeHandle,
+        count: usize,
+        _deadline: Deadline,
+    ) -> Result<Vec<crate::LocatorEvidence>, AdapterError> {
+        self.ancestor_reads.fetch_add(1, Ordering::SeqCst);
+        let path = self
+            .anchored
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|anchor| anchor.scope.path.as_slice().to_vec())
+            .unwrap_or_default();
+        let tree = self
+            .ancestor_tree
+            .clone()
+            .unwrap_or_else(|| self.observed.clone());
+        let observed = crate::adapter::observed_tree(&ObservationRoot::Window(&window()), tree)?;
+        let parents = crate::refs::ref_ancestry::parents(&observed);
+        let Some(mut index) = observed
+            .nodes
+            .iter()
+            .position(|node| node.path.as_slice() == path.as_slice())
+        else {
+            return Ok(Vec::new());
+        };
+        let mut ancestors = Vec::new();
+        while ancestors.len() < count {
+            match parents[index] {
+                Some(parent) if parents[parent].is_some() => {
+                    ancestors.push(observed.nodes[parent].evidence.clone());
+                    index = parent;
+                }
+                _ => break,
+            }
+        }
+        Ok(ancestors)
     }
 }
 

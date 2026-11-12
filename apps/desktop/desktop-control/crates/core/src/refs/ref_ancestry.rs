@@ -30,6 +30,87 @@ use crate::{
     tree::accname::non_blank,
 };
 
+/// How a tokenless entry was proven at capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Proof {
+    /// By its own predicate (`unique_at_capture`, no ancestors).
+    Own,
+    /// By its predicate together with its recorded ancestors (stored with
+    /// `unique_at_capture` unset, so a reader that ignores the ancestors sees
+    /// an unproven entry).
+    WithAncestors,
+    /// Not proven, or recorded inconsistently (`unique_at_capture` set and
+    /// ancestors present): refused either way.
+    None,
+}
+
+pub(crate) fn proof_of(entry: &RefEntry) -> Proof {
+    match (
+        entry.identity.unique_at_capture,
+        entry.identity.ancestors.is_empty(),
+    ) {
+        (true, true) => Proof::Own,
+        (false, false) => Proof::WithAncestors,
+        _ => Proof::None,
+    }
+}
+
+/// Holds the element a ref is about to act on to the ancestors its entry
+/// recorded, read upward from that element itself.
+///
+/// Resolution picks the element from a whole-window observation, but the
+/// handle comes from landing the recorded path afterwards, and the checks on
+/// the landed element compare its own predicate only. A twin under different
+/// ancestors that moved into the path in between matches that predicate, so
+/// without this an entry proven by its ancestors could act on the twin. An
+/// entry without recorded ancestors needs no such read and passes as before.
+pub(crate) fn confirm_handle_ancestors(
+    adapter: &dyn crate::PlatformAdapter,
+    entry: &RefEntry,
+    handle: &crate::NativeHandle,
+    deadline: crate::Deadline,
+) -> Result<(), crate::AdapterError> {
+    let recorded = &entry.identity.ancestors;
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    let live = match adapter.read_ancestor_evidence(entry, handle, recorded.len(), deadline) {
+        Ok(live) => live,
+        Err(error) if error.is_default_not_supported("read_ancestor_evidence") => {
+            return Err(crate::refs::resolve_errors::identity_not_unique(entry));
+        }
+        Err(error) => return Err(error),
+    };
+    if live.len() < recorded.len() {
+        return Err(ancestors_changed(entry));
+    }
+    let verdict = recorded
+        .iter()
+        .zip(&live)
+        .map(|(ancestor, evidence)| {
+            FullPredicate::of_ancestor(ancestor).compare(&LivePredicate::observed(evidence))
+        })
+        .fold(IdentityMatch::Match, conjunction);
+    match verdict {
+        IdentityMatch::Match => Ok(()),
+        IdentityMatch::NoMatch => Err(ancestors_changed(entry)),
+        IdentityMatch::Unknown => Err(crate::refs::resolve_errors::identity_unknown_error(entry)),
+    }
+}
+
+fn ancestors_changed(entry: &RefEntry) -> crate::AdapterError {
+    crate::AdapterError::stale_ref_because(
+        "The element the ref landed on no longer sits under the ancestors it was recorded with",
+    )
+    .with_disposition(crate::DeliverySemantics::not_delivered())
+    .with_details(serde_json::json!({
+        "kind": "saved_ref_ancestors_changed",
+        "retryable": false,
+        "complete": true,
+        "role": entry.identity.role,
+    }))
+}
+
 /// Each node's parent in the observation, `None` for a root.
 pub(crate) fn parents(observed: &ObservedTree) -> Vec<Option<usize>> {
     let mut parents = vec![None; observed.nodes.len()];

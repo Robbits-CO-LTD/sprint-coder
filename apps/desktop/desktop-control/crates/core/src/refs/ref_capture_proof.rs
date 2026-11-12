@@ -105,7 +105,9 @@ impl<'a> CaptureProof<'a> {
             index,
         ) {
             entry.identity.ancestors = ancestors;
-            entry.identity.unique_at_capture = true;
+            // Left unset: an older reader that ignores the ancestors must see
+            // an unproven entry (see `RefEntryIdentity::ancestors`).
+            entry.identity.unique_at_capture = false;
         }
     }
 

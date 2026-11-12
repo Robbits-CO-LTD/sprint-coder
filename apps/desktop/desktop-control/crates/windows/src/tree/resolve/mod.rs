@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AdapterError, Deadline, ErrorCode, NativeHandle, RefEntry};
 
 #[cfg(target_os = "windows")]
@@ -157,6 +158,7 @@ fn verify_stored_failure_error(entry: &RefEntry, deadline: Deadline) -> AdapterE
     }
 }
 
+pub(crate) mod resolve_ancestors;
 pub(crate) mod resolve_anchor;
 pub(crate) mod resolve_match;
 pub(crate) mod resolve_pacing;

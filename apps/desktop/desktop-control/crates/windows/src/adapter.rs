@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     AccessibilityNode, ActionOps, AdapterError, AppInfo, ClipboardContent, ClipboardFormat,
     Deadline, DragParams, ElementState, InputOps, InteractionLease, KeyCombo, LiveElement,
@@ -86,6 +87,18 @@ impl ObservationOps for WindowsAdapter {
         deadline: Deadline,
     ) -> Result<NativeHandle, AdapterError> {
         crate::tree::resolve::resolve_anchor::resolve_locator_anchor(entry, deadline)
+    }
+
+    fn read_ancestor_evidence(
+        &self,
+        entry: &RefEntry,
+        handle: &NativeHandle,
+        count: usize,
+        deadline: Deadline,
+    ) -> Result<Vec<agent_desktop_core::LocatorEvidence>, AdapterError> {
+        crate::tree::resolve::resolve_ancestors::read_ancestor_evidence(
+            entry, handle, count, deadline,
+        )
     }
 
     /// The five live readers are projections over one shared single-element

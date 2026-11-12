@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     evaluate::{check_with_stability, check_with_stability_or_gap},
     evidence::ActionabilityEvidence,
@@ -103,6 +104,14 @@ fn observe(target: &LiveCheckTarget<'_>) -> Result<ActionabilityEvidence, Adapte
         Err(err) => return Err(err),
     };
     validate_live_identity(target.entry, &live)?;
+    // The element about to be acted on is held to the ancestors its entry was
+    // proven with as well, not only to its own predicate.
+    crate::refs::ref_ancestry::confirm_handle_ancestors(
+        target.adapter,
+        target.entry,
+        target.handle,
+        target.deadline,
+    )?;
     Ok(ActionabilityEvidence {
         nonspatial: target.adapter.is_nonspatial_target(target.handle),
         state: live.state,
