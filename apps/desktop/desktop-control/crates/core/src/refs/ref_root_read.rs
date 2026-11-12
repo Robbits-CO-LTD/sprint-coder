@@ -25,6 +25,10 @@ pub(crate) fn read_saved_root<T>(
     read_subtree: impl FnOnce(&WindowInfo, &NativeHandle) -> Result<T, AppError>,
     stands_alone: impl FnOnce(&T) -> bool,
 ) -> Result<RootRead<T>, AppError> {
+    // A menu item ref names no accessibility element to read below.
+    if entry.identity.in_menu.is_some() {
+        return Err(crate::refs::ref_menu::menu_ref_refused(entry).into());
+    }
     if element_token(entry).is_some() {
         if entry.identity.in_view.is_some() {
             return Err(crate::refs::ref_view::view_unavailable(entry).into());

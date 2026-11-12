@@ -255,6 +255,18 @@ impl ObservationOps for WindowsAdapter {
     }
 }
 impl ActionOps for WindowsAdapter {
+    /// A standard menu item, run by its command after the live menu shows it
+    /// as recorded (`actions::win32_menu`).
+    fn run_menu_command(
+        &self,
+        entry: &RefEntry,
+        window: &WindowInfo,
+        deadline: Deadline,
+        lease: &InteractionLease,
+    ) -> Result<agent_desktop_core::ActionResult, AdapterError> {
+        crate::actions::win32_menu::run_menu_command(entry, window, deadline, lease)
+    }
+
     fn execute_action(
         &self,
         handle: &NativeHandle,

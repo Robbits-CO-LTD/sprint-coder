@@ -19,6 +19,7 @@ fn action_availability_makes_toggle_and_expand_applicable() {
             unique_at_capture: true,
             ancestors: Vec::new(),
             in_view: None,
+            in_menu: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

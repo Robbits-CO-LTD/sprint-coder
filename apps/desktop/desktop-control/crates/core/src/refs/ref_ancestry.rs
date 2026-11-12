@@ -46,13 +46,25 @@ pub(crate) enum Proof {
     /// Resolution holds it to the same view, its path and its bounds
     /// (`ref_view`), never to the whole-window rule.
     InView,
+    /// An item of a window's standard menu bar (`RefEntryIdentity::in_menu`,
+    /// stored with `unique_at_capture` unset, no ancestors, no view proof and
+    /// no element token). Never resolved to an accessibility element: only a
+    /// click runs it, through the window's own menu (`ref_menu`).
+    InMenu,
     /// Not proven, or recorded inconsistently (`unique_at_capture` set and
-    /// ancestors present, or a view proof next to either other proof):
-    /// refused either way.
+    /// ancestors present, or a view or menu proof next to another proof or an
+    /// element token): refused either way.
     None,
 }
 
 pub(crate) fn proof_of(entry: &RefEntry) -> Proof {
+    if entry.identity.in_menu.is_some() {
+        let alone = !entry.identity.unique_at_capture
+            && entry.identity.ancestors.is_empty()
+            && entry.identity.in_view.is_none()
+            && entry.identity.retained_object.is_none();
+        return if alone { Proof::InMenu } else { Proof::None };
+    }
     match (
         entry.identity.unique_at_capture,
         entry.identity.ancestors.is_empty(),

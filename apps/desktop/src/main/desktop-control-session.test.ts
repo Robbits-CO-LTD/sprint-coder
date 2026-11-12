@@ -79,6 +79,15 @@ describe('the arguments of a run Main places in its session', () => {
       ['--agent-id', 'w1', 'snapshot', '-i'],
       ['snapshot', '--agent-id=w1', '--session', 'x'],
       ['batch', '[]', '--session', 'x'],
+      // A batch entry's own session, which the executable reads per entry.
+      ['batch', JSON.stringify([{ command: 'click', session: 'x', args: { ref_id: '@s1:e1' } }])],
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'snapshot', args: {} },
+          { command: 'click', session: 'x', args: { ref_id: '@s1:e1' } },
+        ]),
+      ],
     ]) {
       expect(desktopControlScopeOptionRefusal(argv)).toContain('Sprint Coder が');
       expect(desktopControlSessionArgvRefusal(argv)).toContain('Sprint Coder が');
@@ -91,6 +100,7 @@ describe('the arguments of a run Main places in its session', () => {
       ['type', '@s1:e1', '--', '--session'],
       ['click', '@s1:e1'],
       ['snapshot', '-i'],
+      ['batch', JSON.stringify([{ command: 'click', args: { ref_id: '@s1:e1' } }])],
     ])
       expect(desktopControlSessionArgvRefusal(argv)).toBeNull();
   });

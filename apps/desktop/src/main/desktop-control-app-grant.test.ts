@@ -46,6 +46,23 @@ beforeAll(() => {
     '@e2': part('charmap.exe', 100, 'w-1', { role: 'textfield', name: 'コピーする文字(A):' }),
   });
   writeRefmap(stateRoot, 'snotepad', { '@e1': part('Notepad.exe', 200, 'w-2') });
+  // Items of charmap's standard menu bar, as `snapshot --surface menubar` records them; the second
+  // has a record the card cannot read.
+  writeRefmap(stateRoot, 'scharmenu', {
+    '@e1': part('charmap.exe', 100, 'w-1', {
+      role: 'menuitem',
+      name: '終了(X)',
+      source_surface: 'menubar',
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '終了(X)', position: 3, submenu: false },
+        ],
+        command_id: 1009,
+      },
+    }),
+    '@e2': part('charmap.exe', 100, 'w-1', { role: 'menuitem', proven_in_menu: 'broken' }),
+  });
   // A packaged app: the executable names the hosted app's own process, not the frame host.
   writeRefmap(stateRoot, 'scalc', { '@e1': part('CalculatorApp.exe', 300, 'w-3') });
   writeRefmap(stateRoot, 'sphotos', { '@e1': part('Photos.exe', 301, 'w-5') });
@@ -152,6 +169,52 @@ describe('desktop-control app-wide Task grant', () => {
     expect(covers(['snapshot', '--window-id', 'w-2', '--app', 'charmap'], [charmap])).toBe(false);
     // No grant at all.
     expect(covers(['click', '@scharmap:e1'], [])).toBe(false);
+  });
+
+  it('never covers or offers a run naming a menu item or a part it cannot tell, in any form', () => {
+    const charmap = offer(['click', '@scharmap:e1'])!;
+    const twenty = Array.from({ length: 20 }, () => ({
+      command: 'click',
+      args: { ref_id: '@scharmap:e1' },
+    }));
+    for (const argv of [
+      // An upper-case id, which the executable reads on a case-blind file system.
+      ['click', '@SCHARMENU:e1'],
+      ['click', '@SCHARMAP:e1'],
+      // Another session's records.
+      ['click', '@scharmenu:e1', '--session', 'other'],
+      ['click', '@scharmap:e1', '--session', 'other'],
+      // A menu item past the twentieth step the card shows.
+      batch(...twenty, { command: 'click', args: { ref_id: '@scharmenu:e1' } }),
+      // An entry's own session.
+      batch({ command: 'click', session: 'other', args: { ref_id: '@scharmap:e1' } }),
+    ]) {
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
+      expect(offer(argv), argv.join(' ')).toBeNull();
+    }
+    // Every step is judged, so the app's plain parts past the twentieth stay covered.
+    expect(covers(batch(...twenty, ...twenty), [charmap])).toBe(true);
+  });
+
+  it('never covers or offers running a standard menu item, alone or in a batch', () => {
+    const charmap = offer(['click', '@scharmap:e1'])!;
+    for (const argv of [
+      ['click', '@scharmenu:e1'],
+      ['click', '@scharmenu:e2'],
+      ['click', '@scharmenu:e1', '--timeout-ms', '2000'],
+      ['get', '@scharmenu:e1', '--property', 'name'],
+      ['snapshot', '--root', '@scharmenu:e1'],
+      batch({ command: 'click', args: { ref_id: '@scharmenu:e1' } }),
+      batch(
+        { command: 'snapshot', args: { window_id: 'w-1', surface: 'menubar' } },
+        { command: 'click', args: { ref_id: '@scharmenu:e1' } },
+      ),
+    ]) {
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
+      expect(offer(argv), argv.join(' ')).toBeNull();
+    }
+    // The app's other parts stay covered.
+    expect(covers(['click', '@scharmap:e1'], [charmap])).toBe(true);
   });
 
   it('covers and offers reading the named window’s own menu bar, and no other surface', () => {

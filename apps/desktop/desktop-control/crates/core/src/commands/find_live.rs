@@ -97,6 +97,10 @@ fn rooted_resolution(
     if entry.identity.in_view.is_some() {
         return Err(crate::refs::ref_view::rooted_find_unsupported(&entry).into());
     }
+    // A menu item ref names no accessibility element to search below.
+    if entry.identity.in_menu.is_some() {
+        return Err(crate::refs::ref_menu::menu_ref_refused(&entry).into());
+    }
     crate::locator::live_locator::resolve_query_from(adapter, query, request, |deadline| {
         let read = read_saved_root(
             adapter,

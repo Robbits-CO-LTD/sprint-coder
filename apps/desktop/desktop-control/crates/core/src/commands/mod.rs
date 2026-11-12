@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 pub mod batch;
 pub mod check;
 pub mod clear;
@@ -28,6 +29,7 @@ pub mod key_up;
 pub mod launch;
 pub mod list_apps;
 pub mod list_displays;
+pub(crate) mod menu_click;
 #[cfg(test)]
 mod list_displays_tests;
 pub mod list_notifications;

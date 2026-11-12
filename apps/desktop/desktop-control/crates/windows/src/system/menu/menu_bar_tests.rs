@@ -7,12 +7,14 @@ fn raw(text: Option<&str>, ftype: u32, fstate: u32) -> RawItem {
         ftype,
         fstate,
         has_bitmap: false,
+        id: 42,
     }
 }
 
 #[test]
 fn a_raw_item_becomes_a_menu_item_with_its_state() {
     let plain = item_from_raw(&raw(Some("開く(&O)\tCtrl+O"), 0, 0));
+    assert_eq!(plain.command_id, 42);
     assert_eq!(plain.text.as_deref(), Some("開く(&O)\tCtrl+O"));
     assert!(!plain.disabled && !plain.checked && !plain.radio && !plain.owner_drawn);
 
@@ -154,6 +156,13 @@ mod live {
         let items = file.submenu.as_ref().expect("the File submenu is read");
         assert_eq!(items.len(), 5);
         assert_eq!(items[0].text.as_deref(), Some("開く(&O)...\tCtrl+O"));
+        assert_eq!(items[0].command_id, 1001);
+        assert!(!items[0].in_notify_by_position_menu);
+        assert_eq!(
+            file.command_id, 0,
+            "an item that opens a submenu sends no command"
+        );
+        assert_eq!(items[3].command_id, 0);
         assert!(items[1].disabled);
         assert!(items[2].separator);
         let nested = items[3]

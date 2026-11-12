@@ -92,6 +92,7 @@ pub fn execute(
             args.window_id.as_deref(),
             args.timeout_ms
                 .unwrap_or(snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS),
+            context,
         ) {
             Err(AppError::Adapter(error)) if error.is_default_not_supported("read_menu_bar") => {}
             result => return result,

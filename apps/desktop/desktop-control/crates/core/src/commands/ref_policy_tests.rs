@@ -141,6 +141,7 @@ fn snapshot_id() -> String {
             unique_at_capture: true,
             ancestors: Vec::new(),
             in_view: None,
+            in_menu: None,
         },
         geometry: crate::RefGeometry {
             bounds_space: None,

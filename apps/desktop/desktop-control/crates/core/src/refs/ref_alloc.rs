@@ -39,6 +39,7 @@ pub(crate) fn ref_entry_from_node(
             unique_at_capture: false,
             ancestors: Vec::new(),
             in_view: None,
+            in_menu: None,
         },
         geometry: crate::RefGeometry {
             bounds,

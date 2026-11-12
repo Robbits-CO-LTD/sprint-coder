@@ -53,6 +53,45 @@ pub struct RefEntryIdentity {
         skip_serializing_if = "Option::is_none"
     )]
     pub in_view: Option<RefViewProof>,
+    /// Set for an item of a window's standard menu bar, read from the native
+    /// menu (`snapshot --surface menubar`) rather than from the accessibility
+    /// tree. Only `click` runs such a ref, by the item's command, after the
+    /// live menu shows the same item at the recorded names; every path that
+    /// resolves a ref to an accessibility element refuses it.
+    ///
+    /// Stored under its own key, `proven_in_menu`, with `unique_at_capture`
+    /// unset and no other proof, so an older reader that does not know the key
+    /// sees an unproven entry and refuses it. An entry carrying this together
+    /// with another proof or an element token is inconsistent and is refused.
+    #[serde(
+        rename = "proven_in_menu",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub in_menu: Option<RefMenuProof>,
+}
+
+/// Where a standard menu item sat in its window's menu bar when it was read,
+/// and the command it runs: the item one level of the menu at a time from the
+/// bar down, each by its name as the menu shows it (`&` markers removed, the
+/// shortcut left out) and its position among its menu's items, and the
+/// command identifier the item sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefMenuProof {
+    pub steps: Vec<RefMenuStep>,
+    pub command_id: u32,
+    /// The shortcut the item's text showed, for naming it to a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
+}
+
+/// One level of a menu item's place: its name, its position among the items
+/// of its menu, and whether it opens a submenu (every level but the last).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefMenuStep {
+    pub name: String,
+    pub position: u32,
+    pub submenu: bool,
 }
 
 /// What a proof over the window's visible elements recorded: where the element
