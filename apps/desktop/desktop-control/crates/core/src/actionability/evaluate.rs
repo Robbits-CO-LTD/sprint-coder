@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     evidence::ActionabilityEvidence, gates, receives_events::receives_events_check,
     report::ActionabilityReport, requirements::ActionabilityRequirements,
@@ -141,6 +142,12 @@ pub(super) fn build_report(
         {
             return Err(refusal);
         }
+        if matches!(visibility.status, super::status::ActionabilityStatus::Fail)
+            && let Some((handle, adapter)) = hit_test
+            && let Some(refusal) = adapter.minimized_window_refusal(handle, deadline)
+        {
+            return Err(refusal);
+        }
         checks.push(visibility);
     }
     if requirements.requires_stability(pointer_delivery) {
@@ -262,6 +269,10 @@ mod recovery_tests;
 #[cfg(test)]
 #[path = "position_refusal_tests.rs"]
 mod position_refusal_tests;
+
+#[cfg(test)]
+#[path = "minimized_refusal_tests.rs"]
+mod minimized_refusal_tests;
 
 #[cfg(test)]
 mod tests {

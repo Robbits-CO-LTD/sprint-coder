@@ -299,6 +299,19 @@ pub trait ObservationOps: Send + Sync {
         None
     }
 
+    /// Why this target cannot take an action at all because its window is
+    /// minimized, when the adapter has proved it. Asked only after the
+    /// visibility gate failed. Waiting cannot help and nothing may be sent,
+    /// not even a scroll-into-view recovery, so the request is refused with
+    /// this error.
+    fn minimized_window_refusal(
+        &self,
+        _handle: &NativeHandle,
+        _deadline: Deadline,
+    ) -> Option<AdapterError> {
+        None
+    }
+
     fn hit_test(
         &self,
         handle: &NativeHandle,

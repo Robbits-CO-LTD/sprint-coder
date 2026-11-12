@@ -109,6 +109,15 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/windows/src/tree/chromium_provenance_tests.rs`（新しく足した） | 上の判定の試験。message-only の窓で、3 段下の子孫の `Chrome_RenderWidgetHostHWND` を見つけること、持たない窓・名前の頭だけが同じ class の窓を見つけないこと |
 | `crates/windows/src/tree/walk/walker_source.rs`（2 回目） | 木の読み取りの Chromium 由来の判定に `has_chromium_provenance` を使う。WebView2 の窓でも、名前の無い通り抜けの入れ子を深さに数えず、一括の取得をせず部品ごとに読む（Electron の窓と同じ）。`with_transaction_timeout` を crate の中で使えるようにした（先祖の読み取りで使う） |
 | `skills/agent-desktop-windows/references/chromium-and-electron.md` | 名前も動作も無い通り抜けの入れ子は、Electron の窓と WebView2 の窓では深さに数えないので、既定の深さから始める、と足した |
+| `crates/windows/src/tree/minimized.rs` | 1 行目に変更の注記を足した。部品の窓が最小化されているかの判定（`owning_window_minimized`）で、UI Automation の先祖をたどって最初に見つかった窓の `GA_ROOT` をそのまま使わず、表示されている（`IsWindowVisible`）根に当たるまでたどるようにした（`owning_shown_root`。読み取りは差し替えられる形にして試験する）。Chromium（Electron・Chrome）は、ページが隠れている間（最小化の間など）、Web の中身を描く窓 `Chrome_RenderWidgetHostHWND` を自分の隠れた窓（`Chrome_WidgetWin_0`）の下へ移すので、根が最小化されていない隠れた窓になり、最小化した Electron の窓の部品が「見えている」と読まれ、click などが送られて `delivered_unverified` で返っていた（実測では、click の処理はすぐ走るが、animation frame に回した処理は窓を戻すまで走らず、部品の木も更新されない）。部品の窓が最小化されている時に、送る前に止めるエラー（`minimized_window_refusal`。`ACTION_FAILED`、`details.kind: "window_minimized"`・`window_id`・`retryable: false`、`delivery: not_delivered`、案内は窓を戻して snapshot を取り直すこと）を足した |
+| `crates/windows/src/tree/minimized_tests.rs` | 1 行目に変更の注記を足した。最小化した Electron の窓で測った先祖の並び（中身の窓の根が隠れた窓）で、たどりが最小化した窓に届くこと、最初の根が表示されていればそこで止まること、表示された根に届かない・読み取りに失敗した時は「分からない」になること、止めるエラーの中身の試験を足した |
+| `crates/windows/src/adapter.rs`（2 回目） | `minimized_window_refusal` を、上の `tree/minimized.rs` の判定につないだ |
+| `crates/core/src/adapter/observation.rs`（2 回目） | 部品の窓が最小化されていて操作を送れないことを adapter が証明できた時に、そのエラーを返す `minimized_window_refusal` を足した（既定は `None`） |
+| `crates/core/src/actionability/evaluate.rs` | 1 行目に変更の注記を足した。操作の前の確認で「見えている」の確認が失敗した時だけ、adapter に `minimized_window_refusal` を聞き、最小化の証明があればそのエラーで止める（待っても変わらず、画面外の部品を見える所へ動かす scroll も送らない） |
+| `crates/core/src/actionability/minimized_refusal_tests.rs`（新しく足した） | 上の確認の試験。最小化の窓の部品への click・set-value・toggle・select・expand が adapter のエラーで止まり、scroll を呼ぶ元になる失敗の確認が残らないこと、最小化でない画面外の部品は今までどおりのエラーになること、見えている部品では adapter に聞かないこと |
+| `crates/core/src/commands/snapshot.rs` | 1 行目に変更の注記を足した。snapshot の `window` に、窓が最小化されている時だけ `minimized: true` を足した（`list-windows` と同じ名前） |
+| `crates/core/src/commands/snapshot_tests.rs` | 1 行目に変更の注記を足した。上の `minimized` が、最小化の時だけ出ることの試験を足した |
+| `skills/agent-desktop-windows/SKILL.md`（2 回目） | 「A minimized one is not」の項を、道具の実際の動きに合わせて書き直した（snapshot は全部読めて `window` に `minimized: true` が出る、`is visible` は false、ref の操作は送る前に `window_minimized` で止まる、Electron・Chrome も同じ、UWP の電卓は最小化で止まり ref が無くなる、`restore --window-id` で戻して snapshot を取り直す） |
 
 ## build と試験
 
