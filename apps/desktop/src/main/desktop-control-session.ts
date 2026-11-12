@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
+  DESKTOP_CONTROL_LEADER_ACCENT,
+  DESKTOP_CONTROL_LEADER_LABEL,
+  DESKTOP_CONTROL_WORKER_ACCENTS,
+  desktopControlWorkerAccent,
+} from '@sprint-coder/contracts';
+import {
   desktopControlArgvIsInert,
   desktopControlStateFolder,
   type DesktopControlSessionVariables,
@@ -30,8 +36,8 @@ import { secureLogger } from './secure-logger';
 
 /** The agent id of the Leader in the Task's session. */
 export const DESKTOP_CONTROL_LEADER_AGENT_ID = 'leader';
-const LEADER_LABEL = 'Leader';
-const LEADER_ACCENT = '#2563EB';
+const LEADER_LABEL = DESKTOP_CONTROL_LEADER_LABEL;
+const LEADER_ACCENT = DESKTOP_CONTROL_LEADER_ACCENT;
 const SESSION_NAME = 'sprint-coder';
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 /**
@@ -66,19 +72,10 @@ type TaskSession = {
 };
 
 /**
- * The Worker cursors' accents, in the order the Team's desktop Workers were marked. None is close
- * to the Leader's blue. The one place these colors live (the Team view is to match them later).
+ * The Worker cursors' accents, in the order the Team's desktop Workers were marked, from the
+ * shared contracts, so the approval card and the Team view mark each Worker with its cursor's color.
  */
-export const DESKTOP_CONTROL_WORKER_ACCENTS = Object.freeze([
-  '#16A34A',
-  '#EA580C',
-  '#9333EA',
-  '#DB2777',
-  '#0D9488',
-  '#CA8A04',
-  '#DC2626',
-  '#92400E',
-]);
+export { DESKTOP_CONTROL_WORKER_ACCENTS };
 /** How many Workers of one Task may hold desktop control at once (at most `..._MAX`). */
 export const DESKTOP_CONTROL_WORKERS_DEFAULT = 3;
 export const DESKTOP_CONTROL_WORKERS_MAX = 5;
@@ -147,7 +144,7 @@ export async function ensureDesktopControlSession(
         '--label',
         worker.label,
         '--accent',
-        DESKTOP_CONTROL_WORKER_ACCENTS[worker.colorIndex % DESKTOP_CONTROL_WORKER_ACCENTS.length]!,
+        desktopControlWorkerAccent(worker.colorIndex),
         ...LINGER,
       ],
       scoped,

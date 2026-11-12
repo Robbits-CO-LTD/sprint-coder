@@ -209,14 +209,15 @@ export class ApprovalCoordinator {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
       /**
-       * The Team Worker marked for desktop control that made this call (by the Turn and call id
-       * the broker sees), for the card to name; `undefined` for the Leader's own calls.
+       * Who made this call (by the Turn and call id the broker sees), for the card to name: the
+       * Team Worker marked for desktop control, `'leader'` for the Leader's own calls, or
+       * `undefined` for a Worker with no mark.
        */
       desktopControlWorkerFor?: (
         taskId: string,
         turnId: string,
         callId: string,
-      ) => Readonly<{ label: string; colorIndex: number }> | undefined;
+      ) => Readonly<{ label: string; colorIndex: number }> | 'leader' | undefined;
     },
   ) {}
 
@@ -460,8 +461,9 @@ export class ApprovalCoordinator {
         : null;
     const desktopAppGrant =
       offered !== null && desktopControlExpectedWindowOwner(offered) !== null ? offered : null;
-    // The Team Worker that asked, as its cursor names and colors it (display only).
-    const worker =
+    // Who asked, as its cursor names and colors it (display only): a marked Team Worker, or the
+    // Leader when the run draws the Leader's cursor, that is, runs in Main's session of the Task.
+    const caller =
       desktopAction === undefined
         ? undefined
         : this.options.desktopControlWorkerFor?.(
@@ -469,6 +471,15 @@ export class ApprovalCoordinator {
             request.context.turnId,
             request.callId,
           );
+    const inSession = readScope === null || readScope.stateRoot !== undefined;
+    const requester =
+      caller === undefined
+        ? undefined
+        : caller === 'leader'
+          ? inSession
+            ? ({ leader: true } as const)
+            : undefined
+          : { label: caller.label, colorIndex: caller.colorIndex };
     const specDigest = facts.specDigest;
     const resource = facts.resourceSet;
     const operation = facts.operation;
@@ -510,9 +521,7 @@ export class ApprovalCoordinator {
               desktopAction: {
                 ...desktopAction,
                 ...(desktopAppGrant === null ? {} : { appGrant: { app: desktopAppGrant.label } }),
-                ...(worker === undefined
-                  ? {}
-                  : { requester: { label: worker.label, colorIndex: worker.colorIndex } }),
+                ...(requester === undefined ? {} : { requester }),
               },
             }),
       },

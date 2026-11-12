@@ -1,6 +1,12 @@
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DESKTOP_CONTROL_LEADER_ACCENT,
+  DESKTOP_CONTROL_LEADER_LABEL,
+  DESKTOP_CONTROL_WORKER_ACCENTS as SHARED_WORKER_ACCENTS,
+  desktopControlWorkerAccent,
+} from '@sprint-coder/contracts';
+import {
   DESKTOP_CONTROL_AGENT_ID_VARIABLE,
   DESKTOP_CONTROL_SESSION_VARIABLE,
   desktopControlArgvRefusal,
@@ -324,6 +330,11 @@ describe('the Team Workers marked for desktop control', () => {
       'cursor-overlay enable --label Checker --accent #EA580C --linger-ms 30000',
     ]);
     expect(calls[3]!.session).toEqual({ id, agentId: 'agent-b' });
+    // The cursors are drawn with the palette the Renderer marks the same agents with.
+    expect(DESKTOP_CONTROL_WORKER_ACCENTS).toBe(SHARED_WORKER_ACCENTS);
+    expect(calls[2]!.argv).toContain(DESKTOP_CONTROL_LEADER_ACCENT);
+    expect(calls[2]!.argv).toContain(DESKTOP_CONTROL_LEADER_LABEL);
+    expect(calls[3]!.argv).toContain(desktopControlWorkerAccent(worker.colorIndex));
     // A styling that failed is tried again on the next run, and that run does not start.
     const failing = vi.fn<DesktopControlOwnRun>(async () => {
       throw new Error('enable failed');

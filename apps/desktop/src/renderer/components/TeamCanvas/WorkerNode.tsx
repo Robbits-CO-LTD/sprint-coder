@@ -6,6 +6,7 @@ import type {
 } from '../../types/sprint-coder';
 import { TeamExecutionStatus } from '../TeamExecutionStatus';
 import { TeamMessageMarkdown } from '../TeamMessageMarkdown';
+import { WorkerDesktopMark } from '../DesktopCursorSwatch';
 import {
   describeMessagePeer,
   describeWorkerModel,
@@ -186,6 +187,8 @@ function WorkerNodeCard({
             {runtime} · {worker.objective}
           </span>
         </div>
+        {/* Only for a Worker holding desktop control: its cursor's color, as on the desktop. */}
+        <WorkerDesktopMark mark={worker.desktopControl} />
         <span className={`w-status ${dotClass}`}>
           <span className="dot" aria-hidden="true" />
           <span className="w-status-label team-status">{statusLabel}</span>

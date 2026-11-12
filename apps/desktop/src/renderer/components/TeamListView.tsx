@@ -27,6 +27,7 @@ import {
 // DOM-free helper, and sharing it (rather than re-wording the same facts here) is what keeps
 // List/Canvas parity true by construction — the same reason this view reuses the Canvas's testids.
 import { describeHierarchy, parentAgentOf } from './TeamCanvas/placement';
+import { WorkerDesktopMark } from './DesktopCursorSwatch';
 import type { TaskSummary, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
@@ -227,6 +228,8 @@ export function TeamListView({
                 <div className="tlv-worker-heading">
                   <div>
                     <span className="role-name">{worker.role}</span>
+                    {/* The same mark as the Canvas card, for a Worker holding desktop control. */}
+                    <WorkerDesktopMark mark={worker.desktopControl} />
                     <span
                       className={`w-status team-status ${phase === 'waiting_integration' ? 'ready' : phase !== null ? 'busy' : statusDotClass(worker.state)}`}
                     >

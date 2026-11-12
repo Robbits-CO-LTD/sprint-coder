@@ -805,9 +805,10 @@ function desktopControlHireResult(
     worker.role,
     workersAtWork(coordinator, taskId),
   );
-  return 'refusal' in marked
-    ? { desktopControl: false, desktopControlNote: marked.refusal }
-    : { desktopControl: true };
+  if ('refusal' in marked) return { desktopControl: false, desktopControlNote: marked.refusal };
+  // The Team view marks the Worker with its cursor's color from now on.
+  coordinator.notifyDesktopControlMarked(taskId);
+  return { desktopControl: true };
 }
 
 /**

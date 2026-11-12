@@ -2,6 +2,7 @@
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { desktopControlWorkerAccent } from '@sprint-coder/contracts';
 import { TeamListView } from './TeamListView';
 import { TeamCanvas } from './TeamCanvas/TeamCanvas';
 import { Timeline } from './ChatSurface/Timeline';
@@ -370,4 +371,51 @@ it('does not show an outdated thinking indicator outside an active work phase', 
   expect(container.querySelector('[data-testid="team-worker"] .w-glance-line')).toBeNull();
   expect(container.querySelector('[data-testid="team-work-counts"]')).toBeNull();
   expect(row.state).toBe('running');
+});
+
+describe.each(['canvas', 'list'] as const)('%s desktop-control mark', (view) => {
+  function renderWith(team: TeamDetail) {
+    useAppStore.setState({ teamByTask: { [task.id]: team } });
+    act(() =>
+      root.render(
+        view === 'list' ? (
+          <TeamListView task={task} onBack={() => {}} onSwitchToCanvasView={() => {}} />
+        ) : (
+          <TeamCanvas
+            task={task}
+            leaderRef={createRef()}
+            leaderAnchorRef={createRef()}
+            onRequestExit={() => {}}
+            onSwitchToListView={() => {}}
+          />
+        ),
+      ),
+    );
+    return container.querySelector('[data-testid="team-worker"]')!;
+  }
+  const heading = view === 'canvas' ? '.w-head' : '.tlv-worker-heading > div';
+
+  it('marks a Worker holding desktop control with its cursor color and the words', () => {
+    const team = detail(execution('running'));
+    team.workers = [{ ...worker, desktopControl: { label: '担当', colorIndex: 1 } }];
+    const mark = renderWith(team).querySelector(`${heading} [data-testid="team-worker-desktop"]`)!;
+    expect(mark.textContent).toBe('デスクトップ操作');
+    expect(mark.getAttribute('title')).toBe('デスクトップ操作のカーソル: 担当');
+    expect(mark.getAttribute('data-cursor-color-index')).toBe('1');
+    const swatch = mark.querySelector('.desktop-cursor-swatch')!;
+    // Main's palette, as Main draws the Worker's cursor with it.
+    expect(swatch.getAttribute('data-cursor-color')).toBe(desktopControlWorkerAccent(1));
+    expect(swatch.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('leaves every other Worker exactly as it was', () => {
+    const card = renderWith(detail(execution('running')));
+    expect(card.querySelector('[data-testid="team-worker-desktop"]')).toBeNull();
+    expect(card.querySelector('.desktop-cursor-swatch')).toBeNull();
+    expect([...card.querySelector(heading)!.children].map((child) => child.className)).toEqual(
+      view === 'canvas'
+        ? ['w-avatar', 'role-line', 'w-status busy', 'w-stop-btn']
+        : ['role-name', 'w-status team-status busy'],
+    );
+  });
 });

@@ -840,6 +840,32 @@ describe('public contracts', () => {
     expect(() => workerSummarySchema.parse({ ...worker, unknown: true })).toThrow();
   });
 
+  it('carries a Worker’s desktop-control cursor as its label and color only', () => {
+    expect(workerSummarySchema.parse(worker)).not.toHaveProperty('desktopControl');
+    const mark = { label: '確認係', colorIndex: 1 };
+    expect(workerSummarySchema.parse({ ...worker, desktopControl: mark })).toMatchObject({
+      desktopControl: mark,
+    });
+    for (const desktopControl of [
+      { ...mark, agentId: 'agent-1' },
+      { ...mark, sessionId: 'run-1' },
+      { label: '', colorIndex: 1 },
+      { ...mark, colorIndex: -1 },
+    ])
+      expect(() => workerSummarySchema.parse({ ...worker, desktopControl })).toThrow();
+  });
+
+  it('keeps one palette for the desktop-control cursors, apart from the Leader’s blue', () => {
+    const accents = contracts.DESKTOP_CONTROL_WORKER_ACCENTS;
+    expect(Object.isFrozen(accents)).toBe(true);
+    expect(new Set(accents).size).toBe(accents.length);
+    expect(accents).not.toContain(contracts.DESKTOP_CONTROL_LEADER_ACCENT);
+    for (const accent of [...accents, contracts.DESKTOP_CONTROL_LEADER_ACCENT])
+      expect(accent).toMatch(/^#[0-9A-F]{6}$/u);
+    expect(contracts.desktopControlWorkerAccent(0)).toBe(accents[0]);
+    expect(contracts.desktopControlWorkerAccent(accents.length + 2)).toBe(accents[2]);
+  });
+
   it('validates team message summaries including a nullable delivery state', () => {
     expect(teamMessageSummarySchema.parse(teamMessage)).toMatchObject({ state: 'delivered' });
     expect(

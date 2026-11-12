@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DESKTOP_CONTROL_LEADER_ACCENT, desktopControlWorkerAccent } from '@sprint-coder/contracts';
 import { ApprovalCard } from './ApprovalCard';
 import { ApprovalAuditRow } from './ApprovalAuditRow';
 import { CommandCard } from './CommandCard';
@@ -94,6 +95,24 @@ describe('desktop-control approval card', () => {
     expect(html).toContain('依頼した Worker: 画面の確認係');
     expect(html).toContain('data-requester-color="2"');
     expect(card(typing)).not.toContain('desktop-approval-requester');
+    expect(card(typing)).not.toContain('desktop-cursor-swatch');
+  });
+
+  it('marks who asked with the color of its cursor, beside its name', () => {
+    const worker = card({ ...typing, requester: { label: '画面の確認係', colorIndex: 2 } });
+    // Main's palette, as Main draws the cursor with it; decorative, beside the words.
+    expect(worker).toMatch(
+      new RegExp(
+        `<span class="desktop-cursor-swatch" aria-hidden="true" data-cursor-color="${desktopControlWorkerAccent(2)}"`,
+        'u',
+      ),
+    );
+    expect(desktopControlWorkerAccent(2)).toBe('#9333EA');
+    const leader = card({ ...typing, requester: { leader: true } });
+    expect(leader).toContain('Leader の依頼');
+    expect(leader).toContain('data-requester-color="leader"');
+    expect(leader).toContain(`data-cursor-color="${DESKTOP_CONTROL_LEADER_ACCENT}"`);
+    expect(leader).not.toContain('依頼した Worker');
   });
 
   it('shows a launch with its note and no mode mark for a read', () => {
