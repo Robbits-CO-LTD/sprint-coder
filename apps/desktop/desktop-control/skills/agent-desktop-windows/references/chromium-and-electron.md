@@ -33,6 +33,11 @@ so a settled tree can show no buttons, textfields or links at the default
 `--max-depth 10`. The groups at the depth boundary carry `children_count` and
 refs, so you can drill into them.
 
+Unnamed pass-through groups without an action do not count toward
+`--max-depth`, in an Electron window and in a window that holds web content in
+a WebView2 control (a Tauri, WinForms or WPF window). Start with the default
+depth there.
+
 When a settled snapshot has refs but no operable controls, and its boundary
 nodes carry `children_count`, do not wait longer or raise `--timeout-ms`. Raise
 `--max-depth`, or drill into a boundary ref with `snapshot --root <ref>`.
