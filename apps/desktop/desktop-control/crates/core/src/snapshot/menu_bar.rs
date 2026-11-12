@@ -12,7 +12,9 @@
 //! An item that can be run - one that opens no submenu, is enabled under
 //! enabled menus, can be read, sends a command, and is the only item of its
 //! name in each menu on its way down - gets a ref proven in the menu
-//! (`refs::ref_menu`), which only `click` runs.
+//! (`refs::ref_menu`), which only `click` runs. In a menu that reports a
+//! chosen item by its position (`MNS_NOTIFYBYPOS`), every menu on the item's
+//! way must report so too.
 
 use serde_json::{Value, json};
 
@@ -42,8 +44,12 @@ pub struct NativeMenuItem {
     /// none, and meaningless for an item that opens a submenu).
     pub command_id: u32,
     /// The menu holding the item reports its items by position
-    /// (`MNS_NOTIFYBYPOS`) instead of sending their commands.
+    /// (`MNS_NOTIFYBYPOS`, with `WM_MENUCOMMAND`) instead of sending their
+    /// commands (`WM_COMMAND`).
     pub in_notify_by_position_menu: bool,
+    /// The style of the menu holding the item could not be read, so how it
+    /// reports a chosen item is not known; such an item is never run.
+    pub notify_style_unread: bool,
     /// The items of the submenu the item opens, when it opens one.
     pub submenu: Option<Vec<NativeMenuItem>>,
     /// The item opens a submenu the read did not reach (its limits ran out,
@@ -296,6 +302,8 @@ fn allocate(
             in_menu: Some(RefMenuProof {
                 steps: steps.clone(),
                 command_id: item.command_id,
+                // Every menu on the way reports the same way (`unrunnable_reason`).
+                by_position: item.in_notify_by_position_menu,
                 shortcut,
             }),
             ..crate::RefEntryIdentity::default()

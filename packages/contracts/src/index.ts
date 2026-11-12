@@ -2106,6 +2106,11 @@ export const desktopActionTargetSchema = z
     /** The part's role, in Japanese. */
     role: z.string().min(1).max(40).optional(),
     name: z.string().min(1).max(120).optional(),
+    /**
+     * The whole name of a standard menu item (its menus from the bar down and its shortcut), set
+     * only when `name` shows it shortened, so two long names that differ anywhere stay apart.
+     */
+    fullName: z.string().min(1).max(2_000).optional(),
     /** The named part that holds this one, when its window has others of the same role and name. */
     within: z
       .object({ role: z.string().min(1).max(40), name: z.string().min(1).max(120) })

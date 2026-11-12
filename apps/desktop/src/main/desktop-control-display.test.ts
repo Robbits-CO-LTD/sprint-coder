@@ -243,7 +243,13 @@ describe('desktop-control approval description', () => {
     expect(name.startsWith('ファイル(F) > … > ')).toBe(true);
     expect(name.endsWith('report-v3.xlsx')).toBe(true);
     expect(long.openDetails).toBe(true);
-    expect(long.notes.some((note) => note.includes('最近使ったファイル(R)'))).toBe(true);
+    // The whole name sits beside the shortened one, not in a note that cuts it.
+    expect((long.target as { fullName?: string }).fullName).toBe(
+      `ファイル(F) > 最近使ったファイル(R) > 1 C:\\Users\\someone\\${'長い名前のフォルダー'.repeat(7)}\\report-v3.xlsx`,
+    );
+    expect(long.notes.some((note) => note.includes('最近使ったファイル(R)'))).toBe(false);
+    // A name that fits has nothing beside it.
+    expect(describeArgv(['click', '@smenu:e1']).target).not.toHaveProperty('fullName');
     // 「(1)」 and 「(2)」 are kept, so items that differ only there are told apart.
     expect((describeArgv(['click', '@smenu:e5']).target as { name?: string }).name).toBe(
       '表示 (1)',
@@ -254,7 +260,46 @@ describe('desktop-control approval description', () => {
     // An item whose own name is past what the card shows is cut, and says so.
     const huge = describeArgv(['click', '@smenu:e7']);
     expect(huge.openDetails).toBe(true);
-    expect((huge.target as { name?: string }).name!.endsWith('…')).toBe(true);
+    expect((huge.target as { name?: string }).name).toContain('…');
+    expect((huge.target as { fullName?: string }).fullName).toBe('あ'.repeat(300));
+  });
+
+  it('keeps the start and the end of a menu item name too long even alone', () => {
+    // Two recent files whose long paths differ only at their ends, and one only in the middle.
+    const at = (folder: string, file: string) =>
+      `1 C:\\Users\\someone\\${folder}\\${'深い階層のフォルダー'.repeat(12)}\\${file}`;
+    const item = (path: string) => ({
+      role: 'menuitem',
+      source_app: 'menuapp.exe',
+      source_window_id: 'w-6622478',
+      source_window_title: 'menu 試験アプリ',
+      source_surface: 'menubar',
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: path, position: 0, submenu: false },
+        ],
+        command_id: 6101,
+        shortcut: 'Ctrl+1',
+      },
+    });
+    writeRefmap('slong', {
+      '@e1': item(at('a', 'report-v3.xlsx')),
+      '@e2': item(at('a', 'report-v4.xlsx')),
+      '@e3': item(at('b', 'report-v3.xlsx')),
+    });
+    const target = (ref: string) =>
+      describeArgv(['click', ref]).target as { name: string; fullName: string; app: string };
+    const v3 = target('@slong:e1');
+    expect(v3.name.length).toBeLessThanOrEqual(120);
+    expect(v3.name.startsWith('… > 1 C:\\Users\\someone\\a\\')).toBe(true);
+    // Its end - the file and the shortcut - stays, so items differing there read apart.
+    expect(v3.name.endsWith('report-v3.xlsx（Ctrl+1）')).toBe(true);
+    expect(target('@slong:e2').name.endsWith('report-v4.xlsx（Ctrl+1）')).toBe(true);
+    expect(v3.app).toBe('menuapp.exe');
+    // Differing only in the middle: the shown names may read the same, the whole names do not.
+    expect(target('@slong:e3').fullName).not.toBe(v3.fullName);
+    expect(v3.fullName).toBe(`ファイル(F) > ${at('a', 'report-v3.xlsx')}（Ctrl+1）`);
   });
 
   it('names the app, window and part a ref points at, and the text it enters', () => {
