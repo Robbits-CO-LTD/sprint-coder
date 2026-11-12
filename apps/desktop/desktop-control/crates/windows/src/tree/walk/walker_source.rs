@@ -211,6 +211,11 @@ mod imp {
         let mut count = 1usize;
         let mut pending = vec![root.0.clone()];
         while let Some(node) = pending.pop() {
+            // Checked before every navigation, leaves included: a run of slow
+            // "no child" answers must not outlast the counting share.
+            if deadline.is_expired() {
+                return None;
+            }
             let mut child = match walker.get_first_child(&node) {
                 Ok(child) => child,
                 Err(error) if failure_of(&error).is_exhaustion() => continue,
