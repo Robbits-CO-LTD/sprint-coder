@@ -230,7 +230,7 @@ fn symbol_names_and_characters_resolve_through_the_active_layout() {
         ("period", '.'),
         ("comma", ','),
     ] {
-        let Some(scan) = imp::vk_key_scan(symbol) else {
+        let Some(scan) = imp::vk_key_scan(symbol, KeyboardLayout::Caller) else {
             assert!(
                 resolve_key(name).is_err(),
                 "{name}: a symbol the layout cannot produce is refused, not guessed"
@@ -261,6 +261,147 @@ fn a_symbol_never_resolves_to_its_ascii_value_as_a_virtual_key() {
             assert_ne!(resolved.vk, symbol as u16, "{name}");
         }
     }
+}
+
+/// A layout this session already has loaded, found by its full handle
+/// (`0x04110411` is the Japanese keyboard, `0x04090409` the US one). Only the
+/// loaded list is read: loading a layout to test against it would add it to
+/// the user's input-language switcher, which a test must not do.
+#[cfg(target_os = "windows")]
+fn loaded_layout(handle: isize) -> Option<KeyboardLayout> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayoutList;
+    let mut layouts = [std::ptr::null_mut(); 64];
+    let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) };
+    let count = usize::try_from(count).unwrap_or(0).min(layouts.len());
+    layouts[..count]
+        .iter()
+        .any(|layout| *layout as isize == handle)
+        .then_some(KeyboardLayout::Handle(handle))
+}
+
+#[cfg(target_os = "windows")]
+fn layout_scan(character: char, layout: KeyboardLayout) -> ResolvedKey {
+    resolved_from_scan(imp::vk_key_scan(character, layout).expect("the layout has the key"))
+}
+
+#[cfg(target_os = "windows")]
+const VK_OEM_1: u16 = 0xBA;
+#[cfg(target_os = "windows")]
+const VK_OEM_PLUS: u16 = 0xBB;
+#[cfg(target_os = "windows")]
+const VK_OEM_MINUS: u16 = 0xBD;
+
+/// On the Japanese keyboard `=` is Shift+`-`, `+` is Shift+`;` and `;` is the
+/// key US calls `=` (`VK_OEM_PLUS`). Looked up in the Japanese layout handle,
+/// the symbol names press those keys.
+#[cfg(target_os = "windows")]
+#[test]
+fn symbols_resolve_to_the_japanese_layouts_own_keys() {
+    let Some(japanese) = loaded_layout(0x0411_0411) else {
+        eprintln!("skipped: the Japanese keyboard layout is not loaded in this session");
+        return;
+    };
+    let equal = resolve_key_in("equal", japanese).expect("equal resolves");
+    assert_eq!((equal.vk, equal.layout_shift), (VK_OEM_MINUS, true));
+    let plus = resolve_key_in("plus", japanese).expect("plus resolves");
+    assert_eq!((plus.vk, plus.layout_shift), (VK_OEM_PLUS, true));
+    let semicolon = layout_scan(';', japanese);
+    assert_eq!((semicolon.vk, semicolon.layout_shift), (VK_OEM_PLUS, false));
+    let minus = resolve_key_in("-", japanese).expect("- resolves");
+    assert_eq!((minus.vk, minus.layout_shift), (VK_OEM_MINUS, false));
+}
+
+/// On the US keyboard `=` is `VK_OEM_PLUS` without Shift, `+` is the same key
+/// with Shift, and `;` is `VK_OEM_1`.
+#[cfg(target_os = "windows")]
+#[test]
+fn symbols_resolve_to_the_us_layouts_own_keys() {
+    let Some(us) = loaded_layout(0x0409_0409) else {
+        eprintln!("skipped: the US keyboard layout is not loaded in this session");
+        return;
+    };
+    let equal = resolve_key_in("equal", us).expect("equal resolves");
+    assert_eq!((equal.vk, equal.layout_shift), (VK_OEM_PLUS, false));
+    let plus = resolve_key_in("plus", us).expect("plus resolves");
+    assert_eq!((plus.vk, plus.layout_shift), (VK_OEM_PLUS, true));
+    let semicolon = layout_scan(';', us);
+    assert_eq!((semicolon.vk, semicolon.layout_shift), (VK_OEM_1, false));
+}
+
+/// The defect itself: the same name is a different key in the two layouts,
+/// so a key looked up in the sender's layout types another character in a
+/// receiver using the other one.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_same_symbol_is_a_different_key_in_the_us_and_japanese_layouts() {
+    let (Some(us), Some(japanese)) = (loaded_layout(0x0409_0409), loaded_layout(0x0411_0411))
+    else {
+        eprintln!("skipped: the US and Japanese keyboard layouts are not both loaded");
+        return;
+    };
+    for name in ["equal", "plus"] {
+        assert_ne!(
+            resolve_key_in(name, us).expect("resolves"),
+            resolve_key_in(name, japanese).expect("resolves"),
+            "{name}"
+        );
+    }
+}
+
+/// A named key does not depend on any layout.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_named_key_is_the_same_in_every_layout() {
+    let layout = KeyboardLayout::from_handle(unsafe {
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0)
+    } as isize);
+    for name in ["return", "tab", "f5", "left"] {
+        assert_eq!(
+            resolve_key_in(name, layout).expect("resolves"),
+            resolve_key_in(name, KeyboardLayout::Caller).expect("resolves"),
+            "{name}"
+        );
+    }
+}
+
+/// A layout handle of zero, what an unreadable thread answers, falls back to
+/// the caller's layout: the behaviour before the receiver's layout was read.
+#[test]
+fn an_unreadable_layout_falls_back_to_the_callers() {
+    assert_eq!(KeyboardLayout::from_handle(0), KeyboardLayout::Caller);
+    assert_eq!(
+        KeyboardLayout::from_handle(0x0411_0411),
+        KeyboardLayout::Handle(0x0411_0411)
+    );
+}
+
+/// Looking up the caller's layout by its handle gives the same key as the
+/// caller-layout lookup, so the handle path changes nothing for an
+/// application that uses the same input language as this process.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_callers_own_handle_resolves_like_the_caller_lookup() {
+    let own = KeyboardLayout::from_handle(unsafe {
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout(0)
+    } as isize);
+    for name in ["a", "z", "5", "plus", "minus", "equal", "comma", "period", "slash"] {
+        assert_eq!(
+            resolve_key_in(name, own).ok(),
+            resolve_key_in(name, KeyboardLayout::Caller).ok(),
+            "{name}"
+        );
+    }
+}
+
+/// Reading the focused thread's layout only reads: this thread's own layout
+/// is the same before and after.
+#[cfg(target_os = "windows")]
+#[test]
+fn reading_the_focused_layout_leaves_this_threads_layout_unchanged() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+    let before = unsafe { GetKeyboardLayout(0) } as isize;
+    let _ = focused_layout();
+    assert_eq!(unsafe { GetKeyboardLayout(0) } as isize, before);
 }
 
 #[test]

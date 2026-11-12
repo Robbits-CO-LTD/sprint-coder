@@ -130,6 +130,13 @@ impl ObservationOps for WindowsAdapter {
         deadline: Deadline,
     ) -> Result<Option<String>, AdapterError> {
         let read = crate::tree::live_read::read_live_element(handle, deadline)?;
+        // An edit control that publishes no Value pattern: its visible text,
+        // read through the Text pattern, gated on IsPassword
+        // (`tree::text_value`). Its `Value` slot holds only the default `""`.
+        #[cfg(target_os = "windows")]
+        if let Some(text) = crate::tree::text_value::text_value(handle, &read, deadline)? {
+            return Ok(Some(text));
+        }
         Ok(crate::tree::live_read::live_value(&read))
     }
 

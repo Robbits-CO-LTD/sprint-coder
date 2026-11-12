@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Modifier chords: press modifiers down, press/release the key, release
 //! modifiers - with a release guard that sweeps any key its own bookkeeping
 //! still believes is held once the sequence ends, whether it ended cleanly
@@ -39,7 +40,9 @@ const _: () = {
 
 pub(crate) fn synthesize_key(combo: &KeyCombo, deadline: Deadline) -> Result<(), AdapterError> {
     deadline.ensure_remaining()?;
-    let resolved = keyboard_map::resolve_key(&combo.key)?;
+    // Looked up in the layout of the thread the key will reach, not this
+    // process's own: with a per-application input language the two differ.
+    let resolved = keyboard_map::resolve_key_in(&combo.key, keyboard_map::focused_layout())?;
     let modifier_vks = chord_modifiers(combo, resolved);
     let key_vk = resolved.vk;
 
