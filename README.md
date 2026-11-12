@@ -96,6 +96,8 @@ npm start
 
 `nvm`を使わない場合は、`node --version`が`v22.x`であることを確認してください。Provider未設定でもMock Runtimeで基本操作を試せます。ビルド済みartifactが公開されている場合は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)から取得できます。
 
+macOSの配布版にはツール接続に使うNode.jsが同梱されます。macOSの配布用パッケージをソースから作る場合は、対象アーキテクチャの[公式Node.js 22.23.3](https://nodejs.org/dist/v22.23.3/)を`LICENSE`付きで展開し、その`bin`を`PATH`の先頭に置いてから`npm run package --workspace @sprint-coder/desktop`を実行してください。
+
 ### 最初のTask
 
 1. 「新規タスク」を作成する。

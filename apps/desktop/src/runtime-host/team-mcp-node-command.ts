@@ -1,10 +1,10 @@
-import { lstatSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 
 /**
  * The packaged Electron binary has the RunAsNode fuse disabled, so it cannot host the temporary
- * stdio MCP server through ELECTRON_RUN_AS_NODE. Claude Code and Codex CLI are resolved from PATH;
- * resolve Node through the same inherited PATH instead of weakening the production fuse.
+ * stdio MCP server through ELECTRON_RUN_AS_NODE. The macOS and Windows packages ship standalone
+ * Node executables for that server.
  */
 export function teamMcpNodeCommand(
   platform: NodeJS.Platform = process.platform,
@@ -12,6 +12,16 @@ export function teamMcpNodeCommand(
   resourcesPath: string | undefined = (process as NodeJS.Process & { resourcesPath?: string })
     .resourcesPath,
 ): string {
+  if (
+    platform === 'darwin' &&
+    resourcesPath !== undefined &&
+    existsSync(join(resourcesPath, 'app.asar'))
+  ) {
+    const bundled = join(resourcesPath, 'node');
+    if (!isRegularFile(bundled)) throw new Error('Bundled Node.js is missing on macOS.');
+    accessSync(bundled, constants.X_OK);
+    return bundled;
+  }
   if (platform !== 'win32') return 'node';
   if (resourcesPath !== undefined) {
     const bundled = join(resourcesPath, 'node.exe');
