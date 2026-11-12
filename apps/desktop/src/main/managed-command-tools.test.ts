@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { symlinkSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +11,7 @@ import {
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
   WRITE_STDIN_TOOL,
+  desktopControlWorkerWaitMs,
   registerCommandRunnerTool,
   registerManagedCommandControlTools,
   type CommandToolBoundary,
@@ -698,25 +700,41 @@ describe('desktop control Workspace roots', () => {
     roots.push(workspace);
     const registry = new ToolRegistry();
     registry.register(COMMAND_RUNNER_TOOL);
-    const { boundary } = createCommandBoundary(workspace);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
     // The Worker's isolated worktree: outside the parent's Workspace, and writable by the Worker.
     const worktree = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-worktree-'));
     roots.push(worktree);
+    // A worktree whose root is given through a link (a junction on Windows, a symlink elsewhere),
+    // as macOS's temp folder is (`/var` → `/private/var`), and a link from outside every root into
+    // a worktree. Neither may make an executable in the worktree read as outside it.
+    const linkBase = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-links-'));
+    roots.push(linkBase);
+    const realWorktree = join(linkBase, 'real-worktree');
+    await mkdir(realWorktree);
+    await writeFile(join(realWorktree, 'tool.exe'), '');
+    const linkedRoot = join(linkBase, 'linked-worktree');
+    const outsideLink = join(linkBase, 'outside-link');
+    for (const link of [linkedRoot, outsideLink])
+      symlinkSync(realWorktree, link, process.platform === 'win32' ? 'junction' : 'dir');
     // Main's binding of each call: these call ids are a Worker's, any other the Leader's.
-    const workers = new Map([
-      ['marked', 'agent-1'],
-      ['unmarked', 'agent-2'],
-      ['unbound', ''],
+    const workers = new Map<string, { workerId: string; roots: readonly string[] }>([
+      ['marked', { workerId: 'agent-1', roots: [worktree] }],
+      ['linked', { workerId: 'agent-1', roots: [linkedRoot] }],
+      ['real', { workerId: 'agent-1', roots: [realWorktree] }],
+      ['unmarked', { workerId: 'agent-2', roots: [worktree] }],
+      // A Worker call whose Workspace Main could not tell (`managedWorkerOf`).
+      ['unbound', { workerId: '', roots: [] }],
     ]);
+    // The Worker calls whose run started something that may have taken effect.
+    const sideEffects: string[] = [];
     const withWorkers = {
       ...boundary,
-      workerFor: (_turnId: string, callId: string) => {
-        const workerId = workers.get(callId.split(':')[0]!);
-        return workerId === undefined ? undefined : { workerId, roots: [worktree] };
-      },
+      workerFor: (_turnId: string, callId: string) => workers.get(callId.split(':')[0]!),
+      workerSideEffect: (_turnId: string, callId: string) => void sideEffects.push(callId),
     } as CommandToolBoundary;
     const runner = new CommandRunner({ sandboxed: true });
     const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      options.beforeSpawn?.();
       if (spec.argv[1] === 'start')
         await options.onBatch?.([
           {
@@ -767,8 +785,12 @@ describe('desktop control Workspace roots', () => {
       configureDesktopControlTeamCursors(true);
       markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
       await dispatch('marked', ['click', '@s1:e1']);
+      await dispatch('marked', ['snapshot', '-i']);
       await dispatch('marked', ['click', '@s1:e2']);
       await dispatch('leader', ['click', '@s1:e3']);
+      // Each of the Worker's operations, and not its read or the Leader's run, stops its request
+      // from being run again from the start (recorded as the run starts).
+      expect(sideEffects).toEqual(['marked:1', 'marked:3']);
       expect(
         run.mock.calls.map(([spec, options]) => [
           spec.argv.join(' '),
@@ -780,6 +802,7 @@ describe('desktop control Workspace roots', () => {
         ['cursor-overlay enable --label Leader --accent #2563EB', 'leader'],
         ['cursor-overlay enable --label Checker --accent #16A34A', 'agent-1'],
         ['click @s1:e1', 'agent-1'],
+        ['snapshot -i', 'agent-1'],
         ['click @s1:e2', 'agent-1'],
         ['click @s1:e3', 'leader'],
       ]);
@@ -827,6 +850,42 @@ describe('desktop control Workspace roots', () => {
       ]);
       run.mockClear();
       authorize.mockClear();
+      // Through links: a root given through a link, with the executable named through the link or
+      // by its real path, existing or not yet written; and a link from outside into the worktree.
+      // Refused before any card, and by the runner's check with the roots it would be given.
+      for (const [who, root, inside] of [
+        ['linked', linkedRoot, join(linkedRoot, 'app.exe')],
+        ['linked', linkedRoot, join(realWorktree, 'app.exe')],
+        ['linked', linkedRoot, join(linkedRoot, 'tool.exe')],
+        ['linked', linkedRoot, join(realWorktree, 'tool.exe')],
+        ['real', realWorktree, join(outsideLink, 'app.exe')],
+        ['real', realWorktree, join(outsideLink, 'tool.exe')],
+      ] as const) {
+        await expect(dispatch(who, ['launch', inside])).rejects.toThrow(
+          'Workspace の中の実行ファイルは起動できない',
+        );
+        expect(
+          desktopControlModule.desktopControlArgvRefusal(['launch', inside], [workspace, root]),
+        ).toContain('Workspace の中の実行ファイルは起動できない');
+      }
+      expect(authorize).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+      // A Worker whose mark is gone by the time its run would start never runs, least of all as
+      // the Leader.
+      authorize.mockImplementationOnce(() => {
+        markDesktopControlWorker(owner.taskId, 'agent-9', 'other', new Set(['agent-9']));
+        return {
+          decision: 'allow' as const,
+          reason: 'test',
+          beforeExecute: () => true,
+          approvalDecision: 'allow_once' as const,
+        };
+      });
+      await expect(dispatch('marked', ['click', '@s1:e1'])).rejects.toThrow('任されていません');
+      expect(run).not.toHaveBeenCalled();
+      expect([...commandRows.values()].at(-1)?.state).toBe('failed');
+      markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
+      authorize.mockClear();
       // Refused before any card: an unmarked or unbound Worker, a background run, a session the
       // Worker chose, and every other executable.
       for (const [who, argv, extra, reason] of [
@@ -852,6 +911,108 @@ describe('desktop control Workspace roots', () => {
       run.mockRestore();
       await broker.dispose();
     }
+  });
+
+  it('waits a Team Worker’s long desktop-control run to its end, and still backgrounds the Leader’s', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-worker-wait-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const { boundary } = createCommandBoundary(workspace);
+    const withWorkers = {
+      ...boundary,
+      workerFor: (_turnId: string, callId: string) =>
+        callId.startsWith('worker:') ? { workerId: 'agent-1', roots: [] } : undefined,
+    } as CommandToolBoundary;
+    const runner = new CommandRunner({ sandboxed: true });
+    // Every run lasts longer than the 50 ms after which a run goes on in the background.
+    vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      options.beforeSpawn?.();
+      options.onStarted?.({
+        executionId: 'execution',
+        pid: 1,
+        startedAt: Date.now(),
+        processStartIdentity: 'identity',
+        executionImageDigest: 'a'.repeat(64),
+        executionImageIdentity: 'identity',
+      });
+      const text =
+        spec.argv[1] === 'start' ? JSON.stringify({ ok: true, data: { session_id: 'run-5' } }) : '';
+      if (spec.argv[0] !== 'session' && spec.argv[0] !== 'cursor-overlay')
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      await options.onBatch?.([{ seq: 0, stream: 'stdout', text, byteLength: text.length }]);
+      return {
+        executionId: 'execution',
+        exitCode: 0,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+        durationMs: 300,
+        outputBytes: 0,
+        truncated: false,
+      };
+    });
+    const sessions = new ManagedCommandSessions(runner);
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+        approvalDecision: 'allow_once',
+      }),
+    );
+    registerCommandRunnerTool(broker, runner, withWorkers, MANAGED_EXEC_COMMAND_TOOL, sessions, 50);
+    const owner = {
+      taskId: 'task-desktop-worker-wait',
+      turnId: 'turn-desktop-worker-wait',
+      workspaceId: 'workspace-desktop-worker-wait',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'codex');
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    const dispatch = (callId: string) =>
+      broker.dispatch({
+        ...owner,
+        callId,
+        providerName: 'exec_command',
+        input: { executable: process.execPath, argv: ['click', '@s1:e1'], purpose: 'wait' },
+      }) as Promise<Record<string, unknown>>;
+    try {
+      configureDesktopControlTeamCursors(true);
+      markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
+      // The Worker gets the run's final result, which it could not poll for otherwise.
+      const worker = await dispatch('worker:1');
+      expect(worker).toMatchObject({ exitCode: 0 });
+      expect(worker).not.toHaveProperty('sessionId');
+      // The Leader's run goes on in the background as before.
+      const leader = await dispatch('leader:1');
+      expect(leader).toMatchObject({ state: 'running' });
+      expect(leader).toHaveProperty('sessionId');
+      await sessions.wait(leader['sessionId'] as string, owner);
+    } finally {
+      desktop.mockRestore();
+      resetDesktopControlSessions();
+      await broker.dispose();
+      await sessions.dispose();
+    }
+  });
+
+  it('bounds the wait for a Worker’s desktop-control run by the timeouts it names', () => {
+    expect(desktopControlWorkerWaitMs(['click', '@s1:e1'])).toBe(60_000);
+    expect(desktopControlWorkerWaitMs(['click', '@s1:e1', '--timeout-ms', '90000'])).toBe(105_000);
+    expect(desktopControlWorkerWaitMs(['wait', '--window', 'x', '--timeout', '999999'])).toBe(
+      300_000,
+    );
+    expect(
+      desktopControlWorkerWaitMs([
+        'batch',
+        JSON.stringify([{ command: 'wait', args: { event: 'window-opened', timeout: 120000 } }]),
+      ]),
+    ).toBe(135_000);
   });
 
   it('refuses desktop-control arguments before a command or card exists', async () => {

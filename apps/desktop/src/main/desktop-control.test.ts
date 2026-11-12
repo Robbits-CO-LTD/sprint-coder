@@ -481,6 +481,33 @@ describe('desktop control outside the command sandbox', () => {
   });
 });
 
+describe('a Workspace root written another way than the file system resolves it', () => {
+  // As on a Windows CI runner, whose temp folder is `C:\Users\RUNNER~1\...` (an 8.3 short name)
+  // while the file system resolves it to the long name, and as through a symlink or junction. The
+  // root exists; the executable to launch has not been written yet, so it does not resolve.
+  const SHORT = 'C:\\Users\\RUNNER~1\\Temp\\worktree';
+  const LONG = 'C:\\Users\\runneradmin\\Temp\\worktree';
+  const realpath = (path: string) => {
+    const lower = path.toLowerCase();
+    for (const base of [SHORT, LONG])
+      if (lower === base.toLowerCase() || lower === `${base}\\`.toLowerCase()) return LONG;
+      else if (lower.startsWith(`${base}\\`.toLowerCase()))
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    return path;
+  };
+  const lookup = { platform: 'win32' as const, realpath };
+  const refused = (target: string, root: string) =>
+    desktopControlArgvRefusal(['launch', target], [root], lookup);
+
+  it('reads an executable under it as inside, in either spelling of either one', () => {
+    for (const root of [SHORT, LONG])
+      for (const target of [`${SHORT}\\app.exe`, `${LONG}\\app.exe`, `${LONG}\\bin\\app.exe`])
+        expect(refused(target, root)).toContain('Workspace の中の実行ファイルは起動できない');
+    expect(refused('C:\\Windows\\System32\\charmap.exe', SHORT)).toBeNull();
+    expect(refused('C:\\Users\\runneradmin\\Temp\\other\\app.exe', SHORT)).toBeNull();
+  });
+});
+
 describe('desktop-control arguments outside the command sandbox', () => {
   const roots = ['C:\\work\\repo'];
   const lookup = { platform: 'win32' as const, realpath: (path: string) => path };

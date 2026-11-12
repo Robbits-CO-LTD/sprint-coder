@@ -826,6 +826,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     run.onEvent?.({ type: 'fileChange', changes });
   }
 
+  /**
+   * Main reports that a managed call of the Worker's Turn has started something outside the
+   * Workspace that may have taken effect (a desktop-control operation that is not a read), so the
+   * Worker's request is never run again from the start on another runtime: whether it landed is
+   * not known, and doing it twice could send or delete twice.
+   */
+  recordManagedSideEffect(turnId: string): void {
+    const run = this.pending.get(turnId);
+    if (run === undefined) return;
+    run.sideEffectsObserved = true;
+  }
+
   /** Main reports a managed Workspace write that policy denied, so the outcome can say so. */
   recordManagedToolDenied(turnId: string, toolName: string): void {
     const run = this.pending.get(turnId);

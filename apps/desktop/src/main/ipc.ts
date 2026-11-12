@@ -996,6 +996,8 @@ export class IpcRouter {
       providerId: string;
       executionBinding?: Readonly<{ executionId: string; agentId: string }>;
       workerId?: string;
+      /** The Worker's own runtime Turn, which its Worker runtime knows the call by. */
+      runtimeTurnId?: string;
       signal: AbortSignal;
       workspace: EffectiveWorkspaceSet;
       mutationBindings: ReadonlyMap<
@@ -1621,6 +1623,13 @@ export class IpcRouter {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
         workerFor: (turnId, callId) => this.managedWorkerOf(turnId, callId),
+        workerSideEffect: (turnId, callId) => {
+          const runtimeTurnId = this.managedWorkerCall.get(
+            JSON.stringify([turnId, callId]),
+          )?.runtimeTurnId;
+          if (runtimeTurnId !== undefined)
+            this.cliTeamWorkerRuntime.recordManagedSideEffect(runtimeTurnId);
+        },
       },
       team: {
         coordinator: this.teamCoordinator,
@@ -4602,6 +4611,7 @@ export class IpcRouter {
           ? {}
           : { executionBinding: worker.executionBinding }),
         ...(worker.workerId === undefined ? {} : { workerId: worker.workerId }),
+        runtimeTurnId: turnId,
         signal: callSignal,
         workspace: worker.workspace,
         mutationBindings: worker.mutationBindings,

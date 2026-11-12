@@ -187,7 +187,11 @@ describe('the Leader’s desktop mark on a hire', () => {
       }),
     ).resolves.toMatchObject({ desktopControl: true });
     // The API Worker holds no place: two more fit beside the CLI one, and the next is refused.
-    await hire(coordinator, { desktopControl: true });
+    // A hire that names no Connection runs on the default CLI (the Worker runtime hands a Worker
+    // without a Connection to its CLI runtime), so it is marked and holds a place too.
+    const defaultCli = await hire(coordinator, { desktopControl: true });
+    expect(defaultCli).toMatchObject({ desktopControl: true });
+    expect(desktopControlWorker('task-1', defaultCli['workerId'] as string)).toBeDefined();
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       desktopControl: true,
     });
