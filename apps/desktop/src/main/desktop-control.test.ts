@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
+  DESKTOP_CONTROL_HOST_PID_VARIABLE,
+  DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
   desktopControlArgvIsInert,
   desktopControlArgvRefusal,
   desktopControlEnvironment,
@@ -159,6 +161,28 @@ describe('desktop-control run environment', () => {
     expect(filtered).toEqual({
       PATH: 'C:\\other',
       AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
+  });
+
+  it('sets the cursor renderer image and host from Main alone, never the ones the caller chose', () => {
+    const chosen = {
+      SPRINT_CODER_DESKTOP_CONTROL_IMAGE: 'C:\attacker\sprint-coder-desktop-control.exe',
+      sprint_coder_desktop_host_pid: '1',
+      OTHER: 'kept',
+    };
+    const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+    expect(desktopControlEnvironment(chosen, [], lookup)).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+    });
+    const image = 'C:\Sprint Coder\resources\sprint-coder-desktop-control.exe';
+    expect(
+      desktopControlEnvironment(chosen, [], lookup, undefined, { image, hostPid: 4242 }),
+    ).toEqual({
+      OTHER: 'kept',
+      AGENT_DESKTOP_HOME: desktopControlStateFolder(),
+      [DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE]: image,
+      [DESKTOP_CONTROL_HOST_PID_VARIABLE]: '4242',
     });
   });
 

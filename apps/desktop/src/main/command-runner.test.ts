@@ -2204,7 +2204,8 @@ describe('desktop control outside the command sandbox', () => {
         "const { spawn } = require('node:child_process');",
         "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
         'child.unref();',
-        'process.stdout.write(JSON.stringify({ pid: child.pid, path: process.env.PATH }));',
+        'const { PATH: path, SPRINT_CODER_DESKTOP_CONTROL_IMAGE: image, SPRINT_CODER_DESKTOP_HOST_PID: host } = process.env;',
+        'process.stdout.write(JSON.stringify({ pid: child.pid, path, image, host }));',
       ].join('\n');
       const prepare = () =>
         prepareTestExecutionSpec({
@@ -2213,7 +2214,12 @@ describe('desktop control outside the command sandbox', () => {
           argv: ['-e', script, process.execPath],
         });
       const report = (chunks: readonly CommandOutputChunk[]) =>
-        JSON.parse(chunks.map(({ text }) => text).join('')) as { pid: number; path: string };
+        JSON.parse(chunks.map(({ text }) => text).join('')) as {
+          pid: number;
+          path: string;
+          image?: string;
+          host?: string;
+        };
       const judge = vi
         .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
         .mockReturnValue(true);
@@ -2239,6 +2245,10 @@ describe('desktop control outside the command sandbox', () => {
         expect(desktopSpec.envDelta['PATH']?.toLowerCase()).toContain(insideFolder.toLowerCase());
         expect(desktop.path.toLowerCase()).not.toContain(insideFolder.toLowerCase());
         expect(desktop.path.toLowerCase()).toContain('system32');
+        // The cursor renderer starts from the approved executable, not the private copy the run
+        // starts from, and ends with this process.
+        expect(desktop.image).toBe(desktopSpec.absoluteExecutable);
+        expect(desktop.host).toBe(String(process.pid));
         await new Promise((resolve) => setTimeout(resolve, 1_000));
         expect(() => process.kill(desktop.pid, 0)).not.toThrow();
 
@@ -2255,6 +2265,8 @@ describe('desktop control outside the command sandbox', () => {
         const plain = report(plainChunks);
         started.push(plain.pid);
         expect(plain.path.toLowerCase()).toContain(insideFolder.toLowerCase());
+        expect(plain.image).toBeUndefined();
+        expect(plain.host).toBeUndefined();
         await expectProcessDead(plain.pid);
       } finally {
         for (const pid of started) {

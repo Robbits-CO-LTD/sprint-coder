@@ -135,6 +135,15 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md` | `scope: "visible"` の意味と、スクロールの後は snapshot し直すこと、を足した |
 | `crates/core/examples/locator_benchmark/fixture_builder.rs`、`crates/core/src/adapter/live_element.rs`、`crates/core/src/adapter/test_support.rs`、`crates/core/src/commands/find_live_test_support.rs`、`crates/core/src/locator/live_locator/observed_tree_tests.rs`、`crates/core/src/locator/live_locator/selected_hydration_tests.rs`、`crates/core/src/refs/ref_capture_proof_tests.rs`、`crates/windows/src/tree/live_read_gate_tests.rs`、`crates/windows/src/tree/live_read_states_complete_tests.rs`、`crates/windows/src/tree/properties/element_properties.rs`、`crates/windows/src/tree/resolve/resolve_anchor_tests.rs` | 1 行目に変更の注記を足した（無かったものだけ）。`LocatorRefEvidence` の literal に `runtime_id: None` を足しただけ |
 | 上の `ancestors: Vec::new()` を足したファイルの全部（`crates/windows/src/tree/walk/walker_enumerate.rs` を除く） | `RefEntryIdentity` の literal に `in_view: None` を足しただけ |
+| `crates/windows/src/system/cursor_overlay/image_identity.rs` | 1 行目に変更の注記を足した。自分の binary と見なす名前に、Sprint Coder が同梱する名前 `sprint-coder-desktop-control`（`BUNDLED_IMAGE_STEM`）を足した（大文字と小文字は区別しない）。同梱の名前では、描画のプロセスを起動する前の確かめ（`spawn.rs`）と、見つけた pipe の相手の確かめ（`peer.rs`）が通らず、`cursor-overlay enable` が `rendered: false` を返すだけで何も描かれなかった |
+| `crates/windows/src/system/cursor_overlay/image_identity_tests.rs` | 1 行目に変更の注記を足した。同梱の名前が通り、似た別の名前は通らないことの試験 `the_bundled_binary_is_recognised_in_any_case` を足した |
+| `crates/windows/src/system/cursor_overlay/spawn.rs` | 1 行目に変更の注記を足した。描画のプロセスを起動する元の file を `renderer_image` で選ぶ。環境変数 `SPRINT_CODER_DESKTOP_CONTROL_IMAGE` があれば、その file（絶対 path で、自分の binary の名前で、中身が今動いている image と 1 byte も違わない物）を、書き込み・名前の変更・削除ができない形で開いたまま、そこから起動する。無ければ従来どおり自分の image から起動する（Sprint Coder は実行ごとに exe を一時 folder の `image-<uuid>.exe` に写して動かし、終わると写しと同じ image のプロセスを止めて写しを消すので、写しから起動した描画のプロセスは名前の確かめで拒まれ、通っても実行の終わりに止められていた） |
+| `crates/windows/src/system/cursor_overlay/child.rs` | 1 行目に変更の注記を足した。描画のプロセスは、起動の最初に `host_watch` で host を開き、待機中（idle の tick ごと）に host が終わっていれば、session の終わりと同じく自分で終わる |
+| `crates/windows/src/system/cursor_overlay/mod.rs` | 1 行目に変更の注記を足した。`host_watch`・`renderer_image` を足した |
+| `crates/windows/src/system/cursor_overlay/renderer_image.rs`（新しく足した） | 描画のプロセスを起動する元の file の選び方（`choose`）と、名指しされた file が今の image と同じ中身の時だけ、変えられない形で開いて返す `hold_if_same` |
+| `crates/windows/src/system/cursor_overlay/renderer_image_tests.rs`（新しく足した） | 上の試験。写しから動く時に名指しが無ければ拒むこと、名指しの file を選ぶこと、別の名前・相対 path を拒むこと、同じ中身なら開いている間は書き込み・削除・名前の変更ができないこと、違う中身・無い file を拒むこと |
+| `crates/windows/src/system/cursor_overlay/host_watch.rs`（新しく足した） | 環境変数 `SPRINT_CODER_DESKTOP_HOST_PID` の process（Sprint Coder の Main）を描画のプロセスの起動の時に `SYNCHRONIZE` で開いて持ち、終わったかを答える。変数が無ければ見張らない（従来どおり session だけで終わる）。値が読めない・開けない時は、host は既に無いと見なし、描画のプロセスを始めない |
+| `crates/windows/src/system/cursor_overlay/host_watch_tests.rs`（新しく足した） | 上の試験。値の読み方、試験が起動した `cmd.exe` を見張り、生きている間は終わっていない・止めた後は終わったと答えること、既に終わった process は最初から終わったと答えること |
 
 ## build と試験
 

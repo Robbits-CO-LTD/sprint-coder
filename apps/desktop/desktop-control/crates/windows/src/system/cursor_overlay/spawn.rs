@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! Reaching the renderer for a session, and starting one when there is none.
 //!
 //! Connect first, classify a failure before acting on it, and spawn only for
@@ -188,7 +189,7 @@ fn start_renderer(
 #[cfg(target_os = "windows")]
 mod imp {
     use super::{pipe_name, transport};
-    use crate::system::cursor_overlay::image_identity;
+    use crate::system::cursor_overlay::renderer_image;
     use crate::system::cursor_overlay::wide::{wide, win32_error};
     use agent_desktop_core::{AdapterError, CursorOverlayControl};
     use std::time::{Duration, Instant};
@@ -208,21 +209,27 @@ mod imp {
     ///
     /// The image test is the one a client applies to a pipe server it found,
     /// so what may be forked and what may be trusted cannot drift apart.
-    fn executable() -> Result<std::path::PathBuf, AdapterError> {
+    ///
+    /// A host that runs this process from a private copy names the installed
+    /// binary instead (`renderer_image`); that file is started only when it
+    /// has this process's bytes, and the returned handle holds it unchanged
+    /// until the renderer has been created.
+    fn executable() -> Result<(std::path::PathBuf, Option<std::fs::File>), AdapterError> {
         let path = std::env::current_exe().map_err(|error| {
             AdapterError::internal("The running executable could not be resolved")
                 .with_platform_detail(error.to_string())
         })?;
-        if !image_identity::is_agent_desktop_image(&path) {
-            let stem = image_identity::image_stem(&path).unwrap_or_default();
-            let wanted = image_identity::IMAGE_STEM;
-            return Err(
-                AdapterError::not_supported("update_cursor_overlay").with_platform_detail(format!(
-                    "the overlay renderer is only started from the {wanted} image, not '{stem}'"
-                )),
-            );
+        let named = std::env::var_os(renderer_image::RENDERER_IMAGE_VARIABLE);
+        let refused = |detail: String| {
+            AdapterError::not_supported("update_cursor_overlay").with_platform_detail(detail)
+        };
+        match renderer_image::choose(&path, named.as_deref()).map_err(refused)? {
+            renderer_image::RendererImage::Own(own) => Ok((own, None)),
+            renderer_image::RendererImage::Named(named) => {
+                let held = renderer_image::hold_if_same(&named, &path).map_err(refused)?;
+                Ok((named, Some(held)))
+            }
         }
-        Ok(path)
     }
 
     /// Starts the renderer with **no inherited handles at all**.
@@ -244,7 +251,7 @@ mod imp {
         control: &CursorOverlayControl,
         budget: Duration,
     ) -> Result<(), AdapterError> {
-        let image = executable()?;
+        let (image, held) = executable()?;
         let mut command_line = wide(&format!(
             "\"{}\" {}",
             image.display(),
@@ -269,6 +276,7 @@ mod imp {
                 &mut information,
             )
         };
+        drop(held);
         if started == 0 {
             return Err(win32_error(
                 "The cursor overlay renderer could not be started",
