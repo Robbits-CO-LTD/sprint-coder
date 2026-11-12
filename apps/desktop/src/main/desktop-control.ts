@@ -220,7 +220,12 @@ export function desktopControlEnvironment(
     DESKTOP_CONTROL_HOST_PID_VARIABLE,
     ...(session === undefined
       ? []
-      : [DESKTOP_CONTROL_SESSION_VARIABLE, DESKTOP_CONTROL_AGENT_ID_VARIABLE]),
+      : [
+          DESKTOP_CONTROL_SESSION_VARIABLE,
+          DESKTOP_CONTROL_AGENT_ID_VARIABLE,
+          // An inherited interaction lease would let a run skip the turn the agents take.
+          DESKTOP_CONTROL_INTERACTION_LEASE_VARIABLE,
+        ]),
   ];
   const filtered = Object.entries(environment).filter(
     ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
@@ -300,6 +305,12 @@ export type DesktopControlCursorRenderer = Readonly<{
  */
 export const DESKTOP_CONTROL_SESSION_VARIABLE = 'AGENT_DESKTOP_SESSION';
 export const DESKTOP_CONTROL_AGENT_ID_VARIABLE = 'AGENT_DESKTOP_AGENT_ID';
+/**
+ * The variable naming an interaction lease handle the run inherits instead of taking the lease
+ * itself (`crates/windows/src/system/interaction_lease`). Never passed by Main, so a run in Main's
+ * session never has one the caller chose.
+ */
+export const DESKTOP_CONTROL_INTERACTION_LEASE_VARIABLE = 'AGENT_DESKTOP_INTERACTION_LEASE_HANDLE';
 
 export type DesktopControlSessionVariables = Readonly<{
   /** The session Main started (`session start` printed it). */
@@ -380,20 +391,69 @@ function comparisonKey(path: string, lookup: DesktopControlLookup): string {
   return platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
 }
 
+/**
+ * Whether a path lies outside every root, read in each of the forms it may take: as written, and
+ * as the file system resolves it (symlinks, junctions and short names). A path that does not exist
+ * yet is resolved through its nearest existing folder, so a file under a root reached through a
+ * link (a macOS `/var` temp folder, a worktree behind a junction) reads as inside it, as it will
+ * once written. A root is read in both forms too. Inside in any form means inside, so a link can
+ * only make a path read as inside, never as outside.
+ */
 function outsideWorkspaceRoots(
   path: string,
   workspaceRoots: readonly string[],
   lookup: DesktopControlLookup,
 ): boolean {
   const paths = (lookup.platform ?? process.platform) === 'win32' ? win32 : posix;
-  const target = comparisonKey(path, lookup);
-  return workspaceRoots.every((root) => {
-    const inside = paths.relative(comparisonKey(root, lookup), target);
-    return (
-      inside !== '' &&
-      (inside === '..' || inside.startsWith(`..${paths.sep}`) || paths.isAbsolute(inside))
-    );
-  });
+  const targets = pathForms(path, lookup);
+  return workspaceRoots.every((root) =>
+    pathForms(root, lookup).every((base) =>
+      targets.every((target) => {
+        const inside = paths.relative(base, target);
+        return (
+          inside !== '' &&
+          (inside === '..' || inside.startsWith(`..${paths.sep}`) || paths.isAbsolute(inside))
+        );
+      }),
+    ),
+  );
+}
+
+/** A path as written and as resolved (through its nearest existing folder), as comparison keys. */
+function pathForms(path: string, lookup: DesktopControlLookup): string[] {
+  const platform = lookup.platform ?? process.platform;
+  const paths = platform === 'win32' ? win32 : posix;
+  const key = (value: string) => {
+    const normalized = paths.normalize(value);
+    return platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+  };
+  // `resolvedPath` resolves the path itself when it exists, as `comparisonKey` does, and never
+  // throws.
+  return [...new Set([key(path), key(resolvedPath(path, lookup))])];
+}
+
+/**
+ * The path the file system resolves this one to, through its nearest existing folder when the path
+ * itself does not exist (the rest is appended as written); the path as written when nothing on it
+ * resolves.
+ */
+function resolvedPath(path: string, lookup: DesktopControlLookup): string {
+  const paths = (lookup.platform ?? process.platform) === 'win32' ? win32 : posix;
+  const realpath = lookup.realpath ?? ((value: string) => realpathSync.native(value));
+  const rest: string[] = [];
+  let current = path;
+  for (let depth = 0; depth < 256; depth += 1) {
+    try {
+      const real = realpath(current);
+      return rest.length === 0 ? real : paths.join(real, ...rest.reverse());
+    } catch {
+      const parent = paths.dirname(current);
+      if (parent === current) return path;
+      rest.push(paths.basename(current));
+      current = parent;
+    }
+  }
+  return path;
 }
 
 // The arguments are what the agent chose. The safety boundary is that the person allows every

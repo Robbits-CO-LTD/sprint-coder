@@ -23,6 +23,8 @@ const runtimeHostMock = vi.hoisted(() => ({
   // When set, the Turn emits these instead of one `finalText` delta; a function runs in its place.
   stream: null as Array<Record<string, unknown> | ((turnId: string) => void)> | null,
   beforeComplete: null as ((turnId: string) => void) | null,
+  // Runs as a failing Turn starts, before its failure arrives (what Main reports meanwhile).
+  beforeFailure: null as ((turnId: string) => void) | null,
   failures: new Map<
     'claude' | 'codex' | 'grok',
     {
@@ -82,6 +84,7 @@ vi.mock('./runtime-host', () => ({
       const turnId = args[1] as string;
       const failure = runtimeHostMock.failures.get(this.kind);
       if (failure !== undefined) {
+        runtimeHostMock.beforeFailure?.(turnId);
         if (failure.emitOperation === true)
           this.onEvent(taskId, turnId, {
             type: 'operation',
@@ -155,6 +158,7 @@ afterEach(() => {
   runtimeHostMock.finalText = '完了';
   runtimeHostMock.stream = null;
   runtimeHostMock.beforeComplete = null;
+  runtimeHostMock.beforeFailure = null;
   runtimeHostMock.waitForExit.mockReset();
   runtimeHostMock.waitForExit.mockResolvedValue(undefined);
 });
@@ -551,6 +555,35 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     });
 
     expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
+  });
+
+  it('does not run a read-only request again after Main reported a desktop operation in it', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      defer: true,
+      emitReadOperation: true,
+    });
+    const subject = runtime({
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+    // A click of the Worker's started (its managed call reports no side effect of its own).
+    runtimeHostMock.beforeFailure = (turnId) => subject.recordManagedSideEffect(turnId);
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '窓のボタンを押す',
+      }),
+    ).rejects.toThrow('Claude Codeの利用上限に達しました。');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
   });
 
   it('fails immediately without waiting for exit when the runtime was not started', async () => {

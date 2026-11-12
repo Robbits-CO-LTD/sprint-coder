@@ -11,16 +11,21 @@ import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
 import {
   desktopControlArgvIsInert,
+  desktopControlArgvMode,
   desktopControlArgvRefusal,
   desktopControlLaunchByName,
   desktopControlSessionArgvRefusal,
   isDesktopControlExecutable,
+  readBatchEntries,
+  readDesktopControlCommand,
   type DesktopControlSessionVariables,
 } from './desktop-control';
 import {
   desktopControlTeamCursors,
+  desktopControlWorker,
   ensureDesktopControlSession,
   type DesktopControlOwnRun,
+  type DesktopControlWorker,
 } from './desktop-control-session';
 import {
   CommandRunner,
@@ -337,6 +342,25 @@ export type CommandToolBoundary = Readonly<{
     | 'completeBackgroundActivity'
   >;
   publish(event: TurnEvent): void;
+  /**
+   * The Team Worker that made this call (by the Turn and the call id the broker sees), from Main's
+   * own binding of the Worker's Turn; `undefined` for a call of the Leader itself.
+   */
+  workerFor?(
+    turnId: string,
+    callId: string,
+  ):
+    | Readonly<{
+        workerId: string;
+        /** Every root the Worker's own Turn reads and writes (its isolated worktree included). */
+        roots: readonly string[];
+      }>
+    | undefined;
+  /**
+   * Told, as a Team Worker's desktop-control run that is not a read starts, so the Worker's request
+   * is never run again from the start (`recordManagedSideEffect`).
+   */
+  workerSideEffect?(turnId: string, callId: string): void;
 }>;
 
 export const APPROVAL_PROBE_TOOL = createToolDefinition({
@@ -430,6 +454,32 @@ export async function rejectWindowsSandboxedNodeTestIsolationWithVersion(
   rejectWindowsSandboxedNodeTestIsolation(absoluteExecutable, argv, { sandboxed, nodeVersion });
 }
 
+/** The least and most a Team Worker's desktop-control run is waited for, and the margin added. */
+const WORKER_DESKTOP_WAIT_MIN_MS = 60_000;
+const WORKER_DESKTOP_WAIT_MAX_MS = 300_000;
+const WORKER_DESKTOP_WAIT_MARGIN_MS = 15_000;
+
+/**
+ * How long a Team Worker's desktop-control run is waited for before it is stopped: the longest
+ * timeout its arguments give the executable (`--timeout-ms`, `--timeout`, a batch's `timeout_ms`,
+ * `timeout` or `ms`) plus a margin, at least a minute and at most five. The executable bounds its
+ * own waits, so this is only reached by a run that hangs.
+ */
+export function desktopControlWorkerWaitMs(argv: readonly string[]): number {
+  const read = readDesktopControlCommand(argv);
+  const given: number[] = [];
+  for (const name of ['--timeout-ms', '--timeout'])
+    given.push(Number(read?.options.get(name) ?? Number.NaN));
+  if (read?.command === 'batch')
+    for (const { args } of readBatchEntries(read.positionals) ?? [])
+      for (const key of ['timeout_ms', 'timeout', 'ms']) given.push(Number(args[key]));
+  const longest = Math.max(0, ...given.filter((value) => Number.isFinite(value) && value > 0));
+  return Math.min(
+    WORKER_DESKTOP_WAIT_MAX_MS,
+    Math.max(WORKER_DESKTOP_WAIT_MIN_MS, longest + WORKER_DESKTOP_WAIT_MARGIN_MS),
+  );
+}
+
 /**
  * Main's own runs of the shipped desktop-control executable for the Task's session (see
  * `desktop-control-session.ts`): prepared and sealed as the agent's run was, in the same Workspace
@@ -481,6 +531,8 @@ export function registerCommandRunnerTool(
     object,
     (argv: readonly string[]) => Promise<ExecutionSpec>
   >();
+  // For a Team Worker's call: the Worker whose cursor the run moves.
+  const desktopControlWorkers = new WeakMap<object, DesktopControlWorker>();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -528,13 +580,44 @@ export function registerCommandRunnerTool(
         spec.argv,
         commandRunner.isSandboxed,
       );
-      const roots = workspace.roots.map(({ path }) => path);
+      // A Team Worker's call reaches this tool under its parent's Turn, whose Workspace is not all
+      // the agent can write: the Worker's own roots (its isolated worktree) are too. Every check
+      // that keeps desktop control away from files the agent wrote (a `launch` target, the Start
+      // menu's target, the run's PATH, the executable itself) uses both, from here to the runner.
+      const caller = command.workerFor?.(context.turnId, control.callId);
+      const roots = [
+        ...new Set([
+          ...workspace.roots.map(({ path }) => path),
+          ...(caller === undefined ? [] : caller.roots),
+        ]),
+      ];
       // Judged on the bytes sealed into this ExecutionSpec, as the card and the run are. Refused
       // before a card exists, so nothing the person could approve would escape the sandbox.
       const desktopControl = isDesktopControlExecutable(
         spec.absoluteExecutable,
         executionSpecContentDigest(spec),
       );
+      // A Team Worker runs only the shipped desktop-control executable, judged on the sealed bytes,
+      // in the foreground of its call, and only when the Leader marked it for desktop control.
+      let worker: DesktopControlWorker | undefined;
+      if (caller !== undefined) {
+        if (!desktopControl)
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'Team の Worker が実行できるのは、デスクトップ操作の実行ファイルだけです。',
+          );
+        worker = desktopControlWorker(context.taskId, caller.workerId);
+        if (worker === undefined || !desktopControlTeamCursors())
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'この Worker には、デスクトップ操作が任されていません。',
+          );
+        if (request.background === true)
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'Team の Worker は、デスクトップ操作を background では実行できません。',
+          );
+      }
       let desktopControlRefusal = desktopControl
         ? desktopControlArgvRefusal(spec.argv, roots)
         : null;
@@ -580,6 +663,7 @@ export function registerCommandRunnerTool(
       if (desktopControl) desktopControlRoots.set(spec, roots);
       if (desktopControl && desktopControlTeamCursors())
         desktopControlOwnSpecs.set(spec, prepareSpec);
+      if (worker !== undefined) desktopControlWorkers.set(spec, worker);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -623,9 +707,44 @@ export function registerCommandRunnerTool(
         desktopControlArgvIsInert(spec.argv)
           ? desktopControlRoots.get(spec)
           : undefined;
+      // A run that never started is recorded as failed.
+      const failUnstarted = (): void => {
+        const current = command.persistence.getCommand(commandId);
+        if (current.state !== 'prepared') return;
+        const persisted = command.persistence.completeCommand({
+          commandId,
+          state: 'failed',
+          exitCode: null,
+          signal: null,
+          outputBytes: 0,
+          truncated: false,
+          finishedAt: new Date().toISOString(),
+        });
+        command.publish(persisted.event);
+      };
+      // A Team Worker's call runs only as the Worker it was prepared for, and only while that
+      // Worker still holds its mark: never as the Leader, whose cursor and agent id it would take.
+      const caller = command.workerFor?.(_context.turnId, control.callId);
+      if (caller !== undefined) {
+        const prepared = desktopControlWorkers.get(spec);
+        const current = desktopControlWorker(_context.taskId, caller.workerId);
+        if (
+          prepared === undefined ||
+          current === undefined ||
+          current.agentId !== prepared.agentId ||
+          !desktopControlTeamCursors()
+        ) {
+          failUnstarted();
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'この Worker には、デスクトップ操作が任されていません。',
+          );
+        }
+      }
       // With the Task's cursors on, a run that reads or operates the desktop runs in the Task's
-      // session as the Leader, and Main starts that session first when the Task has none yet. A
-      // run whose session cannot be started does not start at all.
+      // session as the Leader, or as the Team Worker that made the call, and Main starts that
+      // session (and styles that Worker's cursor) first when it is not there yet. A run whose
+      // session cannot be started does not start at all.
       let desktopSession: DesktopControlSessionVariables | undefined;
       const prepareOwn = desktopControlOwnSpecs.get(spec);
       if (
@@ -639,26 +758,28 @@ export function registerCommandRunnerTool(
           desktopSession = await ensureDesktopControlSession(
             _context.taskId,
             desktopControlOwnRun(commandRunner, prepareOwn, roots),
+            desktopControlWorkers.get(spec),
           );
         } catch (error) {
-          const current = command.persistence.getCommand(commandId);
-          if (current.state === 'prepared') {
-            const persisted = command.persistence.completeCommand({
-              commandId,
-              state: 'failed',
-              exitCode: null,
-              signal: null,
-              outputBytes: 0,
-              truncated: false,
-              finishedAt: new Date().toISOString(),
-            });
-            command.publish(persisted.event);
-          }
+          failUnstarted();
           throw new Error(
             `デスクトップ操作の準備（カーソルの表示）に失敗したため、実行しなかった: ${error instanceof Error ? error.message : String(error)}`,
             { cause: error },
           );
         }
+      }
+      // A Worker's run that reads or operates the desktop runs as that Worker in the session, or
+      // not at all (one allowed by no card of the person's would otherwise run as nobody's).
+      if (
+        caller !== undefined &&
+        !desktopControlArgvIsInert(spec.argv) &&
+        desktopSession?.agentId !== desktopControlWorkers.get(spec)?.agentId
+      ) {
+        failUnstarted();
+        throw new CommandRunnerError(
+          'EXECUTION_SPEC_INVALID',
+          'Team の Worker のデスクトップ操作は、承認カードで許可された時だけ、その Worker として実行します。',
+        );
       }
       // The windows a desktop-control run reported, as the executable printed them, name those
       // windows on the Task's later cards (display only).
@@ -676,6 +797,11 @@ export function registerCommandRunnerTool(
         ...(desktopSession === undefined ? {} : { desktopControlSession: desktopSession }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
+          // Recorded as the run starts, whether or not it then succeeds: a desktop operation
+          // whose outcome is unknown is the one most dangerous to repeat.
+          const mode = caller === undefined ? null : desktopControlArgvMode(spec.argv);
+          if (mode === 'background' || mode === 'foreground')
+            command.workerSideEffect?.(_context.turnId, control.callId);
         },
         onStarted: ({
           pid,
@@ -813,11 +939,21 @@ export function registerCommandRunnerTool(
           observeBackground();
           return started;
         }
-        const completed = await sessions.waitFor(
+        // A Team Worker cannot poll a run that went on in the background (its catalog has no
+        // `poll_command`), so its desktop-control run is waited for to the end, within a bound;
+        // past the bound it is stopped and reported as failed, never left running unseen.
+        const workerRun = desktopControlWorkers.has(spec);
+        let completed = await sessions.waitFor(
           started.sessionId,
           owner,
-          foregroundToBackgroundMs,
+          workerRun ? desktopControlWorkerWaitMs(spec.argv) : foregroundToBackgroundMs,
         );
+        let overran = false;
+        if (completed === null && workerRun) {
+          overran = true;
+          sessions.terminate(started.sessionId, owner);
+          completed = await sessions.wait(started.sessionId, owner);
+        }
         if (completed === null) {
           persistBackground();
           observeBackground();
@@ -836,6 +972,10 @@ export function registerCommandRunnerTool(
               })
             : completePersistedCommand(command.persistence, commandId, completed.result);
         command.publish(persisted.event);
+        if (overran)
+          throw new Error(
+            `デスクトップ操作が ${Math.round(desktopControlWorkerWaitMs(spec.argv) / 1000)} 秒以内に終わらなかったため、止めた。操作が届いたかは分からない。snapshot で状態を確かめてから続ける。`,
+          );
         if (completed.result === null)
           throw new Error(completed.error ?? 'Managed command failed before completion');
         rememberWindows();

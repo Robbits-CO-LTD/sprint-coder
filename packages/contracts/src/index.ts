@@ -2168,6 +2168,17 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
       .object({ app: z.string().min(1).max(120) })
       .strict()
       .optional(),
+    /**
+     * The Team Worker that asked for this run, as its cursor names it (its role) and colors it (the
+     * place of its accent in Main's palette). Absent for the Leader's own runs.
+     */
+    requester: z
+      .object({
+        label: z.string().min(1).max(40),
+        colorIndex: z.number().int().min(0).max(31),
+      })
+      .strict()
+      .optional(),
     notes: z.array(z.string().min(1).max(200)).max(6),
     /** Whether the card opens its details: something could not be confirmed or shown in full. */
     openDetails: z.boolean(),
