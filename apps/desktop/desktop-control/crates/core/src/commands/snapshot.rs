@@ -156,6 +156,11 @@ pub(crate) fn format_snapshot_fields(
     });
     if !win.is_process_owner() {
         body["window"] = json!({ "id": win.id, "title": win.title });
+        // A minimized window reads in full, but its refs cannot be operated
+        // until it is restored; say so where the caller sees the window.
+        if win.state.minimized == Some(true) {
+            body["window"]["minimized"] = json!(true);
+        }
     }
     if !result.complete {
         body["truncated"] = json!(true);
