@@ -66,6 +66,7 @@ pub(crate) fn item_from_raw(raw: &RawItem) -> NativeMenuItem {
         radio: raw.ftype & MFT_RADIOCHECK != 0,
         command_id: raw.id,
         in_notify_by_position_menu: false,
+        notify_style_unread: false,
         submenu: None,
         submenu_unread: false,
     }
@@ -174,14 +175,21 @@ mod live {
     }
 
     /// Whether the menu reports its items by position (`MNS_NOTIFYBYPOS`)
-    /// instead of sending their commands; an unreadable style counts as yes.
-    pub(crate) fn notifies_by_position(menu: HMENU) -> bool {
+    /// instead of sending their commands; `None` when its style cannot be
+    /// read, which no item is run under.
+    pub(crate) fn notifies_by_position(menu: HMENU) -> Option<bool> {
         let mut info: MENUINFO = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<MENUINFO>() as u32;
         info.fMask = MIM_STYLE;
         // SAFETY: a plain read into a sized struct.
         let read = unsafe { GetMenuInfo(menu, &mut info) };
-        read == 0 || info.dwStyle & MNS_NOTIFYBYPOS != 0
+        (read != 0).then_some(info.dwStyle & MNS_NOTIFYBYPOS != 0)
+    }
+
+    /// Marks how the item's menu reports a chosen item, as read.
+    fn mark_style(item: &mut NativeMenuItem, notify: Option<bool>) {
+        item.in_notify_by_position_menu = notify == Some(true);
+        item.notify_style_unread = notify.is_none();
     }
 
     /// One level of a menu: each item without its submenu (an item that
@@ -199,7 +207,7 @@ mod live {
         for position in 0..count {
             let (raw, submenu) = read_raw(menu, position as u32)?;
             let mut item = item_from_raw(&raw);
-            item.in_notify_by_position_menu = notify;
+            mark_style(&mut item, notify);
             if !submenu.is_null() {
                 item.submenu_unread = true;
                 item.command_id = 0;
@@ -230,7 +238,7 @@ mod live {
                 continue;
             };
             let mut item = item_from_raw(&raw);
-            item.in_notify_by_position_menu = notify;
+            mark_style(&mut item, notify);
             if !submenu.is_null() {
                 item.command_id = 0;
                 if depth + 1 >= MAX_MENU_DEPTH || budget.left == 0 || budget.deadline.is_expired() {

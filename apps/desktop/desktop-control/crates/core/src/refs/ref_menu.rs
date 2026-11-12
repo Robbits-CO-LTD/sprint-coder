@@ -17,6 +17,12 @@
 //! opens, which moves items, and a moved item that still reads the same and
 //! sends the same command is the same item. Two items with the recorded name
 //! in one level stop it, so a moved item can never be taken for another.
+//!
+//! A menu whose bar reports a chosen item by its position (`MNS_NOTIFYBYPOS`)
+//! gets `WM_MENUCOMMAND` with the item's position and menu instead of
+//! `WM_COMMAND`. Such an item is matched the same way, its command included,
+//! and every menu on its way must report by position at capture and at the
+//! run alike (`reports_by_position`).
 
 use serde_json::json;
 
@@ -93,7 +99,9 @@ pub enum MenuMismatch {
     Disabled,
     /// The item sends another command now.
     CommandChanged,
-    /// The menu now reports its items by position (`MNS_NOTIFYBYPOS`).
+    /// The menu now reports a chosen item otherwise than recorded (by
+    /// position, `MNS_NOTIFYBYPOS`, or by command), or its style cannot be
+    /// read.
     NotifyByPosition,
     /// The window has no menu bar now.
     NoMenuBar,
@@ -151,9 +159,14 @@ pub fn opens_submenu(item: &NativeMenuItem) -> bool {
 }
 
 /// The one item of a live menu level the recorded step names: exactly one
-/// item with the recorded name, opening a submenu exactly when the step does,
-/// and enabled.
-pub fn match_step(items: &[NativeMenuItem], step: &RefMenuStep) -> Result<usize, MenuMismatch> {
+/// item with the recorded name, in a menu that reports a chosen item the way
+/// the record says (`by_position`), opening a submenu exactly when the step
+/// does, and enabled.
+pub fn match_step(
+    items: &[NativeMenuItem],
+    step: &RefMenuStep,
+    by_position: bool,
+) -> Result<usize, MenuMismatch> {
     let mut found = None;
     for (index, item) in items.iter().enumerate() {
         if item_name(item).as_deref() == Some(step.name.as_str()) {
@@ -165,7 +178,7 @@ pub fn match_step(items: &[NativeMenuItem], step: &RefMenuStep) -> Result<usize,
     }
     let index = found.ok_or(MenuMismatch::Missing)?;
     let item = &items[index];
-    if item.in_notify_by_position_menu {
+    if item.notify_style_unread || item.in_notify_by_position_menu != by_position {
         return Err(MenuMismatch::NotifyByPosition);
     }
     if opens_submenu(item) != step.submenu {
@@ -189,6 +202,34 @@ pub fn confirm_leaf(item: &NativeMenuItem, proof: &RefMenuProof) -> Result<(), M
         return Err(MenuMismatch::CommandChanged);
     }
     Ok(())
+}
+
+/// Whether a chosen item reaches the window by its position (`WM_MENUCOMMAND`)
+/// rather than by its command (`WM_COMMAND`), from the style of every menu on
+/// its way down. The style of the bar decides for the whole menu, as the
+/// platform documents it, but a submenu can carry a style of its own; so the
+/// item is runnable only when every menu on its way says the same, and when
+/// any of their styles could not be read, it is not: either way, a message
+/// the window may not take as the item is never sent.
+pub(crate) fn reports_by_position(
+    item: &NativeMenuItem,
+    path: &[(&NativeMenuItem, &[NativeMenuItem])],
+) -> Result<bool, &'static str> {
+    let mut menus = path
+        .iter()
+        .map(|(ancestor, _)| *ancestor)
+        .chain(std::iter::once(item));
+    if menus.clone().any(|menu| menu.notify_style_unread) {
+        return Err("How this menu reports a chosen item could not be read, so it cannot be run.");
+    }
+    let by_position = item.in_notify_by_position_menu;
+    if menus.any(|menu| menu.in_notify_by_position_menu != by_position) {
+        return Err(
+            "This menu and a menu above it report a chosen item in different ways, so it cannot \
+             be run by ref.",
+        );
+    }
+    Ok(by_position)
 }
 
 /// Why a menu item read at capture gets no ref, or `None` when it gets one.
@@ -219,14 +260,8 @@ pub(crate) fn unrunnable_reason(
     if item.command_id == 0 || item.command_id > 0xFFFF {
         return Some("This item sends no command, so it cannot be run by ref.");
     }
-    if item.in_notify_by_position_menu
-        || path
-            .iter()
-            .any(|(ancestor, _)| ancestor.in_notify_by_position_menu)
-    {
-        return Some(
-            "This menu reports its items by position, which running by ref does not support.",
-        );
+    if let Err(reason) = reports_by_position(item, path) {
+        return Some(reason);
     }
     let unique = |item: &NativeMenuItem, menu: &[NativeMenuItem]| {
         let name = item_name(item);

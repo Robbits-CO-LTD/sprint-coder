@@ -402,6 +402,12 @@ function DesktopStepFacts({
           <dd id={targetId}>{desktopTargetText(step.target)}</dd>
         </div>
       )}
+      {step.target?.fullName === undefined ? null : (
+        <div>
+          <dt>名前（全部）</dt>
+          <dd data-testid="desktop-approval-full-name">{step.target.fullName}</dd>
+        </div>
+      )}
       {step.destination === undefined ? null : (
         <div>
           <dt>移動先</dt>

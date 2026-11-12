@@ -485,7 +485,6 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   let openDetails = false;
   // A run naming a standard menu item ref, which runs an app command; never granted for the Task.
   let menuItems = false;
-  const menuNames: string[] = [];
   let steps: DesktopActionStep[] | undefined;
   let stepsOmitted: number | undefined;
   let head: DesktopActionStep;
@@ -521,7 +520,6 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     steps = described.map(({ step }) => step);
     if (described.some(({ menu }) => menu)) menuItems = true;
-    for (const { menuFull } of described) if (menuFull !== undefined) menuNames.push(menuFull);
     if (described.some(({ unexplained }) => unexplained)) openDetails = true;
     // The same in a batch, by argument name (`xy`, `from_xy`, `to_xy` …).
     if (
@@ -564,7 +562,6 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     head = described.step;
     if (described.menu) menuItems = true;
-    if (described.menuFull !== undefined) menuNames.push(described.menuFull);
     if (described.unexplained) openDetails = true;
     // A point given as coordinates is not what the card names, even beside a part.
     if (COORDINATE_OPTIONS.some((option) => read.options.has(option))) openDetails = true;
@@ -596,8 +593,6 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
   if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
-  for (const name of menuNames.slice(0, 2))
-    notes.push(visible(`メニューの項目の名前（全部）: ${name}`, NOTE_MAX).text);
   if (menuItems) notes.unshift(MENU_NOTE);
   if (mode === 'foreground') {
     // Only bringing a window to the front, without `--headed`, takes no mouse or keyboard.
@@ -619,7 +614,6 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   };
 }
 
-const NOTE_MAX = 200;
 // The most entries the executable runs in one batch (`MAX_BATCH_ENTRIES`); it refuses more.
 const BATCH_ENTRIES_MAX = 64;
 // The fields of a batch entry the executable reads (`BatchCommand`); it refuses any other.
@@ -706,8 +700,6 @@ function describeStep(
   cut: boolean;
   unexplained: boolean;
   menu: boolean;
-  /** The whole name of a menu item the card could not show in full. */
-  menuFull: string | undefined;
 } {
   const [kind, heading] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
   // Any command naming a menu item ref; the executable runs it only for `click`.
@@ -754,7 +746,6 @@ function describeStep(
     cut: shown?.cut === true,
     unexplained,
     menu,
-    menuFull: label?.cut === true ? label.full : undefined,
   };
 }
 
@@ -829,7 +820,8 @@ type MenuLabel = Readonly<{ text: string; full: string; cut: boolean }>;
  * names it (「(F)」 and 「(1)」 kept, so items that differ only there stay apart), and its shortcut,
  * e.g. 「ファイル(F) > 上書き保存(S)（Ctrl+S）」. The item's own name is never dropped: a name too
  * long for the card shortens the menus above it to 「…」 first, and whenever anything is left out
- * `cut` is set, so the card opens its details and shows the whole name in a note.
+ * `cut` is set, so the card opens its details and shows the whole name beside it (`fullName`). An
+ * item's own name too long to fit even alone keeps its start and its end, its middle cut.
  * `undefined` when the record is not in the shape the executable writes.
  */
 function menuLabel(proof: unknown): MenuLabel | undefined {
@@ -849,13 +841,43 @@ function menuLabel(proof: unknown): MenuLabel | undefined {
       ? `（${visible(shortcut, NAME_MAX).text}）`
       : '';
   const leaf = `${names.at(-1)!}${keys}`;
-  const full = `${names.join(' > ')}${keys}`;
-  const shortened = [full];
+  const whole = `${names.join(' > ')}${keys}`;
+  const full = cutMiddle(whole, MENU_FULL_NAME_MAX);
+  const shortened = [whole];
   if (names.length > 2) shortened.push(`${names[0]!} > … > ${leaf}`);
   if (names.length > 1) shortened.push(`… > ${leaf}`);
   for (const text of shortened)
-    if (text.length <= NAME_MAX) return { text, full, cut: text !== full };
-  return { text: visible(shortened.at(-1)!, NAME_MAX).text, full, cut: true };
+    if (text.length <= NAME_MAX) return { text, full, cut: text !== whole };
+  // The item's own name is too long even alone (a long path in 「最近使ったファイル」): its middle
+  // gives way, so both its start and its end - where two such names usually differ - stay.
+  return { text: cutMiddle(shortened.at(-1)!, NAME_MAX), full, cut: true };
+}
+
+/** The whole name a card shows beside a shortened one; past this its middle is cut too. */
+const MENU_FULL_NAME_MAX = 2_000;
+
+/** `text` within `max` UTF-16 units, its middle replaced by 「…」, cut on whole characters. */
+function cutMiddle(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const characters = Array.from(text);
+  let head = '';
+  let tail = '';
+  let start = 0;
+  let end = characters.length - 1;
+  // Head and tail grow in turn, the head first, until nothing more fits beside the 「…」.
+  for (let turn = 0; start <= end; turn += 1) {
+    const fromHead = turn % 2 === 0;
+    const next = fromHead ? characters[start]! : characters[end]!;
+    if (head.length + tail.length + next.length > max - 1) break;
+    if (fromHead) {
+      head += next;
+      start += 1;
+    } else {
+      tail = next + tail;
+      end -= 1;
+    }
+  }
+  return `${head}…${tail}`;
 }
 
 function isMenuEntry(entry: RefmapEntry): boolean {
@@ -915,7 +937,10 @@ class SnapshotReader {
     const menu = isMenuEntry(entry);
     // A menu item is named by its whole place in the menu; one whose record cannot be read is
     // shown without a name, which opens the card's details.
-    const name = menu ? menuLabel(entry.proven_in_menu)?.text : textField(entry.name, NAME_MAX);
+    const label = menu ? menuLabel(entry.proven_in_menu) : undefined;
+    const name = menu ? label?.text : textField(entry.name, NAME_MAX);
+    // A shortened menu item name is shown whole beside it, step by step in a batch too.
+    const fullName = label?.cut === true ? label.full : undefined;
     if (app === undefined && window === undefined) return unresolved;
     const windowId =
       typeof entry.source_window_id === 'string' && WINDOW_ID.test(entry.source_window_id)
@@ -928,6 +953,7 @@ class SnapshotReader {
       ...(window === undefined ? {} : { window }),
       role: roleText(entry.role),
       ...(name === undefined ? {} : { name }),
+      ...(fullName === undefined ? {} : { fullName }),
       ...(within === undefined ? {} : { within }),
       ...(windowId === undefined ? {} : { windowId }),
     };
