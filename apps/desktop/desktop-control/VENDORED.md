@@ -135,6 +135,8 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md` | `scope: "visible"` の意味と、スクロールの後は snapshot し直すこと、を足した |
 | `crates/core/examples/locator_benchmark/fixture_builder.rs`、`crates/core/src/adapter/live_element.rs`、`crates/core/src/adapter/test_support.rs`、`crates/core/src/commands/find_live_test_support.rs`、`crates/core/src/locator/live_locator/observed_tree_tests.rs`、`crates/core/src/locator/live_locator/selected_hydration_tests.rs`、`crates/core/src/refs/ref_capture_proof_tests.rs`、`crates/windows/src/tree/live_read_gate_tests.rs`、`crates/windows/src/tree/live_read_states_complete_tests.rs`、`crates/windows/src/tree/properties/element_properties.rs`、`crates/windows/src/tree/resolve/resolve_anchor_tests.rs` | 1 行目に変更の注記を足した（無かったものだけ）。`LocatorRefEvidence` の literal に `runtime_id: None` を足しただけ |
 | 上の `ancestors: Vec::new()` を足したファイルの全部（`crates/windows/src/tree/walk/walker_enumerate.rs` を除く） | `RefEntryIdentity` の literal に `in_view: None` を足しただけ |
+| `crates/core/src/commands/snapshot.rs`・`snapshot_tests.rs`（2 回目） | 返す木に、深さの上限で子を省いた節（`children_count` があり子が無い）が 1 つでもあれば、`depth_limited: true` と、`--max-depth` を上げるか `--root` で掘る、という `depth_hint` を付ける（`complete` の意味は変えない）。その試験 |
+| `skills/agent-desktop/references/commands-observation.md`・`skills/agent-desktop-windows/references/chromium-and-electron.md`（2 回目） | `depth_limited` の意味と、その時は `complete: true` でも下に部品があり得るので深さを上げるか `--root` で掘ること、を足した |
 
 ## build と試験
 
