@@ -31,6 +31,11 @@ pub fn resolve_saved_ref(
     deadline: Deadline,
     lease: Option<&crate::InteractionLease>,
 ) -> Result<NativeHandle, AdapterError> {
+    // A menu item ref is run through the window's own menu by click alone,
+    // never resolved to an accessibility element (ef_menu).
+    if entry.identity.in_menu.is_some() {
+        return Err(crate::refs::ref_menu::menu_ref_refused(entry));
+    }
     if element_token(entry).is_some() {
         if entry.identity.in_view.is_some() {
             return Err(crate::refs::ref_view::view_unavailable(entry));
@@ -63,6 +68,9 @@ pub(crate) fn land_saved_ref(
     entry: &RefEntry,
     deadline: Deadline,
 ) -> Result<NativeHandle, AdapterError> {
+    if entry.identity.in_menu.is_some() {
+        return Err(crate::refs::ref_menu::menu_ref_refused(entry));
+    }
     // A view-proven entry is only ever judged by a fresh read of its view
     // (`ref_view`), so it takes the full resolution.
     if element_token(entry).is_none()
@@ -101,6 +109,9 @@ pub(crate) fn observe_saved_ref(
     lease: Option<&crate::InteractionLease>,
     identity_only: bool,
 ) -> Result<SavedRefMatch, AdapterError> {
+    if entry.identity.in_menu.is_some() {
+        return Err(crate::refs::ref_menu::menu_ref_refused(entry));
+    }
     let token = element_token(entry);
     let proof = crate::refs::ref_ancestry::proof_of(entry);
     if token.is_none() && proof == crate::refs::ref_ancestry::Proof::None {

@@ -29,7 +29,7 @@ observation, actions and capture there fail or return nothing.
 
 | Group | Commands | Status on Windows |
 |-------|----------|-------------------|
-| Observation | `snapshot`, `find`, `get`, `is`, `screenshot` | Works. Surfaces are `window`, `focused`, a Chromium modal as `sheet`, an open application menu as `menu`, and a window's standard menu bar as `menubar` (`snapshot` only, read without opening it) |
+| Observation | `snapshot`, `find`, `get`, `is`, `screenshot` | Works. Surfaces are `window`, `focused`, a Chromium modal as `sheet`, an open application menu as `menu`, and a window's standard menu bar as `menubar` (`snapshot` only, read without opening it; its items run with `click`) |
 | Surfaces | `list-surfaces` | Works. Lists `window`, `focused` and `sheet` per process, plus `menu` with `item_count` while a menu is open |
 | Shell surfaces | `open-system-surface` | Works for `start-menu`, `taskbar`, `system-tray`, `system-tray-overflow` and `action-center`, and returns the window `snapshot --surface <kind>` reads. `quick-settings` returns `INVALID_ARGS` naming `action-center` |
 | Ref interaction | `click`, `right-click`, `type`, `set-value`, `clear`, `select`, `toggle`, `check`, `uncheck`, `expand`, `collapse`, `scroll`, `scroll-to` | Works, semantic in headless and `--headed` mode. `right-click` and `type` need `--headed` and return `POLICY_DENIED` headless |
@@ -101,11 +101,40 @@ observation, actions and capture there fail or return nothing.
   menu with `snapshot --surface menubar --window-id <id>`: names (with `&`
   removed, as UI Automation names them), the shortcut as `hint`, and
   `disabled`, `checked` and `haspopup` states, `subrole: "radio"` for a radio
-  item. Nothing is sent to the app, so states are as the app last set them,
-  and some apps (7-Zip File Manager, for one) change the items only when the
-  menu opens. The items carry no refs: running one from there is not
-  available yet. An item the app draws itself has no name and says so in
-  `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no
+  item. The read sends nothing to the app, so states are as the app last set
+  them, and some apps (7-Zip File Manager, for one) change the items only
+  when the menu opens. An item that can be run carries a ref and the `Click`
+  action; `click <ref>` runs it in the background: the app receives the
+  item's command as if a person chose it (`WM_COMMAND`), and the window
+  neither comes to the front nor takes the focus. Before sending, the menu
+  is read again the way an opening menu is (the app is told each menu on the
+  way opens, then closes), and every level must still show exactly one item
+  of the recorded name, enabled, with the last one sending the recorded
+  command; otherwise nothing is sent and the click fails `STALE_REF` with
+  `details.kind: "menu_item_changed"` and a `reason` (`missing`,
+  `ambiguous`, `disabled`, `command_changed`, ...): read the menu again. The
+  result is `delivered_unverified`, except for an item with a check mark or
+  a radio mark whose state changed as expected (`delivered_verified`,
+  `details.verification_scope: "menu_check_state"`): confirm the effect with
+  a fresh snapshot or `wait`. A command that opens a dialog opens it without
+  bringing it forward. No ref is given to a submenu, a disabled item, an item
+  under a disabled menu, an item the app draws itself, one that sends no
+  command, or one with a twin of the same name on its way down (its `hint`
+  says which). A minimized window is refused as for any ref
+  (`window_minimized`). A window that does not take input (a dialog it opened
+  has disabled it) gets no refs (`window_disabled: true` on the snapshot), and
+  a click on an earlier ref then fails `ACTION_FAILED`,
+  `details.kind: "window_disabled"`, with nothing sent: finish the dialog
+  first. The command is handed to the app's thread without waiting for it
+  (a command that opens a dialog returns at once), and ahead of anything a
+  later click sends, so the next menu click cannot change the menu before
+  this command runs; while that command shows a modal dialog, the next click
+  stops with `window_disabled`. After the command nothing more goes to the
+  app; the check mark is read from the menu itself, so an app that updates
+  it only when the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
+  every other command refuses it with `ACTION_NOT_SUPPORTED`,
+  `details.kind: "menu_item_ref"`. An item the app draws itself has no name
+  and says so in `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no
   standard menu bar: `snapshot --surface menubar` returns `ELEMENT_NOT_FOUND`
   (`details.kind: "no_standard_menu_bar"`), a failed `expand` or `click` on
   its menu items carries `details.menu_bar: "not_standard"`, and opening

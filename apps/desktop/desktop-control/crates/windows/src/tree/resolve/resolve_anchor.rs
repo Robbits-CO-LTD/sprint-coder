@@ -41,6 +41,11 @@ pub(crate) fn resolve_locator_anchor(
     entry: &RefEntry,
     deadline: Deadline,
 ) -> Result<NativeHandle, AdapterError> {
+    // A menu item ref names a place in the window's native menu, not a path
+    // in its UI Automation tree; landing it there could reach another element.
+    if entry.identity.in_menu.is_some() {
+        return Err(agent_desktop_core::menu_ref_refused(entry));
+    }
     crate::tree::resolve::retry_incomplete_until(deadline, || {
         resolve_locator_anchor_once(entry, deadline)
     })

@@ -117,6 +117,10 @@ pub(crate) fn execute_ref_action_dispatching(
         super::point_resolve::require_pointer_capability(adapter)?;
     }
     let entry = load_ref_entry(&args.ref_id, context)?;
+    // A menu item ref runs through the window's own menu, by click alone.
+    if entry.identity.in_menu.is_some() {
+        return super::menu_click::execute(adapter, &entry, request, context);
+    }
     let action = request.action.clone();
     let (result, lease, pre, deadline, lease_started) =
         crate::ref_action::ref_action_wait::execute_with_auto_wait_and_lease(

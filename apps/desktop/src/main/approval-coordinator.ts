@@ -145,6 +145,11 @@ type Waiter = {
   canceled: boolean;
   /** The app this desktop-control card offered the app-wide Task grant for, if it did. */
   desktopAppGrant: DesktopAppGrantKey | null;
+  /**
+   * For a desktop-control card, whether it offered 「Task中許可」 at all. A run it did not offer it for
+   * (one naming a standard menu item, or a part Main cannot tell) is never allowed for the Task.
+   */
+  desktopTaskGrantOffered: boolean;
 };
 
 type DesktopAppGrant = Readonly<{
@@ -264,7 +269,10 @@ export class ApprovalCoordinator {
         desktopControl &&
         !desktopForeground &&
         evaluation.decision.decision === 'allow' &&
-        evaluation.decision.reason === 'remembered_grant';
+        evaluation.decision.reason === 'remembered_grant' &&
+        // Judged again on this run: one naming a standard menu item, or a part Main cannot tell,
+        // is asked on its card instead.
+        this.desktopTaskGrantAllowed(request);
       // A desktop-control run that only prints the bundled guides, help, the version or its own
       // status touches no other app, window or file, so it runs without a card wherever the policy
       // allows or would ask; a deny was returned above. Judged on the sealed argv, as the run is.
@@ -382,6 +390,9 @@ export class ApprovalCoordinator {
     if (
       !perCall &&
       !desktopForeground &&
+      // A desktop-control run is judged again: one naming a standard menu item, or a part Main
+      // cannot tell, never runs on a Task grant, whatever card left one.
+      (!desktopControl || this.desktopTaskGrantAllowed(request)) &&
       this.options.persistence.hasTaskGrant?.({
         taskId: request.context.taskId,
         requestDigest,
@@ -519,6 +530,7 @@ export class ApprovalCoordinator {
           settlers: [],
           canceled: false,
           desktopAppGrant,
+          desktopTaskGrantOffered: desktopAction?.allowTaskGrant === true,
         };
         this.waiters.set(persistedId, waiter);
         this.attachSettler(persistedId, waiter, settler);
@@ -631,7 +643,12 @@ export class ApprovalCoordinator {
         // A desktop-control run that uses the foreground is allowed one run at a time.
         (waiter !== undefined &&
           isDesktopControlCall(waiter.request) &&
-          isForegroundDesktopControlCall(waiter.request)))
+          isForegroundDesktopControlCall(waiter.request)) ||
+        // So is one whose card did not offer 「Task中許可」 (a standard menu item, a part Main cannot
+        // tell), and one judged so now. Without the waiter no Task grant is saved below.
+        (waiter !== undefined &&
+          isDesktopControlCall(waiter.request) &&
+          (!waiter.desktopTaskGrantOffered || !this.desktopTaskGrantAllowed(waiter.request))))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
@@ -804,6 +821,24 @@ export class ApprovalCoordinator {
     this.desktopAppGrants.set(taskId, grants);
     if (this.desktopAppGrants.size > DESKTOP_APP_GRANT_TASKS)
       this.desktopAppGrants.delete(this.desktopAppGrants.keys().next().value!);
+  }
+
+  /**
+   * Whether this desktop-control run may be allowed for the Task, judged now as its card would be
+   * (`allowTaskGrant`): never one that uses the foreground, names a standard menu item or a part
+   * Main cannot tell (a ref in a form Main does not read, records Main does not read such as
+   * another session's, more steps than it judges), or that it cannot describe.
+   */
+  private desktopTaskGrantAllowed(request: ToolAuthorizationRequest): boolean {
+    if (!validateExecutionSpec(request.input)) return false;
+    const { taskId } = request.context;
+    const readScope = desktopControlSessionReadScope(taskId, request.input.argv);
+    return (
+      desktopControlApprovalAction(
+        request.input.argv,
+        readScope === null ? { taskId, names: false } : { taskId, ...readScope },
+      ).allowTaskGrant === true
+    );
   }
 
   /**

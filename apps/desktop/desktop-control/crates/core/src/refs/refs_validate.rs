@@ -76,6 +76,7 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
     if entry.scope.path.len() > MAX_PATH_DEPTH {
         return Err(AppError::invalid_input("RefEntry path is too deep"));
     }
+    crate::refs::ref_menu::validate_menu_proof(entry)?;
     validate_rest(entry)
 }
 

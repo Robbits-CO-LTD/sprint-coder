@@ -63,6 +63,74 @@ beforeAll(() => {
     '@e8': { ...mail, role: 'button', name: '保存', path: [2, 5], root_ref: '@e9' },
     '@e10': { ...mail, role: 'button', name: '保存', path: [3] },
   });
+  // Items of a standard menu bar, as `snapshot --surface menubar` records them.
+  const menuApp = {
+    role: 'menuitem',
+    source_app: 'menuapp.exe',
+    source_window_id: 'w-6622478',
+    source_window_title: 'menu 試験アプリ',
+    source_surface: 'menubar',
+  };
+  writeRefmap('smenu', {
+    '@e1': {
+      ...menuApp,
+      name: '上書き保存(S)',
+      path: [0, 1],
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '上書き保存(S)', position: 1, submenu: false },
+        ],
+        command_id: 1002,
+        shortcut: 'Ctrl+S',
+      },
+    },
+    '@e2': {
+      ...menuApp,
+      name: '孫 1(1)',
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '入れ子(N)', position: 5, submenu: true },
+          { name: '孫(G)', position: 1, submenu: true },
+          { name: '孫 1(1)', position: 0, submenu: false },
+        ],
+        command_id: 1211,
+      },
+    },
+    // A record the card cannot read is shown without a name.
+    '@e3': { ...menuApp, name: '終了(X)', proven_in_menu: { steps: 'x' } },
+    '@e4': {
+      ...menuApp,
+      proven_in_menu: {
+        steps: [
+          { name: 'ファイル(F)', position: 0, submenu: true },
+          { name: '最近使ったファイル(R)', position: 2, submenu: true },
+          {
+            name: `1 C:\\Users\\someone\\${'長い名前のフォルダー'.repeat(7)}\\report-v3.xlsx`,
+            position: 0,
+            submenu: false,
+          },
+        ],
+        command_id: 6101,
+      },
+    },
+    '@e5': {
+      ...menuApp,
+      proven_in_menu: { steps: [{ name: '表示 (1)', position: 0, submenu: false }], command_id: 1 },
+    },
+    '@e6': {
+      ...menuApp,
+      proven_in_menu: { steps: [{ name: '表示 (2)', position: 1, submenu: false }], command_id: 2 },
+    },
+    '@e7': {
+      ...menuApp,
+      proven_in_menu: {
+        steps: [{ name: 'あ'.repeat(300), position: 0, submenu: false }],
+        command_id: 3,
+      },
+    },
+  });
   writeRefmap('snotepad', {
     '@e1': {
       role: 'document',
@@ -93,6 +161,102 @@ const describeArgv = (argv: readonly string[]) => {
 };
 
 describe('desktop-control approval description', () => {
+  it('names a standard menu item by its place in the menu, and never offers the Task grant', () => {
+    const action = describeArgv(['click', '@smenu:e1']);
+    expect(action).toMatchObject({
+      kind: 'operate',
+      title: 'メニューの項目を実行します',
+      mode: 'background',
+      allowTaskGrant: false,
+      target: {
+        resolved: true,
+        app: 'menuapp.exe',
+        window: 'menu 試験アプリ',
+        role: 'メニューの項目',
+        name: 'ファイル(F) > 上書き保存(S)（Ctrl+S）',
+      },
+    });
+    expect(action.notes[0]).toContain('毎回確かめます');
+    expect(describeArgv(['click', '@smenu:e2']).target).toMatchObject({
+      name: 'ファイル(F) > 入れ子(N) > 孫(G) > 孫 1(1)',
+    });
+    // Unreadable: no name, so the card opens its details.
+    const broken = describeArgv(['click', '@smenu:e3']);
+    expect(broken.target).not.toHaveProperty('name');
+    expect(broken.openDetails).toBe(true);
+    expect(broken.allowTaskGrant).toBe(false);
+    // In a batch too, and beside other steps.
+    const batch = describeArgv([
+      'batch',
+      JSON.stringify([
+        { command: 'snapshot', args: { window_id: 'w-6622478', surface: 'menubar' } },
+        { command: 'click', args: { ref_id: '@smenu:e1' } },
+      ]),
+    ]);
+    expect(batch.allowTaskGrant).toBe(false);
+    expect(batch.steps?.[1]).toMatchObject({
+      title: 'メニューの項目を実行します',
+      target: { name: 'ファイル(F) > 上書き保存(S)（Ctrl+S）' },
+    });
+    // A plain click elsewhere keeps the grant.
+    expect(describeArgv(['click', '@s1abc:e3']).allowTaskGrant).toBe(true);
+  });
+
+  it('never offers the Task grant for a run naming a part Main cannot tell', () => {
+    const twenty = Array.from({ length: 20 }, () => ({
+      command: 'click',
+      args: { ref_id: '@s1abc:e3' },
+    }));
+    for (const argv of [
+      // An upper-case id: Main does not read it, the executable does (a case-blind file system).
+      ['click', '@SMENU:e1'],
+      ['click', '@S1ABC:e3'],
+      // Another session's records, which Main does not read.
+      ['click', '@smenu:e1', '--session', 'other'],
+      ['click', '@s1abc:e3', '--session', 'other'],
+      // A step past the twenty the card shows, the executable runs it all the same.
+      ['batch', JSON.stringify([...twenty, { command: 'click', args: { ref_id: '@smenu:e1' } }])],
+      ['batch', JSON.stringify([...twenty, { command: 'click', args: { ref_id: '@s1abc:e3' } }])],
+      // An entry's own session, and any other field the card does not read.
+      [
+        'batch',
+        JSON.stringify([{ command: 'click', session: 'other', args: { ref_id: '@s1abc:e3' } }]),
+      ],
+      ['batch', JSON.stringify([{ command: 'click', agent: 'x', args: { ref_id: '@s1abc:e3' } }])],
+      // A ref anywhere in a batch entry's arguments.
+      [
+        'batch',
+        JSON.stringify([{ command: 'drag', args: { from: '@s1abc:e3', to: '@smenu:e1' } }]),
+      ],
+      ['click', '@sunknown:e1'],
+    ])
+      expect(describeArgv(argv).allowTaskGrant, argv.join(' ')).toBe(false);
+    // The same runs on parts Main reads keep it.
+    expect(describeArgv(['batch', JSON.stringify(twenty)]).allowTaskGrant).toBe(true);
+    expect(describeArgv(['snapshot', '--window-id', 'w-62263518']).allowTaskGrant).toBe(true);
+  });
+
+  it('never drops a menu item’s own name, and shows the whole name when it cannot fit', () => {
+    const long = describeArgv(['click', '@smenu:e4']);
+    const name = (long.target as { name?: string }).name!;
+    // The menus above it give way first, never the item itself.
+    expect(name.startsWith('ファイル(F) > … > ')).toBe(true);
+    expect(name.endsWith('report-v3.xlsx')).toBe(true);
+    expect(long.openDetails).toBe(true);
+    expect(long.notes.some((note) => note.includes('最近使ったファイル(R)'))).toBe(true);
+    // 「(1)」 and 「(2)」 are kept, so items that differ only there are told apart.
+    expect((describeArgv(['click', '@smenu:e5']).target as { name?: string }).name).toBe(
+      '表示 (1)',
+    );
+    expect((describeArgv(['click', '@smenu:e6']).target as { name?: string }).name).toBe(
+      '表示 (2)',
+    );
+    // An item whose own name is past what the card shows is cut, and says so.
+    const huge = describeArgv(['click', '@smenu:e7']);
+    expect(huge.openDetails).toBe(true);
+    expect((huge.target as { name?: string }).name!.endsWith('…')).toBe(true);
+  });
+
   it('names the app, window and part a ref points at, and the text it enters', () => {
     const action = describeArgv(['set-value', '@s1abc:e1', 'ABC']);
     expect(action).toMatchObject({

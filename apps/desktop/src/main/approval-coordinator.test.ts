@@ -2330,22 +2330,37 @@ describe('ApprovalCoordinator desktop control card', () => {
         }
         expect(harness.persistence.grants).toHaveLength(0);
 
-        // A background run keeps its Task grant, and its card offers one.
+        // A background run keeps its Task grant, and its card offers one. (A run naming a ref Main
+        // cannot read the record of is asked every time: see the menu item tests.)
         harness.published.length = 0;
         const background = await harness.coordinator.authorizeTool(
-          request(await prepare(['click', '@s1:e1']), 'bg-remembered'),
+          request(
+            await prepare([
+              'resize-window',
+              '--window-id',
+              'w-1',
+              '--width',
+              '400',
+              '--height',
+              '300',
+            ]),
+            'bg-remembered',
+          ),
         );
         expect(background).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
         expect(harness.published).toHaveLength(0);
         reason = 'narrow_allow';
         harness.persistence.hasTaskGrant = () => false;
         const asked = harness.coordinator.authorizeTool(
-          request(await prepare(['set-value', '@s1:e1', 'ABC']), 'bg-card'),
+          request(
+            await prepare(['move-window', '--window-id', 'w-1', '--x', '1', '--y', '1']),
+            'bg-card',
+          ),
         );
         const approval = await waitForPublished(harness);
         expect(
           (approval as unknown as { display: { desktopAction?: unknown } }).display.desktopAction,
-        ).toMatchObject({ title: '文字を入力します', mode: 'background', allowTaskGrant: true });
+        ).toMatchObject({ title: '窓を動かします', mode: 'background', allowTaskGrant: true });
         harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
         await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_task' });
       });
@@ -2401,6 +2416,146 @@ describe('ApprovalCoordinator desktop control card', () => {
     const desktopActionOf = (approval: StoredApproval) =>
       (approval as unknown as { display: { desktopAction?: Record<string, unknown> } }).display
         .desktopAction;
+
+    /** charmap's 「ファイル(F) > 終了(X)」, as `snapshot --surface menubar` records it. */
+    const writeMenuItem = async () => {
+      const folder = join(desktopControlModule.desktopControlStateFolder(), 'snapshots', 'smenu');
+      await mkdir(folder, { recursive: true });
+      await writeFile(
+        join(folder, 'refmap.json'),
+        JSON.stringify({
+          inner: {
+            '@e1': {
+              ...part('charmap.exe', 100, 'w-1'),
+              role: 'menuitem',
+              name: '終了(X)',
+              source_surface: 'menubar',
+              proven_in_menu: {
+                steps: [
+                  { name: 'ファイル(F)', position: 0, submenu: true },
+                  { name: '終了(X)', position: 3, submenu: false },
+                ],
+                command_id: 1009,
+              },
+            },
+          },
+        }),
+      );
+    };
+    // The runs Main must never allow for the Task: a standard menu item, and the forms in which it
+    // cannot tell what a ref names (an upper-case id the executable still reads, records of another
+    // session, a step past those it judges, an entry's own session).
+    const twenty = Array.from({ length: 20 }, () => ({
+      command: 'click',
+      args: { ref_id: '@scharmap:e1' },
+    }));
+    const ungrantable: string[][] = [
+      ['click', '@smenu:e1'],
+      // A menu item among a few steps the card shows in full.
+      [
+        'batch',
+        JSON.stringify([
+          { command: 'snapshot', args: { window_id: 'w-1' } },
+          { command: 'click', args: { ref_id: '@scharmap:e1' } },
+          { command: 'click', args: { ref_id: '@smenu:e1' } },
+        ]),
+      ],
+      ['click', '@SMENU:e1'],
+      ['click', '@SCHARMAP:e1'],
+      ['click', '@smenu:e1', '--session', 'other'],
+      ['click', '@scharmap:e1', '--session', 'other'],
+      ['batch', JSON.stringify([...twenty, { command: 'click', args: { ref_id: '@smenu:e1' } }])],
+      [
+        'batch',
+        JSON.stringify([{ command: 'click', session: 'other', args: { ref_id: '@scharmap:e1' } }]),
+      ],
+    ];
+
+    it('never offers or accepts a Task grant for a menu item or a part Main cannot tell', async () => {
+      const harness = createHarness();
+      await withAppGrantState(async (prepare) => {
+        await writeMenuItem();
+        // charmap is allowed for the Task, app-wide.
+        const first = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e1']), 'grant-app'),
+        );
+        const offered = await waitForPublished(harness);
+        harness.coordinator.resolve({
+          ...resolveCommand(offered, 'allow_task'),
+          grantScope: 'app',
+        });
+        await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+        for (const argv of ungrantable) {
+          harness.published.length = 0;
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(argv), `never-${argv.join('-').slice(0, 40)}`),
+          );
+          const approval = await waitForPublished(harness);
+          expect(desktopActionOf(approval), argv.join(' ')).toMatchObject({
+            allowTaskGrant: false,
+          });
+          expect(desktopActionOf(approval), argv.join(' ')).not.toHaveProperty('appGrant');
+          // Main refuses the choice the card did not offer, whatever the renderer sends.
+          expect(() => harness.coordinator.resolve(resolveCommand(approval, 'allow_task'))).toThrow(
+            'APPROVAL_DECISION_NOT_ALLOWED',
+          );
+          harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+          await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_once' });
+        }
+        expect(harness.persistence.grants).toHaveLength(0);
+        // The app-wide grant judges every step the executable runs, so a long batch of the app's
+        // plain parts stays covered, and one with a menu item past the twentieth does not (above).
+        harness.published.length = 0;
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['batch', JSON.stringify([...twenty, ...twenty])]), 'long-plain'),
+          ),
+        ).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(0);
+      });
+    });
+
+    it('asks again for such a run whatever Task grant, remembered grant or app grant exists', async () => {
+      const harness = createHarness({
+        evaluatePermission: () => ({
+          decision: 'allow',
+          reason: 'remembered_grant',
+          beforeExecute: () => true,
+        }),
+      });
+      await withAppGrantState(async (prepare) => {
+        await writeMenuItem();
+        // Every exact command has a Task grant on record, and the policy engine remembers one.
+        harness.persistence.hasTaskGrant = () => true;
+        for (const argv of [
+          ...ungrantable,
+          // More steps than the card shows: no Task grant of the exact command is reused.
+          [
+            'batch',
+            JSON.stringify([...twenty, { command: 'click', args: { ref_id: '@scharmap:e2' } }]),
+          ],
+        ]) {
+          harness.published.length = 0;
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(argv), `again-${argv.join('-').slice(0, 40)}`),
+          );
+          const approval = await waitForPublished(harness);
+          expect(desktopActionOf(approval), argv.join(' ')).toMatchObject({
+            allowTaskGrant: false,
+          });
+          harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+          await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+        }
+        // A plain part of the same app still runs on the grant without a card.
+        harness.published.length = 0;
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['click', '@scharmap:e1']), 'still-granted'),
+          ),
+        ).resolves.toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(0);
+      });
+    });
 
     it('offers the app on the card, and then runs its reads and background operations without one', async () => {
       const harness = createHarness();
@@ -2603,15 +2758,15 @@ describe('ApprovalCoordinator desktop control card', () => {
               },
             }),
           );
-          // Before the Task has its session, the run's parts cannot be read, so none is named and
-          // the app is not offered.
+          // Before the Task has its session, the run's parts cannot be read, so none is named, the
+          // app is not offered, and nor is the Task grant: a part Main cannot tell may be a menu item.
           const before = harness.coordinator.authorizeTool(
             request(await prepare(['click', '@scharmap:e1']), 'session-before'),
           );
           const unnamed = await waitForPublished(harness);
           expect(desktopActionOf(unnamed)).toMatchObject({
             target: { resolved: false },
-            allowTaskGrant: true,
+            allowTaskGrant: false,
           });
           expect(desktopActionOf(unnamed)).not.toHaveProperty('appGrant');
           harness.coordinator.resolve(resolveCommand(unnamed, 'deny'));

@@ -832,6 +832,28 @@ function commandMode(command: string): Exclude<DesktopControlMode, 'inert'> {
   return Object.hasOwn(COMMAND_MODES, command) ? COMMAND_MODES[command]! : 'foreground';
 }
 
+/**
+ * Whether an entry of a batch argument carries a field besides `command` and `args`: the executable
+ * reads `session` there (it runs that entry in another session) and refuses anything else.
+ */
+function batchEntriesHaveScope(positionals: readonly string[]): boolean {
+  if (positionals.length !== 1) return false;
+  try {
+    const entries: unknown = JSON.parse(positionals[0]!);
+    return (
+      Array.isArray(entries) &&
+      entries.some(
+        (entry) =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          Object.keys(entry as object).some((key) => key !== 'command' && key !== 'args'),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** The entries of a batch argument, or `null` when they are not the shape `batch` takes. */
 export function readBatchEntries(
   positionals: readonly string[],
@@ -922,11 +944,17 @@ export function desktopControlScopeOptionRefusal(argv: readonly string[]): strin
   const read = readDesktopControlArgv(argv);
   if (typeof read === 'string') return null;
   const given = ['--session', '--agent-id'].filter((name) => read.options.has(name));
-  return given.length === 0
-    ? null
-    : refusal(
-        `${given.join(' と ')} は付けない（Sprint Coder が、この Task の操作の記録とカーソルを自分で入れる）`,
-      );
+  if (given.length > 0)
+    return refusal(
+      `${given.join(' と ')} は付けない（Sprint Coder が、この Task の操作の記録とカーソルを自分で入れる）`,
+    );
+  // A batch entry's own `session` reads and writes another session's records, the same as
+  // `--session` for the whole run.
+  if (read.command === 'batch' && batchEntriesHaveScope(read.positionals))
+    return refusal(
+      'batch の項目に session を付けない（Sprint Coder が、この Task の操作の記録とカーソルを自分で入れる）',
+    );
+  return null;
 }
 
 // The commands that start, end or reclaim sessions or switch the cursors, which Main keeps for the

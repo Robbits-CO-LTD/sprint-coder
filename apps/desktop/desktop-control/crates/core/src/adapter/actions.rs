@@ -1,9 +1,26 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AdapterError, InteractionLease, actions::action_request::ActionRequest,
     actions::action_result::ActionResult, adapter::native_handle::NativeHandle,
 };
 
 pub trait ActionOps: Send + Sync {
+    /// Runs the standard menu item a menu item ref names (`refs::ref_menu`)
+    /// in `window`, which core has already matched to the ref's window and
+    /// process instance. The adapter must send nothing that runs the item
+    /// unless the live menu still shows it as recorded, and must report a
+    /// delivery it cannot observe as unverified. An adapter without native
+    /// menus answers with this default.
+    fn run_menu_command(
+        &self,
+        _entry: &crate::RefEntry,
+        _window: &crate::WindowInfo,
+        _deadline: crate::Deadline,
+        _lease: &InteractionLease,
+    ) -> Result<ActionResult, AdapterError> {
+        Err(AdapterError::not_supported("run_menu_command"))
+    }
+
     fn execute_action(
         &self,
         _handle: &NativeHandle,
