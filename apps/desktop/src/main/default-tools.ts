@@ -14,6 +14,7 @@ import {
   desktopControlArgvMode,
   desktopControlArgvRefusal,
   desktopControlLaunchByName,
+  desktopControlMainOnlyOptionRefusal,
   desktopControlSessionArgvRefusal,
   isDesktopControlExecutable,
   readBatchEntries,
@@ -619,7 +620,8 @@ export function registerCommandRunnerTool(
           );
       }
       let desktopControlRefusal = desktopControl
-        ? desktopControlArgvRefusal(spec.argv, roots)
+        ? (desktopControlArgvRefusal(spec.argv, roots) ??
+          desktopControlMainOnlyOptionRefusal(spec.argv))
         : null;
       if (desktopControlRefusal !== null)
         throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
@@ -636,7 +638,9 @@ export function registerCommandRunnerTool(
             'EXECUTION_SPEC_INVALID',
             'デスクトップ操作の実行ファイルが準備の途中で変わった。',
           );
-        desktopControlRefusal = desktopControlArgvRefusal(spec.argv, roots);
+        desktopControlRefusal =
+          desktopControlArgvRefusal(spec.argv, roots) ??
+          desktopControlMainOnlyOptionRefusal(spec.argv);
         if (desktopControlRefusal !== null)
           throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
       }

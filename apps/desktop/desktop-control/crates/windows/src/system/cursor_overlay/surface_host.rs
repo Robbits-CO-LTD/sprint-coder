@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! The renderer's state: where the cursor is, what style it wears, and what
 //! it does when a control arrives.
 //!
@@ -314,7 +315,7 @@ impl SurfaceHost {
         if self.rest.resting {
             return;
         }
-        if self.rest.quiet_since.elapsed() < Duration::from_millis(CURSOR_IDLE_REST_MS) {
+        if self.rest.quiet_since.elapsed() < schedule::rest_after(&self.presentation.style) {
             return;
         }
         self.fade_away();

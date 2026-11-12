@@ -548,7 +548,7 @@ const COMMAND_OPTIONS: Readonly<Record<string, string>> = {
   'session gc': '--older-than= --ended',
   'session help': '',
   'cursor-overlay enable':
-    '--multi-agent --label= --max-words= --fill= --rim= --accent= --size= --no-ripple --no-highlight --hotspot= --pointer-hotspot= --travel-ms= --bow= --overshoot= --tremor= --dwell-ms= --motion-seed=',
+    '--multi-agent --label= --max-words= --fill= --rim= --accent= --size= --no-ripple --no-highlight --hotspot= --pointer-hotspot= --travel-ms= --bow= --overshoot= --tremor= --dwell-ms= --motion-seed= --linger-ms=',
   'cursor-overlay disable': '',
   'cursor-overlay help': '',
 };
@@ -1015,6 +1015,21 @@ export function desktopControlScopeOptionRefusal(argv: readonly string[]): strin
       'batch の項目に session を付けない（Sprint Coder が、この Task の操作の記録とカーソルを自分で入れる）',
     );
   return null;
+}
+
+// The options only Main's own runs give (how long the Task's cursors stay drawn).
+const MAIN_ONLY_OPTIONS = ['--linger-ms'];
+
+/**
+ * Why an argv the agent chose may not run because it gives an option only Main's own runs give,
+ * or `null`. Main's own runs are judged by `desktopControlArgvRefusal` alone, so this is what keeps
+ * the option Main's: without the Team cursors' opt-in, no run carries it, as before it existed.
+ */
+export function desktopControlMainOnlyOptionRefusal(argv: readonly string[]): string | null {
+  const read = readDesktopControlArgv(argv);
+  if (typeof read === 'string') return null;
+  const given = MAIN_ONLY_OPTIONS.filter((name) => read.options.has(name));
+  return given.length > 0 ? refusal(`${given.join(' と ')} は付けない`) : null;
 }
 
 // The commands that start, end or reclaim sessions or switch the cursors, which Main keeps for the
