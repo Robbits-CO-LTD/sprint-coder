@@ -627,6 +627,11 @@ describe('desktop control Workspace roots', () => {
       expect(calls()).toEqual([
         { argv: ['--session', 'mine', 'list-windows'], session: undefined, roots: [workspace] },
       ]);
+      // How long the cursors stay drawn is Main's alone, with the opt-in off as well.
+      await expect(
+        dispatch('off-linger', ['cursor-overlay', 'enable', '--linger-ms', '30000']),
+      ).rejects.toThrow('--linger-ms は付けない');
+      expect(calls()).toHaveLength(1);
       run.mockClear();
 
       configureDesktopControlTeamCursors(true);
@@ -655,7 +660,16 @@ describe('desktop control Workspace roots', () => {
           roots: [workspace],
         },
         {
-          argv: ['cursor-overlay', 'enable', '--label', 'Leader', '--accent', '#2563EB'],
+          argv: [
+            'cursor-overlay',
+            'enable',
+            '--label',
+            'Leader',
+            '--accent',
+            '#2563EB',
+            '--linger-ms',
+            '30000',
+          ],
           session: leader,
           roots: [workspace],
         },
@@ -675,6 +689,7 @@ describe('desktop control Workspace roots', () => {
         ['--agent-id', 'w1', 'click', '@s1:e1'],
         ['session', 'end'],
         ['cursor-overlay', 'disable'],
+        ['cursor-overlay', 'enable', '--linger-ms', '30000'],
       ])
         await expect(dispatch(`refused-${argv.join('-')}`, argv)).rejects.toThrow(
           'デスクトップ操作の実行を拒否した',
@@ -799,8 +814,8 @@ describe('desktop control Workspace roots', () => {
       ).toEqual([
         ['session gc --ended', undefined],
         ['session start --name sprint-coder --cursor --multi-agent --no-trace', undefined],
-        ['cursor-overlay enable --label Leader --accent #2563EB', 'leader'],
-        ['cursor-overlay enable --label Checker --accent #16A34A', 'agent-1'],
+        ['cursor-overlay enable --label Leader --accent #2563EB --linger-ms 30000', 'leader'],
+        ['cursor-overlay enable --label Checker --accent #16A34A --linger-ms 30000', 'agent-1'],
         ['click @s1:e1', 'agent-1'],
         ['snapshot -i', 'agent-1'],
         ['click @s1:e2', 'agent-1'],

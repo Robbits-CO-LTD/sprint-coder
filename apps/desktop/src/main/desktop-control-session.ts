@@ -32,6 +32,15 @@ const LEADER_LABEL = 'Leader';
 const LEADER_ACCENT = '#2563EB';
 const SESSION_NAME = 'sprint-coder';
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/u;
+/**
+ * How long each cursor of the Task stays drawn after its agent's last action before it fades
+ * (`--linger-ms`; the executable's own is about 6 seconds). An agent's actions are often several
+ * seconds apart, so with the executable's own, the Team's cursors were rarely on screen together.
+ * Finite, because a cursor is drawn above every window, the user's own included, whether or not
+ * the window it acted on is still in view; a finished Worker's cursor goes away by the same time.
+ */
+export const DESKTOP_CONTROL_CURSOR_LINGER_MS = 30_000;
+const LINGER = ['--linger-ms', String(DESKTOP_CONTROL_CURSOR_LINGER_MS)] as const;
 /** How long quitting waits for the sessions to end; the renderer ends with Main regardless. */
 const END_ALL_TIMEOUT_MS = 3_000;
 
@@ -137,6 +146,7 @@ export async function ensureDesktopControlSession(
         worker.label,
         '--accent',
         DESKTOP_CONTROL_WORKER_ACCENTS[worker.colorIndex % DESKTOP_CONTROL_WORKER_ACCENTS.length]!,
+        ...LINGER,
       ],
       scoped,
     ).then(() => undefined);
@@ -183,7 +193,7 @@ function taskSession(taskId: string, run: DesktopControlOwnRun): TaskSession {
     const leader = { id, agentId: DESKTOP_CONTROL_LEADER_AGENT_ID };
     try {
       await run(
-        ['cursor-overlay', 'enable', '--label', LEADER_LABEL, '--accent', LEADER_ACCENT],
+        ['cursor-overlay', 'enable', '--label', LEADER_LABEL, '--accent', LEADER_ACCENT, ...LINGER],
         leader,
       );
     } catch (error) {

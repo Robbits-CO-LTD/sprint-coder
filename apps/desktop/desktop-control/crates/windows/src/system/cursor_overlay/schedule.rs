@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 //! When to sample the cursor's pose, and when it has arrived.
 //!
 //! Pure. Core owns the trajectory — `CursorMotion` is a function of elapsed
@@ -88,6 +89,12 @@ pub(crate) fn reveal_progress(elapsed_ms: u64, duration_ms: u64) -> f64 {
 /// Linear, matching the reference, which steps its window alpha down in even
 /// hops rather than easing. Easing the disappearance would draw attention to
 /// it, which is the opposite of what resting is for.
+/// How long the overlay stays drawn with no control before it rests: the
+/// linger its style carries, or the platform's own idle rest without one.
+pub(crate) fn rest_after(style: &agent_desktop_core::CursorOverlayStyle) -> Duration {
+    Duration::from_millis(style.rest_after_ms())
+}
+
 pub(crate) fn rest_fade(step: u32, steps: u32) -> f64 {
     if steps == 0 {
         return 0.0;

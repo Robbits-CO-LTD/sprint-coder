@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_AGENT_ID_VARIABLE,
   DESKTOP_CONTROL_SESSION_VARIABLE,
+  desktopControlArgvRefusal,
   desktopControlEnvironment,
+  desktopControlMainOnlyOptionRefusal,
   desktopControlScopeOptionRefusal,
   desktopControlSessionArgvRefusal,
   desktopControlStateFolder,
@@ -126,6 +128,26 @@ describe('the arguments of a run Main places in its session', () => {
     ])
       expect(desktopControlSessionArgvRefusal(argv)).toBeNull();
   });
+
+  it('keeps how long the cursors stay drawn Main’s alone, with or without the opt-in', () => {
+    const lookup = { platform: 'win32' as const, realpath: (path: string) => path };
+    for (const argv of [
+      ['cursor-overlay', 'enable', '--label', 'X', '--linger-ms', '30000'],
+      ['cursor-overlay', 'enable', '--linger-ms=120000'],
+    ]) {
+      expect(desktopControlMainOnlyOptionRefusal(argv)).toBe(
+        'デスクトップ操作の実行を拒否した: --linger-ms は付けない。',
+      );
+      // Main's own run of the same argv is judged on the table alone, which accepts it.
+      expect(desktopControlArgvRefusal(argv, [], lookup)).toBeNull();
+    }
+    for (const argv of [
+      ['cursor-overlay', 'enable', '--label', 'X', '--dwell-ms', '50'],
+      ['click', '@s1:e1'],
+      ['type', '@s1:e1', '--', '--linger-ms'],
+    ])
+      expect(desktopControlMainOnlyOptionRefusal(argv)).toBeNull();
+  });
 });
 
 describe('the Task’s desktop-control session', () => {
@@ -162,7 +184,16 @@ describe('the Task’s desktop-control session', () => {
         ],
       },
       {
-        argv: ['cursor-overlay', 'enable', '--label', 'Leader', '--accent', '#2563EB'],
+        argv: [
+          'cursor-overlay',
+          'enable',
+          '--label',
+          'Leader',
+          '--accent',
+          '#2563EB',
+          '--linger-ms',
+          '30000',
+        ],
         session: { id, agentId: 'leader' },
       },
     ]);
@@ -289,8 +320,8 @@ describe('the Team Workers marked for desktop control', () => {
     expect(calls.map(({ argv }) => argv.join(' '))).toEqual([
       'session gc --ended',
       'session start --name sprint-coder --cursor --multi-agent --no-trace',
-      'cursor-overlay enable --label Leader --accent #2563EB',
-      'cursor-overlay enable --label Checker --accent #EA580C',
+      'cursor-overlay enable --label Leader --accent #2563EB --linger-ms 30000',
+      'cursor-overlay enable --label Checker --accent #EA580C --linger-ms 30000',
     ]);
     expect(calls[3]!.session).toEqual({ id, agentId: 'agent-b' });
     // A styling that failed is tried again on the next run, and that run does not start.

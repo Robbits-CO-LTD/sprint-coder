@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{AppError, CursorOverlayStyle};
 use clap::Args;
 
@@ -26,6 +27,12 @@ pub(crate) struct CursorOverlayStyleArgs {
     pub no_ripple: bool,
     #[arg(long, help = "Do not outline the element when the agent clicks")]
     pub no_highlight: bool,
+    #[arg(
+        long,
+        value_name = "MS",
+        help = "Keep the cursor drawn this long after its last action before it fades, 1000 to 120000 ms (default: the platform's own; 6000 on Windows)"
+    )]
+    pub linger_ms: Option<u64>,
     #[command(flatten)]
     pub images: super::cursor_overlay_images::CursorOverlayImagesArgs,
 }
@@ -46,6 +53,7 @@ impl CursorOverlayStyleArgs {
             style.set_size(size);
         }
         style.set_effects(!self.no_ripple, !self.no_highlight);
+        style.set_linger_ms(self.linger_ms);
         self.images.apply_to(&mut style)?;
         Ok(style)
     }

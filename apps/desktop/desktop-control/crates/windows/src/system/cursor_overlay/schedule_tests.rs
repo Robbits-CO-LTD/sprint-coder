@@ -1,7 +1,22 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
-    clamp_refresh, frame_interval, has_arrived, highlight_progress, rest_fade, reveal_progress,
+    clamp_refresh, frame_interval, has_arrived, highlight_progress, rest_after, rest_fade,
+    reveal_progress,
 };
+use agent_desktop_core::{CURSOR_IDLE_REST_MS, CursorOverlayStyle};
 use std::time::Duration;
+
+#[test]
+fn the_overlay_rests_after_the_platform_idle_unless_its_style_lingers() {
+    let plain = CursorOverlayStyle::default();
+    assert_eq!(
+        rest_after(&plain),
+        Duration::from_millis(CURSOR_IDLE_REST_MS)
+    );
+    let mut lingering = CursorOverlayStyle::default();
+    lingering.set_linger_ms(Some(30_000));
+    assert_eq!(rest_after(&lingering), Duration::from_secs(30));
+}
 
 /// A29-7 measured the obvious refresh call failing on this host and leaving
 /// its frequency at zero. A renderer that divided by that reading would take

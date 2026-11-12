@@ -33,6 +33,26 @@ impl Drop for TempDir {
     }
 }
 
+// Added by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+#[test]
+fn the_linger_flag_is_stored_validated_and_absent_by_default() {
+    let config = parse(&["--linger-ms", "30000"])
+        .unwrap()
+        .enable
+        .to_core()
+        .unwrap();
+    assert_eq!(config.style().linger_ms(), Some(30_000));
+    let plain = parse(&[]).unwrap().enable.to_core().unwrap();
+    assert_eq!(plain.style().linger_ms(), None);
+    assert!(
+        parse(&["--linger-ms", "500"])
+            .unwrap()
+            .enable
+            .to_core()
+            .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn image_and_motion_flags_are_validated_and_stored_together() {
