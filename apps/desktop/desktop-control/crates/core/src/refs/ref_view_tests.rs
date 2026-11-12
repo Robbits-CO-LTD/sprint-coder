@@ -404,7 +404,11 @@ impl ObservationOps for ViewAdapter {
 
 impl ActionOps for ViewAdapter {}
 impl InputOps for ViewAdapter {}
-impl SystemOps for ViewAdapter {}
+impl SystemOps for ViewAdapter {
+    fn supported_surfaces(&self) -> Vec<crate::SnapshotSurface> {
+        vec![crate::SnapshotSurface::Window]
+    }
+}
 
 fn captured(adapter: &ViewAdapter, row: &str) -> RefEntry {
     let tree = adapter.tree.lock().unwrap().clone();
@@ -567,4 +571,51 @@ fn live_bounds_must_equal_the_recorded_ones() {
     let mut plain = entry;
     plain.identity.in_view = None;
     assert!(super::confirm_live_bounds(&plain, None).is_ok());
+}
+
+/// A find rooted at a view-proven entry would count the visible elements only
+/// and report that as the whole subtree, so it is refused with its own error.
+#[test]
+fn a_find_rooted_at_a_view_proven_entry_is_refused() {
+    use crate::commands::find::{FindArgs, FindFilterArgs, FindSelectionArgs, execute};
+    let _guard = crate::refs::refs_test_support::HomeGuard::new();
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1"]));
+    let entry = captured(&adapter, "Mail 1");
+    let mut stored = RefMap::new();
+    stored.allocate(entry);
+    let snapshot = crate::refs::refs_store::RefStore::new()
+        .unwrap()
+        .save_new_snapshot(&stored)
+        .unwrap();
+    let args = FindArgs {
+        app: None,
+        window_id: None,
+        root: Some(format!("@{snapshot}:e1")),
+        surface: crate::SnapshotSurface::Window,
+        filter: FindFilterArgs {
+            role: Some("button".into()),
+            name: None,
+            description: None,
+            native_id: None,
+            value: None,
+            text: None,
+            exact: false,
+        },
+        states: Vec::new(),
+        timeout_ms: None,
+        selection: FindSelectionArgs {
+            count: true,
+            first: false,
+            last: false,
+            nth: None,
+            limit: None,
+        },
+    };
+    let error = execute(args, &adapter, &crate::CommandContext::default())
+        .expect_err("a rooted find over a view is refused");
+    assert!(
+        format!("{error:?}").contains("rooted_find_in_view_unsupported"),
+        "{error:?}"
+    );
+    assert_eq!(adapter.whole_reads.load(Ordering::SeqCst), 0);
 }

@@ -114,6 +114,23 @@ pub(crate) fn view_unavailable(entry: &RefEntry) -> AdapterError {
     crate::refs::resolve_errors::identity_not_unique(entry)
 }
 
+/// A find rooted at a view-proven entry would search the visible elements only
+/// and report its counts as if they covered the whole subtree, so it is refused.
+pub(crate) fn rooted_find_unsupported(entry: &RefEntry) -> AdapterError {
+    AdapterError::new(
+        crate::ErrorCode::ActionNotSupported,
+        "find --root does not accept a ref from a snapshot with scope \"visible\": only the          elements on screen can be read under it, so matches scrolled out of view would be missed",
+    )
+    .with_suggestion(
+        "Run 'snapshot --root' with this ref to read what is on screen under it, or scroll and          run 'snapshot' again.",
+    )
+    .with_details(json!({
+        "kind": "rooted_find_in_view_unsupported",
+        "retryable": false,
+        "role": entry.identity.role,
+    }))
+}
+
 #[cfg(test)]
 #[path = "ref_view_tests.rs"]
 mod tests;

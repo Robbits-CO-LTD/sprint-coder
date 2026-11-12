@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{DEFAULT_LIMIT, FindArgs};
 use crate::{
     AdapterError, AppError, LocatorQuery,
@@ -112,6 +113,12 @@ fn rooted_resolution(
             RootRead::Subtree(tree) => Ok(ObservedObservation::whole(tree)),
             RootRead::Window(window_read) => {
                 let (_, tree, index) = *window_read;
+                // A root proven among the visible elements is read in that view
+                // only, so a count or a last match under it would silently leave
+                // out what is scrolled out of view. Refused, not answered.
+                if tree.is_visible_scope() {
+                    return Err(crate::refs::ref_view::rooted_find_unsupported(&entry).into());
+                }
                 ObservedObservation::under(tree, index)
             }
         }

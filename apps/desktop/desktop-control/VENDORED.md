@@ -116,6 +116,7 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/core/src/refs/refs_validate.rs`（2 回目） | 見えている範囲の証明の形の検査（経路の深さ 256 まで、位置と大きさが正しく面積がある、`RuntimeId` が 1〜32 個、先祖は今までと同じ上限）を足した |
 | `crates/core/src/refs/ref_capture_proof.rs`（2 回目） | 観察が見えている範囲だけの時は、同じ 2 つの規則（部品自身の条件、近い先祖）をその範囲の中で数え、`in_view` として記録する（`establish_in_view`）。`unique_at_capture` は立てず、`proves_node` は常に偽（skeleton の anchor も証明しない）。element token のある部品には付けない |
 | `crates/core/src/refs/resolve_saved_ref.rs`（2 回目） | 見えている範囲で証明した記録は、`visible_only` の読み取りで照合し、窓全体の照合に流さない（返った観察が見えている範囲でなければ拒否）。当たった部品を `ref_view::confirm_matched` で確かめる。着地した部品の位置と大きさも確かめる。`land_saved_ref` の近道は使わない。element token と並んだ記録は拒否。先祖は `recorded_ancestors` から読む。`observe_visible_window` を足した |
+| `crates/core/src/commands/find_live.rs` | 1 行目に変更の注記を足した。見えている範囲で証明した ref を根にした `find --root` は拒否する（`ACTION_NOT_SUPPORTED`、`details.kind` は `rooted_find_in_view_unsupported`）。見えている部品だけを数えた件数や最後の一致を、部分木の全体の答えとして返さないため |
 | `crates/core/src/refs/ref_root_read.rs` | 1 行目に変更の注記を足した。element token と見えている範囲の証明が並んだ記録の根は拒否する |
 | `crates/core/src/refs/mod.rs`・`crates/core/src/lib.rs`（2 回目） | `ref_view` と `RefViewProof` の公開を足した |
 | `crates/core/src/snapshot/window_capture.rs` | 1 行目に変更の注記を足した。窓全体の読み取りが時間切れ・打ち切りで終わり、かつ snapshot の期限が既定（3 秒）以上の時だけ、見えている部品だけの読み取り（`observe_visible_window`）に切り替える（`view_fallback_allowed`。`--timeout-ms` を短くしても切り替わらない）。見えている範囲の読み取りには残りの期限の 3 分の 2 だけを使う。対応しない窓（`ACTION_NOT_SUPPORTED`）は今までどおり浅い読み取りへ。対応する窓で読み切れなかった時は、時間切れの呼び出しが相手を忙しくしたままにし得るので、それ以上の読み取りを始めず、打ち切られた窓全体の読み取りを未証明のまま返す（5 万行の page で、今までと同じ部品 30・ref 11 の未証明の結果） |
