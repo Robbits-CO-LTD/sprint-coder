@@ -1623,13 +1623,7 @@ export class IpcRouter {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
         workerFor: (turnId, callId) => this.managedWorkerOf(turnId, callId),
-        workerSideEffect: (turnId, callId) => {
-          const runtimeTurnId = this.managedWorkerCall.get(
-            JSON.stringify([turnId, callId]),
-          )?.runtimeTurnId;
-          if (runtimeTurnId !== undefined)
-            this.cliTeamWorkerRuntime.recordManagedSideEffect(runtimeTurnId);
-        },
+        workerSideEffect: (turnId, callId) => this.recordManagedWorkerSideEffect(turnId, callId),
       },
       team: {
         coordinator: this.teamCoordinator,
@@ -4535,6 +4529,19 @@ export class IpcRouter {
       workerId: call.workerId ?? '',
       roots: call.workspace.roots.map(({ path }) => path),
     };
+  }
+
+  /**
+   * A Team Worker's managed call (its parent Turn and call id, as the broker sees them) started
+   * something that may have taken effect: tell the Worker's own runtime Turn, so its request is
+   * never run again from the start (`recordManagedSideEffect`). Any other call is left alone.
+   */
+  private recordManagedWorkerSideEffect(turnId: string, callId: string): void {
+    const runtimeTurnId = this.managedWorkerCall.get(
+      JSON.stringify([turnId, callId]),
+    )?.runtimeTurnId;
+    if (runtimeTurnId !== undefined)
+      this.cliTeamWorkerRuntime.recordManagedSideEffect(runtimeTurnId);
   }
 
   private readManagedTeamResult<T>(

@@ -586,6 +586,58 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude']);
   });
 
+  // Issue #1211: a connection failure (`RUNTIME_UNAVAILABLE`, e.g. Codex's "temporary failure at
+  // the endpoint") after a desktop operation of the Worker's must not run its request again on the
+  // next runtime, for each CLI a marked Worker can run on. Without the operation it does, so the
+  // test tells the two apart.
+  it.each([
+    ['codex', 'grok'],
+    ['grok', 'codex'],
+    ['claude', 'codex'],
+  ] as const)(
+    'does not run a %s Worker’s request again on %s after RUNTIME_UNAVAILABLE that followed a desktop operation',
+    async (first, second) => {
+      const select = () => [
+        { kind: first, model: `${first}-model` },
+        { kind: second, model: `${second}-model` },
+      ];
+      const failure = {
+        code: 'RUNTIME_UNAVAILABLE' as const,
+        userMessage: '接続先で一時的な障害が発生しました。',
+        retryable: true,
+        defer: true,
+        // What the runtime itself reports for a managed tool call: no side effect of its own.
+        emitReadOperation: true,
+      };
+
+      runtimeHostMock.starts.length = 0;
+      runtimeHostMock.failures.set(first, failure);
+      const operated = runtime({ selectRuntimes: select });
+      runtimeHostMock.beforeFailure = (turnId) => operated.recordManagedSideEffect(turnId);
+      await expect(
+        operated.execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '窓のボタンを押す',
+        }),
+      ).rejects.toThrow('接続先で一時的な障害が発生しました。');
+      expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual([first]);
+
+      runtimeHostMock.starts.length = 0;
+      runtimeHostMock.beforeFailure = null;
+      runtimeHostMock.failures.set(first, failure);
+      const readOnly = runtime({ selectRuntimes: select });
+      await expect(
+        readOnly.execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '窓を読む',
+        }),
+      ).resolves.toMatchObject({ resolution: { resolvedModel: `${second}-model` } });
+      expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual([first, second]);
+    },
+  );
+
   it('fails immediately without waiting for exit when the runtime was not started', async () => {
     runtimeHostMock.startSucceeds = false;
     runtimeHostMock.waitForExit.mockClear();
