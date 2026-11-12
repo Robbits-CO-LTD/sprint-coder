@@ -429,3 +429,103 @@ fn the_check_before_dispatch_refuses_a_landed_twin_and_skips_entries_without_anc
     );
     assert_eq!(adapter.ancestor_reads.load(Ordering::SeqCst), reads);
 }
+
+/// The counterexample from review: E "OK" sits under two unnamed groups and
+/// the pane "Settings"; F "OK" under one unnamed group and the pane "Main".
+fn wrapped_ok_buttons(with_settings: bool, wrappers_over_main: usize) -> AccessibilityNode {
+    let mut main = parent("group", "", vec![node("button", "OK")]);
+    for _ in 1..wrappers_over_main {
+        main = parent("group", "", vec![main]);
+    }
+    let mut panes = Vec::new();
+    if with_settings {
+        panes.push(parent(
+            "pane",
+            "Settings",
+            vec![parent(
+                "group",
+                "",
+                vec![parent("group", "", vec![node("button", "OK")])],
+            )],
+        ));
+    }
+    panes.push(parent("pane", "Main", vec![main]));
+    tree_with(panes)
+}
+
+#[test]
+fn unnamed_wrappers_alone_never_tell_twins_apart() {
+    let entry = capture_all(wrapped_ok_buttons(true, 1))
+        .into_iter()
+        .find(|entry| entry.identity.name.as_deref() == Some("OK"))
+        .expect("E has a ref");
+
+    // The two wrappers differ from F's ancestors only in number and role, so
+    // the record runs on to the pane that carries a name.
+    assert_eq!(proof_of(&entry), Proof::WithAncestors);
+    let roles: Vec<(&str, Option<&str>)> = entry
+        .identity
+        .ancestors
+        .iter()
+        .map(|ancestor| (ancestor.role.as_str(), ancestor.name.as_deref()))
+        .collect();
+    assert_eq!(
+        roles,
+        [("group", None), ("group", None), ("pane", Some("Settings"))]
+    );
+}
+
+#[test]
+fn a_twin_that_gains_a_wrapper_after_the_recorded_one_closes_is_not_taken() {
+    let _guard = HomeGuard::new();
+    let entry = capture_all(wrapped_ok_buttons(true, 1))
+        .into_iter()
+        .find(|entry| entry.identity.name.as_deref() == Some("OK"))
+        .expect("E has a ref");
+    // Settings closed, and a redraw put one more unnamed group over F.
+    let adapter = RuleAdapter::new(wrapped_ok_buttons(false, 2));
+
+    let Err(error) = resolve(&adapter, &entry) else {
+        panic!("F is not E, whatever wrappers it gains");
+    };
+
+    assert_eq!(error.code, ErrorCode::StaleRef);
+    assert_eq!(adapter.anchors.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn twins_that_differ_only_in_unnamed_wrappers_stay_unproven() {
+    let tree = tree_with(vec![
+        parent(
+            "group",
+            "",
+            vec![parent("group", "", vec![node("button", "OK")])],
+        ),
+        parent("pane", "", vec![node("button", "OK")]),
+    ]);
+    for entry in capture_all(tree)
+        .into_iter()
+        .filter(|entry| entry.identity.name.as_deref() == Some("OK"))
+    {
+        assert_eq!(proof_of(&entry), Proof::None);
+        assert!(entry.identity.ancestors.is_empty());
+    }
+}
+
+#[test]
+fn a_record_with_more_ancestors_than_a_walk_can_reach_is_refused() {
+    let mut entry = dialog_close(dialog_and_title_bar("Settings"));
+    let ancestor = entry.identity.ancestors[0].clone();
+    entry.identity.ancestors = vec![ancestor.clone(); crate::refs::MAX_RECORDED_ANCESTORS];
+    let mut refmap = crate::RefMap::new();
+    assert!(refmap.try_allocate(entry.clone()).is_ok());
+
+    entry.identity.ancestors.push(ancestor.clone());
+    assert!(refmap.try_allocate(entry.clone()).is_err());
+
+    entry.identity.ancestors = vec![crate::RefAncestorIdentity {
+        name: Some("x".repeat(65_537)),
+        ..ancestor
+    }];
+    assert!(refmap.try_allocate(entry).is_err());
+}

@@ -386,6 +386,7 @@ pub mod refs_store;
 #[cfg(test)]
 pub(crate) mod refs_test_support;
 pub(crate) mod refs_validate;
+pub use refs_validate::MAX_RECORDED_ANCESTORS;
 pub(crate) mod resolve_attempt_outcome;
 pub mod resolve_errors;
 pub mod resolve_saved_ref;

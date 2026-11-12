@@ -1,4 +1,9 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{AppError, RefEntry};
+
+/// The most ancestors an entry may record: a whole-window walk descends at most
+/// 50 levels, so a longer list was never written by a capture.
+pub const MAX_RECORDED_ANCESTORS: usize = 64;
 
 pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
     const MAX_FIELD_BYTES: usize = 65_536;
@@ -42,6 +47,25 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
     {
         return Err(AppError::invalid_input(
             "RefEntry contains invalid typed identifier evidence",
+        ));
+    }
+    if entry.identity.ancestors.len() > MAX_RECORDED_ANCESTORS
+        || entry.identity.ancestors.iter().any(|ancestor| {
+            ancestor.role.trim().is_empty()
+                || ancestor.role.len() > 256
+                || [ancestor.name.as_deref(), ancestor.description.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|field| field.len() > MAX_FIELD_BYTES)
+                || ancestor.native_id.as_ref().is_some_and(|identifier| {
+                    identifier.value.trim().is_empty()
+                        || identifier.value.len() > MAX_FIELD_BYTES
+                        || identifier.kind == crate::IdentifierKind::Unknown
+                })
+        })
+    {
+        return Err(AppError::invalid_input(
+            "RefEntry ancestor evidence exceeds its limit",
         ));
     }
     if entry.scope.path.len() > MAX_PATH_DEPTH {

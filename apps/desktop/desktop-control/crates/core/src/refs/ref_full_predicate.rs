@@ -36,6 +36,18 @@ impl<'a> FullPredicate<'a> {
         )
     }
 
+    /// [`Self::of_ancestor`] with the role taken from elsewhere, so a comparison
+    /// decides on the recorded name, description and identifier alone.
+    pub(crate) fn of_ancestor_as(ancestor: &'a crate::RefAncestorIdentity, role: &'a str) -> Self {
+        Self::of_fields(
+            role,
+            ancestor.name.as_deref(),
+            None,
+            ancestor.description.as_deref(),
+            ancestor.native_id.as_ref(),
+        )
+    }
+
     pub(crate) fn of_entry(entry: &'a RefEntry) -> Self {
         Self::of_fields(
             &entry.identity.role,

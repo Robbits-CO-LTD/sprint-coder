@@ -76,6 +76,9 @@ pub(crate) fn confirm_handle_ancestors(
     if recorded.is_empty() {
         return Ok(());
     }
+    if recorded.len() > crate::refs::refs_validate::MAX_RECORDED_ANCESTORS {
+        return Err(crate::refs::resolve_errors::identity_not_unique(entry));
+    }
     let live = match adapter.read_ancestor_evidence(entry, handle, recorded.len(), deadline) {
         Ok(live) => live,
         Err(error) if error.is_default_not_supported("read_ancestor_evidence") => {
@@ -186,12 +189,50 @@ fn ancestor_identity(evidence: &LocatorEvidence) -> Option<RefAncestorIdentity> 
     })
 }
 
+/// Whether a recorded ancestor carries a stable feature - a name, a
+/// description or a native identifier - that can tell elements apart. An
+/// unnamed wrapper does not: wrappers come and go with a redraw, so a
+/// difference in their number or role is never what proves a ref.
+fn is_stable(ancestor: &RefAncestorIdentity) -> bool {
+    ancestor.name.is_some() || ancestor.description.is_some() || ancestor.native_id.is_some()
+}
+
+/// Whether the live element could be the recorded stable ancestor: its
+/// recorded name, description and identifier compared under the identity
+/// rule, with the role taken from the live element, so only a difference in
+/// those features rules it out.
+fn could_be(ancestor: &RefAncestorIdentity, live: &LocatorEvidence) -> bool {
+    let role = crate::refs::ref_identity::meaningful_field(&live.role)
+        .known()
+        .copied()
+        .unwrap_or(ancestor.role.as_str());
+    FullPredicate::of_ancestor_as(ancestor, role).compare(&LivePredicate::observed(live))
+        != IdentityMatch::NoMatch
+}
+
+/// Whether some ancestor of `node` could be the recorded stable ancestor, at
+/// whatever depth: an element is told apart by a stable ancestor only when
+/// none of its own ancestors could be that one.
+fn has_possible(ancestor: &RefAncestorIdentity, observed: &ObservedTree, chain: &[usize]) -> bool {
+    chain.iter().any(|node| match observed.nodes.get(*node) {
+        Some(node) => could_be(ancestor, &node.evidence),
+        None => true,
+    })
+}
+
 /// The shortest run of nearest ancestors that, with the entry's own
-/// predicate, matches the node at `index` and no other node, or `None` when
-/// no run does. Every other node the predicate matches must be told apart by
-/// a definite mismatch; one whose ancestors cannot be read leaves the entry
-/// unproven. A predicate that matches another node only as unknown also
-/// leaves it unproven, as the plain proof does.
+/// predicate, matches the node at `index` and tells it apart from every other
+/// node the predicate matches, or `None` when no run does.
+///
+/// Ancestors are recorded one level at a time, and the node's own ancestor
+/// must match its record at every level. Another node is told apart only by
+/// a recorded ancestor with a stable feature (`is_stable`) that none of that
+/// node's ancestors could be (`could_be`, at any depth): unnamed wrappers,
+/// their number and their roles never tell nodes apart, so a node that later
+/// gains or loses a wrapper cannot slide into the recorded place. One whose
+/// ancestors cannot be read is not told apart. A predicate that matches
+/// another node only as unknown leaves the entry unproven, as the plain proof
+/// does.
 ///
 /// This is the rule written out directly, one entry at a time. Capture uses
 /// [`AncestryProver`], which answers the same for every entry of a window
@@ -220,22 +261,17 @@ pub(crate) fn distinguishing_ancestors(
     }
     let mut recorded = Vec::new();
     for ancestor in chain(parents, index) {
-        recorded.push(ancestor_identity(&observed.nodes.get(ancestor)?.evidence)?);
+        let identity = ancestor_identity(&observed.nodes.get(ancestor)?.evidence)?;
+        recorded.push(identity.clone());
         if ancestors_match(&recorded, observed, parents, index) != IdentityMatch::Match {
             return None;
         }
-        let mut undecided = Vec::new();
-        for other in others {
-            // An unreadable ancestor is not a mismatch; a nearer one that
-            // definitely differs can still tell the two apart.
-            if ancestors_match(&recorded, observed, parents, other) != IdentityMatch::NoMatch {
-                undecided.push(other);
-            }
+        if is_stable(&identity) {
+            others.retain(|other| has_possible(&identity, observed, &chain(parents, *other)));
         }
-        if undecided.is_empty() {
+        if others.is_empty() {
             return Some(recorded);
         }
-        others = undecided;
     }
     None
 }
@@ -254,42 +290,50 @@ type PredicateKey = (
     Option<crate::ElementIdentifier>,
 );
 
-/// A live name slot as an index key.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum NameKey<'a> {
-    Known(&'a str),
-    Absent,
-    Unknown,
-}
-
 /// Every node one predicate matches (its "group"), with each member's
-/// ancestors below the root and the per-level indexes used to rule members
-/// out without comparing each of them.
+/// ancestors below the root and an index of the stable features those
+/// ancestors carry, used to rule members out without scanning each of them.
 struct Group<'a> {
     members: Vec<usize>,
     chains: Vec<Vec<usize>>,
     /// Members whose whole chain of ancestors reads exactly like another
     /// member's: no recorded ancestor can ever tell those two apart.
     shadowed: Vec<bool>,
-    levels: Vec<Option<Level<'a>>>,
+    features: Option<Features<'a>>,
+    /// Generation marks over the members, reused by every entry of the group
+    /// so no entry pays for clearing a list as long as the group.
+    seen: Vec<u32>,
+    alive: Vec<u32>,
+    generation: u32,
 }
 
-/// The members that have an ancestor at one level, indexed by that
-/// ancestor's role and stable name. Members whose ancestor role is unread are
-/// kept apart, since a recorded role cannot rule them out.
-struct Level<'a> {
-    by_role_and_name: HashMap<(&'a str, NameKey<'a>), Vec<usize>>,
-    by_role: HashMap<&'a str, Vec<usize>>,
-    unread_role: Vec<usize>,
+/// For each stable feature, the members that have an ancestor carrying it,
+/// and the members that have an ancestor whose slot (or role) is unread and
+/// so could carry anything.
+#[derive(Default)]
+struct Features<'a> {
+    names: HashMap<&'a str, Vec<usize>>,
+    descriptions: HashMap<&'a str, Vec<usize>>,
+    identifiers: HashMap<&'a crate::ElementIdentifier, Vec<usize>>,
+    open_names: Vec<usize>,
+    open_descriptions: Vec<usize>,
+    open_identifiers: Vec<usize>,
+}
+
+fn push_once(list: &mut Vec<usize>, member: usize) {
+    if list.last() != Some(&member) {
+        list.push(member);
+    }
 }
 
 /// Proves entries by their ancestors for one complete observation, with the
 /// same answers as the entry-by-entry rule (`distinguishing_ancestors`): the
-/// ancestor chains, the nodes each predicate matches and the per-level indexes
-/// are built once and shared by every entry of the window, and an entry with a
-/// twin whose ancestors all read the same is settled at once, since nothing
-/// can ever tell the two apart. The work it does is counted against a limit;
-/// past the limit every remaining entry stays unproven.
+/// ancestor chains, the nodes each predicate matches and the index of their
+/// ancestors' stable features are built once and shared by every entry of the
+/// window, and an entry with a twin whose ancestors all read the same is
+/// settled at once, since nothing can ever tell the two apart. The work it
+/// does is counted against a limit; past the limit every remaining entry
+/// stays unproven.
 pub(crate) struct AncestryProver<'a> {
     observed: &'a ObservedTree,
     parents: Vec<Option<usize>>,
@@ -350,8 +394,8 @@ impl<'a> AncestryProver<'a> {
             self.groups.insert(key.clone(), group);
         }
         let Some(mut group) = self.groups.remove(&key).flatten() else {
-            // Kept as `None`, so the next entry of the same predicate does not
-            // scan the whole window again and spend the work limit on it.
+            // Remember the unprovable answer too, so the window is not scanned
+            // again for the next entry with the same predicate.
             self.groups.insert(key, None);
             return None;
         };
@@ -414,57 +458,68 @@ impl<'a> AncestryProver<'a> {
             .iter()
             .map(|signature| seen.get(signature.as_str()).copied().unwrap_or(0) > 1)
             .collect();
-        let deepest = chains.iter().map(Vec::len).max().unwrap_or(0);
         Some(Group {
             members,
             chains,
             shadowed,
-            levels: (0..deepest).map(|_| None).collect(),
+            features: None,
+            seen: Vec::new(),
+            alive: Vec::new(),
+            generation: 0,
         })
     }
 
-    fn level(&self, group: &Group<'a>, level: usize) -> Level<'a> {
-        let mut index = Level {
-            by_role_and_name: HashMap::new(),
-            by_role: HashMap::new(),
-            unread_role: Vec::new(),
-        };
-        for (position, chain) in group.chains.iter().enumerate() {
-            let observed: &'a ObservedTree = self.observed;
-            let Some(evidence) = chain
-                .get(level)
-                .and_then(|node| observed.nodes.get(*node))
-                .map(|node| &node.evidence)
-            else {
-                continue;
-            };
-            match crate::refs::ref_identity::meaningful_field(&evidence.role) {
-                LocatorField::Known(role) => {
-                    let name = match stable_name_field(role, &evidence.name, &evidence.value) {
-                        LocatorField::Known(name) => NameKey::Known(name),
-                        LocatorField::Absent => NameKey::Absent,
-                        LocatorField::Unknown => NameKey::Unknown,
-                    };
-                    index
-                        .by_role_and_name
-                        .entry((role, name))
-                        .or_default()
-                        .push(position);
-                    index.by_role.entry(role).or_default().push(position);
+    /// The index of every member's ancestors' stable features, read the way
+    /// `could_be` compares them: the name as the stable name under the
+    /// ancestor's own role.
+    fn features(&self, group: &Group<'a>) -> Features<'a> {
+        let observed: &'a ObservedTree = self.observed;
+        let mut features = Features::default();
+        for (member, chain) in group.chains.iter().enumerate() {
+            for node in chain {
+                let Some(evidence) = observed.nodes.get(*node).map(|node| &node.evidence) else {
+                    push_once(&mut features.open_names, member);
+                    push_once(&mut features.open_descriptions, member);
+                    push_once(&mut features.open_identifiers, member);
+                    continue;
+                };
+                match crate::refs::ref_identity::meaningful_field(&evidence.role) {
+                    LocatorField::Known(role) => {
+                        match stable_name_field(role, &evidence.name, &evidence.value) {
+                            LocatorField::Known(name) => {
+                                push_once(features.names.entry(name).or_default(), member)
+                            }
+                            LocatorField::Absent => {}
+                            LocatorField::Unknown => push_once(&mut features.open_names, member),
+                        }
+                    }
+                    // A recorded name is compared under the recorded role when
+                    // the live one is unread, so such an ancestor stays open.
+                    _ => push_once(&mut features.open_names, member),
                 }
-                LocatorField::Absent => {}
-                LocatorField::Unknown => index.unread_role.push(position),
+                match crate::refs::ref_identity::meaningful_field(&evidence.description) {
+                    LocatorField::Known(description) => push_once(
+                        features.descriptions.entry(description).or_default(),
+                        member,
+                    ),
+                    LocatorField::Absent => {}
+                    LocatorField::Unknown => push_once(&mut features.open_descriptions, member),
+                }
+                for identifier in evidence.identifiers.identifiers() {
+                    push_once(features.identifiers.entry(identifier).or_default(), member);
+                }
+                if !evidence.identifiers.is_complete() {
+                    push_once(&mut features.open_identifiers, member);
+                }
             }
         }
-        index
+        features
     }
 
-    /// The rule of `distinguishing_ancestors` for one member: the ancestors are
-    /// recorded one level at a time, the entry's own ancestor must match its
-    /// record at every level, and the other members are ruled out as soon as
-    /// one recorded level definitely differs from theirs (a member with no
-    /// ancestor at that level is ruled out too). Only the members the level's
-    /// index cannot rule out by role and name are compared.
+    /// The rule of `distinguishing_ancestors` for one member. The index only
+    /// narrows which members need the full check: a member that has no
+    /// ancestor carrying the recorded feature, nor one whose slot is unread,
+    /// cannot have an ancestor that could be the recorded one.
     fn prove_in(
         &mut self,
         group: &mut Group<'a>,
@@ -474,91 +529,98 @@ impl<'a> AncestryProver<'a> {
         if group.members.len() < 2 || group.shadowed.get(own).copied().unwrap_or(true) {
             return None;
         }
-        let mut survivors: Vec<usize> = (0..group.members.len())
-            .filter(|position| *position != own)
-            .collect();
-        let mut alive = vec![false; group.members.len()];
-        for position in &survivors {
-            alive[*position] = true;
+        if group.seen.len() != group.members.len() {
+            group.seen = vec![0; group.members.len()];
+            group.alive = vec![0; group.members.len()];
         }
+        // Until the first stable ancestor rules anyone out, every other member
+        // is still undecided; the list is only built once it shrinks.
+        let mut everyone = true;
+        let mut survivors: Vec<usize> = Vec::new();
+        let mut alive_mark = 0u32;
         let own_chain = group.chains.get(own)?.clone();
         let mut recorded = Vec::new();
-        for (level, ancestor) in own_chain.iter().enumerate() {
+        for ancestor in &own_chain {
             let evidence = &self.observed.nodes.get(*ancestor)?.evidence;
             let identity = ancestor_identity(evidence)?;
-            let predicate = FullPredicate::of_ancestor(&identity);
-            if predicate.compare(&LivePredicate::observed(evidence)) != IdentityMatch::Match {
+            if FullPredicate::of_ancestor(&identity).compare(&LivePredicate::observed(evidence))
+                != IdentityMatch::Match
+            {
                 return None;
             }
-            if group.levels.get(level)?.is_none() {
-                if !self.spend(group.members.len()) {
-                    return None;
+            if is_stable(&identity) {
+                if group.features.is_none() {
+                    let size = group.chains.iter().map(Vec::len).sum::<usize>();
+                    if !self.spend(size) {
+                        return None;
+                    }
+                    group.features = Some(self.features(group));
                 }
-                let built = self.level(group, level);
-                group.levels[level] = Some(built);
-            }
-            let at = group.levels.get(level)?.as_ref()?;
-            let mut possible: Vec<usize> = at.unread_role.clone();
-            match identity.name.as_deref() {
-                Some(name) => {
-                    for key in [NameKey::Known(name), NameKey::Unknown] {
-                        if let Some(found) = at.by_role_and_name.get(&(identity.role.as_str(), key))
-                        {
-                            possible.extend(found);
+                let features = group.features.as_ref()?;
+                let (found, open) = if let Some(name) = identity.name.as_deref() {
+                    (features.names.get(name), &features.open_names)
+                } else if let Some(description) = identity.description.as_deref() {
+                    (
+                        features.descriptions.get(description),
+                        &features.open_descriptions,
+                    )
+                } else {
+                    let identifier = identity.native_id.as_ref()?;
+                    (
+                        features.identifiers.get(identifier),
+                        &features.open_identifiers,
+                    )
+                };
+                let candidates: Vec<usize> =
+                    found.into_iter().flatten().chain(open).copied().collect();
+                group.generation = group.generation.wrapping_add(1);
+                let mark = group.generation;
+                let observed = self.observed;
+                let chains = &group.chains;
+                let mut checked = 0usize;
+                let mut kept = Vec::new();
+                if everyone || candidates.len() < survivors.len() {
+                    for member in candidates {
+                        if member == own || group.seen[member] == mark {
+                            continue;
+                        }
+                        group.seen[member] = mark;
+                        let undecided = everyone || group.alive[member] == alive_mark;
+                        if undecided {
+                            checked = checked.saturating_add(chains[member].len());
+                            if has_possible(&identity, observed, &chains[member]) {
+                                kept.push(member);
+                            }
+                        }
+                    }
+                } else {
+                    for member in candidates {
+                        group.seen[member] = mark;
+                    }
+                    for member in &survivors {
+                        if group.seen[*member] == mark {
+                            checked = checked.saturating_add(chains[*member].len());
+                            if has_possible(&identity, observed, &chains[*member]) {
+                                kept.push(*member);
+                            }
                         }
                     }
                 }
-                None => {
-                    if let Some(found) = at.by_role.get(identity.role.as_str()) {
-                        possible.extend(found);
-                    }
+                if !self.spend(checked.saturating_add(survivors.len()).saturating_add(1)) {
+                    return None;
                 }
-            }
-            if !self.spend(possible.len().min(survivors.len()).saturating_add(1)) {
-                return None;
-            }
-            let observed = self.observed;
-            let chains = &group.chains;
-            let still = |position: usize| {
-                let verdict = match chains
-                    .get(position)
-                    .and_then(|chain| chain.get(level))
-                    .and_then(|node| observed.nodes.get(*node))
-                {
-                    Some(node) => predicate.compare(&LivePredicate::observed(&node.evidence)),
-                    None => IdentityMatch::NoMatch,
-                };
-                verdict != IdentityMatch::NoMatch
-            };
-            let mut kept = Vec::new();
-            if possible.len() < survivors.len() {
-                for position in possible {
-                    if alive[position] && still(position) {
-                        kept.push(position);
-                    }
+                group.generation = group.generation.wrapping_add(1);
+                alive_mark = group.generation;
+                for member in &kept {
+                    group.alive[*member] = alive_mark;
                 }
-            } else {
-                let mut listed = vec![false; group.members.len()];
-                for position in &possible {
-                    listed[*position] = true;
-                }
-                for position in &survivors {
-                    if listed[*position] && still(*position) {
-                        kept.push(*position);
-                    }
-                }
-            }
-            for position in &survivors {
-                alive[*position] = false;
-            }
-            for position in &kept {
-                alive[*position] = true;
+                survivors = kept;
+                everyone = false;
             }
             recorded.push(identity);
-            if kept.is_empty() {
+            if !everyone && survivors.is_empty() {
                 return Some(recorded);
             }
-            survivors = kept;
         }
         None
     }
