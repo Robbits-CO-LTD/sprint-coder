@@ -271,6 +271,37 @@ fn cwd_is_honored_for_create_process() {
     let _ = std::fs::remove_dir_all(&temp);
 }
 
+/// Without `--cwd`, the app starts in its executable's folder, not in this
+/// process's directory (the caller's workspace), as it would from Explorer.
+#[test]
+fn cwd_defaults_to_the_folder_of_the_executable() {
+    let temp = scratch_dir("cwd-default");
+    let probe = copy_system_exe("cmd.exe", &temp, "launchprobe_cwd_default.exe");
+    let marker = temp.join("cwd.txt");
+    let options = LaunchOptions {
+        args: vec!["/C".into(), format!("cd > \"{}\"", marker.display())],
+        cwd: None,
+        attach_if_running: false,
+        timeout_ms: 0,
+        ..Default::default()
+    };
+    let result = launch_app_impl(
+        probe.to_str().expect("utf8 path"),
+        &options,
+        deadline(10_000),
+    )
+    .expect("a windowless probe is a successful launch");
+    let _guard = KillOnDrop(result.pid);
+    let written = poll_read_marker(&marker, Deadline::after(5_000).expect("deadline"));
+    let normalized_written = written.trim().trim_end_matches('\\').to_ascii_lowercase();
+    let normalized_temp = temp
+        .to_string_lossy()
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    assert_eq!(normalized_written, normalized_temp);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
 /// The marker is written by a child shell redirecting `cd` output, a step
 /// that lands strictly after `CreateProcessW` returns to this test. Reading
 /// it once, immediately, races that write; polling under a deadline lets the

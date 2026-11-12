@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use agent_desktop_core::{
     AppError, Deadline, DeliverySemantics, ErrorCode, ErrorPayload, ProcessId,
@@ -177,6 +178,25 @@ fn absolute_cwd_returns_an_absolute_path_unchanged() {
     let returned =
         super::absolute_cwd(absolute).expect("an absolute cwd must be accepted unchanged");
     assert_eq!(returned, absolute);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn default_cwd_is_the_folder_of_the_executable() {
+    let folder = std::env::temp_dir();
+    let executable = folder.join("launch-default-cwd-probe.exe");
+    assert_eq!(super::default_cwd(&executable), Some(folder.as_path()));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn default_cwd_is_none_when_the_folder_is_missing_or_relative() {
+    let missing = std::env::temp_dir()
+        .join(format!("launch-default-cwd-missing-{}", std::process::id()))
+        .join("app.exe");
+    assert_eq!(super::default_cwd(&missing), None);
+    assert_eq!(super::default_cwd(Path::new(r"relative\app.exe")), None);
+    assert_eq!(super::default_cwd(Path::new("app.exe")), None);
 }
 
 #[cfg(target_os = "windows")]
