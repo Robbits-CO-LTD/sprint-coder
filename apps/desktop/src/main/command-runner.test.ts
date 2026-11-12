@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -18,11 +18,12 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { join, win32 as windowsPath } from 'node:path';
+import { dirname, join, win32 as windowsPath } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
   buildControlledEnvironment,
+  executionSpecContentDigest,
   executionSpecPathGuard,
   posixSupervisorCommand,
   posixGroupSignalIsAuthorized,
@@ -35,9 +36,14 @@ import {
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import * as sandboxRunnerModule from './sandbox-runner';
+import * as desktopControlModule from './desktop-control';
+import * as windowsProcessJobModule from './windows-process-job';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
+import * as preparedExecutionImageModule from './prepared-execution-image';
+import { resolveDesktopControlCommand } from './desktop-control';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -2104,6 +2110,442 @@ describe('rejectWindowsSandboxedNodeTestIsolation node version instruction', () 
     ).not.toThrow();
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+describe('desktop control outside the command sandbox', () => {
+  it('starts a command outside the sandbox only when the desktop-control judgment says so', async () => {
+    const root = await workspace();
+    const prepare = () =>
+      prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', "process.stdout.write('desktop-control-ok:' + process.cwd())"],
+      });
+    const ranIn = (chunks: readonly CommandOutputChunk[]) =>
+      chunks
+        .map(({ text }) => text)
+        .join('')
+        .split('desktop-control-ok:')[1]
+        ?.toLowerCase();
+    const judge = vi.spyOn(desktopControlModule, 'runsOutsideCommandSandbox').mockReturnValue(true);
+    const argvCheck = vi
+      .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+      .mockReturnValue(null);
+    const runnerPath = vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath');
+    try {
+      const runner = new CommandRunner({ sandboxed: true });
+      // Arguments the check refuses never start, inside or outside the sandbox.
+      argvCheck.mockReturnValueOnce('refused for the test');
+      const beforeSpawn = vi.fn();
+      await expect(
+        runner.run(await prepare(), { desktopControlWorkspaceRoots: [root], beforeSpawn }),
+      ).rejects.toThrow('refused for the test');
+      expect(beforeSpawn).not.toHaveBeenCalled();
+      const spec = await prepare();
+      const chunks: CommandOutputChunk[] = [];
+      const result = await runner.run(spec, {
+        desktopControlWorkspaceRoots: [root],
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      // Outside the sandbox it starts in the executable's own folder, not the approved cwd.
+      expect(ranIn(chunks)).toBe(dirname(spec.absoluteExecutable).toLowerCase());
+      expect(judge).toHaveBeenCalledWith(
+        spec.absoluteExecutable,
+        executionSpecContentDigest(spec),
+        [root],
+      );
+      expect(argvCheck).toHaveBeenLastCalledWith(spec.argv, [root]);
+      expect(runnerPath).not.toHaveBeenCalled();
+
+      // A negative judgment, or no Turn roots at all, keeps the sandbox runner.
+      runnerPath.mockImplementation(() => {
+        throw new Error('sandbox runner requested');
+      });
+      judge.mockReturnValue(false);
+      await expect(
+        runner.run(await prepare(), { desktopControlWorkspaceRoots: [root] }),
+      ).rejects.toThrow('sandbox runner requested');
+      judge.mockClear();
+      judge.mockReturnValue(true);
+      await expect(runner.run(await prepare())).rejects.toThrow('sandbox runner requested');
+      expect(judge).not.toHaveBeenCalled();
+      // An unsandboxed runner never asks, and keeps the approved cwd.
+      const plain: CommandOutputChunk[] = [];
+      const unsandboxed = await prepare();
+      await expect(
+        new CommandRunner().run(unsandboxed, {
+          desktopControlWorkspaceRoots: [root],
+          onChunk: (chunk) => {
+            plain.push(chunk);
+          },
+        }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(ranIn(plain)).toBe(unsandboxed.cwdIdentity.canonicalPath.toLowerCase());
+      expect(judge).not.toHaveBeenCalled();
+    } finally {
+      judge.mockRestore();
+      argvCheck.mockRestore();
+      runnerPath.mockRestore();
+    }
+  }, 15_000);
+
+  it.skipIf(process.platform !== 'win32')(
+    'lets only a desktop-control run leave the apps it started running, with a PATH outside the Workspace',
+    async () => {
+      const root = await workspace();
+      const insideFolder = join(root, 'bin');
+      await mkdir(insideFolder);
+      vi.stubEnv('PATH', `${insideFolder};${process.env['PATH'] ?? ''}`);
+      // The command starts a long-lived process of another image, reports it and its PATH, and ends.
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        'process.stdout.write(JSON.stringify({ pid: child.pid, path: process.env.PATH }));',
+      ].join('\n');
+      const prepare = () =>
+        prepareTestExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: ['-e', script, process.execPath],
+        });
+      const report = (chunks: readonly CommandOutputChunk[]) =>
+        JSON.parse(chunks.map(({ text }) => text).join('')) as { pid: number; path: string };
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const started: number[] = [];
+      try {
+        const desktopChunks: CommandOutputChunk[] = [];
+        const desktopSpec = await prepare();
+        expect(desktopSpec.envDelta['PATH']?.toLowerCase()).toContain(insideFolder.toLowerCase());
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(desktopSpec, {
+            desktopControlWorkspaceRoots: [root],
+            onChunk: (chunk) => {
+              desktopChunks.push(chunk);
+            },
+          }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        const desktop = report(desktopChunks);
+        started.push(desktop.pid);
+        // The approved spec keeps its PATH; only the launch leaves out the Workspace folder.
+        expect(desktopSpec.envDelta['PATH']?.toLowerCase()).toContain(insideFolder.toLowerCase());
+        expect(desktop.path.toLowerCase()).not.toContain(insideFolder.toLowerCase());
+        expect(desktop.path.toLowerCase()).toContain('system32');
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        expect(() => process.kill(desktop.pid, 0)).not.toThrow();
+
+        // Any other command still ends with everything it started, and keeps its PATH.
+        const plainChunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner().run(await prepare(), {
+            desktopControlWorkspaceRoots: [root],
+            onChunk: (chunk) => {
+              plainChunks.push(chunk);
+            },
+          }),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        const plain = report(plainChunks);
+        started.push(plain.pid);
+        expect(plain.path.toLowerCase()).toContain(insideFolder.toLowerCase());
+        await expectProcessDead(plain.pid);
+      } finally {
+        for (const pid of started) {
+          try {
+            process.kill(pid);
+          } catch {
+            // Already ended.
+          }
+        }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'gives a desktop-control run the state folder its approval card reads, and only that one',
+    async () => {
+      const root = await workspace();
+      // The command reports every variable named like the state folder's, in any letter case.
+      const script = [
+        'const found = Object.entries(process.env).filter(([key]) => /^agent_desktop_home$/iu.test(key));',
+        'process.stdout.write(JSON.stringify(found));',
+      ].join('\n');
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const run = async () => {
+        const chunks: CommandOutputChunk[] = [];
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(
+            await prepareTestExecutionSpec({
+              workspacePath: root,
+              executable: process.execPath,
+              argv: ['-e', script],
+            }),
+            { desktopControlWorkspaceRoots: [root], onChunk: (chunk) => void chunks.push(chunk) },
+          ),
+        ).resolves.toMatchObject({ exitCode: 0 });
+        return JSON.parse(chunks.map(({ text }) => text).join('')) as [string, string][];
+      };
+      try {
+        // The folder could not be made private, so runs and the card fall back to the default.
+        desktopControlModule.configureDesktopControlStateRoot(join(root, 'state'), () => {
+          throw new Error('ACL refused');
+        });
+        expect(await run()).toEqual([
+          ['AGENT_DESKTOP_HOME', desktopControlModule.desktopControlStateFolder()],
+        ]);
+        // Sprint Coder's own folder, once it can be used.
+        const own = join(root, 'own-state');
+        desktopControlModule.configureDesktopControlStateRoot(own, () => {});
+        expect(await run()).toEqual([['AGENT_DESKTOP_HOME', own]]);
+      } finally {
+        desktopControlModule.configureDesktopControlStateRoot(null);
+        judge.mockRestore();
+        argvCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'Stop still ends a running desktop-control command and everything it started',
+    async () => {
+      const root = await workspace();
+      // Output can reach the sink only as the command closes, so the started process is reported
+      // through a file.
+      const report = join(root, 'started.txt');
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        "require('node:fs').writeFileSync(process.argv[2], String(child.pid));",
+        'setTimeout(() => {}, 60000);',
+      ].join('\n');
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', script, process.execPath, report],
+      });
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const controller = new AbortController();
+      let wrapper = 0;
+      let started = 0;
+      try {
+        const running = new CommandRunner({ sandboxed: true, cancelGraceMs: 100 }).run(spec, {
+          desktopControlWorkspaceRoots: [root],
+          signal: controller.signal,
+          onStarted: ({ pid }) => {
+            wrapper = pid;
+          },
+        });
+        const deadline = Date.now() + 10_000;
+        while (started === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          started = Number(await readFile(report, 'utf8').catch(() => '0'));
+        }
+        controller.abort();
+        const result = await running;
+        expect(result).toMatchObject({ canceled: true, termination: 'forced' });
+        expect(started).toBeGreaterThan(0);
+        await expectProcessDead(wrapper);
+        await expectProcessDead(started);
+      } finally {
+        if (started > 0)
+          try {
+            process.kill(started);
+          } catch {
+            // Already ended.
+          }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'Stop while the final output is saved still ends everything a desktop-control command started',
+    async () => {
+      const root = await workspace();
+      // The command starts a long-lived process of another image, reports it and ends at once.
+      const script = [
+        "const { spawn } = require('node:child_process');",
+        "const child = spawn(process.argv[1], ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });",
+        'child.unref();',
+        'process.stdout.write(String(child.pid));',
+      ].join('\n');
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', script, process.execPath],
+      });
+      const judge = vi
+        .spyOn(desktopControlModule, 'runsOutsideCommandSandbox')
+        .mockReturnValue(true);
+      const argvCheck = vi
+        .spyOn(desktopControlModule, 'desktopControlArgvRefusal')
+        .mockReturnValue(null);
+      const release = vi.spyOn(windowsProcessJobModule, 'releaseOwnedJob');
+      const controller = new AbortController();
+      let started = 0;
+      try {
+        // The output is held until the command has ended, so the one batch is the final save; the
+        // Stop lands during it and the save ends long before the forced termination would.
+        const result = await new CommandRunner({
+          sandboxed: true,
+          cancelGraceMs: 10_000,
+          batchIntervalMs: 60_000,
+        }).run(spec, {
+          desktopControlWorkspaceRoots: [root],
+          signal: controller.signal,
+          onBatch: async (chunks) => {
+            started = Number(chunks.map(({ text }) => text).join(''));
+            controller.abort();
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          },
+        });
+        expect(result).toMatchObject({ canceled: true, termination: 'cooperative' });
+        expect(started).toBeGreaterThan(0);
+        expect(release).not.toHaveBeenCalled();
+        await expectProcessDead(started);
+      } finally {
+        if (started > 0)
+          try {
+            process.kill(started);
+          } catch {
+            // Already ended.
+          }
+        judge.mockRestore();
+        argvCheck.mockRestore();
+        release.mockRestore();
+      }
+    },
+    20_000,
+  );
+});
+
+// The real shipped executable (the build output in a development checkout); Windows x64 only.
+const shippedDesktopControl = process.platform === 'win32' ? resolveDesktopControlCommand() : null;
+
+describe.skipIf(shippedDesktopControl === null)('desktop control bound to the sealed bytes', () => {
+  const stdout = (chunks: readonly CommandOutputChunk[]) =>
+    chunks
+      .filter(({ stream }) => stream === 'stdout')
+      .map(({ text }) => text)
+      .join('');
+  const refuseSandboxRunner = () =>
+    vi.spyOn(sandboxRunnerModule, 'sandboxRunnerPath').mockImplementation(() => {
+      throw new Error('sandbox runner requested');
+    });
+
+  it('runs the shipped desktop-control binary outside the sandbox when its sealed bytes are its seal', async () => {
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: shippedDesktopControl!,
+      argv: ['status'],
+    });
+    expect(executionSpecContentDigest(spec)).toBe(
+      readFileSync(`${shippedDesktopControl!}.sha256`, 'utf8').trim(),
+    );
+    const runnerPath = refuseSandboxRunner();
+    try {
+      const chunks: CommandOutputChunk[] = [];
+      const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+        desktopControlWorkspaceRoots: [root],
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(stdout(chunks))).toMatchObject({ ok: true });
+      expect(runnerPath).not.toHaveBeenCalled();
+    } finally {
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
+
+  it('keeps the sandbox when the image about to start is not the sealed bytes, though the path is', async () => {
+    // The Critical: the path still names the shipped desktop-control binary, but the image sealed
+    // for the launch holds other bytes (on Linux, a memfd fixed before the path was swapped).
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: shippedDesktopControl!,
+      argv: ['status'],
+    });
+    const original = preparedExecutionImageModule.prepareExecutionImage;
+    const prepare = vi
+      .spyOn(preparedExecutionImageModule, 'prepareExecutionImage')
+      .mockImplementation(async (...args) => {
+        const image = await original(...args);
+        return { ...image, digest: 'f'.repeat(64), close: () => image.close() };
+      });
+    const runnerPath = refuseSandboxRunner();
+    try {
+      await expect(
+        new CommandRunner({ sandboxed: true }).run(spec, { desktopControlWorkspaceRoots: [root] }),
+      ).rejects.toThrow('sandbox runner requested');
+      expect(prepare).toHaveBeenCalled();
+    } finally {
+      prepare.mockRestore();
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
+
+  it('keeps any other binary inside, whatever it is named and wherever it lives', async () => {
+    const root = await workspace();
+    const elsewhere = await workspace();
+    // Other bytes under the shipped name outside the Workspace, and the sealed bytes copied into
+    // the Workspace: neither is the shipped desktop-control binary.
+    const renamed = join(elsewhere, 'sprint-coder-desktop-control.exe');
+    await copyFile(process.execPath, renamed);
+    const copied = join(root, 'sprint-coder-desktop-control.exe');
+    await copyFile(shippedDesktopControl!, copied);
+    const runnerPath = refuseSandboxRunner();
+    try {
+      for (const executable of [renamed, copied]) {
+        const spec = await prepareExecutionSpec({
+          workspacePath: root,
+          executable,
+          argv: ['status'],
+        });
+        expect(
+          desktopControlModule.isDesktopControlExecutable(
+            spec.absoluteExecutable,
+            executionSpecContentDigest(spec),
+          ),
+        ).toBe(false);
+        await expect(
+          new CommandRunner({ sandboxed: true }).run(spec, {
+            desktopControlWorkspaceRoots: [root],
+          }),
+        ).rejects.toThrow('sandbox runner requested');
+      }
+    } finally {
+      runnerPath.mockRestore();
+    }
+  }, 30_000);
 });
 
 async function expectProcessDead(pid: number): Promise<void> {

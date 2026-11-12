@@ -10,13 +10,22 @@ import {
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
 import {
+  desktopControlArgvIsInert,
+  desktopControlArgvRefusal,
+  desktopControlLaunchByName,
+  isDesktopControlExecutable,
+} from './desktop-control';
+import {
   CommandRunner,
+  CommandRunnerError,
+  executionSpecContentDigest,
   prepareExecutionSpec,
   rejectWindowsSandboxedNodeTestIsolation,
   shouldRejectWindowsSandboxedNodeTestIsolation,
   type CommandOutputChunk,
   type CommandResult,
 } from './command-runner';
+import { rememberDesktopControlWindows } from './desktop-control-display';
 import { readWindowsExecutableFileVersion } from './windows-pe-version';
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
@@ -425,6 +434,8 @@ export function registerCommandRunnerTool(
 ): void {
   const commandIds = new WeakMap<object, string>();
   const resourceKeys = new WeakMap<object, string>();
+  // The Turn's Workspace roots, kept only for a call prepared as the shipped desktop control.
+  const desktopControlRoots = new WeakMap<object, readonly string[]>();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -457,19 +468,50 @@ export function registerCommandRunnerTool(
           : undefined;
       if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
         throw new Error('CommandRunner Turn Workspace identity is incomplete');
-      const spec = await prepareExecutionSpec({
-        rootId: root.rootId,
-        workspacePath: root.path,
-        ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-        executable: request.executable,
-        argv: request.argv,
-        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-      });
+      const prepareSpec = (argv: readonly string[]) =>
+        prepareExecutionSpec({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          executable: request.executable,
+          argv: [...argv],
+          ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+        });
+      let spec = await prepareSpec(request.argv);
       await rejectWindowsSandboxedNodeTestIsolationWithVersion(
         spec.absoluteExecutable,
         spec.argv,
         commandRunner.isSandboxed,
       );
+      const roots = workspace.roots.map(({ path }) => path);
+      // Judged on the bytes sealed into this ExecutionSpec, as the card and the run are. Refused
+      // before a card exists, so nothing the person could approve would escape the sandbox.
+      const desktopControl = isDesktopControlExecutable(
+        spec.absoluteExecutable,
+        executionSpecContentDigest(spec),
+      );
+      let desktopControlRefusal = desktopControl
+        ? desktopControlArgvRefusal(spec.argv, roots)
+        : null;
+      if (desktopControlRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      // A `launch <name>` the binary would not find in the system folders is sealed with the
+      // absolute path the Start menu names instead, before the card exists, so the card shows and
+      // the run starts that path. The new spec is judged again as the first one was.
+      const byName = desktopControl ? desktopControlLaunchByName(spec.argv, roots) : null;
+      if (byName !== null && 'refusal' in byName)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', byName.refusal);
+      if (byName !== null) {
+        spec = await prepareSpec(byName.argv);
+        if (!isDesktopControlExecutable(spec.absoluteExecutable, executionSpecContentDigest(spec)))
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'デスクトップ操作の実行ファイルが準備の途中で変わった。',
+          );
+        desktopControlRefusal = desktopControlArgvRefusal(spec.argv, roots);
+        if (desktopControlRefusal !== null)
+          throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
+      }
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,
@@ -482,6 +524,7 @@ export function registerCommandRunnerTool(
       });
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
+      if (desktopControl) desktopControlRoots.set(spec, roots);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -512,8 +555,32 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
+      // Only a call prepared as the shipped desktop control and allowed on its own card ("allow
+      // once", or "allow for the Task" kept for exactly this command) may start outside the
+      // command sandbox, and the runner checks the bytes again before it starts. So may one that
+      // only prints the bundled guides, help, the version or its own status, which the
+      // ApprovalCoordinator allows without a card; that is judged again here on the same sealed
+      // argv. Every other command, explicitly allowed or not, gets no roots and stays inside. A
+      // preset or policy allow never does; the Stop stays the same.
+      const roots =
+        control.authorizationDecision === 'allow_once' ||
+        control.authorizationDecision === 'allow_task' ||
+        desktopControlArgvIsInert(spec.argv)
+          ? desktopControlRoots.get(spec)
+          : undefined;
+      // The windows a desktop-control run reported, as the executable printed them, name those
+      // windows on the Task's later cards (display only).
+      const rememberWindows = (): void => {
+        if (roots !== undefined)
+          rememberDesktopControlWindows(_context.taskId, spec.argv, toolOutput.stdout);
+      };
       const hooks = {
         ...(control.signal === undefined ? {} : { signal: control.signal }),
+        ...(roots === undefined ? {} : { desktopControlWorkspaceRoots: roots }),
+        // Set only by an app-wide Task grant, for the executable to check window ids against.
+        ...(roots === undefined || control.desktopControlExpectedWindowOwner === undefined
+          ? {}
+          : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
         beforeSpawn: () => {
           command.persistence.beginCommand(commandId);
         },
@@ -678,6 +745,7 @@ export function registerCommandRunnerTool(
         command.publish(persisted.event);
         if (completed.result === null)
           throw new Error(completed.error ?? 'Managed command failed before completion');
+        rememberWindows();
         return {
           ...completed.result,
           ...toolOutput,
@@ -688,6 +756,7 @@ export function registerCommandRunnerTool(
         const result = await commandRunner.run(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
+        rememberWindows();
         return {
           ...result,
           ...toolOutput,

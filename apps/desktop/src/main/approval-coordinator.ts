@@ -25,6 +25,20 @@ import type {
   ApprovalRequestInput,
   ApprovalResolutionInput,
 } from './persistence';
+import {
+  desktopControlArgvIsInert,
+  desktopControlArgvMode,
+  desktopControlExpectedWindowOwner,
+  isDesktopControlExecutable,
+} from './desktop-control';
+import { desktopControlApprovalAction } from './desktop-control-display';
+import {
+  desktopAppGrantCovering,
+  desktopAppGrantOffer,
+  type DesktopAppGrantKey,
+} from './desktop-control-app-grant';
+import { APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS } from './approval-display-characters';
+import { executionSpecContentDigest } from './command-runner';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
 import {
@@ -104,6 +118,8 @@ type ResolveCommand = {
   expectedRevision: number;
   challenge: string;
   operationId: string;
+  /** With `allow_task`: 「このアプリは Task 中許可」, accepted only when the card offered it. */
+  grantScope?: 'app';
 };
 
 type WaiterSettler = {
@@ -126,7 +142,16 @@ type Waiter = {
    * or grant for a call that is gone.
    */
   canceled: boolean;
+  /** The app this desktop-control card offered the app-wide Task grant for, if it did. */
+  desktopAppGrant: DesktopAppGrantKey | null;
 };
+
+type DesktopAppGrant = Readonly<{
+  key: DesktopAppGrantKey;
+  policyEpoch: number;
+  expiresAt: string;
+}>;
+const DESKTOP_APP_GRANT_TASKS = 50;
 
 /** Keep the sandbox profile recorded by an approval identical to the profile used by permission
  * evaluation and execution revalidation. A write recorded as read-only can be approved by the
@@ -147,6 +172,12 @@ export function sandboxProfileForToolAuthorization(
 
 export class ApprovalCoordinator {
   private readonly waiters = new Map<string, Waiter>();
+  /**
+   * Per Task, the apps the person allowed on a desktop-control card for the rest of the Task
+   * (「このアプリは Task 中許可」). Kept like a Task grant — bound to the Task, its policy epoch and
+   * the grant's expiry — but only in memory, so a restart asks again.
+   */
+  private readonly desktopAppGrants = new Map<string, Map<string, DesktopAppGrant>>();
 
   constructor(
     private readonly options: {
@@ -216,14 +247,48 @@ export class ApprovalCoordinator {
     const revalidators: (() => boolean)[] = [];
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
+    let expectedWindowOwner: string | undefined;
+    const desktopControl = isDesktopControlCall(request);
+    // A desktop-control run that takes the foreground, the cursor or the keyboard is decided on its
+    // own card every time: no Task grant covers it, including one given before this rule.
+    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
     for (const evaluation of evaluations) {
       // The policy engine never allows a per-call capability, and if it ever did, the person would
       // still be asked: only their decision on this call's card covers this call.
+      // The bundled desktop-control binary runs outside the command sandbox, so it is never
+      // covered by a preset or policy allow either: the person decides it on its own card. The one
+      // allow that is their decision is the Task grant they gave on such a card, which the policy
+      // engine matches only for the exact same ExecutionSpec (executable identity, argv, cwd, env).
+      const desktopTaskGrant =
+        desktopControl &&
+        !desktopForeground &&
+        evaluation.decision.decision === 'allow' &&
+        evaluation.decision.reason === 'remembered_grant';
+      // A desktop-control run that only prints the bundled guides, help, the version or its own
+      // status touches no other app, window or file, so it runs without a card wherever the policy
+      // allows or would ask; a deny was returned above. Judged on the sealed argv, as the run is.
+      if (
+        desktopControl &&
+        !requiresPerCallHumanApproval(evaluation.capability) &&
+        isInertDesktopControlCall(request)
+      ) {
+        const policyCheck = evaluation.decision.beforeExecute;
+        revalidators.push(
+          () =>
+            this.options.isTurnActive(request.context.taskId, request.context.turnId) &&
+            this.options.getCurrentPolicyEpoch(request.context.taskId) ===
+              request.context.policyEpoch &&
+            (policyCheck?.() ?? true),
+        );
+        continue;
+      }
       if (
         evaluation.decision.decision === 'allow' &&
-        !requiresPerCallHumanApproval(evaluation.capability)
+        !requiresPerCallHumanApproval(evaluation.capability) &&
+        (!desktopControl || desktopTaskGrant)
       ) {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
+        if (desktopTaskGrant) approvalDecision ??= 'allow_task';
         continue;
       }
       if (evaluation.decision.beforeExecute !== undefined)
@@ -248,6 +313,13 @@ export class ApprovalCoordinator {
       )
         throw new Error('APPROVAL_USER_INPUT_SELECTION_CONFLICT');
       userInputSelection ??= decision.userInputSelection;
+      if (
+        expectedWindowOwner !== undefined &&
+        decision.desktopControlExpectedWindowOwner !== undefined &&
+        expectedWindowOwner !== decision.desktopControlExpectedWindowOwner
+      )
+        throw new Error('APPROVAL_DESKTOP_WINDOW_OWNER_CONFLICT');
+      expectedWindowOwner ??= decision.desktopControlExpectedWindowOwner;
       revalidators.push(decision.beforeExecute ?? (() => false));
     }
     return {
@@ -256,6 +328,9 @@ export class ApprovalCoordinator {
       beforeExecute: () => revalidators.every((revalidate) => revalidate()),
       ...(approvalDecision === undefined ? {} : { approvalDecision }),
       ...(userInputSelection === undefined ? {} : { userInputSelection }),
+      ...(expectedWindowOwner === undefined
+        ? {}
+        : { desktopControlExpectedWindowOwner: expectedWindowOwner }),
     };
   }
 
@@ -278,9 +353,34 @@ export class ApprovalCoordinator {
     const perCallSubject = perCall ? perCallApprovalSubject(request, capability) : undefined;
     if (perCallSubject === null)
       return { decision: 'deny', reason: 'per_call_approval_subject_unbound' };
-    // A per-call capability never reuses a Task grant, including one left by an earlier version.
+    const desktopControl = isDesktopControlCall(request);
+    const desktopForeground = desktopControl && isForegroundDesktopControlCall(request);
+    // A read or background run on an app the person allowed for the Task on an earlier card of
+    // this Task, judged again from the executable's own records before it starts.
+    // The executable checks each window id the run names against the granted process instance as
+    // it runs (`desktopControlExpectedWindowOwner`), since a closed window's id can be reused by
+    // another app's window while the records still name the granted one.
+    const grantedApp =
+      !perCall && desktopControl && !desktopForeground
+        ? this.desktopAppGrantCovering(request)
+        : null;
+    const expectedWindowOwner =
+      grantedApp === null ? null : desktopControlExpectedWindowOwner(grantedApp);
+    if (grantedApp !== null && expectedWindowOwner !== null)
+      return {
+        decision: 'allow',
+        reason: 'desktop_app_task_grant',
+        approvalDecision: 'allow_task',
+        desktopControlExpectedWindowOwner: expectedWindowOwner,
+        beforeExecute: () =>
+          this.options.isTurnActive(request.context.taskId, request.context.turnId) &&
+          this.desktopAppGrantCovering(request)?.id === grantedApp.id,
+      };
+    // A per-call capability never reuses a Task grant, including one left by an earlier version,
+    // and neither does a desktop-control run that uses the foreground.
     if (
       !perCall &&
+      !desktopForeground &&
       this.options.persistence.hasTaskGrant?.({
         taskId: request.context.taskId,
         requestDigest,
@@ -291,6 +391,9 @@ export class ApprovalCoordinator {
       return {
         decision: 'allow',
         reason: 'task_grant',
+        // The person chose "allow for the Task" on a card for this exact request (the digest binds
+        // the tool, its whole input and the policy epoch), so it counts as their decision.
+        approvalDecision: 'allow_task',
         beforeExecute: () =>
           this.options.persistence.hasTaskGrant?.({
             taskId: request.context.taskId,
@@ -306,6 +409,21 @@ export class ApprovalCoordinator {
     const approvalId = randomUUID();
     const challenge = `${randomUUID()}${randomUUID()}`;
     const facts = approvalFactsForTool(request, capability);
+    const desktopAction =
+      desktopControl && perCallSubject === undefined && validateExecutionSpec(request.input)
+        ? desktopControlApprovalAction(request.input.argv, { taskId: request.context.taskId })
+        : undefined;
+    // Offered only beside 「Task中許可」, for a run the app-wide grant could cover, and only for an
+    // app whose process the executable can be told to check window ids against.
+    const offered =
+      desktopAction?.allowTaskGrant === true &&
+      !desktopForeground &&
+      validateExecutionSpec(request.input) &&
+      desktopAppGrantEnvironmentAllows(request.input)
+        ? desktopAppGrantOffer(request.input.argv, { taskId: request.context.taskId })
+        : null;
+    const desktopAppGrant =
+      offered !== null && desktopControlExpectedWindowOwner(offered) !== null ? offered : null;
     const specDigest = facts.specDigest;
     const resource = facts.resourceSet;
     const operation = facts.operation;
@@ -339,6 +457,16 @@ export class ApprovalCoordinator {
         target: perCallSubject?.label ?? displayTarget(request.input),
         impact: request.entry.sideEffect,
         execution: perCallSubject?.execution ?? safeApprovalExecution(request),
+        // What the run does, for the card only. Nothing decides on it: it is built after the
+        // decisions above, and a part it cannot name is shown as not confirmed.
+        ...(desktopAction === undefined
+          ? {}
+          : {
+              desktopAction:
+                desktopAppGrant === null
+                  ? desktopAction
+                  : { ...desktopAction, appGrant: { app: desktopAppGrant.label } },
+            }),
       },
       ...ephemeralApprovalExecution(request),
       challenge,
@@ -374,6 +502,7 @@ export class ApprovalCoordinator {
           capability,
           settlers: [],
           canceled: false,
+          desktopAppGrant,
         };
         this.waiters.set(persistedId, waiter);
         this.attachSettler(persistedId, waiter, settler);
@@ -456,12 +585,37 @@ export class ApprovalCoordinator {
     // Its call was aborted and the card could not be canceled durably. Recording a decision now
     // would mint a permit or grant for a call that no longer exists.
     if (waiter?.canceled === true) throw new Error('APPROVAL_CANCELED');
+    // 「このアプリは Task 中許可」 is accepted only from a card this process raised with that choice
+    // on it, for a run the grant could cover. Refused before anything is recorded.
+    if (
+      command.grantScope !== undefined &&
+      (command.grantScope !== 'app' ||
+        command.decision !== 'allow_task' ||
+        waiter === undefined ||
+        waiter.desktopAppGrant === null ||
+        desktopControlExpectedWindowOwner(waiter.desktopAppGrant) === null ||
+        !isDesktopControlCall(waiter.request) ||
+        isForegroundDesktopControlCall(waiter.request))
+    )
+      throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
+    const appScope = command.grantScope === 'app';
+    // The card's own run is allowed under the app-wide grant too, so the executable checks each
+    // window id it names against the granted process as it runs, like every later run under it: the
+    // window can close and its id be reused by another app while the card waits.
+    const appWindowOwner =
+      appScope && waiter?.desktopAppGrant != null
+        ? desktopControlExpectedWindowOwner(waiter.desktopAppGrant)
+        : null;
     // Approved one call at a time (Issue #546). Refused before anything is recorded, whether or not
     // this process still holds the waiter, so no Task grant can come out of such a card.
     if (
       command.decision === 'allow_task' &&
       ((waiter !== undefined && requiresPerCallHumanApproval(waiter.capability)) ||
-        (current.capability !== undefined && requiresPerCallHumanApproval(current.capability)))
+        (current.capability !== undefined && requiresPerCallHumanApproval(current.capability)) ||
+        // A desktop-control run that uses the foreground is allowed one run at a time.
+        (waiter !== undefined &&
+          isDesktopControlCall(waiter.request) &&
+          isForegroundDesktopControlCall(waiter.request)))
     )
       throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
@@ -503,6 +657,8 @@ export class ApprovalCoordinator {
       operationId: command.operationId,
       decidedAt: this.options.now(),
       grantExpiresAt: this.options.expiresAt(),
+      // The app-wide grant lives in memory only, so no grant for the exact command is stored.
+      ...(appScope ? { saveTaskGrant: false as const } : {}),
     });
     if (policyChanged) {
       this.options.publish(result.approval, result.event);
@@ -517,6 +673,7 @@ export class ApprovalCoordinator {
 
     if (
       command.decision === 'allow_task' &&
+      !appScope &&
       waiter !== undefined &&
       waiter.request.entry.providerName !== 'request_user_input'
     )
@@ -526,12 +683,19 @@ export class ApprovalCoordinator {
         policyEpoch: current.policyEpoch,
         expiresAt: this.options.expiresAt(),
       });
+    if (appScope && waiter?.desktopAppGrant != null)
+      this.saveDesktopAppGrant(command.taskId, {
+        key: waiter.desktopAppGrant,
+        policyEpoch: current.policyEpoch,
+        expiresAt: this.options.expiresAt(),
+      });
     this.release(command.approvalId, {
       decision: command.decision === 'deny' && !userInputRequest ? 'deny' : 'allow',
       reason: `approval_${command.decision}`,
       ...(selectedUserInput !== undefined
         ? { userInputSelection: selectedUserInput }
         : { approvalDecision: command.decision }),
+      ...(appWindowOwner === null ? {} : { desktopControlExpectedWindowOwner: appWindowOwner }),
       ...(userInputRequest && waiter !== undefined
         ? {
             beforeExecute: () =>
@@ -566,6 +730,12 @@ export class ApprovalCoordinator {
                     ) ??
                       true)
                   );
+                // The run this card was raised for, under the app-wide grant just given.
+                if (appScope)
+                  return (
+                    appWindowOwner !== null &&
+                    this.desktopAppGrantCovering(waiter.request)?.id === waiter.desktopAppGrant?.id
+                  );
                 if (
                   this.options.revalidateTaskGrant?.({
                     capability: waiter.capability,
@@ -589,6 +759,18 @@ export class ApprovalCoordinator {
     return result.approval;
   }
 
+  /**
+   * The Runtime finished its Turn while cards of that Turn were still unanswered — a CLI does not
+   * have to wait for a tool call it issued (issue #1170). Nobody can use those decisions any more, so
+   * each card is canceled exactly as for an aborted call: no decision, no permit or grant, the call
+   * is told `approval_canceled` and never runs, the cancellation is published so the card leaves the
+   * screen, and once no card is pending the Turn leaves `waiting_approval` for `executing`.
+   */
+  cancelUnansweredForTurn(taskId: string, turnId: string): void {
+    for (const [id, waiter] of [...this.waiters.entries()])
+      if (waiter.taskId === taskId && waiter.turnId === turnId) this.cancelForAbortedCall(id);
+  }
+
   turnEnded(taskId: string, turnId: string, reason: 'canceled' | 'finished'): void {
     const ended = this.options.persistence.endTurnApprovals?.(taskId, turnId, reason);
     const ids =
@@ -599,7 +781,42 @@ export class ApprovalCoordinator {
     for (const id of ids) this.release(id, { decision: 'deny', reason: `turn_${reason}` });
   }
 
+  private saveDesktopAppGrant(taskId: string, grant: DesktopAppGrant): void {
+    const grants = this.desktopAppGrants.get(taskId) ?? new Map<string, DesktopAppGrant>();
+    grants.set(grant.key.id, grant);
+    this.desktopAppGrants.delete(taskId);
+    this.desktopAppGrants.set(taskId, grants);
+    if (this.desktopAppGrants.size > DESKTOP_APP_GRANT_TASKS)
+      this.desktopAppGrants.delete(this.desktopAppGrants.keys().next().value!);
+  }
+
+  /**
+   * The app-wide Task grant of this Task that covers this desktop-control run, or `null`: one given
+   * under the current policy epoch, not expired, for the app the run is confined to by the
+   * executable's own records (`desktopAppGrantCovering`).
+   */
+  private desktopAppGrantCovering(request: ToolAuthorizationRequest): DesktopAppGrantKey | null {
+    const { taskId, policyEpoch } = request.context;
+    const grants = this.desktopAppGrants.get(taskId);
+    if (grants === undefined || !validateExecutionSpec(request.input)) return null;
+    if (!desktopAppGrantEnvironmentAllows(request.input)) return null;
+    const now = Date.parse(this.options.now());
+    const current = this.options.getCurrentPolicyEpoch(taskId);
+    const live = [...grants.values()].filter(
+      (grant) =>
+        grant.policyEpoch === policyEpoch &&
+        grant.policyEpoch === current &&
+        Date.parse(grant.expiresAt) > now,
+    );
+    return desktopAppGrantCovering(
+      request.input.argv,
+      live.map(({ key }) => key),
+      { taskId },
+    );
+  }
+
   policyEpochChanged(taskId: string, policyEpoch: number): void {
+    this.desktopAppGrants.delete(taskId);
     const invalidated =
       this.options.persistence.invalidatePendingApprovalsForTask?.(
         taskId,
@@ -693,8 +910,6 @@ function operationFor(capability: Capability): PermissionOperation {
   if (capability === 'shell.execute') return 'execute';
   if (capability === 'secret.use') return 'use';
   if (capability === 'provider.egress') return 'egress';
-  if (capability === 'computer.observe') return 'observe';
-  if (capability === 'computer.control') return 'control';
   return capability.endsWith('.write') ? 'write' : 'read';
 }
 
@@ -913,31 +1128,6 @@ function skillDraftApprovalInput(input: unknown): {
  */
 const APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS = 500;
 const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
-/**
- * Characters the card would not show as themselves, so the person would approve text they did not
- * read. Control characters (other than tab, line feed, and carriage return) and format characters
- * draw as nothing or reorder what is drawn; line and paragraph separators, private-use, and
- * unassigned codepoints have no reliable glyph.
- *
- * `\p{Cf}` rather than a hand-picked list, for the reason `computerUseUntrustedTextSchemaOf` in the
- * contracts gives: the Unicode Tag block (U+E0000-U+E007F) spells a whole sentence in invisible
- * codepoints, which would then sit in Project memory and be read by every later Turn, and a single
- * U+200B inside a token is enough to hide it from the secret scanner. ZWJ is a format character, so
- * an emoji joined by it is refused, which is accepted.
- *
- * Unlike the contracts, combining marks as a whole stay allowed, since NFD Japanese depends on them.
- * The ones that never draw are refused through Unicode's Default_Ignorable_Code_Point rather than a
- * list of names, which kept missing some (the Khmer inherent vowels U+17B4 and U+17B5, for one):
- * each hides a token from the secret scanner as U+200B does, and a run of variation selectors
- * carries one byte apiece. Only the two a card needs to draw are allowed, and only where they draw
- * something. U+FE0E or U+FE0F must follow an emoji and choose its form, and after a keycap base
- * (0-9, #, *) only as part of a keycap with U+20E3; anywhere else it draws nothing, so it could
- * split a secret or carry one bit per character. One ideographic variation selector may follow a
- * Han character, which Japanese names need. Either repeated, or out of those places, is refused.
- */
-const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
-  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}|(?![\uFE0E\uFE0F\u{E0100}-\u{E01EF}])\p{Default_Ignorable_Code_Point}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Emoji})[\uFE0E\uFE0F]|(?<=[0-9#*])[\uFE0E\uFE0F](?!\u20E3)|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
-
 function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
   if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
     return `approval_content_not_displayable: the approval card target is longer than ${APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS} characters`;
@@ -964,6 +1154,60 @@ function displayTarget(input: unknown): string {
 }
 
 /**
+ * Whether this call runs the shipped desktop-control binary, judged on the executable bytes sealed
+ * when its ExecutionSpec was prepared (against the shipped file's seal), not on its path.
+ */
+export function isDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    request.entry.implementationKind === 'command-runner' &&
+    validateExecutionSpec(request.input) &&
+    isDesktopControlExecutable(
+      request.input.absoluteExecutable,
+      executionSpecContentDigest(request.input),
+    )
+  );
+}
+
+/**
+ * Whether this desktop-control call only prints the bundled guides, help, the version or the
+ * binary's own status (see `desktopControlArgvIsInert`), judged on the argv sealed into its
+ * ExecutionSpec. The command tool judges the same sealed argv again before it starts the run.
+ */
+export function isInertDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    isDesktopControlCall(request) &&
+    validateExecutionSpec(request.input) &&
+    desktopControlArgvIsInert(request.input.argv)
+  );
+}
+
+/**
+ * Whether the run's environment leaves the executable reading its refs where the app-wide grant
+ * reads them: a session or agent id (`AGENT_DESKTOP_SESSION`, `AGENT_DESKTOP_AGENT_ID`) moves them
+ * to a folder the grant does not read, so such a run is never offered or covered by one.
+ */
+function desktopAppGrantEnvironmentAllows(spec: ExecutionSpec): boolean {
+  const scoped = (key: string) =>
+    ['AGENT_DESKTOP_SESSION', 'AGENT_DESKTOP_AGENT_ID'].includes(key.toUpperCase());
+  return (
+    !Object.keys(spec.envDelta).some(scoped) &&
+    !Object.entries(process.env).some(([key, value]) => scoped(key) && value !== undefined)
+  );
+}
+
+/**
+ * Whether this desktop-control call takes the foreground, the cursor or the keyboard, or may close
+ * an app (see `desktopControlArgvMode`), judged on the argv sealed into its ExecutionSpec. Such a
+ * run is decided on its own card every time.
+ */
+function isForegroundDesktopControlCall(request: ToolAuthorizationRequest): boolean {
+  return (
+    validateExecutionSpec(request.input) &&
+    desktopControlArgvMode(request.input.argv) === 'foreground'
+  );
+}
+
+/**
  * What a persisted digest over a Tool input may be taken from.
  *
  * Every digest this module produces is stored — `spec_digest` on the approval row, the permission
@@ -973,6 +1217,7 @@ function displayTarget(input: unknown): string {
  * grant recognises a repeat, but nobody holding the database can confirm a candidate password
  * (Issue #473).
  */
+
 function durableDigestInput(input: unknown): unknown {
   const stdin = managedStdinAuthorizationFacts(input);
   return stdin === undefined ? input : managedStdinApprovalExecution(stdin);

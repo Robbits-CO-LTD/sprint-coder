@@ -22,6 +22,9 @@ import {
   clearDependencyToolCaches,
   compilerCacheable,
   dependencyCacheValid,
+  desktopControlCacheValid,
+  desktopControlProbeValid,
+  resetDesktopControlOutput,
   resetSandboxOutput,
   sandboxCacheValid,
   sandboxProbeValid,
@@ -33,6 +36,9 @@ const depsAction = parse(
 );
 const sandboxAction = parse(
   readFileSync(join(repo, '.github/actions/prepare-sandbox/action.yml'), 'utf8'),
+);
+const desktopControlAction = parse(
+  readFileSync(join(repo, '.github/actions/prepare-desktop-control/action.yml'), 'utf8'),
 );
 const workflow = parse(readFileSync(join(repo, '.github/workflows/ci.yml'), 'utf8'));
 const cleanup = [];
@@ -217,6 +223,90 @@ describe('CI cache reuse and fallback', () => {
     expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
     const windowsBuild = sandboxAction.runs.steps.find((step) => step.shell === 'pwsh');
     expect(condition(windowsBuild.if, { sandbox: {}, validation: {} })).toBe(true);
+  });
+
+  it('builds desktop control only on Windows, on a miss or an invalid hit, keyed by its source', () => {
+    const builds = desktopControlAction.runs.steps.filter((step) =>
+      step.name.startsWith('Build desktop-control on'),
+    );
+    expect(builds).toHaveLength(1);
+    const [build] = builds;
+    expect(build.shell).toBe('pwsh');
+    expect(build.run).toContain('npm run build:desktop-control');
+    expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+    for (const [hit, valid, expected] of [
+      ['', '', true],
+      ['false', 'true', true],
+      ['true', 'false', true],
+      ['true', 'true', false],
+    ]) {
+      const outputs = { 'desktop-control': { 'cache-hit': hit }, validation: { valid } };
+      expect(condition(build.if, outputs, 'Windows')).toBe(expected);
+      for (const os of ['Linux', 'macOS']) expect(condition(build.if, outputs, os)).toBe(false);
+    }
+    const restore = desktopControlAction.runs.steps.find((step) => step.id === 'desktop-control');
+    expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
+    expect(condition(restore.if, { compiler: { cacheable: 'true' } })).toBe(true);
+    expect(condition(restore.if, { compiler: { cacheable: 'true' } }, 'Linux')).toBe(false);
+    expect(restore.with.path).toBe('apps/desktop/desktop-control/build/Release');
+    // The vendored source, its lock and pinned toolchain, but never its own build output.
+    expect(restore.with.key).toContain("'apps/desktop/desktop-control/**'");
+    expect(restore.with.key).toContain("'!apps/desktop/desktop-control/build/**'");
+    expect(restore.with.key).toContain("'!apps/desktop/desktop-control/target/**'");
+    expect(restore.with.key).toContain("'build-desktop-control.mjs'");
+    const verify = desktopControlAction.runs.steps.at(-1);
+    expect(verify.run).toBe('node ci-cache.mjs assert-desktop-control');
+    for (const os of ['Linux', 'macOS']) expect(condition(verify.if, {}, os)).toBe(false);
+    // Every Windows job that packages or runs the desktop tests prepares it first.
+    for (const [job, consumer] of [
+      ['package-windows-build', 'npx electron-forge package --platform=win32 --arch=x64'],
+      ['package-windows', 'npx electron-forge make --platform=win32 --arch=x64'],
+      ['platform-tests', 'npx vitest run --shard=${{ matrix.shard }} --maxWorkers=1'],
+    ]) {
+      const steps = workflow.jobs[job].steps;
+      const prepare = steps.findIndex(
+        (step) => step.uses === './.github/actions/prepare-desktop-control',
+      );
+      expect(prepare, job).toBeGreaterThan(-1);
+      expect(steps.findIndex((step) => step.run?.startsWith(consumer))).toBeGreaterThan(prepare);
+    }
+    for (const job of ['package-linux', 'package-macos', 'test-macos'])
+      expect(
+        workflow.jobs[job].steps.some(
+          (step) => step.uses === './.github/actions/prepare-desktop-control',
+        ),
+      ).toBe(false);
+  });
+
+  it('accepts a cached desktop-control build only when its bytes match its seal', () => {
+    const root = fixture();
+    expect(desktopControlCacheValid(root)).toBe(false);
+    const directory = join(root, 'apps/desktop/desktop-control/build/Release');
+    const executable = join(directory, 'sprint-coder-desktop-control.exe');
+    write(executable, 'fixture-desktop-control', 0o755);
+    expect(desktopControlCacheValid(root)).toBe(false);
+    write(
+      `${executable}.sha256`,
+      `${createHash('sha256').update('fixture-desktop-control').digest('hex')}\n`,
+    );
+    expect(desktopControlCacheValid(root)).toBe(true);
+    writeFileSync(executable, 'changed');
+    expect(desktopControlCacheValid(root)).toBe(false);
+    writeFileSync(`${executable}.sha256`, 'invalid');
+    expect(desktopControlCacheValid(root)).toBe(false);
+    // Not an executable that starts and reports a version.
+    expect(desktopControlProbeValid(root)).toBe(false);
+    resetDesktopControlOutput(root);
+    expect(existsSync(directory)).toBe(false);
+    const invoke = spawnSync(
+      process.execPath,
+      [join(repo, 'ci-cache.mjs'), 'assert-desktop-control'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+      },
+    );
+    expect(invoke.status).not.toBe(0);
   });
 
   it('fails closed when build output or executable protocol is invalid', () => {
@@ -534,8 +624,8 @@ describe('full CI partition contract', () => {
         .map((step) => ({ job, step })),
     );
     expect(cargoSteps).toHaveLength(1);
-    expect(cargoSteps[0].job).toBe('computer-use-native-gate');
-    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
+    expect(cargoSteps[0].job).toBe('platform-tests');
+    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows' && matrix.shard == '1/5'");
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
     expect(rust.if).toBe("needs.classify.outputs.full_matrix == 'true'");
@@ -599,16 +689,11 @@ describe('full CI partition contract', () => {
       );
     }
     const required = workflow.jobs.required;
-    expect(required.needs).toContain('computer-use-native-gate');
-    expect(required.needs).toContain('computer-use-windows-v2-harness');
-    expect(required.needs).toContain('computer-use-hung-helper');
     const scope = classifyChanges([], { eventName: 'push' });
     const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
     expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
     for (const dependency of [
-      'computer-use-native-gate',
-      'computer-use-windows-v2-harness',
-      'computer-use-hung-helper',
+      'sandbox-rust-windows',
       'test-macos',
       'package-macos',
       'electron-bridges',

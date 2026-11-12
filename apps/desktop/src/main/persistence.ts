@@ -3,19 +3,6 @@ import { secureLogger } from './secure-logger';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
 import {
-  computerAppGrantMismatch,
-  type ComputerAppGrantIdentity,
-  type ComputerAppGrantIdentityKind,
-  type ComputerAppGrantPlatform,
-} from './computer-use-grant-identity';
-import {
-  computerAppGrantMacMatches,
-  computerAppGrantRecordMac,
-  computerAppGrantStoredIdentity,
-  type ComputerAppGrantMode,
-  type ComputerAppGrantRecord,
-} from './computer-use-grant-record';
-import {
   graphUpdateRequestSchema,
   graphUpdateCommitSchema,
   graphPendingUpdateSchema,
@@ -48,7 +35,6 @@ import {
   type GraphStepInterruption,
 } from './graph-resource';
 import {
-  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   graphGenerationSchema,
   graphMissionPlanSchema,
   teamMissionCheckpointSchema,
@@ -101,6 +87,8 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   chatMessageSchema,
   approvalSummarySchema,
+  desktopApprovalActionSchema,
+  type DesktopApprovalAction,
   commandSummarySchema,
   executionResolutionSchema,
   modelSelectionSchema,
@@ -329,6 +317,8 @@ import {
 } from './edit-saga';
 import { assertStableSingleLinkFile } from './stable-file-snapshot';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
+import { isShippedDesktopControlPath } from './desktop-control';
+import { desktopControlApprovalAction } from './desktop-control-display';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -1107,276 +1097,6 @@ type ApprovalRow = {
   requested_at: string;
   resolved_at: string | null;
   decision_operation_id: string | null;
-};
-export type ComputerAppProfileKind = 'win32-executable' | 'windows-package' | 'macos-bundle';
-export type ComputerAppProfilePlatform = 'win32' | 'darwin';
-export const COMPUTER_USE_MAX_PROFILES = 64;
-/** The same ceiling as profiles: a list a person is expected to read and prune by hand. */
-export const COMPUTER_USE_MAX_GRANTS = 64;
-/**
- * How many application histories one read of the totals may return.
- *
- * The settings screen shows the ungranted ones, so the caller asks for enough that a full grant
- * table cannot crowd them out: every granted application may also have a history, and they are
- * filtered out after the query.
- */
-export const COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS =
-  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT + COMPUTER_USE_MAX_GRANTS;
-/**
- * The grant record format this build writes.
- *
- * Stored per row and covered by the MAC, so a future format change can be told apart from a row
- * this build wrote — a grant that means something different than the reader assumes is exactly what
- * §6.2's integrity protection is for.
- */
-export const COMPUTER_APP_GRANT_VERSION = 1;
-export type ComputerAppGrantListing = Readonly<{
-  grants: readonly ComputerAppGrantRecord[];
-  /** Rows whose MAC did not verify; surfaced as a count in settings, never as content. */
-  discarded: number;
-}>;
-/**
- * One application's access-request history inside one Task (ADR v2 §6.1, T8).
- *
- * Keyed by platform + grant identity digest rather than by a profile id, so the row survives the
- * application being re-registered and means the same thing once S4/S5 enumerate applications that
- * were never registered at all. `denied` is the Task-scoped refusal: once the user says no, the
- * agent may not raise another card for this application in this Task, and a different Task may ask.
- *
- * Deliberately not MAC-authenticated, unlike `computer_app_grants`. Every field here can only ever
- * *withhold* — forging a row denies an application or inflates a counter, and clearing one puts the
- * agent back to needing a human click it never had. There is no value an attacker can write that
- * grants anything, so the per-install key buys nothing and the extra column would have to be kept
- * consistent across two counters that move on every card.
- */
-export type ComputerAppAccessRequestRecord = Readonly<{
-  platform: ComputerAppGrantPlatform;
-  grantIdentityDigest: string;
-  taskId: string;
-  appId: string;
-  /** App-authored. Sanitised on the way in and again on the way to the Renderer. */
-  displayName: string;
-  requestCount: number;
-  denialCount: number;
-  denied: boolean;
-  /** Like denied, retained until Task deletion; does not refuse provider-egress consent. */
-  upgradeDenied: boolean;
-  createdAt: string;
-  updatedAt: string;
-}>;
-
-export type ComputerAppAccessRequestInput = Readonly<{
-  platform: ComputerAppGrantPlatform;
-  grantIdentityDigest: string;
-  taskId: string;
-  appId: string;
-  displayName: string;
-  outcome: 'requested' | 'denied' | 'upgrade_denied';
-  now?: string;
-}>;
-
-/** The aggregate a settings row shows for an application that holds no grant. */
-export type ComputerAppAccessRequestTotals = Readonly<{
-  platform: ComputerAppGrantPlatform;
-  grantIdentityDigest: string;
-  appId: string;
-  displayName: string;
-  requestCount: number;
-  denialCount: number;
-  lastRequestedAt: string;
-}>;
-
-export type ComputerAppGrantInput = Readonly<{
-  id?: string;
-  /** Derived by the pure leaf, so the store can never be handed a digest its fields disagree with. */
-  identity: ComputerAppGrantIdentity;
-  /** App-authored, bounded, and never an identity input. Sanitised again before it is displayed. */
-  displayName: string;
-  maxMode: ComputerAppGrantMode;
-  denyRulesetVersion: number;
-  providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
-  requestCount?: number;
-  denialCount?: number;
-  lastUsedAt?: string | null;
-  createdAt?: string;
-  updatedAt?: string;
-}>;
-export type ComputerAppProfileRecord = Readonly<{
-  id: string;
-  platform: ComputerAppProfilePlatform;
-  kind: ComputerAppProfileKind;
-  label: string;
-  canonicalPath: string;
-  appUrl: string | null;
-  identity: Readonly<Record<string, unknown>>;
-  identityDigest: string;
-  version: string | null;
-  executableDigest: string | null;
-  mode: 'observe_only' | 'supervised' | 'full_access_app';
-  connectionId: string;
-  modelId: string;
-  providerEgressConsent: boolean;
-  remember: boolean;
-  revision: number;
-  createdAt: string;
-  updatedAt: string;
-}>;
-export type ComputerAppProfileInput = Omit<
-  ComputerAppProfileRecord,
-  'revision' | 'createdAt' | 'updatedAt'
-> & {
-  revision?: number;
-  createdAt?: string;
-  updatedAt?: string;
-};
-export type ComputerActionKind =
-  | 'invoke'
-  | 'set_text'
-  | 'select'
-  | 'toggle'
-  | 'expand_collapse'
-  | 'scroll'
-  | 'click'
-  | 'type'
-  | 'key'
-  | 'wait'
-  | 'finish'
-  | 'copy';
-export type ComputerActionAuditState =
-  'pending' | 'applied' | 'rejected' | 'unknown_effect' | 'canceled';
-/**
- * N2b-4 approval correlation (ADR S4-4 addendum 8). Trace-only: these values are never read to
- * authorize, de-duplicate, or resume anything. `revalidation_failed` is a reason code, not an outcome.
- */
-export type ComputerActionApprovalOutcome = 'approved' | 'denied' | 'expired' | 'revoked';
-export type ComputerActionApprovalEffect =
-  'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
-const COMPUTER_ACTION_APPROVAL_OUTCOMES: readonly string[] = [
-  'approved',
-  'denied',
-  'expired',
-  'revoked',
-];
-const COMPUTER_ACTION_APPROVAL_EFFECTS: readonly string[] = [
-  'download_open',
-  'file_manager_open',
-  'high_impact_confirmation',
-  'supervised_action',
-];
-export type ComputerActionAuditRecord = Readonly<{
-  id: string;
-  taskId: string;
-  /** SHA-256 binding digest; the live synthetic Turn id is never persisted. */
-  turnId: string;
-  /** SHA-256 binding digest; the live session id is never persisted. */
-  sessionId: string;
-  profileId: string;
-  /** Only native-discovered candidates; never creates a saved profile. */
-  candidateProfileDisplayName?: string;
-  profileRevision: number;
-  appIdentityDigest: string;
-  windowIdentityDigest: string;
-  observationRevision: number;
-  observationDigest: string;
-  clientWidth: number;
-  clientHeight: number;
-  actionDigest: string;
-  actionKind: ComputerActionKind;
-  route: 'semantic' | 'visual' | 'none';
-  state: ComputerActionAuditState;
-  reasonCode: string | null;
-  /** SHA-256 binding digest; the native request id remains ephemeral. */
-  nativeRequestId: string;
-  policyEpoch: number;
-  /** Main approval id; set on the (b) row only. */
-  approvalId: string | null;
-  /** computerUseAuditBindingDigest(requestId) of the (b) native request; set on the (c) row only. */
-  approvalParentRequestId: string | null;
-  /** NULL until the approval resolves; then written exactly once. */
-  approvalOutcome: ComputerActionApprovalOutcome | null;
-  approvalEffect: ComputerActionApprovalEffect | null;
-  createdAt: string;
-  updatedAt: string;
-}>;
-export type ComputerActionAuditInput = Readonly<{
-  id?: string;
-  taskId: string;
-  /** SHA-256 binding digest. */
-  turnId: string;
-  /** SHA-256 binding digest. */
-  sessionId: string;
-  profileId: string;
-  /** Only native-discovered candidates; never creates a saved profile. */
-  candidateProfileDisplayName?: string;
-  profileRevision: number;
-  appIdentityDigest: string;
-  windowIdentityDigest: string;
-  observationRevision: number;
-  observationDigest: string;
-  clientWidth: number;
-  clientHeight: number;
-  actionDigest: string;
-  actionKind: ComputerActionKind;
-  route: 'semantic' | 'visual' | 'none';
-  state?: ComputerActionAuditState;
-  reasonCode?: string | null;
-  /** SHA-256 binding digest. */
-  nativeRequestId: string;
-  policyEpoch: number;
-  approvalId?: string | null;
-  /** SHA-256 binding digest of the (b) native request id, never the raw id. */
-  approvalParentRequestId?: string | null;
-  approvalEffect?: ComputerActionApprovalEffect | null;
-  createdAt?: string;
-}>;
-type ComputerAppProfileRow = {
-  id: string;
-  platform: ComputerAppProfilePlatform;
-  app_kind: ComputerAppProfileKind;
-  display_name: string;
-  canonical_path: string;
-  app_url: string | null;
-  identity_json: string;
-  identity_digest: string;
-  version: string | null;
-  executable_digest: string | null;
-  mode: 'observe_only' | 'supervised' | 'full_access_app';
-  connection_id: string;
-  model_id: string;
-  provider_egress_consent: number;
-  remember: number;
-  revision: number;
-  created_at: string;
-  updated_at: string;
-};
-type ComputerActionAuditRow = {
-  id: string;
-  task_id: string;
-  turn_id: string;
-  session_id: string;
-  profile_id: string | null;
-  candidate_profile_id: string | null;
-  candidate_profile_display_name: string | null;
-  profile_revision: number;
-  app_identity_digest: string;
-  window_identity_digest: string;
-  observation_revision: number;
-  observation_digest: string;
-  client_width: number;
-  client_height: number;
-  action_digest: string;
-  action_kind: ComputerActionKind;
-  route: 'semantic' | 'visual' | 'none';
-  state: ComputerActionAuditState;
-  reason_code: string | null;
-  native_request_id: string;
-  policy_epoch: number;
-  approval_id: string | null;
-  approval_parent_request_id: string | null;
-  approval_outcome: ComputerActionApprovalOutcome | null;
-  approval_effect: ComputerActionApprovalEffect | null;
-  created_at: string;
-  updated_at: string;
 };
 type CommandRow = {
   id: string;
@@ -5120,7 +4840,13 @@ export type ApprovalRequestInput = {
   sandboxProfile: SandboxProfile;
   risk: 'low' | 'medium' | 'high';
   reasonUntrusted: string;
-  display: { target: string; impact: string; execution: string };
+  display: {
+    target: string;
+    impact: string;
+    execution: string;
+    /** A desktop-control run's own card. Display only; kept in `display_json`. */
+    desktopAction?: DesktopApprovalAction;
+  };
   /**
    * Live-only card detail. It is attached to the returned approval and event after both have been
    * written, so it never reaches `display_json` or the persisted `approval.requested` payload.
@@ -5157,6 +4883,11 @@ export type ApprovalResolutionInput = {
   operationId: string;
   decidedAt: string;
   grantExpiresAt?: string;
+  /**
+   * `false` records an `allow_task` without saving its Task grant for the exact command: the
+   * desktop-control app-wide grant (「このアプリは Task 中許可」) is kept in memory only.
+   */
+  saveTaskGrant?: false;
 };
 
 export type ApprovalPersistenceResult = {
@@ -6163,74 +5894,10 @@ export interface PersistenceClient {
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
-  getComputerUseEnabled(): boolean;
-  setComputerUseEnabled(enabled: boolean): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
   getSprintCoderPrePrompt(): string;
   setSprintCoderPrePrompt(prompt: string): void;
-  listComputerAppProfiles(): ComputerAppProfileRecord[];
-  getComputerAppProfile(profileId: string): ComputerAppProfileRecord;
-  createComputerAppProfile(input: ComputerAppProfileInput): ComputerAppProfileRecord;
-  updateComputerAppProfile(
-    profileId: string,
-    expectedRevision: number,
-    input: ComputerAppProfileInput,
-  ): ComputerAppProfileRecord;
-  removeComputerAppProfile(profileId: string, expectedRevision: number): void;
-  listComputerAppGrants(): ComputerAppGrantListing;
-  findComputerAppGrantByIdentity(
-    platform: ComputerAppGrantPlatform,
-    grantIdentityDigest: string,
-  ): ComputerAppGrantRecord | null;
-  getComputerAppGrant(grantId: string): ComputerAppGrantRecord;
-  createComputerAppGrant(
-    input: ComputerAppGrantInput,
-    replace?: Readonly<{ id: string; revision: number }>,
-  ): ComputerAppGrantRecord;
-  touchComputerAppGrantUsed(
-    grantId: string,
-    usedAt: string,
-    observed?: ComputerAppGrantIdentity | null,
-  ): ComputerAppGrantRecord;
-  countComputerAppGrantAccessRequest(
-    grantId: string,
-    outcome: 'requested' | 'denied',
-  ): ComputerAppGrantRecord;
-  setComputerAppGrantProviderEgress(
-    grantId: string,
-    providerEgress: Readonly<{ connectionId: string; modelId: string }> | null,
-  ): ComputerAppGrantRecord;
-  removeComputerAppGrant(grantId: string, expectedRevision: number): void;
-  /** Drops grant rows that no longer authenticate, and answers how many were dropped (T14). */
-  purgeUnauthenticatedComputerAppGrants(): number;
-  recordComputerAppAccessRequest(
-    input: ComputerAppAccessRequestInput,
-  ): ComputerAppAccessRequestRecord;
-  getComputerAppAccessRequest(
-    platform: ComputerAppGrantPlatform,
-    grantIdentityDigest: string,
-    taskId: string,
-  ): ComputerAppAccessRequestRecord | null;
-  countComputerAppAccessRequestsForTask(taskId: string): number;
-  listComputerAppAccessRequestTotals(limit?: number): readonly ComputerAppAccessRequestTotals[];
-  recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord;
-  completeComputerActionAudit(input: {
-    auditId: string;
-    state: Exclude<ComputerActionAuditState, 'pending'>;
-    reasonCode?: string | null;
-    /** Set once, with the terminal state, on the (b) row that records an offered approval. */
-    approvalId?: string | null;
-    approvalEffect?: ComputerActionApprovalEffect | null;
-    updatedAt: string;
-  }): ComputerActionAuditRecord;
-  recordComputerActionApprovalOutcome(input: {
-    auditId: string;
-    outcome: ComputerActionApprovalOutcome;
-    updatedAt: string;
-  }): ComputerActionAuditRecord;
-  listComputerActionAudits(taskId: string, limit?: number): ComputerActionAuditRecord[];
-  quarantinePendingComputerActionAudits(updatedAt: string): number;
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -6539,11 +6206,6 @@ export interface PersistenceClient {
   getActiveTurnId(taskId: string): string | null;
   changeStage(taskId: string, turnId: string, stage: TurnStage): TurnEvent;
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent;
-  recordComputerUseDiscoveryResult(
-    result: Extract<TurnEvent, { type: 'computer_use.discovery_result' }>['result'] & {
-      taskId: string;
-    },
-  ): TurnEvent;
   assistantMessageIdFor(taskId: string, turnId: string): string | null;
   completeTurn(
     taskId: string,
@@ -7356,7 +7018,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.backfillAcceptanceContracts();
       this.rematerializeLegacyPresetRules();
       this.interruptActiveCommands();
-      this.quarantinePendingComputerActionAudits(new Date().toISOString());
       this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
         this.liveStateForReminder(taskId, turnId),
       );
@@ -15940,23 +15601,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(enabled ? '1' : '0', new Date().toISOString());
   }
 
-  /** Computer Use (beta) is off unless the user turned it on: only an exact '1' opens it. */
-  getComputerUseEnabled(): boolean {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = 'computer-use.enabled'")
-      .get() as { value: string } | undefined;
-    return row?.value === '1';
-  }
-
-  setComputerUseEnabled(enabled: boolean): void {
-    this.db
-      .prepare(
-        `INSERT INTO settings(key, value, updated_at) VALUES ('computer-use.enabled', ?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      )
-      .run(enabled ? '1' : '0', new Date().toISOString());
-  }
-
   getTeamModelSelectionGuidance(): string {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'team.model-selection-guidance'")
@@ -15991,766 +15635,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(normalized, new Date().toISOString());
-  }
-
-  listComputerAppProfiles(): ComputerAppProfileRecord[] {
-    return (
-      this.db
-        .prepare('SELECT * FROM computer_app_profiles ORDER BY display_name, id')
-        .all() as ComputerAppProfileRow[]
-    ).map(toComputerAppProfile);
-  }
-
-  getComputerAppProfile(profileId: string): ComputerAppProfileRecord {
-    const row = this.db
-      .prepare('SELECT * FROM computer_app_profiles WHERE id = ?')
-      .get(profileId) as ComputerAppProfileRow | undefined;
-    if (row === undefined) throw new NotFoundError('Computer Use app profile not found');
-    return toComputerAppProfile(row);
-  }
-
-  createComputerAppProfile(input: ComputerAppProfileInput): ComputerAppProfileRecord {
-    const validated = validateComputerAppProfileInput(input);
-    const now = new Date().toISOString();
-    const revision = input.revision ?? 1;
-    const createdAt = input.createdAt === undefined ? now : canonicalTimestamp(input.createdAt);
-    const updatedAt = input.updatedAt === undefined ? now : canonicalTimestamp(input.updatedAt);
-    const profileCount = this.db
-      .prepare('SELECT COUNT(*) AS count FROM computer_app_profiles')
-      .get() as { count: number };
-    if (profileCount.count >= COMPUTER_USE_MAX_PROFILES)
-      throw new Error('Computer Use app profile limit reached');
-    this.db
-      .prepare(
-        `INSERT INTO computer_app_profiles(
-           id, platform, app_kind, display_name, canonical_path, app_url,
-           identity_json, identity_digest, version, executable_digest,
-           mode, connection_id, model_id, provider_egress_consent, remember,
-           revision, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        validated.id,
-        validated.platform,
-        validated.kind,
-        validated.label,
-        validated.canonicalPath,
-        validated.appUrl,
-        JSON.stringify(validated.identity),
-        validated.identityDigest,
-        validated.version,
-        validated.executableDigest,
-        validated.mode,
-        validated.connectionId,
-        validated.modelId,
-        validated.providerEgressConsent ? 1 : 0,
-        validated.remember ? 1 : 0,
-        revision,
-        createdAt,
-        updatedAt,
-      );
-    return this.getComputerAppProfile(validated.id);
-  }
-
-  updateComputerAppProfile(
-    profileId: string,
-    expectedRevision: number,
-    input: ComputerAppProfileInput,
-  ): ComputerAppProfileRecord {
-    const validated = validateComputerAppProfileInput({ ...input, id: profileId });
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
-      throw new Error('Invalid Computer Use profile revision');
-    const current = this.getComputerAppProfile(profileId);
-    if (current.revision !== expectedRevision) throw new OperationConflictError();
-    const updatedAt = new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE computer_app_profiles
-         SET platform = ?, app_kind = ?, display_name = ?, canonical_path = ?, app_url = ?,
-             identity_json = ?, identity_digest = ?, version = ?, executable_digest = ?,
-             mode = ?, connection_id = ?, model_id = ?, provider_egress_consent = ?, remember = ?,
-             revision = revision + 1, updated_at = ?
-         WHERE id = ? AND revision = ?`,
-      )
-      .run(
-        validated.platform,
-        validated.kind,
-        validated.label,
-        validated.canonicalPath,
-        validated.appUrl,
-        JSON.stringify(validated.identity),
-        validated.identityDigest,
-        validated.version,
-        validated.executableDigest,
-        validated.mode,
-        validated.connectionId,
-        validated.modelId,
-        validated.providerEgressConsent ? 1 : 0,
-        validated.remember ? 1 : 0,
-        updatedAt,
-        profileId,
-        expectedRevision,
-      );
-    if (result.changes !== 1) throw new OperationConflictError();
-    return this.getComputerAppProfile(profileId);
-  }
-
-  removeComputerAppProfile(profileId: string, expectedRevision: number): void {
-    const current = this.getComputerAppProfile(profileId);
-    if (!Number.isSafeInteger(expectedRevision) || current.revision !== expectedRevision)
-      throw new OperationConflictError();
-    try {
-      const result = this.db
-        .prepare('DELETE FROM computer_app_profiles WHERE id = ? AND revision = ?')
-        .run(profileId, expectedRevision);
-      if (result.changes !== 1) throw new OperationConflictError();
-    } catch (error) {
-      if (error instanceof OperationConflictError) throw error;
-      throw new Error('Computer Use app profile is referenced by an action audit', {
-        cause: error,
-      });
-    }
-  }
-
-  /**
-   * Every grant this installation holds, plus how many rows were discarded (ADR v2 §6.2, T14).
-   *
-   * Verification is per row. One forged or corrupted row must not blank the settings screen — that
-   * would be a way to hide the other grants from the person deciding whether to keep them — so a row
-   * that fails its MAC is dropped and counted. The count is shown, never the row.
-   */
-  listComputerAppGrants(): ComputerAppGrantListing {
-    const rows = this.db
-      .prepare('SELECT * FROM computer_app_grants ORDER BY app_id, id')
-      .all() as ComputerAppGrantRow[];
-    const grants: ComputerAppGrantRecord[] = [];
-    let discarded = 0;
-    for (const row of rows) {
-      const grant = verifiedComputerAppGrant(row);
-      if (grant === null) discarded += 1;
-      else grants.push(grant);
-    }
-    return Object.freeze({ grants, discarded });
-  }
-
-  /**
-   * The grant for one verified identity, or null.
-   *
-   * Null covers "no grant", "a grant whose MAC does not verify", and "a row that no longer parses".
-   * The caller cannot tell them apart, and must not: all three mean the application is not granted,
-   * and a caller that could distinguish a tampered row would be tempted to treat it as recoverable.
-   */
-  findComputerAppGrantByIdentity(
-    platform: ComputerAppGrantPlatform,
-    grantIdentityDigest: string,
-  ): ComputerAppGrantRecord | null {
-    const row = this.db
-      .prepare('SELECT * FROM computer_app_grants WHERE platform = ? AND grant_identity_digest = ?')
-      .get(platform, grantIdentityDigest) as ComputerAppGrantRow | undefined;
-    return row === undefined ? null : verifiedComputerAppGrant(row);
-  }
-
-  getComputerAppGrant(grantId: string): ComputerAppGrantRecord {
-    const row = this.db.prepare('SELECT * FROM computer_app_grants WHERE id = ?').get(grantId) as
-      ComputerAppGrantRow | undefined;
-    const grant = row === undefined ? null : verifiedComputerAppGrant(row);
-    if (grant === null) throw new NotFoundError('Computer Use app grant not found');
-    return grant;
-  }
-
-  createComputerAppGrant(
-    input: ComputerAppGrantInput,
-    replace?: Readonly<{ id: string; revision: number }>,
-  ): ComputerAppGrantRecord {
-    return this.db.transaction(() => {
-      if (replace !== undefined) this.removeComputerAppGrant(replace.id, replace.revision);
-      return this.insertComputerAppGrant(input);
-    })();
-  }
-
-  private insertComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord {
-    const now = new Date().toISOString();
-    const record = validateComputerAppGrant({
-      id: input.id ?? randomUUID(),
-      platform: input.identity.platform,
-      identityKind: input.identity.identityKind,
-      grantIdentityDigest: input.identity.grantIdentityDigest,
-      appId: input.identity.appId,
-      displayName: input.displayName,
-      publisher: input.identity.publisher,
-      signingIdentifier: input.identity.signingIdentifier,
-      signerDigest: input.identity.signerDigest,
-      packageFamilyName: input.identity.packageFamilyName,
-      executablePath: input.identity.executablePath,
-      executableDigest: input.identity.executableDigest,
-      cdHash: input.identity.cdHash,
-      lastCdHash: null,
-      cdHashChangedAt: null,
-      maxMode: input.maxMode,
-      scope: 'global',
-      denyRulesetVersion: input.denyRulesetVersion,
-      grantVersion: COMPUTER_APP_GRANT_VERSION,
-      providerEgressConnectionId: input.providerEgress?.connectionId ?? null,
-      providerEgressModelId: input.providerEgress?.modelId ?? null,
-      requestCount: input.requestCount ?? 0,
-      denialCount: input.denialCount ?? 0,
-      lastUsedAt: input.lastUsedAt ?? null,
-      createdAt: input.createdAt === undefined ? now : canonicalTimestamp(input.createdAt),
-      updatedAt: input.updatedAt === undefined ? now : canonicalTimestamp(input.updatedAt),
-      revision: 1,
-    });
-    // A row already holding this identity must not be able to block a fresh approval.
-    //
-    // Two ways that happens, and both are how a grant becomes *unusable* rather than valid: a row
-    // whose MAC does not verify (T14 — otherwise writing one forged row would permanently deny an
-    // application, since the unique index refuses the insert and `removeComputerAppGrant` refuses
-    // the delete), and a row that no longer describes this application at all — on macOS the digest
-    // excludes the path, so a copy in another directory collides with the original's row while
-    // failing §6.3. Only a row that authenticates *and* still matches is a real duplicate.
-    const conflicting = this.db
-      .prepare('SELECT * FROM computer_app_grants WHERE platform = ? AND grant_identity_digest = ?')
-      .get(record.platform, record.grantIdentityDigest) as ComputerAppGrantRow | undefined;
-    if (conflicting !== undefined) {
-      const verified = verifiedComputerAppGrant(conflicting);
-      if (
-        verified !== null &&
-        computerAppGrantMismatch(
-          computerAppGrantStoredIdentity(verified),
-          input.identity,
-          false,
-        ) === null
-      )
-        throw new Error('Computer Use app grant already exists');
-      this.db.prepare('DELETE FROM computer_app_grants WHERE id = ?').run(conflicting.id);
-    }
-    const grantCount = this.db
-      .prepare('SELECT COUNT(*) AS count FROM computer_app_grants')
-      .get() as {
-      count: number;
-    };
-    if (grantCount.count >= COMPUTER_USE_MAX_GRANTS)
-      throw new Error('Computer Use app grant limit reached');
-    this.db
-      .prepare(
-        `INSERT INTO computer_app_grants(
-           id, platform, identity_kind, grant_identity_digest, app_id, display_name, publisher,
-           signing_identifier, signer_digest, package_family_name, executable_path,
-           executable_digest, cd_hash, last_cd_hash, cd_hash_changed_at, max_mode, scope,
-           deny_ruleset_version, grant_version, provider_egress_connection_id,
-           provider_egress_model_id, request_count, denial_count, last_used_at,
-           created_at, updated_at, revision, record_mac
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(...computerAppGrantColumnValues(record), computerAppGrantRecordMac(record));
-    return this.getComputerAppGrant(record.id);
-  }
-
-  /**
-   * Marks a grant as used now, and records a signed application's code identity moving (§6.2.1).
-   *
-   * A moved `cdHash` is written down, not re-confirmed: the signer, Team ID, signing identifier and
-   * path are all still the same, which is exactly the ordinary-update case the ADR keeps quiet. The
-   * settings screen shows the date, so an application that changes implausibly often is visible.
-   */
-  touchComputerAppGrantUsed(
-    grantId: string,
-    usedAt: string,
-    observed: ComputerAppGrantIdentity | null = null,
-  ): ComputerAppGrantRecord {
-    const at = canonicalTimestamp(usedAt);
-    return this.rewriteComputerAppGrant(grantId, (current) => {
-      const movedTo =
-        observed !== null && observed.cdHash !== null && observed.cdHash !== current.cdHash
-          ? observed.cdHash
-          : null;
-      return {
-        ...current,
-        lastUsedAt: at,
-        ...(movedTo === null
-          ? {}
-          : { lastCdHash: current.cdHash, cdHash: movedTo, cdHashChangedAt: at }),
-      };
-    });
-  }
-
-  /**
-   * Counts one agent access request against an application (ADR v2 §6.1).
-   *
-   * Shown in settings so approval fatigue and an application the agent keeps asking about are both
-   * visible. Counting is not authorisation: nothing here widens what the grant permits.
-   */
-  countComputerAppGrantAccessRequest(
-    grantId: string,
-    outcome: 'requested' | 'denied',
-  ): ComputerAppGrantRecord {
-    return this.rewriteComputerAppGrant(grantId, (current) => ({
-      ...current,
-      requestCount: current.requestCount + (outcome === 'requested' ? 1 : 0),
-      denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
-    }));
-  }
-
-  /**
-   * Records provider egress consent for one application (ADR v2 §6.4, D10).
-   *
-   * Separate from creating the grant because the two agreements are separate: changing the model
-   * re-asks only where the screen may go, and the application's own permission — and its mode
-   * ceiling, its identity, and its counters — is left exactly as the user gave it.
-   */
-  setComputerAppGrantProviderEgress(
-    grantId: string,
-    providerEgress: Readonly<{ connectionId: string; modelId: string }> | null,
-  ): ComputerAppGrantRecord {
-    return this.rewriteComputerAppGrant(grantId, (current) => ({
-      ...current,
-      providerEgressConnectionId: providerEgress?.connectionId ?? null,
-      providerEgressModelId: providerEgress?.modelId ?? null,
-    }));
-  }
-
-  /** Revokes one grant. The caller is responsible for stopping any session that was using it. */
-  removeComputerAppGrant(grantId: string, expectedRevision: number): void {
-    const current = this.getComputerAppGrant(grantId);
-    if (!Number.isSafeInteger(expectedRevision) || current.revision !== expectedRevision)
-      throw new OperationConflictError();
-    const result = this.db
-      .prepare('DELETE FROM computer_app_grants WHERE id = ? AND revision = ?')
-      .run(grantId, expectedRevision);
-    if (result.changes !== 1) throw new OperationConflictError();
-  }
-
-  /**
-   * Removes every grant row that no longer authenticates, and answers how many (T14).
-   *
-   * Never called on read. A row that fails its MAC is already treated as absent everywhere, so
-   * deleting it silently while listing would destroy the one piece of evidence that something
-   * rewrote the file — and would do it on a path the user never asked to mutate anything. This runs
-   * only from the settings button, and only rows whose MAC fails are touched: a row that verifies is
-   * a grant the user gave and is not this action's business.
-   *
-   * Regenerating the per-install key is the ordinary reason to reach for it: every row then fails,
-   * every application is effectively ungranted, and without this the dead rows would sit in the
-   * table forever because `removeComputerAppGrant` refuses to delete what it cannot read.
-   */
-  purgeUnauthenticatedComputerAppGrants(): number {
-    const rows = this.db
-      .prepare('SELECT * FROM computer_app_grants')
-      .all() as ComputerAppGrantRow[];
-    const doomed = rows.filter((row) => verifiedComputerAppGrant(row) === null);
-    if (doomed.length === 0) return 0;
-    const statement = this.db.prepare('DELETE FROM computer_app_grants WHERE id = ?');
-    const remove = this.db.transaction((ids: readonly string[]) => {
-      for (const id of ids) statement.run(id);
-    });
-    remove(doomed.map((row) => row.id));
-    return doomed.length;
-  }
-
-  /**
-   * Counts one access request against an application inside one Task (ADR v2 §6.1, T8).
-   *
-   * Upsert rather than read-modify-write: two cards for the same application cannot be in flight at
-   * once (§6.1 allows one unresolved card globally), but the Task row is also read by the rate
-   * limit, and a lost update there would quietly raise the ceiling. `denied` only ever goes from 0
-   * to 1 — a refusal inside a Task is final for that Task, and the `MAX` keeps a later `requested`
-   * from clearing it.
-   */
-  recordComputerAppAccessRequest(
-    input: ComputerAppAccessRequestInput,
-  ): ComputerAppAccessRequestRecord {
-    this.assertTask(input.taskId);
-    const now = canonicalTimestamp(input.now ?? new Date().toISOString());
-    const denied = input.outcome === 'denied' ? 1 : 0;
-    const upgradeDenied = input.outcome === 'upgrade_denied' ? 1 : 0;
-    // Requests and refusals count different things. `requested` means a card was shown, and that is
-    // what the per-Turn and per-Task ceilings are about; either denial answers a card that was
-    // already counted when it went up, so it moves only the refusal columns. Counting a refusal as
-    // a second request would spend two of the Task's five on one card and would tell the settings
-    // screen the agent asked twice.
-    //
-    // A refusal with no prior row inserts `request_count` 0 rather than 1: it means the card's own
-    // `requested` write did not land (the Task went away and came back, an older build), and
-    // inventing a request nobody can point at is worse than a counter that is one low.
-    const requested = input.outcome === 'requested' ? 1 : 0;
-    this.db
-      .prepare(
-        `INSERT INTO computer_app_access_requests(
-           platform, grant_identity_digest, task_id, app_id, display_name,
-           request_count, denial_count, denied, upgrade_denied, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(platform, grant_identity_digest, task_id) DO UPDATE SET
-           app_id = excluded.app_id,
-           display_name = excluded.display_name,
-           request_count = computer_app_access_requests.request_count + excluded.request_count,
-           denial_count = computer_app_access_requests.denial_count + excluded.denial_count,
-           denied = MAX(computer_app_access_requests.denied, excluded.denied),
-           upgrade_denied = MAX(computer_app_access_requests.upgrade_denied, excluded.upgrade_denied),
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        input.platform,
-        input.grantIdentityDigest,
-        input.taskId,
-        input.appId.slice(0, 256),
-        input.displayName.slice(0, 256),
-        requested,
-        denied + upgradeDenied,
-        denied,
-        upgradeDenied,
-        now,
-        now,
-      );
-    const record = this.getComputerAppAccessRequest(
-      input.platform,
-      input.grantIdentityDigest,
-      input.taskId,
-    );
-    if (record === null) throw new Error('Computer Use access request was not recorded');
-    return record;
-  }
-
-  getComputerAppAccessRequest(
-    platform: ComputerAppGrantPlatform,
-    grantIdentityDigest: string,
-    taskId: string,
-  ): ComputerAppAccessRequestRecord | null {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM computer_app_access_requests
-         WHERE platform = ? AND grant_identity_digest = ? AND task_id = ?`,
-      )
-      .get(platform, grantIdentityDigest, taskId) as ComputerAppAccessRequestRow | undefined;
-    return row === undefined ? null : toComputerAppAccessRequest(row);
-  }
-
-  /** How many cards this Task has raised, for the per-Task ceiling (T8). */
-  countComputerAppAccessRequestsForTask(taskId: string): number {
-    const row = this.db
-      .prepare(
-        'SELECT COALESCE(SUM(request_count), 0) AS total FROM computer_app_access_requests WHERE task_id = ?',
-      )
-      .get(taskId) as { total: number };
-    return Number.isSafeInteger(row.total) ? row.total : 0;
-  }
-
-  /**
-   * Per-application totals across every Task, for the settings screen.
-   *
-   * Grouped here rather than in Main so the sum is one statement over the index: the caller pairs
-   * these with the grant rows and shows only the applications that never became one.
-   */
-  listComputerAppAccessRequestTotals(
-    limit = COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS,
-  ): readonly ComputerAppAccessRequestTotals[] {
-    // Most recent first and bounded in SQL. This table grows with every application the agent has
-    // ever asked about, across every Task, and nothing prunes it; the caller's envelope has a
-    // length the contract enforces, so the bound belongs here as well as there.
-    const rows = this.db
-      .prepare(
-        `SELECT platform, grant_identity_digest,
-                SUM(request_count) AS request_count,
-                SUM(denial_count) AS denial_count,
-                MAX(updated_at) AS last_requested_at
-         FROM computer_app_access_requests
-         GROUP BY platform, grant_identity_digest
-         ORDER BY last_requested_at DESC, platform, grant_identity_digest
-         LIMIT ?`,
-      )
-      .all(Math.max(0, Math.trunc(limit))) as {
-      platform: string;
-      grant_identity_digest: string;
-      request_count: number;
-      denial_count: number;
-      last_requested_at: string;
-    }[];
-    const naming = this.db.prepare(
-      `SELECT app_id, display_name FROM computer_app_access_requests
-       WHERE platform = ? AND grant_identity_digest = ?
-       ORDER BY updated_at DESC, task_id LIMIT 1`,
-    );
-    const totals: ComputerAppAccessRequestTotals[] = [];
-    for (const row of rows) {
-      if (row.platform !== 'win32' && row.platform !== 'darwin') continue;
-      const named = naming.get(row.platform, row.grant_identity_digest) as
-        { app_id: string; display_name: string } | undefined;
-      if (named === undefined) continue;
-      totals.push(
-        Object.freeze({
-          platform: row.platform,
-          grantIdentityDigest: row.grant_identity_digest,
-          appId: named.app_id,
-          displayName: named.display_name,
-          requestCount: row.request_count,
-          denialCount: row.denial_count,
-          lastRequestedAt: row.last_requested_at,
-        }),
-      );
-    }
-    return Object.freeze(totals);
-  }
-
-  /**
-   * Read, verify, mutate, re-MAC, write — the only way a grant column ever changes.
-   *
-   * Going through `getComputerAppGrant` means a row whose MAC does not verify cannot be updated into
-   * a row whose MAC does: an attacker who writes a forged grant cannot have the app launder it by
-   * touching a counter. The revision guard makes the read-modify-write safe against a concurrent
-   * revoke, which would otherwise resurrect the row.
-   */
-  private rewriteComputerAppGrant(
-    grantId: string,
-    mutate: (current: ComputerAppGrantRecord) => ComputerAppGrantRecord,
-  ): ComputerAppGrantRecord {
-    const current = this.getComputerAppGrant(grantId);
-    const next = validateComputerAppGrant({
-      ...mutate(current),
-      id: current.id,
-      createdAt: current.createdAt,
-      updatedAt: new Date().toISOString(),
-      revision: current.revision + 1,
-    });
-    const result = this.db
-      .prepare(
-        `UPDATE computer_app_grants
-         SET platform = ?, identity_kind = ?, grant_identity_digest = ?, app_id = ?,
-             display_name = ?, publisher = ?,
-             signing_identifier = ?, signer_digest = ?, package_family_name = ?,
-             executable_path = ?, executable_digest = ?, cd_hash = ?, last_cd_hash = ?,
-             cd_hash_changed_at = ?, max_mode = ?, scope = ?, deny_ruleset_version = ?,
-             grant_version = ?, provider_egress_connection_id = ?, provider_egress_model_id = ?,
-             request_count = ?, denial_count = ?, last_used_at = ?, created_at = ?, updated_at = ?,
-             revision = ?, record_mac = ?
-         WHERE id = ? AND revision = ?`,
-      )
-      .run(
-        ...computerAppGrantColumnValues(next).slice(1),
-        computerAppGrantRecordMac(next),
-        current.id,
-        current.revision,
-      );
-    if (result.changes !== 1) throw new OperationConflictError();
-    return this.getComputerAppGrant(current.id);
-  }
-
-  recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord {
-    const validated = validateComputerActionAuditInput(input);
-    const createdAt = canonicalTimestamp(input.createdAt ?? new Date().toISOString());
-    const id = input.id ?? randomUUID();
-    const state = input.state ?? 'pending';
-    const existing = this.db
-      .prepare(
-        'SELECT * FROM computer_action_audits WHERE session_id = ? AND native_request_id = ?',
-      )
-      .get(validated.sessionId, validated.nativeRequestId) as ComputerActionAuditRow | undefined;
-    if (existing !== undefined) {
-      const prior = toComputerActionAudit(existing);
-      if (
-        prior.taskId !== validated.taskId ||
-        prior.turnId !== validated.turnId ||
-        prior.profileId !== validated.profileId ||
-        prior.candidateProfileDisplayName !== validated.candidateProfileDisplayName ||
-        prior.profileRevision !== validated.profileRevision ||
-        prior.appIdentityDigest !== validated.appIdentityDigest ||
-        prior.windowIdentityDigest !== validated.windowIdentityDigest ||
-        prior.observationRevision !== validated.observationRevision ||
-        prior.observationDigest !== validated.observationDigest ||
-        prior.clientWidth !== validated.clientWidth ||
-        prior.clientHeight !== validated.clientHeight ||
-        prior.actionDigest !== validated.actionDigest ||
-        prior.actionKind !== validated.actionKind ||
-        prior.route !== validated.route ||
-        prior.policyEpoch !== validated.policyEpoch
-      )
-        throw new OperationConflictError('Computer Use request id was reused');
-      if (prior.state === 'pending') {
-        const at = new Date().toISOString();
-        this.db
-          .prepare(
-            `UPDATE computer_action_audits
-             SET state = 'unknown_effect', reason_code = 'duplicate_pending', updated_at = ?
-             WHERE id = ? AND state = 'pending'`,
-          )
-          .run(at, prior.id);
-        return toComputerActionAudit(
-          this.db
-            .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-            .get(prior.id) as ComputerActionAuditRow,
-        );
-      }
-      return prior;
-    }
-    this.assertTask(validated.taskId);
-    // A Computer Use session may be started from an idle Task. In that case its synthetic
-    // controller turn has no row in `turns`; the audit still remains Task-bound and privacy-safe.
-    if (validated.candidateProfileDisplayName === undefined)
-      this.getComputerAppProfile(validated.profileId);
-    this.db
-      .prepare(
-        `INSERT INTO computer_action_audits(
-           id, task_id, turn_id, session_id, profile_id, profile_revision,
-           app_identity_digest, window_identity_digest, observation_revision,
-           observation_digest, client_width, client_height, action_digest, action_kind,
-           route, state, reason_code, native_request_id, policy_epoch, created_at, updated_at,
-           approval_id, approval_parent_request_id, approval_effect,
-           candidate_profile_id, candidate_profile_display_name
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        validated.taskId,
-        validated.turnId,
-        validated.sessionId,
-        validated.candidateProfileDisplayName === undefined ? validated.profileId : null,
-        validated.profileRevision,
-        validated.appIdentityDigest,
-        validated.windowIdentityDigest,
-        validated.observationRevision,
-        validated.observationDigest,
-        validated.clientWidth,
-        validated.clientHeight,
-        validated.actionDigest,
-        validated.actionKind,
-        validated.route,
-        state,
-        validated.reasonCode,
-        validated.nativeRequestId,
-        validated.policyEpoch,
-        createdAt,
-        createdAt,
-        validated.approvalId ?? null,
-        validated.approvalParentRequestId ?? null,
-        validated.approvalEffect ?? null,
-        validated.candidateProfileDisplayName === undefined ? null : validated.profileId,
-        validated.candidateProfileDisplayName ?? null,
-      );
-    return toComputerActionAudit(
-      this.db
-        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-        .get(id) as ComputerActionAuditRow,
-    );
-  }
-
-  completeComputerActionAudit(input: {
-    auditId: string;
-    state: Exclude<ComputerActionAuditState, 'pending'>;
-    reasonCode?: string | null;
-    approvalId?: string | null;
-    approvalEffect?: ComputerActionApprovalEffect | null;
-    updatedAt: string;
-  }): ComputerActionAuditRecord {
-    const updatedAt = canonicalTimestamp(input.updatedAt);
-    if (
-      (input.approvalId !== undefined &&
-        input.approvalId !== null &&
-        (typeof input.approvalId !== 'string' ||
-          input.approvalId.length < 1 ||
-          input.approvalId.length > 128)) ||
-      (input.approvalEffect !== undefined &&
-        input.approvalEffect !== null &&
-        !COMPUTER_ACTION_APPROVAL_EFFECTS.includes(input.approvalEffect))
-    )
-      throw new Error('Invalid Computer Use action audit');
-    const row = this.db
-      .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-      .get(input.auditId) as ComputerActionAuditRow | undefined;
-    if (row === undefined) throw new NotFoundError('Computer Use action audit not found');
-    const current = toComputerActionAudit(row);
-    if (current.state !== 'pending') {
-      if (
-        current.state === input.state &&
-        (input.reasonCode === undefined || current.reasonCode === input.reasonCode)
-      )
-        return current;
-      throw new OperationConflictError('Computer Use action audit is already terminal');
-    }
-    const reasonCode = normalizeComputerReasonCode(input.reasonCode);
-    const result = this.db
-      .prepare(
-        `UPDATE computer_action_audits
-         SET state = ?, reason_code = ?, updated_at = ?,
-             approval_id = COALESCE(?, approval_id),
-             approval_effect = COALESCE(?, approval_effect)
-         WHERE id = ? AND state = 'pending'`,
-      )
-      .run(
-        input.state,
-        reasonCode,
-        updatedAt,
-        input.approvalId ?? null,
-        input.approvalEffect ?? null,
-        input.auditId,
-      );
-    if (result.changes !== 1) throw new OperationConflictError();
-    return toComputerActionAudit(
-      this.db
-        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-        .get(input.auditId) as ComputerActionAuditRow,
-    );
-  }
-
-  /**
-   * Records how an approval resolved on its (b) row. NULL -> value exactly once: replaying the same
-   * value is a no-op, any other second value is refused. Trace-only; never read for authorization.
-   */
-  recordComputerActionApprovalOutcome(input: {
-    auditId: string;
-    outcome: ComputerActionApprovalOutcome;
-    updatedAt: string;
-  }): ComputerActionAuditRecord {
-    if (
-      typeof input.outcome !== 'string' ||
-      !COMPUTER_ACTION_APPROVAL_OUTCOMES.includes(input.outcome)
-    )
-      throw new Error('Invalid Computer Use approval outcome');
-    const updatedAt = canonicalTimestamp(input.updatedAt);
-    const row = this.db
-      .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-      .get(input.auditId) as ComputerActionAuditRow | undefined;
-    if (row === undefined) throw new NotFoundError('Computer Use action audit not found');
-    const current = toComputerActionAudit(row);
-    if (current.approvalId === null)
-      throw new OperationConflictError('Computer Use action audit has no approval');
-    if (current.approvalOutcome !== null) {
-      if (current.approvalOutcome === input.outcome) return current;
-      throw new OperationConflictError('Computer Use approval outcome is already recorded');
-    }
-    const result = this.db
-      .prepare(
-        `UPDATE computer_action_audits
-         SET approval_outcome = ?, updated_at = ?
-         WHERE id = ? AND approval_outcome IS NULL AND approval_id IS NOT NULL`,
-      )
-      .run(input.outcome, updatedAt, input.auditId);
-    if (result.changes !== 1) throw new OperationConflictError();
-    return toComputerActionAudit(
-      this.db
-        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
-        .get(input.auditId) as ComputerActionAuditRow,
-    );
-  }
-
-  listComputerActionAudits(taskId: string, limit = 200): ComputerActionAuditRecord[] {
-    this.assertTask(taskId);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
-      throw new Error('Invalid Computer Use action audit limit');
-    return (
-      this.db
-        .prepare(
-          'SELECT * FROM computer_action_audits WHERE task_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
-        )
-        .all(taskId, limit) as ComputerActionAuditRow[]
-    ).map(toComputerActionAudit);
-  }
-
-  quarantinePendingComputerActionAudits(updatedAt: string): number {
-    const at = canonicalTimestamp(updatedAt);
-    return this.db
-      .prepare(
-        `UPDATE computer_action_audits
-         SET state = 'unknown_effect', reason_code = 'application_restart', updated_at = ?
-         WHERE state = 'pending'`,
-      )
-      .run(at).changes;
   }
 
   getTeamModelRestriction(): TeamModelRestriction {
@@ -17133,8 +16017,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.transaction(() => {
       this.assertTask(taskId);
       const validated = createSessionGrant(grant);
-      if ((validated.capability as string).startsWith('computer.'))
-        throw new Error('Computer Use control grants are session-scoped and cannot be persisted');
       if (validated.policyEpoch !== this.getPermissionPolicy(taskId).policyEpoch)
         throw new Error('Grant policy epoch must match the current Task policy epoch');
       this.db
@@ -17383,11 +16265,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           input.sandboxProfile,
           input.risk,
           sanitizeApprovalText(input.reasonUntrusted, 500),
-          JSON.stringify({
-            target: sanitizeApprovalText(input.display.target, 500),
-            impact: sanitizeApprovalText(input.display.impact, 500),
-            execution: sanitizeApprovalText(input.display.execution, 100_000),
-          }),
+          JSON.stringify(sanitizedApprovalDisplay(input.display)),
           sha256(input.challenge),
           new Date(input.expiresAt).toISOString(),
           new Date(input.requestedAt).toISOString(),
@@ -17605,7 +16483,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           row.runtime_call_id,
           row.subject_id,
         );
-    } else if (decision === 'allow_task') {
+    } else if (decision === 'allow_task' && input.saveTaskGrant !== false) {
       const grantExpiresAt = new Date(input.grantExpiresAt ?? row.expires_at).toISOString();
       if (Date.parse(grantExpiresAt) <= Date.parse(decidedAt))
         throw new Error('Approval grant expiry must be in the future');
@@ -20789,13 +19667,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }>;
     return turnSnapshotSchema.parse({
       lastSeq,
-      discoveryResults: (
-        this.db
-          .prepare(
-            "SELECT payload_json FROM turn_events WHERE task_id = ? AND type = 'computer_use.discovery_result' ORDER BY seq",
-          )
-          .all(taskId) as { payload_json: string }[]
-      ).map(({ payload_json }) => turnEventSchema.parse(JSON.parse(payload_json))),
       activeTurn,
       queued: this.listQueued(taskId),
       contextUsage,
@@ -22573,6 +21444,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       target: display.target,
       impact: display.impact,
       execution: display.execution,
+      ...(display.desktopAction === undefined ? {} : { desktopAction: display.desktopAction }),
       risk: row.risk,
       capability: row.capability,
       challenge,
@@ -22768,22 +21640,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
         };
       })(),
     }));
-  }
-
-  recordComputerUseDiscoveryResult(
-    result: Extract<TurnEvent, { type: 'computer_use.discovery_result' }>['result'] & {
-      taskId: string;
-    },
-  ): TurnEvent {
-    this.assertTask(result.taskId);
-    // A late native exit still belongs to its original, possibly terminal Turn.
-    if (result.turnId !== null) this.getTurn(result.taskId, result.turnId);
-    return this.appendEvent({
-      type: 'computer_use.discovery_result',
-      taskId: result.taskId,
-      turnId: result.turnId,
-      result,
-    });
   }
 
   private appendEvent(event: EventWithoutSeq): TurnEvent {
@@ -24486,6 +23342,7 @@ export function toApprovalSummary(approval: PersistedApproval): ApprovalSummary 
     target: approval.target,
     impact: approval.impact,
     execution: approval.execution,
+    ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
     risk: approval.risk,
     capability: approval.capability,
     challenge: approval.challenge,
@@ -24514,6 +23371,7 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     cwd: spec.cwdIdentity.canonicalPath,
     envDelta: { ...spec.envDelta },
     purpose: row.purpose,
+    ...commandDesktopAction(spec),
     risk: row.risk,
     state: row.state,
     pid: row.pid,
@@ -24525,6 +23383,20 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
   });
+}
+
+/**
+ * What a desktop-control command did, for its timeline row: only for the shipped binary, and
+ * without reading any snapshot (the part names are on its approval card, when it had one).
+ */
+function commandDesktopAction(spec: ExecutionSpec): { desktopAction?: DesktopApprovalAction } {
+  try {
+    return isShippedDesktopControlPath(spec.absoluteExecutable)
+      ? { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function validateApprovalRequest(input: ApprovalRequestInput): void {
@@ -24556,11 +23428,9 @@ function validateApprovalRequest(input: ApprovalRequestInput): void {
   parseResourceSet(JSON.stringify(input.resource));
 }
 
-function parseApprovalDisplay(value: string): {
-  target: string;
-  impact: string;
-  execution: string;
-} {
+type ApprovalDisplay = ApprovalRequestInput['display'];
+
+function parseApprovalDisplay(value: string): ApprovalDisplay {
   const parsed = JSON.parse(value) as Record<string, unknown>;
   if (
     typeof parsed.target !== 'string' ||
@@ -24568,10 +23438,29 @@ function parseApprovalDisplay(value: string): {
     typeof parsed.execution !== 'string'
   )
     throw new Error('Invalid approval display projection');
+  // Older rows have no desktop-control card and show the plain one, as does a card that no longer
+  // reads as one.
+  return sanitizedApprovalDisplay({
+    target: parsed.target,
+    impact: parsed.impact,
+    execution: parsed.execution,
+    ...(parsed.desktopAction === undefined
+      ? {}
+      : { desktopAction: parsed.desktopAction as DesktopApprovalAction }),
+  });
+}
+
+/** The display as it is stored and compared: bounded text, and a desktop card only when valid. */
+function sanitizedApprovalDisplay(display: ApprovalDisplay): ApprovalDisplay {
+  const desktopAction =
+    display.desktopAction === undefined
+      ? undefined
+      : desktopApprovalActionSchema.safeParse(display.desktopAction);
   return {
-    target: sanitizeApprovalText(parsed.target, 500),
-    impact: sanitizeApprovalText(parsed.impact, 500),
-    execution: sanitizeApprovalText(parsed.execution, 100_000),
+    target: sanitizeApprovalText(display.target, 500),
+    impact: sanitizeApprovalText(display.impact, 500),
+    execution: sanitizeApprovalText(display.execution, 100_000),
+    ...(desktopAction?.success === true ? { desktopAction: desktopAction.data } : {}),
   };
 }
 
@@ -24632,11 +23521,7 @@ function approvalRequestDigest(input: ApprovalRequestInput): string {
       sandboxProfile: input.sandboxProfile,
       risk: input.risk,
       reason: sanitizeApprovalText(input.reasonUntrusted, 500),
-      display: {
-        target: sanitizeApprovalText(input.display.target, 500),
-        impact: sanitizeApprovalText(input.display.impact, 500),
-        execution: sanitizeApprovalText(input.display.execution, 100_000),
-      },
+      display: sanitizedApprovalDisplay(input.display),
     }),
   );
 }
@@ -24666,6 +23551,7 @@ function persistedApprovalRequestDigest(approval: PersistedApproval): string {
         target: approval.target,
         impact: approval.impact,
         execution: approval.execution,
+        ...(approval.desktopAction === undefined ? {} : { desktopAction: approval.desktopAction }),
       },
     }),
   );
@@ -24700,549 +23586,6 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function canonicalTimestamp(value: string): string {
-  const timestamp = new Date(value);
-  if (!Number.isFinite(timestamp.getTime())) throw new Error('Invalid timestamp');
-  return timestamp.toISOString();
-}
-
-function validateComputerAppProfileInput(
-  input: ComputerAppProfileInput,
-): Omit<ComputerAppProfileRecord, 'revision' | 'createdAt' | 'updatedAt'> {
-  if (
-    typeof input.id !== 'string' ||
-    input.id.length < 1 ||
-    input.id.length > 128 ||
-    (input.platform !== 'win32' && input.platform !== 'darwin') ||
-    !['win32-executable', 'windows-package', 'macos-bundle'].includes(input.kind) ||
-    (input.platform === 'win32' && input.kind === 'macos-bundle') ||
-    (input.platform === 'darwin' && input.kind !== 'macos-bundle') ||
-    typeof input.label !== 'string' ||
-    input.label.trim().length === 0 ||
-    input.label.length > 256 ||
-    typeof input.canonicalPath !== 'string' ||
-    input.canonicalPath.length === 0 ||
-    input.canonicalPath.length > 4096 ||
-    input.canonicalPath.includes('\0') ||
-    (input.platform === 'darwin' && !input.canonicalPath.startsWith('/')) ||
-    (input.platform === 'win32' && !/^(?:[A-Za-z]:[\\/]|\\\\)/.test(input.canonicalPath)) ||
-    (input.appUrl !== null &&
-      (typeof input.appUrl !== 'string' ||
-        input.appUrl.length > 4096 ||
-        input.appUrl.includes('\0'))) ||
-    typeof input.identity !== 'object' ||
-    input.identity === null ||
-    Array.isArray(input.identity) ||
-    !isPlainComputerRecord(input.identity) ||
-    Buffer.byteLength(JSON.stringify(input.identity), 'utf8') > 16_384 ||
-    !/^[a-f0-9]{64}$/.test(input.identityDigest) ||
-    (input.version !== null && (typeof input.version !== 'string' || input.version.length > 256)) ||
-    (input.executableDigest !== null && !/^[a-f0-9]{64}$/.test(input.executableDigest)) ||
-    !['observe_only', 'supervised', 'full_access_app'].includes(input.mode) ||
-    typeof input.connectionId !== 'string' ||
-    input.connectionId.length < 1 ||
-    input.connectionId.length > 128 ||
-    typeof input.modelId !== 'string' ||
-    input.modelId.length < 1 ||
-    input.modelId.length > 256 ||
-    typeof input.providerEgressConsent !== 'boolean' ||
-    typeof input.remember !== 'boolean'
-  )
-    throw new Error('Invalid Computer Use app profile');
-  return {
-    id: input.id,
-    platform: input.platform,
-    kind: input.kind,
-    label: input.label.trim(),
-    canonicalPath: input.canonicalPath,
-    appUrl: input.appUrl,
-    identity: structuredClone(input.identity),
-    identityDigest: input.identityDigest,
-    version: input.version,
-    executableDigest: input.executableDigest,
-    mode: input.mode,
-    connectionId: input.connectionId,
-    modelId: input.modelId,
-    providerEgressConsent: input.providerEgressConsent,
-    remember: input.remember,
-  };
-}
-
-function isPlainComputerRecord(value: object): value is Record<string, unknown> {
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) return false;
-  const seen = new Set<object>();
-  const visit = (candidate: unknown, depth: number): boolean => {
-    if (depth > 32) return false;
-    if (
-      candidate === null ||
-      typeof candidate === 'string' ||
-      typeof candidate === 'boolean' ||
-      (typeof candidate === 'number' && Number.isFinite(candidate))
-    )
-      return true;
-    if (typeof candidate !== 'object') return false;
-    if (seen.has(candidate)) return false;
-    seen.add(candidate);
-    if (Array.isArray(candidate)) return candidate.every((nested) => visit(nested, depth + 1));
-    const nestedPrototype = Object.getPrototypeOf(candidate);
-    return (
-      (nestedPrototype === Object.prototype || nestedPrototype === null) &&
-      Object.values(candidate).every((nested) => visit(nested, depth + 1))
-    );
-  };
-  return visit(value, 0);
-}
-
-type ComputerAppGrantRow = {
-  id: string;
-  platform: string;
-  identity_kind: string;
-  grant_identity_digest: string;
-  app_id: string;
-  display_name: string;
-  publisher: string | null;
-  signing_identifier: string | null;
-  signer_digest: string | null;
-  package_family_name: string | null;
-  executable_path: string;
-  executable_digest: string | null;
-  cd_hash: string | null;
-  last_cd_hash: string | null;
-  cd_hash_changed_at: string | null;
-  max_mode: string;
-  scope: string;
-  deny_ruleset_version: number;
-  grant_version: number;
-  provider_egress_connection_id: string | null;
-  provider_egress_model_id: string | null;
-  request_count: number;
-  denial_count: number;
-  last_used_at: string | null;
-  created_at: string;
-  updated_at: string;
-  revision: number;
-  record_mac: string;
-};
-
-type ComputerAppAccessRequestRow = {
-  platform: string;
-  grant_identity_digest: string;
-  task_id: string;
-  app_id: string;
-  display_name: string;
-  request_count: number;
-  denial_count: number;
-  denied: number;
-  upgrade_denied: number;
-  created_at: string;
-  updated_at: string;
-};
-
-/**
- * A stored access-request row, or a throw.
- *
- * Unlike a grant there is nothing to authenticate, so the only question is whether the row is the
- * shape this code wrote. A malformed row here would be a bug rather than an attack — it can only
- * withhold — and throwing is right: the caller is deciding whether to raise a card, and it must not
- * proceed on a count it could not read.
- */
-function toComputerAppAccessRequest(
-  row: ComputerAppAccessRequestRow,
-): ComputerAppAccessRequestRecord {
-  if (row.platform !== 'win32' && row.platform !== 'darwin')
-    throw new Error('Invalid Computer Use access request row');
-  return Object.freeze({
-    platform: row.platform,
-    grantIdentityDigest: row.grant_identity_digest,
-    taskId: row.task_id,
-    appId: row.app_id,
-    displayName: row.display_name,
-    requestCount: row.request_count,
-    denialCount: row.denial_count,
-    denied: row.denied === 1,
-    upgradeDenied: row.upgrade_denied === 1,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
-}
-
-/**
- * A row, only if it both parses and authenticates (ADR v2 §6.2 / T14).
- *
- * Structure first, MAC second: `validateComputerAppGrant` throws on a row whose columns are not the
- * shape the MAC was computed over, and computing a MAC over a malformed record would compare two
- * things that were never comparable. Both failures answer null, because both mean the same thing to
- * every caller — this application is not granted.
- */
-function verifiedComputerAppGrant(row: ComputerAppGrantRow): ComputerAppGrantRecord | null {
-  let record: ComputerAppGrantRecord;
-  try {
-    record = validateComputerAppGrant({
-      id: row.id,
-      platform: row.platform,
-      identityKind: row.identity_kind,
-      grantIdentityDigest: row.grant_identity_digest,
-      appId: row.app_id,
-      displayName: row.display_name,
-      publisher: row.publisher,
-      signingIdentifier: row.signing_identifier,
-      signerDigest: row.signer_digest,
-      packageFamilyName: row.package_family_name,
-      executablePath: row.executable_path,
-      executableDigest: row.executable_digest,
-      cdHash: row.cd_hash,
-      lastCdHash: row.last_cd_hash,
-      cdHashChangedAt: row.cd_hash_changed_at,
-      maxMode: row.max_mode,
-      scope: row.scope,
-      denyRulesetVersion: row.deny_ruleset_version,
-      grantVersion: row.grant_version,
-      providerEgressConnectionId: row.provider_egress_connection_id,
-      providerEgressModelId: row.provider_egress_model_id,
-      requestCount: row.request_count,
-      denialCount: row.denial_count,
-      lastUsedAt: row.last_used_at,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      revision: row.revision,
-    });
-  } catch {
-    return null;
-  }
-  return computerAppGrantMacMatches(computerAppGrantRecordMac(record), row.record_mac)
-    ? record
-    : null;
-}
-
-/**
- * The column values, in the order both statements above write them.
- *
- * One list rather than two literal argument lists: an insert and an update that enumerate the same
- * 26 columns separately drift, and a grant written with two columns transposed authenticates fine
- * and then means something else.
- */
-function computerAppGrantColumnValues(
-  record: ComputerAppGrantRecord,
-): readonly (string | number | null)[] {
-  return [
-    record.id,
-    record.platform,
-    record.identityKind,
-    record.grantIdentityDigest,
-    record.appId,
-    record.displayName,
-    record.publisher,
-    record.signingIdentifier,
-    record.signerDigest,
-    record.packageFamilyName,
-    record.executablePath,
-    record.executableDigest,
-    record.cdHash,
-    record.lastCdHash,
-    record.cdHashChangedAt,
-    record.maxMode,
-    record.scope,
-    record.denyRulesetVersion,
-    record.grantVersion,
-    record.providerEgressConnectionId,
-    record.providerEgressModelId,
-    record.requestCount,
-    record.denialCount,
-    record.lastUsedAt,
-    record.createdAt,
-    record.updatedAt,
-    record.revision,
-  ];
-}
-
-/**
- * Structural validation of a grant, applied on the way in *and* on the way out.
- *
- * Applied on read as well as on write because the file is writable by the attacker this feature
- * models: a row inserted by something other than this code has never been through the writer's
- * checks, and the MAC only proves that whatever is there is what we wrote — a row from an older,
- * looser build would still authenticate.
- */
-function validateComputerAppGrant(
-  input: Readonly<Record<string, unknown>>,
-): ComputerAppGrantRecord {
-  const invalid = (): never => {
-    throw new Error('Invalid Computer Use app grant');
-  };
-  const text = (key: string, maximum: number): string => {
-    const value = input[key];
-    if (typeof value !== 'string' || value.length < 1 || value.length > maximum) invalid();
-    return value as string;
-  };
-  const optionalText = (key: string, maximum: number): string | null => {
-    const value = input[key];
-    if (value === null || value === undefined) return null;
-    if (typeof value !== 'string' || value.length < 1 || value.length > maximum) invalid();
-    return value as string;
-  };
-  const digest = (key: string): string => {
-    const value = text(key, 64);
-    if (!/^[a-f0-9]{64}$/u.test(value)) invalid();
-    return value;
-  };
-  const optionalDigest = (key: string): string | null => {
-    const value = optionalText(key, 64);
-    if (value !== null && !/^[a-f0-9]{64}$/u.test(value)) invalid();
-    return value;
-  };
-  const count = (key: string, minimum: number): number => {
-    const value = input[key];
-    if (!Number.isSafeInteger(value) || (value as number) < minimum) invalid();
-    return value as number;
-  };
-  const timestamp = (key: string): string => {
-    const value = text(key, 64);
-    if (!Number.isFinite(Date.parse(value))) invalid();
-    return canonicalTimestamp(value);
-  };
-  const optionalTimestamp = (key: string): string | null => {
-    const value = optionalText(key, 64);
-    if (value === null) return null;
-    if (!Number.isFinite(Date.parse(value))) invalid();
-    return canonicalTimestamp(value);
-  };
-  const platform = input['platform'];
-  if (platform !== 'darwin' && platform !== 'win32') invalid();
-  const identityKind = input['identityKind'];
-  if (identityKind !== 'verified-signed' && identityKind !== 'unverified') invalid();
-  const maxMode = input['maxMode'];
-  if (maxMode !== 'observe_only' && maxMode !== 'supervised' && maxMode !== 'full_access_app')
-    invalid();
-  if (input['scope'] !== 'global') invalid();
-  const executablePath = text('executablePath', 4_096);
-  if (executablePath.includes('\u0000')) invalid();
-  const providerEgressConnectionId = optionalText('providerEgressConnectionId', 128);
-  const providerEgressModelId = optionalText('providerEgressModelId', 256);
-  // Consent is a pair; half of one would be a consent whose destination is unknown.
-  if ((providerEgressConnectionId === null) !== (providerEgressModelId === null)) invalid();
-  return Object.freeze({
-    id: text('id', 128),
-    platform: platform as ComputerAppGrantPlatform,
-    identityKind: identityKind as ComputerAppGrantIdentityKind,
-    grantIdentityDigest: digest('grantIdentityDigest'),
-    appId: text('appId', 256),
-    displayName: text('displayName', 256),
-    publisher: optionalText('publisher', 128),
-    signingIdentifier: optionalText('signingIdentifier', 256),
-    signerDigest: optionalDigest('signerDigest'),
-    packageFamilyName: optionalText('packageFamilyName', 256),
-    executablePath,
-    executableDigest: optionalDigest('executableDigest'),
-    cdHash: optionalDigest('cdHash'),
-    lastCdHash: optionalDigest('lastCdHash'),
-    cdHashChangedAt: optionalTimestamp('cdHashChangedAt'),
-    maxMode: maxMode as ComputerAppGrantMode,
-    scope: 'global',
-    denyRulesetVersion: count('denyRulesetVersion', 1),
-    grantVersion: count('grantVersion', 1),
-    providerEgressConnectionId,
-    providerEgressModelId,
-    requestCount: count('requestCount', 0),
-    denialCount: count('denialCount', 0),
-    lastUsedAt: optionalTimestamp('lastUsedAt'),
-    createdAt: timestamp('createdAt'),
-    updatedAt: timestamp('updatedAt'),
-    revision: count('revision', 1),
-  });
-}
-
-function toComputerAppProfile(row: ComputerAppProfileRow): ComputerAppProfileRecord {
-  let identity: unknown;
-  try {
-    identity = JSON.parse(row.identity_json);
-  } catch {
-    throw new Error('Invalid persisted Computer Use app profile identity');
-  }
-  const parsed = validateComputerAppProfileInput({
-    id: row.id,
-    platform: row.platform,
-    kind: row.app_kind,
-    label: row.display_name,
-    canonicalPath: row.canonical_path,
-    appUrl: row.app_url,
-    identity: identity as Record<string, unknown>,
-    identityDigest: row.identity_digest,
-    version: row.version,
-    executableDigest: row.executable_digest,
-    mode: row.mode,
-    connectionId: row.connection_id,
-    modelId: row.model_id,
-    providerEgressConsent: row.provider_egress_consent === 1,
-    remember: row.remember === 1,
-  });
-  if (
-    !Number.isSafeInteger(row.revision) ||
-    row.revision < 1 ||
-    !Number.isFinite(Date.parse(row.created_at)) ||
-    !Number.isFinite(Date.parse(row.updated_at))
-  )
-    throw new Error('Invalid persisted Computer Use app profile metadata');
-  return Object.freeze({
-    ...parsed,
-    revision: row.revision,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
-}
-
-function normalizeComputerReasonCode(reasonCode: string | null | undefined): string | null {
-  if (reasonCode === undefined || reasonCode === null) return null;
-  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(reasonCode))
-    throw new Error('Invalid Computer Use reason code');
-  return reasonCode;
-}
-
-function validateComputerActionAuditInput(
-  input: ComputerActionAuditInput,
-): ComputerActionAuditInput {
-  if (
-    typeof input.taskId !== 'string' ||
-    input.taskId.length === 0 ||
-    input.taskId.length > 128 ||
-    !/^[a-f0-9]{64}$/.test(input.turnId) ||
-    !/^[a-f0-9]{64}$/.test(input.sessionId) ||
-    typeof input.profileId !== 'string' ||
-    input.profileId.length === 0 ||
-    input.profileId.length > 128 ||
-    (input.candidateProfileDisplayName !== undefined &&
-      (!/^native-target:[a-f0-9]{64}$/.test(input.profileId) ||
-        typeof input.candidateProfileDisplayName !== 'string' ||
-        input.candidateProfileDisplayName.length < 1 ||
-        input.candidateProfileDisplayName.length > 160 ||
-        /[\p{Cc}\p{Cf}]/u.test(input.candidateProfileDisplayName))) ||
-    !Number.isSafeInteger(input.profileRevision) ||
-    input.profileRevision < 1 ||
-    !/^[a-f0-9]{64}$/.test(input.appIdentityDigest) ||
-    !/^[a-f0-9]{64}$/.test(input.windowIdentityDigest) ||
-    !Number.isSafeInteger(input.observationRevision) ||
-    input.observationRevision < 1 ||
-    !/^[a-f0-9]{64}$/.test(input.observationDigest) ||
-    !Number.isSafeInteger(input.clientWidth) ||
-    input.clientWidth < 1 ||
-    input.clientWidth > 2_560 ||
-    !Number.isSafeInteger(input.clientHeight) ||
-    input.clientHeight < 1 ||
-    input.clientHeight > 1_600 ||
-    !/^[a-f0-9]{64}$/.test(input.actionDigest) ||
-    ![
-      'invoke',
-      'set_text',
-      'select',
-      'toggle',
-      'expand_collapse',
-      'scroll',
-      'click',
-      'type',
-      'key',
-      'wait',
-      'finish',
-      'copy',
-    ].includes(input.actionKind) ||
-    !['semantic', 'visual', 'none'].includes(input.route) ||
-    (input.state !== undefined &&
-      !['pending', 'applied', 'rejected', 'unknown_effect', 'canceled'].includes(input.state)) ||
-    (input.reasonCode !== undefined &&
-      input.reasonCode !== null &&
-      !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(input.reasonCode)) ||
-    !/^[a-f0-9]{64}$/.test(input.nativeRequestId) ||
-    !Number.isSafeInteger(input.policyEpoch) ||
-    input.policyEpoch < 0 ||
-    (input.approvalId !== undefined &&
-      input.approvalId !== null &&
-      (typeof input.approvalId !== 'string' ||
-        input.approvalId.length < 1 ||
-        input.approvalId.length > 128)) ||
-    (input.approvalParentRequestId !== undefined &&
-      input.approvalParentRequestId !== null &&
-      !/^[a-f0-9]{64}$/.test(input.approvalParentRequestId)) ||
-    (input.approvalEffect !== undefined &&
-      input.approvalEffect !== null &&
-      !COMPUTER_ACTION_APPROVAL_EFFECTS.includes(input.approvalEffect))
-  )
-    throw new Error('Invalid Computer Use action audit');
-  return {
-    ...input,
-    state: input.state ?? 'pending',
-    reasonCode: normalizeComputerReasonCode(input.reasonCode),
-    approvalId: input.approvalId ?? null,
-    approvalParentRequestId: input.approvalParentRequestId ?? null,
-    approvalEffect: input.approvalEffect ?? null,
-  };
-}
-
-function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAuditRecord {
-  const parsed = validateComputerActionAuditInput({
-    id: row.id,
-    taskId: row.task_id,
-    turnId: row.turn_id,
-    sessionId: row.session_id,
-    profileId: row.profile_id ?? row.candidate_profile_id ?? '',
-    ...(row.candidate_profile_display_name === null
-      ? {}
-      : { candidateProfileDisplayName: row.candidate_profile_display_name }),
-    profileRevision: row.profile_revision,
-    appIdentityDigest: row.app_identity_digest,
-    windowIdentityDigest: row.window_identity_digest,
-    observationRevision: row.observation_revision,
-    observationDigest: row.observation_digest,
-    clientWidth: row.client_width,
-    clientHeight: row.client_height,
-    actionDigest: row.action_digest,
-    actionKind: row.action_kind,
-    route: row.route,
-    state: row.state,
-    reasonCode: row.reason_code,
-    nativeRequestId: row.native_request_id,
-    policyEpoch: row.policy_epoch,
-    approvalId: row.approval_id,
-    approvalParentRequestId: row.approval_parent_request_id,
-    approvalEffect: row.approval_effect,
-  });
-  if (
-    row.approval_outcome !== null &&
-    !COMPUTER_ACTION_APPROVAL_OUTCOMES.includes(row.approval_outcome)
-  )
-    throw new Error('Invalid persisted Computer Use approval outcome');
-  if (!Number.isFinite(Date.parse(row.created_at)) || !Number.isFinite(Date.parse(row.updated_at)))
-    throw new Error('Invalid persisted Computer Use action audit timestamps');
-  return Object.freeze({
-    id: row.id,
-    taskId: parsed.taskId,
-    turnId: parsed.turnId,
-    sessionId: parsed.sessionId,
-    profileId: parsed.profileId,
-    ...(parsed.candidateProfileDisplayName === undefined
-      ? {}
-      : { candidateProfileDisplayName: parsed.candidateProfileDisplayName }),
-    profileRevision: parsed.profileRevision,
-    appIdentityDigest: parsed.appIdentityDigest,
-    windowIdentityDigest: parsed.windowIdentityDigest,
-    observationRevision: parsed.observationRevision,
-    observationDigest: parsed.observationDigest,
-    clientWidth: parsed.clientWidth,
-    clientHeight: parsed.clientHeight,
-    actionDigest: parsed.actionDigest,
-    actionKind: parsed.actionKind,
-    route: parsed.route,
-    state: parsed.state!,
-    reasonCode: parsed.reasonCode ?? null,
-    nativeRequestId: parsed.nativeRequestId,
-    policyEpoch: parsed.policyEpoch,
-    approvalId: parsed.approvalId ?? null,
-    approvalParentRequestId: parsed.approvalParentRequestId ?? null,
-    approvalOutcome: row.approval_outcome,
-    approvalEffect: parsed.approvalEffect ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  });
 }
 
 function sprintCoderPrePromptContent(prompt: string): string {

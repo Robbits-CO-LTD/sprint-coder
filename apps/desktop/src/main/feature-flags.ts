@@ -17,28 +17,3 @@ export function settingsWorkspaceV2Enabled(env: FeatureFlagEnvironment = process
 export function projectMultiFolderUxEnabled(env: FeatureFlagEnvironment = process.env): boolean {
   return env['SPRINT_CODER_PROJECT_MULTI_FOLDER_UX'] !== '0';
 }
-
-/**
- * Desktop Computer Use is a privileged preview (beta). Its user-facing switch is the saved setting
- * (see `computer-use-feature-gate.ts`); this exact opt-in is the forced-on override CI and
- * acceptance runs use. Every other value leaves the decision to the setting, which defaults to off.
- */
-export function computerUseDesktopV1Enabled(env: FeatureFlagEnvironment = process.env): boolean {
-  return env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] === '1';
-}
-
-/**
- * The agent-driven target tools (ADR v2 §9).
- *
- * Two gates, both exact opt-ins. `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1` stays the master switch for
- * the whole feature — the package, signing, and release scans are tied to that name, so its meaning
- * must not change — and this flag adds the v2 tool surface on top of it. Off, the tools are never
- * registered at all, so the model does not see a definition it could call; the default is off.
- */
-export function computerUseAgentDrivenV2Enabled(
-  env: FeatureFlagEnvironment = process.env,
-): boolean {
-  return (
-    computerUseDesktopV1Enabled(env) && env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'] === '1'
-  );
-}

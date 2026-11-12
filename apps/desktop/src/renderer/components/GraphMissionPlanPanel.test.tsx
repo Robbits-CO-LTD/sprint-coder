@@ -96,13 +96,6 @@ it('offers a step resume that dispatches only the requested step', async () => {
     );
     const button = container.querySelector('button')!;
     expect(button.textContent).toBe('この工程を再開');
-    expect(button.dataset['computerUseActivation']).toBe('graph-resume-step');
-    expect(JSON.parse(button.dataset['computerUseIntent']!)).toMatchObject({
-      operation: 'graph-resume-step',
-      missionId: 'mission-1',
-      stepKey: 'a',
-      generation: 2,
-    });
     await act(async () => button.click());
     expect(resumeStep).toHaveBeenCalledWith({
       taskId: 'task-1',
@@ -138,16 +131,13 @@ it('requires workspace review before exposing the digest-bound continuation gest
     await act(async () =>
       root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
     );
-    const resume = container.querySelector<HTMLButtonElement>('[data-computer-use-activation]')!;
+    const resume = container.querySelector<HTMLButtonElement>('button.button')!;
     expect(resume.disabled).toBe(true);
     await act(async () => container.querySelector('button')!.click());
     expect(
       container.querySelector('[data-testid="graph-workspace-review"]')?.textContent,
     ).toContain('retained.ts');
     expect(resume.disabled).toBe(false);
-    expect(JSON.parse(resume.dataset['computerUseIntent']!)).toMatchObject({
-      workspaceReviewDigest: 'a'.repeat(64),
-    });
     expect(resumeStep).not.toHaveBeenCalled();
     await act(async () => resume.click());
     expect(resumeStep).toHaveBeenCalledWith(
@@ -172,10 +162,6 @@ it('keeps a sealed step on the integration resume instead of a new Worker run', 
     );
     const button = container.querySelector('button')!;
     expect(button.textContent).toBe('完了した変更の統合を再開');
-    expect(button.dataset['computerUseActivation']).toBe('graph-resume');
-    expect(JSON.parse(button.dataset['computerUseIntent']!).operation).toBe(
-      'graph-resume-integration',
-    );
     await act(async () => button.click());
     expect(resumeIntegration).toHaveBeenCalledTimes(1);
     expect(resumeStep).not.toHaveBeenCalled();

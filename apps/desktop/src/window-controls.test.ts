@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyWindowControl,
+  disabledChromiumFeatures,
   isWindowControlAction,
   presentWindow,
   restoreWindow,
@@ -34,6 +35,17 @@ describe('windowChromeOptions', () => {
 
   it('leaves Linux on its existing native frame', () => {
     expect(windowChromeOptions('linux')).toEqual({ autoHideMenuBar: true });
+  });
+});
+
+describe('disabledChromiumFeatures', () => {
+  it('turns off the Windows occlusion judgement that froze the window after a desktop-control launch', () => {
+    expect(disabledChromiumFeatures('win32')).toEqual(['CalculateNativeWinOcclusion']);
+  });
+
+  it('leaves macOS and Linux on Chromium defaults', () => {
+    expect(disabledChromiumFeatures('darwin')).toEqual([]);
+    expect(disabledChromiumFeatures('linux')).toEqual([]);
   });
 });
 

@@ -90,26 +90,6 @@ try {
         & $recordScript -RunPath $runRoot -RecordType surface -CaseId WEB-02 -PrimarySurface browser-use -ComputerUseReason CU-03-non-dom-app -Message 'Wrong routing.' | Out-Null
     } 'Non-Computer Use drivers must be rejected.'
 
-    $cleanupPlanner = Join-Path $scriptRoot 'Get-ComputerUseCleanupPlan.ps1'
-    $beforeNew = '[{"id":1,"app":"existing.exe"}]'
-    $afterNew = '[{"id":1,"app":"existing.exe"},{"id":2,"app":"new.exe"}]'
-    $newPlan = & $cleanupPlanner -BeforeWindowsJson $beforeNew -AfterWindowsJson $afterNew -TargetWindowId 2 -TargetApp new.exe -LaunchAttempted $true -PreviousFocusKnown $true -PreviousFocusWindowId 1 -PreviousFocusApp existing.exe
-    Assert-True ($newPlan.ownership -eq 'owned_new' -and $newPlan.should_close) 'A single new window after a recorded launch must be closed.'
-    Assert-True $newPlan.should_restore_focus 'Known prior focus must be restored after closing an owned window.'
-    $existingPlan = & $cleanupPlanner -BeforeWindowsJson $beforeNew -AfterWindowsJson $beforeNew -TargetWindowId 1 -TargetApp existing.exe -LaunchAttempted $true -PreviousFocusKnown $true -PreviousFocusWindowId 1 -PreviousFocusApp existing.exe
-    Assert-True ($existingPlan.ownership -eq 'reused_existing' -and -not $existingPlan.should_close) 'An existing window must never be closed.'
-    $unknownPlan = & $cleanupPlanner -BeforeWindowsJson '[]' -AfterWindowsJson '[{"id":3,"app":"unknown.exe"}]' -TargetWindowId 3 -TargetApp unknown.exe -LaunchAttempted $false
-    Assert-True ($unknownPlan.result -eq 'cleanup_hold' -and -not $unknownPlan.should_close) 'Unknown ownership must be held without a close action.'
-    $cleanupConfirmer = Join-Path $scriptRoot 'Confirm-ComputerUseCleanup.ps1'
-    $newCleanup = & $cleanupConfirmer -PostCleanupWindowsJson $beforeNew -TargetWindowId 2 -TargetApp new.exe -Ownership owned_new -PreviousFocusKnown $true -FocusRestored $true -BindingsDiscarded $true
-    Assert-True ($newCleanup.complete -and $newCleanup.result -eq 'cleanup_complete') 'A newly launched window must be absent after cleanup.'
-    $existingCleanup = & $cleanupConfirmer -PostCleanupWindowsJson $beforeNew -TargetWindowId 1 -TargetApp existing.exe -Ownership reused_existing -PreviousFocusKnown $true -FocusRestored $true -BindingsDiscarded $true
-    Assert-True ($existingCleanup.complete -and $existingCleanup.result -eq 'cleanup_preserved_existing') 'A reused existing window must remain open.'
-    $unknownCleanup = & $cleanupConfirmer -PostCleanupWindowsJson '[{"id":3,"app":"unknown.exe"}]' -TargetWindowId 3 -TargetApp unknown.exe -Ownership unknown -BindingsDiscarded $true
-    Assert-True (-not $unknownCleanup.complete -and $unknownCleanup.result -eq 'cleanup_hold') 'Unknown ownership must remain on hold without force close.'
-    $cleanupRecord = & $recordScript -RunPath $runRoot -RecordType cleanup -CaseId WIN-01 -PrimarySurface computer-use -ComputerUseReason CU-03-non-dom-app -Classification cleanup_preserved_existing -Message 'Existing window preserved and handles discarded.' -DetailsJson '{"ownership":"reused_existing","closed":false,"bindings_discarded":true}'
-    Assert-True $cleanupRecord.recorded 'Cleanup result must be appended to the execution record.'
-
     $bodyPath = Join-Path $tempRoot 'issue.md'
     $bodyResult = & (Join-Path $scriptRoot 'New-E2ePatrolIssueBody.ps1') `
         -Title '[bug] Preference save status remains unchanged after submit' `

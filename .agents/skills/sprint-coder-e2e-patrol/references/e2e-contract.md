@@ -142,8 +142,6 @@ Hard stops:
 - `dedup_incomplete`: Issue or PR inventory could not be fully retrieved;
 - `halted_budget`: time limit or five-Issue limit reached;
 - `aborted_safety`: a destructive or unauthorized operation was reached.
-- `cleanup_hold`: Computer Use ownership, close, focus restoration, or handle
-  disposal could not be proven; preserve the window and report its impact.
 
 One failed Issue creation or post-create verification stops the batch. A held
 Finding does not stop unrelated matrix rows unless it proves the environment or

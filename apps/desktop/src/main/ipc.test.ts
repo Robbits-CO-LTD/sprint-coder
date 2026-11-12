@@ -1,5 +1,6 @@
 import { TurnStreamingResources } from './turn-streaming-resources';
 import { RetryableActionRegistry } from './retryable-action';
+import * as desktopControlModule from './desktop-control';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
@@ -23,17 +24,6 @@ import {
   graphReleaseInputSchema,
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
-  computerUseApprovalResolveInputSchema,
-  computerUseForegroundHandoffResolveInputSchema,
-  computerUseOpenPermissionSettingsInputSchema,
-  computerUseProfileListInputSchema,
-  computerAppGrantResolveInputSchema,
-  computerUseGrantRevokeInputSchema,
-  computerUseProfileRegisterInputSchema,
-  computerUseSessionStatusInputSchema,
-  computerUseStartInputSchema,
-  computerUseStopInputSchema,
-  computerUseWindowCandidatesInputSchema,
   canvasViewSaveInputSchema,
   commandEnvelopeSchema,
   commandOutputPageInputSchema,
@@ -107,7 +97,6 @@ import {
   teamPolicyUpdateInputSchema,
   teamModelResearchSettingsSetInputSchema,
   teamConcurrencySettingsSetInputSchema,
-  computerUseSettingsSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamSendMessageInputSchema,
   teamSubscriptionInputSchema,
@@ -2911,8 +2900,7 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded },
-        // Every Turn ending fans out to both coordinators through `notifyTurnEnded`.
-        computerUseController: { turnEnded: vi.fn() },
+        // Every Turn ending reaches the approval coordinator through `notifyTurnEnded`.
         managedCodingHarness: {
           broker: {
             getTurnSnapshot: (taskId: string, turnId: string) => {
@@ -2999,7 +2987,6 @@ describe('Main image attachment dispatch boundary', () => {
         ]),
         persistence: { getActiveTurnId: () => null },
         approvalCoordinator: { turnEnded },
-        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: { finishTurn },
       });
       releaseManagedWorkerTurn.call(router, 'worker-a');
@@ -3032,7 +3019,6 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded: vi.fn() },
-        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: { getTurnSnapshot: () => started.get(missionTurnId) },
           startTurn,
@@ -3406,6 +3392,185 @@ describe('Main image attachment dispatch boundary', () => {
       }
     },
   );
+
+  it('keeps the Task grant of an exact desktop-control command, and only that, under Ask and Auto', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'command',
+          name: 'run',
+          version: '1',
+        }),
+        providerName: 'run_command',
+        kind: 'shell',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+        sideEffect: 'process',
+        risk: 'high',
+        requiredCapabilities: ['shell.execute'],
+        executionTarget: 'command-runner',
+        implementationKind: 'command-runner',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['mock'],
+      }),
+    );
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-ad' })
+      .entries[0]!;
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-ad-grant-'));
+    const desktop = vi.spyOn(desktopControlModule, 'isDesktopControlExecutable');
+    try {
+      const request = {
+        context: {
+          taskId: 'task-ad',
+          turnId: 'turn-ad',
+          workspaceId: 'workspace-ad',
+          policyEpoch: 1,
+        },
+        callId: 'call-ad',
+        entry,
+        input: await prepareExecutionSpec({
+          workspacePath,
+          executable: process.execPath,
+          argv: ['list-windows'],
+          cwd: '.',
+        }),
+      } as unknown as ToolAuthorizationRequest;
+      const decide = async (preset: AccessPreset, reason: string) => {
+        const router = Object.create(IpcRouter.prototype) as {
+          evaluateToolPermission(
+            request: ToolAuthorizationRequest,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        };
+        Object.assign(router, {
+          managedWorkerCall: new Map(),
+          autoReviewer: AutoReviewer.createProduction(),
+          publish: () => undefined,
+          permissionBroker: {
+            getPolicy: () => ({ preset, policyEpoch: 1 }),
+            // What the policy engine reports for a matched grant or another allow.
+            previewExecutionSpec: () => ({
+              decision: 'allow',
+              reason,
+              policyEpoch: 1,
+              permit: { id: 'permit' },
+            }),
+            commitEvaluation: () => undefined,
+            revalidate: () => ({ valid: true }),
+          },
+        });
+        return router.evaluateToolPermission(request, 'shell.execute');
+      };
+      for (const preset of ['ask', 'auto'] as const) {
+        desktop.mockReturnValue(true);
+        await expect(decide(preset, 'remembered_grant')).resolves.toMatchObject({
+          decision: 'allow',
+          reason: 'remembered_grant',
+        });
+        await expect(decide(preset, 'narrow_allow')).resolves.toMatchObject({
+          decision: 'approval_required',
+        });
+        // Every other command keeps being asked again, as before.
+        desktop.mockReturnValue(false);
+        await expect(decide(preset, 'remembered_grant')).resolves.toMatchObject({
+          decision: 'approval_required',
+          reason: 'provider_command_requires_explicit_approval',
+        });
+      }
+    } finally {
+      desktop.mockRestore();
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('consults no Auto reviewer for a desktop-control run that touches no other app', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'command',
+          name: 'run',
+          version: '1',
+        }),
+        providerName: 'run_command',
+        kind: 'shell',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+        sideEffect: 'process',
+        risk: 'high',
+        requiredCapabilities: ['shell.execute'],
+        executionTarget: 'command-runner',
+        implementationKind: 'command-runner',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['mock'],
+      }),
+    );
+    const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-ad' })
+      .entries[0]!;
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-ad-inert-'));
+    const desktop = vi.spyOn(desktopControlModule, 'isDesktopControlExecutable');
+    try {
+      const request = {
+        context: {
+          taskId: 'task-ad',
+          turnId: 'turn-ad',
+          workspaceId: 'workspace-ad',
+          policyEpoch: 1,
+        },
+        callId: 'call-ad',
+        entry,
+        input: await prepareExecutionSpec({
+          workspacePath,
+          executable: process.execPath,
+          argv: ['skills', 'get', 'desktop'],
+          cwd: '.',
+        }),
+      } as unknown as ToolAuthorizationRequest;
+      const review = vi.fn(async () => {
+        throw new Error('reviewer consulted');
+      });
+      const decide = async (decision: 'approval_required' | 'deny') => {
+        const router = Object.create(IpcRouter.prototype) as {
+          evaluateToolPermission(
+            request: ToolAuthorizationRequest,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        };
+        Object.assign(router, {
+          managedWorkerCall: new Map(),
+          autoReviewer: { review },
+          publish: () => undefined,
+          permissionBroker: {
+            getPolicy: () => ({ preset: 'auto', policyEpoch: 1 }),
+            previewExecutionSpec: () => ({ decision, reason: 'policy', policyEpoch: 1 }),
+            commitEvaluation: () => undefined,
+          },
+        });
+        return router.evaluateToolPermission(request, 'shell.execute');
+      };
+      // The ApprovalCoordinator allows it without a card; a policy deny stays a deny.
+      desktop.mockReturnValue(true);
+      await expect(decide('approval_required')).resolves.toMatchObject({
+        decision: 'approval_required',
+      });
+      await expect(decide('deny')).resolves.toMatchObject({ decision: 'deny' });
+      expect(review).not.toHaveBeenCalled();
+      // Any other executable with the same arguments goes to the reviewer as before.
+      desktop.mockReturnValue(false);
+      await expect(decide('approval_required')).rejects.toThrow('reviewer consulted');
+      expect(review).toHaveBeenCalledTimes(1);
+    } finally {
+      desktop.mockRestore();
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
 
   describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {
     const prepareWorkerManagedCatalog = Reflect.get(
@@ -7929,21 +8094,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsListRecent]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsResolve]: approvalResolveInputSchema,
-  [IPC_CHANNELS.computerUseAvailability]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseOpenPermissionSettings]: computerUseOpenPermissionSettingsInputSchema,
-  [IPC_CHANNELS.computerUseProfilesList]: computerUseProfileListInputSchema,
-  [IPC_CHANNELS.computerUseProfileRegister]: computerUseProfileRegisterInputSchema,
-  [IPC_CHANNELS.computerUseGrantsList]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseGrantRevoke]: computerUseGrantRevokeInputSchema,
-  [IPC_CHANNELS.computerUseGrantPurge]: emptyPayloadSchema,
-  [IPC_CHANNELS.computerUseGrantRequestResolve]: computerAppGrantResolveInputSchema,
-  [IPC_CHANNELS.computerUseWindowCandidates]: computerUseWindowCandidatesInputSchema,
-  [IPC_CHANNELS.computerUseStart]: computerUseStartInputSchema,
-  [IPC_CHANNELS.computerUseStatusGet]: computerUseSessionStatusInputSchema,
-  [IPC_CHANNELS.computerUseStop]: computerUseStopInputSchema,
-  [IPC_CHANNELS.computerUseApprovalResolve]: computerUseApprovalResolveInputSchema,
-  [IPC_CHANNELS.computerUseForegroundHandoffResolve]:
-    computerUseForegroundHandoffResolveInputSchema,
   [IPC_CHANNELS.commandsList]: taskIdPayloadSchema,
   [IPC_CHANNELS.commandsOutputPage]: commandOutputPageInputSchema,
   [IPC_CHANNELS.commandsOutputTail]: commandOutputTailInputSchema,
@@ -8004,8 +8154,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamConcurrency]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamConcurrency]: teamConcurrencySettingsSetInputSchema,
-  [IPC_CHANNELS.settingsGetComputerUse]: emptyPayloadSchema,
-  [IPC_CHANNELS.settingsSetComputerUse]: computerUseSettingsSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamModelSelectionGuidance]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelSelectionGuidance]: teamModelSelectionGuidanceSetInputSchema,
   [IPC_CHANNELS.settingsGetSprintCoderPrePrompt]: emptyPayloadSchema,
@@ -8035,10 +8183,6 @@ const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.fileEditEvent,
   IPC_CHANNELS.runtimeStatusEvent,
   IPC_CHANNELS.updateHealthEvent,
-  IPC_CHANNELS.computerUseActivationIntent,
-  IPC_CHANNELS.computerUseStatusEvent,
-  // Main pushes the application approval card; the Renderer answers on its own router channel.
-  IPC_CHANNELS.computerUseGrantRequestEvent,
   IPC_CHANNELS.updateCheckNow,
   IPC_CHANNELS.updateOpenManual,
   IPC_CHANNELS.updateOpenLog,
@@ -8055,37 +8199,6 @@ describe('IPC channel registry stays in sync with the adversarial fuzz table', (
     }
     expect(handled.size + NON_ROUTER_CHANNELS.size).toBe(allChannels.size);
   });
-});
-
-describe('Computer Use stop channel', () => {
-  // The schema ipc.ts registers for the stop channel and preload validates against (T15-1).
-  const envelope = commandEnvelopeSchema(computerUseStopInputSchema);
-  const stop = (reason: string) =>
-    envelope.safeParse({
-      requestId: 'r1',
-      operationId: 'o1',
-      payload: { sessionId: 'session-1', reason },
-    }).success;
-
-  it('accepts the reasons the Renderer actually sends', () => {
-    // useComputerUse.tsx sends `user_stop` (the Stop button) and `task_changed` (Task switch).
-    expect(stop('user_stop')).toBe(true);
-    expect(stop('task_changed')).toBe(true);
-  });
-
-  it.each(['agent_stop', 'agent_finish'])(
-    'refuses %s from the Renderer, so a model-ended session cannot be claimed or faked',
-    (reason) => {
-      expect(stop(reason)).toBe(false);
-    },
-  );
-
-  it.each(['emergency_stop', 'renderer_reloaded', 'limit_reached', 'policy_changed'])(
-    'refuses Main-only reason %s from the Renderer',
-    (reason) => {
-      expect(stop(reason)).toBe(false);
-    },
-  );
 });
 
 describe('every registered IPC channel rejects adversarial envelopes', () => {
@@ -8649,7 +8762,6 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
-      computerUseController: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,
       persistence: {

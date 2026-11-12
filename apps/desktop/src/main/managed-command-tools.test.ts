@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolBroker, type ManagedToolLifecycleEvent } from './tool-broker';
 import { ToolRegistry, type Capability } from '@sprint-coder/domain';
 import {
+  COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
@@ -16,6 +17,7 @@ import {
 import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
 import { CommandRunner, CommandRunnerError, type CommandResult } from './command-runner';
 import * as commandRunnerModule from './command-runner';
+import * as desktopControlModule from './desktop-control';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -269,6 +271,323 @@ describe('managed command root selection (issue #840)', () => {
     } finally {
       prepare.mockRestore();
       await sessions.dispose();
+    }
+  });
+});
+
+describe('desktop control Workspace roots', () => {
+  it('hands the Turn roots to the runner only for desktop control allowed on its card or touching no other app', async () => {
+    const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-a-'));
+    const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-roots-b-'));
+    roots.push(primary, secondary);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary } = createCommandBoundary(primary);
+    const single = boundary.persistence.readTurnWorkspaceSet('turn')!;
+    boundary.persistence.readTurnWorkspaceSet = () => ({
+      ...single,
+      roots: [
+        single.roots[0]!,
+        { rootId: 'root-b', path: secondary, label: 'b', role: 'secondary', status: 'available' },
+      ],
+    });
+    const result: CommandResult = {
+      executionId: 'execution',
+      exitCode: 0,
+      signal: null,
+      canceled: false,
+      termination: 'natural',
+      durationMs: 1,
+      outputBytes: 0,
+      truncated: false,
+    };
+    const managedRunner = new CommandRunner({ sandboxed: true });
+    const directRunner = new CommandRunner({ sandboxed: true });
+    const managedRun = vi.spyOn(managedRunner, 'run').mockResolvedValue(result);
+    const directRun = vi.spyOn(directRunner, 'run').mockResolvedValue(result);
+    const sessions = new ManagedCommandSessions(managedRunner);
+    // What the person chose on the card; `undefined` is a preset or policy allow with no card.
+    let approvalDecision: 'allow_once' | 'allow_task' | undefined = 'allow_once';
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+        ...(approvalDecision === undefined ? {} : { approvalDecision }),
+      }),
+    );
+    registerCommandRunnerTool(broker, managedRunner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
+    registerCommandRunnerTool(broker, directRunner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-roots',
+      turnId: 'turn-desktop-roots',
+      workspaceId: 'workspace-desktop-roots',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    let input = { executable: process.execPath, argv: ['list-windows'], purpose: 'desktop roots' };
+    const expected = expect.objectContaining({
+      desktopControlWorkspaceRoots: [primary, secondary],
+    });
+    const dispatchAll = async (suffix: string) => {
+      for (const [callId, providerName, background] of [
+        ['exec-foreground', 'exec_command', false],
+        ['exec-background', 'exec_command', true],
+        ['run-command', 'run_command', false],
+      ] as const)
+        await broker.dispatch({
+          ...owner,
+          callId: `${callId}-${suffix}`,
+          providerName,
+          input: { ...input, ...(background ? { background } : {}) },
+        });
+      await vi.waitFor(() => expect(managedRun).toHaveBeenCalledTimes(2));
+    };
+    // Prepared as the shipped desktop control (by its sealed bytes); the runner is mocked here.
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await dispatchAll('once');
+      expect(desktop).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringMatching(/^[a-f0-9]{64}$/u),
+      );
+      expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+
+      approvalDecision = 'allow_task';
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('task');
+      expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+
+      // A preset or policy allow never lets a command out of the sandbox.
+      approvalDecision = undefined;
+      managedRun.mockClear();
+      directRun.mockClear();
+      await dispatchAll('preset');
+      for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
+        expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+
+      // A run that only prints the guides or the status needs no card, and runs outside the
+      // sandbox with the roots, judged again on the sealed argv.
+      for (const argv of [['status'], ['skills', 'get', 'desktop']]) {
+        input = { ...input, argv };
+        managedRun.mockClear();
+        directRun.mockClear();
+        await dispatchAll(`inert-${argv.join('-')}`);
+        expect(managedRun.mock.calls.map(([, options]) => options)).toEqual([expected, expected]);
+        expect(directRun).toHaveBeenCalledExactlyOnceWith(expect.anything(), expected);
+      }
+
+      // Any other command never gets the roots, even when the person allowed it on its card, or
+      // when it has the same arguments as a desktop-control status check.
+      desktop.mockReturnValue(false);
+      for (const decision of ['allow_once', 'allow_task', undefined] as const) {
+        approvalDecision = decision;
+        managedRun.mockClear();
+        directRun.mockClear();
+        await dispatchAll(`ordinary-${decision ?? 'preset'}`);
+        expect(directRun).toHaveBeenCalledOnce();
+        for (const [, options] of [...managedRun.mock.calls, ...directRun.mock.calls])
+          expect(options).not.toHaveProperty('desktopControlWorkspaceRoots');
+      }
+    } finally {
+      desktop.mockRestore();
+      await broker.dispose();
+      await sessions.dispose();
+      managedRun.mockRestore();
+      directRun.mockRestore();
+    }
+  });
+
+  it('seals a launch by name with the Start menu path before the card, and runs that path', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-launch-name-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary } = createCommandBoundary(workspace);
+    const result: CommandResult = {
+      executionId: 'execution',
+      exitCode: 0,
+      signal: null,
+      canceled: false,
+      termination: 'natural',
+      durationMs: 1,
+      outputBytes: 0,
+      truncated: false,
+    };
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run').mockResolvedValue(result);
+    // What the card is raised for: the input the authorizer sees.
+    const carded: unknown[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      (request) => {
+        carded.push(request.input);
+        return {
+          decision: 'allow',
+          reason: 'test',
+          beforeExecute: () => true,
+          approvalDecision: 'allow_once',
+        };
+      },
+    );
+    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-launch-name',
+      turnId: 'turn-launch-name',
+      workspaceId: 'workspace-launch-name',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    // An absolute path outside the Workspace as this OS reads one, since the replaced arguments
+    // are judged again with the checks of an absolute path.
+    const path =
+      process.platform === 'win32'
+        ? 'C:\\Program Files\\RabbitMail\\rabbitmail-desktop.exe'
+        : '/opt/RabbitMail/rabbitmail-desktop';
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    const byName = vi
+      .spyOn(desktopControlModule, 'desktopControlLaunchByName')
+      .mockImplementation((argv) =>
+        argv[1] === 'RabbitMail'
+          ? { argv: ['launch', path] }
+          : argv[1] === 'Missing'
+            ? { refusal: 'デスクトップ操作の実行を拒否した: 見つからない。' }
+            : null,
+      );
+    try {
+      await broker.dispatch({
+        ...owner,
+        callId: 'launch-name',
+        providerName: 'run_command',
+        input: { executable: process.execPath, argv: ['launch', 'RabbitMail'], purpose: 'open' },
+      });
+      expect(carded).toEqual([expect.objectContaining({ argv: ['launch', path] })]);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ argv: ['launch', path] }),
+        expect.anything(),
+      );
+      expect(run.mock.calls[0]![0]).toBe(carded[0]);
+
+      // A name the Start menu does not settle is refused before any card.
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'launch-missing',
+          providerName: 'run_command',
+          input: { executable: process.execPath, argv: ['launch', 'Missing'], purpose: 'open' },
+        }),
+      ).rejects.toThrow('見つからない');
+      expect(carded).toHaveLength(1);
+    } finally {
+      desktop.mockRestore();
+      byName.mockRestore();
+      run.mockRestore();
+      await broker.dispose();
+    }
+  });
+
+  it.skipIf(
+    process.platform !== 'win32' || desktopControlModule.resolveDesktopControlCommand() === null,
+  )(
+    'runs the shipped guides and status outside the sandbox without a decision of the person',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-inert-'));
+      roots.push(workspace);
+      const registry = new ToolRegistry();
+      registry.register(COMMAND_RUNNER_TOOL);
+      const { boundary } = createCommandBoundary(workspace);
+      // What the ApprovalCoordinator returns for such a run: an allow with no card behind it.
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      );
+      registerCommandRunnerTool(
+        broker,
+        new CommandRunner({ sandboxed: true }),
+        boundary,
+        COMMAND_RUNNER_TOOL,
+      );
+      const owner = {
+        taskId: 'task-desktop-inert',
+        turnId: 'turn-desktop-inert',
+        workspaceId: 'workspace-desktop-inert',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'grok');
+      const executable = desktopControlModule.resolveDesktopControlCommand()!;
+      const dispatch = (callId: string, argv: string[]) =>
+        broker.dispatch({
+          ...owner,
+          callId,
+          providerName: 'run_command',
+          input: { executable, argv, purpose: 'desktop guides' },
+        }) as Promise<{ exitCode: number; stdout: string }>;
+      try {
+        // Both guides at once, as the agent asks for them at the start of a Turn, and the status,
+        // which fails inside the sandbox (no home folder there).
+        const results = await Promise.all([
+          dispatch('guide-desktop', ['skills', 'get', 'desktop']),
+          dispatch('guide-platform', ['skills', 'get', 'platform']),
+          dispatch('status', ['status']),
+        ]);
+        for (const result of results) {
+          expect(result.exitCode).toBe(0);
+          expect(JSON.parse(result.stdout)).toMatchObject({ ok: true });
+        }
+      } finally {
+        await broker.dispose();
+      }
+    },
+    60_000,
+  );
+
+  it('refuses desktop-control arguments before a command or card exists', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-refusal-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run');
+    const authorize = vi.fn(() => ({ decision: 'allow' as const, reason: 'test' }));
+    const broker = new ToolBroker(registry, () => 1, authorize);
+    registerCommandRunnerTool(broker, runner, boundary, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-refusal',
+      turnId: 'turn-desktop-refusal',
+      workspaceId: 'workspace-desktop-refusal',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'desktop-mcp',
+          providerName: 'run_command',
+          input: { executable: process.execPath, argv: ['mcp'], purpose: 'desktop refusal' },
+        }),
+      ).rejects.toThrow('デスクトップ操作の実行を拒否した: mcp は使えない。');
+      expect(authorize).not.toHaveBeenCalled();
+      expect(commandRows.size).toBe(0);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      desktop.mockRestore();
+      await broker.dispose();
     }
   });
 });

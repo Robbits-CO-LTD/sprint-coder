@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -23,6 +23,8 @@ import {
   type ToolAuthorizationRequest,
 } from './tool-broker';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import * as desktopControlModule from './desktop-control';
+import { rememberDesktopControlWindows } from './desktop-control-display';
 import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
@@ -1405,6 +1407,60 @@ describe('ApprovalCoordinator cancellation of an aborted call', () => {
     expect(executions()).toBe(1);
   });
 
+  it("cancels every unanswered card of a Turn its CLI ended, and only that Turn's (issue #1170)", async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    broker.startTurn({ ...toolContext, turnId: 'turn-2' }, 'mock');
+    const first = dispatchFetch(broker, 'call-1', 'https://one.test');
+    const second = dispatchFetch(broker, 'call-2', 'https://two.test');
+    const otherTurn = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-2',
+      callId: 'call-1',
+      providerName: 'approval_fetch',
+      input: { origin: 'https://other.test' },
+    });
+    await viWaitFor(() => harness.published.length === 3);
+    const [cardOne, cardTwo, otherCard] = harness.published as [
+      StoredApproval,
+      StoredApproval,
+      StoredApproval,
+    ];
+
+    harness.coordinator.cancelUnansweredForTurn('task-1', 'turn-1');
+
+    for (const call of [first, second])
+      await expect(call).rejects.toThrow('Tool authorization deny: approval_canceled');
+    for (const card of [cardOne, cardTwo]) {
+      expect(harness.persistence.approvals.get(card.id)).toMatchObject({
+        state: 'canceled',
+        decision: null,
+        revision: 1,
+      });
+      // Committed before it is published, and never decidable afterwards.
+      expect(harness.persistence.timeline.filter((entry) => entry.endsWith(`:${card.id}`))).toEqual(
+        [
+          `committed:${card.id}`,
+          `published:${card.id}`,
+          `cancel-attempt:${card.id}`,
+          `canceled:${card.id}`,
+          `published:${card.id}`,
+        ],
+      );
+      expect(() => harness.coordinator.resolve(resolveCommand(card, 'allow_once'))).toThrow();
+    }
+    expect(harness.persistence.grants).toEqual([]);
+    expect(executions()).toBe(0);
+    // Another Turn's card is not touched.
+    expect(harness.persistence.approvals.get(otherCard.id)).toMatchObject({ state: 'pending' });
+    harness.coordinator.resolve(resolveCommand(otherCard, 'allow_once'));
+    await expect(otherTurn).resolves.toEqual({ ok: true });
+    expect(executions()).toBe(1);
+  });
+
   it('refuses a late allow once the cancellation committed first', async () => {
     const harness = createHarness();
     const { broker, executions } = createBroker(
@@ -2004,5 +2060,561 @@ describe('managed command stdin approval', () => {
     harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
     await expect(dispatch).resolves.toEqual({ written: true });
     expect(written).toEqual([chars]);
+  });
+});
+
+describe('ApprovalCoordinator desktop control card', () => {
+  const definition = createToolDefinition({
+    toolId: createToolId({ provider: 'builtin', namespace: 'command', name: 'run', version: '1' }),
+    providerName: 'run_command',
+    kind: 'shell',
+    schemaVersion: 1,
+    inputSchema: { type: 'object' },
+    outputSchema: { type: 'object' },
+    sideEffect: 'process',
+    risk: 'high',
+    requiredCapabilities: ['shell.execute'],
+    executionTarget: 'command-runner',
+    implementationKind: 'command-runner',
+    priority: 1,
+    workspaceBinding: { kind: 'any' },
+    providerCompatibility: ['mock'],
+  });
+  const registry = new ToolRegistry();
+  registry.register(definition);
+  const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-1' })
+    .entries[0]!;
+
+  async function withSpecs(
+    run: (prepare: (argv: string[]) => Promise<ToolAuthorizationRequest['input']>) => Promise<void>,
+  ) {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-desktop-'));
+    try {
+      const { prepareExecutionSpec } = await import('./command-runner');
+      await run((argv) =>
+        prepareExecutionSpec({ workspacePath, executable: process.execPath, argv }),
+      );
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  }
+
+  const request = (input: unknown, callId: string): ToolAuthorizationRequest => ({
+    context: toolContext,
+    callId,
+    entry,
+    input,
+  });
+  // What the Full preset or a policy allow hands back for a command.
+  const policyAllow = () => ({
+    decision: 'allow' as const,
+    reason: 'preset_full',
+    beforeExecute: () => true,
+  });
+
+  it('raises a card for desktop control even when the preset allows, and records the person', async () => {
+    const harness = createHarness({ evaluatePermission: policyAllow });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        const pending = harness.coordinator.authorizeTool(
+          request(await prepare(['snapshot']), 'desktop-once'),
+        );
+        const approval = await waitForPublished(harness);
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+        await expect(pending).resolves.toMatchObject({
+          decision: 'allow',
+          approvalDecision: 'allow_once',
+        });
+
+        // Any other executable keeps the preset's silent allow, with no decision of the person.
+        desktop.mockReturnValue(false);
+        const silent = await harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-silent'),
+        );
+        expect(silent.decision).toBe('allow');
+        expect(silent).not.toHaveProperty('approvalDecision');
+        expect(harness.published).toHaveLength(1);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('reuses only a Task grant given on the card of this exact desktop-control command', async () => {
+    const harness = createHarness({ evaluatePermission: () => 'approval_required' });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(false);
+    try {
+      await withSpecs(async (prepare) => {
+        // A Task grant on another executable's card.
+        const other = harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-task'),
+        );
+        harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_task'));
+        await expect(other).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+
+        desktop.mockReturnValue(true);
+        const spec = await prepare(['snapshot']);
+        const first = harness.coordinator.authorizeTool(request(spec, 'desktop-task'));
+        await viWaitFor(() => harness.published.length === 2);
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'allow_task'));
+        await expect(first).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+
+        // The same command again is the person's Task decision, without a new card.
+        await expect(
+          harness.coordinator.authorizeTool(request(spec, 'desktop-reuse')),
+        ).resolves.toMatchObject({
+          decision: 'allow',
+          reason: 'all_capabilities_allowed',
+          approvalDecision: 'allow_task',
+        });
+        expect(harness.published).toHaveLength(2);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('takes the Task grant the policy engine matched for this exact command as the person', async () => {
+    // How production delivers 「Task中許可」: the grant is saved with the approval and the policy
+    // engine matches it for the same ExecutionSpec only, reporting `remembered_grant`.
+    let reason = 'remembered_grant';
+    const harness = createHarness({
+      evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
+    });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        const granted = await harness.coordinator.authorizeTool(
+          request(await prepare(['list-windows']), 'desktop-remembered'),
+        );
+        expect(granted).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(granted.beforeExecute?.()).toBe(true);
+        expect(harness.published).toHaveLength(0);
+
+        // Any other allow still asks the person on a card.
+        reason = 'narrow_allow';
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['list-windows']), 'desktop-narrow'),
+        );
+        await waitForPublished(harness);
+        harness.coordinator.resolve(resolveCommand(harness.published[0]!, 'deny'));
+        await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+
+        // Another executable's remembered grant stays a plain allow, with no decision recorded.
+        desktop.mockReturnValue(false);
+        reason = 'remembered_grant';
+        const other = await harness.coordinator.authorizeTool(
+          request(await prepare(['--version']), 'other-remembered'),
+        );
+        expect(other.decision).toBe('allow');
+        expect(other).not.toHaveProperty('approvalDecision');
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('allows a desktop-control run that touches no other app without a card, under any preset', async () => {
+    for (const evaluatePermission of [policyAllow, () => 'approval_required' as const]) {
+      const harness = createHarness({ evaluatePermission });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      try {
+        await withSpecs(async (prepare) => {
+          // The agent asks for both guides at once at the start of a Turn: neither waits on a card
+          // nor on the other.
+          const [desktopGuide, platformGuide, status] = await Promise.all([
+            harness.coordinator.authorizeTool(
+              request(await prepare(['skills', 'get', 'desktop']), 'guide-desktop'),
+            ),
+            harness.coordinator.authorizeTool(
+              request(await prepare(['skills', 'get', 'platform']), 'guide-platform'),
+            ),
+            harness.coordinator.authorizeTool(request(await prepare(['status']), 'status')),
+          ]);
+          for (const decision of [desktopGuide, platformGuide, status]) {
+            expect(decision).toMatchObject({ decision: 'allow' });
+            // Nobody decided it on a card, so it carries no decision of the person.
+            expect(decision).not.toHaveProperty('approvalDecision');
+            expect(decision.beforeExecute?.()).toBe(true);
+          }
+          expect(harness.published).toHaveLength(0);
+          // A policy change before the run withdraws it.
+          harness.setPolicyEpoch(8);
+          expect(desktopGuide.beforeExecute?.()).toBe(false);
+          harness.setPolicyEpoch(7);
+
+          // Reading the screen, operating, a batch or a shared option still asks every time.
+          for (const argv of [['list-windows'], ['launch', 'notepad'], ['--headed', 'status']]) {
+            const asked = harness.coordinator.authorizeTool(
+              request(await prepare(argv), `asked-${argv.join('-')}`),
+            );
+            const approval = await waitForPublished(harness);
+            harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+            await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+            harness.published.length = 0;
+          }
+
+          // The same argv on any other executable keeps its own path: the policy's allow, or a card.
+          desktop.mockReturnValue(false);
+          const other = harness.coordinator.authorizeTool(
+            request(await prepare(['skills', 'get', 'desktop']), 'other-skills'),
+          );
+          if (evaluatePermission === policyAllow) {
+            await expect(other).resolves.toMatchObject({ decision: 'allow' });
+            expect(harness.published).toHaveLength(0);
+          } else {
+            const approval = await waitForPublished(harness);
+            harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+            await expect(other).resolves.toMatchObject({ decision: 'deny' });
+          }
+        });
+      } finally {
+        desktop.mockRestore();
+      }
+    }
+  });
+
+  it('asks every time for a run that uses the foreground, whatever Task grant exists', async () => {
+    let reason = 'remembered_grant';
+    const harness = createHarness({
+      evaluatePermission: () => ({ decision: 'allow', reason, beforeExecute: () => true }),
+    });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        for (const argv of [
+          ['--headed', 'click', '@s1:e1'],
+          ['focus-window', '--window-id', 'w-1'],
+          ['press', 'return'],
+          ['launch', 'charmap', '--activate'],
+          ['close-app', 'charmap'],
+        ]) {
+          harness.published.length = 0;
+          // A grant the policy engine remembers, or one left in the Task by an earlier version.
+          harness.persistence.hasTaskGrant = () => true;
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(argv), `fg-${argv.join('-')}`),
+          );
+          const approval = await waitForPublished(harness);
+          const display = (approval as unknown as { display: { desktopAction?: unknown } }).display;
+          expect(display.desktopAction).toMatchObject({
+            mode: 'foreground',
+            allowTaskGrant: false,
+          });
+          // The card offers no Task grant, and Main refuses one before anything is recorded.
+          expect(() => harness.coordinator.resolve(resolveCommand(approval, 'allow_task'))).toThrow(
+            'APPROVAL_DECISION_NOT_ALLOWED',
+          );
+          expect(harness.persistence.approvals.get(approval.id)?.state).toBe('pending');
+          harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+          await expect(asked).resolves.toMatchObject({
+            decision: 'allow',
+            approvalDecision: 'allow_once',
+          });
+        }
+        expect(harness.persistence.grants).toHaveLength(0);
+
+        // A background run keeps its Task grant, and its card offers one.
+        harness.published.length = 0;
+        const background = await harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@s1:e1']), 'bg-remembered'),
+        );
+        expect(background).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(0);
+        reason = 'narrow_allow';
+        harness.persistence.hasTaskGrant = () => false;
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['set-value', '@s1:e1', 'ABC']), 'bg-card'),
+        );
+        const approval = await waitForPublished(harness);
+        expect(
+          (approval as unknown as { display: { desktopAction?: unknown } }).display.desktopAction,
+        ).toMatchObject({ title: '文字を入力します', mode: 'background', allowTaskGrant: true });
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
+        await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  describe('「このアプリは Task 中許可」', () => {
+    const part = (app: string, pid: number, window: string) => ({
+      pid,
+      process_instance: `windows-proc-v1:${pid}:1`,
+      role: 'button',
+      name: 'OK',
+      source_app: app,
+      source_window_id: window,
+      source_window_title: app,
+    });
+
+    async function withAppGrantState(
+      run: (
+        prepare: (argv: string[]) => Promise<ToolAuthorizationRequest['input']>,
+      ) => Promise<void>,
+    ) {
+      const stateRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-app-grant-'));
+      const write = async (snapshot: string, inner: unknown) => {
+        await mkdir(join(stateRoot, 'snapshots', snapshot), { recursive: true });
+        await writeFile(
+          join(stateRoot, 'snapshots', snapshot, 'refmap.json'),
+          JSON.stringify({ inner }),
+        );
+      };
+      await write('scharmap', {
+        '@e1': part('charmap.exe', 100, 'w-1'),
+        '@e2': part('charmap.exe', 100, 'w-1'),
+      });
+      await write('snotepad', { '@e1': part('Notepad.exe', 200, 'w-2') });
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockReturnValue(true);
+      const folder = vi
+        .spyOn(desktopControlModule, 'desktopControlStateFolder')
+        .mockReturnValue(stateRoot);
+      try {
+        await withSpecs(run);
+      } finally {
+        desktop.mockRestore();
+        folder.mockRestore();
+        await rm(stateRoot, { recursive: true, force: true });
+      }
+    }
+
+    const desktopActionOf = (approval: StoredApproval) =>
+      (approval as unknown as { display: { desktopAction?: Record<string, unknown> } }).display
+        .desktopAction;
+
+    it('offers the app on the card, and then runs its reads and background operations without one', async () => {
+      const harness = createHarness();
+      await withAppGrantState(async (prepare) => {
+        const first = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e1']), 'app-first'),
+        );
+        const approval = await waitForPublished(harness);
+        expect(desktopActionOf(approval)).toMatchObject({
+          allowTaskGrant: true,
+          appGrant: { app: 'charmap.exe' },
+        });
+        const recorded = vi.spyOn(harness.persistence, 'resolveApproval');
+        harness.coordinator.resolve({
+          ...resolveCommand(approval, 'allow_task'),
+          grantScope: 'app',
+        });
+        const granted = await first;
+        expect(granted).toMatchObject({ approvalDecision: 'allow_task' });
+        // Kept in memory only: no Task grant of the exact command is stored with it.
+        expect(recorded.mock.calls[0]![0]).toMatchObject({
+          decision: 'allow_task',
+          saveTaskGrant: false,
+        });
+        expect(harness.persistence.grants).toHaveLength(0);
+        // The run the card was raised for goes ahead under the app-wide grant.
+        expect(granted.beforeExecute?.()).toBe(true);
+
+        // A different command on the same app: no card, recorded as the person's Task decision.
+        const next = await harness.coordinator.authorizeTool(
+          request(await prepare(['set-value', '@scharmap:e2', 'ABC']), 'app-next'),
+        );
+        expect(next).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(next.beforeExecute?.()).toBe(true);
+        const read = await harness.coordinator.authorizeTool(
+          request(await prepare(['snapshot', '--window-id', 'w-1', '-i']), 'app-read'),
+        );
+        expect(read).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(1);
+        // Every run the grant allows carries the granted process for the executable to check window
+        // ids against, the card's own run included: its window may be reused while the card waits.
+        expect(granted.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
+        expect(next.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
+        expect(read.desktopControlExpectedWindowOwner).toBe('100:windows-proc-v1:100:1');
+
+        // A window id the executable found owned by another app is never allowed by the records
+        // again in this Task: the next run on it gets a card.
+        rememberDesktopControlWindows(
+          'task-1',
+          ['snapshot', '--window-id', 'w-1'],
+          JSON.stringify({
+            ok: false,
+            command: 'snapshot',
+            error: {
+              code: 'POLICY_DENIED',
+              details: { kind: 'window_owner_mismatch', window_id: 'w-1', found: 1 },
+            },
+          }),
+        );
+        const moved = harness.coordinator.authorizeTool(
+          request(await prepare(['snapshot', '--window-id', 'w-1']), 'app-moved'),
+        );
+        await viWaitFor(() => harness.published.length === 2);
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+        await expect(moved).resolves.toMatchObject({ decision: 'deny' });
+        harness.published.length = 1;
+        // Parts of the app stay allowed: the executable checks a ref's process itself.
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['click', '@scharmap:e1']), 'app-part'),
+          ),
+        ).resolves.toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+
+        // A policy change withdraws it before the run, and from later runs.
+        harness.setPolicyEpoch(8);
+        expect(next.beforeExecute?.()).toBe(false);
+        harness.setPolicyEpoch(7);
+        harness.coordinator.policyEpochChanged('task-1', 7);
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e2']), 'app-after-change'),
+        );
+        await viWaitFor(() => harness.published.length === 2);
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+        await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+      });
+    });
+
+    it('still asks for another app, the foreground, a launch, a close and another Task', async () => {
+      const harness = createHarness();
+      await withAppGrantState(async (prepare) => {
+        const first = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e1']), 'grant'),
+        );
+        const approval = await waitForPublished(harness);
+        harness.coordinator.resolve({
+          ...resolveCommand(approval, 'allow_task'),
+          grantScope: 'app',
+        });
+        await first;
+        for (const argv of [
+          ['click', '@snotepad:e1'],
+          ['--headed', 'click', '@scharmap:e1'],
+          ['press', 'return', '--window-id', 'w-1'],
+          ['launch', 'charmap'],
+          ['close-app', 'charmap'],
+          ['list-windows'],
+          [
+            'batch',
+            JSON.stringify([
+              { command: 'click', args: { ref_id: '@scharmap:e1' } },
+              { command: 'click', args: { ref_id: '@snotepad:e1' } },
+            ]),
+          ],
+        ]) {
+          harness.published.length = 0;
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(argv), `asked-${argv.join('-')}`),
+          );
+          const card = await waitForPublished(harness);
+          harness.coordinator.resolve(resolveCommand(card, 'deny'));
+          await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+        }
+        // Another Task of the same app is not covered (it gets no card here only because its Turn
+        // is not active in this harness).
+        const other = await harness.coordinator.authorizeTool({
+          ...request(await prepare(['click', '@scharmap:e2']), 'other-task'),
+          context: { ...toolContext, taskId: 'task-2' },
+        });
+        expect(other).toMatchObject({ decision: 'deny', reason: 'turn_ended' });
+      });
+    });
+
+    it('refuses the app-wide grant from a card that did not offer it', async () => {
+      const harness = createHarness();
+      await withAppGrantState(async (prepare) => {
+        for (const argv of [['list-windows'], ['click', '@snotepad:e9']]) {
+          harness.published.length = 0;
+          const asked = harness.coordinator.authorizeTool(
+            request(await prepare(argv), `no-offer-${argv.join('-')}`),
+          );
+          const approval = await waitForPublished(harness);
+          expect(desktopActionOf(approval)).not.toHaveProperty('appGrant');
+          expect(() =>
+            harness.coordinator.resolve({
+              ...resolveCommand(approval, 'allow_task'),
+              grantScope: 'app',
+            }),
+          ).toThrow('APPROVAL_DECISION_NOT_ALLOWED');
+          expect(harness.persistence.approvals.get(approval.id)?.state).toBe('pending');
+          harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+          await expect(asked).resolves.toMatchObject({ decision: 'deny' });
+        }
+        // Only with 「Task中許可」 itself, even on a card that offers it.
+        harness.published.length = 0;
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e1']), 'once-app'),
+        );
+        const approval = await waitForPublished(harness);
+        expect(() =>
+          harness.coordinator.resolve({
+            ...resolveCommand(approval, 'allow_once'),
+            grantScope: 'app',
+          }),
+        ).toThrow('APPROVAL_DECISION_NOT_ALLOWED');
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+        // A run allowed on its card, not by the app-wide grant, carries no expected owner.
+        expect(await asked).not.toHaveProperty('desktopControlExpectedWindowOwner');
+        // Nothing was granted for the app; 「Task中許可」 of the exact command carries none either.
+        harness.published.length = 0;
+        const again = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e2']), 'again'),
+        );
+        harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_task'));
+        const exact = await again;
+        expect(exact).toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(exact).not.toHaveProperty('desktopControlExpectedWindowOwner');
+      });
+    });
+  });
+
+  it('describes no other command as desktop control', async () => {
+    const harness = createHarness();
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(false);
+    try {
+      await withSpecs(async (prepare) => {
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['--headed', 'press', 'return']), 'plain'),
+        );
+        const approval = await waitForPublished(harness);
+        expect(
+          (approval as unknown as { display: Record<string, unknown> }).display,
+        ).not.toHaveProperty('desktopAction');
+        // Its Task grant works as before.
+        harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
+        await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+      });
+    } finally {
+      desktop.mockRestore();
+    }
+  });
+
+  it('keeps a policy deny of a desktop-control run that touches no other app', async () => {
+    const harness = createHarness({ evaluatePermission: () => 'deny' });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      await withSpecs(async (prepare) => {
+        await expect(
+          harness.coordinator.authorizeTool(
+            request(await prepare(['skills', 'get', 'desktop']), 'denied'),
+          ),
+        ).resolves.toMatchObject({ decision: 'deny' });
+        expect(harness.published).toHaveLength(0);
+      });
+    } finally {
+      desktop.mockRestore();
+    }
   });
 });

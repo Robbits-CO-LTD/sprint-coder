@@ -60,11 +60,6 @@ it.each([false, true])(
       } else {
         expect(container.querySelector('[data-testid="graph-diff"]')).not.toBeNull();
         const agree = container.querySelectorAll('button')[1]!;
-        expect(JSON.parse(agree.dataset['computerUseIntent']!)).toMatchObject({
-          operation: 'graph-update-agree',
-          requestId: 'request',
-          contextDigest: review.contextDigest,
-        });
         await act(async () => agree.click());
         expect(agreeUpdate).toHaveBeenCalledWith({
           ...input,

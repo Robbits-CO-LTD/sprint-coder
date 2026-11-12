@@ -1,8 +1,4 @@
 import { useEffect, useState } from 'react';
-import {
-  graphResumeActivationIntent,
-  graphResumeStepActivationIntent,
-} from '../../graph-activation-intent';
 import type {
   GraphMissionPlan,
   GraphView,
@@ -370,10 +366,6 @@ function GraphResumeButton({
         type="button"
         className="button"
         disabled={pending || (!integration && reviewRequired && !review)}
-        data-computer-use-activation={integration ? 'graph-resume' : 'graph-resume-step'}
-        data-computer-use-intent={
-          integration ? graphResumeActivationIntent(input) : graphResumeStepActivationIntent(input)
-        }
         onClick={() => void resume()}
       >
         {pending

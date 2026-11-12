@@ -187,11 +187,8 @@ describe('Electron download archive cache', () => {
     expect(install.run).toBe('node ci-install-electron.mjs');
   });
 
-  it('uses the shared action for release validation, both release makers and acceptance packaging', () => {
-    for (const [file, jobs] of [
-      ['release-beta.yml', ['validate-desktop-tests', 'make', 'make-windows-signed']],
-      ['computer-use-acceptance-build.yml', ['acceptance-build']],
-    ]) {
+  it('uses the shared action for release validation and the release maker', () => {
+    for (const [file, jobs] of [['release-beta.yml', ['validate-desktop-tests', 'make']]]) {
       const workflow = parse(readFileSync(join(repository, '.github/workflows', file), 'utf8'));
       for (const job of jobs) {
         const steps = workflow.jobs[job].steps;

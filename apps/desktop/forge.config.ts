@@ -5,13 +5,9 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
-import { extractFile as extractAsarFile, listPackage as listAsarPackage } from '@electron/asar';
-import { sign as signWindowsFiles } from '@electron/windows-sign';
 import { createHash } from 'node:crypto';
-import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import {
   cpSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -19,21 +15,15 @@ import {
   realpathSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { basename, dirname, join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
-  COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
-  COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
-  COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
-  computerUseAcceptanceBuildForEnv,
-} from './computer-use-acceptance-build';
-import {
-  computerUseNativeCompiledPin,
-  verifyWindowsMainAddonDigest,
-} from './src/main/computer-use-native-provenance';
-
+  DESKTOP_CONTROL_EXECUTABLE,
+  DESKTOP_CONTROL_VERSION,
+  desktopControlSupported,
+} from './src/main/desktop-control-build';
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
 // from the packaged app). The native-safe-fs compiled addon lives outside `.vite` and
@@ -90,16 +80,6 @@ const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
 const allowAdhocCodeSign = process.env['SPRINT_CODER_ALLOW_ADHOC_CODESIGN'] === '1';
 const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] === '1';
 const windowsSign = resolveWindowsSignOptions(process.env);
-const packagerWindowsSign =
-  windowsSign === undefined
-    ? undefined
-    : {
-        ...windowsSign,
-        hookFunction: async (file: string) => {
-          if (shouldSkipPackagerCodeSign(file)) return;
-          await signWindowsFiles({ files: [file], ...windowsSign });
-        },
-      };
 const BUNDLED_NODE_VERSION = '22.23.3';
 const BUNDLED_NODE_SHA256 = '9C9245166B4A8E182E0B797DA9C20136117FF24368EAFF1FEC8343A123C8DB0E';
 const MAC_BUNDLED_NODE_SHA256 = {
@@ -113,17 +93,6 @@ const BUNDLED_NODE_SIGNER_SUBJECT =
 const BUNDLED_NODE_SIGNER_ISSUER =
   'CN=Microsoft ID Verified CS EOC CA 03, O=Microsoft Corporation, C=US';
 const BUNDLED_NODE_SIGNER_THUMBPRINT = '5A2C440219B027EF812E24A1E15F671D7CD379DE';
-const MAC_TEAM_IDENTIFIER_PATTERN = /^[A-Z0-9]{10}$/u;
-
-function computerUseRepositorySourceCommit(): string {
-  const commit = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
-    cwd: resolve(__dirname, '..', '..'),
-    encoding: 'utf8',
-    windowsHide: true,
-  }).trim();
-  if (!/^[0-9a-f]{40}$/u.test(commit)) throw new Error('Computer Use source commit is unavailable');
-  return commit;
-}
 
 function macBundledNodeResources(): [string, string] {
   const nodeExecutable = realpathSync(process.execPath);
@@ -152,504 +121,57 @@ function sandboxRunnerResources(): string[] {
   ];
 }
 
-export const COMPUTER_USE_NATIVE_RESOURCE_ROOT = resolve(
-  __dirname,
-  'computer-use-native',
-  'build',
-  'Release',
-);
-export const COMPUTER_USE_NATIVE_MANIFEST_PATH = join(
-  COMPUTER_USE_NATIVE_RESOURCE_ROOT,
-  'computer-use-native.manifest.json',
-);
-const WINDOWS_MAIN_ADDON = 'sprint_coder_computer_use_windows_main.node';
-
-function computerUseNativeResources(): string[] {
-  if (process.platform === 'darwin')
-    return [
-      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node'),
-      COMPUTER_USE_NATIVE_MANIFEST_PATH,
-    ];
-  if (process.platform === 'win32')
-    return [
-      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe'),
-      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, WINDOWS_MAIN_ADDON),
-      COMPUTER_USE_NATIVE_MANIFEST_PATH,
-    ];
-  return [];
+// Sprint Coder's desktop control ships the desktop-control executable built from the source in
+// desktop-control/ (build-desktop-control.mjs; Windows x64 only for now, see
+// src/main/desktop-control-build.ts), the `.sha256` manifest its build wrote beside it, and the
+// license of that third-party source. Like the sandbox runner, the files keep their build names.
+export function desktopControlSource(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string | null {
+  if (!desktopControlSupported(platform, arch)) return null;
+  return resolve(__dirname, 'desktop-control', 'build', 'Release', DESKTOP_CONTROL_EXECUTABLE);
 }
 
-export function isComputerUseNativeArtifactPath(path: string): boolean {
-  const normalized = path.replaceAll('\\', '/').toLowerCase();
-  return (
-    normalized.endsWith('/sprint-coder-computer-use-host.exe') ||
-    normalized.endsWith(`/${WINDOWS_MAIN_ADDON}`) ||
-    normalized.endsWith('/sprint_coder_computer_use_native.node')
-  );
+export function desktopControlResources(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string[] {
+  const executable = desktopControlSource(platform, arch);
+  if (executable === null) return [];
+  return [
+    executable,
+    `${executable}.sha256`,
+    resolve(__dirname, '..', '..', 'docs', 'licenses', 'agent-desktop-license.txt'),
+  ];
 }
 
-function shouldSkipPackagerCodeSign(path: string): boolean {
-  return isComputerUseNativeArtifactPath(path);
-}
-
-function buildComputerUseNative(platform: ForgePlatform, architecture: string): void {
-  assertNativePackagingHost(platform);
-  const sourceCommit = computerUseRepositorySourceCommit();
-  execFileSync(
-    process.execPath,
-    [
-      resolve(__dirname, '..', '..', 'build-computer-use-native.mjs'),
-      `--target=${platform}`,
-      `--arch=${architecture}`,
-      `--source-commit=${sourceCommit}`,
-      ...(process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY'] === undefined
-        ? []
-        : [`--eligibility=${process.env['SPRINT_CODER_COMPUTER_USE_ELIGIBILITY']}`]),
-    ],
-    {
-      cwd: resolve(__dirname, '..', '..'),
-      stdio: 'inherit',
-      windowsHide: true,
-    },
-  );
-}
-
-export async function signAndSealWindowsComputerUse(
-  resourcesPath: string,
-  signer?: (files: string[]) => Promise<void>,
-): Promise<void> {
-  const mainAddonPath = join(resourcesPath, WINDOWS_MAIN_ADDON);
-  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
-  if (signer !== undefined) {
-    await signer([join(resourcesPath, 'sprint-coder-computer-use-host.exe'), mainAddonPath]);
-    const manifest = computerUseNativeManifestSchema.parse(
-      JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-    );
-    if (manifest.windowsMainAddon === undefined)
-      throw new Error('Windows Main addon provenance unavailable');
-    writeFileSync(
-      manifestPath,
-      `${JSON.stringify(
-        {
-          ...manifest,
-          windowsMainAddon: {
-            ...manifest.windowsMainAddon,
-            sha256: createHash('sha256').update(readFileSync(mainAddonPath)).digest('hex'),
-          },
-        },
-        null,
-        2,
-      )}\n`,
-      { mode: 0o600 },
-    );
-  }
-  refreshPackagedComputerUseArtifactDigest(resourcesPath, 'win32');
-}
-
-async function prepareComputerUseNativeForViteBuild(
-  platform: ForgePlatform,
-  architecture: string,
-): Promise<void> {
-  if (platform !== 'darwin' && platform !== 'win32') return;
-  const artifactPath = join(
-    COMPUTER_USE_NATIVE_RESOURCE_ROOT,
-    platform === 'darwin'
-      ? 'sprint_coder_computer_use_native.node'
-      : 'sprint-coder-computer-use-host.exe',
-  );
-  if (platform === 'win32') {
-    verifyComputerUseNativeBuild(platform, architecture);
-    await signAndSealWindowsComputerUse(
-      COMPUTER_USE_NATIVE_RESOURCE_ROOT,
-      windowsSign === undefined
-        ? undefined
-        : async (files) => {
-            await signWindowsFiles({ files, ...windowsSign });
-          },
-    );
-    refreshPackagedComputerUseWindowsSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
-  } else {
-    execFileSync(
-      '/usr/bin/codesign',
-      [
-        '--force',
-        '--options',
-        'runtime',
-        ...(macCodeSignIdentity === '-' ? ['--timestamp=none'] : ['--timestamp']),
-        '--sign',
-        macCodeSignIdentity,
-        artifactPath,
-      ],
-      { stdio: 'inherit' },
-    );
-    refreshPackagedComputerUseArtifactDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'darwin');
-    refreshComputerUseNativeMacModuleSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
-  }
-  verifyComputerUseNativeBuild(platform, architecture);
-}
-
-export function verifyComputerUseNativeBuild(platform: ForgePlatform, architecture: string): void {
-  if (platform !== 'darwin' && platform !== 'win32') return;
-  assertNativePackagingHost(platform);
-  const expectedArtifact =
-    platform === 'darwin'
-      ? join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node')
-      : join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe');
-  if (!existsSync(expectedArtifact) || !lstatSync(expectedArtifact).isFile())
-    throw new Error(`Computer Use native artifact was not built for ${platform}-${architecture}`);
-  if (!lstatSync(COMPUTER_USE_NATIVE_MANIFEST_PATH).isFile())
-    throw new Error('Computer Use native manifest was not built');
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(COMPUTER_USE_NATIVE_MANIFEST_PATH, 'utf8')) as unknown,
-  );
-  const digest = createHash('sha256').update(readFileSync(expectedArtifact)).digest('hex');
-  const sourceCommit = computerUseRepositorySourceCommit();
-  if (platform === 'win32')
-    verifyWindowsMainAddonDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, manifest);
-  if (
-    manifest.sourceCommit !== sourceCommit ||
-    manifest.platform !== platform ||
-    manifest.architecture !== architecture ||
-    manifest.protocolVersion !== 1 ||
-    manifest.apiVersion !== 3 ||
-    manifest.moduleDigest !== digest ||
-    manifest.binaryDigest !== digest
-  )
-    throw new Error('Computer Use native manifest does not match its artifact');
-}
-
-export function verifyPackagedComputerUseNativeBundle(
-  outputPath: string,
-  platform: ForgePlatform,
-  architecture: string,
-): void {
-  if (platform !== 'darwin' && platform !== 'win32') return;
-  const resources =
-    platform === 'darwin'
-      ? join(
-          outputPath,
-          readdirSync(outputPath, { withFileTypes: true }).find(
-            (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
-          )?.name ?? '',
-          'Contents',
-          'Resources',
-        )
-      : join(outputPath, 'resources');
-  const manifestPath = join(resources, 'computer-use-native.manifest.json');
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-  );
-  const artifactName =
-    platform === 'darwin'
-      ? 'sprint_coder_computer_use_native.node'
-      : 'sprint-coder-computer-use-host.exe';
-  const artifactPath = join(resources, artifactName);
-  if (platform === 'win32') {
-    verifyWindowsMainAddonDigest(resources, manifest);
-    if (countResourceBasename(resources, WINDOWS_MAIN_ADDON) !== 1)
-      throw new Error('Packaged Windows Main addon must occur exactly once');
-  }
-  const packagedArtifactCount = countResourceBasename(resources, artifactName);
-  const packagedManifestCount = countResourceBasename(
-    resources,
-    'computer-use-native.manifest.json',
-  );
-  const asarEntries = listAsarPackage(join(resources, 'app.asar'), { isPack: false }).map((entry) =>
-    entry.replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase(),
-  );
-  const artifactEntry = artifactName.toLowerCase();
-  const manifestEntry = 'computer-use-native.manifest.json';
-  const hasAsarDuplicate = asarEntries.some(
-    (entry) =>
-      entry.includes('/computer-use-native/') ||
-      entry.startsWith('computer-use-native/') ||
-      entry === WINDOWS_MAIN_ADDON ||
-      entry.endsWith(`/${WINDOWS_MAIN_ADDON}`) ||
-      entry === manifestEntry ||
-      entry.endsWith(`/${manifestEntry}`) ||
-      entry === artifactEntry ||
-      entry.endsWith(`/${artifactEntry}`),
-  );
-  const digest =
-    existsSync(artifactPath) && lstatSync(artifactPath).isFile()
-      ? createHash('sha256').update(readFileSync(artifactPath)).digest('hex')
-      : null;
-  const compiledPin = computerUseNativeCompiledPin(manifest);
-  const packagedMain = extractAsarFile(
-    join(resources, 'app.asar'),
-    join('.vite', 'build', 'index.js'),
-  ).toString('utf8');
-  const mainContainsCompiledPin = [
-    compiledPin.sourceCommit,
-    compiledPin.artifactDigest,
-    compiledPin.manifestDigest,
-  ].every((value) => packagedMain.includes(value));
-  if (
-    manifest.platform !== platform ||
-    manifest.architecture !== architecture ||
-    manifest.protocolVersion !== 1 ||
-    manifest.apiVersion !== 3 ||
-    packagedArtifactCount !== 1 ||
-    packagedManifestCount !== 1 ||
-    hasAsarDuplicate ||
-    !existsSync(artifactPath) ||
-    !lstatSync(artifactPath).isFile() ||
-    digest === null ||
-    manifest.moduleDigest !== digest ||
-    manifest.binaryDigest !== digest ||
-    !mainContainsCompiledPin
-  )
-    throw new Error(`Packaged Computer Use native artifact verification failed for ${platform}`);
-  const receiptPath = join(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME);
-  assertPackagedComputerUseAcceptanceConsistency(
-    packagedMain,
-    existsSync(join(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME)),
-    computerUseAcceptanceBuildForEnv(process.env, process.platform)?.mode ?? null,
-    existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : null,
-  );
-}
-
-/**
- * The marker exists only inside the compiled acceptance payload, so the packaged Main bundle
- * carries it exactly when the build was an acceptance build.  Verifying the produced bytes — not
- * the build inputs — is what keeps an acceptance package out of a release.
- */
-export function assertPackagedComputerUseAcceptanceConsistency(
-  packagedMain: string,
-  hasReceipt: boolean,
-  expectedMode: string | null,
-  receipt: unknown = null,
-): void {
-  const markedMain = packagedMain.includes(COMPUTER_USE_ACCEPTANCE_BUILD_MARKER);
-  if (expectedMode === 'windows-background-acceptance') {
-    if (
-      !receipt ||
-      typeof receipt !== 'object' ||
-      !('mode' in receipt) ||
-      receipt.mode !== expectedMode ||
-      !('fixtureDigest' in receipt) ||
-      typeof receipt.fixtureDigest !== 'string' ||
-      !/^[a-f0-9]{64}$/u.test(receipt.fixtureDigest) ||
-      !packagedMain.includes(JSON.stringify(receipt.fixtureDigest))
-    )
-      throw new Error('Packaged Computer Use acceptance fixtureDigest is missing or inconsistent');
-  }
-  if (markedMain === (expectedMode !== null) && hasReceipt === (expectedMode !== null)) return;
-  throw new Error(
-    `Packaged Computer Use acceptance build state is inconsistent (main: ${markedMain}, receipt: ${hasReceipt}, expected: ${expectedMode ?? 'none'})`,
-  );
-}
-
-/** A release package must never be produced from an acceptance build. */
-export function assertComputerUseAcceptanceBuildAllowed(
-  environment: Readonly<Record<string, string | undefined>>,
-  platform: NodeJS.Platform,
-): void {
-  if (environment['SPRINT_CODER_RELEASE'] !== '1') return;
-  if (computerUseAcceptanceBuildForEnv(environment, platform) === null) return;
-  throw new Error(
-    `${COMPUTER_USE_ACCEPTANCE_BUILD_ENV} must not be set for a release package; acceptance builds are never published`,
-  );
-}
-
-/**
- * Records the mode and the exact source commit next to the packaged helper so an acceptance run can
- * be reported without trusting a screenshot.  Nothing at runtime reads this file.
- */
-export function writeComputerUseAcceptanceBuildReceipt(
-  resourcesPath: string,
-  platform: ForgePlatform,
-  sourceCommit: string,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  if (platform !== 'win32') return false;
-  const acceptance = computerUseAcceptanceBuildForEnv(environment, 'win32');
-  if (acceptance === null) return false;
-  writeFileSync(
-    join(resourcesPath, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME),
-    `${JSON.stringify({ mode: acceptance.mode, sourceCommit, ...(acceptance.mode === 'windows-background-acceptance' ? { fixtureDigest: acceptance.fixtureDigest } : {}) }, null, 2)}\n`,
-    { mode: 0o600 },
-  );
-  return true;
-}
-
-function countResourceBasename(directory: string, expectedName: string): number {
-  let count = 0;
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.name === expectedName) count += 1;
-    if (entry.isDirectory() && !entry.isSymbolicLink())
-      count += countResourceBasename(path, expectedName);
-  }
-  return count;
-}
-
-export function refreshPackagedComputerUseArtifactDigest(
-  resourcesPath: string,
-  platform: 'darwin' | 'win32',
-): string {
-  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
-  const artifactPath = join(
-    resourcesPath,
-    platform === 'darwin'
-      ? 'sprint_coder_computer_use_native.node'
-      : 'sprint-coder-computer-use-host.exe',
-  );
-  if (!lstatSync(artifactPath).isFile() || !lstatSync(manifestPath).isFile())
-    throw new Error('Packaged Computer Use artifact or manifest is unavailable');
-  const digest = createHash('sha256').update(readFileSync(artifactPath)).digest('hex');
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-  );
-  if (manifest.platform !== platform)
-    throw new Error('Packaged Computer Use manifest platform changed');
-  writeFileSync(
-    manifestPath,
-    `${JSON.stringify({ ...manifest, moduleDigest: digest, binaryDigest: digest }, null, 2)}\n`,
-    { mode: 0o600 },
-  );
-  return digest;
-}
-
-function readWindowsAuthenticodeSignature(artifactPath: string): {
-  Status?: unknown;
-  Thumbprint?: unknown;
-} {
-  const signatureJson = execFileSync(
-    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; [pscustomobject]@{Status=$signature.Status.ToString();Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
-    ],
-    {
-      encoding: 'utf8',
-      env: { ...process.env, SPRINT_CODER_COMPUTER_USE_HELPER: artifactPath },
-      windowsHide: true,
-    },
-  ).trim();
-  return JSON.parse(signatureJson) as { Status?: unknown; Thumbprint?: unknown };
-}
-
-export function verifyWindowsMainAddonSignature(
-  helper: { Status?: unknown; Thumbprint?: unknown },
-  addon: { Status?: unknown; Thumbprint?: unknown },
-): void {
-  if (
-    helper.Status !== 'Valid' ||
-    addon.Status !== 'Valid' ||
-    typeof helper.Thumbprint !== 'string' ||
-    !/^[0-9a-f]{40}$/iu.test(helper.Thumbprint) ||
-    typeof addon.Thumbprint !== 'string' ||
-    addon.Thumbprint.toUpperCase() !== helper.Thumbprint.toUpperCase()
-  )
+/** Fails the build unless the file holds exactly the bytes its `.sha256` manifest seals. */
+export function verifyDesktopControlBinary(executable: string): void {
+  if (!lstatSync(executable).isFile())
+    throw new Error(`desktop-control ${DESKTOP_CONTROL_VERSION} executable was not found`);
+  const expected = readFileSync(`${executable}.sha256`, 'utf8').trim();
+  if (!/^[a-f0-9]{64}$/u.test(expected))
+    throw new Error(`desktop-control ${basename(executable)} has an invalid digest manifest`);
+  const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  if (digest !== expected)
     throw new Error(
-      'Signed Windows Main addon failed Authenticode verification or signer mismatch',
+      `desktop-control ${basename(executable)} SHA-256 ${digest} does not match its sealed digest ${expected}`,
     );
-}
-
-export function refreshPackagedComputerUseWindowsSignerDigest(
-  resourcesPath: string,
-): string | null {
-  const artifactPath = join(resourcesPath, 'sprint-coder-computer-use-host.exe');
-  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
-  const signature = readWindowsAuthenticodeSignature(artifactPath);
-  const signerDigest =
-    signature.Status === 'Valid' &&
-    typeof signature.Thumbprint === 'string' &&
-    /^[0-9A-F]{40}$/u.test(signature.Thumbprint.toUpperCase())
-      ? createHash('sha256').update(signature.Thumbprint.toUpperCase(), 'utf8').digest('hex')
-      : null;
-  if (windowsSign !== undefined && signerDigest === null)
-    throw new Error('Signed Windows Computer Use helper failed Authenticode verification');
-  if (windowsSign !== undefined)
-    verifyWindowsMainAddonSignature(
-      signature,
-      readWindowsAuthenticodeSignature(join(resourcesPath, WINDOWS_MAIN_ADDON)),
-    );
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-  );
-  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  return signerDigest;
-}
-
-export function refreshComputerUseNativeMacModuleSignerDigest(
-  resourcesPath: string,
-): string | null {
-  const artifactPath = join(resourcesPath, 'sprint_coder_computer_use_native.node');
-  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
-  const details = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', artifactPath], {
-    encoding: 'utf8',
-  });
-  if (details.status !== 0)
-    throw new Error('Unable to inspect the macOS Computer Use native module identity');
-  const output = `${details.stdout ?? ''}\n${details.stderr ?? ''}`;
-  const teamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(output)?.[1]?.trim();
-  const signerDigest =
-    teamIdentifier !== undefined && MAC_TEAM_IDENTIFIER_PATTERN.test(teamIdentifier)
-      ? createHash('sha256').update(teamIdentifier, 'utf8').digest('hex')
-      : null;
-  if (macCodeSignIdentity !== '-' && signerDigest === null)
-    throw new Error('Developer ID-signed Computer Use native module has no TeamIdentifier');
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-  );
-  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  return signerDigest;
 }
 
 /**
- * Stamp the native manifest with proof from the already signed macOS app. Build-time environment
- * variables are intentionally not accepted as signer evidence. The outer app is resealed by the
- * caller after this write, so the signer digest is covered by CodeResources.
+ * Seals the packaged desktop-control executable's final bytes, after Packager's Authenticode
+ * signing changed them (as for the sandbox runner). The copy was checked against its build-time
+ * seal before signing, in afterCopyExtraResources.
  */
-export function refreshPackagedComputerUseSignerDigest(appPath: string): string {
-  const details = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', appPath], {
-    encoding: 'utf8',
-  });
-  if (details.status !== 0)
-    throw new Error('Unable to inspect the signed macOS Computer Use app identity');
-  const output = `${details.stdout ?? ''}\n${details.stderr ?? ''}`;
-  const teamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(output)?.[1]?.trim();
-  if (teamIdentifier === undefined || !MAC_TEAM_IDENTIFIER_PATTERN.test(teamIdentifier))
-    throw new Error('Signed macOS Computer Use app identity is incomplete');
-  const modulePath = join(
-    appPath,
-    'Contents',
-    'Resources',
-    'sprint_coder_computer_use_native.node',
-  );
-  const moduleDetails = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', modulePath], {
-    encoding: 'utf8',
-  });
-  if (moduleDetails.status !== 0)
-    throw new Error('Unable to inspect the signed macOS Computer Use native module identity');
-  const moduleOutput = `${moduleDetails.stdout ?? ''}\n${moduleDetails.stderr ?? ''}`;
-  const moduleTeamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(moduleOutput)?.[1]?.trim();
-  if (
-    moduleTeamIdentifier !== teamIdentifier ||
-    moduleTeamIdentifier === undefined ||
-    !MAC_TEAM_IDENTIFIER_PATTERN.test(moduleTeamIdentifier)
-  )
-    throw new Error('macOS Computer Use app and native module signer identities differ');
-  const signerDigest = createHash('sha256').update(teamIdentifier, 'utf8').digest('hex');
-  const manifestPath = join(appPath, 'Contents', 'Resources', 'computer-use-native.manifest.json');
-  const manifest = computerUseNativeManifestSchema.parse(
-    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
-  );
-  if (manifest.platform !== 'darwin')
-    throw new Error('Packaged macOS Computer Use manifest is invalid');
-  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  return signerDigest;
+export function refreshPackagedDesktopControlDigest(appPath: string): string {
+  const executable = join(appPath, 'resources', DESKTOP_CONTROL_EXECUTABLE);
+  if (!lstatSync(executable).isFile())
+    throw new Error('Packaged desktop-control executable was not found');
+  const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  writeFileSync(`${executable}.sha256`, `${digest}\n`, { mode: 0o600 });
+  return digest;
 }
 
 export function refreshPackagedSandboxRunnerDigest(
@@ -826,7 +348,6 @@ function signAdhocBundle(appPath: string): void {
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (shouldSkipPackagerCodeSign(path)) continue;
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         visit(path);
@@ -881,12 +402,8 @@ const config: ForgeConfig = {
       resolve(__dirname, '..', '..', 'docs', 'licenses', 'unicode-license.txt'),
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
-      ...computerUseNativeResources(),
+      ...desktopControlResources(),
     ],
-    extendInfo: {
-      NSScreenCaptureUsageDescription:
-        'Sprint Coder needs Screen Recording permission to observe the explicitly selected app window.',
-    },
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -896,12 +413,11 @@ const config: ForgeConfig = {
       : {
           osxSign: {
             identity: macCodeSignIdentity,
-            ignore: shouldSkipPackagerCodeSign,
             optionsForFile: (file) =>
               isPackagedMacNode(file) ? { entitlements: bundledNodeEntitlements } : {},
           },
         }),
-    ...(packagerWindowsSign === undefined ? {} : { windowsSign: packagerWindowsSign }),
+    ...(windowsSign === undefined ? {} : { windowsSign }),
     afterCopy: [
       (buildPath, _electronVersion, _platform, _arch, done) => {
         try {
@@ -912,42 +428,43 @@ const config: ForgeConfig = {
         }
       },
     ],
+    // Runs before Packager's Windows signing, right after the extraResource copies: the copied
+    // desktop-control executable must still be the bytes its build sealed. Only Windows x64 ships
+    // it, and its resources sit directly under the build path.
+    afterCopyExtraResources: [
+      (buildPath, _electronVersion, platform, arch, done) => {
+        try {
+          if (desktopControlSupported(platform, arch))
+            verifyDesktopControlBinary(join(buildPath, 'resources', DESKTOP_CONTROL_EXECUTABLE));
+          done();
+        } catch (error) {
+          done(error instanceof Error ? error : new Error(String(error)));
+        }
+      },
+    ],
   },
   hooks: {
-    generateAssets: async (_forgeConfig, platform, architecture) => {
-      buildComputerUseNative(platform, architecture);
-    },
-    prePackage: async (_forgeConfig, platform, architecture) => {
+    prePackage: async (_forgeConfig, platform, arch) => {
       assertNativePackagingHost(platform);
-      // Runs before the Vite plugin compiles Main, so a release build aborts before the acceptance
-      // constant can be baked in at all.
-      assertComputerUseAcceptanceBuildAllowed(process.env, process.platform);
-      await prepareComputerUseNativeForViteBuild(platform, architecture);
-      verifyBundledNodeResources(architecture);
+      verifyBundledNodeResources(arch);
+      // The resources above were chosen for the build host's architecture.
+      if (desktopControlSupported(platform, arch)) {
+        if (arch !== process.arch)
+          throw new Error(`desktop-control for ${platform}-${arch} must be packaged on ${arch}`);
+        verifyDesktopControlBinary(desktopControlSource(platform, arch)!);
+      }
     },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') {
-        for (const outputPath of packageResult.outputPaths) {
-          // Packager's Authenticode signing changes the helper after the build-time seal.
-          // Seal its final bytes before ZIP/Squirrel consume this packaged directory.
-          if (packageResult.platform === 'win32')
+        // Packager's Authenticode signing changes the sandbox runner after the build-time seal.
+        // Seal its final bytes before ZIP/Squirrel consume this packaged directory.
+        if (packageResult.platform === 'win32')
+          for (const outputPath of packageResult.outputPaths) {
             refreshPackagedSandboxRunnerDigest(outputPath, 'win32');
-          if (packageResult.platform === 'win32')
-            refreshPackagedComputerUseArtifactDigest(join(outputPath, 'resources'), 'win32');
-          if (packageResult.platform === 'win32')
-            refreshPackagedComputerUseWindowsSignerDigest(join(outputPath, 'resources'));
-          if (packageResult.platform === 'win32')
-            writeComputerUseAcceptanceBuildReceipt(
-              join(outputPath, 'resources'),
-              'win32',
-              computerUseRepositorySourceCommit(),
-            );
-          verifyPackagedComputerUseNativeBundle(
-            outputPath,
-            packageResult.platform,
-            packageResult.arch,
-          );
-        }
+            // The same for the desktop-control executable, which signing changes too.
+            if (desktopControlSupported('win32', packageResult.arch))
+              refreshPackagedDesktopControlDigest(outputPath);
+          }
         return;
       }
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
@@ -971,8 +488,6 @@ const config: ForgeConfig = {
         // Seal the signed bytes, then refresh only the outer app signature so CodeResources
         // covers the new manifest without rewriting the already-signed nested executable.
         refreshPackagedSandboxRunnerDigest(appPath);
-        refreshPackagedComputerUseArtifactDigest(join(appPath, 'Contents', 'Resources'), 'darwin');
-        if (macCodeSignIdentity !== '-') refreshPackagedComputerUseSignerDigest(appPath);
         resealMacAppBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',
@@ -986,11 +501,6 @@ const config: ForgeConfig = {
         ).trim();
         if (nodeVersion !== `v${BUNDLED_NODE_VERSION}`)
           throw new Error(`Unexpected packaged Node version: ${nodeVersion}`);
-        verifyPackagedComputerUseNativeBundle(
-          outputPath,
-          packageResult.platform,
-          packageResult.arch,
-        );
       }
     },
     postMake: async (_forgeConfig, makeResults) => {

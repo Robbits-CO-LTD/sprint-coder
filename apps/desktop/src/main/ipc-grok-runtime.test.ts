@@ -151,7 +151,6 @@ function createHarness() {
       compacted: false,
     }),
     managedCodingHarness: { startTurn: vi.fn(() => catalog) },
-    computerTargetsExposedForTurn: () => false,
     registerManagedMcp,
     prepareTurnImageAttachments: async () => undefined,
     teamMcpBridge: { unregister: vi.fn() },

@@ -5,6 +5,8 @@ import { stat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import {
+  basename,
+  dirname,
   delimiter,
   extname,
   isAbsolute,
@@ -25,6 +27,12 @@ import {
   revalidatePathGuard,
   type PathGuard,
 } from './path-guard';
+import {
+  desktopControlArgvIsInert,
+  desktopControlArgvRefusal,
+  desktopControlEnvironment,
+  runsOutsideCommandSandbox,
+} from './desktop-control';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
@@ -43,9 +51,11 @@ import { secureLogger } from './secure-logger';
 import {
   assignProcessToOwnedJob,
   closeOwnedJob,
+  releaseOwnedJob,
   terminateOwnedJob,
   WINDOWS_JOB_WRAPPER,
   windowsJobWrapperCommand,
+  windowsJobWrapperDetached,
 } from './windows-process-job';
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
@@ -660,6 +670,21 @@ export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
   return identity.pathGuard;
 }
 
+/**
+ * The SHA-256 of the executable bytes sealed when this ExecutionSpec was prepared, which the
+ * ExecutionSpec's identity digest binds; `null` for a spec this module did not seal, or one that
+ * runs through a script interpreter (its bytes are not the program that starts).
+ */
+export function executionSpecContentDigest(spec: unknown): string | null {
+  if (typeof spec !== 'object' || spec === null) return null;
+  const identity = issuedSpecs.get(spec);
+  if (identity === undefined || identity.executable.interpreter !== undefined) return null;
+  const sealed = spec as ExecutionSpec;
+  return sealed.executionIdentityDigest === sealedExecutableIdentityDigest(identity.executable)
+    ? identity.executable.digest
+    : null;
+}
+
 type RunnerOptions = Readonly<{
   batchIntervalMs?: number;
   maxBatchBytes?: number;
@@ -671,6 +696,19 @@ type RunnerOptions = Readonly<{
 
 export type RunOptions = Readonly<{
   signal?: AbortSignal;
+  /**
+   * The Turn's Workspace roots. Given, a sandboxed runner starts this one command outside the
+   * sandbox when the sealed image about to start is the shipped desktop-control binary, by its
+   * bytes, and it lives outside every root (see `runsOutsideCommandSandbox`); every other command stays
+   * inside. Callers pass it only for a call prepared as desktop control and allowed on its card,
+   * or one that only prints the bundled guides, help, the version or its own status.
+   */
+  desktopControlWorkspaceRoots?: readonly string[];
+  /**
+   * For a desktop-control run allowed by an app-wide Task grant: the `<pid>:<process instance>` a
+   * window id it names must still belong to (`desktopControlEnvironment`). Absent otherwise.
+   */
+  desktopControlExpectedWindowOwner?: string;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
   onBatch?: (chunks: readonly CommandOutputChunk[]) => void | Promise<void>;
@@ -698,6 +736,12 @@ type ActiveProcess = {
   posixOwnedMembers?: Map<number, string>;
   posixIdentityMonitor?: ReturnType<typeof setTimeout>;
   windowsJobId?: string;
+  /**
+   * Set only for the approved desktop-control run: the image the command itself runs from. Closing
+   * its Job then terminates just the members running this image, so an app the command launched
+   * outlives it. Stop and every forced termination still terminate the whole Job.
+   */
+  windowsJobCommandImage?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
   executionImage?: PreparedExecutionImage;
 };
@@ -809,22 +853,69 @@ export class CommandRunner {
       const executionId = randomUUID();
       const lease = randomUUID();
       const posixControlNonce = randomUUID();
+      // Decided after revalidation on the digest of the sealed image that is about to start, never
+      // on a path resolved again here. On Windows that digest is of the bytes read through the
+      // handle that holds the private launch copy against writes, renames and deletes; on Linux of
+      // the sealed memfd the process starts from. It must also equal the bytes sealed at prepare.
+      // An image with an argv prefix runs through an interpreter and never qualifies.
+      const desktopControl =
+        this.sandboxed &&
+        options.desktopControlWorkspaceRoots !== undefined &&
+        executionImage.argvPrefix.length === 0 &&
+        executionImage.digest === executionSpecContentDigest(spec) &&
+        runsOutsideCommandSandbox(
+          spec.absoluteExecutable,
+          executionImage.digest,
+          options.desktopControlWorkspaceRoots,
+        );
+      const desktopControlRefusal = desktopControl
+        ? desktopControlArgvRefusal(spec.argv, options.desktopControlWorkspaceRoots ?? [])
+        : null;
+      if (desktopControlRefusal !== null)
+        throw new CommandRunnerError('EXECUTION_SPEC_INVALID', desktopControlRefusal);
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
-      const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
+      if (desktopControl)
+        secureLogger.info(
+          'Desktop control command runs outside the command sandbox',
+          {
+            executable: basename(spec.absoluteExecutable),
+            // Whether it only prints guides, help, version or status, and so ran without a card.
+            inert: desktopControlArgvIsInert(spec.argv),
+          },
+          { event: 'command_desktop_control_unsandboxed' },
+        );
+      const sandboxExecutable = !this.sandboxed || desktopControl ? null : sandboxRunnerPath();
+      // Outside the sandbox the desktop-control binary starts in its own folder, which is outside
+      // every Workspace root, so neither it nor an app it launches can pick up a file the agent wrote
+      // there (a bare launch name or a DLL). This differs from the cwd shown on the approval card
+      // and kept in the ExecutionSpec, which stay as approved.
+      const launchCwd = desktopControl
+        ? dirname(spec.absoluteExecutable)
+        : spec.cwdIdentity.canonicalPath;
       const launchImage =
         process.platform === 'linux' && sandboxExecutable !== null
           ? linuxSandboxExecutionImage(executionImage)
           : { ...executionImage, sandboxArguments: [] };
+      // Outside the sandbox the PATH also leaves out every folder inside the Workspace, so a bare
+      // launch name cannot resolve to a file the agent wrote there.
+      const envDelta = desktopControl
+        ? desktopControlEnvironment(
+            spec.envDelta,
+            options.desktopControlWorkspaceRoots ?? [],
+            {},
+            options.desktopControlExpectedWindowOwner,
+          )
+        : spec.envDelta;
       const commandEnvironment =
         process.platform === 'win32'
           ? windowsCommandEnvironment(
-              spec.envDelta,
+              envDelta,
               executionImage.environment,
               sandboxExecutable !== null,
             )
-          : buildEnvironment(spec.envDelta, launchImage.environment);
+          : buildEnvironment(envDelta, launchImage.environment);
       try {
         const windows = process.platform === 'win32';
         if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
@@ -855,17 +946,17 @@ export class CommandRunner {
                 ]),
           ],
           {
-            cwd: spec.cwdIdentity.canonicalPath,
+            cwd: launchCwd,
             // The host Job wrapper creates pipes outside AppContainer and must stay unguarded.
             // Only its payload below inherits the sandbox compatibility preload.
             env: windows
-              ? windowsCommandEnvironment(spec.envDelta, executionImage.environment, false)
+              ? windowsCommandEnvironment(envDelta, executionImage.environment, false)
               : commandEnvironment,
             shell: false,
             stdio: windows
               ? ['pipe', 'pipe', 'pipe', 'pipe']
               : ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
-            detached: !windows,
+            detached: windows ? windowsJobWrapperDetached(desktopControl) : true,
             windowsHide: true,
           },
         );
@@ -908,7 +999,7 @@ export class CommandRunner {
                       ...executionImage.argvPrefix,
                       ...spec.argv,
                     ],
-              cwd: spec.cwdIdentity.canonicalPath,
+              cwd: launchCwd,
               env: commandEnvironment,
             }),
           );
@@ -935,6 +1026,9 @@ export class CommandRunner {
         outcome: processClosePromise,
         ...(process.platform === 'win32' ? {} : { posixOwnedMembers: new Map<number, string>() }),
         ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
+        ...(process.platform === 'win32' && desktopControl
+          ? { windowsJobCommandImage: executionImage.launchPath }
+          : {}),
       };
       this.active.set(executionId, active);
       const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
@@ -1324,6 +1418,10 @@ export class CommandRunner {
         if (forceTimer !== undefined) clearTimeout(forceTimer);
         if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
         options.signal?.removeEventListener('abort', cancel);
+        // A Stop ends everything the run started, the apps a desktop-control `launch` opened
+        // included, even when it lands while the final output is saved after the command itself
+        // ended (and the forced termination never came).
+        if (canceled) delete active.windowsJobCommandImage;
         if (!retainActive) this.releaseActive(executionId, active);
       }
     } finally {
@@ -1567,7 +1665,10 @@ export class CommandRunner {
       clearTimeout(active.posixIdentityMonitor);
       delete active.posixIdentityMonitor;
     }
-    if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
+    if (active.windowsJobId !== undefined) {
+      if (active.windowsJobCommandImage === undefined) closeOwnedJob(active.windowsJobId);
+      else releaseOwnedJob(active.windowsJobId, active.windowsJobCommandImage);
+    }
     const executionImage = active.executionImage;
     delete active.executionImage;
     if (executionImage === undefined) active.resolveSettled();

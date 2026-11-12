@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$RunPath,
     [Parameter(Mandatory = $true)]
-    [ValidateSet('surface', 'observation', 'promotion', 'dedup', 'filing', 'hold', 'cleanup')]
+    [ValidateSet('surface', 'observation', 'promotion', 'dedup', 'filing', 'hold')]
     [string]$RecordType,
     [Parameter(Mandatory = $true)][string]$CaseId,
     [string]$SessionId = '',

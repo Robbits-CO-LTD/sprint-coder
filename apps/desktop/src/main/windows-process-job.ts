@@ -8,6 +8,7 @@ type WindowsJobAddon = Readonly<{
   assignProcessToOwnedJob(pid: number, jobId: string): boolean;
   terminateOwnedJob(jobId: string): boolean;
   closeOwnedJob(jobId: string): boolean;
+  releaseOwnedJob?(jobId: string, commandImage: string): boolean;
   terminateRetainedOwnedJob?(jobId: string): boolean;
   ownedJobActiveProcesses?(jobId: string): number;
   runPreparedExecutionImage(executable: string, argv: readonly string[]): number;
@@ -27,6 +28,30 @@ export function terminateOwnedJob(jobId: string): boolean {
 
 export function closeOwnedJob(jobId: string): boolean {
   return addon().closeOwnedJob(jobId);
+}
+
+/**
+ * Closes an owned Job like `closeOwnedJob`, except that only the members still running
+ * `commandImage` (the command's own launch image) are terminated: the processes the command
+ * started outlive it. Only the approved desktop-control run uses this, so the app a `launch`
+ * started stays open after the command returns. A build without the release, or any failure in
+ * it, terminates the whole Job as `closeOwnedJob` does.
+ */
+export function releaseOwnedJob(jobId: string, commandImage: string): boolean {
+  const operation = addon().releaseOwnedJob;
+  if (operation === undefined) return addon().closeOwnedJob(jobId);
+  return operation(jobId, commandImage);
+}
+
+/**
+ * Whether the host Job wrapper starts detached. An attached child also joins the Job that Node and
+ * Electron keep for every attached child (kill on close, so it ends when Sprint Coder exits), and
+ * the owned Job nests inside it, so every process the command starts is in that Job as well.
+ * Only the approved desktop-control run starts outside it, so an app its `launch` started and
+ * `releaseOwnedJob` left running outlives Sprint Coder. Every other command stays in it.
+ */
+export function windowsJobWrapperDetached(desktopControl: boolean): boolean {
+  return desktopControl;
 }
 
 /** Keeps ownership after termination so callers can confirm that every member exited. */

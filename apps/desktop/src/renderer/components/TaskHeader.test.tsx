@@ -32,23 +32,6 @@ describe('TaskHeader Team button', () => {
     expect(button).not.toContain('<small');
   });
 
-  it('exposes Computer Use only when Main made the gated entry available', () => {
-    const hidden = renderToStaticMarkup(<TaskHeader task={task} onToggleTeam={() => {}} />);
-    const visible = renderToStaticMarkup(
-      <TaskHeader
-        task={task}
-        onToggleTeam={() => {}}
-        onOpenComputerUse={() => {}}
-        computerUseActive
-      />,
-    );
-
-    expect(hidden).not.toContain('data-testid="computer-use-launch"');
-    expect(visible).toContain('data-testid="computer-use-launch"');
-    expect(visible).toContain('aria-pressed="true"');
-    expect(visible).toContain('Computer Use');
-  });
-
   it('has no manual graph button; a graph opens from the reply that rendered it', () => {
     const html = renderToStaticMarkup(<TaskHeader task={task} onToggleTeam={() => {}} />);
     expect(html).not.toContain('graph-toggle');

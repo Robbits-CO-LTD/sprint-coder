@@ -1256,6 +1256,99 @@ napi_value CloseOwnedJob(napi_env env, napi_callback_info info) {
   return result;
 }
 
+// The volume and file index of a file, without following it for anything but its identity.
+bool ReadFileIdentity(const wchar_t* path, BY_HANDLE_FILE_INFORMATION* identity) {
+  HANDLE file = CreateFileW(path, FILE_READ_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  const BOOL read = GetFileInformationByHandle(file, identity);
+  CloseHandle(file);
+  return read != FALSE;
+}
+
+// Terminates every member of the job still running the given image file. False when the image or a
+// member could not be identified, or a member running it could not be terminated.
+bool TerminateJobMembersRunningImage(HANDLE job, const std::wstring& image) {
+  BY_HANDLE_FILE_INFORMATION expected{};
+  if (!ReadFileIdentity(image.c_str(), &expected)) return false;
+  std::vector<unsigned char> storage(sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) +
+                                     sizeof(ULONG_PTR) * 1024);
+  auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(storage.data());
+  if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, list,
+                                 static_cast<DWORD>(storage.size()), nullptr) ||
+      list->NumberOfProcessIdsInList != list->NumberOfAssignedProcesses)
+    return false;
+  std::vector<wchar_t> name(32768);
+  for (DWORD index = 0; index < list->NumberOfProcessIdsInList; ++index) {
+    const DWORD pid = static_cast<DWORD>(list->ProcessIdList[index]);
+    HANDLE process =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (process == nullptr) {
+      if (GetLastError() == ERROR_INVALID_PARAMETER) continue;  // Exited since the listing.
+      return false;
+    }
+    bool ok = false;
+    BOOL member = FALSE;
+    DWORD length = static_cast<DWORD>(name.size());
+    BY_HANDLE_FILE_INFORMATION running{};
+    if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) {
+      ok = true;  // Already exited.
+    } else if (IsProcessInJob(process, job, &member) && member == FALSE) {
+      ok = true;  // The listed process ID now names a process outside this job.
+    } else if (member != FALSE && QueryFullProcessImageNameW(process, 0, name.data(), &length) &&
+               ReadFileIdentity(name.data(), &running)) {
+      const bool same = running.dwVolumeSerialNumber == expected.dwVolumeSerialNumber &&
+                        running.nFileIndexHigh == expected.nFileIndexHigh &&
+                        running.nFileIndexLow == expected.nFileIndexLow;
+      ok = !same || (TerminateProcess(process, 1) != FALSE &&
+                     WaitForSingleObject(process, 5000) == WAIT_OBJECT_0);
+    }
+    CloseHandle(process);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Closes an owned job without terminating every member: members still running `image` (the command
+// itself) are terminated, and the processes it started outlive the job. Used only for the approved
+// desktop-control run, whose launched apps must stay open after the command returns. Any failure
+// falls back to terminating the whole job, as closeOwnedJob would.
+napi_value ReleaseOwnedJob(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  std::string id;
+  std::string image_utf8;
+  std::wstring image;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 2 ||
+      !ReadString(env, argv[0], &id) || !ReadString(env, argv[1], &image_utf8) ||
+      !Utf8ToWide(image_utf8, &image) || image.empty()) {
+    napi_throw_type_error(env, nullptr, "releaseOwnedJob requires a job id and an image path");
+    return nullptr;
+  }
+  HANDLE job = nullptr;
+  {
+    std::lock_guard<std::mutex> guard(jobs_mutex);
+    const auto found = jobs.find(id);
+    if (found != jobs.end()) {
+      job = found->second;
+      jobs.erase(found);
+    }
+  }
+  bool released = false;
+  if (job != nullptr) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    released = TerminateJobMembersRunningImage(job, image) &&
+               SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                                       sizeof(limits)) != FALSE;
+    if (!released) TerminateJobObject(job, 1);
+    CloseHandle(job);
+  }
+  napi_value result;
+  napi_get_boolean(env, released, &result);
+  return result;
+}
+
 napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
@@ -1740,6 +1833,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"terminateOwnedJob", nullptr, TerminateOwnedJob, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"closeOwnedJob", nullptr, CloseOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"releaseOwnedJob", nullptr, ReleaseOwnedJob, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"replaceFileWithBackup", nullptr, ReplaceFileWithBackup, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,

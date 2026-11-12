@@ -1,5 +1,6 @@
 import { Check, X } from './icons';
 import type { ApprovalSummary } from '../types/sprint-coder';
+import { desktopActionSummary } from '../lib/desktop-action';
 
 const DECISION_LABEL = {
   allow_once: '今回のみ許可しました',
@@ -24,9 +25,15 @@ export function ApprovalAuditRow({ approval }: { approval: ApprovalSummary }) {
         )}
       </span>
       <span>{selectedChoice ?? DECISION_LABEL[approval.decision]}</span>
-      <span className="approval-audit__scope">
-        {approval.capability} · {approval.risk}
-      </span>
+      {approval.desktopAction === undefined ? (
+        <span className="approval-audit__scope">
+          {approval.capability} · {approval.risk}
+        </span>
+      ) : (
+        <span className="approval-audit__scope" data-testid="approval-audit-desktop">
+          デスクトップ操作 · {desktopActionSummary(approval.desktopAction)}
+        </span>
+      )}
     </div>
   );
 }
