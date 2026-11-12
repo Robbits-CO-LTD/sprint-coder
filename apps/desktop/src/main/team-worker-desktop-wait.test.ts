@@ -320,47 +320,53 @@ describe('the bound on a Team Worker’s desktop-control run', () => {
     await sessions.dispose();
   });
 
-  it('leaves no process of a real run behind once its bound is reached', async () => {
-    // Unsandboxed, so this runs everywhere: a Worker run that only prints the executable's status
-    // (it needs no session), here a script that starts a child of its own and never ends.
-    const runner = new CommandRunner({ sandboxed: false, cancelGraceMs: 30 });
-    let pidFile = '';
-    const { dispatch, workspace, completions, sessions } = await setUp(runner, () => {
-      return 1;
-    });
-    pidFile = join(workspace, 'pids.json');
-    await writeFile(
-      join(workspace, 'status'),
-      [
-        "const { spawn } = require('node:child_process');",
-        "const { writeFileSync } = require('node:fs');",
-        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
-        `writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ parent: process.pid, child: child.pid }));`,
-        'setInterval(() => {}, 1000);',
-      ].join('\n'),
-    );
-    // The bound is reached only once both processes are up.
-    const waitFor = sessions.waitFor;
-    vi.mocked(waitFor).mockImplementationOnce(async (sessionId, sessionOwner) => {
-      const pids = await readPidsWhenReady(pidFile);
-      spawnedPids.push(pids.parent, pids.child);
-      return ManagedCommandSessions.prototype.waitFor.call(sessions, sessionId, sessionOwner, 1);
-    });
+  // Not on macOS: there the runner refuses to start a mutable executable such as the test's Node,
+  // and desktop control runs on Windows only. Windows and Linux run it.
+  it.skipIf(process.platform === 'darwin')(
+    'leaves no process of a real run behind once its bound is reached',
+    async () => {
+      // Unsandboxed, so this runs on both: a Worker run that only prints the executable's status
+      // (it needs no session), here a script that starts a child of its own and never ends.
+      const runner = new CommandRunner({ sandboxed: false, cancelGraceMs: 30 });
+      let pidFile = '';
+      const { dispatch, workspace, completions, sessions } = await setUp(runner, () => {
+        return 1;
+      });
+      pidFile = join(workspace, 'pids.json');
+      await writeFile(
+        join(workspace, 'status'),
+        [
+          "const { spawn } = require('node:child_process');",
+          "const { writeFileSync } = require('node:fs');",
+          "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+          `writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ parent: process.pid, child: child.pid }));`,
+          'setInterval(() => {}, 1000);',
+        ].join('\n'),
+      );
+      // The bound is reached only once both processes are up.
+      const waitFor = sessions.waitFor;
+      vi.mocked(waitFor).mockImplementationOnce(async (sessionId, sessionOwner) => {
+        const pids = await readPidsWhenReady(pidFile);
+        spawnedPids.push(pids.parent, pids.child);
+        return ManagedCommandSessions.prototype.waitFor.call(sessions, sessionId, sessionOwner, 1);
+      });
 
-    await expect(dispatch('worker:1', ['status'])).rejects.toThrow(
-      '60 秒以内に終わらなかったため、止めた',
-    );
+      await expect(dispatch('worker:1', ['status'])).rejects.toThrow(
+        '60 秒以内に終わらなかったため、止めた',
+      );
 
-    const { parent, child } = JSON.parse(await readFile(pidFile, 'utf8')) as {
-      parent: number;
-      child: number;
-    };
-    await expectProcessDead(parent);
-    await expectProcessDead(child);
-    expect(completions.at(-1)!.state).toBe('canceled');
-    expect(sessions.hasActiveTurnSessions(owner)).toBe(false);
-    await sessions.dispose();
-  }, 20_000);
+      const { parent, child } = JSON.parse(await readFile(pidFile, 'utf8')) as {
+        parent: number;
+        child: number;
+      };
+      await expectProcessDead(parent);
+      await expectProcessDead(child);
+      expect(completions.at(-1)!.state).toBe('canceled');
+      expect(sessions.hasActiveTurnSessions(owner)).toBe(false);
+      await sessions.dispose();
+    },
+    20_000,
+  );
 });
 
 async function readPidsWhenReady(path: string): Promise<{ parent: number; child: number }> {
