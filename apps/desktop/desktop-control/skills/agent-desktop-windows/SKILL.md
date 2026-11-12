@@ -121,7 +121,13 @@ observation, actions and capture there fail or return nothing.
   under a disabled menu, an item the app draws itself, one that sends no
   command, or one with a twin of the same name on its way down (its `hint`
   says which). A minimized window is refused as for any ref
-  (`window_minimized`). Only `click` (without `--headed`) takes such a ref:
+  (`window_minimized`). A window that does not take input (a dialog it opened
+  has disabled it) gets no refs (`window_disabled: true` on the snapshot), and
+  a click on an earlier ref then fails `ACTION_FAILED`,
+  `details.kind: "window_disabled"`, with nothing sent: finish the dialog
+  first. After the command is sent nothing more goes to the app; the check
+  mark is read from the menu itself, so an app that updates it only when
+  the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
   every other command refuses it with `ACTION_NOT_SUPPORTED`,
   `details.kind: "menu_item_ref"`. An item the app draws itself has no name
   and says so in `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no

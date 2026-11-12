@@ -388,7 +388,10 @@ export type DesktopControlOwnerReader = Readonly<{
   part(ref: string): DesktopControlOwner | null;
   /** The one owner every record of this window id agrees on. */
   window(id: string): DesktopControlOwner | null;
-  /** Whether the ref names an item of a window's standard menu bar. */
+  /**
+   * Whether the ref may name an item of a window's standard menu bar: it does, or its record cannot
+   * be told (`SnapshotReader.refRecord`).
+   */
   menuPart(ref: string): boolean;
 }>;
 
@@ -402,7 +405,7 @@ export function desktopControlOwnerReader(
   const { taskId } = lookup;
   return {
     part: (ref) => reader.partOwner(ref),
-    menuPart: (ref) => reader.menuPart(ref),
+    menuPart: (ref) => reader.refRecord(ref) !== 'part',
     // Read when asked, so an id distrusted after the reader was made is not taken either.
     window: (id) =>
       taskId !== undefined && distrustedWindows.get(taskId)?.has(id) === true
@@ -467,7 +470,8 @@ export function desktopControlApprovalAction(
       kind: 'other',
       title: UNKNOWN[1],
       mode,
-      allowTaskGrant: mode !== 'foreground',
+      // A run the card cannot describe is not one it can judge for the Task either.
+      allowTaskGrant: false,
       notes: mode === 'foreground' ? [FOREGROUND_NOTE] : [],
       openDetails: true,
     };
@@ -481,6 +485,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
   let openDetails = false;
   // A run naming a standard menu item ref, which runs an app command; never granted for the Task.
   let menuItems = false;
+  const menuNames: string[] = [];
   let steps: DesktopActionStep[] | undefined;
   let stepsOmitted: number | undefined;
   let head: DesktopActionStep;
@@ -516,6 +521,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     steps = described.map(({ step }) => step);
     if (described.some(({ menu }) => menu)) menuItems = true;
+    for (const { menuFull } of described) if (menuFull !== undefined) menuNames.push(menuFull);
     if (described.some(({ unexplained }) => unexplained)) openDetails = true;
     // The same in a batch, by argument name (`xy`, `from_xy`, `to_xy` …).
     if (
@@ -558,6 +564,7 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     );
     head = described.step;
     if (described.menu) menuItems = true;
+    if (described.menuFull !== undefined) menuNames.push(described.menuFull);
     if (described.unexplained) openDetails = true;
     // A point given as coordinates is not what the card names, even beside a part.
     if (COORDINATE_OPTIONS.some((option) => read.options.has(option))) openDetails = true;
@@ -589,6 +596,8 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     notes.unshift(LAUNCH_FRONT_NOTE);
   if (all.some(({ kind }) => kind === 'close')) notes.unshift(CLOSE_NOTE);
   if (commands.includes('minimize')) notes.unshift(MINIMIZE_NOTE);
+  for (const name of menuNames.slice(0, 2))
+    notes.push(visible(`メニューの項目の名前（全部）: ${name}`, NOTE_MAX).text);
   if (menuItems) notes.unshift(MENU_NOTE);
   if (mode === 'foreground') {
     // Only bringing a window to the front, without `--headed`, takes no mouse or keyboard.
@@ -604,10 +613,71 @@ function describe(argv: readonly string[], snapshots: SnapshotReader): DesktopAp
     ...head,
     ...(steps === undefined ? {} : { steps }),
     ...(stepsOmitted === undefined ? {} : { stepsOmitted }),
-    allowTaskGrant: mode !== 'foreground' && !menuItems,
+    allowTaskGrant: mode !== 'foreground' && !menuItems && !taskGrantBlocked(read, snapshots),
     notes,
     openDetails,
   };
+}
+
+const NOTE_MAX = 200;
+// The most entries the executable runs in one batch (`MAX_BATCH_ENTRIES`); it refuses more.
+const BATCH_ENTRIES_MAX = 64;
+// The fields of a batch entry the executable reads (`BatchCommand`); it refuses any other.
+const BATCH_ENTRY_FIELDS = new Set(['command', 'args']);
+
+/**
+ * Whether this run's card must not offer 「Task中許可」 because what it acts on cannot be judged
+ * here: Main allows a run for the Task only when it can tell every part it names, so anything it
+ * cannot tell counts as what it would refuse (a standard menu item, which runs an app command).
+ * Judged over every step the executable runs, not only those the card shows: a run Main cannot read,
+ * a batch with more steps than the card shows or the executable runs, an entry with a field other
+ * than `command` and `args` (a `session` there switches where its refs are read from), and any ref,
+ * wherever it appears, that is not one Main reads as a part (`SnapshotReader.refRecord`).
+ */
+function taskGrantBlocked(
+  read: ReturnType<typeof readDesktopControlCommand>,
+  snapshots: SnapshotReader,
+): boolean {
+  if (read === null) return true;
+  if (read.help || read.command === undefined) return false;
+  const refs: string[] = [];
+  for (const value of read.options.values()) if (value.startsWith('@')) refs.push(value);
+  if (read.command === 'batch') {
+    const raw = batchJson(read.positionals);
+    const entries = readBatchEntries(read.positionals);
+    if (raw === null || entries === null) return true;
+    if (entries.length === 0 || entries.length > DESKTOP_ACTION_MAX_STEPS) return true;
+    if (entries.length > BATCH_ENTRIES_MAX) return true;
+    if (raw.some((entry) => Object.keys(entry).some((key) => !BATCH_ENTRY_FIELDS.has(key))))
+      return true;
+    for (const { args } of entries) collectRefs(args, refs);
+  } else for (const value of read.positionals) if (value.startsWith('@')) refs.push(value);
+  return refs.some((ref) => snapshots.refRecord(ref) !== 'part');
+}
+
+/** The entries of a batch argument as objects, or `null` when it is not a JSON array of them. */
+function batchJson(positionals: readonly string[]): Readonly<Record<string, unknown>>[] | null {
+  if (positionals.length !== 1) return null;
+  try {
+    const parsed: unknown = JSON.parse(positionals[0]!);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some((entry) => typeof entry !== 'object' || entry === null || Array.isArray(entry))
+    )
+      return null;
+    return parsed as Record<string, unknown>[];
+  } catch {
+    return null;
+  }
+}
+
+/** Every string in a batch entry's arguments that may be a ref, at any depth. */
+function collectRefs(value: unknown, refs: string[]): void {
+  if (typeof value === 'string') {
+    if (value.startsWith('@')) refs.push(value);
+  } else if (Array.isArray(value)) for (const item of value) collectRefs(item, refs);
+  else if (typeof value === 'object' && value !== null)
+    for (const item of Object.values(value)) collectRefs(item, refs);
 }
 
 type StepArguments = Readonly<{
@@ -631,10 +701,18 @@ function describeStep(
   mode: Mode,
   { ref, windowId, app, destination, text, surface }: StepArguments,
   snapshots: SnapshotReader,
-): { step: DesktopActionStep; cut: boolean; unexplained: boolean; menu: boolean } {
+): {
+  step: DesktopActionStep;
+  cut: boolean;
+  unexplained: boolean;
+  menu: boolean;
+  /** The whole name of a menu item the card could not show in full. */
+  menuFull: string | undefined;
+} {
   const [kind, heading] = Object.hasOwn(COMMANDS, command) ? COMMANDS[command]! : UNKNOWN;
   // Any command naming a menu item ref; the executable runs it only for `click`.
-  const menu = ref !== undefined && ref !== '' && snapshots.menuPart(ref);
+  const menu = ref !== undefined && ref !== '' && snapshots.refRecord(ref) === 'menu';
+  const label = menu ? snapshots.menuLabelOf(ref) : undefined;
   const title =
     command === 'select' && (text === undefined || text === '')
       ? SELECT_ITEM_TITLE
@@ -662,7 +740,8 @@ function describeStep(
     kind !== 'read' &&
     ((target === undefined && !NO_TARGET_COMMANDS.has(command)) ||
       (target !== undefined && unnamed(target)) ||
-      (command === 'drag' && (drop === undefined || unnamed(drop))));
+      (command === 'drag' && (drop === undefined || unnamed(drop))) ||
+      label?.cut === true);
   return {
     step: {
       kind,
@@ -675,6 +754,7 @@ function describeStep(
     cut: shown?.cut === true,
     unexplained,
     menu,
+    menuFull: label?.cut === true ? label.full : undefined,
   };
 }
 
@@ -739,12 +819,20 @@ type RefmapEntry = Readonly<{
 
 const MENU_STEPS_MAX = 16;
 
+const MENU_NAME_MAX = 1_024;
+
+/** How the card names a menu item: what fits, the whole name, and whether they differ. */
+type MenuLabel = Readonly<{ text: string; full: string; cut: boolean }>;
+
 /**
- * How a person names a standard menu item: its menus from the bar down, as the menu shows them
- * without the access key 「(F)」, and its shortcut, e.g. 「ファイル > 上書き保存（Ctrl+S）」.
+ * How a person names a standard menu item: its menus from the bar down, each exactly as the record
+ * names it (「(F)」 and 「(1)」 kept, so items that differ only there stay apart), and its shortcut,
+ * e.g. 「ファイル(F) > 上書き保存(S)（Ctrl+S）」. The item's own name is never dropped: a name too
+ * long for the card shortens the menus above it to 「…」 first, and whenever anything is left out
+ * `cut` is set, so the card opens its details and shows the whole name in a note.
  * `undefined` when the record is not in the shape the executable writes.
  */
-function menuLabel(proof: unknown): string | undefined {
+function menuLabel(proof: unknown): MenuLabel | undefined {
   if (typeof proof !== 'object' || proof === null) return undefined;
   const { steps, shortcut } = proof as { steps?: unknown; shortcut?: unknown };
   if (!Array.isArray(steps) || steps.length === 0 || steps.length > MENU_STEPS_MAX)
@@ -753,14 +841,21 @@ function menuLabel(proof: unknown): string | undefined {
   for (const step of steps) {
     const name =
       typeof step === 'object' && step !== null ? (step as { name?: unknown }).name : undefined;
-    if (typeof name !== 'string') return undefined;
-    const shown = name.replace(/\([A-Za-z0-9]\)/gu, '').trim();
-    if (shown === '') return undefined;
-    names.push(shown);
+    if (typeof name !== 'string' || name.trim() === '') return undefined;
+    names.push(visible(name, MENU_NAME_MAX).text);
   }
   const keys =
-    typeof shortcut === 'string' && shortcut.trim() !== '' ? `（${shortcut.trim()}）` : '';
-  return textField(`${names.join(' > ')}${keys}`, NAME_MAX);
+    typeof shortcut === 'string' && shortcut.trim() !== ''
+      ? `（${visible(shortcut, NAME_MAX).text}）`
+      : '';
+  const leaf = `${names.at(-1)!}${keys}`;
+  const full = `${names.join(' > ')}${keys}`;
+  const shortened = [full];
+  if (names.length > 2) shortened.push(`${names[0]!} > … > ${leaf}`);
+  if (names.length > 1) shortened.push(`… > ${leaf}`);
+  for (const text of shortened)
+    if (text.length <= NAME_MAX) return { text, full, cut: text !== full };
+  return { text: visible(shortened.at(-1)!, NAME_MAX).text, full, cut: true };
 }
 
 function isMenuEntry(entry: RefmapEntry): boolean {
@@ -820,7 +915,7 @@ class SnapshotReader {
     const menu = isMenuEntry(entry);
     // A menu item is named by its whole place in the menu; one whose record cannot be read is
     // shown without a name, which opens the card's details.
-    const name = menu ? menuLabel(entry.proven_in_menu) : textField(entry.name, NAME_MAX);
+    const name = menu ? menuLabel(entry.proven_in_menu)?.text : textField(entry.name, NAME_MAX);
     if (app === undefined && window === undefined) return unresolved;
     const windowId =
       typeof entry.source_window_id === 'string' && WINDOW_ID.test(entry.source_window_id)
@@ -897,15 +992,28 @@ class SnapshotReader {
   }
 
   /**
-   * Whether a qualified ref names an item of a window's standard menu bar, which runs the app's
-   * command for that item. Read from the record alone; a ref whose record cannot be read is not
-   * one, and is refused elsewhere for that.
+   * What the record of a ref says it names: an item of a window's standard menu bar (which runs the
+   * app's command for that item), another part, or `unknown` when Main cannot tell - a ref not in
+   * the form Main reads (`QUALIFIED_REF`; the executable takes more forms, such as an upper-case
+   * id, which a case-blind file system finds under the lower-case one), records Main does not read
+   * (`--session`, names off) or a record that cannot be read. Anything but `part` may be a menu
+   * item, and is treated as one wherever that matters.
    */
-  menuPart(ref: string): boolean {
+  refRecord(ref: string): 'menu' | 'part' | 'unknown' {
     const match = QUALIFIED_REF.exec(ref);
-    if (match === null) return false;
+    if (match === null) return 'unknown';
     const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
-    return typeof entry === 'object' && entry !== null && isMenuEntry(entry);
+    if (typeof entry !== 'object' || entry === null) return 'unknown';
+    return isMenuEntry(entry) ? 'menu' : 'part';
+  }
+
+  /** The card's name of the menu item a ref names, when it is one whose record can be read. */
+  menuLabelOf(ref: string): MenuLabel | undefined {
+    const match = QUALIFIED_REF.exec(ref);
+    if (match === null) return undefined;
+    const entry = this.refmap(match[1]!)?.[`@${match[2]!}`];
+    if (typeof entry !== 'object' || entry === null || !isMenuEntry(entry)) return undefined;
+    return menuLabel(entry.proven_in_menu);
   }
 
   partOwner(ref: string): DesktopControlOwner | null {

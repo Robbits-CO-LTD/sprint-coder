@@ -22,8 +22,11 @@
 //! a send would time out while the command runs. A posted command is queued
 //! but cannot be observed, so the result is `delivered_unverified`, except
 //! for an item that shows a check mark or a radio mark: its state is read
-//! again, the same way, for a short while, and only a change to the expected
-//! state reports `delivered_verified`.
+//! again for a short while - from the menu only, sending the application
+//! nothing more (`read_check_quietly`) - and only a change to the expected
+//! state reports `delivered_verified`. Nothing is sent either when the window
+//! is disabled (a modal dialog it opened), when the closing messages fail, or
+//! when the deadline has passed by the time the command would be posted.
 
 use agent_desktop_core::{
     ActionResult, ActionStep, AdapterError, Deadline, DeliverySemantics, ErrorCode,
@@ -59,9 +62,11 @@ pub(crate) fn expected_check(checked: bool, radio: bool) -> Option<bool> {
 mod imp {
     use super::*;
     use agent_desktop_core::{
-        MenuMismatch, NativeMenuItem, confirm_menu_leaf, match_menu_step, menu_mismatch_error,
+        MenuMismatch, NativeMenuItem, RefMenuProof, confirm_menu_leaf, match_menu_step,
+        menu_mismatch_error,
     };
-    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError, SetLastError};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         HMENU, IsIconic, PostMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND,
         WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP,
@@ -76,19 +81,69 @@ mod imp {
     const VERIFY_MS: u64 = 1_000;
     const VERIFY_STEP_MS: u64 = 100;
 
-    fn unresponsive(message: u32) -> AdapterError {
+    fn unresponsive(message: u32, last_error: u32) -> AdapterError {
+        // UIPI refuses a message to a window of a higher integrity level
+        // (one run as administrator): trying again changes nothing.
+        if last_error == ERROR_ACCESS_DENIED {
+            return AdapterError::new(
+                ErrorCode::PermDenied,
+                "The window runs with higher rights than this program, so its menu cannot be run \
+                 from here; the menu item was not run",
+            )
+            .with_platform_detail(format!(
+                "SendMessageTimeoutW(0x{message:04X}) failed: access denied"
+            ))
+            .with_suggestion(
+                "A window of an app run as administrator does not take messages from a program \
+                 run without those rights. Run its menu item from the app itself.",
+            )
+            .with_details(serde_json::json!({
+                "kind": "menu_window_elevated",
+                "command_sent": false,
+                "retryable": false,
+            }))
+            .with_disposition(DeliverySemantics::not_delivered());
+        }
         AdapterError::new(
             ErrorCode::AppUnresponsive,
-            "The application did not answer the menu's opening messages in time, so the menu \
-             item was not run",
+            "The application did not answer the menu's opening or closing messages in time, so \
+             the menu item was not run",
         )
-        .with_platform_detail(format!("SendMessageTimeoutW(0x{message:04X}) failed"))
+        .with_platform_detail(format!(
+            "SendMessageTimeoutW(0x{message:04X}) failed: {last_error}"
+        ))
         .with_details(serde_json::json!({
             "kind": "menu_not_answered",
             "command_sent": false,
             "retryable": true,
         }))
         .with_disposition(DeliverySemantics::not_delivered())
+    }
+
+    /// The refusal for a window that does not take input now: a modal dialog
+    /// it opened (a file dialog, a confirmation) disables it, and the dialog
+    /// is what decides what may happen next, so its menu must not be run.
+    fn window_disabled(hwnd: isize) -> AdapterError {
+        AdapterError::new(
+            ErrorCode::ActionFailed,
+            "The window does not take input now (a dialog it opened, or something else, has \
+             disabled it), so the menu item was not run",
+        )
+        .with_suggestion(
+            "Nothing reached the app. Finish or close the dialog the window has open, then take \
+             snapshot --surface menubar again and use the new ref.",
+        )
+        .with_details(serde_json::json!({
+            "kind": "window_disabled",
+            "window_id": format!("w-{hwnd}"),
+            "retryable": false,
+        }))
+        .with_disposition(DeliverySemantics::not_delivered())
+    }
+
+    fn enabled(hwnd: isize) -> bool {
+        // SAFETY: a plain read of a window handle.
+        unsafe { IsWindowEnabled(hwnd as *mut std::ffi::c_void) != 0 }
     }
 
     /// The popups told they open, to be told they close in reverse order.
@@ -100,12 +155,15 @@ mod imp {
 
     impl Opened {
         fn send(&self, message: u32, wparam: usize, lparam: isize) -> Result<(), AdapterError> {
-            self.deadline.ensure_remaining()?;
+            self.deadline
+                .ensure_remaining()
+                .map_err(|error| error.with_disposition(DeliverySemantics::not_delivered()))?;
             let timeout = self.deadline.remaining_ms().clamp(1, MESSAGE_CAP_MS);
             let mut answer: usize = 0;
             // SAFETY: a message to a window of another process, bounded by the
             // timeout; `SMTO_ABORTIFHUNG` returns at once for a hung window.
             let sent = unsafe {
+                SetLastError(0);
                 SendMessageTimeoutW(
                     self.hwnd as *mut std::ffi::c_void,
                     message,
@@ -117,17 +175,25 @@ mod imp {
                 )
             };
             if sent == 0 {
-                Err(unresponsive(message))
+                // SAFETY: reads this thread's last error.
+                Err(unresponsive(message, unsafe { GetLastError() }))
             } else {
                 Ok(())
             }
         }
 
-        fn close(mut self) {
+        /// Tells every opened popup it closes. Every one is told even after a
+        /// failure; the first failure is returned, and the caller then sends
+        /// no command: an application that did not take the closing messages
+        /// is not in the state a closing menu leaves it in.
+        fn close(mut self) -> Result<(), AdapterError> {
+            let mut first = None;
             while let Some(popup) = self.popups.pop() {
-                // A failure here changes nothing about what was run.
-                let _ = self.send(WM_UNINITMENUPOPUP, popup as usize, 0);
+                if let Err(error) = self.send(WM_UNINITMENUPOPUP, popup as usize, 0) {
+                    first.get_or_insert(error);
+                }
             }
+            first.map_or(Ok(()), Err)
         }
     }
 
@@ -136,12 +202,9 @@ mod imp {
     fn locate(
         hwnd: isize,
         bar: HMENU,
-        entry: &RefEntry,
+        proof: &RefMenuProof,
         deadline: Deadline,
     ) -> Result<(Result<NativeMenuItem, MenuMismatch>, Opened), AdapterError> {
-        let Some(proof) = entry.identity.in_menu.as_ref() else {
-            return Err(agent_desktop_core::menu_ref_refused(entry));
-        };
         let mut opened = Opened {
             hwnd,
             popups: Vec::new(),
@@ -170,7 +233,7 @@ mod imp {
             // `lParam`: the item's position in its menu, and FALSE for a
             // menu that is not the window menu.
             if let Err(error) = opened.send(WM_INITMENUPOPUP, *submenu as usize, position) {
-                opened.close();
+                let _ = opened.close();
                 return Err(error);
             }
             opened.popups.push(*submenu);
@@ -179,13 +242,33 @@ mod imp {
         Ok((Err(MenuMismatch::Missing), opened))
     }
 
-    /// Reads the item again the way `locate` does, for its check mark.
-    fn read_check(hwnd: isize, entry: &RefEntry, deadline: Deadline) -> Option<bool> {
-        let window_id = entry.source.source_window_id.as_deref()?;
-        let bar = bar_of(window_id, entry.process.pid.get()).ok()??;
-        let (found, opened) = locate(hwnd, bar, entry, deadline).ok()?;
-        opened.close();
-        found.ok().map(|item| item.checked)
+    /// The item's check mark as the menu holds it now, read without sending
+    /// the application anything, down the recorded names; `None` when the
+    /// menu no longer shows the item as recorded.
+    ///
+    /// No message may follow the posted command: a message sent to a window
+    /// is handled before the messages posted to it, so an opening message
+    /// sent now would reach the application while the command still waits in
+    /// its queue, and an application that renumbers its items when a menu
+    /// opens (a list of recent files, for one) would then read the posted
+    /// identifier as another item's.
+    fn read_check_quietly(bar: HMENU, proof: &RefMenuProof) -> Option<bool> {
+        let mut menu = bar;
+        let last = proof.steps.len().checked_sub(1)?;
+        for (level, step) in proof.steps.iter().enumerate() {
+            let items = read_level(menu)?;
+            let plain: Vec<NativeMenuItem> = items.iter().map(|(item, _)| item.clone()).collect();
+            let index = match_menu_step(&plain, step).ok()?;
+            let (item, submenu) = &items[index];
+            if level == last {
+                return (item.command_id == proof.command_id).then_some(item.checked);
+            }
+            if submenu.is_null() {
+                return None;
+            }
+            menu = *submenu;
+        }
+        None
     }
 
     pub(crate) fn run_menu_command(
@@ -227,13 +310,25 @@ mod imp {
         if unsafe { IsIconic(hwnd as *mut std::ffi::c_void) } != 0 {
             return Err(crate::tree::minimized::minimized_window_error(hwnd));
         }
+        if !enabled(hwnd) {
+            return Err(window_disabled(hwnd));
+        }
         let Some(bar) = bar_of(&window.id, entry.process.pid.get())? else {
             return Err(menu_mismatch_error(entry, MenuMismatch::NoMenuBar));
         };
-        let (found, opened) = locate(hwnd, bar, entry, deadline)?;
-        opened.close();
+        let (found, opened) = locate(hwnd, bar, proof, deadline)?;
+        opened.close()?;
         let item = found.map_err(|mismatch| menu_mismatch_error(entry, mismatch))?;
         let expected = super::expected_check(item.checked, item.radio);
+        // The last checks before the command: the opening messages may have
+        // taken the time left, or the application may have opened a dialog
+        // that disabled the window meanwhile.
+        deadline
+            .ensure_remaining()
+            .map_err(|error| error.with_disposition(DeliverySemantics::not_delivered()))?;
+        if !enabled(hwnd) {
+            return Err(window_disabled(hwnd));
+        }
         let wparam = proof.command_id as usize;
         // SAFETY: posting a message to a window handle; no pointer is passed.
         let posted = unsafe { PostMessageW(hwnd as *mut std::ffi::c_void, WM_COMMAND, wparam, 0) };
@@ -248,11 +343,12 @@ mod imp {
             .with_details(serde_json::json!({ "kind": "menu_command_not_posted" }))
             .with_disposition(DeliverySemantics::not_delivered()));
         }
+        // Read only from here on: nothing more is sent to the application.
         let verified = expected.is_some_and(|expected| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(VERIFY_MS);
             while std::time::Instant::now() < until && !deadline.is_expired() {
                 std::thread::sleep(std::time::Duration::from_millis(VERIFY_STEP_MS));
-                match read_check(hwnd, entry, deadline) {
+                match read_check_quietly(bar, proof) {
                     Some(checked) if checked == expected => return true,
                     Some(_) => {}
                     None => return false,

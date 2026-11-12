@@ -58,6 +58,9 @@ pub struct NativeMenuBar {
     /// Every item was read; false when the read stopped at a limit or the
     /// deadline, leaving some submenus unread.
     pub complete: bool,
+    /// The window does not take input now (a modal dialog it opened has
+    /// disabled it), so none of its items gets a ref.
+    pub window_disabled: bool,
 }
 
 /// What a window's native menu says about a menu item a ref names, for the
@@ -74,6 +77,8 @@ pub enum MenuBarKind {
 }
 
 pub(crate) const MENU_BAR_HINT: &str = "These are the window's standard menu items, read from the menu itself without opening it or sending anything to the application. An item with a ref runs with click <ref>: the application receives the item's command as if a person chose it, and the window stays where it is. Before sending, the menu is read again the way an opening menu is (the application is told the menu opens, so it can update it), and the item must still be there by the same names, enabled and sending the same command; otherwise nothing is sent. Items without a ref cannot be run this way (a submenu, a disabled item, or one whose hint says why). Enabled and checked states here are as the application last set them, so the open menu can differ.";
+
+const MENU_BAR_DISABLED_HINT: &str = "The window does not take input now (a dialog it opened, or something else, has disabled it), so no item has a ref: finish or close the dialog, then read the menu bar again.";
 
 const MENU_BAR_DEPTH_HINT: &str = "Some submenus were cut at the depth limit, so their items are not listed; each carries children_count. Run snapshot --surface menubar again with a larger --max-depth (up to 50).";
 
@@ -358,7 +363,7 @@ pub(crate) fn run(
         result.bind_snapshot_id(snapshot_id);
         super::emit_snapshot_saved(context, &result)?;
     }
-    Ok(present(&result))
+    Ok(present(&result, bar.window_disabled))
 }
 
 /// The snapshot of a menu bar read, with the refs of its runnable items.
@@ -368,14 +373,12 @@ pub(crate) fn capture(
     max_depth: u8,
 ) -> super::SnapshotResult {
     let mut refmap = RefMap::new();
-    let (tree, nodes_observed) = build_tree(
-        bar,
-        max_depth,
-        Some(&mut MenuRefs {
-            window,
-            refmap: &mut refmap,
-        }),
-    );
+    let mut refs = MenuRefs {
+        window,
+        refmap: &mut refmap,
+    };
+    let (tree, nodes_observed) =
+        build_tree(bar, max_depth, (!bar.window_disabled).then_some(&mut refs));
     super::SnapshotResult {
         tree,
         refmap,
@@ -388,13 +391,17 @@ pub(crate) fn capture(
     }
 }
 
-pub(crate) fn present(result: &super::SnapshotResult) -> Value {
+pub(crate) fn present(result: &super::SnapshotResult, window_disabled: bool) -> Value {
     let mut body = match crate::commands::snapshot::format_snapshot_fields(result, None, None) {
         Ok(body) => body,
         Err(_) => json!({}),
     };
     body["surface"] = json!("menubar");
     body["menu_hint"] = json!(MENU_BAR_HINT);
+    if window_disabled {
+        body["window_disabled"] = json!(true);
+        body["menu_hint"] = json!(format!("{MENU_BAR_DISABLED_HINT} {MENU_BAR_HINT}"));
+    }
     if body.get("depth_hint").is_some() {
         body["depth_hint"] = json!(MENU_BAR_DEPTH_HINT);
     }

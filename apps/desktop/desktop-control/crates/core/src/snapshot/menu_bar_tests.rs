@@ -66,6 +66,7 @@ pub(crate) fn sample_bar() -> NativeMenuBar {
             ),
         ],
         complete: true,
+        window_disabled: false,
     }
 }
 
@@ -219,6 +220,7 @@ fn an_item_with_a_twin_name_on_its_way_gets_no_ref_and_says_why() {
             submenu("編集(E)", vec![item("やり直す", 4)]),
         ],
         complete: true,
+        window_disabled: false,
     };
     let (tree, refmap) = with_refs(&bar, 10);
     assert!(refmap.is_empty());
@@ -255,6 +257,7 @@ fn an_item_without_a_command_under_a_disabled_menu_or_reported_by_position_gets_
             submenu("C", vec![notify]),
         ],
         complete: true,
+        window_disabled: false,
     };
     let (tree, refmap) = with_refs(&bar, 10);
     assert!(refmap.is_empty());
@@ -316,6 +319,7 @@ fn an_unread_submenu_is_marked_cut_short() {
             ..item("ファイル(&F)", 0)
         }],
         complete: false,
+        window_disabled: false,
     };
     let (tree, _) = build_tree(&bar, 10, None);
     let file = &tree.children[0];
@@ -326,7 +330,7 @@ fn an_unread_submenu_is_marked_cut_short() {
 
 #[test]
 fn the_envelope_says_it_is_the_menu_bar_and_how_to_run_an_item() {
-    let body = present(&capture(&window(), &sample_bar(), 10));
+    let body = present(&capture(&window(), &sample_bar(), 10), false);
     assert_eq!(body["surface"], "menubar");
     assert_eq!(body["menu_hint"], MENU_BAR_HINT);
     assert!(MENU_BAR_HINT.contains("click <ref>"));
@@ -339,16 +343,37 @@ fn the_envelope_says_it_is_the_menu_bar_and_how_to_run_an_item() {
 
 #[test]
 fn a_cut_read_says_so_with_the_menu_bar_depth_hint() {
-    let body = present(&capture(&window(), &sample_bar(), 1));
+    let body = present(&capture(&window(), &sample_bar(), 1), false);
     assert_eq!(body["depth_limited"], true);
     assert_eq!(body["depth_hint"], MENU_BAR_DEPTH_HINT);
     let mut bar = sample_bar();
     bar.complete = false;
-    let body = present(&capture(&window(), &bar, 10));
+    let body = present(&capture(&window(), &bar, 10), false);
     assert_eq!(body["complete"], false);
     assert_eq!(body["truncated"], true);
 }
 
+#[test]
+fn a_disabled_window_gets_no_refs_and_says_so() {
+    let mut bar = sample_bar();
+    bar.window_disabled = true;
+    let result = capture(&window(), &bar, 10);
+    assert!(result.refmap.is_empty());
+    let body = present(&result, bar.window_disabled);
+    assert_eq!(body["window_disabled"], true);
+    assert!(
+        body["menu_hint"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(MENU_BAR_DISABLED_HINT)
+    );
+    assert!(body.get("window_disabled").is_some());
+    assert!(
+        present(&capture(&window(), &sample_bar(), 10), false)
+            .get("window_disabled")
+            .is_none()
+    );
+}
 struct Bar;
 impl ObservationOps for Bar {
     fn list_windows(

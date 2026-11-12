@@ -261,9 +261,17 @@ mod live {
             complete: true,
         };
         let items = read_menu(bar, 0, &mut budget);
+        let handle = crate::system::window::window_ops::parse_window_id(&window.id)?;
+        // SAFETY: a plain read of a window handle.
+        let window_disabled = unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(
+                handle as *mut std::ffi::c_void,
+            )
+        } == 0;
         Ok(NativeMenuBar {
             items,
             complete: budget.complete,
+            window_disabled,
         })
     }
 

@@ -171,6 +171,31 @@ describe('desktop-control app-wide Task grant', () => {
     expect(covers(['click', '@scharmap:e1'], [])).toBe(false);
   });
 
+  it('never covers or offers a run naming a menu item or a part it cannot tell, in any form', () => {
+    const charmap = offer(['click', '@scharmap:e1'])!;
+    const twenty = Array.from({ length: 20 }, () => ({
+      command: 'click',
+      args: { ref_id: '@scharmap:e1' },
+    }));
+    for (const argv of [
+      // An upper-case id, which the executable reads on a case-blind file system.
+      ['click', '@SCHARMENU:e1'],
+      ['click', '@SCHARMAP:e1'],
+      // Another session's records.
+      ['click', '@scharmenu:e1', '--session', 'other'],
+      ['click', '@scharmap:e1', '--session', 'other'],
+      // A menu item past the twentieth step the card shows.
+      batch(...twenty, { command: 'click', args: { ref_id: '@scharmenu:e1' } }),
+      // An entry's own session.
+      batch({ command: 'click', session: 'other', args: { ref_id: '@scharmap:e1' } }),
+    ]) {
+      expect(covers(argv, [charmap]), argv.join(' ')).toBe(false);
+      expect(offer(argv), argv.join(' ')).toBeNull();
+    }
+    // Every step is judged, so the app's plain parts past the twentieth stay covered.
+    expect(covers(batch(...twenty, ...twenty), [charmap])).toBe(true);
+  });
+
   it('never covers or offers running a standard menu item, alone or in a batch', () => {
     const charmap = offer(['click', '@scharmap:e1'])!;
     for (const argv of [

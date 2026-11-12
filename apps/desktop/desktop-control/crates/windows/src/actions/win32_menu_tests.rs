@@ -237,6 +237,89 @@ mod live {
         refused(&window, &hidden, &save, "ambiguous");
     }
 
+    static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "system" fn logging_proc(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        SEEN.lock().unwrap().push(message);
+        // SAFETY: the default handling of a message to this test's window.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::DefWindowProcW(
+                hwnd, message, wparam, lparam,
+            )
+        }
+    }
+
+    /// A checked item is read again after its command, from the menu only:
+    /// the window is told its menu opens once, before the command, and never
+    /// after it, so an opening message cannot overtake the posted command.
+    #[test]
+    fn after_the_command_nothing_more_is_sent_to_the_window() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CheckMenuItem, GWLP_WNDPROC, MF_CHECKED, SetWindowLongPtrW, WM_INITMENU,
+            WM_INITMENUPOPUP, WM_UNINITMENUPOPUP,
+        };
+        let hidden = window();
+        let window = info(&hidden);
+        unsafe {
+            CheckMenuItem(file_menu(&hidden), 1002, MF_BYCOMMAND | MF_CHECKED);
+            SetWindowLongPtrW(hidden.0, GWLP_WNDPROC, logging_proc as usize as isize);
+        }
+        SEEN.lock().unwrap().clear();
+        let save = entry(&window, &[("ファイル(F)", 0), ("上書き保存(S)", 1)], 1002);
+        let result = run(&window, &save).unwrap();
+        // Nothing here unchecks it, so the change cannot be seen: not verified.
+        assert_eq!(
+            result.disposition(),
+            DeliverySemantics::delivered_unverified()
+        );
+        let seen: Vec<u32> = SEEN
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|message| [WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP].contains(message))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![WM_INITMENU, WM_INITMENUPOPUP, WM_UNINITMENUPOPUP]
+        );
+        assert_eq!(drain(&hidden), vec![1002]);
+    }
+    #[test]
+    fn a_disabled_window_is_not_run() {
+        let hidden = window();
+        let window = info(&hidden);
+        let save = entry(&window, &[("ファイル(F)", 0), ("上書き保存(S)", 1)], 1002);
+        // As a modal dialog the window opened leaves it.
+        unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hidden.0, 0) };
+        let error = run(&window, &save).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ActionFailed);
+        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+        assert_eq!(error.details.unwrap()["kind"], "window_disabled");
+        assert!(drain(&hidden).is_empty(), "nothing may be posted");
+        unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hidden.0, 1) };
+        run(&window, &save).unwrap();
+        assert_eq!(drain(&hidden), vec![1002]);
+    }
+
+    #[test]
+    fn a_deadline_that_has_passed_sends_nothing() {
+        let hidden = window();
+        let window = info(&hidden);
+        let save = entry(&window, &[("ファイル(F)", 0), ("上書き保存(S)", 1)], 1002);
+        let deadline = Deadline::after(1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let lease = InteractionLease::guarded(Deadline::after(1_000).unwrap(), ()).unwrap();
+        let error = run_menu_command(&save, &window, deadline, &lease).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.disposition, DeliverySemantics::not_delivered());
+        assert!(drain(&hidden).is_empty(), "nothing may be posted");
+    }
     #[test]
     fn a_window_of_another_process_or_with_no_menu_is_not_run() {
         let hidden = window();

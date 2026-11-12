@@ -182,6 +182,9 @@ build にも同梱にも使わないファイル（2026-11-11）。
 | `crates/windows/src/tree/resolve/resolve_anchor.rs`（3 回目） | menu の項目の ref は、UI Automation の木への着地を断る（念のための 2 重の守り） |
 | 上の `in_view: None` を足したファイルの全部 | `RefEntryIdentity` の literal に `in_menu: None` を足しただけ |
 | `skills/agent-desktop-windows/SKILL.md`（4 回目） | 標準の menu bar の項目の実行の仕方（`click <ref>`、送る前の照合、止まった時のエラー、結果の確かめ方、ref が付かない項目、click 以外は断ること）を足した |
+| `crates/windows/src/actions/win32_menu.rs`・`win32_menu_tests.rs`（2 回目） | レビューの指摘への対応。窓が入力を受けない時（`IsWindowEnabled` が偽。開いた modal の dialog が親を無効にした時など）は、menu を開く message の前と、command を Post する直前の両方で確かめて、何も送らずに止める（`ACTION_FAILED`、`details.kind: "window_disabled"`、`not_delivered`）。閉じる通知（`WM_UNINITMENUPOPUP`）の失敗と、Post の直前の期限切れ（`TIMEOUT`）でも、command を送らない。Post の後は、アプリに何も送らない（check の確かめは menu を読むだけ。Send の message は Post の message より先に処理されるので、開く通知を送ると、開くたびに ID を振り直すアプリで、Post した ID が別の項目を指し得るため）。権限の高い窓への送信が UIPI で拒まれた時は、`PERM_DENIED`（`details.kind: "menu_window_elevated"`、`retryable: false`）。その試験（窓の message を記録する試験用の窓で、Post の後に開く通知が来ないこと） |
+| `crates/windows/src/system/menu/menu_bar.rs`（3 回目）・`crates/core/src/snapshot/menu_bar.rs`・`menu_bar_tests.rs`（3 回目） | 窓が入力を受けない時は、`snapshot --surface menubar` の項目に ref を付けず、`window_disabled: true` と案内を出す（`NativeMenuBar::window_disabled`） |
+| `skills/agent-desktop-windows/SKILL.md`（5 回目） | 窓が無効の時の扱いと、実行の後の確かめが menu を読むだけであることを足した |
 
 ## build と試験
 
