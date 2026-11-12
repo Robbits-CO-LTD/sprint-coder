@@ -28,7 +28,7 @@ pub(crate) struct CaptureProof<'a> {
     buckets: [OnceLock<HashMap<LiveKey<'a>, usize>>; MASKS],
     unread: Vec<(u8, LivePredicate<'a>)>,
     whole_window: bool,
-    parents: OnceLock<Vec<Option<usize>>>,
+    ancestry: std::cell::RefCell<Option<crate::refs::ref_ancestry::AncestryProver<'a>>>,
 }
 
 impl<'a> CaptureProof<'a> {
@@ -48,7 +48,7 @@ impl<'a> CaptureProof<'a> {
                     (bits != 0).then(|| (bits, LivePredicate::observed(&node.evidence)))
                 })
                 .collect(),
-            parents: OnceLock::new(),
+            ancestry: std::cell::RefCell::new(None),
         }
     }
 
@@ -95,15 +95,12 @@ impl<'a> CaptureProof<'a> {
         if entry.identity.unique_at_capture || !self.whole_window {
             return;
         }
-        let parents = self
-            .parents
-            .get_or_init(|| crate::refs::ref_ancestry::parents(self.observed));
-        if let Some(ancestors) = crate::refs::ref_ancestry::distinguishing_ancestors(
-            self.observed,
-            parents,
-            entry,
-            index,
-        ) {
+        let proven = self
+            .ancestry
+            .borrow_mut()
+            .get_or_insert_with(|| crate::refs::ref_ancestry::AncestryProver::new(self.observed))
+            .prove(entry, index);
+        if let Some(ancestors) = proven {
             entry.identity.ancestors = ancestors;
             // Left unset: an older reader that ignores the ancestors must see
             // an unproven entry (see `RefEntryIdentity::ancestors`).
