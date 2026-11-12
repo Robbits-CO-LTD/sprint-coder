@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
@@ -155,6 +156,12 @@ impl Deadline {
 
     pub fn elapsed(self) -> Duration {
         now().saturating_duration_since(self.started_at)
+    }
+
+    /// The whole time this deadline allows, from its start to its expiry:
+    /// what a caller asked for, or less when an enclosing deadline cut it.
+    pub(crate) fn span(self) -> Duration {
+        self.expires_at.saturating_duration_since(self.started_at)
     }
 
     pub fn timeout_ms(self) -> u64 {

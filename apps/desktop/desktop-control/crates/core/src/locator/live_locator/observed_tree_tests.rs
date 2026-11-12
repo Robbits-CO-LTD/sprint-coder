@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{
     LocatorMaterialization, LocatorResolveRequest, LocatorSelection, ObservationSource,
     ObservedSubtree, ObservedTree, evaluate_locator_tree,
@@ -63,6 +64,7 @@ fn descriptor_evidence_projects_onto_the_accessibility_node() {
                 placeholder: Some("Enter name".into()),
                 dom_classes: vec!["btn".into()],
             },
+            runtime_id: None,
         },
     };
     let tree = ObservedTree::from_roots(

@@ -17,6 +17,7 @@ fn entry(name: &str, root_ref: Option<&str>) -> crate::RefEntry {
             native_id: None,
             unique_at_capture: true,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: RefGeometry {
             bounds_space: None,

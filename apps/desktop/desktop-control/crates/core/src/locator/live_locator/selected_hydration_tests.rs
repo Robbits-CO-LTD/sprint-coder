@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::test_support::window;
 use super::{
     IdentifierEvidence, LocatorEvidence, LocatorField, LocatorMaterialization, LocatorRefEvidence,
@@ -213,6 +214,7 @@ fn role_only_evidence(role: &str) -> LocatorEvidence {
             bounds: LocatorField::Unknown,
             available_actions: LocatorField::Unknown,
             descriptors: Default::default(),
+            runtime_id: None,
         },
     }
 }

@@ -178,6 +178,7 @@ fn entry(bounds: Rect) -> RefEntry {
             native_id: None,
             unique_at_capture: false,
             ancestors: Vec::new(),
+            in_view: None,
         },
         geometry: RefGeometry {
             bounds_space: None,

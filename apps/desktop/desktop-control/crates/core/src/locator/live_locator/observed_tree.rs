@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde_json::json;
 
 use crate::{AccessibilityNode, AdapterError, ErrorCode, refs::RefPath};
@@ -12,6 +13,10 @@ pub struct ObservedTree {
     pub(crate) stats: LocatorStats,
     pub(crate) structurally_complete: bool,
     pub(crate) logical_depths: Vec<u8>,
+    /// Whether the adapter read only the elements the window shows (see
+    /// ObservationMode::visible_only): every count over this tree then covers
+    /// that view, never the whole window.
+    pub(crate) visible_scope: bool,
 }
 
 impl ObservedTree {
@@ -31,6 +36,7 @@ impl ObservedTree {
             stats,
             structurally_complete,
             logical_depths: Vec::new(),
+            visible_scope: false,
         };
         for root in roots {
             let index = tree.append(root, RefPath::new(), 0)?;
@@ -41,6 +47,16 @@ impl ObservedTree {
             .iter()
             .all(|root| tree.nodes[*root as usize].completeness.subtree_complete);
         Ok(tree)
+    }
+
+    /// Marks a tree read with ObservationMode::visible_only. Only the adapter
+    /// that performed such a read may call this.
+    pub fn mark_visible_scope(&mut self) {
+        self.visible_scope = true;
+    }
+
+    pub(crate) fn is_visible_scope(&self) -> bool {
+        self.visible_scope
     }
 
     pub fn is_complete(&self) -> bool {

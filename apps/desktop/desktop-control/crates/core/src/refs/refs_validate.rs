@@ -5,6 +5,10 @@ use crate::{AppError, RefEntry};
 /// 50 levels, so a longer list was never written by a capture.
 pub const MAX_RECORDED_ANCESTORS: usize = 64;
 
+/// The most parts a recorded runtime identifier may have (providers use a
+/// handful: a kind marker, a window or process part, a node number).
+const MAX_RUNTIME_ID_PARTS: usize = 32;
+
 pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
     const MAX_FIELD_BYTES: usize = 65_536;
     const MAX_PATH_DEPTH: usize = 256;
@@ -49,8 +53,36 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
             "RefEntry contains invalid typed identifier evidence",
         ));
     }
-    if entry.identity.ancestors.len() > MAX_RECORDED_ANCESTORS
-        || entry.identity.ancestors.iter().any(|ancestor| {
+    let view = entry.identity.in_view.as_ref();
+    if view.is_some_and(|view| {
+        view.path.len() > MAX_PATH_DEPTH
+            || view.bounds.validate().is_err()
+            || view.bounds.width <= 0.0
+            || view.bounds.height <= 0.0
+            || view.runtime_id.is_empty()
+            || view.runtime_id.len() > MAX_RUNTIME_ID_PARTS
+    }) {
+        return Err(AppError::invalid_input(
+            "RefEntry view proof exceeds its limit",
+        ));
+    }
+    let recorded = [
+        Some(entry.identity.ancestors.as_slice()),
+        view.map(|view| view.ancestors.as_slice()),
+    ];
+    for ancestors in recorded.into_iter().flatten() {
+        validate_ancestors(ancestors)?;
+    }
+    if entry.scope.path.len() > MAX_PATH_DEPTH {
+        return Err(AppError::invalid_input("RefEntry path is too deep"));
+    }
+    validate_rest(entry)
+}
+
+fn validate_ancestors(ancestors: &[crate::RefAncestorIdentity]) -> Result<(), AppError> {
+    const MAX_FIELD_BYTES: usize = 65_536;
+    if ancestors.len() > MAX_RECORDED_ANCESTORS
+        || ancestors.iter().any(|ancestor| {
             ancestor.role.trim().is_empty()
                 || ancestor.role.len() > 256
                 || [ancestor.name.as_deref(), ancestor.description.as_deref()]
@@ -68,9 +100,10 @@ pub(crate) fn validate_ref_entry(entry: &RefEntry) -> Result<(), AppError> {
             "RefEntry ancestor evidence exceeds its limit",
         ));
     }
-    if entry.scope.path.len() > MAX_PATH_DEPTH {
-        return Err(AppError::invalid_input("RefEntry path is too deep"));
-    }
+    Ok(())
+}
+
+fn validate_rest(entry: &RefEntry) -> Result<(), AppError> {
     if let Some(bounds) = entry.geometry.bounds {
         bounds.validate()?;
         if entry.geometry.bounds_hash != bounds.bounds_hash() {

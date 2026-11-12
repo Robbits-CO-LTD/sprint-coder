@@ -32,6 +32,9 @@ pub fn resolve_saved_ref(
     lease: Option<&crate::InteractionLease>,
 ) -> Result<NativeHandle, AdapterError> {
     if element_token(entry).is_some() {
+        if entry.identity.in_view.is_some() {
+            return Err(crate::refs::ref_view::view_unavailable(entry));
+        }
         return adapter.resolve_element_strict(entry, deadline);
     }
     let (_, observed, found) = observe_saved_ref(adapter, entry, deadline, lease, true)?;
@@ -60,8 +63,13 @@ pub(crate) fn land_saved_ref(
     entry: &RefEntry,
     deadline: Deadline,
 ) -> Result<NativeHandle, AdapterError> {
+    // A view-proven entry is only ever judged by a fresh read of its view
+    // (`ref_view`), so it takes the full resolution.
     if element_token(entry).is_none()
-        && crate::refs::ref_ancestry::proof_of(entry) != crate::refs::ref_ancestry::Proof::None
+        && matches!(
+            crate::refs::ref_ancestry::proof_of(entry),
+            crate::refs::ref_ancestry::Proof::Own | crate::refs::ref_ancestry::Proof::WithAncestors
+        )
         && let Ok(handle) = adapter.resolve_locator_anchor(entry, deadline)
     {
         let root = ObservationRoot::Element {
@@ -94,10 +102,15 @@ pub(crate) fn observe_saved_ref(
     identity_only: bool,
 ) -> Result<SavedRefMatch, AdapterError> {
     let token = element_token(entry);
-    if token.is_none()
-        && crate::refs::ref_ancestry::proof_of(entry) == crate::refs::ref_ancestry::Proof::None
-    {
+    let proof = crate::refs::ref_ancestry::proof_of(entry);
+    if token.is_none() && proof == crate::refs::ref_ancestry::Proof::None {
         return Err(identity_not_unique(entry));
+    }
+    let in_view = entry.identity.in_view.is_some();
+    // A view proof stands alone: next to an element token or another proof it
+    // is inconsistent, and is refused rather than judged by either rule.
+    if in_view && (token.is_some() || proof != crate::refs::ref_ancestry::Proof::InView) {
+        return Err(crate::refs::ref_view::view_unavailable(entry));
     }
     let window = recorded_window(adapter, entry, deadline)?;
     let base = TreeOptions {
@@ -107,12 +120,21 @@ pub(crate) fn observe_saved_ref(
     };
     let mut request = whole_window_request(&base, deadline)?;
     request.observation_mode.identity_only = identity_only;
+    request.observation_mode.visible_only = in_view;
     let observed = observe_window(adapter, &request, &window, lease)?;
+    // The view a view proof was measured in, and nothing else, judges it; a
+    // whole window is never read in its place.
+    if observed.is_visible_scope() != in_view {
+        return Err(crate::refs::ref_view::view_unavailable(entry));
+    }
     let index = saved_ref_node(entry, token, &observed)?;
     let node = observed
         .nodes
         .get(index)
         .ok_or_else(|| AdapterError::internal("saved ref match is missing from the observation"))?;
+    if in_view {
+        crate::refs::ref_view::confirm_matched(entry, &node.path, &node.evidence)?;
+    }
     adapter.validate_saved_ref_context(entry, node.evidence.identifiers.retained_object())?;
     Ok((window, observed, index))
 }
@@ -160,6 +182,20 @@ fn confirm_landed(
         .and_then(|index| observed.nodes.get(*index as usize))
         .ok_or_else(|| AdapterError::internal("the landed element was not observed"))?;
     match FullPredicate::of_entry(entry).compare(&LivePredicate::observed(&landed.evidence)) {
+        // A view-proven entry is held to its recorded bounds on the very
+        // element that landed as well.
+        IdentityMatch::Match if entry.identity.in_view.is_some() => match root {
+            ObservationRoot::Element { handle, .. } => {
+                crate::refs::ref_view::confirm_live_bounds(
+                    entry,
+                    landed.evidence.ref_evidence.bounds.known().copied(),
+                )?;
+                crate::refs::ref_ancestry::confirm_handle_ancestors(
+                    adapter, entry, handle, deadline,
+                )
+            }
+            ObservationRoot::Window(_) => Err(crate::refs::ref_view::view_unavailable(entry)),
+        },
         IdentityMatch::Match => match root {
             // An entry proven with its ancestors is held to them on the very
             // element that landed, not only on the one the count picked.
@@ -261,6 +297,20 @@ pub(crate) fn observe_whole_window(
     )
 }
 
+/// [`observe_whole_window`] over the elements the window shows only
+/// (`ObservationMode::visible_only`): the read a view proof is measured in at
+/// capture and judged by at resolution, in the same settings.
+pub(crate) fn observe_visible_window(
+    adapter: &dyn PlatformAdapter,
+    base: &TreeOptions,
+    window: &WindowInfo,
+    deadline: Deadline,
+) -> Result<ObservedTree, AdapterError> {
+    let mut request = whole_window_request(base, deadline)?;
+    request.observation_mode.visible_only = true;
+    observe_window(adapter, &request, window, None)
+}
+
 fn whole_window_request(
     base: &TreeOptions,
     deadline: Deadline,
@@ -319,7 +369,7 @@ fn saved_ref_node(
 
 fn unique_live_match(entry: &RefEntry, observed: &ObservedTree) -> Result<usize, AdapterError> {
     let predicate = FullPredicate::of_entry(entry);
-    let ancestors = &entry.identity.ancestors;
+    let ancestors = crate::refs::ref_ancestry::recorded_ancestors(entry);
     let parents = (!ancestors.is_empty()).then(|| crate::refs::ref_ancestry::parents(observed));
     let mut found = None;
     let mut incomplete = !observed.is_exhaustive();

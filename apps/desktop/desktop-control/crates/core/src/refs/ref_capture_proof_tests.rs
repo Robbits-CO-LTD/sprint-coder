@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::locator::live_locator::{
     IdentifierEvidence, LocatorEvidence, LocatorField, LocatorRefEvidence, LocatorStats,
     ObservationRoot, ObservationSource, ObservedSubtree, ObservedTree,
@@ -91,6 +92,7 @@ fn evidence(
             bounds: LocatorField::Absent,
             available_actions: LocatorField::Known(Vec::new()),
             descriptors: Default::default(),
+            runtime_id: None,
         },
     }
 }

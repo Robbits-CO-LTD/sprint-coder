@@ -90,7 +90,7 @@ pub use notifications::notification_info::NotificationInfo;
 pub use refs::RefMap;
 pub use refs::ref_capabilities::RefCapabilities;
 pub use refs::ref_entry::RefEntry;
-pub use refs::ref_entry_identity::{RefAncestorIdentity, RefEntryIdentity};
+pub use refs::ref_entry_identity::{RefAncestorIdentity, RefEntryIdentity, RefViewProof};
 pub use refs::ref_geometry::RefGeometry;
 pub use refs::ref_identity_match::IdentityMatch;
 pub use refs::ref_process::RefProcess;
