@@ -316,7 +316,10 @@ import {
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import { configureDesktopControlStateRoot } from './desktop-control';
 import {
+  DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   configureDesktopControlTeamCursors,
+  desktopControlTeamCursors,
+  desktopControlWorker,
   endDesktopControlSession,
 } from './desktop-control-session';
 import { configureStartMenuShortcutReader } from './desktop-control-start-menu';
@@ -638,9 +641,11 @@ import {
 import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
+  LEADER_DESKTOP_CONTROL_GUIDANCE,
   LEADER_MCP_SYSTEM_PROMPT,
   MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
+  WORKER_DESKTOP_CONTROL_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
   WORKER_PROVIDER_TOOLS,
   decodeTeamModelCursor,
@@ -964,6 +969,8 @@ export class IpcRouter {
       taskId: string;
       parentTurnId: string;
       executionBinding?: Readonly<{ executionId: string; agentId: string }>;
+      /** The Team agent this Worker Turn runs as (Main's own binding, never the call's input). */
+      workerId?: string;
       snapshot: ToolCatalogSnapshot;
       workspace: EffectiveWorkspaceSet;
       mutationBindings: ReadonlyMap<
@@ -988,6 +995,7 @@ export class IpcRouter {
     Readonly<{
       providerId: string;
       executionBinding?: Readonly<{ executionId: string; agentId: string }>;
+      workerId?: string;
       signal: AbortSignal;
       workspace: EffectiveWorkspaceSet;
       mutationBindings: ReadonlyMap<
@@ -1147,7 +1155,7 @@ export class IpcRouter {
     configureDesktopControlStateRoot(join(app.getPath('userData'), 'desktop-control'));
     // Hidden opt-in, read once here: each Task's desktop-control runs share one multi-agent
     // session, so every agent of the Task draws its own cursor (desktop-control-session.ts).
-    configureDesktopControlTeamCursors(process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1');
+    configureDesktopControlTeamCursors(DESKTOP_CONTROL_TEAM_CURSORS_AT_START);
     // `launch <name>` of desktop control looks the name up in the Start menu's shortcuts.
     if (process.platform === 'win32')
       configureStartMenuShortcutReader((path) => shell.readShortcutLink(path));
@@ -1334,6 +1342,7 @@ export class IpcRouter {
           writeScope,
           executionId,
           onApprovalWait,
+          worker.id,
         ),
       authorizeEgress: (
         kind,
@@ -1555,6 +1564,10 @@ export class IpcRouter {
         const parsed = turnEventSchema.safeParse(event);
         if (parsed.success) this.publish(parsed.data);
       },
+      desktopControlWorkerFor: (taskId, turnId, callId) => {
+        const caller = this.managedWorkerOf(turnId, callId);
+        return caller === undefined ? undefined : desktopControlWorker(taskId, caller.workerId);
+      },
     });
     this.permissionBroker = new PermissionBroker(persistence, {
       policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
@@ -1607,6 +1620,7 @@ export class IpcRouter {
       command: {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
+        workerFor: (turnId, callId) => this.managedWorkerOf(turnId, callId),
       },
       team: {
         coordinator: this.teamCoordinator,
@@ -4491,6 +4505,16 @@ export class IpcRouter {
     return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
   }
 
+  /**
+   * The Team Worker behind a managed call the broker sees (its parent Turn and call id), from Main's
+   * own binding of the Worker's Turn; `undefined` for any other call. A Worker call with no bound
+   * agent reads as an unknown Worker (`''`), which nothing is granted to.
+   */
+  private managedWorkerOf(turnId: string, callId: string): { workerId: string } | undefined {
+    const call = this.managedWorkerCall.get(JSON.stringify([turnId, callId]));
+    return call === undefined ? undefined : { workerId: call.workerId ?? '' };
+  }
+
   private readManagedTeamResult<T>(
     request: ManagedTeamResultReadRequest,
     read: (source: TeamResultReadSource) => Promise<T>,
@@ -4564,6 +4588,7 @@ export class IpcRouter {
         ...(worker.executionBinding === undefined
           ? {}
           : { executionBinding: worker.executionBinding }),
+        ...(worker.workerId === undefined ? {} : { workerId: worker.workerId }),
         signal: callSignal,
         workspace: worker.workspace,
         mutationBindings: worker.mutationBindings,
@@ -6106,6 +6131,8 @@ export class IpcRouter {
             this.persistence.getTeamModelSelectionGuidance(),
           )
         : null,
+      // Only with the Team's desktop cursors on, so the Leader's guidance is otherwise as it was.
+      options.teamTurn && desktopControlTeamCursors() ? LEADER_DESKTOP_CONTROL_GUIDANCE : null,
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
         : null,
@@ -6256,6 +6283,7 @@ export class IpcRouter {
     writeScope: 'read-only' | 'workspace-write' | 'full',
     executionId?: string,
     onApprovalWait?: ApprovalWaitObserver,
+    workerId?: string,
   ): Promise<ToolCatalogSnapshot> {
     try {
       return await this.buildWorkerManagedCatalog(
@@ -6267,6 +6295,7 @@ export class IpcRouter {
         writeScope,
         executionId,
         onApprovalWait,
+        workerId,
       );
     } catch (error) {
       secureLogger.error(
@@ -6293,6 +6322,7 @@ export class IpcRouter {
     writeScope: 'read-only' | 'workspace-write' | 'full',
     executionId?: string,
     onApprovalWait?: ApprovalWaitObserver,
+    workerId?: string,
   ): Promise<ToolCatalogSnapshot> {
     const execution =
       executionId === undefined ? undefined : this.persistence.getTeamExecution(executionId);
@@ -6365,10 +6395,23 @@ export class IpcRouter {
     void canDelegate;
     const readable = new Set(['list_workspace', 'read_file', 'search_workspace', 'view_image']);
     const writable = new Set(['create_file', 'create_directory', 'apply_patch']);
+    // The Worker this Turn runs as: the one Main started it for, and the assignee of its execution.
+    const agentId =
+      execution === undefined || workerId === undefined || execution.assigneeAgentId === workerId
+        ? (workerId ?? execution?.assigneeAgentId)
+        : undefined;
+    // With the Task's cursors on, a CLI Worker the Leader marked for desktop control also gets the
+    // command tool, which runs nothing but the shipped desktop-control executable for a Worker
+    // (`registerCommandRunnerTool`). Without the opt-in or the mark, the catalog is as it was.
+    const desktopControl =
+      kind !== 'provider' &&
+      agentId !== undefined &&
+      desktopControlWorker(taskId, agentId) !== undefined;
     const allowed = new Set([
       'update_plan',
       ...(workspace.roots.length === 0 ? [] : readable),
       ...(writeScope === 'read-only' ? [] : writable),
+      ...(desktopControl ? ['exec_command'] : []),
     ]);
     const facts = {
       revision: parent.revision,
@@ -6392,6 +6435,7 @@ export class IpcRouter {
               agentId: execution.assigneeAgentId,
             }),
           }),
+      ...(agentId === undefined ? {} : { workerId: agentId }),
       snapshot,
       workspace,
       mutationBindings,
@@ -6493,7 +6537,11 @@ export class IpcRouter {
     return {
       socketPath,
       token,
-      guidance: WORKER_MCP_SYSTEM_PROMPT,
+      // A Worker marked for desktop control is told how to share the desktop (opt-in only).
+      guidance:
+        desktopControlWorker(taskId, requesterAgentId) === undefined
+          ? WORKER_MCP_SYSTEM_PROMPT
+          : `${WORKER_MCP_SYSTEM_PROMPT}${WORKER_DESKTOP_CONTROL_PROMPT}`,
       toolNames: teamMcpToolNamesForCapabilities(registration),
       ...(managedTools.length === 0
         ? {}

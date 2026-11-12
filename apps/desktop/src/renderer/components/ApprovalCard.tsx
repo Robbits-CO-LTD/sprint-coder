@@ -233,6 +233,16 @@ function DesktopControlApprovalCard({
         <div>
           <strong id={headingId}>{action.title}</strong>
           <div className="approval-card__tool">デスクトップ操作</div>
+          {action.requester === undefined ? null : (
+            // The Team Worker that asked, named as its cursor is.
+            <div
+              className="approval-card__tool"
+              data-testid="desktop-approval-requester"
+              data-requester-color={action.requester.colorIndex}
+            >
+              依頼した Worker: {action.requester.label}
+            </div>
+          )}
         </div>
         {badge === null ? null : (
           <span

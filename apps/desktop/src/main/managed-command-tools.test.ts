@@ -21,6 +21,7 @@ import * as desktopControlModule from './desktop-control';
 import {
   configureDesktopControlTeamCursors,
   endDesktopControlSessions,
+  markDesktopControlWorker,
   resetDesktopControlSessions,
 } from './desktop-control-session';
 import { ManagedCommandSessions } from './managed-command-sessions';
@@ -684,6 +685,122 @@ describe('desktop control Workspace roots', () => {
       expect(calls()).toEqual([
         { argv: ['session', 'end', 'run-77'], session: undefined, roots: [workspace] },
       ]);
+    } finally {
+      desktop.mockRestore();
+      resetDesktopControlSessions();
+      run.mockRestore();
+      await broker.dispose();
+    }
+  });
+
+  it('runs only desktop control for a Team Worker the Leader marked, as that Worker’s cursor', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-worker-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(COMMAND_RUNNER_TOOL);
+    const { boundary } = createCommandBoundary(workspace);
+    // Main's binding of each call: these call ids are a Worker's, any other the Leader's.
+    const workers = new Map([
+      ['marked', 'agent-1'],
+      ['unmarked', 'agent-2'],
+      ['unbound', ''],
+    ]);
+    const withWorkers = {
+      ...boundary,
+      workerFor: (_turnId: string, callId: string) => {
+        const workerId = workers.get(callId.split(':')[0]!);
+        return workerId === undefined ? undefined : { workerId };
+      },
+    } as CommandToolBoundary;
+    const runner = new CommandRunner({ sandboxed: true });
+    const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      if (spec.argv[1] === 'start')
+        await options.onBatch?.([
+          {
+            seq: 0,
+            stream: 'stdout',
+            text: JSON.stringify({ ok: true, data: { session_id: 'run-9' } }),
+            byteLength: 1,
+          },
+        ]);
+      return {
+        executionId: 'execution',
+        exitCode: 0,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+    });
+    const authorize = vi.fn(() => ({
+      decision: 'allow' as const,
+      reason: 'test',
+      beforeExecute: () => true,
+      approvalDecision: 'allow_once' as const,
+    }));
+    const broker = new ToolBroker(registry, () => 1, authorize);
+    registerCommandRunnerTool(broker, runner, withWorkers, COMMAND_RUNNER_TOOL);
+    const owner = {
+      taskId: 'task-desktop-worker',
+      turnId: 'turn-desktop-worker',
+      workspaceId: 'workspace-desktop-worker',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    let n = 0;
+    const dispatch = (who: string, argv: string[], extra: Record<string, unknown> = {}) =>
+      broker.dispatch({
+        ...owner,
+        callId: `${who}:${(n += 1)}`,
+        providerName: 'run_command',
+        input: { executable: process.execPath, argv, purpose: 'desktop worker', ...extra },
+      });
+    const desktop = vi
+      .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+      .mockReturnValue(true);
+    try {
+      configureDesktopControlTeamCursors(true);
+      markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
+      await dispatch('marked', ['click', '@s1:e1']);
+      await dispatch('marked', ['click', '@s1:e2']);
+      await dispatch('leader', ['click', '@s1:e3']);
+      expect(
+        run.mock.calls.map(([spec, options]) => [
+          spec.argv.join(' '),
+          options?.desktopControlSession?.agentId,
+        ]),
+      ).toEqual([
+        ['session gc --ended', undefined],
+        ['session start --name sprint-coder --cursor --multi-agent --no-trace', undefined],
+        ['cursor-overlay enable --label Leader --accent #2563EB', 'leader'],
+        ['cursor-overlay enable --label Checker --accent #16A34A', 'agent-1'],
+        ['click @s1:e1', 'agent-1'],
+        ['click @s1:e2', 'agent-1'],
+        ['click @s1:e3', 'leader'],
+      ]);
+      run.mockClear();
+      authorize.mockClear();
+      // Refused before any card: an unmarked or unbound Worker, a background run, a session the
+      // Worker chose, and every other executable.
+      for (const [who, argv, extra, reason] of [
+        ['unmarked', ['click', '@s1:e1'], {}, '任されていません'],
+        ['unbound', ['click', '@s1:e1'], {}, '任されていません'],
+        ['marked', ['click', '@s1:e1'], { background: true }, 'background'],
+        ['marked', ['--session', 'x', 'click', '@s1:e1'], {}, '--session'],
+      ] as const)
+        await expect(dispatch(who, [...argv], extra)).rejects.toThrow(reason);
+      desktop.mockReturnValue(false);
+      await expect(dispatch('marked', ['-e', '1'])).rejects.toThrow(
+        'デスクトップ操作の実行ファイルだけ',
+      );
+      // Without the opt-in, even a marked Worker runs nothing.
+      desktop.mockReturnValue(true);
+      configureDesktopControlTeamCursors(false);
+      await expect(dispatch('marked', ['click', '@s1:e1'])).rejects.toThrow('任されていません');
+      expect(authorize).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
     } finally {
       desktop.mockRestore();
       resetDesktopControlSessions();

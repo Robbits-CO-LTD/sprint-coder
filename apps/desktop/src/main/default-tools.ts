@@ -19,8 +19,10 @@ import {
 } from './desktop-control';
 import {
   desktopControlTeamCursors,
+  desktopControlWorker,
   ensureDesktopControlSession,
   type DesktopControlOwnRun,
+  type DesktopControlWorker,
 } from './desktop-control-session';
 import {
   CommandRunner,
@@ -337,6 +339,11 @@ export type CommandToolBoundary = Readonly<{
     | 'completeBackgroundActivity'
   >;
   publish(event: TurnEvent): void;
+  /**
+   * The Team Worker that made this call (by the Turn and the call id the broker sees), from Main's
+   * own binding of the Worker's Turn; `undefined` for a call of the Leader itself.
+   */
+  workerFor?(turnId: string, callId: string): Readonly<{ workerId: string }> | undefined;
 }>;
 
 export const APPROVAL_PROBE_TOOL = createToolDefinition({
@@ -481,6 +488,8 @@ export function registerCommandRunnerTool(
     object,
     (argv: readonly string[]) => Promise<ExecutionSpec>
   >();
+  // For a Team Worker's call: the Worker whose cursor the run moves.
+  const desktopControlWorkers = new WeakMap<object, DesktopControlWorker>();
   const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
@@ -535,6 +544,28 @@ export function registerCommandRunnerTool(
         spec.absoluteExecutable,
         executionSpecContentDigest(spec),
       );
+      // A Team Worker runs only the shipped desktop-control executable, judged on the sealed bytes,
+      // in the foreground of its call, and only when the Leader marked it for desktop control.
+      const caller = command.workerFor?.(context.turnId, control.callId);
+      let worker: DesktopControlWorker | undefined;
+      if (caller !== undefined) {
+        if (!desktopControl)
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'Team の Worker が実行できるのは、デスクトップ操作の実行ファイルだけです。',
+          );
+        worker = desktopControlWorker(context.taskId, caller.workerId);
+        if (worker === undefined || !desktopControlTeamCursors())
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'この Worker には、デスクトップ操作が任されていません。',
+          );
+        if (request.background === true)
+          throw new CommandRunnerError(
+            'EXECUTION_SPEC_INVALID',
+            'Team の Worker は、デスクトップ操作を background では実行できません。',
+          );
+      }
       let desktopControlRefusal = desktopControl
         ? desktopControlArgvRefusal(spec.argv, roots)
         : null;
@@ -580,6 +611,7 @@ export function registerCommandRunnerTool(
       if (desktopControl) desktopControlRoots.set(spec, roots);
       if (desktopControl && desktopControlTeamCursors())
         desktopControlOwnSpecs.set(spec, prepareSpec);
+      if (worker !== undefined) desktopControlWorkers.set(spec, worker);
       if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
@@ -624,8 +656,9 @@ export function registerCommandRunnerTool(
           ? desktopControlRoots.get(spec)
           : undefined;
       // With the Task's cursors on, a run that reads or operates the desktop runs in the Task's
-      // session as the Leader, and Main starts that session first when the Task has none yet. A
-      // run whose session cannot be started does not start at all.
+      // session as the Leader, or as the Team Worker that made the call, and Main starts that
+      // session (and styles that Worker's cursor) first when it is not there yet. A run whose
+      // session cannot be started does not start at all.
       let desktopSession: DesktopControlSessionVariables | undefined;
       const prepareOwn = desktopControlOwnSpecs.get(spec);
       if (
@@ -639,6 +672,7 @@ export function registerCommandRunnerTool(
           desktopSession = await ensureDesktopControlSession(
             _context.taskId,
             desktopControlOwnRun(commandRunner, prepareOwn, roots),
+            desktopControlWorkers.get(spec),
           );
         } catch (error) {
           const current = command.persistence.getCommand(commandId);

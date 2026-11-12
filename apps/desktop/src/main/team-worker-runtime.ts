@@ -547,6 +547,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             mode: writeScope === 'read-only' ? 'read-only' : 'write-capable',
           },
           teamMcpEnabled: teamMcp !== undefined,
+          // A Worker's catalog has the command tool only when the Leader marked it for desktop
+          // control (Main then runs nothing but the desktop-control executable for it).
+          desktopControlGranted: promptToolCatalog.entries.some(
+            ({ providerName }) => providerName === 'exec_command',
+          ),
         }),
       );
       const serializedPayload = serializeCliExecutionPayload({

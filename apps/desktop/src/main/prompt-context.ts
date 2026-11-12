@@ -86,6 +86,11 @@ export function compilePromptGuidance(input: {
   teamMcpEnabled?: boolean;
   /** `null` leaves desktop control out; omitted, the CLI is looked up on this machine. */
   desktopControlCommand?: string | null;
+  /**
+   * Whether this agent was given desktop control on its own (a Team Worker the Leader marked for
+   * it), so it gets the CLI even when it cannot write.
+   */
+  desktopControlGranted?: boolean;
 }): CompiledPromptGuidance {
   const requestedAgent = input.agent ?? {
     role: 'primary',
@@ -113,9 +118,10 @@ export function compilePromptGuidance(input: {
       ? 'read-only'
       : 'write-capable';
   const writeApproval = input.writeApproval ?? requestedAgent.writeApproval;
-  // Operating another app is a side effect, so a read-only agent never gets the CLI.
+  // Operating another app is a side effect, so a read-only agent never gets the CLI, unless it
+  // was given desktop control on its own.
   const desktopControlCommand =
-    mode !== 'write-capable'
+    mode !== 'write-capable' && input.desktopControlGranted !== true
       ? null
       : input.desktopControlCommand === undefined
         ? resolveDesktopControlCommand()

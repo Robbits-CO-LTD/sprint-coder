@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import {
   desktopControlArgvIsInert,
@@ -15,8 +16,9 @@ import { secureLogger } from './secure-logger';
  * On, Main starts the Task's session itself before the Task's first desktop-control run that is
  * not inert, and every such run of the Task then runs in it: Main sets the session and the agent
  * id as variables (`desktopControlEnvironment`), and the agent may not choose either
- * (`desktopControlSessionArgvRefusal`). Only the Leader works on the desktop for now, as agent
- * `leader`. The session ends when the Task is archived and when Sprint Coder quits; the cursors'
+ * (`desktopControlSessionArgvRefusal`). The Leader runs as agent `leader`; a Team Worker the
+ * Leader marked for desktop control (`markDesktopControlWorker`) runs as its own agent, with its
+ * role and an accent of its own on its cursor. The session ends when the Task is archived and when Sprint Coder quits; the cursors'
  * renderer also ends by itself when Main exits.
  *
  * A session keeps its snapshots below its own folder, so the approval card and the app-wide Task
@@ -48,11 +50,57 @@ type TaskSession = {
   id: string | null;
   ready: Promise<DesktopControlSessionVariables>;
   run: DesktopControlOwnRun;
+  /** The Workers whose cursor has been styled in this session, by agent id. */
+  styled: Map<string, Promise<void>>;
 };
+
+/**
+ * The Worker cursors' accents, in the order the Team's desktop Workers were marked. None is close
+ * to the Leader's blue. The one place these colors live (the Team view is to match them later).
+ */
+export const DESKTOP_CONTROL_WORKER_ACCENTS = Object.freeze([
+  '#16A34A',
+  '#EA580C',
+  '#9333EA',
+  '#DB2777',
+  '#0D9488',
+  '#CA8A04',
+  '#DC2626',
+  '#92400E',
+]);
+/** How many Workers of one Task may hold desktop control at once (at most `..._MAX`). */
+export const DESKTOP_CONTROL_WORKERS_DEFAULT = 3;
+export const DESKTOP_CONTROL_WORKERS_MAX = 5;
+const DESKTOP_CONTROL_WORKERS = Math.min(
+  DESKTOP_CONTROL_WORKERS_DEFAULT,
+  DESKTOP_CONTROL_WORKERS_MAX,
+);
+const LABEL_MAX = 24;
+
+/** A Worker the Leader marked for desktop control: the cursor it draws, and how it is named. */
+export type DesktopControlWorker = Readonly<{
+  /** The Team agent (`AgentRecord.id`). */
+  workerId: string;
+  /** The agent id its runs carry, in the form the executable accepts. */
+  agentId: string;
+  /** Its role, as its cursor and the approval card name it. */
+  label: string;
+  /** Its accent's place in `DESKTOP_CONTROL_WORKER_ACCENTS`. */
+  colorIndex: number;
+}>;
+
+/**
+ * The hidden opt-in as this Main process started with it. Main turns the feature on from it once
+ * (`configureDesktopControlTeamCursors`), and the Leader's hire tool offers the desktop mark only
+ * when it was given, so without it the tool is exactly as it was.
+ */
+export const DESKTOP_CONTROL_TEAM_CURSORS_AT_START =
+  process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1';
 
 let teamCursors = false;
 let collected: Promise<void> | null = null;
 const sessions = new Map<string, TaskSession>();
+const desktopWorkers = new Map<string, Map<string, DesktopControlWorker>>();
 
 /** Read once, when Main starts; `false` keeps every run as it was. */
 export function configureDesktopControlTeamCursors(enabled: boolean): void {
@@ -64,18 +112,52 @@ export function desktopControlTeamCursors(): boolean {
 }
 
 /**
- * The Task's session, started (and the Leader's cursor styled) on the first call. A failure leaves
- * no session behind, so the next call tries again, and is thrown: the run that needed it does not
- * start outside the session.
+ * The Task's session, started (and the Leader's cursor styled) on the first call, as the Leader,
+ * or as the Worker given, whose cursor is styled (its role and accent) the first time it runs in
+ * the session. A failure leaves nothing behind, so the next call tries again, and is thrown: the
+ * run that needed it does not start outside the session or with an unstyled cursor.
  */
-export function ensureDesktopControlSession(
+export async function ensureDesktopControlSession(
   taskId: string,
   run: DesktopControlOwnRun,
+  worker?: DesktopControlWorker,
 ): Promise<DesktopControlSessionVariables> {
-  if (!teamCursors) return Promise.reject(new Error('Desktop control team cursors are off'));
+  if (!teamCursors) throw new Error('Desktop control team cursors are off');
+  const entry = taskSession(taskId, run);
+  const leader = await entry.ready;
+  if (worker === undefined) return leader;
+  const scoped = { id: leader.id, agentId: worker.agentId };
+  let styled = entry.styled.get(worker.agentId);
+  if (styled === undefined) {
+    styled = run(
+      [
+        'cursor-overlay',
+        'enable',
+        '--label',
+        worker.label,
+        '--accent',
+        DESKTOP_CONTROL_WORKER_ACCENTS[worker.colorIndex % DESKTOP_CONTROL_WORKER_ACCENTS.length]!,
+      ],
+      scoped,
+    ).then(() => undefined);
+    entry.styled.set(worker.agentId, styled);
+    styled.catch(() => {
+      if (entry.styled.get(worker.agentId) === styled) entry.styled.delete(worker.agentId);
+    });
+  }
+  await styled;
+  return scoped;
+}
+
+function taskSession(taskId: string, run: DesktopControlOwnRun): TaskSession {
   const existing = sessions.get(taskId);
-  if (existing !== undefined) return existing.ready;
-  const entry: TaskSession = { id: null, ready: Promise.resolve({ id: '', agentId: '' }), run };
+  if (existing !== undefined) return existing;
+  const entry: TaskSession = {
+    id: null,
+    ready: Promise.resolve({ id: '', agentId: '' }),
+    run,
+    styled: new Map(),
+  };
   entry.ready = (async () => {
     // Sessions an earlier Sprint Coder ended are only folders by now; reclaimed once per start.
     collected ??= run(['session', 'gc', '--ended']).then(
@@ -115,7 +197,69 @@ export function ensureDesktopControlSession(
   entry.ready.catch(() => {
     if (sessions.get(taskId) === entry) sessions.delete(taskId);
   });
-  return entry.ready;
+  return entry;
+}
+
+/**
+ * Marks a Worker the Leader hired for desktop control, with the next accent of the Task, or says
+ * why it is not marked: the Task already has as many desktop Workers as it may hold at once. Kept
+ * in memory only: after a restart no Worker is marked, which only takes the tool away. Marking the
+ * same Worker again keeps its first mark.
+ */
+export function markDesktopControlWorker(
+  taskId: string,
+  workerId: string,
+  role: string,
+): { worker: DesktopControlWorker } | { refusal: string } {
+  const workers = desktopWorkers.get(taskId) ?? new Map<string, DesktopControlWorker>();
+  const known = workers.get(workerId);
+  if (known !== undefined) return { worker: known };
+  if (workers.size >= DESKTOP_CONTROL_WORKERS)
+    return {
+      refusal: `デスクトップ操作を任せられる Worker は、同時に ${DESKTOP_CONTROL_WORKERS} 人までです。この Worker にはデスクトップ操作の道具を渡しません。`,
+    };
+  const colorIndex = workers.size;
+  const worker: DesktopControlWorker = Object.freeze({
+    workerId,
+    agentId: desktopControlAgentId(workerId),
+    label: desktopControlWorkerLabel(role, colorIndex),
+    colorIndex,
+  });
+  workers.set(workerId, worker);
+  desktopWorkers.set(taskId, workers);
+  return { worker };
+}
+
+/** The Worker's desktop-control mark, when the Leader gave it one and the opt-in is on. */
+export function desktopControlWorker(
+  taskId: string,
+  workerId: string,
+): DesktopControlWorker | undefined {
+  return teamCursors ? desktopWorkers.get(taskId)?.get(workerId) : undefined;
+}
+
+/**
+ * The agent id a Worker's runs carry: its Team id when the executable accepts that form (1 to 64
+ * letters, digits, `-` or `_`) and it is not the Leader's, or else a stable digest of it.
+ */
+export function desktopControlAgentId(workerId: string): string {
+  return SESSION_ID.test(workerId) && workerId !== DESKTOP_CONTROL_LEADER_AGENT_ID
+    ? workerId
+    : `w-${createHash('sha256').update(workerId).digest('hex').slice(0, 24)}`;
+}
+
+/** The cursor's label: the role without control or invisible characters, cut short. */
+export function desktopControlWorkerLabel(role: string, colorIndex: number): string {
+  const characters = Array.from(
+    role
+      .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim(),
+  );
+  if (characters.length === 0) return `Worker ${colorIndex + 1}`;
+  return characters.length > LABEL_MAX
+    ? `${characters.slice(0, LABEL_MAX - 1).join('')}…`
+    : characters.join('');
 }
 
 /**
@@ -181,4 +325,5 @@ export function resetDesktopControlSessions(): void {
   teamCursors = false;
   collected = null;
   sessions.clear();
+  desktopWorkers.clear();
 }

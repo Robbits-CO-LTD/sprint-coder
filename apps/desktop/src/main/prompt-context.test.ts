@@ -242,6 +242,23 @@ describe('prompt context compiler', () => {
     });
     expect(readOnly.context).not.toHaveProperty('desktopControl');
     expect(readOnly.content).not.toContain('agent-desktop');
+    // A read-only Team Worker the Leader gave desktop control to gets the same guidance.
+    const granted = compilePromptGuidance({
+      ...base,
+      writeScope: 'read-only',
+      desktopControlCommand: command,
+      desktopControlGranted: true,
+    });
+    expect(granted.context.desktopControl).toEqual({ command });
+    expect(granted.context.agent.mode).toBe('read-only');
+    expect(
+      compilePromptGuidance({
+        ...base,
+        writeScope: 'read-only',
+        desktopControlCommand: command,
+        desktopControlGranted: false,
+      }).digest,
+    ).toBe(readOnly.digest);
   });
 
   it('injects the canonical guidance once as system authority', () => {

@@ -220,7 +220,12 @@ export function desktopControlEnvironment(
     DESKTOP_CONTROL_HOST_PID_VARIABLE,
     ...(session === undefined
       ? []
-      : [DESKTOP_CONTROL_SESSION_VARIABLE, DESKTOP_CONTROL_AGENT_ID_VARIABLE]),
+      : [
+          DESKTOP_CONTROL_SESSION_VARIABLE,
+          DESKTOP_CONTROL_AGENT_ID_VARIABLE,
+          // An inherited interaction lease would let a run skip the turn the agents take.
+          DESKTOP_CONTROL_INTERACTION_LEASE_VARIABLE,
+        ]),
   ];
   const filtered = Object.entries(environment).filter(
     ([key]) => !owned.includes(windows ? key.toUpperCase() : key),
@@ -300,6 +305,12 @@ export type DesktopControlCursorRenderer = Readonly<{
  */
 export const DESKTOP_CONTROL_SESSION_VARIABLE = 'AGENT_DESKTOP_SESSION';
 export const DESKTOP_CONTROL_AGENT_ID_VARIABLE = 'AGENT_DESKTOP_AGENT_ID';
+/**
+ * The variable naming an interaction lease handle the run inherits instead of taking the lease
+ * itself (`crates/windows/src/system/interaction_lease`). Never passed by Main, so a run in Main's
+ * session never has one the caller chose.
+ */
+export const DESKTOP_CONTROL_INTERACTION_LEASE_VARIABLE = 'AGENT_DESKTOP_INTERACTION_LEASE_HANDLE';
 
 export type DesktopControlSessionVariables = Readonly<{
   /** The session Main started (`session start` printed it). */

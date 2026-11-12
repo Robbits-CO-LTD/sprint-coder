@@ -24,6 +24,18 @@ import {
 } from './team-mcp-tool-contract';
 export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
+// With the Team's desktop cursors on (the hidden opt-in Main started with, which this host
+// inherits), the Leader may mark a leaf Worker for desktop control when it hires it. Without it,
+// the source is exactly as it was.
+export function teamMcpDesktopHireProperty(enabled: boolean): string {
+  return enabled
+    ? "\n        desktopControl: { type: 'boolean', description: 'true lets this leaf worker run only the Sprint Coder desktop-control executable (each run still needs the user approval card). Give each such worker its own app/window; at most 3 at once.' },"
+    : '';
+}
+const TEAM_MCP_DESKTOP_HIRE_PROPERTY = teamMcpDesktopHireProperty(
+  process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1',
+);
+
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
 const net = require('net');
 
@@ -127,7 +139,7 @@ const TOOLS = [
           type: 'string',
           enum: ['none', 'summary', 'selected_items', 'full_fork'],
         },
-        writeCapable: { type: 'boolean' },
+        writeCapable: { type: 'boolean' },${TEAM_MCP_DESKTOP_HIRE_PROPERTY}
         modelSelection: {
           type: 'object',
           properties: {

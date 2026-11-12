@@ -210,6 +210,12 @@ import { AutoReviewer } from './auto-reviewer';
 import { FileRevisionRegistry } from './file-revision';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
+import { MANAGED_EXEC_COMMAND_TOOL, UPDATE_PLAN_TOOL } from './default-tools';
+import {
+  configureDesktopControlTeamCursors,
+  markDesktopControlWorker,
+  resetDesktopControlSessions,
+} from './desktop-control-session';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
@@ -3586,6 +3592,7 @@ describe('Main image attachment dispatch boundary', () => {
       writeScope: 'read-only' | 'workspace-write' | 'full',
       executionId?: string,
       onApprovalWait?: ApprovalWaitObserver,
+      workerId?: string,
     ) => Promise<{ digest: string }>;
     const releaseManagedWorkerTurn = Reflect.get(
       IpcRouter.prototype,
@@ -3676,6 +3683,90 @@ describe('Main image attachment dispatch boundary', () => {
         approvals[index]!({ decision: 'allow', reason: 'test_allow', beforeExecute: () => true });
       return { router, broker, catalog, execute, approvals, call, allow };
     }
+
+    it('gives the command tool only to a CLI Worker the Leader marked, with the Team cursors on', async () => {
+      const registry = new ToolRegistry();
+      registry.register(MANAGED_EXEC_COMMAND_TOOL);
+      registry.register(UPDATE_PLAN_TOOL);
+      const broker = new ToolBroker(
+        registry,
+        () => 9,
+        () => ({ decision: 'deny', reason: 'x' }),
+      );
+      for (const definition of [MANAGED_EXEC_COMMAND_TOOL, UPDATE_PLAN_TOOL])
+        broker.registerImplementation({
+          toolId: definition.toolId,
+          implementationKind: definition.implementationKind,
+          execute: vi.fn(async () => ({})),
+        });
+      broker.startTurn(
+        { taskId: 'task-1', turnId: 'turn-parent', workspaceId: 'workspace-1', policyEpoch: 9 },
+        'codex',
+      );
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        managedWorkerTurn: new Map(),
+        managedWorkerCall: new Map(),
+        managedCodingHarness: { broker },
+        persistence: {
+          getActiveTurnId: () => 'turn-parent',
+          getTeamByTask: () => ({ id: 'team-1' }),
+          getTeamExecution: (id: string) => ({ id, teamId: 'team-1', assigneeAgentId: 'worker-1' }),
+          getTeamMissionForExecution: () => null,
+          readTurnWorkspaceSetForTask: () => null,
+          getPermissionPolicy: () => ({ policyEpoch: 9 }),
+        },
+      });
+      const tools = async (
+        kind: 'codex' | 'provider',
+        executionId: string | undefined,
+        workerId: string,
+      ) => {
+        const catalog = (await prepareWorkerManagedCatalog.call(
+          router,
+          kind,
+          'task-1',
+          `runtime-${kind}-${workerId}-${executionId ?? 'none'}`,
+          { primaryRootId: null, digest: 'x'.repeat(64), roots: [] },
+          false,
+          'read-only',
+          executionId,
+          undefined,
+          workerId,
+        )) as unknown as { entries: readonly { providerName: string }[] };
+        return catalog.entries.map(({ providerName }) => providerName);
+      };
+      try {
+        markDesktopControlWorker('task-1', 'worker-1', 'Explorer');
+        // Off: exactly the catalog it had.
+        expect(await tools('codex', 'execution-1', 'worker-1')).not.toContain('exec_command');
+        configureDesktopControlTeamCursors(true);
+        expect(await tools('codex', 'execution-1', 'worker-1')).toEqual([
+          'exec_command',
+          'update_plan',
+        ]);
+        // Not for an API Worker, an unmarked Worker, or an execution assigned to someone else.
+        expect(await tools('provider', 'execution-1', 'worker-1')).not.toContain('exec_command');
+        expect(await tools('codex', undefined, 'worker-2')).not.toContain('exec_command');
+        expect(await tools('codex', 'execution-1', 'worker-2')).not.toContain('exec_command');
+        // The command tool learns which Worker made a call from Main's binding of the call alone.
+        const managedWorkerOf = Reflect.get(IpcRouter.prototype, 'managedWorkerOf') as (
+          this: unknown,
+          turnId: string,
+          callId: string,
+        ) => { workerId: string } | undefined;
+        const calls = router['managedWorkerCall'] as Map<string, unknown>;
+        calls.set(JSON.stringify(['turn-parent', 'call-1']), { workerId: 'worker-1' });
+        calls.set(JSON.stringify(['turn-parent', 'call-2']), {});
+        expect(managedWorkerOf.call(router, 'turn-parent', 'call-1')).toEqual({
+          workerId: 'worker-1',
+        });
+        expect(managedWorkerOf.call(router, 'turn-parent', 'call-2')).toEqual({ workerId: '' });
+        expect(managedWorkerOf.call(router, 'turn-parent', 'call-3')).toBeUndefined();
+      } finally {
+        resetDesktopControlSessions();
+      }
+    });
 
     it.each(['cli', 'mcp'] as const)(
       'returns nested %s Worker results while retaining the parent authority and capability ceiling',

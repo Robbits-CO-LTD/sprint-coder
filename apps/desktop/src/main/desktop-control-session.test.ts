@@ -9,14 +9,20 @@ import {
   desktopControlStateFolder,
 } from './desktop-control';
 import {
+  DESKTOP_CONTROL_WORKER_ACCENTS,
   configureDesktopControlTeamCursors,
+  desktopControlAgentId,
   desktopControlSessionReadScope,
   desktopControlTeamCursors,
+  desktopControlWorker,
+  desktopControlWorkerLabel,
   endDesktopControlSession,
   endDesktopControlSessions,
   ensureDesktopControlSession,
+  markDesktopControlWorker,
   resetDesktopControlSessions,
   type DesktopControlOwnRun,
+  type DesktopControlWorker,
 } from './desktop-control-session';
 
 afterEach(() => resetDesktopControlSessions());
@@ -39,6 +45,7 @@ describe('the variables of a run in Main’s session', () => {
     AGENT_DESKTOP_SESSION: 'agent-chosen',
     agent_desktop_agent_id: 'w9',
     Agent_Desktop_Session: 'agent-chosen-2',
+    agent_desktop_interaction_lease_handle: '1234',
     OTHER: 'kept',
   };
 
@@ -212,5 +219,85 @@ describe('the Task’s desktop-control session', () => {
     await endDesktopControlSessions();
     expect(two.run).toHaveBeenLastCalledWith(['session', 'end', 'run-b']);
     expect(desktopControlSessionReadScope('task-2', ['click', '@s1:e1'])).toBeNull();
+  });
+});
+
+describe('the Team Workers marked for desktop control', () => {
+  it('names each with its role and the next accent, up to three at once, and keeps a first mark', () => {
+    const one = markDesktopControlWorker('task-1', 'agent-a', '画面の確認係');
+    const two = markDesktopControlWorker('task-1', 'agent-b', '  \u0007\u200b ');
+    const three = markDesktopControlWorker('task-1', 'agent-c', 'x'.repeat(40));
+    expect(one).toEqual({
+      worker: { workerId: 'agent-a', agentId: 'agent-a', label: '画面の確認係', colorIndex: 0 },
+    });
+    expect(two).toMatchObject({ worker: { label: 'Worker 2', colorIndex: 1 } });
+    expect(three).toMatchObject({ worker: { label: `${'x'.repeat(23)}…`, colorIndex: 2 } });
+    expect(markDesktopControlWorker('task-1', 'agent-d', 'four')).toEqual({
+      refusal: expect.stringContaining('同時に 3 人まで'),
+    });
+    expect(markDesktopControlWorker('task-1', 'agent-a', 'renamed')).toEqual(one);
+    // Another Task counts its own.
+    expect(markDesktopControlWorker('task-2', 'agent-d', 'four')).toMatchObject({
+      worker: { colorIndex: 0 },
+    });
+    // Read only with the opt-in on.
+    expect(desktopControlWorker('task-1', 'agent-a')).toBeUndefined();
+    configureDesktopControlTeamCursors(true);
+    expect(desktopControlWorker('task-1', 'agent-a')).toEqual((one as { worker: unknown }).worker);
+    expect(desktopControlWorker('task-1', 'agent-d')).toBeUndefined();
+    // No accent repeats the Leader's blue, and none repeats another.
+    expect(new Set(DESKTOP_CONTROL_WORKER_ACCENTS).size).toBe(8);
+    expect(DESKTOP_CONTROL_WORKER_ACCENTS).not.toContain('#2563EB');
+  });
+
+  it('gives runs an agent id the executable accepts, never the Leader’s', () => {
+    expect(desktopControlAgentId('0f3c-agent_1')).toBe('0f3c-agent_1');
+    for (const id of ['leader', 'a b', 'x'.repeat(65), 'ä', ''])
+      expect(desktopControlAgentId(id)).toMatch(/^w-[a-f0-9]{24}$/u);
+    expect(desktopControlAgentId('a b')).toBe(desktopControlAgentId('a b'));
+    expect(desktopControlWorkerLabel('a\nb\tc', 0)).toBe('a b c');
+  });
+
+  it('styles a Worker’s cursor once per session, as that Worker', async () => {
+    configureDesktopControlTeamCursors(true);
+    const { run, calls, id } = ownRuns();
+    const worker: DesktopControlWorker = {
+      workerId: 'agent-b',
+      agentId: 'agent-b',
+      label: 'Checker',
+      colorIndex: 1,
+    };
+    await expect(ensureDesktopControlSession('task-1', run, worker)).resolves.toEqual({
+      id,
+      agentId: 'agent-b',
+    });
+    await ensureDesktopControlSession('task-1', run, worker);
+    await expect(ensureDesktopControlSession('task-1', run)).resolves.toEqual({
+      id,
+      agentId: 'leader',
+    });
+    expect(calls.map(({ argv }) => argv.join(' '))).toEqual([
+      'session gc --ended',
+      'session start --name sprint-coder --cursor --multi-agent --no-trace',
+      'cursor-overlay enable --label Leader --accent #2563EB',
+      'cursor-overlay enable --label Checker --accent #EA580C',
+    ]);
+    expect(calls[3]!.session).toEqual({ id, agentId: 'agent-b' });
+    // A styling that failed is tried again on the next run, and that run does not start.
+    const failing = vi.fn<DesktopControlOwnRun>(async () => {
+      throw new Error('enable failed');
+    });
+    const other = { ...worker, workerId: 'agent-c', agentId: 'agent-c', colorIndex: 2 };
+    await expect(ensureDesktopControlSession('task-1', failing, other)).rejects.toThrow(
+      'enable failed',
+    );
+    expect(failing).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(4);
+    run.mockImplementationOnce(async () => {
+      throw new Error('enable failed');
+    });
+    await expect(ensureDesktopControlSession('task-1', run, other)).rejects.toThrow();
+    await ensureDesktopControlSession('task-1', run, other);
+    expect(run).toHaveBeenCalledTimes(6);
   });
 });

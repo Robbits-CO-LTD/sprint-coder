@@ -280,6 +280,11 @@ function createHarness(input?: {
     capability: Capability;
     request: ToolAuthorizationRequest;
   }) => boolean;
+  desktopControlWorkerFor?: (
+    taskId: string,
+    turnId: string,
+    callId: string,
+  ) => Readonly<{ label: string; colorIndex: number }> | undefined;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -295,6 +300,9 @@ function createHarness(input?: {
     ...(input?.revalidateTaskGrant === undefined
       ? {}
       : { revalidateTaskGrant: input.revalidateTaskGrant }),
+    ...(input?.desktopControlWorkerFor === undefined
+      ? {}
+      : { desktopControlWorkerFor: input.desktopControlWorkerFor }),
     publish: (approval: StoredApproval) => {
       persistence.timeline.push(`published:${approval.id}`);
       published.push(approval);
@@ -2655,6 +2663,56 @@ describe('ApprovalCoordinator desktop control card', () => {
       } finally {
         resetDesktopControlSessions();
       }
+    });
+
+    it('names the Team Worker that asked, and shares the app-wide grant across the Team', async () => {
+      // Calls whose id starts with `w1:` are the Worker's, by Main's binding of the call.
+      const harness = createHarness({
+        desktopControlWorkerFor: (_taskId, _turnId, callId) =>
+          callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : undefined,
+      });
+      await withAppGrantState(async (prepare) => {
+        // The Worker's card names it; the Leader's does not.
+        const asked = harness.coordinator.authorizeTool(
+          request(await prepare(['click', '@scharmap:e1']), 'w1:first'),
+        );
+        const approval = await waitForPublished(harness);
+        expect(desktopActionOf(approval)).toMatchObject({
+          requester: { label: '確認係', colorIndex: 1 },
+          appGrant: { app: 'charmap.exe' },
+        });
+        harness.coordinator.resolve({
+          ...resolveCommand(approval, 'allow_task'),
+          grantScope: 'app',
+        });
+        await expect(asked).resolves.toMatchObject({ approvalDecision: 'allow_task' });
+        // The app the Worker's card granted covers the Leader's and the Worker's next runs.
+        for (const callId of ['leader-next', 'w1:next'])
+          await expect(
+            harness.coordinator.authorizeTool(
+              request(await prepare(['set-value', '@scharmap:e2', 'ABC']), callId),
+            ),
+          ).resolves.toMatchObject({ decision: 'allow', approvalDecision: 'allow_task' });
+        expect(harness.published).toHaveLength(1);
+        // The foreground is still asked every time, the Worker's included, and named.
+        const typed = harness.coordinator.authorizeTool(
+          request(await prepare(['type', '@scharmap:e2', 'ABC']), 'w1:type'),
+        );
+        await viWaitFor(() => harness.published.length === 2);
+        expect(desktopActionOf(harness.published[1]!)).toMatchObject({
+          mode: 'foreground',
+          requester: { label: '確認係' },
+        });
+        harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+        await expect(typed).resolves.toMatchObject({ decision: 'deny' });
+        const leader = harness.coordinator.authorizeTool(
+          request(await prepare(['type', '@scharmap:e2', 'ABC']), 'leader-type'),
+        );
+        await viWaitFor(() => harness.published.length === 3);
+        expect(desktopActionOf(harness.published[2]!)).not.toHaveProperty('requester');
+        harness.coordinator.resolve(resolveCommand(harness.published[2]!, 'deny'));
+        await expect(leader).resolves.toMatchObject({ decision: 'deny' });
+      });
     });
   });
 

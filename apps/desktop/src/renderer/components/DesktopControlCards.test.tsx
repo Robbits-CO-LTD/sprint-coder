@@ -89,6 +89,13 @@ describe('desktop-control approval card', () => {
     expect(html).toContain('Task中許可');
   });
 
+  it('names the Team Worker that asked, and nobody for the Leader’s own run', () => {
+    const html = card({ ...typing, requester: { label: '画面の確認係', colorIndex: 2 } });
+    expect(html).toContain('依頼した Worker: 画面の確認係');
+    expect(html).toContain('data-requester-color="2"');
+    expect(card(typing)).not.toContain('desktop-approval-requester');
+  });
+
   it('shows a launch with its note and no mode mark for a read', () => {
     const launch = card({
       ...typing,

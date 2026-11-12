@@ -203,6 +203,15 @@ export class ApprovalCoordinator {
       publish: {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
+      /**
+       * The Team Worker marked for desktop control that made this call (by the Turn and call id
+       * the broker sees), for the card to name; `undefined` for the Leader's own calls.
+       */
+      desktopControlWorkerFor?: (
+        taskId: string,
+        turnId: string,
+        callId: string,
+      ) => Readonly<{ label: string; colorIndex: number }> | undefined;
     },
   ) {}
 
@@ -440,6 +449,15 @@ export class ApprovalCoordinator {
         : null;
     const desktopAppGrant =
       offered !== null && desktopControlExpectedWindowOwner(offered) !== null ? offered : null;
+    // The Team Worker that asked, as its cursor names and colors it (display only).
+    const worker =
+      desktopAction === undefined
+        ? undefined
+        : this.options.desktopControlWorkerFor?.(
+            request.context.taskId,
+            request.context.turnId,
+            request.callId,
+          );
     const specDigest = facts.specDigest;
     const resource = facts.resourceSet;
     const operation = facts.operation;
@@ -478,10 +496,13 @@ export class ApprovalCoordinator {
         ...(desktopAction === undefined
           ? {}
           : {
-              desktopAction:
-                desktopAppGrant === null
-                  ? desktopAction
-                  : { ...desktopAction, appGrant: { app: desktopAppGrant.label } },
+              desktopAction: {
+                ...desktopAction,
+                ...(desktopAppGrant === null ? {} : { appGrant: { app: desktopAppGrant.label } }),
+                ...(worker === undefined
+                  ? {}
+                  : { requester: { label: worker.label, colorIndex: worker.colorIndex } }),
+              },
             }),
       },
       ...ephemeralApprovalExecution(request),

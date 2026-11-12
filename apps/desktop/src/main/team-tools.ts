@@ -28,6 +28,12 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import {
+  DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
+  DESKTOP_CONTROL_WORKERS_DEFAULT,
+  desktopControlTeamCursors,
+  markDesktopControlWorker,
+} from './desktop-control-session';
 import { maskTeamHiringMarkdown } from './team-hiring-markdown';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
@@ -84,6 +90,10 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
     writeCapable: { type: 'boolean' },
+    // Offered only when Sprint Coder started with the Team's desktop cursors on, so the Leader's
+    // tool is exactly as it was otherwise. True gives the leaf Worker the command tool, for the
+    // shipped desktop-control executable only; the cards and the app-wide grant stay the boundary.
+    ...(DESKTOP_CONTROL_TEAM_CURSORS_AT_START ? { desktopControl: { type: 'boolean' } } : {}),
     modelSelection: {
       type: 'object',
       properties: {
@@ -516,6 +526,19 @@ const hireArgsSchema = z.discriminatedUnion('agentKind', [
     })
     .strict(),
 ]);
+// With the Team's desktop cursors on, a hire may also ask for desktop control (see
+// TEAM_HIRE_WORKER_TOOL); without them, that field is refused as any unknown one is.
+const desktopHireShape = { ...hireCommonShape, desktopControl: z.boolean().optional() };
+const desktopHireArgsSchema = z.discriminatedUnion('agentKind', [
+  z.object({ ...desktopHireShape, agentKind: z.literal('worker') }).strict(),
+  z
+    .object({
+      ...desktopHireShape,
+      agentKind: z.literal('manager'),
+      managerPolicy: managerHirePolicySchema,
+    })
+    .strict(),
+]);
 
 function usesLegacyDelegationField(args: unknown): boolean {
   if (typeof args !== 'object' || args === null) return false;
@@ -740,6 +763,34 @@ async function executeWaitReports(
   }
 }
 
+/**
+ * What a hire that asked for desktop control (`desktopControl: true`) reports back: whether the
+ * Worker got it, and why not. Only the Leader marks, only a leaf Worker, and only as many Workers
+ * as the Task may hold at once; the mark only shows the Worker the command tool, whose runs still
+ * get their cards (the boundary).
+ */
+function desktopControlHireResult(
+  taskId: string,
+  worker: Readonly<{ id: string; role: string }>,
+  agentKind: 'worker' | 'manager',
+  requesterAgentId: string | undefined,
+): { desktopControl: boolean; desktopControlNote?: string } {
+  if (requesterAgentId !== undefined)
+    return {
+      desktopControl: false,
+      desktopControlNote: 'デスクトップ操作を任せられるのは、Leader が直接雇った Worker だけです。',
+    };
+  if (agentKind !== 'worker')
+    return {
+      desktopControl: false,
+      desktopControlNote: 'デスクトップ操作は、Manager には任せられません。',
+    };
+  const marked = markDesktopControlWorker(taskId, worker.id, worker.role);
+  return 'refusal' in marked
+    ? { desktopControl: false, desktopControlNote: marked.refusal }
+    : { desktopControl: true };
+}
+
 /** The single execution path for every team tool call, shared by BOTH the mock ToolBroker
  * registration below and the MCP bridge (team-mcp-bridge.ts) that services the real Claude
  * Leader's tool calls. `taskId` always comes from the caller's own trusted binding (ToolBroker's
@@ -793,9 +844,11 @@ export async function executeTeamTool(
             'managerPolicy.maxDelegationDepth is no longer accepted; use relative maxDelegationLevels',
           ),
         );
-      const parsed = hireArgsSchema.safeParse(args);
+      const parsed = (
+        desktopControlTeamCursors() ? desktopHireArgsSchema : hireArgsSchema
+      ).safeParse(args);
       if (!parsed.success) return teamToolError(parsed.error);
-      const request = parsed.data;
+      const request: z.infer<typeof desktopHireArgsSchema> = parsed.data;
       if (
         options.modelSelectionRequired !== false &&
         options.listModelCandidates !== undefined &&
@@ -871,6 +924,9 @@ export async function executeTeamTool(
             worker.managerPolicy == null
               ? 0
               : Math.max(0, worker.managerPolicy.maxDelegationDepth - worker.depth),
+          ...(request.desktopControl === true
+            ? desktopControlHireResult(taskId, worker, request.agentKind, options.requesterAgentId)
+            : {}),
         };
       } catch (error) {
         return teamToolError(error);
@@ -1381,6 +1437,20 @@ team_get_statusには自分の権限範囲だけが表示されます。宛先ID
 taskIdや送信元identityを引数へ追加しないでください。
 権限はMCP tokenへ固定されています。Team管理ツールを呼び出してはいけません。
 `;
+
+/**
+ * Added to the guidance of a Worker the Leader marked for desktop control (with the Team's desktop
+ * cursors on only), and to the Leader's Team guidance under the same opt-in. Without the opt-in
+ * neither changes, so the prompts stay as they were.
+ */
+export const WORKER_DESKTOP_CONTROL_PROMPT = `
+デスクトップ操作を任されています。コマンドの道具で実行できるのは、デスクトップ操作の実行ファイルだけです。
+- --session と --agent-id は付けません（Sprint Coder が入れます。付けると拒否されます）。
+- 文字の入力は、type より set-value を優先します。
+- TIMEOUT になったら、同じ操作を繰り返さず、少し待ってから snapshot を取り直します。
+- 割り当てられたアプリ／窓だけを操作し、ほかの Worker の窓には触りません。
+`;
+export const LEADER_DESKTOP_CONTROL_GUIDANCE = `デスクトップ操作をWorkerに任せる場合は、team_hire_workerでagentKind: "worker"とdesktopControl: trueを指定します。そのWorkerはデスクトップ操作の実行ファイルだけを実行できます。Worker 1人に1つのアプリ／窓を割り当て、同時にデスクトップ操作を任せるのは${DESKTOP_CONTROL_WORKERS_DEFAULT}人までにします。結果のdesktopControlがfalseなら、そのWorkerには任せられません。`;
 
 // --- Deterministic mock team scenario -------------------------------------------------------
 //
