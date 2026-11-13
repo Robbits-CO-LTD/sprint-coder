@@ -41,7 +41,7 @@ import {
   shouldShowSetupWizard,
 } from './lib/setup-preference';
 import { SetupReplayDialog, SetupWizard } from './components/SetupWizard';
-import { focusAfterSetupReplay } from './lib/setup-focus';
+import { focusAfterFirstSetup, focusAfterSetupReplay } from './lib/setup-focus';
 import { unlockSoundEffects } from './lib/ui-sound';
 
 export default function App() {
@@ -296,8 +296,20 @@ export default function App() {
     if (!setupWasVisibleRef.current) return;
     setupWasVisibleRef.current = false;
     setSetupReveal(true);
-    const timer = window.setTimeout(() => setSetupReveal(false), 1_250);
-    return () => window.clearTimeout(timer);
+    // The Setup took the focus with it: it goes to the Composer, so the first Task can be written
+    // at once. Tried on the next frame (the Composer only), and again once the reveal is over (then
+    // with the fallbacks of setup-focus); either time only if the focus is still nowhere.
+    const frame = requestAnimationFrame(() =>
+      focusAfterFirstSetup(document, { composerOnly: true }),
+    );
+    const timer = window.setTimeout(() => {
+      setSetupReveal(false);
+      focusAfterFirstSetup();
+    }, 1_250);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
   }, [showSetupWizard]);
 
   useEffect(() => {

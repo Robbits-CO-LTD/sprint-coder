@@ -217,11 +217,14 @@ export function SetupWizard({
   mode = 'first-run',
   onOpenSettings,
   onClose,
+  onBusyChange,
 }: {
   mode?: SetupMode;
   onOpenSettings: () => void;
   /** Replay only: the × button, Escape, and the final "完了". */
   onClose?: () => void;
+  /** Told whenever a step starts or stops being saved (the replay dialog holds Escape meanwhile). */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const runtime = useAppStore((state) => state.runtime);
   const createTask = useAppStore((state) => state.createTask);
@@ -294,6 +297,9 @@ export function SetupWizard({
   // The Project is made only by "最初の Task を始める"; going back and forth never makes another.
   const createdProject = useRef<{ path: string; id: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    onBusyChange?.(busy);
+  }, [busy, onBusyChange]);
   const [leaving, setLeaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -348,6 +354,16 @@ export function SetupWizard({
   const generation = useRef(0);
   const saving = useRef(0);
   const readAfterSave = useRef(false);
+  // Each read of Main's two settings also gets its own number, so that answers arriving out of
+  // order cannot step back: once a later read has answered, an earlier one's answer is dropped.
+  // (This PC's two settings are read at once, with nothing to wait for, so they cannot cross.)
+  const readSerial = useRef({ assistant: 0, team: 0 });
+  const answeredSerial = useRef({ assistant: 0, team: 0 });
+  const isLatestAnswer = useCallback((kind: 'assistant' | 'team', serial: number): boolean => {
+    if (serial < answeredSerial.current[kind]) return false;
+    answeredSerial.current[kind] = serial;
+    return true;
+  }, []);
 
   /** Reads what is stored now: at the start, on the Team step, back from Settings, and when the
    * window comes back to the front. A read that fails leaves a known baseline as it was, and marks
@@ -364,22 +380,28 @@ export function SetupWizard({
       const overtaken = () => generation.current !== started;
       adoptLocal();
       if (support.assistant) {
+        const serial = (readSerial.current.assistant += 1);
         const latest = await loadAssistantPreferences();
         if (!live.current) return;
         if (overtaken()) continue;
-        if (latest) adoptPreferences(latest.preferences, latest.configured);
-        else if (stored.current.assistant !== 'ready') remember({ assistant: 'failed' });
+        if (isLatestAnswer('assistant', serial)) {
+          if (latest) adoptPreferences(latest.preferences, latest.configured);
+          else if (stored.current.assistant !== 'ready') remember({ assistant: 'failed' });
+        }
       }
       if (support.team) {
+        const serial = (readSerial.current.team += 1);
         const mode = await loadTeamUsageMode();
         if (!live.current) return;
         if (overtaken()) continue;
-        if (mode !== null) adoptTeam(mode);
-        else if (stored.current.team !== 'ready') remember({ team: 'failed' });
+        if (isLatestAnswer('team', serial)) {
+          if (mode !== null) adoptTeam(mode);
+          else if (stored.current.team !== 'ready') remember({ team: 'failed' });
+        }
       }
       return;
     }
-  }, [adoptLocal, adoptPreferences, adoptTeam, remember, support]);
+  }, [adoptLocal, adoptPreferences, adoptTeam, isLatestAnswer, remember, support]);
 
   /** "もう一度読み込む" after a failed read. */
   const retryRead = useCallback(() => {
@@ -573,14 +595,14 @@ export function SetupWizard({
         noteSaved(local);
       }
       if (assistant.length > 0) {
-        // Lay only the changed items over what is stored right now. If that cannot be read, the
-        // last value read stands in; if nothing was ever read, nothing is written.
+        // Lay only the changed items over what is stored right now. Main replaces the whole set,
+        // so if that cannot be read (as with the Team mode), nothing is written: an older value
+        // standing in would put back items changed elsewhere since (in Settings, say).
         const latest = await loadAssistantPreferences();
-        const base = latest?.preferences ?? stored.current.preferences;
-        if (latest === null && stored.current.assistant !== 'ready') {
+        if (latest === null) {
           noteFailed(assistant);
         } else {
-          const snapshot: AssistantPreferences = { ...base };
+          const snapshot: AssistantPreferences = { ...latest.preferences };
           for (const key of assistant)
             (snapshot as Record<string, unknown>)[key] = preferences[key];
           snapshot.callName = clampCallName(snapshot.callName.trim());
@@ -663,6 +685,21 @@ export function SetupWizard({
     [index, steps.length],
   );
 
+  /** Locks the step while something is under way. The focus is first moved off the controls about
+   * to be disabled (onto the heading), so it never falls to the page — where Escape would reach
+   * the replay dialog itself. */
+  const lockStep = useCallback(() => {
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== headingRef.current &&
+      rootRef.current?.contains(active)
+    ) {
+      headingRef.current?.focus({ preventScroll: true });
+    }
+    setBusy(true);
+  }, []);
+
   const leave = useCallback(
     async (how: 'continue' | 'skip' | 'back') => {
       if (busy) return;
@@ -674,7 +711,7 @@ export function SetupWizard({
         else {
           const changes = changesOn(id);
           if (changes.assistant.length + changes.local.length > 0 || changes.team) {
-            setBusy(true);
+            lockStep();
             try {
               await whileSaving(() => persist(id));
             } finally {
@@ -686,7 +723,7 @@ export function SetupWizard({
       cue(how === 'back' ? 'back' : 'forward');
       moveTo(how === 'back' ? index - 1 : index + 1);
     },
-    [busy, changesOn, cue, index, moveTo, persist, revert, step, whileSaving],
+    [busy, changesOn, cue, index, lockStep, moveTo, persist, revert, step, whileSaving],
   );
 
   const chooseFolder = useCallback(async () => {
@@ -706,13 +743,17 @@ export function SetupWizard({
     moveTo(index + 1);
   }, [cue, index, moveTo]);
 
+  // Set at once (not on the next render), so a second press in the same moment does nothing.
+  const finishing = useRef(false);
   const finish = useCallback(async () => {
+    if (busy || finishing.current) return;
     if (replay) {
       cue('success');
       onClose?.();
       return;
     }
-    setBusy(true);
+    finishing.current = true;
+    lockStep();
     setError(null);
     try {
       // The chosen folder becomes a Project now, once: a retry after a failed Task reuses it.
@@ -755,9 +796,10 @@ export function SetupWizard({
       }
       writeSetupComplete();
     } finally {
+      finishing.current = false;
       setBusy(false);
     }
-  }, [animate, createProject, createTask, cue, folder, onClose, replay]);
+  }, [animate, busy, createProject, createTask, cue, folder, lockStep, onClose, replay]);
 
   // Celebrate on arrival, once.
   useEffect(() => {
@@ -829,12 +871,20 @@ export function SetupWizard({
       return { text: '変更しました', tone: 'changed' };
     return { text: '変更なし', tone: 'same' };
   };
+  // The "細かい好み" row lists many items under one mark. Each item gets a mark of its own only
+  // when the row is mixed — some saved, some not — since the row's mark then cannot speak for all.
+  const DETAIL_ROW: readonly SummaryItem[] = [...DETAIL_KEYS, 'soundEnabled', 'accessDefault'];
+  const detailRowMixed =
+    DETAIL_ROW.some((item) => failedItems.has(item)) &&
+    DETAIL_ROW.some((item) => savedChanges.has(item) && !failedItems.has(item));
   const mark = (item: SummaryItem, text: string) =>
-    failedItems.has(item)
-      ? `${text}（保存できませんでした）`
-      : savedChanges.has(item)
-        ? `${text}（変更しました）`
-        : text;
+    !detailRowMixed
+      ? text
+      : failedItems.has(item)
+        ? `${text}（保存できませんでした）`
+        : savedChanges.has(item)
+          ? `${text}（変更しました）`
+          : text;
   const replySummary =
     saved.assistant !== 'ready'
       ? NOT_READ
@@ -1330,7 +1380,7 @@ export function SetupWizard({
                     index={3}
                     label="細かい好み"
                     value={detailSummary}
-                    note={rowNote([...DETAIL_KEYS, 'soundEnabled', 'accessDefault'])}
+                    note={rowNote(DETAIL_ROW)}
                   />
                   {!replay && (
                     <SummaryRow
@@ -1495,6 +1545,11 @@ export function SetupReplayDialog({
   onOpenSettings: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  // While a step is being saved the replay does not close, whichever way Escape arrives.
+  const busy = useRef(false);
+  const onBusyChange = useCallback((value: boolean) => {
+    busy.current = value;
+  }, []);
   useEffect(() => {
     const dialog = dialogRef.current;
     if (dialog === null) return;
@@ -1517,10 +1572,15 @@ export function SetupReplayDialog({
       aria-labelledby="setup-title"
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        if (!busy.current) onClose();
       }}
     >
-      <SetupWizard mode="replay" onOpenSettings={onOpenSettings} onClose={onClose} />
+      <SetupWizard
+        mode="replay"
+        onOpenSettings={onOpenSettings}
+        onClose={onClose}
+        onBusyChange={onBusyChange}
+      />
     </dialog>
   );
 }

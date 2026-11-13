@@ -124,6 +124,89 @@ describe('SetupSky', () => {
       sky.destroy();
     });
 
+    it.each(['proactive', 'auto'] as const)(
+      '%s: every teammate settles into the formation, and none runs backwards when the leader wraps round',
+      (mode) => {
+        vi.useFakeTimers({
+          toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance'],
+        });
+        vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+        const width = 1280;
+        const parent = document.createElement('div');
+        const canvas = document.createElement('canvas');
+        parent.append(canvas);
+        vi.spyOn(parent, 'getBoundingClientRect').mockReturnValue({
+          width,
+          height: 820,
+          top: 0,
+          left: 0,
+          right: width,
+          bottom: 820,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect);
+        const sky = new SetupSky(canvas, { animate: true });
+        sky.setTeam(mode, 0.86, 0.045);
+        const xs = new Map<string, number[]>();
+        const arrivals = new Map<string, Set<number>>();
+        const settledAt = new Map<string, number>();
+        // 16 seconds: the leader crosses the window about four times (one crossing ≈ 3.7 s).
+        for (let frame = 0; frame < 960; frame += 1) {
+          vi.advanceTimersByTime(16.7);
+          for (const cursor of sky.activeTeam()) {
+            const key = `${cursor.label}${cursor.lane}`;
+            if (!xs.has(key)) {
+              xs.set(key, []);
+              arrivals.set(key, new Set());
+            }
+            const series = xs.get(key)!;
+            if (cursor.catching && settledAt.has(key)) arrivals.get(key)!.add(series.length);
+            series.push(cursor.x);
+            if (!cursor.catching && !settledAt.has(key)) settledAt.set(key, frame);
+            if (cursor.catching) settledAt.delete(key);
+          }
+        }
+        const lane = (key: string) => Number(key.replace('仲間', ''));
+        // The first frame at which the cursor stepped backwards on screen, or -1. Not counted: a
+        // wrap round (it lands before the left edge), and a helper arriving again with the next
+        // big job (it starts over from the edge, having faded out meanwhile).
+        const backwardsOnScreen = (key: string, from = 0) =>
+          xs
+            .get(key)!
+            .findIndex(
+              (x, at) =>
+                at > from &&
+                x < xs.get(key)![at - 1]! - 0.001 &&
+                x >= 0 &&
+                !arrivals.get(key)!.has(at),
+            );
+        const workers = [...xs.keys()].filter((key) => key !== 'AI0');
+        expect(workers.length).toBe(mode === 'proactive' ? 4 : 2);
+        for (const key of workers) {
+          // Each settles within the run (a helper settles again after each arrival).
+          expect(settledAt.get(key), key).toBeDefined();
+          // One arriving from the left never runs backwards on screen, before or after the
+          // leader wraps round. (One from the right dives in leftwards, until it has its place.)
+          if (lane(key) < 0) expect(backwardsOnScreen(key), key).toBe(-1);
+        }
+        if (mode === 'proactive') {
+          // Settled: everyone keeps the leader's pace, a fixed distance behind it, wrap after wrap.
+          const span = width + 160;
+          const lead = xs.get('AI0')!.slice(-600);
+          for (const key of workers) {
+            const series = xs.get(key)!.slice(-600);
+            expect(backwardsOnScreen(key, xs.get(key)!.length - 600), key).toBe(-1);
+            for (let at = 0; at < series.length; at += 1) {
+              const gap = (((lead[at]! - series[at]!) % span) + span) % span;
+              expect(gap, `${key} at ${at}`).toBeCloseTo(50 + Math.abs(lane(key)) * 64, 0);
+            }
+          }
+        }
+        sky.destroy();
+      },
+    );
+
     it('a quick back-and-forth does not lose the teammates', () => {
       const sky = make();
       sky.setTeam('auto');

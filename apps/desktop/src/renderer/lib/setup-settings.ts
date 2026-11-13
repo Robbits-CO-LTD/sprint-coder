@@ -87,17 +87,41 @@ function normalizePreferences(value: unknown): AssistantPreferences {
   };
 }
 
-/** What Main has stored right now, or `null` when it cannot be read (no bridge, or an error). A
- * caller that cannot read must not guess: it keeps the last value it knew. */
+/** The preferences in an answer from Main, only when every item is there and well-formed; `null`
+ * otherwise. A broken answer says nothing about what is stored, so it is never filled in with
+ * defaults and passed off as the stored value. */
+function parsePreferences(value: unknown): AssistantPreferences | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const input = value as Record<string, unknown>;
+  const choice = (key: keyof AssistantPreferences, allowed: Set<string>) =>
+    typeof input[key] === 'string' && allowed.has(input[key]);
+  const flag = (key: 'emoji' | 'suggestNextSteps' | 'planFirst') => typeof input[key] === 'boolean';
+  const wellFormed =
+    choice('tone', TONES) &&
+    choice('length', LENGTHS) &&
+    choice('depth', DEPTHS) &&
+    choice('language', LANGUAGES) &&
+    choice('confirm', CONFIRMS) &&
+    typeof input.callName === 'string' &&
+    flag('emoji') &&
+    flag('suggestNextSteps') &&
+    flag('planFirst');
+  return wellFormed ? normalizePreferences(input) : null;
+}
+
+/** What Main has stored right now, or `null` when it cannot be read (no bridge, an error, or an
+ * answer that is not well-formed). A caller that cannot read must not guess: it keeps the last
+ * value it knew. */
 export async function loadAssistantPreferences(): Promise<AssistantPreferencesState | null> {
   const get = bridge()?.getAssistantPreferences;
   if (typeof get !== 'function') return null;
   try {
-    const state = await get();
-    return {
-      configured: state?.configured === true,
-      preferences: normalizePreferences(state?.preferences),
-    };
+    const state: unknown = await get();
+    if (typeof state !== 'object' || state === null) return null;
+    const { configured, preferences } = state as Record<string, unknown>;
+    const parsed = parsePreferences(preferences);
+    if (parsed === null || typeof configured !== 'boolean') return null;
+    return { configured, preferences: parsed };
   } catch {
     return null;
   }
@@ -122,13 +146,14 @@ export async function saveAssistantPreferences(
   }
 }
 
-/** The stored Team mode, or `null` when it cannot be read. */
+/** The stored Team mode, or `null` when it cannot be read (an error, or an answer without a known
+ * mode — which is never taken for the default). */
 export async function loadTeamUsageMode(): Promise<TeamUsageMode | null> {
   const get = bridge()?.getTeamUsageMode;
   if (typeof get !== 'function') return null;
   try {
     const state = await get();
-    return TEAM_MODES.has(state?.mode) ? state.mode : DEFAULT_TEAM_USAGE_MODE;
+    return TEAM_MODES.has(state?.mode) ? state.mode : null;
   } catch {
     return null;
   }

@@ -49,7 +49,12 @@ type Comet = {
   /** 'helper' comets in "おまかせ" come and go with the big job. */
   helper: boolean;
   present?: boolean;
+  /** Still on its way to its place in the formation. */
   catching?: boolean;
+  /** Where it runs relative to the leader (pixels; behind is negative). While catching up this
+   * eases towards its place in the formation; once there it stays, so the cursor keeps the leader's
+   * pace and wraps round the window with it. Unset when it runs on its own (no leader, or leaving). */
+  offset?: number | undefined;
 };
 
 type Confetto = {
@@ -229,10 +234,22 @@ export class SetupSky {
   }
 
   /** The Team cursors that are staying (not on their way out), for checking the picture in tests. */
-  activeTeam(): readonly { label: string; lane: number; helper: boolean }[] {
+  activeTeam(): readonly {
+    label: string;
+    lane: number;
+    helper: boolean;
+    x: number;
+    catching: boolean;
+  }[] {
     return this.comets
       .filter((comet) => !comet.leaving)
-      .map(({ label, lane, helper }) => ({ label, lane, helper }));
+      .map(({ label, lane, helper, x, catching }) => ({
+        label,
+        lane,
+        helper,
+        x,
+        catching: catching === true,
+      }));
   }
 
   /** Confetti thrown up from both bottom corners. */
@@ -474,30 +491,50 @@ export class SetupSky {
     const autoPhase =
       this.teamMode === 'auto' ? ((now - this.teamSince) % AUTO_CYCLE_MS) / AUTO_CYCLE_MS : 0;
     const bigJob = autoPhase > 0.3 && autoPhase < 0.82;
+    // Every cursor runs left to right and wraps round from just past the right edge to just
+    // before the left one.
+    const span = this.width + 160;
+    const wrap = (x: number) => ((((x + 80) % span) + span) % span) - 80;
     const leader = this.comets.find((comet) => comet.lane === 0 && !comet.leaving);
+    const leaderFrom = leader?.x ?? 0;
+    if (leader) leader.x = wrap(leader.x + leader.speed * dt);
     for (const comet of this.comets) {
       const present = !comet.leaving && (!comet.helper || bigJob);
       if (present && !comet.present && comet.lane !== 0) {
         // Arriving: dive in from the window's left or right edge towards the leader.
         comet.x = comet.from === -1 ? -60 : this.width + 60;
         comet.catching = true;
+        comet.offset = leader ? comet.x - leader.x : undefined;
         comet.trail = [];
       }
       comet.present = present;
       comet.life += ((present ? 1 : 0) - comet.life) * 0.08 * dt;
-      if (comet.catching && leader) {
-        const goal = leader.x - 50 - Math.abs(comet.lane) * 64;
-        comet.x += (goal - comet.x) * 0.075 * dt;
-        if (Math.abs(goal - comet.x) < 12) comet.catching = false;
+      const before = comet === leader ? leaderFrom : comet.x;
+      if (comet === leader) {
+        // Moved above, before the others take their places from it.
+      } else if (leader && !comet.leaving && comet.offset !== undefined) {
+        // Placed relative to the leader, so its wrapping round the window never pulls anyone back.
+        if (comet.catching) {
+          const place = -50 - Math.abs(comet.lane) * 64;
+          let move = (place - comet.offset) * 0.075 * dt;
+          // One arriving from the left only ever runs forwards (at worst it keeps still).
+          if (comet.from === -1) move = Math.max(move, -leader.speed * dt);
+          comet.offset += move;
+          if (Math.abs(place - comet.offset) < 1) {
+            comet.offset = place;
+            comet.catching = false;
+          }
+        }
+        comet.x = wrap(leader.x + comet.offset);
       } else {
-        comet.x += comet.speed * dt;
+        // On its own (no leader, or on its way out): keeps running at its own pace.
+        comet.catching = false;
+        comet.offset = undefined;
+        comet.x = wrap(comet.x + comet.speed * dt);
       }
+      // Wrapped round: the trail starts again rather than streaking across the window.
+      if (comet.x < before - span / 2) comet.trail = [];
       comet.phase += 0.03 * dt;
-      const span = this.width + 160;
-      if (!comet.catching && comet.x > this.width + 80) {
-        comet.x -= span;
-        comet.trail = [];
-      }
       const pos = this.cometPosition(comet);
       comet.trail.push(pos);
       if (comet.trail.length > 44) comet.trail.shift();

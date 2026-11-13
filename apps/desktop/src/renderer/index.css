@@ -424,6 +424,13 @@ body {
   letter-spacing: 0.14em;
 }
 
+/* On the Team step the racing cursors keep to the band along the bottom of the window: the caption
+   moves to the top, where nothing runs, so the two never overlap. */
+.setup-wizard[data-step='team'] .setup-visual-caption {
+  top: 22px;
+  bottom: auto;
+}
+
 /* Words drawn straight on the stage get their own dark backing, so the moving light behind them
    never takes them under the contrast bar. */
 .setup-visual-caption span,
@@ -1906,6 +1913,12 @@ body {
   margin-top: 0;
 }
 
+/* In the footer, close to the board's corner: its ring goes out only a little, so it stays inside
+   the board instead of cutting into the rounded corner. */
+.setup-wizard.is-animated .setup-primary.setup-finish::before {
+  animation-name: setup-call-near;
+}
+
 .setup-primary:hover:not(:disabled) {
   transform: translateY(-2px) scale(1.02);
 }
@@ -2515,7 +2528,8 @@ body {
   font-style: normal;
   font-weight: 600;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.06);
+  /* Opaque, so the light moving behind the board cannot show through and thin the contrast. */
+  background: #1c1f27;
 }
 
 .setup-summary-note.is-changed {
@@ -3113,6 +3127,18 @@ body {
   100% {
     opacity: 0;
     transform: scale(1.35, 1.7);
+  }
+}
+
+@keyframes setup-call-near {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.05, 1.22);
   }
 }
 

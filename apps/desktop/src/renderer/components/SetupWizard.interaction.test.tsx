@@ -13,7 +13,7 @@ vi.mock('../lib/ui-sound', async (importOriginal) => ({
   ...(await importOriginal<typeof UiSound>()),
   playInterfaceCue: playCue,
 }));
-import { SetupWizard } from './SetupWizard';
+import { SetupReplayDialog, SetupWizard } from './SetupWizard';
 
 type Bridge = Record<string, unknown>;
 
@@ -470,10 +470,14 @@ describe('SetupWizard', () => {
     ]) {
       expect(summary).toContain(text);
     }
-    // Not changed here, so not listed.
     // Not changed here: shown with its stored value, without the mark.
     expect(summary).toContain('返事の言語: 相手に合わせる');
-    expect(summary).not.toContain('相手に合わせる（変更しました）');
+    // Every change on the row was saved: the row's one mark says so, not each item again.
+    expect(summary).not.toContain('（変更しました）');
+    const row = [...container.querySelectorAll('[data-testid="setup-summary"] li')].find((li) =>
+      li.textContent?.startsWith('細かい好み'),
+    );
+    expect(row?.querySelector('.setup-summary-note')?.textContent).toBe('変更しました');
   });
 
   it('says what "前回選択した設定" means, on a first launch and after a choice', async () => {
@@ -631,6 +635,101 @@ describe('SetupWizard', () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('if what is stored cannot be read again just before a save, nothing is written (Settings’ later changes are not put back)', async () => {
+      const settings = fullBridge();
+      let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+      let readable = true;
+      settings.getAssistantPreferences.mockImplementation(async () => {
+        if (!readable) throw new Error('busy');
+        return { configured: true, preferences: { ...current } };
+      });
+      await render();
+      await goTo('details');
+      // In Settings, the language changes; from now on reading fails.
+      current = { ...current, language: 'en' };
+      readable = false;
+      await choose('setup-emoji');
+      await press('setup-next');
+      expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+      expect(step()).toBe('workspace');
+      await press('setup-next');
+      const row = [...container.querySelectorAll('[data-testid="setup-summary"] li')].find((li) =>
+        li.textContent?.startsWith('細かい好み'),
+      );
+      expect(row?.querySelector('.setup-summary-note')?.textContent).toBe('保存できませんでした');
+      expect(q('[data-testid="setup-save-warning"]')).not.toBeNull();
+    });
+
+    it('answers arriving out of order: an older read never undoes a newer one', async () => {
+      const settings = fullBridge(undefined, 'auto');
+      let answerFirst: () => void = () => {};
+      settings.getTeamUsageMode.mockImplementationOnce(
+        () => new Promise((resolve) => (answerFirst = () => resolve({ mode: 'explicit' }))),
+      );
+      await render(); // the first read of the Team mode is slow
+      await act(async () => window.dispatchEvent(new Event('focus'))); // a later one answers first
+      await flush();
+      await goTo('team');
+      expect(q<HTMLInputElement>('[data-testid="setup-team-auto"]')?.checked).toBe(true);
+      await act(async () => answerFirst()); // the old answer arrives last
+      await flush();
+      expect(q<HTMLInputElement>('[data-testid="setup-team-auto"]')?.checked).toBe(true);
+      expect(q('[data-testid="setup-wizard"]')?.dataset.team).toBe('auto');
+    });
+
+    it('a broken answer from Main counts as not read: nothing is shown or stored as the default', async () => {
+      const settings = fullBridge();
+      settings.getAssistantPreferences.mockResolvedValue({
+        configured: true,
+        preferences: { tone: 'casual' },
+      });
+      settings.getTeamUsageMode.mockResolvedValue({ mode: 'sometimes' });
+      await render();
+      await goTo('reply');
+      expect(q('[data-testid="setup-reading-failed"]')).not.toBeNull();
+      expect(q('[data-testid="setup-tone-polite"]')).toBeNull();
+      await press('setup-next');
+      expect(step()).toBe('team');
+      expect(q('[data-testid="setup-reading-failed"]')).not.toBeNull();
+      expect(q('[data-testid="setup-team-explicit"]')).toBeNull();
+      for (let i = 0; i < 4 && step() !== 'done'; i += 1) await press('setup-next');
+      const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+      expect(summary).toContain('返事の仕方今の設定を読み込めませんでした');
+      expect(summary).toContain('Team今の設定を読み込めませんでした');
+      expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+      expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
+    });
+
+    it('the replay dialog: while a step is being saved, its own Escape (cancel) does not close it, and the focus stays inside', async () => {
+      const settings = fullBridge();
+      let finishSave: () => void = () => {};
+      settings.setTeamUsageMode.mockImplementation(
+        (input: { mode: string }) => new Promise((resolve) => (finishSave = () => resolve(input))),
+      );
+      const onClose = vi.fn();
+      await act(async () => {
+        root.render(<SetupReplayDialog onClose={onClose} onOpenSettings={() => {}} />);
+      });
+      await flush();
+      await goTo('team');
+      await choose('setup-team-auto');
+      const next = q<HTMLButtonElement>('[data-testid="setup-next"]')!;
+      next.focus();
+      await act(async () => next.click());
+      // The button about to be disabled hands the focus to the heading, not to the page.
+      expect(document.activeElement?.id).toBe('setup-title');
+      const dialog = q<HTMLDialogElement>('[data-testid="setup-replay-dialog"]')!;
+      const cancel = new Event('cancel', { cancelable: true });
+      await act(async () => dialog.dispatchEvent(cancel));
+      expect(cancel.defaultPrevented).toBe(true);
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => finishSave());
+      await flush();
+      expect(step()).toBe('details');
+      await act(async () => dialog.dispatchEvent(new Event('cancel', { cancelable: true })));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
     it('reply settings that cannot be read are never written over with defaults', async () => {
       const settings = fullBridge();
       settings.getAssistantPreferences.mockRejectedValue(new Error('busy'));
@@ -716,6 +815,30 @@ describe('SetupWizard', () => {
     await waitForHandOff();
     expect(createTask).toHaveBeenCalledExactlyOnceWith(undefined);
     expect(localStorage.getItem(SETUP_COMPLETE_KEY)).toBe('1');
+  });
+
+  it('"最初の Task を始める" pressed twice in the same moment makes one Project and one Task', async () => {
+    installBridge({});
+    pickProjectFolders.mockResolvedValue({
+      canceled: false,
+      folders: [{ path: 'C:/work/app', label: 'app' }],
+    });
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-folder');
+    await press('setup-next');
+    expect(step()).toBe('done');
+    const finishButton = q<HTMLButtonElement>('[data-testid="setup-finish"]')!;
+    // Both presses land before the button can be redrawn as disabled.
+    await act(async () => {
+      finishButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      finishButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForHandOff();
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(createTask).toHaveBeenCalledTimes(1);
   });
 
   it('creates the Project from a picked folder before the first Task', async () => {
