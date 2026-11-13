@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
+  desktopControlSupported,
+} from './desktop-control-build';
 import type { TeamCoordinator } from './team-coordinator';
 import {
   BUILTIN_CLAUDE_CONNECTION_ID,
@@ -18,19 +22,15 @@ import {
 } from './desktop-control-session';
 import {
   LEADER_DESKTOP_CONTROL_GUIDANCE,
-  TEAM_HIRE_WORKER_TOOL,
   WORKER_DESKTOP_CONTROL_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
   executeTeamTool,
 } from './team-tools';
-import {
-  TEAM_MCP_SERVER_SOURCE,
-  teamMcpDesktopHireProperty,
-} from '../runtime-host/team-mcp-server-source';
+import { teamMcpDesktopHireProperty } from '../runtime-host/team-mcp-server-source';
 
 afterEach(() => resetDesktopControlSessions());
 
-/** The opt-in on, in a Main whose harness offers its Turns the command tool (the sandbox is there). */
+/** The cursors on, in a Main whose harness offers its Turns the command tool (the sandbox is). */
 function cursorsOn(): void {
   configureDesktopControlTeamCursors(true);
   configureDesktopControlWorkerTool(() => true);
@@ -90,12 +90,43 @@ const hire = (
     requesterAgentId === undefined ? {} : { requesterAgentId },
   ) as Promise<Record<string, unknown>>;
 
+describe('the Team’s desktop cursors as Main and the Runtime Host start', () => {
+  // Where desktop control is not built (macOS, Linux), the cursors stay off whatever is given.
+  const built = desktopControlSupported(process.platform, process.arch);
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it.each([
+    ['unset (the default)', undefined, built],
+    ['1', '1', built],
+    ['another value', 'yes', built],
+    ['0', '0', false],
+  ] as const)(
+    'with the variable %s, are on in Main, its hire tool and the Leader’s MCP tool alike, or off',
+    async (_name, value, on) => {
+      vi.stubEnv(DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE, value);
+      vi.resetModules();
+      const session = await import('./desktop-control-session');
+      const tools = await import('./team-tools');
+      const source = await import('../runtime-host/team-mcp-server-source');
+      expect(session.DESKTOP_CONTROL_TEAM_CURSORS_AT_START).toBe(on);
+      const properties = (tools.TEAM_HIRE_WORKER_TOOL.inputSchema as { properties: object })
+        .properties;
+      expect(Object.hasOwn(properties, 'desktopControl')).toBe(on);
+      expect(source.TEAM_MCP_SERVER_SOURCE.includes('desktopControl')).toBe(on);
+    },
+  );
+});
+
 describe('the Leader’s desktop mark on a hire', () => {
-  it('is not offered, accepted or reported without the Team cursors', async () => {
-    const properties = (TEAM_HIRE_WORKER_TOOL.inputSchema as { properties: object }).properties;
-    expect(properties).not.toHaveProperty('desktopControl');
+  it('is not offered, accepted or reported with the Team cursors off', async () => {
+    // Off is what `SPRINT_CODER_DESKTOP_TEAM_CURSORS=0` gives Main (and what Main is before it
+    // configures them): the MCP tool has no such field, and the hire refuses it as any unknown one.
+    configureDesktopControlTeamCursors(false);
+    configureDesktopControlWorkerTool(() => true);
     expect(teamMcpDesktopHireProperty(false)).toBe('');
-    expect(TEAM_MCP_SERVER_SOURCE).not.toContain('desktopControl');
     const coordinator = team();
     const plain = await hire(coordinator, {});
     expect(plain).toMatchObject({ ok: true, workerId: 'agent-1' });

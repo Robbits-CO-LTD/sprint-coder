@@ -64,9 +64,10 @@ describe('the Team detail’s desktop-control mark of a Worker', () => {
     ]);
   });
 
-  it('is absent, and nothing more is published, while the opt-in is off', async () => {
+  it('is absent, and nothing more is published, while the cursors are off', async () => {
     const { coordinator, published, taskId, workerId } = await teamWithWorker();
-    // A mark recorded without the opt-in (it is only read with it on) changes nothing.
+    configureDesktopControlTeamCursors(false);
+    // A mark recorded with the cursors off (it is only read with them on) changes nothing.
     markDesktopControlWorker(taskId, workerId, '画面の確認係');
     published.length = 0;
     coordinator.notifyDesktopControlMarked(taskId);

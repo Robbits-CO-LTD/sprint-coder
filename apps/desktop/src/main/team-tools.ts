@@ -92,9 +92,10 @@ export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
     objective: { type: 'string' },
     contextInheritancePolicy: { type: 'string' },
     writeCapable: { type: 'boolean' },
-    // Offered only when Sprint Coder started with the Team's desktop cursors on, so the Leader's
-    // tool is exactly as it was otherwise. True gives the leaf Worker the command tool, for the
-    // shipped desktop-control executable only; the cards and the app-wide grant stay the boundary.
+    // Offered only when Sprint Coder started with the Team's desktop cursors on (the default), so
+    // with them off the Leader's tool is exactly as it was. True gives the leaf Worker the command
+    // tool, for the shipped desktop-control executable only; the cards and the app-wide grant stay
+    // the boundary.
     ...(DESKTOP_CONTROL_TEAM_CURSORS_AT_START ? { desktopControl: { type: 'boolean' } } : {}),
     modelSelection: {
       type: 'object',
@@ -1535,8 +1536,8 @@ taskIdや送信元identityを引数へ追加しないでください。
 
 /**
  * Added to the guidance of a Worker the Leader marked for desktop control (with the Team's desktop
- * cursors on only), and to the Leader's Team guidance under the same opt-in. Without the opt-in
- * neither changes, so the prompts stay as they were.
+ * cursors on only), and to the Leader's Team guidance under the same condition. With the cursors
+ * off neither changes, so the prompts stay as they were.
  */
 export const WORKER_DESKTOP_CONTROL_PROMPT = `
 デスクトップ操作を任されています。コマンドの道具で実行できるのは、デスクトップ操作の実行ファイルだけです。

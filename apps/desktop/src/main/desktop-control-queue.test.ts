@@ -707,9 +707,10 @@ describe.each([
     }
   });
 
-  it('without the opt-in, runs as before: outside any order, and never again', async () => {
+  it('with the cursors off (`=0`), runs as before: outside any order, and never again', async () => {
     const { dispatch, dispose, answers, operations, startCommand } = await setUp();
     try {
+      configureDesktopControlTeamCursors(false);
       answers.push(UNDELIVERED);
       const result = await dispatch('leader:1');
       expect(result.stdout).toBe(UNDELIVERED);
@@ -723,7 +724,7 @@ describe.each([
     }
   });
 
-  it('with the opt-in, runs each operation in the Task’s order, and once more when not delivered', async () => {
+  it('with the cursors on (the default), runs each operation in the Task’s order, and once more when not delivered', async () => {
     const { dispatch, dispose, answers, operations, rows, startCommand, taskId } = await setUp();
     try {
       configureDesktopControlTeamCursors(true);

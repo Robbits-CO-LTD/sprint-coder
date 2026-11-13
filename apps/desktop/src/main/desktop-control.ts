@@ -1023,7 +1023,7 @@ const MAIN_ONLY_OPTIONS = ['--linger-ms'];
 /**
  * Why an argv the agent chose may not run because it gives an option only Main's own runs give,
  * or `null`. Main's own runs are judged by `desktopControlArgvRefusal` alone, so this is what keeps
- * the option Main's: without the Team cursors' opt-in, no run carries it, as before it existed.
+ * the option Main's: with the Team's cursors off, no run carries it, as before it existed.
  */
 export function desktopControlMainOnlyOptionRefusal(argv: readonly string[]): string | null {
   const read = readDesktopControlArgv(argv);

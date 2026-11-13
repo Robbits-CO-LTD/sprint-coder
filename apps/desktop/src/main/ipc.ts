@@ -1156,8 +1156,9 @@ export class IpcRouter {
     configureApprovalDigestKey(app.getPath('userData'));
     // Desktop-control runs keep their snapshots here, where the approval card reads part names.
     configureDesktopControlStateRoot(join(app.getPath('userData'), 'desktop-control'));
-    // Hidden opt-in, read once here: each Task's desktop-control runs share one multi-agent
-    // session, so every agent of the Task draws its own cursor (desktop-control-session.ts).
+    // Read once here (on by default, off with SPRINT_CODER_DESKTOP_TEAM_CURSORS=0): each Task's
+    // desktop-control runs share one multi-agent session, so every agent of the Task draws its own
+    // cursor (desktop-control-session.ts).
     configureDesktopControlTeamCursors(DESKTOP_CONTROL_TEAM_CURSORS_AT_START);
     // `launch <name>` of desktop control looks the name up in the Start menu's shortcuts.
     if (process.platform === 'win32')
@@ -6174,7 +6175,7 @@ export class IpcRouter {
             this.persistence.getTeamModelSelectionGuidance(),
           )
         : null,
-      // Only with the Team's desktop cursors on, so the Leader's guidance is otherwise as it was.
+      // Only with the Team's desktop cursors on, so with them off the guidance is as it was.
       options.teamTurn && desktopControlTeamCursors() ? LEADER_DESKTOP_CONTROL_GUIDANCE : null,
       options.skillCreatorTurn
         ? 'skill-creatorが選択されています。skill_draft_createで確認待ちDraftだけを作成し、インストールは行わないでください。team_*ツールは使用しません。'
@@ -6445,7 +6446,8 @@ export class IpcRouter {
         : undefined;
     // With the Task's cursors on, a CLI Worker the Leader marked for desktop control also gets the
     // command tool, which runs nothing but the shipped desktop-control executable for a Worker
-    // (`registerCommandRunnerTool`). Without the opt-in or the mark, the catalog is as it was.
+    // (`registerCommandRunnerTool`). With the cursors off or without the mark, the catalog is as
+    // it was.
     const desktopControl =
       kind !== 'provider' &&
       agentId !== undefined &&
@@ -6580,7 +6582,7 @@ export class IpcRouter {
     return {
       socketPath,
       token,
-      // A Worker marked for desktop control is told how to share the desktop (opt-in only).
+      // A Worker marked for desktop control is told how to share the desktop (cursors on only).
       guidance:
         desktopControlWorker(taskId, requesterAgentId) === undefined
           ? WORKER_MCP_SYSTEM_PROMPT

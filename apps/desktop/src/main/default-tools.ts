@@ -692,10 +692,12 @@ export function registerCommandRunnerTool(
       // It writes no Workspace file (it starts in its own folder, a screenshot path or a launch in
       // a Workspace root is refused), so it claims only itself here. A Workspace-wide write would
       // line every Worker's run up behind the Leader's long `team_wait_*` and behind each other,
-      // out of that order's sight. Without the opt-in, and for every other command, as before.
+      // out of that order's sight. A runner without the command sandbox never places a run in the
+      // session nor in that order, so its run keeps the Workspace-wide claim. With the cursors off
+      // (`=0`), and for every other command, as before.
       resourceKeys.set(
         spec,
-        desktopControl && desktopControlTeamCursors()
+        desktopControl && desktopControlTeamCursors() && commandRunner.isSandboxed
           ? `desktop-control-run:${persisted.id}`
           : `workspace:${workspace.digest}`,
       );

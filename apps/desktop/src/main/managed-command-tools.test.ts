@@ -640,7 +640,7 @@ describe('desktop control Workspace roots', () => {
       expect(calls()).toEqual([
         { argv: ['--session', 'mine', 'list-windows'], session: undefined, roots: [workspace] },
       ]);
-      // How long the cursors stay drawn is Main's alone, with the opt-in off as well.
+      // How long the cursors stay drawn is Main's alone, with the cursors off as well.
       await expect(
         dispatch('off-linger', ['cursor-overlay', 'enable', '--linger-ms', '30000']),
       ).rejects.toThrow('--linger-ms は付けない');
@@ -965,7 +965,7 @@ describe('desktop control Workspace roots', () => {
       await expect(dispatch('marked', ['-e', '1'])).rejects.toThrow(
         'デスクトップ操作の実行ファイルだけ',
       );
-      // Without the opt-in, even a marked Worker runs nothing.
+      // With the cursors off (`=0`), even a marked Worker runs nothing.
       desktop.mockReturnValue(true);
       configureDesktopControlTeamCursors(false);
       await expect(dispatch('marked', ['click', '@s1:e1'])).rejects.toThrow('任されていません');
@@ -1334,9 +1334,10 @@ describe('Team Workers’ desktop control under the Leader’s Turn', () => {
   /**
    * The Leader's Turn as Main binds it: the Team's tools and the command tool on one broker, so a
    * Worker's call shares the Leader's resource gate (`dispatchManagedRuntimeTool`). Runs named
-   * `wait` last until the test ends them; every other run ends at once.
+   * `wait` last until the test ends them; every other run ends at once. `sandboxed: false` is a
+   * runner without the command sandbox, which places no run in the Task's session or order.
    */
-  async function setUp() {
+  async function setUp(sandboxed = true) {
     const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-team-gate-'));
     roots.push(workspace);
     const registry = new ToolRegistry();
@@ -1354,7 +1355,7 @@ describe('Team Workers’ desktop control under the Leader’s Turn', () => {
         return workerId === undefined ? undefined : { workerId, roots: [] };
       },
     } as CommandToolBoundary;
-    const runner = new CommandRunner({ sandboxed: true });
+    const runner = new CommandRunner({ sandboxed });
     const holding: (() => void)[] = [];
     const operations: string[] = [];
     vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
@@ -1498,7 +1499,7 @@ describe('Team Workers’ desktop control under the Leader’s Turn', () => {
     }
   });
 
-  it('keeps the Workspace-wide claim of every other command, and of desktop control without the opt-in', async () => {
+  it('keeps the Workspace-wide claim of every other command, and of desktop control with the cursors off', async () => {
     const { exec, waitReports, operations, holding, dispose } = await setUp();
     const leaderWait = new AbortController();
     try {
@@ -1532,6 +1533,27 @@ describe('Team Workers’ desktop control under the Leader’s Turn', () => {
       for (const call of calls) await expect(call).resolves.toMatchObject({ exitCode: 0 });
     } finally {
       leaderWait.abort();
+      await dispose();
+    }
+  });
+
+  it('keeps the Workspace-wide claim of desktop control on a runner without the sandbox, cursors on', async () => {
+    const { owner, exec, operations, holding, dispose } = await setUp(false);
+    try {
+      configureDesktopControlTeamCursors(true);
+      // Such a run starts no session and takes no turn in the Task's order…
+      const first = exec('leader:1', ['wait', '1']);
+      await vi.waitFor(() => expect(holding).toHaveLength(1), { timeout: 5_000 });
+      expect(desktopControlQueueState(owner.taskId)).toEqual({ busy: false, waiting: 0 });
+      // …so the Workspace-wide claim is what still keeps the next run of the Workspace waiting.
+      const second = exec('leader:2', ['click', '@s1:e1']);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(operations).toEqual(['wait 1']);
+      holding.splice(0).forEach((release) => release());
+      await expect(first).resolves.toMatchObject({ exitCode: 0 });
+      await expect(second).resolves.toMatchObject({ exitCode: 0 });
+      expect(operations).toEqual(['wait 1', 'click @s1:e1']);
+    } finally {
       await dispose();
     }
   });

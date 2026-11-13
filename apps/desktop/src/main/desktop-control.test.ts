@@ -20,8 +20,10 @@ import {
 } from './desktop-control';
 import {
   DESKTOP_CONTROL_EXECUTABLE,
+  DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
   DESKTOP_CONTROL_VERSION,
   desktopControlSupported,
+  desktopControlTeamCursorsEnabled,
 } from './desktop-control-build';
 
 // The digest a build (or the package's signing step) sealed in the `.sha256` manifest.
@@ -233,6 +235,20 @@ describe('desktop-control build', () => {
       ['__proto__', 'x'],
     ] as const)
       expect(desktopControlSupported(platform, arch)).toBe(false);
+  });
+
+  it('has the Team’s desktop cursors on by default, off only with 0, and never where it is not built', () => {
+    expect(DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE).toBe('SPRINT_CODER_DESKTOP_TEAM_CURSORS');
+    for (const value of [undefined, '1', '', 'true', 'false', 'off', ' 0', '00'])
+      expect(desktopControlTeamCursorsEnabled(value, 'win32', 'x64'), String(value)).toBe(true);
+    expect(desktopControlTeamCursorsEnabled('0', 'win32', 'x64')).toBe(false);
+    for (const [platform, arch] of [
+      ['win32', 'arm64'],
+      ['darwin', 'arm64'],
+      ['linux', 'x64'],
+    ] as const)
+      for (const value of [undefined, '1'])
+        expect(desktopControlTeamCursorsEnabled(value, platform, arch)).toBe(false);
   });
 
   it.skipIf(process.platform !== 'win32' || process.arch !== 'x64')(

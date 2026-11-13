@@ -17,6 +17,10 @@
 //    thing that knows which Task/turn this socket connection belongs to.
 import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
 import {
+  DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE,
+  desktopControlTeamCursorsEnabled,
+} from '../main/desktop-control-build';
+import {
   TEAM_ASSIGN_TASKS_MAX,
   TEAM_ASSIGN_TASKS_MAX_BYTES,
   TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
@@ -24,16 +28,21 @@ import {
 } from './team-mcp-tool-contract';
 export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
-// With the Team's desktop cursors on (the hidden opt-in Main started with, which this host
-// inherits), the Leader may mark a leaf Worker for desktop control when it hires it. Without it,
-// the source is exactly as it was.
+// With the Team's desktop cursors on (by default where desktop control is built; off with
+// SPRINT_CODER_DESKTOP_TEAM_CURSORS=0 in the environment Main started with, which this host
+// inherits), the Leader may mark a leaf Worker for desktop control when it hires it. Off, the
+// source is exactly as it was before the mark existed.
 export function teamMcpDesktopHireProperty(enabled: boolean): string {
   return enabled
     ? "\n        desktopControl: { type: 'boolean', description: 'true lets this leaf worker run only the Sprint Coder desktop-control executable (each run still needs the user approval card). Give each such worker its own app/window; at most 3 at once.' },"
     : '';
 }
 const TEAM_MCP_DESKTOP_HIRE_PROPERTY = teamMcpDesktopHireProperty(
-  process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1',
+  desktopControlTeamCursorsEnabled(
+    process.env[DESKTOP_CONTROL_TEAM_CURSORS_VARIABLE],
+    process.platform,
+    process.arch,
+  ),
 );
 
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
