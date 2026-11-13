@@ -497,4 +497,52 @@ describe('desktop-control app-wide Task grant', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('binds a launch that reached a running app to that window’s own process, never wider', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sc-dc-app-grant-attached-'));
+    try {
+      // The launch result's own pid and flags decide nothing: only the window's recorded owner does.
+      rememberDesktopControlWindows(
+        'task-attached',
+        ['launch', 'charmap'],
+        JSON.stringify({
+          ok: true,
+          command: 'launch',
+          data: {
+            app: 'charmap.exe',
+            pid: 700,
+            process_instance: 'windows-proc-v1:7:1',
+            attached: true,
+            new_instance: false,
+            window: {
+              id: 'w-510',
+              app_name: 'charmap.exe',
+              title: '文字コード表',
+              pid: 610,
+              process_instance: 'windows-proc-v1:10:1',
+            },
+          },
+        }),
+      );
+      const lookup = { stateRoot: root, taskId: 'task-attached' };
+      const key = desktopAppGrantOffer(['snapshot', '--window-id', 'w-510'], lookup);
+      expect(key).toMatchObject({
+        pid: 610,
+        instance: 'windows-proc-v1:10:1',
+        app: 'charmap.exe',
+      });
+      // Nothing is covered before the person allows it on a card.
+      expect(desktopAppGrantCovering(['snapshot', '--window-id', 'w-510'], [], lookup)).toBeNull();
+      // A grant for the launch's own pid does not reach the window of the running app.
+      expect(
+        desktopAppGrantCovering(
+          ['snapshot', '--window-id', 'w-510'],
+          [{ ...key!, pid: 700, instance: 'windows-proc-v1:7:1' }],
+          lookup,
+        ),
+      ).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

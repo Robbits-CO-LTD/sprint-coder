@@ -205,6 +205,10 @@ describe('prompt context compiler', () => {
     expect(compiled.content).toContain('裏の操作が失敗しても前面の操作で取り返さず');
     expect(compiled.content).toContain('最小化した窓は操作できない');
     expect(compiled.content).toContain('（--activate は付けない）');
+    // A launch that reached the person's running app is not one the agent opened.
+    expect(compiled.content).toContain('launch の結果の attached が true なら');
+    expect(compiled.content).toContain('new_instance が true の時だけ');
+    expect(compiled.content).toContain('list-windows で窓を取り直す');
     // Nothing recommends taking the foreground any more.
     expect(compiled.content).not.toContain('窓を前面に出し');
     expect(compiled.content).not.toContain('--headed type');

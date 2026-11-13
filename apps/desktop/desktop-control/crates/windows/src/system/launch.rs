@@ -33,20 +33,31 @@ pub(crate) fn launch_app_impl(
         parent_deadline.capped(Duration::from_millis(options.timeout_ms))
     };
     deadline.ensure_remaining().map_err(before_launch)?;
-    let (executable, attached) = prepare(id, options, deadline).map_err(before_launch)?;
-    if let Some(attached) = attached {
+    let prepared = prepare(id, options, deadline).map_err(before_launch)?;
+    if let Some(attached) = prepared.attached {
         return Ok(attached);
     }
     let guard = ForegroundGuard::begin(options.activate);
-    let (pid, token, process) = create_process(&executable, options, deadline)?;
+    let (pid, token, process) = create_process(&prepared.executable, options, deadline)?;
     let lineage = launch_handoff::Lineage::new(pid, &token, process);
     let observed = observe_launched_window(pid, &token, lineage, options, deadline)?;
     if let Some(guard) = guard {
         guard.finish(&observed.owners, observed.window.as_ref());
     }
+    let new_instance = observed.window.is_some();
     let mut result = launch_result(id, pid, token, observed.window);
+    result.new_instance = new_instance;
     if observed.exited_without_window {
-        result.suggestion = Some(launch_handoff::EXITED_WITHOUT_WINDOW.to_string());
+        let handed_off = prepared.running.iter().any(|process| !process.has_exited());
+        result.attached = handed_off;
+        result.suggestion = Some(
+            if handed_off {
+                launch_attach::HANDED_OFF
+            } else {
+                launch_handoff::EXITED_WITHOUT_WINDOW
+            }
+            .to_string(),
+        );
     }
     Ok(result)
 }
@@ -314,6 +325,8 @@ fn launch_result(
         cdp: None,
         renderer,
         suggestion: None,
+        attached: false,
+        new_instance: false,
     }
 }
 
@@ -582,15 +595,6 @@ fn to_wide_str(value: &str) -> Result<Vec<u16>, AdapterError> {
     let mut wide: Vec<u16> = value.encode_utf16().collect();
     wide.push(0);
     Ok(wide)
-}
-
-fn already_running_error(pid: ProcessId, matches: &[ProcessRow]) -> AdapterError {
-    AdapterError::new(ErrorCode::ActionFailed, "Application is already running")
-        .with_details(serde_json::json!({
-            "pid": pid,
-            "candidate_pids": matches.iter().map(|row| row.pid).collect::<Vec<_>>(),
-        }))
-        .with_suggestion("Omit --no-attach to attach to the running instance, or close it first.")
 }
 
 fn ambiguous_apps(matches: &[ProcessRow]) -> AdapterError {

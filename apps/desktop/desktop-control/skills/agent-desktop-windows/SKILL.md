@@ -90,6 +90,18 @@ observation, actions and capture there fail or return nothing.
 - **`launch` takes an absolute path or a bare name** under System32 or the
   Windows directory, with or without `.exe` (`notepad` or `notepad.exe`), not
   a display name. Use `list-apps` to find a running app.
+- **Read `attached` and `new_instance` in the `launch` result.** A bare
+  `launch` of an app that is already running attaches to it and starts
+  nothing (`attached: true`); its windows may be ones the user had open, so do
+  not treat them as yours. `--no-attach`, or any `--arg`, `--env` or `--cwd`,
+  starts a new process instead. A single-instance app (a browser on its
+  default profile, many editors) may pass that new process to the running
+  instance and exit: the result then also says `attached: true`, with no
+  `window`. Only `new_instance: true` proves `window` belongs to a process
+  this launch started.
+- **The `window` a launch returns can be a splash screen** that closes once
+  the app's main window opens. When a command on that window id fails with
+  `WINDOW_NOT_FOUND`, run `list-windows --app <app>` and use the current id.
 - **Notifications:** `list-notifications` with the Action Center closed needs
   `--headed`. Single-item `dismiss-notification` and `notification-action` need
   `--headed` and `--expected-app` or `--expected-title` for the entry at INDEX.

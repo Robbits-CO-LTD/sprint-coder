@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use clap::{Args, Parser};
 use serde::Deserialize;
 
@@ -42,7 +43,7 @@ pub(crate) struct LaunchArgs {
     pub cwd: Option<std::path::PathBuf>,
     #[arg(
         long = "no-attach",
-        help = "Start a fresh instance instead of attaching to a running one (Windows fails if the app is already running)"
+        help = "Start a new instance instead of attaching to a running one; a single-instance app may still pass it to the running one (the result then says attached)"
     )]
     #[serde(default)]
     pub no_attach: bool,

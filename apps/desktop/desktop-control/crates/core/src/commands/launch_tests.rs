@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
 use crate::system::launch_options::LaunchOptions;
@@ -50,6 +51,8 @@ impl SystemOps for LaunchAdapter {
             cdp: None,
             renderer: None,
             suggestion: None,
+            attached: false,
+            new_instance: false,
         })
     }
 }

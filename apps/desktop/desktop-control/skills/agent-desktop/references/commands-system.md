@@ -11,7 +11,7 @@ agent-desktop launch "MyTool" --arg /tmp/notes.txt --env KEY=VALUE --no-attach
 agent-desktop launch "Obsidian" --cdp
 ```
 
-`launch` returns once the process runs. The identifier differs by OS: the examples use macOS display names, and the platform skill names the form for its OS. By default it attaches to a running instance. `--no-attach` starts a fresh instance instead of attaching: on Windows it returns `ACTION_FAILED` if a matching app is already running; on macOS it launches a second instance alongside the running one. For an `--arg` value that starts with `-`, use `--arg=<value>`.
+`launch` returns once the process runs. The identifier differs by OS: the examples use macOS display names, and the platform skill names the form for its OS. By default it attaches to a running instance. `--no-attach` starts a fresh instance instead of attaching; on macOS it launches a second instance alongside the running one. On Windows, `--arg`, `--env` and `--cwd` also start a fresh instance, and the result says `attached: true` when it reached an instance that was already running (also when a single-instance app passed the new process to it) and `new_instance: true` only when `window` is proven to be the started process's. For an `--arg` value that starts with `-`, use `--arg=<value>`.
 
 The process running and the app showing a window are separate facts:
 

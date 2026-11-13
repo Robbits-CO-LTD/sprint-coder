@@ -150,7 +150,7 @@ impl Process {
         Self(handle)
     }
 
-    fn open(pid: ProcessId) -> Option<Self> {
+    pub(super) fn open(pid: ProcessId) -> Option<Self> {
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
@@ -159,7 +159,7 @@ impl Process {
         (!handle.is_null()).then_some(Self(handle))
     }
 
-    fn has_exited(&self) -> bool {
+    pub(super) fn has_exited(&self) -> bool {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
         unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }
@@ -232,11 +232,11 @@ pub(super) struct Process;
 
 #[cfg(not(target_os = "windows"))]
 impl Process {
-    fn open(_pid: ProcessId) -> Option<Self> {
+    pub(super) fn open(_pid: ProcessId) -> Option<Self> {
         None
     }
 
-    fn has_exited(&self) -> bool {
+    pub(super) fn has_exited(&self) -> bool {
         false
     }
 

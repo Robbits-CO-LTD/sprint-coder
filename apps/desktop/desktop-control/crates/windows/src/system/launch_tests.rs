@@ -103,6 +103,46 @@ fn observe_window_once_tolerates_an_expired_deadline_as_no_window_observed() {
     );
 }
 
+/// Only a bare launch may attach: `--no-attach`, arguments, environment and
+/// a working directory all ask for (or only reach) a process this launch
+/// creates. Attaching would report success while dropping them.
+#[test]
+fn only_a_bare_launch_may_attach_to_a_running_instance() {
+    assert!(launch_attach::may_attach(&LaunchOptions::default()));
+    let refused = [
+        LaunchOptions {
+            attach_if_running: false,
+            ..Default::default()
+        },
+        LaunchOptions {
+            args: vec!["--user-data-dir=C:\\profile".into()],
+            ..Default::default()
+        },
+        LaunchOptions {
+            env: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
+            ..Default::default()
+        },
+        LaunchOptions {
+            cwd: Some(std::env::temp_dir()),
+            ..Default::default()
+        },
+    ];
+    for options in &refused {
+        assert!(!launch_attach::may_attach(options), "{options:?}");
+    }
+}
+
+/// The two flags a caller reads never both claim the result: a fresh result
+/// is neither attached nor proven new until the launch shows which.
+#[test]
+fn a_result_is_neither_attached_nor_new_until_proven() {
+    let result = launch_result("app.exe", ProcessId::from(7), "7:1".to_string(), None);
+    assert!(!result.attached && !result.new_instance);
+    let wire = serde_json::to_value(&result).expect("serializes");
+    assert_eq!(wire["attached"], false);
+    assert_eq!(wire["new_instance"], false);
+}
+
 #[test]
 fn launch_options_enforce_bounded_entry_counts() {
     let options = LaunchOptions {
