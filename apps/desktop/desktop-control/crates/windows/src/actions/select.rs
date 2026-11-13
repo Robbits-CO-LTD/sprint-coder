@@ -9,7 +9,8 @@
 //! that, a walker DFS finds a named SelectionItem. Collapsed ExpandCollapse
 //! containers expand first and best-effort collapse after failure; after a
 //! successful select an open combo-box list is closed and the close is
-//! recorded as its own step. Descendant search always scroll-to-realizes
+//! recorded as its own step, checked by reading the selection again after the
+//! close. Descendant search always scroll-to-realizes
 //! (A18-1), re-searching after every scroll step and retaining the first match
 //! so an intermediate or below-fold duplicate still surfaces as
 //! AMBIGUOUS_TARGET. Container Value verification routes through the
@@ -42,18 +43,25 @@ pub(crate) fn resolve_select_verification(
 /// The outcome recorded for closing a combo-box list after a select.
 ///
 /// The action's summary ANDs the check of every delivered step, so the
-/// close's own check (the list is closed) is recorded only when the selection
-/// before it was verified. After an unverified or unobserved selection the
-/// close is recorded as delivered without a check, and the action stays
-/// unverified rather than borrowing the close's success.
+/// close's own check is recorded only when the selection before it was
+/// verified. After an unverified or unobserved selection the close is
+/// recorded as delivered without a check, and the action stays unverified
+/// rather than borrowing the close's success. The close's check needs both
+/// the list closed and the selection read again after the close
+/// (`held_after_close`): the app hears of the close and may put the
+/// selection back then, so a selection checked only before the close is not
+/// reported verified.
 pub(crate) fn close_outcome(
     selection_verified: Option<bool>,
     delivered: bool,
     closed: bool,
+    held_after_close: Option<bool>,
 ) -> DeliveryOutcome {
     match (delivered, selection_verified) {
         (false, _) => DeliveryOutcome::NotDelivered,
-        (true, Some(true)) => DeliveryOutcome::from_delivery(true, closed),
+        (true, Some(true)) => {
+            DeliveryOutcome::from_delivery(true, closed && held_after_close == Some(true))
+        }
         (true, _) => DeliveryOutcome::DeliveredUnobserved,
     }
 }
@@ -125,9 +133,13 @@ mod imp {
         }
         let self_match = is_item && (value.is_empty() || name_matches(element, value));
         // A ref to the item itself keeps that item's identity; only a name
-        // given to the box has to be unique in it.
+        // given to the box has to be unique in it. An item's ref with another
+        // item's name never chooses by name in the box the item belongs to:
+        // that would select an item other than the one the ref names.
         let win32 = if self_match {
             win32_combo_select_item(element, deadline)?
+        } else if is_item {
+            None
         } else {
             win32_combo_select(element, value, deadline)?
         };
@@ -205,7 +217,17 @@ mod imp {
             },
         )?;
         let selection_verified = steps.last().and_then(ActionStep::verified);
-        if let Some(step) = close_open_list(element, selection_verified, deadline) {
+        // Closing the list is reported to the app, which may put the selection
+        // back then (a WPF `DropDownClosed` handler, for one): the selection
+        // is read again once the list is closed.
+        let recheck = || {
+            let target = found_holder.borrow().clone()?;
+            let container_value_available = !value.is_empty() && value_available(element);
+            verify_once(element, &target, value, container_value_available)
+                .ok()
+                .flatten()
+        };
+        if let Some(step) = close_open_list(element, selection_verified, deadline, recheck) {
             steps.push(step);
         }
         Ok(steps)
@@ -251,8 +273,10 @@ mod imp {
         if combo.is_box(element) || !combo.keeps_text() {
             return Ok(None);
         }
+        // A name with a NUL in it cannot be checked against the box's text,
+        // which ends at the first NUL.
         let Some(item_name) = (match read_one(element, TreeProperty::Name).text() {
-            LocatorField::Known(name) if !name.is_empty() => Some(name),
+            LocatorField::Known(name) if !name.is_empty() && !name.contains('\0') => Some(name),
             _ => None,
         }) else {
             return Ok(None);
@@ -314,13 +338,19 @@ mod imp {
         element: &UIAElement,
         selection_verified: Option<bool>,
         deadline: Deadline,
+        recheck: impl FnOnce() -> Option<bool>,
     ) -> Option<ActionStep> {
         let combo = open_combo_box(element, deadline)?;
         let delivered = matches!(collapse_container(&combo), Ok(true));
         let closed = delivered && poll_collapsed(&combo, deadline);
+        let held_after_close = if closed && selection_verified == Some(true) {
+            recheck()
+        } else {
+            None
+        };
         Some(build_step(
             COLLAPSE_LABEL,
-            close_outcome(selection_verified, delivered, closed),
+            close_outcome(selection_verified, delivered, closed, held_after_close),
         ))
     }
 

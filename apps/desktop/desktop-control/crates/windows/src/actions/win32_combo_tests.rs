@@ -1,7 +1,8 @@
 use super::{
     ComboClass, ItemMatch, after_item_select, ambiguous_item_error, classify_class,
-    classify_matches, holds_requested, is_drop_down_list, keeps_item_text, missing_item_error,
-    position_still_names_item, search_start, selection_notifications,
+    classify_matches, holds_requested, is_drop_down_list, item_text_wide, keeps_item_text,
+    list_settled, missing_item_error, position_still_names_item, search_start,
+    selection_notifications,
 };
 use crate::actions::chain::DeliveryOutcome;
 use agent_desktop_core::{DeliveryDisposition, ErrorCode};
@@ -81,14 +82,43 @@ fn errors_never_echo_the_requested_text() {
 
 #[test]
 fn a_commit_is_verified_only_on_the_requested_item() {
-    assert!(holds_requested(2, 2, 0, true));
+    assert!(holds_requested(2, 2, true, true));
     assert!(
-        !holds_requested(1, 1, 0, false),
+        !holds_requested(1, 1, true, false),
         "the position held, but another item moved into it"
     );
-    assert!(!holds_requested(1, 2, 0, true));
-    assert!(!holds_requested(-1, 0, 0, true));
-    assert!(!holds_requested(2, 2, 1, true), "list still open");
+    assert!(!holds_requested(1, 2, true, true));
+    assert!(!holds_requested(-1, 0, true, true));
+    assert!(!holds_requested(2, 2, false, true), "list still open");
+}
+
+#[test]
+fn a_simple_box_counts_its_always_shown_list_as_settled() {
+    assert!(list_settled(0x0003, 0), "a closed drop-down list");
+    assert!(!list_settled(0x0003, 1), "an open drop-down list");
+    assert!(
+        !list_settled(0x0002, 1),
+        "an open drop-down with an edit field"
+    );
+    assert!(
+        list_settled(0x0001, 1),
+        "CBS_SIMPLE: CB_GETDROPPEDSTATE is always TRUE, the list never closes"
+    );
+    assert!(list_settled(0x0201, 1), "CBS_SIMPLE with CBS_HASSTRINGS");
+}
+
+#[test]
+fn an_item_name_with_a_nul_is_refused_before_anything_is_sent() {
+    let wide = item_text_wide("Beta").expect("plain name");
+    assert_eq!(wide.last(), Some(&0));
+    assert_eq!(wide.len(), 5);
+    let error = item_text_wide("Beta\0suffix").expect_err("NUL inside");
+    assert_eq!(error.code, ErrorCode::InvalidArgs);
+    assert_eq!(
+        error.disposition.delivery(),
+        DeliveryDisposition::NotDelivered
+    );
+    assert!(!error.message.contains("Beta"), "the value is not echoed");
 }
 
 #[test]

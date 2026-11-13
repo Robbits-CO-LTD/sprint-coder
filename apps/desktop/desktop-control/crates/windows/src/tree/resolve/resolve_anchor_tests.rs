@@ -272,3 +272,36 @@ fn a_known_but_mismatched_role_settles_stale() {
     };
     assert_eq!(error.code, ErrorCode::StaleRef);
 }
+
+/// A view-proven entry lands only on the element whose runtime identifier it
+/// recorded, even when the path and the role lead to an element.
+#[test]
+fn a_view_proven_path_lands_only_on_the_recorded_runtime_id() {
+    ensure_test_apartment();
+    let fixture = HostedFixture::spawn().expect("the fixture host starts");
+    let entry = blank_entry_with_path(&fixture, Vec::new());
+    let handle = resolve_locator_anchor(&entry, deadline()).expect("the raw path lands");
+    let element = crate::tree::element::uia_element(&handle).expect("the landed element");
+    let runtime_id = crate::tree::walk::walker_source::runtime_id_of(element)
+        .expect("the fixture element publishes a runtime id");
+    let view = |runtime_id: Vec<i32>| {
+        let mut in_view = entry.clone();
+        in_view.identity.in_view = Some(agent_desktop_core::RefViewProof {
+            path: entry.scope.path.clone(),
+            bounds: entry.geometry.bounds.expect("recorded bounds"),
+            runtime_id,
+            ancestors: Vec::new(),
+        });
+        in_view
+    };
+    resolve_locator_anchor(&view(runtime_id.clone()), deadline())
+        .expect("the recorded element lands in the view of visible elements");
+    let mut other = runtime_id;
+    if let Some(last) = other.last_mut() {
+        *last = last.wrapping_add(1);
+    }
+    let Err(error) = resolve_locator_anchor(&view(other), deadline()) else {
+        panic!("another runtime id at the same place landed");
+    };
+    assert_eq!(error.code, ErrorCode::StaleRef);
+}

@@ -395,3 +395,111 @@ mod semantic_geometry_tests;
 
 #[path = "actionability_live_failure_tests.rs"]
 mod failure_tests;
+
+/// Serves the "OK" button under one group, whose name a test chooses, and
+/// records the order of its reads.
+struct AncestorAdapter {
+    group: &'static str,
+    reads: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl ObservationOps for AncestorAdapter {
+    fn get_live_element(
+        &self,
+        handle: &NativeHandle,
+        deadline: crate::Deadline,
+    ) -> Result<LiveElement, AdapterError> {
+        self.reads.lock().unwrap().push("element");
+        CombinedLiveAdapter.get_live_element(handle, deadline)
+    }
+
+    fn read_ancestor_evidence(
+        &self,
+        _entry: &RefEntry,
+        _handle: &NativeHandle,
+        _count: usize,
+        _deadline: crate::Deadline,
+    ) -> Result<Vec<crate::LocatorEvidence>, AdapterError> {
+        use crate::LocatorField;
+        self.reads.lock().unwrap().push("ancestors");
+        Ok(vec![crate::LocatorEvidence {
+            role: LocatorField::Known("group".into()),
+            name: LocatorField::Known(self.group.into()),
+            description: LocatorField::Absent,
+            value: LocatorField::Absent,
+            identifiers: Default::default(),
+            states: LocatorField::Absent,
+            ref_evidence: crate::locator::live_locator::LocatorRefEvidence {
+                bounds: LocatorField::Absent,
+                window_bounds: LocatorField::Absent,
+                available_actions: LocatorField::Absent,
+                descriptors: Default::default(),
+                runtime_id: None,
+            },
+        }])
+    }
+}
+
+impl ActionOps for AncestorAdapter {}
+
+impl InputOps for AncestorAdapter {}
+
+impl SystemOps for AncestorAdapter {}
+
+fn entry_under_group(name: &str) -> RefEntry {
+    let mut entry = entry();
+    entry.identity.unique_at_capture = false;
+    entry.identity.ancestors = vec![crate::RefAncestorIdentity {
+        role: "group".into(),
+        name: Some(name.into()),
+        description: None,
+        native_id: None,
+    }];
+    entry
+}
+
+#[test]
+fn the_check_before_the_action_reads_the_ancestors_before_the_element_itself() {
+    let adapter = AncestorAdapter {
+        group: "A",
+        reads: std::sync::Mutex::new(Vec::new()),
+    };
+    let request = ActionRequest::headless(Action::Click);
+    check_live(
+        &entry_under_group("A"),
+        &NativeHandle::new("ok"),
+        &adapter,
+        &request,
+    )
+    .expect("the element sits under its recorded group");
+    assert_eq!(
+        *adapter.reads.lock().unwrap(),
+        ["ancestors", "element"],
+        "the element's own read stays the one closest to the action"
+    );
+}
+
+#[test]
+fn ancestors_changed_right_before_the_action_send_a_waiting_action_back_to_resolve() {
+    let adapter = AncestorAdapter {
+        group: "B",
+        reads: std::sync::Mutex::new(Vec::new()),
+    };
+    let request = ActionRequest::headless(Action::Click);
+    let Err(error) = check_live(
+        &entry_under_group("A"),
+        &NativeHandle::new("ok"),
+        &adapter,
+        &request,
+    ) else {
+        panic!("the element now sits under another group");
+    };
+    assert_eq!(error.code, ErrorCode::StaleRef);
+    assert_eq!(
+        error.details.as_ref().unwrap()["kind"],
+        "saved_ref_ancestors_changed"
+    );
+    assert!(error.is_explicitly_retryable());
+    assert_eq!(error.disposition, crate::DeliverySemantics::not_delivered());
+    assert_eq!(*adapter.reads.lock().unwrap(), ["ancestors"]);
+}

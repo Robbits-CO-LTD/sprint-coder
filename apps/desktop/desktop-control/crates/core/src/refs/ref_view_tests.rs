@@ -291,6 +291,9 @@ struct ViewAdapter {
     whole_reads: AtomicU32,
     /// Bounds the landed element reports, when a test moves it after the read.
     landed_y: Mutex<Option<f64>>,
+    /// Runtime identifiers a test pins on nodes (by their index in the
+    /// observation), for an element that keeps its identifier as it moves.
+    pinned: Mutex<Vec<(usize, Vec<i32>)>>,
 }
 
 impl ViewAdapter {
@@ -303,6 +306,7 @@ impl ViewAdapter {
             view_reads: AtomicU32::new(0),
             whole_reads: AtomicU32::new(0),
             landed_y: Mutex::new(None),
+            pinned: Mutex::new(Vec::new()),
         }
     }
 
@@ -312,7 +316,11 @@ impl ViewAdapter {
             self.tree.lock().unwrap().clone(),
         )
         .unwrap();
-        with_runtime_ids(observed, self.generation.load(Ordering::SeqCst))
+        let mut observed = with_runtime_ids(observed, self.generation.load(Ordering::SeqCst));
+        for (index, runtime_id) in self.pinned.lock().unwrap().iter() {
+            observed.nodes[*index].evidence.ref_evidence.runtime_id = Some(runtime_id.clone());
+        }
+        observed
     }
 
     fn landed_index(&self) -> Option<usize> {
@@ -516,6 +524,36 @@ fn a_row_inserted_above_moves_the_path_and_stops_the_ref() {
     *adapter.tree.lock().unwrap() = moved;
     let error = refused(&adapter, &entry);
     assert_eq!(error.code, ErrorCode::StaleRef);
+}
+
+/// Only the path tells this change: the recorded element keeps its runtime
+/// identifier and its bounds, and a row inserted above it moves it to another
+/// place in the view.
+#[test]
+fn the_path_alone_stops_a_ref_whose_element_moved_in_the_view() {
+    let adapter = ViewAdapter::new(rows(&["Mail 0", "Mail 1"]));
+    let entry = captured(&adapter, "Mail 1");
+    let view = entry.identity.in_view.clone().unwrap();
+    let mut moved = rows(&["New", "Mail 0", "Mail 1"]);
+    moved.children[2].children[0].presentation.bounds = Some(view.bounds);
+    *adapter.tree.lock().unwrap() = moved;
+    // Every other element is new; the moved button (the sixth node after the
+    // window) keeps the identifier it was recorded with.
+    adapter.generation.store(2, Ordering::SeqCst);
+    adapter
+        .pinned
+        .lock()
+        .unwrap()
+        .push((6, view.runtime_id.clone()));
+    let landed = adapter.current();
+    assert_eq!(landed.nodes[6].path.as_slice(), &[2, 0]);
+    assert_eq!(
+        landed.nodes[6].evidence.ref_evidence.runtime_id.as_ref(),
+        Some(&view.runtime_id)
+    );
+    let error = refused(&adapter, &entry);
+    assert_eq!(error.code, ErrorCode::StaleRef);
+    assert!(adapter.anchored.lock().unwrap().is_none());
 }
 
 #[test]

@@ -83,6 +83,16 @@ pub(crate) fn check_live_with_stability_or_gap(
 }
 
 fn observe(target: &LiveCheckTarget<'_>) -> Result<ActionabilityEvidence, AdapterError> {
+    // The element about to be acted on is held to the ancestors its entry was
+    // proven with as well, not only to its own predicate. They are read first,
+    // so the element's own read stays the one closest to the action.
+    crate::refs::ref_ancestry::confirm_handle_ancestors(
+        target.adapter,
+        target.entry,
+        target.handle,
+        target.deadline,
+    )
+    .map_err(ancestors_changed_is_retryable)?;
     let live = match target
         .adapter
         .get_live_element(target.handle, target.deadline)
@@ -104,14 +114,6 @@ fn observe(target: &LiveCheckTarget<'_>) -> Result<ActionabilityEvidence, Adapte
         Err(err) => return Err(err),
     };
     validate_live_identity(target.entry, &live)?;
-    // The element about to be acted on is held to the ancestors its entry was
-    // proven with as well, not only to its own predicate.
-    crate::refs::ref_ancestry::confirm_handle_ancestors(
-        target.adapter,
-        target.entry,
-        target.handle,
-        target.deadline,
-    )?;
     // An entry proven among the elements the window showed is held to the
     // screen rectangle it was recorded at, right before the action.
     crate::refs::ref_view::confirm_live_bounds(target.entry, live.bounds)?;
@@ -192,6 +194,27 @@ fn live_evidence(live: &LiveElement) -> LocatorEvidence {
             runtime_id: None,
         },
     }
+}
+
+/// Ancestors found changed in the check right before the action are, like an
+/// element found changed there ([`stale_live_element`]), a reason to resolve
+/// the ref again rather than to give up: an action that waits resolves it
+/// from the start, and that resolution holds the entry to its full proof
+/// again, ancestors included, so a lasting change still stops it there.
+pub(crate) fn ancestors_changed_is_retryable(error: AdapterError) -> AdapterError {
+    let Some(mut details) = error.details.clone() else {
+        return error;
+    };
+    if details.get("kind").and_then(serde_json::Value::as_str)
+        != Some("saved_ref_ancestors_changed")
+    {
+        return error;
+    }
+    let Some(object) = details.as_object_mut() else {
+        return error;
+    };
+    object.insert("retryable".into(), serde_json::json!(true));
+    error.with_details(details)
 }
 
 fn stale_live_element(message: &'static str) -> AdapterError {

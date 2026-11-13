@@ -570,3 +570,48 @@ fn an_owner_drawn_box_without_item_text_is_left_to_ui_automation() {
     assert_eq!(host.notified(), 0);
     unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 0, 0) };
 }
+
+#[test]
+fn a_value_with_a_nul_chooses_nothing_and_tells_the_owner_nothing() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&ITEMS);
+    let error =
+        select_steps(&host.element(), "Beta\0suffix", deadline(5_000)).expect_err("select NUL");
+    assert_eq!(error.code, ErrorCode::InvalidArgs);
+    let error = set_value_steps(
+        &host.element(),
+        "Beta\0suffix",
+        InteractionPolicy::headless(),
+        deadline(5_000),
+    )
+    .expect_err("set-value NUL");
+    assert_eq!(error.code, ErrorCode::InvalidArgs);
+    assert_eq!(
+        host.selected(),
+        -1,
+        "Beta, the part before the NUL, was not chosen"
+    );
+    assert_eq!(host.notified(), 0);
+}
+
+#[test]
+fn an_item_ref_with_another_items_name_chooses_nothing() {
+    ensure_test_apartment();
+    let host = ComboHost::create(&ITEMS);
+    let items = list_items(&host);
+    assert_eq!(items.len(), ITEMS.len());
+    select_steps(&items[0], "Beta", deadline(5_000)).expect_err("the Alpha ref with the name Beta");
+    let _ = set_value_steps(
+        &items[0],
+        "Beta",
+        InteractionPolicy::headless(),
+        deadline(5_000),
+    );
+    assert_eq!(
+        host.selected(),
+        -1,
+        "Beta was not chosen through Alpha's ref"
+    );
+    assert_eq!(host.notified(), 0);
+    unsafe { SendMessageW(host.combo as HWND, CB_SHOWDROPDOWN, 0, 0) };
+}

@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::{LocatorResolution, ObservationRequest, ObservationRoot, ObservedNode, ObservedTree};
 use crate::{
     AdapterError, AppError, ErrorCode, IdentityMatch, adapter::PlatformAdapter,
@@ -42,7 +43,11 @@ pub(super) fn selected_matches(
         let has_identity = crate::refs::ref_identity::has_meaningful_identity(&preliminary);
         let has_bounds = preliminary.geometry.bounds_hash.is_some();
         let index = matched.document_order as usize;
-        let proven = proof.proves_node(&preliminary, index);
+        // A match proven together with its ancestors is held to its full
+        // predicate as well, and to those ancestors once it has landed.
+        let with_ancestors = crate::refs::ref_ancestry::proof_of(&preliminary)
+            == crate::refs::ref_ancestry::Proof::WithAncestors;
+        let proven = proof.proves_node(&preliminary, index) || with_ancestors;
         tracing::debug!(
             role = preliminary.identity.role,
             path_len = preliminary.scope.path.len(),
@@ -61,6 +66,17 @@ pub(super) fn selected_matches(
         }
         let handle = adapter.resolve_locator_anchor(&preliminary, deadline)?;
         ensure_remaining(deadline)?;
+        // A twin under other ancestors that moved into the path matches the
+        // match's own predicate; only its ancestors tell it apart, so its name,
+        // value and position are never reported for this match.
+        if with_ancestors {
+            crate::refs::ref_ancestry::confirm_handle_ancestors(
+                adapter,
+                &preliminary,
+                &handle,
+                deadline,
+            )?;
+        }
         let hydration_root = ObservationRoot::Element {
             handle: &handle,
             entry: &preliminary,
