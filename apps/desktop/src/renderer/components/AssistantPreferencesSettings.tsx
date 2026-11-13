@@ -39,6 +39,13 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
   // The newest value Main confirmed, so a failed save can fall back to what is really stored even
   // when an older save succeeded while a newer one was still on its way.
   const confirmed = useRef<{ request: number; preferences: AssistantPreferences } | null>(null);
+  // Typing in the call-name field does not start a save, so `generation` cannot tell whether the
+  // field holds an unsaved name. `callNameEdits` counts keystrokes; `callNameSent` is the count at
+  // which the field last matched a name that was loaded or sent with a save. A save response only
+  // rewrites the field while the two agree, so a name being typed is never thrown away — it is
+  // saved by the next blur or Enter instead.
+  const callNameEdits = useRef(0);
+  const callNameSent = useRef(0);
 
   useEffect(() => {
     if (!active || api === null) return;
@@ -52,6 +59,7 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
         confirmed.current = { request, preferences: result.preferences };
         setShown(result.preferences);
         setCallNameDraft(result.preferences.callName);
+        callNameSent.current = callNameEdits.current;
       } catch {
         if (request !== generation.current) return;
         setError('返事の仕方の設定を読み込めませんでした。設定を開き直してください。');
@@ -64,9 +72,16 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
     };
   }, [active, api]);
 
+  /**
+   * `next.callName` is always the last saved (or just committed) name, never the half-typed
+   * draft: changing another item does not send a name the user has not finished.
+   */
   async function save(next: AssistantPreferences): Promise<void> {
     if (api === null) return;
     const request = ++generation.current;
+    const syncCallName = (callName: string) => {
+      if (callNameEdits.current === callNameSent.current) setCallNameDraft(callName);
+    };
     setShown(next);
     setPhase('saving');
     setError(null);
@@ -77,13 +92,13 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
         confirmed.current = { request, preferences: result.preferences };
       if (request !== generation.current) return;
       setShown(result.preferences);
-      setCallNameDraft(result.preferences.callName);
+      syncCallName(result.preferences.callName);
       setStatus('返事の仕方を保存しました。');
     } catch {
       if (request !== generation.current) return;
       const fallback = confirmed.current?.preferences ?? null;
       setShown(fallback);
-      setCallNameDraft(fallback?.callName ?? '');
+      syncCallName(fallback?.callName ?? '');
       setError('設定を保存できませんでした。直前の値に戻しました。');
     } finally {
       if (request === generation.current) setPhase('idle');
@@ -93,6 +108,7 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
   function commitCallName(): void {
     if (shown === null) return;
     const callName = callNameDraft.trim();
+    callNameSent.current = callNameEdits.current;
     if (callName === shown.callName) {
       setCallNameDraft(callName);
       return;
@@ -141,7 +157,10 @@ export function AssistantPreferencesSettings({ active }: { active: boolean }) {
           aria-describedby={`${uid}-call-name-desc`}
           disabled={disabled}
           value={callNameDraft}
-          onChange={(event) => setCallNameDraft(event.target.value)}
+          onChange={(event) => {
+            callNameEdits.current += 1;
+            setCallNameDraft(event.target.value);
+          }}
           onBlur={commitCallName}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {

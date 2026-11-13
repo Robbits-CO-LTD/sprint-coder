@@ -1,4 +1,5 @@
 import { modelSelectionForRuntime } from './connection-identity';
+import { isAssistantPreferencesFragment } from './assistant-preferences-prompt';
 import { randomUUID } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import type {
@@ -1096,10 +1097,24 @@ export function reserveTeamWorkerContext(context: PreparedContext): PreparedCont
   return { ...context, fragments };
 }
 
+/**
+ * The one place a sealed context becomes a Worker's context, for the CLI and the API Worker alike.
+ * The user's reply-style preferences are dropped first: they shape what the Leader says to the
+ * user, while a Worker's report is read by the Leader. The seal itself is left untouched, so its
+ * digest and fragment rows still describe exactly what was sealed.
+ */
 export function applyWorkerContextInheritance(
   worker: AgentRecord,
-  sealed: PreparedContext,
+  sealedContext: PreparedContext,
 ): PreparedContext {
+  const sealed = sealedContext.fragments.some(isAssistantPreferencesFragment)
+    ? {
+        ...sealedContext,
+        fragments: sealedContext.fragments.filter(
+          (fragment) => !isAssistantPreferencesFragment(fragment),
+        ),
+      }
+    : sealedContext;
   if (
     worker.contextInheritancePolicy === 'none' ||
     worker.contextInheritancePolicy === 'selected_items'

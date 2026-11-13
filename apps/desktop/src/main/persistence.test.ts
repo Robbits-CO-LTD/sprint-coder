@@ -28,6 +28,7 @@ import {
   turnStartInputSchema,
 } from '@sprint-coder/contracts';
 import { assistantPreferencesPromptContent } from './assistant-preferences-prompt';
+import { applyWorkerContextInheritance } from './team-worker-runtime';
 import { isTeamScenarioInput, requiresTeamWorkersInput } from './team-tools';
 import {
   ToolRegistry,
@@ -3322,6 +3323,65 @@ if (runsWithElectronAbi)
         ).toBe(false);
         persistence.close();
       });
+
+      it.each(['full_fork', 'summary', 'none', 'selected_items'] as const)(
+        'drops the preferences from a %s Worker forked from a configured Leader Turn',
+        (policy) => {
+          const { persistence } = createPersistence();
+          persistence.setSprintCoderPrePrompt('既存設計を確認してから実装する。');
+          persistence.setAssistantPreferences(changed);
+          const task = persistence.createTask(`forked ${policy} worker`);
+          const root = persistence.startTurn(task.id, 'チームで実装して');
+          const team = persistence.promoteTaskToTeam(task.id);
+          const leader = persistence.getTaskLeader(task.id);
+          persistence.transitionTeamState(team.id, 'forming');
+          persistence.transitionTeamState(team.id, 'active');
+          const worker = persistence.registerTeamWorker({
+            teamId: team.id,
+            role: 'implementer',
+            objective: 'inherit the Leader context',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+            contextInheritancePolicy: policy,
+          });
+          const execution = persistence.createTeamExecution({
+            teamId: team.id,
+            assigneeAgentId: worker.id,
+            createdByAgentId: leader.id,
+            instruction: 'implement',
+            now: '2026-11-13T00:00:00.000Z',
+            contextOwner: { type: 'turn', id: root.turnId },
+          });
+
+          // The Leader keeps the fragment, and the cloned seal stays a faithful copy of the root.
+          const leaderContext = persistence.prepareContext(task.id, root.turnId);
+          expect(preferenceFragments(leaderContext.fragments)).toHaveLength(1);
+          const sealed = persistence.prepareTeamExecutionContext(task.id, execution.id);
+          expect(sealed.fragments).toEqual(leaderContext.fragments);
+          expect(persistence.getContextSealManifest('team_execution', execution.id)).toMatchObject({
+            sealedDigest: persistence.getContextSealManifest('turn', root.turnId).sealedDigest,
+          });
+
+          // What either Worker runtime actually receives.
+          const received = applyWorkerContextInheritance(worker, sealed);
+          expect(preferenceFragments(received.fragments)).toEqual([]);
+          expect(
+            received.fragments.some(({ content }) =>
+              content.includes('sprint-coder-assistant-preferences'),
+            ),
+          ).toBe(false);
+          // The pre-prompt keeps its current behaviour: only a full fork carries it.
+          expect(
+            received.fragments.some(({ id }) => id.startsWith('settings:sprint-coder-pre-prompt:')),
+          ).toBe(policy === 'full_fork');
+          if (policy === 'full_fork')
+            expect(received.fragments).toEqual(
+              leaderContext.fragments.filter(
+                ({ id }) => !id.startsWith('settings:assistant-preferences:'),
+              ),
+            );
+          persistence.close();
+        },
+      );
 
       it('treats a damaged or older-shaped stored value as never saved', () => {
         const { persistence, path } = createPersistence();

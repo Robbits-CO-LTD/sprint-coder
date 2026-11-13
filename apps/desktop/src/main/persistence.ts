@@ -45,6 +45,7 @@ import {
   type WorkerActivityEntry,
 } from '@sprint-coder/contracts';
 import {
+  ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX,
   assistantPreferencesPromptContent,
   normalizeAssistantPreferences,
 } from './assistant-preferences-prompt';
@@ -20573,14 +20574,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * The user's reply-style preferences as one system fragment, or null while they were never
    * saved (the context then stays byte-for-byte what it was before the setting existed).
    * Only Leader turns carry it: the Team execution snapshot below is a Worker's context, and a
-   * Worker's report is read by the Leader rather than by the user.
+   * Worker's report is read by the Leader rather than by the user. A Worker forked from a Leader
+   * Turn still clones this fragment into its seal (the seal stays a faithful copy), and
+   * `applyWorkerContextInheritance` drops it before either Worker runtime sees the context.
    */
   private assistantPreferencesFragment(taskId: string): ContextFragment | null {
     const state = this.getAssistantPreferences();
     if (!state.configured) return null;
     const content = assistantPreferencesPromptContent(state.preferences);
     return {
-      id: `settings:assistant-preferences:${sha256(content)}`,
+      id: `${ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX}${sha256(content)}`,
       taskId,
       source: 'system',
       trust: 'system',
