@@ -475,6 +475,7 @@ fn the_settle_is_scoped_to_one_observation_and_tracks_its_own_walks() {
     request.observation_mode.settle = Some(crate::locator::live_locator::SettleProgress {
         activated_at: std::time::Instant::now(),
         previous_thin_nodes: Some(25),
+        stable_since: None,
     });
 
     observe_tree(&adapter, ObservationRoot::Window(&window), &request, None)
@@ -495,6 +496,19 @@ fn the_settle_is_scoped_to_one_observation_and_tracks_its_own_walks() {
     assert_eq!(seen[3].unwrap().previous_thin_nodes, Some(25));
     assert_eq!(seen[2].unwrap().activated_at, after.activated_at);
     assert_eq!(seen[3].unwrap().activated_at, after.activated_at);
+    assert_eq!(
+        after.stable_since, None,
+        "no size has been seen after activation"
+    );
+    let first_seen = seen[2]
+        .unwrap()
+        .stable_since
+        .expect("the first size after activation starts the span");
+    assert_eq!(
+        seen[3].unwrap().stable_since,
+        Some(first_seen),
+        "an unchanged size keeps its start"
+    );
 }
 
 #[test]
@@ -502,10 +516,45 @@ fn a_thin_walk_without_a_size_leaves_nothing_to_compare_with() {
     let progress = crate::locator::live_locator::SettleProgress {
         activated_at: std::time::Instant::now(),
         previous_thin_nodes: Some(25),
+        stable_since: Some(std::time::Instant::now()),
     };
     let error = crate::AdapterError::new(crate::ErrorCode::ActionNotSupported, "thin");
-    assert_eq!(
-        settle_after_walk(progress, &error).previous_thin_nodes,
-        None
-    );
+    let next = settle_after_walk(progress, &error, std::time::Instant::now());
+    assert_eq!(next.previous_thin_nodes, None);
+    assert_eq!(next.stable_since, None);
+}
+
+fn thin_error(nodes: u64) -> crate::AdapterError {
+    let mut error = crate::AdapterError::renderer_accessibility_activation_required("thin");
+    if let Some(details) = error
+        .details
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        details.insert("nodes_observed".into(), serde_json::json!(nodes));
+    }
+    error
+}
+
+/// The span a size held starts at the end of the first walk that saw it, is
+/// kept while the size stays, and starts over at the end of the walk that saw
+/// a new size.
+#[test]
+fn the_span_a_size_held_restarts_when_the_size_changes() {
+    let start = std::time::Instant::now();
+    let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+    let progress = crate::locator::live_locator::SettleProgress {
+        activated_at: start,
+        previous_thin_nodes: None,
+        stable_since: None,
+    };
+
+    let first = settle_after_walk(progress, &thin_error(20), at(205));
+    assert_eq!(first.stable_since, Some(at(205)));
+    let same = settle_after_walk(first, &thin_error(20), at(415));
+    assert_eq!(same.stable_since, Some(at(205)));
+    let changed = settle_after_walk(same, &thin_error(25), at(625));
+    assert_eq!(changed.stable_since, Some(at(625)));
+    assert_eq!(changed.previous_thin_nodes, Some(25));
+    assert_eq!(changed.activated_at, start);
 }

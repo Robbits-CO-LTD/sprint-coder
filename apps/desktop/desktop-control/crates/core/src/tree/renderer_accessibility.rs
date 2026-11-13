@@ -39,9 +39,12 @@ pub(crate) fn observe_tree(
                         crate::locator::live_locator::SettleProgress {
                             activated_at: std::time::Instant::now(),
                             previous_thin_nodes: None,
+                            stable_since: None,
                         }
                     }
-                    Some(progress) => settle_after_walk(progress, &error),
+                    Some(progress) => {
+                        settle_after_walk(progress, &error, std::time::Instant::now())
+                    }
                 });
                 let remaining = request.deadline.remaining();
                 if remaining.is_zero() {
@@ -55,19 +58,31 @@ pub(crate) fn observe_tree(
     }
 }
 
-/// The settle after one more thin walk past the activation: the walk's size,
-/// as the adapter reported it, becomes the one the next walk is compared with.
-/// A walk that reported no size leaves nothing to compare with.
+/// The settle after one more thin walk past the activation, which ended at
+/// `walk_ended`: the walk's size, as the adapter reported it, becomes the one
+/// the next walk is compared with. When the size is the one the walks before
+/// it had, the time that size was first seen stands; a new size is first seen
+/// at the end of this walk (the latest it can have appeared, so the span it
+/// held is never overstated). A walk that reported no size leaves nothing to
+/// compare with.
 pub(crate) fn settle_after_walk(
     progress: crate::locator::live_locator::SettleProgress,
     error: &crate::AdapterError,
+    walk_ended: std::time::Instant,
 ) -> crate::locator::live_locator::SettleProgress {
+    let nodes = error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("nodes_observed"))
+        .and_then(serde_json::Value::as_u64);
+    let stable_since = match (nodes, progress.previous_thin_nodes) {
+        (Some(nodes), Some(previous)) if nodes == previous => progress.stable_since,
+        (Some(_), _) => Some(walk_ended),
+        (None, _) => None,
+    };
     crate::locator::live_locator::SettleProgress {
-        previous_thin_nodes: error
-            .details
-            .as_ref()
-            .and_then(|details| details.get("nodes_observed"))
-            .and_then(serde_json::Value::as_u64),
+        previous_thin_nodes: nodes,
+        stable_since,
         ..progress
     }
 }

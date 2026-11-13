@@ -146,11 +146,16 @@ fn finish_observation(
         if content && is_recorded_settled_tree(request.observation_mode.settled_thin_nodes, nodes) {
             return settled(walk.outcome.tree);
         }
+        // The walk that just ran confirms its size from when it started, so the
+        // span the size held is measured to the walk's start, never its end.
+        let walk_started = Instant::now()
+            .checked_sub(walk.walk_duration)
+            .unwrap_or_else(Instant::now);
         if thin_tree_settled(
-            request.observation_mode.settle.map(|settle| ThinWalk {
-                since_activation: settle.activated_at.elapsed(),
-                previous_nodes: settle.previous_thin_nodes,
-            }),
+            request
+                .observation_mode
+                .settle
+                .map(|settle| thin_walk(settle, walk_started)),
             nodes,
             content,
         ) {
@@ -167,36 +172,49 @@ fn finish_observation(
     Ok(walk.outcome.tree)
 }
 
-/// How long after this observation's settle a thin tree with published
-/// content that stopped changing is taken for the window's whole tree. A small
+/// How long a thin tree with published content must keep one size, within
+/// this observation's settle, to be taken for the window's whole tree. A small
 /// page (25 elements in a test window) walks under the shell ceiling forever,
 /// so without this the settle loop re-walked it until the deadline ran out (38
 /// walks under a 20 s snapshot, every one 25 nodes) and the read was never
 /// complete. A shell never passes, whatever the time: its documents hold no
-/// content ([`ObservedTree::has_document_content`]). The span only covers a
-/// renderer that published part of a page: such a walk changes size before the
-/// next, which keeps the loop going. It is shorter than a default read's share
-/// and fixed, not a share of the deadline.
-pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_millis(400);
+/// content ([`ObservedTree::has_document_content`]). The span covers a
+/// renderer that published part of a page and the rest later: a size change
+/// restarts it. Cold windows were measured publishing 0.25 to 0.6 s after
+/// their first walk, a spread of about 0.35 s, so the span is set past it.
+/// It is measured between walks (from the end of the first walk at the size to
+/// the start of the latest), which can only understate how long the size held.
+/// It is fixed, not a share of the deadline.
+pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_millis(500);
 
-/// One thin walk past this observation's settle: the time since the
-/// observation activated the renderer, and the size of its walk before this
-/// one (`None` for the first).
+/// One thin walk past this observation's settle: how long its size has held
+/// (from the end of the first walk at that size to the start of this one;
+/// zero when this walk is the first), and the size of the walk before it
+/// (`None` for the first).
 #[derive(Clone, Copy, Debug)]
 struct ThinWalk {
-    since_activation: Duration,
+    held: Duration,
     previous_nodes: Option<u64>,
 }
 
+fn thin_walk(settle: agent_desktop_core::SettleProgress, walk_started: Instant) -> ThinWalk {
+    ThinWalk {
+        held: settle.stable_since.map_or(Duration::ZERO, |since| {
+            walk_started.saturating_duration_since(since)
+        }),
+        previous_nodes: settle.previous_thin_nodes,
+    }
+}
+
 /// Whether a thin walk is the window's whole tree: its documents hold
-/// published content, this observation settled the renderer at least
-/// [`THIN_TREE_SETTLE`] ago, and its walk before this one, also past the
-/// settle, had the same size. Anything else waits.
+/// published content, its walk before this one, past this observation's
+/// settle, had the same size, and that size has held for at least
+/// [`THIN_TREE_SETTLE`]. Two equal walks close together do not pass, and a
+/// size change starts the span over. Anything else waits.
 fn thin_tree_settled(walk: Option<ThinWalk>, nodes: u64, content: bool) -> bool {
     content
-        && walk.is_some_and(|walk| {
-            walk.since_activation >= THIN_TREE_SETTLE && walk.previous_nodes == Some(nodes)
-        })
+        && walk
+            .is_some_and(|walk| walk.previous_nodes == Some(nodes) && walk.held >= THIN_TREE_SETTLE)
 }
 
 /// Whether a thin walk is the settled small tree a capture of this same

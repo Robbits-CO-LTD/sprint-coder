@@ -295,15 +295,15 @@ fn a_still_shell_walk_with_an_exhausted_deadline_returns_the_guidance_error() {
     assert_eq!(error.code, ErrorCode::ActionFailed);
 }
 
-fn thin(since_ms: u64, previous_nodes: Option<u64>) -> Option<ThinWalk> {
+fn thin(held_ms: u64, previous_nodes: Option<u64>) -> Option<ThinWalk> {
     Some(ThinWalk {
-        since_activation: Duration::from_millis(since_ms),
+        held: Duration::from_millis(held_ms),
         previous_nodes,
     })
 }
 
 /// The settle decision itself: a thin tree with content, whose size held
-/// across two walks of this observation, once its settle is old enough.
+/// across walks of this observation for the settle span.
 #[test]
 fn a_thin_tree_is_settled_only_with_content_and_a_held_size_after_the_settle_window() {
     let settle = THIN_TREE_SETTLE.as_millis() as u64;
@@ -325,6 +325,74 @@ fn a_shell_never_settles_however_long_its_size_held() {
         19,
         false
     ));
+}
+
+/// Drives the core loop's bookkeeping (`settle_after_walk`'s rule, reproduced
+/// on a virtual clock) and this predicate over a sequence of thin walks, each
+/// `(start_ms, duration_ms, nodes)` after activation, and returns the start of
+/// the first walk taken as settled.
+fn first_settled_walk(walks: &[(u64, u64, u64)]) -> Option<u64> {
+    let mut previous: Option<u64> = None;
+    let mut stable_since: Option<u64> = None;
+    for &(start, duration, nodes) in walks {
+        let held = stable_since.map_or(0, |since| start.saturating_sub(since));
+        if thin_tree_settled(thin(held, previous), nodes, true) {
+            return Some(start);
+        }
+        if previous != Some(nodes) {
+            stable_since = Some(start + duration);
+        }
+        previous = Some(nodes);
+    }
+    None
+}
+
+/// The reviewed path: walks about 35, 95, 205 and 415 ms after activation,
+/// part of the page (20 nodes) published by 205 ms and the rest (25 nodes) at
+/// 600 ms. The two equal partial walks are too close together to pass, and
+/// the change at 600 ms starts the span over, so only the whole page settles,
+/// a span after it first showed.
+#[test]
+fn a_page_published_in_two_steps_settles_only_on_the_whole_page() {
+    let walks = [
+        (25, 10, 19),
+        (85, 10, 19),
+        (195, 10, 20),
+        (405, 10, 20),
+        (615, 10, 25),
+        (1_025, 10, 25),
+        (1_435, 10, 25),
+    ];
+    let settled = first_settled_walk(&walks).expect("the whole page settles");
+    assert_eq!(
+        settled, 1_435,
+        "settled on a walk of the whole page, a span after it showed"
+    );
+    assert!(settled >= 625 + THIN_TREE_SETTLE.as_millis() as u64);
+}
+
+/// Two equal walks close together never pass, however long ago the settle
+/// ran; a page that keeps its size settles once the span has passed.
+#[test]
+fn equal_walks_close_together_wait_and_a_held_size_settles_after_the_span() {
+    let settle = THIN_TREE_SETTLE.as_millis() as u64;
+    assert_eq!(
+        first_settled_walk(&[(5_000, 10, 25), (5_050, 10, 25)]),
+        None
+    );
+    let walks = [
+        (25, 10, 25),
+        (85, 10, 25),
+        (195, 10, 25),
+        (405, 10, 25),
+        (815, 10, 25),
+    ];
+    let settled = first_settled_walk(&walks).expect("a held size settles");
+    assert!(settled >= 35 + settle);
+    assert_eq!(
+        settled, 815,
+        "the first walk a span after the size first showed"
+    );
 }
 
 /// The settle window is a fixed span, not a share of the deadline.
@@ -420,12 +488,16 @@ fn finish_with(
     )
 }
 
+/// A settle that ran two spans ago, whose walks have seen `previous` since
+/// then (`None`: no walk yet).
 fn settled_long_ago(previous: Option<u64>) -> Option<agent_desktop_core::SettleProgress> {
+    let long_ago = std::time::Instant::now()
+        .checked_sub(THIN_TREE_SETTLE * 2)
+        .expect("the clock reaches back two settle windows");
     Some(agent_desktop_core::SettleProgress {
-        activated_at: std::time::Instant::now()
-            .checked_sub(THIN_TREE_SETTLE * 2)
-            .expect("the clock reaches back two settle windows"),
+        activated_at: long_ago,
         previous_thin_nodes: previous,
+        stable_since: previous.map(|_| long_ago),
     })
 }
 
@@ -495,8 +567,9 @@ fn a_walk_without_its_own_settle_waits_whatever_the_process_saw_before() {
     assert!(error.requires_renderer_accessibility_activation());
 }
 
-/// A settle younger than the settle window, or a walk with nothing before it,
-/// keeps a same-size page in the loop; so does a size that changed.
+/// A size first seen just now (even long after the settle), or a walk with
+/// nothing before it, keeps a same-size page in the loop; so does a size that
+/// changed.
 #[test]
 fn a_fresh_settle_a_first_walk_or_a_changed_size_keeps_the_loop_going() {
     let adapter = crate::adapter::WindowsAdapter::new();
@@ -505,10 +578,17 @@ fn a_fresh_settle_a_first_walk_or_a_changed_size_keeps_the_loop_going() {
     let fresh = Some(agent_desktop_core::SettleProgress {
         activated_at: std::time::Instant::now(),
         previous_thin_nodes: Some(nodes),
+        stable_since: Some(std::time::Instant::now()),
     });
+    let just_seen =
+        settled_long_ago(Some(nodes)).map(|settle| agent_desktop_core::SettleProgress {
+            stable_since: Some(std::time::Instant::now()),
+            ..settle
+        });
 
     for settle in [
         fresh,
+        just_seen,
         settled_long_ago(None),
         settled_long_ago(Some(nodes - 1)),
     ] {
