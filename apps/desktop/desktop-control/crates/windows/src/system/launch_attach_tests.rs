@@ -21,6 +21,95 @@ fn with_window(
     }
 }
 
+/// A top-level window of `owner` with the given state; the handle is never
+/// read by the count.
+fn top(owner: u32, visible: bool, cloaked: bool, iconic: bool, tool: bool) -> TopWindow {
+    TopWindow {
+        window: EnumeratedWindow {
+            handle: std::ptr::null_mut(),
+            visible,
+            iconic,
+            cloaked,
+            tool,
+            rect: agent_desktop_core::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: if iconic { 0.0 } else { 400.0 },
+                height: if iconic { 0.0 } else { 300.0 },
+            },
+        },
+        owner: ProcessId::from(owner),
+        hosted: None,
+    }
+}
+
+#[test]
+fn a_cloaked_window_on_another_desktop_still_counts_as_a_window_of_its_own() {
+    let windows = [top(300, true, true, false, false)];
+    assert!(owns_a_shown_window(ProcessId::from(300), &windows));
+}
+
+#[test]
+fn a_minimized_or_tool_window_still_counts_as_a_window_of_its_own() {
+    assert!(owns_a_shown_window(
+        ProcessId::from(300),
+        &[top(300, true, false, true, false)]
+    ));
+    assert!(owns_a_shown_window(
+        ProcessId::from(300),
+        &[top(300, true, false, false, true)]
+    ));
+}
+
+#[test]
+fn hidden_windows_alone_make_no_window_of_its_own() {
+    // A Chromium helper's message windows: hidden, and some of them cloaked
+    // or tool windows too; plus a visible window of another process.
+    let windows = [
+        top(301, false, false, false, false),
+        top(301, false, true, false, true),
+        top(100, true, false, false, false),
+    ];
+    assert!(!owns_a_shown_window(ProcessId::from(301), &windows));
+    assert!(!owns_a_shown_window(ProcessId::from(999), &[]));
+}
+
+#[test]
+fn a_window_a_shell_frame_hosts_for_the_process_counts_as_its_own() {
+    let mut frame = top(50, true, false, false, false);
+    frame.hosted = Some(ProcessId::from(300));
+    assert!(owns_a_shown_window(ProcessId::from(300), &[frame]));
+}
+
+#[test]
+fn children_whose_only_windows_are_cloaked_or_minimized_are_instances_of_their_own() {
+    // A (100) started B (300, its window cloaked on another desktop) and
+    // C (400, minimized), plus a hidden-window helper (101).
+    let windows = [
+        top(100, true, false, false, false),
+        top(101, false, false, false, false),
+        top(300, true, true, false, false),
+        top(400, true, false, true, false),
+    ];
+    let candidates: Vec<Candidate> = [
+        (100, 4, 1_000),
+        (101, 100, 1_100),
+        (300, 100, 2_000),
+        (400, 100, 3_000),
+    ]
+    .into_iter()
+    .map(|(pid, parent, created)| {
+        with_window(
+            pid,
+            Some(parent),
+            Some(created),
+            Some(owns_a_shown_window(ProcessId::from(pid), &windows)),
+        )
+    })
+    .collect();
+    assert_eq!(instance_roots(&candidates), pids(&[100, 300, 400]));
+}
+
 #[test]
 fn a_child_with_a_window_of_its_own_is_an_instance_of_its_own() {
     // Instance A (100, with its window) started B (300) from the same

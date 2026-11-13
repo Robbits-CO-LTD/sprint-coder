@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use agent_desktop_core::{
-    AdapterError, Deadline, ErrorCode, ProcessId, WindowFilter, WindowInfo,
-    system::launch_options::LaunchOptions, system::launch_result::LaunchResult,
+    AdapterError, Deadline, ErrorCode, ProcessId, system::launch_options::LaunchOptions,
+    system::launch_result::LaunchResult,
 };
+
+use super::super::window::window_enum::EnumeratedWindow;
 
 use super::super::app_ops::{ProcessRow, process_snapshot};
 use super::super::launch_path::{image_file_name, resolve_executable};
@@ -73,15 +75,10 @@ pub(super) fn prepare(
         .filter(|(_, process)| !process.as_ref().is_some_and(Process::has_exited))
         .map(|(pid, process)| (*pid, process.as_ref().and_then(Process::created)))
         .collect();
-    // Only several processes need telling apart, and only then is the window
-    // inventory read (the one a launch that attaches reads its window from):
-    // a failed read leaves every window unknown (`None`).
-    let filter = WindowFilter {
-        focused_only: false,
-        app: None,
-    };
+    // Only several processes need telling apart, and only then are the
+    // top-level windows read: a failed read leaves every window unknown.
     let windows = if live.len() > 1 {
-        super::list_windows_live(&filter, deadline).ok()
+        top_level_windows()
     } else {
         None
     };
@@ -92,8 +89,8 @@ pub(super) fn prepare(
             parent: parents.get(&pid).copied(),
             created,
             has_window: windows
-                .as_ref()
-                .map(|windows| windows.iter().any(|window| window.pid == pid)),
+                .as_deref()
+                .map(|windows| owns_a_shown_window(pid, windows)),
         })
         .collect();
     let roots = instance_roots(&candidates);
@@ -131,10 +128,8 @@ pub(super) fn prepare(
 
 /// One running process of the launch target's executable, as the instance
 /// count reads it: its parent pid from ToolHelp, its creation time in
-/// `FILETIME` ticks, and whether it owns a window of its own (one the window
-/// inventory lists for its pid, the same kind of window a launch that attaches
-/// returns: visible, top-level, not a tool window), each unknown when it could
-/// not be read.
+/// `FILETIME` ticks, and whether it owns a window of its own (see
+/// [`owns_a_shown_window`]), each unknown when it could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Candidate {
     pub(super) pid: ProcessId,
@@ -185,16 +180,78 @@ fn is_helper_of_a_candidate(child: &Candidate, candidates: &[Candidate]) -> bool
         })
 }
 
-/// Each instance's root pid with the title of its first window in `windows`.
-/// A title is only a hint for the caller; with no window read it is left out.
-fn with_titles(roots: &[ProcessId], windows: &[WindowInfo]) -> Vec<(ProcessId, Option<String>)> {
+/// A top-level window as the instance count reads it: the process that owns
+/// it (and the app a shell frame hosts, if any) and its window state.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TopWindow {
+    pub(super) window: EnumeratedWindow,
+    pub(super) owner: ProcessId,
+    pub(super) hosted: Option<ProcessId>,
+}
+
+impl TopWindow {
+    fn belongs_to(&self, pid: ProcessId) -> bool {
+        self.owner == pid || self.hosted == Some(pid)
+    }
+}
+
+/// Whether `pid` owns a top-level window with the visible style
+/// (`IsWindowVisible`).
+///
+/// Wider on purpose than the windows a launch attaches to (`observe_window`
+/// keeps only uncloaked, non-tool windows with a size): an instance whose
+/// window sits on another virtual desktop (cloaked), is minimized, has no
+/// size or is a tool window is still an instance the caller must choose
+/// between. Only a process with no visible-style window at all (the message
+/// windows of a Chromium helper are hidden) is taken as a helper.
+pub(super) fn owns_a_shown_window(pid: ProcessId, windows: &[TopWindow]) -> bool {
+    windows
+        .iter()
+        .any(|top| top.window.visible && top.belongs_to(pid))
+}
+
+/// Every top-level window whose owner can be read, or `None` when the
+/// windows could not be enumerated.
+fn top_level_windows() -> Option<Vec<TopWindow>> {
+    use super::super::window::{frame_identity, window_enum, window_identity};
+    let mut windows = Vec::new();
+    window_enum::enumerate_top_level(|window| {
+        if let Some(owner) = window_identity::live_window_owner(window.handle) {
+            // The frame lookup reads the class and children; only a window
+            // that can count needs it.
+            let hosted = window
+                .visible
+                .then(|| frame_identity::hosted_application_pid(window.handle))
+                .flatten();
+            windows.push(TopWindow {
+                window,
+                owner,
+                hosted,
+            });
+        }
+        true
+    })
+    .ok()?;
+    Some(windows)
+}
+
+/// Each instance's root pid with the title of one of its windows (one that
+/// is not cloaked first, then any, so a window on another virtual desktop is
+/// named too). A title is only a hint for the caller; one that cannot be read
+/// is left out.
+fn with_titles(roots: &[ProcessId], windows: &[TopWindow]) -> Vec<(ProcessId, Option<String>)> {
+    use super::super::window::window_identity::live_window_title;
     roots
         .iter()
         .map(|&pid| {
-            let title = windows
+            let mut own: Vec<&TopWindow> = windows
                 .iter()
-                .find(|window| window.pid == pid && !window.title.is_empty())
-                .map(|window| window.title.clone());
+                .filter(|top| top.window.visible && top.belongs_to(pid))
+                .collect();
+            own.sort_by_key(|top| top.window.cloaked);
+            let title = own.into_iter().find_map(|top| {
+                live_window_title(top.window.handle).filter(|title| !title.is_empty())
+            });
             (pid, title)
         })
         .collect()
