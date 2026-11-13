@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { DEFAULT_ASSISTANT_PREFERENCES } from '@sprint-coder/contracts';
 import {
   LegacyBody,
   SETTINGS_SECTIONS,
@@ -41,6 +42,10 @@ function stubBridge(): void {
         setTeamModelSelectionGuidance: () => Promise.resolve(),
         getSprintCoderPrePrompt: () => Promise.resolve({ prompt: '' }),
         setSprintCoderPrePrompt: () => Promise.resolve(),
+        getAssistantPreferences: () =>
+          Promise.resolve({ configured: false, preferences: DEFAULT_ASSISTANT_PREFERENCES }),
+        setAssistantPreferences: (preferences: unknown) =>
+          Promise.resolve({ configured: true, preferences }),
         getTeamModelSettings: () =>
           Promise.resolve({
             restriction: { mode: 'all', allowedModels: [] },
@@ -68,7 +73,13 @@ afterEach(() => {
 describe('which body the flag selects', () => {
   it('keeps Provider connections in both layouts without the retired model installer', () => {
     stubBridge();
-    expect(SETTINGS_SECTIONS.map(({ id }) => id)).toEqual(['models', 'team', 'skills', 'advanced']);
+    expect(SETTINGS_SECTIONS.map(({ id }) => id)).toEqual([
+      'models',
+      'replies',
+      'team',
+      'skills',
+      'advanced',
+    ]);
     for (const html of [workspace(), legacy()]) {
       expect(html).toContain('プロバイダー接続');
       expect(html).not.toContain('settings-local-ai');
@@ -107,6 +118,30 @@ describe('which body the flag selects', () => {
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
     expect(html).not.toContain('data-testid="settings-nav-general"');
+  });
+
+  it('adds the 返事の仕方 page between モデルと接続 and Team in both layouts', () => {
+    stubBridge();
+    const html = workspace();
+    expect(html).toMatch(/data-testid="settings-page-replies"[^>]*hidden=""/);
+    expect(html.indexOf('settings-nav-models')).toBeLessThan(html.indexOf('settings-nav-replies'));
+    expect(html.indexOf('settings-nav-replies')).toBeLessThan(html.indexOf('settings-nav-team'));
+    for (const body of [html, legacy()]) {
+      expect(body).toContain('data-testid="settings-assistant-preferences"');
+      for (const title of [
+        '言葉づかい',
+        '長さ',
+        '説明のしかた',
+        '返事の言語',
+        '進め方',
+        '呼び名',
+        '絵文字を使う',
+        '最後に次の一手を提案する',
+        '作業の前に進め方を見せる',
+        '変更は次の発言から反映されます。',
+      ])
+        expect(body).toContain(title);
+    }
   });
 
   it('keeps the shipped one-column body as the fallback when the flag is off', () => {
