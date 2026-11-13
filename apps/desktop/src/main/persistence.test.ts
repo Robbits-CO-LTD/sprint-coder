@@ -10142,7 +10142,8 @@ if (runsWithElectronAbi)
         DROP TABLE command_runs;
         ALTER TABLE legacy_commands RENAME TO command_runs;
         CREATE INDEX command_runs_task_created_idx ON command_runs(task_id, created_at, id);
-        DELETE FROM schema_migrations WHERE version = 82;
+        -- A database from before v82 has none of the later command columns either.
+        DELETE FROM schema_migrations WHERE version IN (82, 107);
       `);
       legacy
         .prepare(
@@ -11135,6 +11136,7 @@ if (runsWithElectronAbi)
         { version: 104 },
         { version: 105 },
         { version: 106 },
+        { version: 107 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
