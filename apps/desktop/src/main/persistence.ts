@@ -1117,6 +1117,7 @@ type CommandRow = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  desktop_action_json?: string | null;
 };
 type EditSagaRow = {
   commit_sequence: number | null;
@@ -4698,6 +4699,13 @@ const migrations = [
       CHECK (persistent_identity_digest IS NULL OR
         (length(persistent_identity_digest) = 64 AND persistent_identity_digest NOT GLOB '*[^a-f0-9]*'));`,
   },
+  {
+    // What a desktop-control run did, with the parts it named, as read when it started (display
+    // only; see `beginCommand`).
+    version: 107,
+    checksum: 'commands-v107-desktop-action-display',
+    sql: `ALTER TABLE command_runs ADD COLUMN desktop_action_json TEXT;`,
+  },
 ];
 
 /** The newest 200 denials and the newest 200 other Auto decisions of a Task, oldest first
@@ -5995,7 +6003,7 @@ export interface PersistenceClient {
     processStartTime: string;
     startedAt: string;
   }): { command: CommandSummary; event: TurnEvent };
-  beginCommand(commandId: string): CommandSummary;
+  beginCommand(commandId: string, desktopAction?: DesktopApprovalAction): CommandSummary;
   appendCommandOutput(input: {
     commandId: string;
     seq: number;
@@ -16883,11 +16891,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  beginCommand(commandId: string): CommandSummary {
+  /**
+   * Marks the run as starting. A desktop-control run may bring what it does, with the parts it
+   * names as read when it starts, for its timeline row (display only): a run allowed without a
+   * card (the app-wide Task grant) has no card that names them.
+   */
+  beginCommand(commandId: string, desktopAction?: DesktopApprovalAction): CommandSummary {
+    const display =
+      desktopAction === undefined
+        ? undefined
+        : desktopApprovalActionSchema.safeParse(desktopAction);
     return this.db.transaction(() => {
       const updated = this.db
-        .prepare("UPDATE command_runs SET state = 'starting' WHERE id = ? AND state = 'prepared'")
-        .run(commandId);
+        .prepare(
+          `UPDATE command_runs SET state = 'starting',
+             desktop_action_json = COALESCE(?, desktop_action_json)
+           WHERE id = ? AND state = 'prepared'`,
+        )
+        .run(display?.success === true ? JSON.stringify(display.data) : null, commandId);
       if (updated.changes !== 1) throw new Error('Command is not prepared');
       return this.getCommand(commandId);
     })();
@@ -23393,7 +23414,7 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     cwd: spec.cwdIdentity.canonicalPath,
     envDelta: { ...spec.envDelta },
     purpose: row.purpose,
-    ...commandDesktopAction(spec),
+    ...commandDesktopAction(spec, row.desktop_action_json),
     risk: row.risk,
     state: row.state,
     pid: row.pid,
@@ -23409,15 +23430,31 @@ function toCommandSummary(row: CommandRow): CommandSummary {
 
 /**
  * What a desktop-control command did, for its timeline row: only for the shipped binary, and
- * without reading any snapshot (the part names are on its approval card, when it had one).
+ * without reading any snapshot. The part names are the ones recorded as the run started
+ * (`beginCommand`), or on its approval card, when it had one.
  */
-function commandDesktopAction(spec: ExecutionSpec): { desktopAction?: DesktopApprovalAction } {
+function commandDesktopAction(
+  spec: ExecutionSpec,
+  recorded: string | null | undefined,
+): { desktopAction?: DesktopApprovalAction } {
   try {
-    return isShippedDesktopControlPath(spec.absoluteExecutable)
-      ? { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) }
-      : {};
+    if (!isShippedDesktopControlPath(spec.absoluteExecutable)) return {};
+    const parsed =
+      typeof recorded === 'string'
+        ? desktopApprovalActionSchema.safeParse(parseRecordedJson(recorded))
+        : null;
+    if (parsed?.success === true) return { desktopAction: parsed.data };
+    return { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) };
   } catch {
     return {};
+  }
+}
+
+function parseRecordedJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
   }
 }
 

@@ -690,29 +690,73 @@ const INERT_COMMANDS = new Set([
   'permissions',
   'help',
 ]);
-// The skill names `skills get` accepts on the desktop-control binary 1.2.0 (`skills get --help`,
-// `skills list`), and the form of a reference name such as `commands-system`. The binary's own
-// answer to anything else is not relied on: other positionals keep the card.
-const INERT_SKILL_NAMES = new Set([
-  'desktop',
-  'platform',
-  'macos',
-  'windows',
-  'linux',
-  'ffi',
-  'jev',
+// The skills `skills get` prints on the desktop-control binary 1.2.0, by each name it accepts (the
+// alias and the full name of `skills list`), with the references each carries. The binary prints
+// only text compiled into it (`crates/core/src/commands/skills.rs`), never a file on disk, and
+// answers any other reference with an error; that answer is not relied on here: only these exact
+// names, in lower case, keep no card. `platform` is the Windows guide, the only one the binary is
+// shipped for. Tested against the guides in `desktop-control/skills`.
+const DESKTOP_REFERENCES = [
+  'commands-observation',
+  'commands-interaction',
+  'commands-system',
+  'workflows',
+];
+const WINDOWS_REFERENCES = [
+  'permissions-and-elevation',
+  'chromium-and-electron',
+  'troubleshooting',
+  'shell-and-overlay',
+];
+const MACOS_REFERENCES = ['troubleshooting'];
+const LINUX_REFERENCES = [
+  'bus-and-permissions',
+  'display-servers-and-input',
+  'windows-and-lifecycle',
+  'capture-and-clipboard',
+  'shell-tray-and-notifications',
+  'troubleshooting',
+];
+const FFI_REFERENCES = ['build-and-link', 'error-handling', 'ownership', 'threading'];
+export const DESKTOP_CONTROL_SKILL_REFERENCES: ReadonlyMap<string, readonly string[]> = new Map([
+  ['desktop', DESKTOP_REFERENCES],
+  ['agent-desktop', DESKTOP_REFERENCES],
+  ['platform', WINDOWS_REFERENCES],
+  ['windows', WINDOWS_REFERENCES],
+  ['agent-desktop-windows', WINDOWS_REFERENCES],
+  ['macos', MACOS_REFERENCES],
+  ['agent-desktop-macos', MACOS_REFERENCES],
+  ['linux', LINUX_REFERENCES],
+  ['agent-desktop-linux', LINUX_REFERENCES],
+  ['ffi', FFI_REFERENCES],
+  ['agent-desktop-ffi', FFI_REFERENCES],
+  ['jev', []],
+  ['jev-desktop', []],
 ]);
-const INERT_SKILL_REFERENCE = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+
+/**
+ * Whether `skills get` names a known skill, and at most one of its references either as its name
+ * (`workflows`) or as its path in the guide (`references/workflows.md`), with no option beside a
+ * reference (`--full` alone, for the whole guide, is one).
+ */
+function inertSkillRead(
+  positionals: readonly string[],
+  options: ReadonlyMap<string, string>,
+): boolean {
+  if (positionals.length === 0) return true;
+  const references = DESKTOP_CONTROL_SKILL_REFERENCES.get(positionals[0]!);
+  if (references === undefined || positionals.length > 2) return false;
+  const reference = positionals[1];
+  if (reference === undefined) return true;
+  return (
+    options.size === 0 &&
+    references.some((name) => reference === name || reference === `references/${name}.md`)
+  );
+}
 
 /** Whether the positionals of an inert command are ones it is known to only print for. */
 function inertPositionals(command: string, positionals: readonly string[]): boolean {
   if (positionals.length === 0) return true;
-  if (command === 'skills get')
-    return (
-      positionals.length <= 2 &&
-      INERT_SKILL_NAMES.has(positionals[0]!) &&
-      (positionals[1] === undefined || INERT_SKILL_REFERENCE.test(positionals[1]))
-    );
   if (command !== 'help' || positionals.length > 2) return false;
   // `help <command>` or `help <command> <subcommand>`, named as the commands above are.
   const [name, sub] = positionals as [string, string | undefined];
@@ -742,9 +786,12 @@ export function desktopControlArgvIsInert(argv: readonly string[]): boolean {
   return (
     read.command !== undefined &&
     INERT_COMMANDS.has(read.command) &&
-    // No path separator, dot, colon, space, control character or leading dash in any of them.
-    read.positionals.every((token) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) &&
-    inertPositionals(read.command, read.positionals)
+    (read.command === 'skills get'
+      ? // Only the exact names of the bundled guides and their references.
+        inertSkillRead(read.positionals, read.options)
+      : // No path separator, dot, colon, space, control character or leading dash in any of them.
+        read.positionals.every((token) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(token)) &&
+        inertPositionals(read.command, read.positionals))
   );
 }
 
