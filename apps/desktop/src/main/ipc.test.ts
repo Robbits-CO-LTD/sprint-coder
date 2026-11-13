@@ -177,6 +177,7 @@ import {
 } from './image-attachment-capability';
 import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
+import { teamWorkspaceRepositoryMessage } from './team-workspace-repository';
 import { RetainedWorktreeError } from './team-retained-worktrees';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
@@ -6972,6 +6973,14 @@ describe('Provider Team completion and model errors', () => {
         'Team MCP Workerが1名も作成されませんでした。外部のsubagent機能へfallbackせず終了します。',
       retryable: true,
     });
+    // Hiring was refused for the Workspace (issue #1241): that reason, not the generic one.
+    const reason = teamWorkspaceRepositoryMessage('workspace_not_git');
+    expect(requiredTeamWorkerFailure(true, 0, reason)).toEqual({
+      code: 'RUNTIME_FAILED',
+      userMessage: reason,
+      retryable: false,
+    });
+    expect(requiredTeamWorkerFailure(true, 1, reason)).toBeNull();
   });
 
   it('settles Provider completion through its real terminal adapter', async () => {
@@ -6982,6 +6991,7 @@ describe('Provider Team completion and model errors', () => {
       teamCoordinator: {
         get: () => ({ workers: [], executions: [] }),
         listWorkerStops: () => [],
+        workspaceRefusalSince: () => null,
       },
       persistence: {
         recordTurnProviderUsage: vi.fn(),
@@ -7062,6 +7072,7 @@ describe('Provider Team completion and model errors', () => {
           executions: [],
         }),
         listWorkerStops: () => [],
+        workspaceRefusalSince: () => null,
       },
       persistence: {
         recordTurnProviderUsage: vi.fn(),
@@ -7124,6 +7135,7 @@ describe('Provider Team completion and model errors', () => {
           executions,
         }),
         listWorkerStops,
+        workspaceRefusalSince: () => null,
       },
       persistence: {
         recordTurnProviderUsage: vi.fn(),
@@ -7209,6 +7221,7 @@ describe('Provider Team completion and model errors', () => {
       teamCoordinator: {
         get: () => ({ workers: [], executions: [] }),
         listWorkerStops: () => [],
+        workspaceRefusalSince: () => null,
       },
       persistence: { getTurnCreatedAt: vi.fn(() => '2024-01-01T00:00:00.000Z') },
       resolvedModelByTurn: new Map<string, string>(),
@@ -7294,6 +7307,7 @@ describe('Provider Team completion and model errors', () => {
           executions: [],
         }),
         listWorkerStops: () => [],
+        workspaceRefusalSince: () => null,
       },
       persistence: { getTurnCreatedAt: vi.fn(() => '2026-01-01T00:00:10.000Z') },
       resolvedModelByTurn: new Map<string, string>(),
@@ -7387,6 +7401,7 @@ describe('Provider Team completion and model errors', () => {
           executions,
         }),
         listWorkerStops,
+        workspaceRefusalSince: () => null,
       },
       persistence: { getTurnCreatedAt: vi.fn(() => '2026-01-01T00:00:10.000Z') },
       resolvedModelByTurn: new Map<string, string>(),

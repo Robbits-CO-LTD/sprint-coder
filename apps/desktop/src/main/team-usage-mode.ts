@@ -27,11 +27,13 @@ const TEAM_USAGE_COMMON_TAIL = `Team を使わない時は、Team や Worker に
 const TEAM_USAGE_SKILL_PRECEDENCE =
   '- 組み込み Skill の「# 判断」（単発実行・長時間実行・人数など）は、Team を使うと決めた後の進め方の決まりとして読む。Team を使うかどうかと、どの成果物を分担するかは、この発言では、この案内を優先する。';
 
-// Worker の workspace-write の割り当ては Workspace が Git の repo であることを要るが、Leader は
-// 雇う前にそれを道具なしでは知れない（封印に Workspace の Git の状態は入らず、`.git` は
-// list_workspace に出ない）。頼まれていない Team で利用者を止めないよう、失敗した後の戻り方を決める。
+// Worker の workspace-write の割り当ては、Workspace が Git の repo で、commit していない変更が無い
+// ことを要る（issue #1241）。Main は Turn を始める前に同じ確かめをし、通らない Workspace にはこの
+// Turn で Team を渡さないが、Turn の間に変わる（Leader 自身の書き込みなど）こともある。頼まれて
+// いない Team で依頼を止めないよう、失敗した後の戻り方を決める。利用者の変更は、Team のために
+// 勝手に commit・stash・破棄しない。
 const TEAM_USAGE_GIT_FALLBACK =
-  '- Worker への割り当てが、Workspace が Git の repo でないために失敗した時は、雇った Worker を `team_stop_worker` で止め、そのことを利用者に 1 文で伝えてから、自分で対応する。';
+  '- Worker への割り当てや雇用が、Workspace の状態のために失敗した時（Git の repo でない、commit がまだ無い、commit していない変更がある、など）は、雇った Worker を `team_stop_worker` で止め、そのことを利用者に 1 文で伝えてから、自分で対応する。成果物を Worker に任せる、とした上の行より、この戻り方を優先する。利用者の変更には触らない（Team を使うために commit・stash・破棄をしない）。';
 
 const TEAM_USAGE_GUIDANCE: Readonly<Record<OfferedTeamUsageMode, string>> = Object.freeze({
   auto: `# Team の使い方: おまかせ
@@ -80,6 +82,8 @@ export function teamUsageOfferFragmentId(mode: OfferedTeamUsageMode): string {
 
 /** Turn を封印する時に、Main（ipc）へ「この Turn で Team を渡せるか」を尋ねるための入力。 */
 export type TeamUsageOfferRuntime = Readonly<{
+  /** Main が、Turn を始める前に確かめた Workspace の答え（issue #1241）を引くための Task。 */
+  taskId: string;
   runtimeKind: RuntimeKind;
   modelSelection: ModelSelection;
 }>;

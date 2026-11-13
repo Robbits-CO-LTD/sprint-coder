@@ -259,31 +259,30 @@ export class WorkerWorktreeManager {
     return { head };
   }
 
+  /**
+   * Only reads (Git `rev-parse`/`status` and marker files): no worktree, lock, or ref is touched,
+   * so offering Team before a Turn may ask the same question as assignment (issue #1241).
+   * `timeoutMs` bounds each Git call for that quick question; assignment keeps the default.
+   */
   async requireCleanRepositorySet(
     rootPaths: readonly string[],
+    options: Readonly<{ timeoutMs?: number }> = {},
   ): Promise<readonly CleanRepository[]> {
-    if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
-    const rootsByRepository = new Map<string, string[]>();
-    const stateByRepository = new Map<string, RepositoryState>();
-    for (const rootPath of rootPaths) {
-      const state = await this.readRepositoryState(rootPath);
-      const roots = rootsByRepository.get(state.repoPath) ?? [];
-      roots.push(await realpath(resolve(rootPath)));
-      rootsByRepository.set(state.repoPath, roots);
-      if (!stateByRepository.has(state.repoPath)) stateByRepository.set(state.repoPath, state);
-    }
-    const repoPaths = [...rootsByRepository.keys()].sort();
-    for (const [index, repoPath] of repoPaths.entries())
-      for (const candidate of repoPaths.slice(index + 1))
-        if (isInside(repoPath, candidate) || isInside(candidate, repoPath))
-          throw new WorktreeError(
-            'create_failed',
-            'Nested Git repositories cannot share a workspace-write execution',
-          );
+    const { repoPaths, rootsByRepository, stateByRepository } = await this.resolveRepositorySet(
+      rootPaths,
+      options,
+    );
     const repositories: CleanRepository[] = [];
     for (const repoPath of repoPaths) {
       const { head, operationMarkerPaths } = stateByRepository.get(repoPath)!;
-      const status = await this.runGit(repoPath, ['status', '--porcelain'], 'create_failed');
+      const status = await this.runGit(
+        repoPath,
+        ['status', '--porcelain'],
+        'create_failed',
+        undefined,
+        undefined,
+        options.timeoutMs,
+      );
       if (status.stdout.trim() !== '')
         throw new WorktreeError(
           'base_changed',
@@ -307,12 +306,50 @@ export class WorkerWorktreeManager {
   }
 
   /**
+   * Every root's repository and HEAD (at least one commit), refusing roots in nested repositories:
+   * the first half of `requireCleanRepositorySet`.
+   */
+  private async resolveRepositorySet(
+    rootPaths: readonly string[],
+    options: Readonly<{ timeoutMs?: number }> = {},
+  ): Promise<
+    Readonly<{
+      repoPaths: readonly string[];
+      rootsByRepository: ReadonlyMap<string, readonly string[]>;
+      stateByRepository: ReadonlyMap<string, RepositoryState>;
+    }>
+  > {
+    if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
+    const rootsByRepository = new Map<string, string[]>();
+    const stateByRepository = new Map<string, RepositoryState>();
+    for (const rootPath of rootPaths) {
+      const state = await this.readRepositoryState(rootPath, options.timeoutMs);
+      const roots = rootsByRepository.get(state.repoPath) ?? [];
+      roots.push(await realpath(resolve(rootPath)));
+      rootsByRepository.set(state.repoPath, roots);
+      if (!stateByRepository.has(state.repoPath)) stateByRepository.set(state.repoPath, state);
+    }
+    const repoPaths = [...rootsByRepository.keys()].sort();
+    for (const [index, repoPath] of repoPaths.entries())
+      for (const candidate of repoPaths.slice(index + 1))
+        if (isInside(repoPath, candidate) || isInside(candidate, repoPath))
+          throw new WorktreeError(
+            'create_failed',
+            'Nested Git repositories cannot share a workspace-write execution',
+          );
+    return { repoPaths, rootsByRepository, stateByRepository };
+  }
+
+  /**
    * A root's repository, HEAD, and in-progress operation markers from one `git rev-parse`
    * (issue #864). Each Git call costs config probes plus the command, and the
    * write-eligibility check runs for every workspace-write assignment and Worker start, so asking
    * for these one at a time made each assignment wait on about twenty processes.
    */
-  private async readRepositoryState(rootPath: string): Promise<RepositoryState> {
+  private async readRepositoryState(
+    rootPath: string,
+    timeoutMs?: number,
+  ): Promise<RepositoryState> {
     // Git runs in, and its relative `--git-path` output is resolved against, the root's real path:
     // through a junction or symlink Git reports paths from the real directory, and resolving them
     // against the link would look for an operation marker in the wrong place.
@@ -328,6 +365,9 @@ export class WorkerWorktreeManager {
         ...REPOSITORY_OPERATION_MARKERS.flatMap((marker) => ['--git-path', marker]),
       ],
       'create_failed',
+      undefined,
+      undefined,
+      timeoutMs,
     );
     const lines = stdout.split(/\r?\n/u);
     if (lines.at(-1) === '') lines.pop();
@@ -1623,11 +1663,12 @@ export class WorkerWorktreeManager {
     failureCode: Exclude<WorktreeErrorCode, 'git_unavailable' | 'invalid_input'>,
     maxBuffer?: number,
     input?: string,
+    timeoutMs: number = GIT_TIMEOUT_MS,
   ): Promise<ExecFileResult> {
     try {
       return await safeGitExec(this.execFileImpl, dirArg, subArgs, {
         env: process.env,
-        timeout: GIT_TIMEOUT_MS,
+        timeout: timeoutMs,
         ...(maxBuffer === undefined ? {} : { maxBuffer }),
         ...(input === undefined ? {} : { input }),
       });

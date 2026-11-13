@@ -93,6 +93,10 @@ import {
 } from './worker-worktree';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import {
+  TeamWorkspaceRepositoryError,
+  workspaceRepositoryProblemOf,
+} from './team-workspace-repository';
+import {
   RetainedWorktreeError,
   retainedWorktreeBlockedReason,
   retainedWorktreePage,
@@ -498,6 +502,11 @@ const DESKTOP_MARK_ENDED_STATES: ReadonlySet<string> = new Set(['done', 'failed'
 export const TEAM_PROGRESS_PUBLISH_INTERVAL_MS = 250;
 
 export class TeamCoordinator {
+  /** The last Workspace refusal of a writing Worker per Task (issue #1241). */
+  private readonly workspaceRefusals = new Map<
+    string,
+    Readonly<{ error: TeamWorkspaceRepositoryError; at: string }>
+  >();
   private readonly graphWorkspaceResumeDigests = new Map<string, string>();
   private readonly graphIntegrationWorkers = new Set<string>();
   private readonly graphScheduledExecutions = new Set<string>();
@@ -1204,6 +1213,17 @@ export class TeamCoordinator {
     requesterAgentId: string | null,
     childManagerPolicy: ManagerHirePolicy | null,
   ): Promise<WorkerSummary> {
+    // A Worker that writes can only work when its assignment's Workspace check passes. Refuse before
+    // anything is created — no Team, no idle Worker — with a reason the Leader can pass on (issue
+    // #1241). A read-only Worker never needs a worktree, so it is hired as before, matching
+    // assignment, which checks only workspace-write work. Without Worker worktree support there is
+    // no Workspace check to share (Main always has it); assignment refuses as before.
+    if (input.writeCapable && this.worktreeManager !== undefined)
+      await this.requireWorkspaceWriteReady(input.taskId).catch((error: unknown) => {
+        if (error instanceof TeamWorkspaceRepositoryError)
+          this.workspaceRefusals.set(input.taskId, { error, at: new Date().toISOString() });
+        throw error;
+      });
     return this.enqueue(input.taskId, async () => {
       let team = this.persistence.getTeamByTask(input.taskId);
       if (team === null) {
@@ -6256,19 +6276,63 @@ export class TeamCoordinator {
     };
   }
 
-  private async requireWorkspaceWriteEligibility(taskId: string) {
+  /**
+   * The check every workspace-write assignment passes. Reads only (see `requireCleanRepositorySet`),
+   * so hiring and offering Team ask exactly this too (issue #1241).
+   */
+  private async requireWorkspaceWriteEligibility(
+    taskId: string,
+    options: Readonly<{ timeoutMs?: number }> = {},
+  ) {
     if (this.worktreeManager === undefined)
       throw new Error('workspace-write execution requires Worker worktree support');
     await this.verifyWorkspace?.(taskId);
     const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
     if (workspace.roots.length === 0)
-      throw new Error('workspace-write execution requires a Git workspace');
+      throw new TeamWorkspaceRepositoryError('workspace_missing', {
+        cause: new Error('workspace-write execution requires a Git workspace'),
+      });
     const unhealthy = workspace.roots.find(({ status }) => status !== 'available');
     if (unhealthy !== undefined)
       throw new Error(`workspace-write root is not available: ${unhealthy.label}`);
     const manager = this.worktreeManager;
     const rootPaths = workspace.roots.map(({ path }) => path);
-    return this.outsideIntegration(rootPaths, () => manager.requireCleanRepositorySet(rootPaths));
+    return this.outsideIntegration(rootPaths, () =>
+      manager.requireCleanRepositorySet(rootPaths, options),
+    );
+  }
+
+  /**
+   * Whether a workspace-write assignment would pass right now in this Task's Workspace (issue
+   * #1241): the very check assignment runs — a Workspace exists, every root is in a Git repository
+   * with a commit, not nested, with no uncommitted change and no Git operation in progress. Hiring a
+   * writing Worker and offering Team on a Turn the user did not ask Team for both ask this, so
+   * neither leaves the user with a Team whose every assignment fails. Rejects with a
+   * `TeamWorkspaceRepositoryError` (a fixed message the Leader can pass on, one per cause) when the
+   * cause is known, otherwise with the original error.
+   */
+  /**
+   * The Workspace reason a writing Worker was last refused in this Task, if that happened at or
+   * after `since` (an ISO time, the Turn's start): a requested Team Turn that ends with no Worker
+   * reports this instead of the generic "no Worker was created" (issue #1241).
+   */
+  workspaceRefusalSince(taskId: string, since: string): TeamWorkspaceRepositoryError | null {
+    const refusal = this.workspaceRefusals.get(taskId);
+    return refusal !== undefined && refusal.at >= since ? refusal.error : null;
+  }
+
+  async requireWorkspaceWriteReady(
+    taskId: string,
+    options: Readonly<{ timeoutMs?: number }> = {},
+  ): Promise<void> {
+    try {
+      await this.requireWorkspaceWriteEligibility(taskId, options);
+    } catch (error) {
+      if (error instanceof TeamWorkspaceRepositoryError) throw error;
+      const problem = workspaceRepositoryProblemOf(error);
+      if (problem === null) throw error;
+      throw new TeamWorkspaceRepositoryError(problem, { cause: error });
+    }
   }
 
   /**
