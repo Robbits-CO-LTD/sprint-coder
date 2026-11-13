@@ -32,7 +32,13 @@ import {
   markDesktopControlWorker,
   resetDesktopControlSessions,
 } from './desktop-control-session';
-import { desktopControlQueueState } from './desktop-control-queue';
+import {
+  DESKTOP_CONTROL_QUEUE_WAIT_MS,
+  DesktopControlQueueError,
+  desktopControlQueueState,
+} from './desktop-control-queue';
+import { registerTeamTools, TEAM_TOOLS } from './team-tools';
+import type { TeamCoordinator } from './team-coordinator';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -1320,6 +1326,213 @@ describe('desktop control Workspace roots', () => {
     } finally {
       desktop.mockRestore();
       await broker.dispose();
+    }
+  });
+});
+
+describe('Team Workers’ desktop control under the Leader’s Turn', () => {
+  /**
+   * The Leader's Turn as Main binds it: the Team's tools and the command tool on one broker, so a
+   * Worker's call shares the Leader's resource gate (`dispatchManagedRuntimeTool`). Runs named
+   * `wait` last until the test ends them; every other run ends at once.
+   */
+  async function setUp() {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-team-gate-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    for (const definition of TEAM_TOOLS) registry.register(definition);
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const { boundary } = createCommandBoundary(workspace);
+    const workers = new Map([
+      ['w1', 'agent-1'],
+      ['w2', 'agent-2'],
+    ]);
+    const withWorkers = {
+      ...boundary,
+      workerFor: (_turnId: string, callId: string) => {
+        const workerId = workers.get(callId.split(':')[0]!);
+        return workerId === undefined ? undefined : { workerId, roots: [] };
+      },
+    } as CommandToolBoundary;
+    const runner = new CommandRunner({ sandboxed: true });
+    const holding: (() => void)[] = [];
+    const operations: string[] = [];
+    vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+      options.beforeSpawn?.();
+      options.onStarted?.({
+        executionId: 'execution',
+        pid: 1,
+        startedAt: Date.now(),
+        processStartIdentity: 'identity',
+        executionImageDigest: 'a'.repeat(64),
+        executionImageIdentity: 'identity',
+      });
+      const own = spec.argv[0] === 'session' || spec.argv[0] === 'cursor-overlay';
+      if (!own) operations.push(spec.argv.join(' '));
+      if (spec.argv[0] === 'wait') await new Promise<void>((resolve) => holding.push(resolve));
+      const text = own ? JSON.stringify({ ok: true, data: { session_id: 'run-gate' } }) : '{}';
+      await options.onBatch?.([{ seq: 0, stream: 'stdout', text, byteLength: text.length }]);
+      return {
+        executionId: 'execution',
+        exitCode: 0,
+        signal: null,
+        canceled: false,
+        termination: 'natural',
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+    });
+    const sessions = new ManagedCommandSessions(runner);
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+        approvalDecision: 'allow_once',
+      }),
+    );
+    // A Team with a Worker at work and no report yet: the Leader's wait long-polls (issue #753).
+    const coordinator = {
+      listWorkerReports: () => [],
+      hasBusyWorkers: () => true,
+    } as unknown as TeamCoordinator;
+    registerTeamTools(broker, coordinator, { modelSelectionRequired: () => true });
+    registerCommandRunnerTool(broker, runner, withWorkers, MANAGED_EXEC_COMMAND_TOOL, sessions);
+    const owner = {
+      taskId: 'task-desktop-team-gate',
+      turnId: 'turn-desktop-team-gate',
+      workspaceId: 'a'.repeat(64),
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'codex');
+    vi.spyOn(desktopControlModule, 'isDesktopControlExecutable').mockReturnValue(true);
+    configureDesktopControlTeamCursors(true);
+    markDesktopControlWorker(owner.taskId, 'agent-1', 'Checker');
+    markDesktopControlWorker(owner.taskId, 'agent-2', 'Clicker');
+    // Each Worker's results are delivered in their own order, as Main dispatches them.
+    const scopes = new Map<string, object>();
+    const exec = (callId: string, argv: string[]) => {
+      const who = callId.split(':')[0]!;
+      const scope = workers.has(who) ? (scopes.get(who) ?? {}) : undefined;
+      if (scope !== undefined) scopes.set(who, scope);
+      return broker.dispatch({
+        ...owner,
+        callId,
+        providerName: 'exec_command',
+        input: { executable: process.execPath, argv, purpose: 'desktop team gate' },
+        ...(scope === undefined ? {} : { resultOrderScope: scope }),
+      });
+    };
+    const waitReports = (callId: string, signal: AbortSignal) =>
+      broker.dispatch({ ...owner, callId, providerName: 'team_wait_reports', input: {}, signal });
+    const dispose = async () => {
+      for (const release of holding.splice(0)) release();
+      resetDesktopControlSessions();
+      vi.restoreAllMocks();
+      await broker.dispose();
+      await sessions.dispose();
+    };
+    return { owner, exec, waitReports, operations, holding, dispose };
+  }
+
+  it('starts a Worker’s desktop-control run while the Leader waits on its Team', async () => {
+    const { exec, waitReports, operations, dispose } = await setUp();
+    const leaderWait = new AbortController();
+    try {
+      const waiting = waitReports('leader:wait', leaderWait.signal).catch(
+        (error: unknown) => error,
+      );
+      // The wait has its claim and long-polls; the Worker's run must not wait it out (~60 s).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const result = await Promise.race([
+        exec('w1:1', ['click', '@s1:e1']),
+        new Promise((resolve) => setTimeout(() => resolve('held'), 5_000)),
+      ]);
+      expect(result).toMatchObject({ exitCode: 0 });
+      expect(operations).toEqual(['click @s1:e1']);
+      leaderWait.abort(new Error('test ends the wait'));
+      await waiting;
+    } finally {
+      leaderWait.abort();
+      await dispose();
+    }
+  });
+
+  it('lets another Worker’s run reach the Task’s order, which turns it away after its wait', async () => {
+    const { owner, exec, waitReports, operations, holding, dispose } = await setUp();
+    const leaderWait = new AbortController();
+    try {
+      const waiting = waitReports('leader:wait', leaderWait.signal).catch(
+        (error: unknown) => error,
+      );
+      // Worker 1 holds the desktop with a long `wait`.
+      const long = exec('w1:1', ['wait', '150000']);
+      await vi.waitFor(() => expect(holding).toHaveLength(1), { timeout: 10_000 });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true });
+      // Worker 2's snapshot gets past the Leader's Turn to Main's order, and waits there.
+      const snapshot = exec('w2:1', ['snapshot', '-i']).then(
+        () => {
+          throw new Error('the snapshot should not have run');
+        },
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(desktopControlQueueState(owner.taskId).waiting).toBe(1), {
+        timeout: 10_000,
+      });
+      await vi.advanceTimersByTimeAsync(DESKTOP_CONTROL_QUEUE_WAIT_MS);
+      const error = await snapshot;
+      expect(error).toBeInstanceOf(DesktopControlQueueError);
+      expect(operations).toEqual(['wait 150000']);
+      vi.useRealTimers();
+      holding.splice(0).forEach((release) => release());
+      await expect(long).resolves.toMatchObject({ exitCode: 0 });
+      leaderWait.abort(new Error('test ends the wait'));
+      await waiting;
+    } finally {
+      vi.useRealTimers();
+      leaderWait.abort();
+      await dispose();
+    }
+  });
+
+  it('keeps the Workspace-wide claim of every other command, and of desktop control without the opt-in', async () => {
+    const { exec, waitReports, operations, holding, dispose } = await setUp();
+    const leaderWait = new AbortController();
+    try {
+      const waiting = waitReports('leader:wait', leaderWait.signal).catch(
+        (error: unknown) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const calls: Promise<unknown>[] = [];
+      for (const [desktop, cursors] of [
+        [false, true],
+        [true, false],
+      ] as const) {
+        vi.mocked(desktopControlModule.isDesktopControlExecutable).mockReturnValue(desktop);
+        configureDesktopControlTeamCursors(cursors);
+        operations.splice(0);
+        // The Team's wait holds no Workspace claim, so the Leader's command starts at once…
+        calls.push(exec(`leader:${desktop}:1`, ['wait', '1']));
+        await vi.waitFor(() => expect(holding).toHaveLength(1), { timeout: 5_000 });
+        // …and the next one still waits for it, as every command of the Workspace always did.
+        calls.push(exec(`leader:${desktop}:2`, ['click', '@s1:e1']));
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(operations).toEqual(['wait 1']);
+        holding.splice(0).forEach((release) => release());
+        await vi.waitFor(() => expect(operations).toEqual(['wait 1', 'click @s1:e1']), {
+          timeout: 5_000,
+        });
+      }
+      // The Leader's results come back in its calls' order, after its wait's.
+      leaderWait.abort(new Error('test ends the wait'));
+      await waiting;
+      for (const call of calls) await expect(call).resolves.toMatchObject({ exitCode: 0 });
+    } finally {
+      leaderWait.abort();
+      await dispose();
     }
   });
 });
