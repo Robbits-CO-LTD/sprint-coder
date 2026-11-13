@@ -29,6 +29,12 @@ export function writeAccessPresetDefault(value: AccessPresetDefault): void {
   else target.setItem(DEFAULT_ACCESS_PRESET_KEY, value);
 }
 
+/** The safety setting last chosen for a Task, if any: what `last` ("前回選択した設定") carries over. */
+export function readLastAccessPreset(): AccessPreset | null {
+  const value = storage()?.getItem(LAST_ACCESS_PRESET_KEY) ?? null;
+  return isAccessPreset(value) ? value : null;
+}
+
 export function rememberAccessPreset(value: AccessPreset): void {
   const target = storage();
   if (target === null) return;

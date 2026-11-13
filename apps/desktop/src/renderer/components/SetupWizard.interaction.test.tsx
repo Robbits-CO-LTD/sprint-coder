@@ -304,6 +304,187 @@ describe('SetupWizard', () => {
     expect(settings.setTeamUsageMode).not.toHaveBeenCalled();
   });
 
+  it('after a save, a later change to the same item elsewhere is followed, not overwritten', async () => {
+    const settings = fullBridge();
+    let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    settings.getAssistantPreferences.mockImplementation(async () => ({
+      configured: true,
+      preferences: current,
+    }));
+    settings.setAssistantPreferences.mockImplementation(async (input: AssistantPreferences) => {
+      current = { ...input };
+      return { configured: true, preferences: current };
+    });
+    await render();
+    await press('setup-start');
+    await press('setup-next'); // reply
+    await choose('setup-tone-crisp');
+    await press('setup-next'); // saved: crisp
+    // In Settings, the same item changes again; the window comes back to the front.
+    current = { ...current, tone: 'casual' };
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    await flush();
+    await press('setup-back'); // team -> reply
+    expect(q<HTMLInputElement>('[data-testid="setup-tone-casual"]')?.checked).toBe(true);
+    await press('setup-next');
+    await press('setup-next'); // details
+    await choose('setup-emoji');
+    await press('setup-next');
+    expect(settings.setAssistantPreferences).toHaveBeenLastCalledWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      tone: 'casual',
+      emoji: true,
+    });
+  });
+
+  it('a read that started before a save and answers after it is dropped', async () => {
+    const settings = fullBridge();
+    let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    let holdNextRead = false;
+    let answerHeldRead: () => void = () => {};
+    settings.getAssistantPreferences.mockImplementation(() => {
+      const answer = { configured: true, preferences: { ...current } };
+      if (!holdNextRead) return Promise.resolve(answer);
+      holdNextRead = false;
+      return new Promise((resolve) => (answerHeldRead = () => resolve(answer)));
+    });
+    let finishSave: () => void = () => {};
+    settings.setAssistantPreferences.mockImplementation(
+      (input: AssistantPreferences) =>
+        new Promise((resolve) => {
+          finishSave = () => {
+            current = { ...input };
+            resolve({ configured: true, preferences: current });
+          };
+        }),
+    );
+    await render();
+    await press('setup-start');
+    await press('setup-next'); // reply
+    await choose('setup-tone-crisp');
+    // A read starts (the window came to the front) and will answer with what was stored before.
+    holdNextRead = true;
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    // The save starts and finishes before that read answers.
+    await act(async () => q<HTMLButtonElement>('[data-testid="setup-next"]')!.click());
+    const readsDuringSave = settings.getAssistantPreferences.mock.calls.length;
+    await act(async () => window.dispatchEvent(new Event('focus'))); // no read starts mid-save
+    expect(settings.getAssistantPreferences.mock.calls.length).toBe(readsDuringSave);
+    await act(async () => finishSave());
+    await flush();
+    await act(async () => answerHeldRead()); // the old answer arrives last
+    await flush();
+    expect(step()).toBe('team');
+    await press('setup-back');
+    expect(q<HTMLInputElement>('[data-testid="setup-tone-crisp"]')?.checked).toBe(true);
+    for (let i = 0; i < 4; i += 1) await press('setup-next');
+    expect(step()).toBe('done');
+    expect(q('[data-testid="setup-summary"]')?.textContent).toContain('きびきび');
+  });
+
+  it('after a failed first Task, a different folder makes its own Project and the Task goes there', async () => {
+    installBridge({});
+    pickProjectFolders
+      .mockResolvedValueOnce({ canceled: false, folders: [{ path: 'C:/work/a', label: 'a' }] })
+      .mockResolvedValueOnce({ canceled: false, folders: [{ path: 'C:/work/b', label: 'b' }] });
+    createProject
+      .mockResolvedValueOnce({ id: 'project-a' })
+      .mockResolvedValueOnce({ id: 'project-b' });
+    createTask.mockResolvedValueOnce(null);
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-folder');
+    await press('setup-next');
+    await press('setup-finish');
+    await waitForHandOff();
+    expect(container.textContent).toContain('最初の Task を作れませんでした');
+    await press('setup-back');
+    await press('setup-folder');
+    await press('setup-next');
+    await press('setup-finish');
+    await waitForHandOff();
+    // The first, empty Project stays (there is no way to remove one); the Task is in the new one.
+    expect(createProject).toHaveBeenCalledTimes(2);
+    expect(createProject).toHaveBeenLastCalledWith('b', [
+      { path: 'C:/work/b', label: 'b', role: 'primary' },
+    ]);
+    expect(createTask).toHaveBeenLastCalledWith('project-b');
+  });
+
+  it('a choice changed and put back is no change: Settings’ later value is followed and kept', async () => {
+    const settings = fullBridge();
+    let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    settings.getAssistantPreferences.mockImplementation(async () => ({
+      configured: true,
+      preferences: current,
+    }));
+    await render();
+    await press('setup-start');
+    await press('setup-next'); // reply
+    await choose('setup-tone-casual');
+    await choose('setup-tone-polite');
+    // Settings stores another tone; the window comes back to the front.
+    current = { ...current, tone: 'crisp' };
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    await flush();
+    expect(q<HTMLInputElement>('[data-testid="setup-tone-crisp"]')?.checked).toBe(true);
+    await press('setup-next');
+    expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+    expect(step()).toBe('team');
+  });
+
+  it('the summary lists every detail changed and saved here', async () => {
+    fullBridge();
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-next');
+    expect(step()).toBe('details');
+    await choose('setup-confirm-ask');
+    await choose('setup-emoji');
+    await choose('setup-plan-first');
+    await choose('setup-sound');
+    await choose('setup-access-ask');
+    await press('setup-next');
+    await press('setup-next');
+    const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+    for (const text of [
+      '進め方: 迷ったら聞く',
+      '絵文字を使う: オン',
+      '作業の前に進め方を見せる: オン',
+      '効果音: オン',
+      '新しいタスクの安全設定: 実行前に確認',
+    ]) {
+      expect(summary).toContain(text);
+    }
+    // Not changed here, so not listed.
+    expect(summary).not.toContain('返事の言語');
+  });
+
+  it('says what "前回選択した設定" means, on a first launch and after a choice', async () => {
+    fullBridge();
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-next');
+    expect(q('[data-testid="setup-access"]')?.textContent).toContain('はじめは「実行前に確認」');
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    localStorage.setItem('sprint-coder:last-access-preset', 'auto');
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-next');
+    expect(q('[data-testid="setup-access"]')?.textContent).toContain(
+      '今は「安全時は自動」を引き継ぐ',
+    );
+  });
+
   it('works without the new settings bridge: no reply or Team step, nothing reported', async () => {
     installBridge({});
     await render();

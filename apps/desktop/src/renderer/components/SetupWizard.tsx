@@ -48,6 +48,7 @@ import {
 import { ASSISTANT_CALL_NAME_FIELD } from '../lib/assistant-preferences-options';
 import {
   readAccessPresetDefault,
+  readLastAccessPreset,
   writeAccessPresetDefault,
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
@@ -151,8 +152,10 @@ function readinessLabel(readiness: Readiness): string {
   return '未検出';
 }
 
-const REPLY_KEYS: readonly (keyof AssistantPreferences)[] = ['tone', 'length', 'depth'];
-const DETAIL_KEYS: readonly (keyof AssistantPreferences)[] = [
+const PREFERENCE_KEYS: readonly (keyof AssistantPreferences)[] = [
+  'tone',
+  'length',
+  'depth',
   'language',
   'confirm',
   'callName',
@@ -160,6 +163,33 @@ const DETAIL_KEYS: readonly (keyof AssistantPreferences)[] = [
   'suggestNextSteps',
   'planFirst',
 ];
+
+/** Items whose value on screen differs from the baseline (the call name compared as it would be
+ * stored). */
+function changedKeys(
+  screen: AssistantPreferences,
+  base: AssistantPreferences,
+): (keyof AssistantPreferences)[] {
+  return PREFERENCE_KEYS.filter((key) =>
+    key === 'callName'
+      ? screen.callName.trim() !== base.callName.trim()
+      : screen[key] !== base[key],
+  );
+}
+
+/** What the "細かい好み" row of the summary can list. */
+type SummaryItem =
+  | 'language'
+  | 'confirm'
+  | 'callName'
+  | 'emoji'
+  | 'suggestNextSteps'
+  | 'planFirst'
+  | 'soundEnabled'
+  | 'accessDefault'
+  | 'tone'
+  | 'length'
+  | 'depth';
 
 /** The fields each step owns, to tell whether leaving by "戻る" changed anything. */
 function replyFields(p: AssistantPreferences): string {
@@ -203,6 +233,7 @@ export function SetupWizard({
   const [teamMode, setTeamMode] = useState<TeamUsageMode>(DEFAULT_TEAM_USAGE_MODE);
   const [soundEnabled, setSoundEnabled] = useState(() => readSoundEffectPreferences().enabled);
   const [accessDefault, setAccessDefault] = useState<AccessPresetDefault>(readAccessPresetDefault);
+  const [lastAccess] = useState(readLastAccessPreset);
   const stored = useRef({
     preferences: DEFAULT_ASSISTANT_PREFERENCES,
     teamMode: DEFAULT_TEAM_USAGE_MODE as TeamUsageMode,
@@ -220,11 +251,13 @@ export function SetupWizard({
     stored.current = { ...stored.current, ...patch };
     setConfirmed(stored.current);
   }, []);
-  // What the person changed in this Setup, item by item. Only these are ever written over what is
-  // stored; every other item keeps whatever is stored at the moment of saving (Settings, opened
-  // from the AI step, may have changed it meanwhile).
-  const dirty = useRef(new Set<keyof AssistantPreferences>());
-  const teamTouched = useRef(false);
+  // "Changed in this Setup" is never a history of clicks: it is the unsaved difference — an item
+  // whose value on screen differs from the last value known to be stored (`stored`). Only those
+  // are written over what is stored; every other item keeps whatever is stored at the moment of
+  // saving (Settings, opened from the AI step, may have changed it meanwhile). Putting a choice
+  // back, or "あとで決める", removes the difference by itself.
+  // Items this Setup changed and saved, for the summary.
+  const [savedChanges, setSavedChanges] = useState<ReadonlySet<SummaryItem>>(() => new Set());
   const [decisions, setDecisions] = useState<Partial<Record<PreferenceStep, Decision>>>({});
   const [failed, setFailed] = useState<ReadonlySet<'assistant' | 'team'>>(() => new Set());
 
@@ -243,34 +276,74 @@ export function SetupWizard({
     };
   }, []);
 
-  /** Takes in what Main has stored: items the person has not touched follow it on screen. */
+  /** Takes in what Main has stored. An item still equal to the old baseline follows the new value
+   * on screen; an item that differs (changed here, not yet saved) keeps the screen's value. The new
+   * value then becomes the baseline. */
   const adoptPreferences = useCallback(
     (latest: AssistantPreferences) => {
+      const base = stored.current.preferences;
       remember({ preferences: latest });
       setPreferences((current) => {
         const next = { ...latest };
-        for (const key of dirty.current) (next as Record<string, unknown>)[key] = current[key];
+        for (const key of changedKeys(current, base)) {
+          (next as Record<string, unknown>)[key] = current[key];
+        }
         return next;
       });
     },
     [remember],
   );
 
+  // Reads and saves are numbered: a save bumps the number when it starts and when it ends, and a
+  // read that started under an older number is dropped — it may hold what was stored before the
+  // save. No read starts while a save is under way; one runs once the save is over instead.
+  const generation = useRef(0);
+  const saving = useRef(0);
+  const readAfterSave = useRef(false);
+
   /** Reads what is stored now (at the start, and whenever the person may have changed it outside
-   * the Setup). A read that fails changes nothing. */
+   * the Setup). A read that fails, or that a save overtook, changes nothing. */
   const refreshStored = useCallback(async () => {
+    if (saving.current > 0) {
+      readAfterSave.current = true;
+      return;
+    }
+    const started = generation.current;
+    const current = () => live.current && generation.current === started;
     if (support.assistant) {
       const latest = await loadAssistantPreferences();
-      if (live.current && latest) adoptPreferences(latest.preferences);
+      if (!current()) return;
+      if (latest) adoptPreferences(latest.preferences);
     }
     if (support.team) {
       const mode = await loadTeamUsageMode();
-      if (live.current && mode !== null) {
+      if (!current()) return;
+      if (mode !== null) {
+        const base = stored.current.teamMode;
         remember({ teamMode: mode });
-        if (!teamTouched.current) setTeamMode(mode);
+        setTeamMode((current) => (current === base ? mode : current));
       }
     }
   }, [adoptPreferences, remember, support]);
+
+  /** Wraps one save so that reads cannot land on top of it (see `generation`). */
+  const whileSaving = useCallback(
+    async <T,>(work: () => Promise<T>): Promise<T> => {
+      saving.current += 1;
+      generation.current += 1;
+      try {
+        return await work();
+      } finally {
+        generation.current += 1;
+        saving.current -= 1;
+        if (saving.current === 0 && readAfterSave.current) {
+          readAfterSave.current = false;
+          void refreshStored();
+        }
+      }
+    },
+    [refreshStored],
+  );
 
   // Start from what is stored, so a replay opens with the current choices selected.
   useEffect(() => {
@@ -300,7 +373,6 @@ export function SetupWizard({
   }, [step]);
 
   const updatePreferences = useCallback((patch: Partial<AssistantPreferences>) => {
-    for (const key of Object.keys(patch) as (keyof AssistantPreferences)[]) dirty.current.add(key);
     setPreferences((current) => ({ ...current, ...patch }));
   }, []);
 
@@ -380,7 +452,6 @@ export function SetupWizard({
 
   const chooseTeamMode = useCallback(
     (value: TeamUsageMode) => {
-      teamTouched.current = true;
       setTeamMode(value);
       respond('select');
     },
@@ -413,30 +484,39 @@ export function SetupWizard({
             : detailFields(preferences) !== detailFields(saved.preferences));
         if (!localChanged && !assistantChanged) return false;
         if (localChanged) {
-          if (accessDefault !== saved.accessDefault) writeAccessPresetDefault(accessDefault);
+          const localItems: SummaryItem[] = [];
+          if (accessDefault !== saved.accessDefault) {
+            writeAccessPresetDefault(accessDefault);
+            localItems.push('accessDefault');
+          }
+          if (soundEnabled !== saved.soundEnabled) localItems.push('soundEnabled');
           if (soundEnabled !== readSoundEffectPreferences().enabled) {
             setSoundEffectsEnabled(soundEnabled);
           }
           remember({ soundEnabled, accessDefault });
+          setSavedChanges((current) => new Set([...current, ...localItems]));
           if (soundEnabled) void unlockSoundEffects();
         }
         if (assistantChanged) {
           // Read what is stored right now and lay only the person's own changes over it, so an
           // item changed elsewhere (Settings) meanwhile is not put back to an old value.
+          // The unsaved difference, measured against the baseline this screen was built on.
+          const changed = changedKeys(preferences, stored.current.preferences);
           const latest = await loadAssistantPreferences();
           const snapshot: AssistantPreferences = {
             ...(latest?.preferences ?? stored.current.preferences),
           };
-          for (const key of dirty.current) {
-            (snapshot as Record<string, unknown>)[key] = preferences[key];
-          }
+          for (const key of changed) (snapshot as Record<string, unknown>)[key] = preferences[key];
           snapshot.callName = clampCallName(snapshot.callName.trim());
           const result = await saveAssistantPreferences(snapshot);
           noteOutcome('assistant', result.outcome);
           if (result.outcome === 'saved' && result.preferences) {
-            // What Main kept (it cleans the call name) is what the screen and the summary show.
+            // What Main kept (it cleans the call name) is the new baseline, and the screen shows
+            // it: no difference is left, so a later change in Settings to the same item is
+            // followed, not overwritten.
             remember({ preferences: result.preferences });
             if (live.current) setPreferences(result.preferences);
+            setSavedChanges((current) => new Set([...current, ...changed]));
             // An earlier step whose save failed went out again inside this one.
             setDecisions((current) => ({
               ...current,
@@ -459,7 +539,10 @@ export function SetupWizard({
           setDecisions((current) => ({ ...current, team: 'failed' }));
           return false;
         }
-        if (result.outcome === 'saved' && result.mode) remember({ teamMode: result.mode });
+        if (result.outcome === 'saved' && result.mode) {
+          remember({ teamMode: result.mode });
+          if (live.current) setTeamMode(result.mode);
+        }
       }
       setDecisions((current) => ({ ...current, [id]: 'saved' }));
       return true;
@@ -484,11 +567,6 @@ export function SetupWizard({
   /** "あとで決める": nothing is stored, and the step's draft returns to what is stored. */
   const revert = useCallback((id: PreferenceStep) => {
     const saved = stored.current;
-    // What was undone is no longer the person's change.
-    for (const key of id === 'reply' ? REPLY_KEYS : id === 'details' ? DETAIL_KEYS : []) {
-      dirty.current.delete(key);
-    }
-    if (id === 'team') teamTouched.current = false;
     if (id === 'reply') {
       setPreferences((current) => ({
         ...current,
@@ -534,7 +612,7 @@ export function SetupWizard({
         else if (changedSinceStored(id)) {
           setBusy(true);
           try {
-            await persist(id);
+            await whileSaving(() => persist(id));
           } finally {
             setBusy(false);
           }
@@ -543,7 +621,7 @@ export function SetupWizard({
       playInterfaceCue(how === 'back' ? 'back' : 'forward');
       moveTo(how === 'back' ? index - 1 : index + 1);
     },
-    [busy, changedSinceStored, index, moveTo, persist, revert, step],
+    [busy, changedSinceStored, index, moveTo, persist, revert, step, whileSaving],
   );
 
   const chooseFolder = useCallback(async () => {
@@ -649,6 +727,20 @@ export function SetupWizard({
     grok: runtime.grokReadiness,
   };
   const accessLabel = optionLabel(ACCESS_OPTIONS, accessDefault);
+  // "前回選択した設定" says nothing to someone who has never chosen: say what it means right now.
+  const lastLabel = lastAccess ? optionLabel(ACCESS_OPTIONS, lastAccess) : null;
+  const accessDisplay = (value: AccessPresetDefault): string =>
+    value === 'last'
+      ? `${optionLabel(ACCESS_OPTIONS, 'last')}（${lastLabel ? `今は「${lastLabel}」` : 'はじめは「実行前に確認」'}）`
+      : optionLabel(ACCESS_OPTIONS, value);
+  const accessOptions = ACCESS_OPTIONS.map((option) =>
+    option.value === 'last'
+      ? {
+          ...option,
+          description: lastLabel ? `今は「${lastLabel}」を引き継ぐ` : 'はじめは「実行前に確認」',
+        }
+      : option,
+  );
   const position = index + 1;
   const remaining = steps.length - position;
   const isPreferenceStep = SETUP_PREFERENCE_STEPS.has(step);
@@ -656,7 +748,30 @@ export function SetupWizard({
   const saved = confirmed;
   const summaryValue = (decision: Decision | undefined, value: string): string =>
     decision === 'saved' ? value : decision === 'failed' ? '保存できませんでした' : leftAs;
-
+  // Every item this Setup changed and saved on the "細かい好み" step, from the stored values.
+  const onOff = (title: string, on: boolean) => `${title}: ${on ? 'オン' : 'オフ'}`;
+  const detailSummary: string[] = [];
+  const has = (item: SummaryItem) => savedChanges.has(item);
+  if (has('language'))
+    detailSummary.push(
+      `${choiceTitle('language')}: ${optionLabel(LANGUAGE_OPTIONS, saved.preferences.language)}`,
+    );
+  if (has('confirm'))
+    detailSummary.push(
+      `${choiceTitle('confirm')}: ${optionLabel(CONFIRM_OPTIONS, saved.preferences.confirm)}`,
+    );
+  if (has('callName'))
+    detailSummary.push(
+      saved.preferences.callName ? `呼び名「${saved.preferences.callName}」` : '呼び名なし',
+    );
+  if (has('emoji')) detailSummary.push(onOff(toggleTitle('emoji'), saved.preferences.emoji));
+  if (has('suggestNextSteps'))
+    detailSummary.push(onOff(toggleTitle('suggestNextSteps'), saved.preferences.suggestNextSteps));
+  if (has('planFirst'))
+    detailSummary.push(onOff(toggleTitle('planFirst'), saved.preferences.planFirst));
+  if (has('soundEnabled')) detailSummary.push(onOff('効果音', saved.soundEnabled));
+  if (has('accessDefault'))
+    detailSummary.push(`新しいタスクの安全設定: ${accessDisplay(saved.accessDefault)}`);
   const palette = {
     '--setup-leader': DESKTOP_CONTROL_LEADER_ACCENT,
     '--setup-worker-1': desktopControlWorkerAccent(0),
@@ -1008,7 +1123,7 @@ export function SetupWizard({
                     />
                     <SetupChoiceGroup
                       legend="新しいタスクの安全設定"
-                      options={ACCESS_OPTIONS}
+                      options={accessOptions}
                       value={accessDefault}
                       columns={4}
                       testId="setup-access"
@@ -1085,21 +1200,11 @@ export function SetupWizard({
                   <SummaryRow
                     index={3}
                     label="細かい好み"
-                    value={summaryValue(
-                      decisions.details,
-                      [
-                        support.assistant
-                          ? optionLabel(LANGUAGE_OPTIONS, saved.preferences.language)
-                          : null,
-                        support.assistant && saved.preferences.callName
-                          ? `呼び名「${saved.preferences.callName}」`
-                          : null,
-                        saved.soundEnabled ? '効果音あり' : '効果音なし',
-                        optionLabel(ACCESS_OPTIONS, saved.accessDefault),
-                      ]
-                        .filter(Boolean)
-                        .join('・'),
-                    )}
+                    value={
+                      decisions.details === 'saved' && detailSummary.length > 0
+                        ? detailSummary
+                        : summaryValue(decisions.details, '')
+                    }
                   />
                   {!replay && (
                     <SummaryRow
@@ -1186,14 +1291,31 @@ export function SetupWizard({
   );
 }
 
-function SummaryRow({ index, label, value }: { index: number; label: string; value: string }) {
+function SummaryRow({
+  index,
+  label,
+  value,
+}: {
+  index: number;
+  label: string;
+  value: string | readonly string[];
+}) {
   return (
     <li style={{ '--i': index } as CSSProperties}>
       <svg className="setup-summary-check" viewBox="0 0 16 16" aria-hidden="true">
         <path d="M3.5 8.4 6.6 11.4 12.5 4.8" pathLength={1} />
       </svg>
       <span>{label}</span>
-      <strong>{value}</strong>
+      {typeof value === 'string' ? (
+        <strong>{value}</strong>
+      ) : (
+        // Several items wrap onto as many lines as they need instead of one long run.
+        <strong className="setup-summary-items">
+          {value.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </strong>
+      )}
     </li>
   );
 }

@@ -2487,6 +2487,18 @@ body {
   font-weight: 600;
 }
 
+.setup-summary-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.setup-summary-items span {
+  padding: 1px 7px;
+  border-radius: var(--r-xs);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .setup-summary-check {
   width: 18px;
   height: 18px;
