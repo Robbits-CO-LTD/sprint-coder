@@ -29,8 +29,16 @@ pub(crate) fn is_chromium_root(root: &UIAElement) -> bool {
     let class = read_one(root, TreeProperty::ClassName);
     matches!(
         class.text(),
-        agent_desktop_core::LocatorField::Known(name) if name.trim() == CHROMIUM_WINDOW_CLASS
+        agent_desktop_core::LocatorField::Known(name) if is_chromium_class(&name)
     )
+}
+
+/// Whether a window's class names a Chromium top level: exactly
+/// [`CHROMIUM_WINDOW_CLASS`], ignoring surrounding white space. The window
+/// Chromium draws web content into ([`CHROMIUM_CONTENT_CLASS`]) is not a top
+/// level, and a class that only resembles it is another toolkit's.
+pub(crate) fn is_chromium_class(class: &str) -> bool {
+    class.trim() == CHROMIUM_WINDOW_CLASS
 }
 
 /// The non-Windows twin, so the crate's `#![cfg]`-free internal callers compile
@@ -324,6 +332,26 @@ mod tests {
             "the surface clause must be satisfied, so only the root clause can refuse this"
         );
         assert!(!activation_eligible(element_root, &request));
+    }
+
+    /// Only Chromium's own top-level class reads as Chromium: the content
+    /// window's class, a near miss, and an empty class do not, so no other
+    /// toolkit's window is read by its visible elements on a class alone.
+    #[test]
+    fn only_the_chromium_top_level_class_reads_as_chromium() {
+        assert!(is_chromium_class("Chrome_WidgetWin_1"));
+        assert!(is_chromium_class(" Chrome_WidgetWin_1 "));
+        for other in [
+            "",
+            "Chrome_WidgetWin_0",
+            "chrome_widgetwin_1",
+            "Chrome_WidgetWin_1x",
+            "Chrome_RenderWidgetHostHWND",
+            "HwndWrapper[DefaultDomain;;]",
+            "Tauri Window",
+        ] {
+            assert!(!is_chromium_class(other), "{other:?}");
+        }
     }
 }
 

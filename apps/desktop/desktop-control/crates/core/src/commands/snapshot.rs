@@ -142,7 +142,7 @@ pub fn execute(
 
 /// What a snapshot that read only the window's visible elements tells its
 /// reader about the refs it returns.
-const VISIBLE_SCOPE_HINT: &str = "The window has too many elements to read in time, so only the elements it shows on screen were read; elements scrolled out of view are omitted. These refs work only while the view stays as it is: after scrolling, or when the window changes, run snapshot again and use the new refs. If almost nothing is listed, the window is probably covered by another window, which makes it report its elements as off screen: bring it forward, then run snapshot again.";
+const VISIBLE_SCOPE_HINT: &str = "The window has too many elements to read in time or to record whole, so only the elements it shows on screen were read; elements scrolled out of view are omitted. To reach one of them, scroll it into view, then run snapshot again. These refs work only while the view stays as it is: after scrolling, or when the window changes, run snapshot again and use the new refs. If almost nothing is listed, the window is probably covered by another window, which makes it report its elements as off screen: bring it forward, then run snapshot again.";
 
 /// Marks a response built from a capture of the visible elements only, so its
 /// reader knows the refs hold in that view alone.

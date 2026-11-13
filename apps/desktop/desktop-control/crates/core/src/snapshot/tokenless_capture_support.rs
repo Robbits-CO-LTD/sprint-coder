@@ -29,6 +29,9 @@ pub(super) struct CaptureAdapter {
     /// Whether a read of the visible elements is served (as a Chromium-hosted
     /// window is); otherwise such a read is refused as not supported.
     view: std::sync::atomic::AtomicBool,
+    /// What a read of the visible elements returns, when it is not the window
+    /// tree itself.
+    view_tree: Mutex<Option<AccessibilityNode>>,
 }
 
 impl CaptureAdapter {
@@ -42,6 +45,7 @@ impl CaptureAdapter {
             anchors: Mutex::new(Vec::new()),
             whole_read: Mutex::new(None),
             view: std::sync::atomic::AtomicBool::new(false),
+            view_tree: Mutex::new(None),
         }
     }
 
@@ -51,6 +55,12 @@ impl CaptureAdapter {
 
     pub(super) fn serve_view(&self) {
         self.view.store(true, Ordering::SeqCst);
+    }
+
+    /// Serves a read of the visible elements that returns `tree`.
+    pub(super) fn serve_view_of(&self, tree: AccessibilityNode) {
+        *self.view_tree.lock().expect("the view tree locks") = Some(tree);
+        self.serve_view();
     }
 
     pub(super) fn show(&self, tree: AccessibilityNode) {
@@ -92,8 +102,26 @@ impl ObservationOps for CaptureAdapter {
                             "this fixture reads no view of visible elements",
                         ));
                     }
+                    let view = self.view_tree.lock().expect("the view tree locks").clone();
+                    // A view served apart from the window tree also places each
+                    // element on screen, one below the other, so its refs can
+                    // carry the proof of a view.
+                    let placed = view.is_some();
+                    let tree = match view {
+                        Some(view) => cut(view, 0, request.max_logical_depth),
+                        None => tree,
+                    };
                     let mut observed = crate::adapter::observed_tree(&root, tree)?;
                     for (index, node) in observed.nodes.iter_mut().enumerate() {
+                        if placed {
+                            node.evidence.ref_evidence.bounds =
+                                crate::locator::live_locator::LocatorField::Known(crate::Rect {
+                                    x: 0.0,
+                                    y: 20.0 * index as f64,
+                                    width: 200.0,
+                                    height: 20.0,
+                                });
+                        }
                         let index = i32::try_from(index).unwrap_or(i32::MAX);
                         node.evidence.ref_evidence.runtime_id = Some(vec![42, index]);
                     }

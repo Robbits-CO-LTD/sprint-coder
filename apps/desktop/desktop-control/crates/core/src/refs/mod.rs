@@ -174,6 +174,14 @@ impl RefMap {
         Ok(())
     }
 
+    /// Whether this map's record is larger than [`MAX_REFMAP_BYTES`], so that
+    /// [`Self::serialize_with_size_check`] refuses to write it. The count stops
+    /// as soon as it passes the limit, and nothing is kept.
+    pub(crate) fn exceeds_size_limit(&self) -> bool {
+        let mut probe = SizeProbe { written: 0 };
+        serde_json::to_writer(&mut probe, self).is_err() && probe.written > MAX_REFMAP_BYTES
+    }
+
     pub(crate) fn serialize_with_size_check(&self) -> Result<String, AppError> {
         self.validate()?;
         let json = serde_json::to_string(self)?;
@@ -200,6 +208,26 @@ impl RefMap {
         let map: Self = serde_json::from_slice(&json)?;
         map.validate()?;
         Ok(map)
+    }
+}
+
+/// Counts the bytes of a serialized record, failing once they pass
+/// [`MAX_REFMAP_BYTES`] so an oversized record is not serialized to its end.
+struct SizeProbe {
+    written: u64,
+}
+
+impl std::io::Write for SizeProbe {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buf.len() as u64);
+        if self.written > MAX_REFMAP_BYTES {
+            return Err(std::io::Error::other("the record passes the size limit"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -408,7 +436,7 @@ pub mod resolve_saved_ref;
 mod serde_tests;
 #[cfg(test)]
 #[path = "refs_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "refs_size_tests.rs"]

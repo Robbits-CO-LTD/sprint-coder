@@ -652,3 +652,29 @@ fn walk_fault_error_never_folds_a_failures_message_text_into_the_aggregate() {
         .unwrap_or_default();
     assert!(!serialized.contains(MARKER));
 }
+
+/// A read of the visible elements alone is refused for a window that is not
+/// Chromium-hosted, with the code core takes for "not read that way".
+#[test]
+fn a_view_of_a_window_outside_chromium_is_refused_as_not_supported() {
+    let error = refuse_view_outside_chromium(true, || false)
+        .expect_err("a window outside Chromium is not read by its view");
+    assert_eq!(error.code, ErrorCode::ActionNotSupported);
+}
+
+#[test]
+fn a_view_of_a_chromium_window_is_read() {
+    assert!(refuse_view_outside_chromium(true, || true).is_ok());
+}
+
+/// Any other read never asks for the window's provenance.
+#[test]
+fn a_read_of_the_whole_window_asks_no_provenance() {
+    let asked = std::cell::Cell::new(false);
+    let result = refuse_view_outside_chromium(false, || {
+        asked.set(true);
+        false
+    });
+    assert!(result.is_ok());
+    assert!(!asked.get());
+}

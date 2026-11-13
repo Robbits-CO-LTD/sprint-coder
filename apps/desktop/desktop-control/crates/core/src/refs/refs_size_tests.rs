@@ -1,5 +1,26 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::tests::entry;
 use super::*;
+
+/// The size check a capture makes before saving agrees with the write's own
+/// refusal on both sides of the limit.
+#[test]
+fn test_exceeds_size_limit_matches_the_write_refusal() {
+    let mut map = RefMap::new();
+    let big_name = "x".repeat(2048);
+    let (mut kept, mut refused_seen) = (false, false);
+    for _ in 0..600 {
+        map.allocate(entry("button", Some(&big_name)));
+        if map.len() % 20 != 0 {
+            continue;
+        }
+        let refused = map.serialize_with_size_check().is_err();
+        assert_eq!(map.exceeds_size_limit(), refused, "at {} refs", map.len());
+        kept |= !refused;
+        refused_seen |= refused;
+    }
+    assert!(kept && refused_seen, "the map was checked on both sides");
+}
 
 #[test]
 fn test_serialize_with_size_check_rejects_oversized() {

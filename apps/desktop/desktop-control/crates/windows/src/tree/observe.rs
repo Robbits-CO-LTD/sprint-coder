@@ -60,14 +60,7 @@ pub(crate) fn observe_tree(
     let budget = WalkBudget::new(request.max_logical_depth, request.deadline)
         .with_max_raw_depth(request.max_raw_depth.min(DEFAULT_MAX_RAW_DEPTH));
     let visible_only = request.observation_mode.visible_only;
-    // Only a Chromium-hosted window is read by its visible elements: its
-    // provider reports what scrolled out of view, measured on such windows.
-    if visible_only && !chromium::has_chromium_provenance(&element) {
-        return Err(AdapterError::new(
-            ErrorCode::ActionNotSupported,
-            "Reading only the visible elements is supported for Chromium-hosted windows",
-        ));
-    }
+    refuse_view_outside_chromium(visible_only, || chromium::has_chromium_provenance(&element))?;
     let walk_started = Instant::now();
     let outcome = if visible_only {
         walk_uia_visible_subtree(&element, &root, budget)?
@@ -94,6 +87,25 @@ pub(crate) fn observe_tree(
         observed.mark_visible_scope();
     }
     Ok(observed)
+}
+
+/// Refuses a read of the visible elements alone of a window that is not
+/// Chromium-hosted: only such a window's provider was measured to report what
+/// scrolled out of view, which the proof of a view rests on. The refusal is
+/// `ACTION_NOT_SUPPORTED`, which core takes as "this window is not read that
+/// way" and keeps its narrower, unproven capture. `chromium_provenance` is
+/// only asked for such a read.
+fn refuse_view_outside_chromium(
+    visible_only: bool,
+    chromium_provenance: impl FnOnce() -> bool,
+) -> Result<(), AdapterError> {
+    if visible_only && !chromium_provenance() {
+        return Err(AdapterError::new(
+            ErrorCode::ActionNotSupported,
+            "Reading only the visible elements is supported for Chromium-hosted windows",
+        ));
+    }
+    Ok(())
 }
 
 /// The walk's own output, grouped so `finish_observation` stays within the

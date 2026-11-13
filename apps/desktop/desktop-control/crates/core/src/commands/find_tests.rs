@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::AdapterError;
 use crate::LocatorQuery;
@@ -329,5 +330,31 @@ fn a_traversal_timeout_names_the_budget_and_other_errors_are_untouched() {
         untouched.suggestion.as_deref(),
         Some("Launch it first"),
         "only a timeout is re-suggested; anything else keeps its own"
+    );
+    assert!(
+        suggestion.contains("run snapshot instead"),
+        "a window too large to search whole is pointed at snapshot, got: {suggestion}"
+    );
+}
+
+/// A search stopped at a fixed read limit ends the same way under any
+/// deadline, so it is not told to raise the deadline.
+#[test]
+fn a_read_limit_is_not_told_to_raise_the_deadline() {
+    let limited = AppError::Adapter(
+        AdapterError::timeout("Locator traversal reached a deterministic observation budget")
+            .with_details(serde_json::json!({ "kind": "locator_budget_limit" })),
+    );
+    let AppError::Adapter(renamed) = name_the_traversal_remedy(limited) else {
+        panic!("a timeout stays an adapter error");
+    };
+    let suggestion = renamed.suggestion.expect("a timeout carries a suggestion");
+    assert!(
+        suggestion.contains("does not help") && !suggestion.starts_with("The search ran out"),
+        "got: {suggestion}"
+    );
+    assert!(
+        suggestion.contains("run snapshot instead"),
+        "got: {suggestion}"
     );
 }
