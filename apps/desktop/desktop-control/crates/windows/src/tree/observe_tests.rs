@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
 fn window_for(pid: u32, instance: &str) -> agent_desktop_core::WindowInfo {
@@ -290,6 +291,226 @@ fn a_still_shell_walk_with_an_exhausted_deadline_returns_the_guidance_error() {
         "an exhausted deadline must stop the loop with plain guidance instead of looping forever"
     );
     assert_eq!(error.code, ErrorCode::ActionFailed);
+}
+
+fn history(since_ms: u64, previous_nodes: Option<u64>) -> crate::adapter::ThinWalkHistory {
+    crate::adapter::ThinWalkHistory {
+        since_activation: Duration::from_millis(since_ms),
+        previous_nodes,
+    }
+}
+
+/// The settle decision itself: only a thin tree whose size held across two
+/// walks after the settle, once the settle is old enough, counts as settled.
+#[test]
+fn a_thin_tree_is_settled_only_when_its_size_held_after_the_settle_window() {
+    let settle = THIN_TREE_SETTLE.as_millis() as u64;
+    assert!(thin_tree_settled(history(settle, Some(25)), 25));
+    assert!(thin_tree_settled(history(settle * 10, Some(25)), 25));
+    assert!(!thin_tree_settled(history(settle - 1, Some(25)), 25));
+    assert!(!thin_tree_settled(history(settle * 10, Some(19)), 25));
+    assert!(!thin_tree_settled(history(settle * 10, None), 25));
+}
+
+/// The settle window is a fixed span, not a share of the deadline: a long
+/// deadline must not keep a small page in the loop.
+#[test]
+fn the_settle_window_is_independent_of_the_deadline_and_shorter_than_a_default_read() {
+    assert!(
+        THIN_TREE_SETTLE
+            < Duration::from_millis(agent_desktop_core::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS) / 2
+    );
+}
+
+fn shell_walk(outcome: WalkOutcome) -> CompletedWalk {
+    CompletedWalk {
+        chromium_root: true,
+        outcome,
+        walk_duration: Duration::ZERO,
+    }
+}
+
+fn finish(
+    adapter: &crate::adapter::WindowsAdapter,
+    window: &agent_desktop_core::WindowInfo,
+    outcome: WalkOutcome,
+) -> Result<ObservedTree, AdapterError> {
+    let request = request_with(Deadline::after(60_000).unwrap(), false);
+    finish_observation(
+        ObservationRoot::Window(window),
+        request,
+        adapter,
+        shell_walk(outcome),
+        |_| Ok(()),
+    )
+}
+
+fn finish_recorded(
+    adapter: &crate::adapter::WindowsAdapter,
+    window: &agent_desktop_core::WindowInfo,
+    outcome: WalkOutcome,
+    recorded: Option<u64>,
+) -> Result<ObservedTree, AdapterError> {
+    let mut request = request_with(Deadline::after(60_000).unwrap(), false);
+    request.observation_mode.settled_thin_nodes = recorded;
+    finish_observation(
+        ObservationRoot::Window(window),
+        request,
+        adapter,
+        shell_walk(outcome),
+        |_| Ok(()),
+    )
+}
+
+fn small_nodes() -> u64 {
+    small_complete_outcome().stats.traversal.nodes_visited
+}
+
+/// The recorded-count decision itself: only exactly the recorded count.
+#[test]
+fn only_exactly_the_recorded_settled_count_skips_the_settle() {
+    assert!(is_recorded_settled_tree(Some(25), 25));
+    assert!(!is_recorded_settled_tree(Some(25), 19));
+    assert!(!is_recorded_settled_tree(Some(25), 26));
+    assert!(!is_recorded_settled_tree(None, 25));
+}
+
+/// A resolution of a ref captured from a settled small tree, whose first walk
+/// comes back at the recorded count, returns that tree at once, with no settle
+/// run for the process, and marks it settled again.
+#[test]
+fn a_first_walk_at_the_recorded_count_returns_without_a_settle() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+
+    let tree = finish_recorded(
+        &adapter,
+        &window,
+        small_complete_outcome(),
+        Some(small_nodes()),
+    )
+    .expect("the recorded settled tree needs no settle");
+    assert_eq!(tree.settled_thin_nodes(), Some(small_nodes()));
+    assert!(
+        !adapter.renderer_activation_attempted(&root_process_identity(ObservationRoot::Window(
+            &window
+        )))
+    );
+}
+
+/// A walk at another count (a renderer back at its shell) or with no record
+/// is settled as for any first read.
+#[test]
+fn a_walk_at_another_count_or_without_a_record_is_settled_as_usual() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+
+    let other = finish_recorded(
+        &adapter,
+        &window,
+        small_complete_outcome(),
+        Some(small_nodes() + 6),
+    )
+    .expect_err("another count is not the recorded tree");
+    assert!(other.requires_renderer_accessibility_activation());
+
+    let none = finish_recorded(&adapter, &window, small_complete_outcome(), None)
+        .expect_err("no record waits for the settle");
+    assert!(none.requires_renderer_accessibility_activation());
+}
+
+/// The tree the settle accepts carries the mark a capture records.
+#[test]
+fn a_tree_taken_after_the_settle_is_marked_with_its_count() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+    settled_long_ago(&adapter, &window);
+
+    finish(&adapter, &window, small_complete_outcome()).expect_err("first walk");
+    let tree = finish(&adapter, &window, small_complete_outcome()).expect("settled");
+    assert_eq!(tree.settled_thin_nodes(), Some(small_nodes()));
+}
+
+fn settled_long_ago(
+    adapter: &crate::adapter::WindowsAdapter,
+    window: &agent_desktop_core::WindowInfo,
+) {
+    let at = std::time::Instant::now()
+        .checked_sub(THIN_TREE_SETTLE * 2)
+        .expect("the clock reaches back two settle windows");
+    adapter.note_renderer_activation_at(root_process_identity(ObservationRoot::Window(window)), at);
+}
+
+/// The reported case: a small page under the shell ceiling, settled long
+/// enough ago, returns its tree on the second walk of the same size instead of
+/// looping until a long deadline runs out.
+#[test]
+fn a_small_page_that_held_its_size_after_the_settle_is_returned_complete() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+    settled_long_ago(&adapter, &window);
+
+    let first = finish(&adapter, &window, small_complete_outcome())
+        .expect_err("the first walk after the settle has nothing to compare with");
+    assert!(first.requires_renderer_accessibility_activation());
+
+    finish(&adapter, &window, small_complete_outcome())
+        .expect("a thin tree that held its size after the settle is the window's tree");
+}
+
+/// A build that is still landing changes the walk's size, so it keeps the
+/// settle loop going however old the settle is.
+#[test]
+fn a_thin_tree_that_changed_size_keeps_the_settle_looping() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+    settled_long_ago(&adapter, &window);
+    let grown = || {
+        crate::tree::walk::walker_fake::walk(
+            &crate::tree::walk::walker_fake::FakeTree::default().with_chain(&[1, 2, 3]),
+            crate::tree::walk::walker_fake::budget(10),
+        )
+    };
+    assert_ne!(
+        grown().stats.traversal.nodes_visited,
+        small_complete_outcome().stats.traversal.nodes_visited
+    );
+    assert!(grown().tree.is_complete());
+
+    finish(&adapter, &window, small_complete_outcome()).expect_err("first walk");
+    let changed = finish(&adapter, &window, grown())
+        .expect_err("a walk whose size changed is a build still landing");
+    assert!(changed.requires_renderer_accessibility_activation());
+}
+
+/// A settle that ran just now does not take a same-size thin tree for the
+/// window's tree yet: the build may not have landed.
+#[test]
+fn a_fresh_settle_keeps_a_same_size_thin_tree_in_the_loop() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+    adapter.note_renderer_activation_attempted(root_process_identity(ObservationRoot::Window(
+        &window,
+    )));
+
+    finish(&adapter, &window, small_complete_outcome()).expect_err("first walk");
+    let second = finish(&adapter, &window, small_complete_outcome())
+        .expect_err("a settle younger than the settle window keeps looping");
+    assert!(second.requires_renderer_accessibility_activation());
+}
+
+/// A walk of a process whose settle never ran records nothing: the first
+/// thin walk after the settle still has nothing to compare with.
+#[test]
+fn a_walk_before_the_settle_is_not_counted_as_a_settled_walk() {
+    let adapter = crate::adapter::WindowsAdapter::new();
+    let window = window_for(1, "gen-1");
+
+    finish(&adapter, &window, small_complete_outcome()).expect_err("before the settle");
+    settled_long_ago(&adapter, &window);
+    let first_after = finish(&adapter, &window, small_complete_outcome())
+        .expect_err("the walk before the settle must not count");
+    assert!(first_after.requires_renderer_accessibility_activation());
 }
 
 /// `walk_fault_error` only folds a failure's structured `details` into the

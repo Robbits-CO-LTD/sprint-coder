@@ -35,7 +35,10 @@ use super::walk::walker_source::{walk_uia_subtree_for, walk_uia_visible_subtree}
 ///    marker keeps being returned - re-arming core's retry loop - for as
 ///    long as the deadline still has room for another walk of the shape
 ///    just measured; only once that room runs out does a still-thin tree
-///    return the plain guidance error core's loop treats as final. The
+///    return the plain guidance error core's loop treats as final. A thin
+///    tree that keeps its size across walks for [`THIN_TREE_SETTLE`] after the
+///    settle is the window's whole tree (a genuinely small page) and is
+///    returned as observed, whatever the deadline still holds. The
 ///    "settle already ran" state is scoped per process, so a batch or
 ///    session observing several processes through one adapter gives every
 ///    process its own settle rather than the first process's activation
@@ -133,15 +136,50 @@ fn finish_observation(
         if request.observation_mode.force_renderer_accessibility {
             return Ok(walk.outcome.tree);
         }
+        let nodes = walk.outcome.stats.traversal.nodes_visited;
+        let settled = |mut tree: ObservedTree| {
+            tree.mark_settled_thin_tree(nodes);
+            Ok(tree)
+        };
+        if is_recorded_settled_tree(request.observation_mode.settled_thin_nodes, nodes) {
+            return settled(walk.outcome.tree);
+        }
         let process = root_process_identity(root);
-        if !adapter.renderer_activation_attempted(&process)
-            || has_room_for_another_walk(request.deadline, walk.walk_duration)
-        {
+        let history = adapter.record_thin_walk(&process, nodes);
+        if history.is_some_and(|history| thin_tree_settled(history, nodes)) {
+            return settled(walk.outcome.tree);
+        }
+        if history.is_none() || has_room_for_another_walk(request.deadline, walk.walk_duration) {
             return Err(chromium::activation_required(&walk.outcome.stats));
         }
         return Err(still_thin_after_settle());
     }
     Ok(walk.outcome.tree)
+}
+
+/// How long after the settle a thin tree that stopped changing is taken for
+/// the window's whole tree. A small page (25 elements in a test window) walks
+/// under the shell ceiling forever, so without this the settle loop re-walked
+/// it until the deadline ran out (38 walks under a 20 s snapshot, every one 25
+/// nodes) and the read was never complete. The renderer's build was measured
+/// landing 0.25 to 0.6 s after the first walk of a cold window, and a build
+/// that lands changes the walk's size, which keeps the loop going.
+pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_secs(1);
+
+/// Whether a thin walk of a process whose settle ran is its settled tree: the
+/// settle ran at least [`THIN_TREE_SETTLE`] ago and the walk before it, also
+/// after the settle, had the same size.
+fn thin_tree_settled(history: crate::adapter::ThinWalkHistory, nodes: u64) -> bool {
+    history.since_activation >= THIN_TREE_SETTLE && history.previous_nodes == Some(nodes)
+}
+
+/// Whether a thin walk is the settled small tree a capture of this same
+/// process recorded (core hands the count over only for the capture's own
+/// process generation): it must come back at exactly that count. A renderer
+/// that dropped its tree back to the shell walks at the shell's count (19 on a
+/// cold Electron test page) and is settled as usual.
+fn is_recorded_settled_tree(recorded: Option<u64>, nodes: u64) -> bool {
+    recorded == Some(nodes)
 }
 
 /// A walk this small can complete near-instantly under a test double, and a

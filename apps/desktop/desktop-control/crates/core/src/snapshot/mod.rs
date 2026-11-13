@@ -87,6 +87,9 @@ pub fn build(
         capture: Some(&capture_proof),
     };
     let mut tree = ref_alloc::allocate_refs(raw_tree, &mut refmap, &config)?;
+    if let Some(nodes) = observed.settled_thin_nodes() {
+        refmap.record_settled_thin_tree(nodes, None);
+    }
 
     crate::snapshot::hints::add_structural_hints(&mut tree);
 

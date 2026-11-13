@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use agent_desktop_core::{
     Action, ActionOps, ActionRequest, AdapterError, DeliveryDisposition, DeliverySemantics,
     ElementState, ErrorCode, IdentifierEvidence, InputOps, InteractionLease, LiveElement,
@@ -201,6 +202,7 @@ fn entry_for(live: &LiveElement) -> RefEntry {
             source_window_bounds_hash: None,
             source_surface: SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: RefScope {
             root_ref: None,

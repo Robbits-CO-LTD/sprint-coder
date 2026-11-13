@@ -17,6 +17,10 @@ pub struct ObservedTree {
     /// ObservationMode::visible_only): every count over this tree then covers
     /// that view, never the whole window.
     pub(crate) visible_scope: bool,
+    /// The node count of a small tree the adapter took for the window's whole
+    /// tree only once it stopped changing after a renderer settle (see
+    /// ObservationMode::settled_thin_nodes). `None` for every other read.
+    pub(crate) settled_thin_nodes: Option<u64>,
 }
 
 impl ObservedTree {
@@ -37,6 +41,7 @@ impl ObservedTree {
             structurally_complete,
             logical_depths: Vec::new(),
             visible_scope: false,
+            settled_thin_nodes: None,
         };
         for root in roots {
             let index = tree.append(root, RefPath::new(), 0)?;
@@ -57,6 +62,17 @@ impl ObservedTree {
 
     pub(crate) fn is_visible_scope(&self) -> bool {
         self.visible_scope
+    }
+
+    /// Marks a small tree, `nodes` nodes, that the adapter returned as the
+    /// window's whole tree after a renderer settle. Only the adapter that
+    /// settled it may call this.
+    pub fn mark_settled_thin_tree(&mut self, nodes: u64) {
+        self.settled_thin_nodes = Some(nodes);
+    }
+
+    pub fn settled_thin_nodes(&self) -> Option<u64> {
+        self.settled_thin_nodes
     }
 
     pub fn is_complete(&self) -> bool {

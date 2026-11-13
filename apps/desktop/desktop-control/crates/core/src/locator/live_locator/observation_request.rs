@@ -43,6 +43,12 @@ pub struct ObservationMode {
     /// honours this marks the tree it returns (`ObservedTree::mark_visible_scope`);
     /// one that cannot read this way must fail rather than return a whole tree.
     pub visible_only: bool,
+    /// The node count of the small tree a capture of this same process took
+    /// for the window's whole tree once it settled (`RefSource::settled_thin_nodes`).
+    /// A walk that comes back at exactly this count is that tree again, so an
+    /// adapter need not wait out a renderer settle for it; any other count is
+    /// settled as usual.
+    pub settled_thin_nodes: Option<u64>,
 }
 
 impl ObservationRequest {
@@ -90,6 +96,7 @@ impl ObservationRequest {
                 force_renderer_accessibility: options.force_renderer_accessibility,
                 identity_only: false,
                 visible_only: false,
+                settled_thin_nodes: None,
             },
         }
     }
