@@ -21011,7 +21011,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       parsedSkills.some(({ selection }) => selection.kind === 'team') ||
       (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId)) ||
       (isExistingTeamFollowupInput(text) &&
-        (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null));
+        (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null)) ||
+      this.taskHasHiringTeam(taskId);
     const skillCatalogContent = this.skillCatalogContextProvider?.(
       parsedSkills.map(({ selection }) => selection),
       shouldSealBuiltinTeamSkill,
@@ -21172,6 +21173,27 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }
     imageAttachmentMetadataListSchema.parse(ordered.map(toImageAttachmentMetadata));
     return ordered;
+  }
+
+  /**
+   * Whether this Task's Team has hired a Worker and can still take Team work. Every later Turn
+   * of such a Task is a Team Turn whatever its wording: the text classifiers above miss ordinary
+   * follow-ups (「もう一度お願いします。新しく Worker を 1 人雇い…」), and the always-on system
+   * prompt then makes the Leader refuse for want of the Skill. A Team without a Worker (the
+   * Team view was merely opened) and a failed Team (it accepts no new Worker) are left to the
+   * wording. A completed Team still counts: hiring re-forms it.
+   */
+  private taskHasHiringTeam(taskId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS present
+         FROM teams team
+         JOIN agents worker ON worker.team_id = team.id AND worker.kind = 'worker'
+         WHERE team.task_id = ? AND team.state <> 'failed'
+         LIMIT 1`,
+      )
+      .get(taskId) as { present: number } | undefined;
+    return row !== undefined;
   }
 
   private latestTurnIncludedBuiltinTeamSkill(taskId: string): boolean {

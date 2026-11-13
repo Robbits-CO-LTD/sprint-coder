@@ -782,6 +782,14 @@ export class ManagedCodingHarness {
   }
 
   /**
+   * Stops the Task's desktop-control runs, the foreground ones and those gone on in the background,
+   * as a canceled Turn's are stopped (when the Task is archived). Its other commands go on.
+   */
+  async stopTaskDesktopControl(taskId: string): Promise<void> {
+    await this.commandSessions?.terminateTaskDesktopControl(taskId);
+  }
+
+  /**
    * Background commands survive finishTurn. Observe every session whose sealed Workspace root
    * overlaps this Turn's snapshot, including previous Turns and other Tasks sharing a root.
    */

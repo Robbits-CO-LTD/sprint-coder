@@ -26,7 +26,7 @@ import {
   turnQueueInputSchema,
   turnStartInputSchema,
 } from '@sprint-coder/contracts';
-import { requiresTeamWorkersInput } from './team-tools';
+import { isTeamScenarioInput, requiresTeamWorkersInput } from './team-tools';
 import {
   ToolRegistry,
   createExecutionSpec,
@@ -2248,6 +2248,119 @@ if (runsWithElectronAbi)
           .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
       ).toHaveLength(1);
       persistence.close();
+    });
+
+    // The second request of a real Team run (2026-11-13). It names no Team word, so the text
+    // classifier rejects it; only the Task's durable Team record can tell that it is Team work.
+    const FOLLOWUP_HIRE_WITHOUT_TEAM_WORD =
+      'もう一度お願いします。新しく Worker を 1 人雇い、デスクトップ操作を任せてください（雇う時に desktopControl: true を付ける。役割名は「teamA再確認」）。その Worker は、タイトルが teamA の窓（teamaapp.exe）の A-1 のボタンを 1 回だけ押し、最後に pressed の表示を 1 回読んで報告します。';
+
+    function hireFollowupWorker(persistence: SqlitePersistenceClient, taskId: string) {
+      const team = persistence.promoteTaskToTeam(taskId);
+      persistence.transitionTeamState(team.id, 'forming');
+      persistence.registerTeamWorker({
+        teamId: team.id,
+        role: 'teamA担当',
+        objective: 'Press the A-1 button once.',
+        parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      return team;
+    }
+
+    function sealedTeamSkillCount(
+      persistence: SqlitePersistenceClient,
+      taskId: string,
+      turnId: string,
+    ): number {
+      return persistence
+        .prepareContext(taskId, turnId)
+        .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID).length;
+    }
+
+    it.each(['forming', 'active', 'completed'] as const)(
+      'seals Team capability for any later Turn of a Task whose %s Team has hired a Worker',
+      (state) => {
+        expect(isTeamScenarioInput(FOLLOWUP_HIRE_WITHOUT_TEAM_WORD)).toBe(false);
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask('team follow-up hire');
+        try {
+          const initial = persistence.startTurn(
+            task.id,
+            'チームで進めてください。Worker を 3 人雇って',
+          );
+          expect(initial.teamTurn).toBe(true);
+          const team = hireFollowupWorker(persistence, task.id);
+          if (state !== 'forming') persistence.transitionTeamState(team.id, 'active');
+          if (state === 'completed') {
+            persistence.transitionTeamState(team.id, 'winding_down');
+            persistence.transitionTeamState(team.id, 'completed');
+          }
+          finishTurn(persistence, task.id, initial.turnId);
+
+          const followup = persistence.startTurn(task.id, FOLLOWUP_HIRE_WITHOUT_TEAM_WORD);
+          expect(followup.teamTurn).toBe(true);
+          expect(sealedTeamSkillCount(persistence, task.id, followup.turnId)).toBe(1);
+          finishTurn(persistence, task.id, followup.turnId);
+
+          // The answer comes from the Team record, not from the previous Turn's seal or wording.
+          const ordinary = persistence.startTurn(task.id, '通常の依頼です');
+          expect(ordinary.teamTurn).toBe(true);
+          finishTurn(persistence, task.id, ordinary.turnId);
+          persistence.queueInput(task.id, FOLLOWUP_HIRE_WITHOUT_TEAM_WORD, 'team-followup-queue');
+        } finally {
+          persistence.close();
+        }
+
+        const reopened = new SqlitePersistenceClient(path);
+        try {
+          const queued = reopened.startNextQueued(task.id)?.started;
+          if (queued === undefined) throw new Error('Queued turn was not accepted');
+          expect(queued.teamTurn).toBe(true);
+          expect(sealedTeamSkillCount(reopened, task.id, queued.turnId)).toBe(1);
+        } finally {
+          reopened.close();
+        }
+      },
+    );
+
+    it('keeps Team capability out of Tasks without a hired Team, and out of a failed Team', () => {
+      const { persistence } = createPersistence();
+      try {
+        // An ordinary Task never gains the Team Skill from the follow-up wording alone.
+        const plain = persistence.createTask('ordinary task');
+        const plainTurn = persistence.startTurn(plain.id, FOLLOWUP_HIRE_WITHOUT_TEAM_WORD);
+        expect(plainTurn.teamTurn).toBe(false);
+        expect(sealedTeamSkillCount(persistence, plain.id, plainTurn.turnId)).toBe(0);
+        finishTurn(persistence, plain.id, plainTurn.turnId);
+        expect(persistence.startTurn(plain.id, '通常の依頼です').teamTurn).toBe(false);
+
+        // Opening the Team view promotes a draft Team with no Worker: that alone is not Team work.
+        const draft = persistence.createTask('draft team');
+        persistence.promoteTaskToTeam(draft.id);
+        const draftTurn = persistence.startTurn(draft.id, FOLLOWUP_HIRE_WITHOUT_TEAM_WORD);
+        expect(draftTurn.teamTurn).toBe(false);
+        expect(sealedTeamSkillCount(persistence, draft.id, draftTurn.turnId)).toBe(0);
+
+        // A failed Team accepts no new Worker; its Task falls back to the wording of each Turn.
+        const failed = persistence.createTask('failed team');
+        const failedTeam = hireFollowupWorker(persistence, failed.id);
+        persistence.transitionTeamState(failedTeam.id, 'failed');
+        const failedTurn = persistence.startTurn(failed.id, '通常の依頼です');
+        expect(failedTurn.teamTurn).toBe(false);
+        expect(sealedTeamSkillCount(persistence, failed.id, failedTurn.turnId)).toBe(0);
+        finishTurn(persistence, failed.id, failedTurn.turnId);
+        expect(persistence.startTurn(failed.id, 'チームで進めて').teamTurn).toBe(true);
+
+        // Another Task's Team never leaks into an unrelated Task.
+        const hired = persistence.createTask('hired team');
+        hireFollowupWorker(persistence, hired.id);
+        const unrelated = persistence.createTask('unrelated task');
+        expect(persistence.startTurn(unrelated.id, '通常の依頼です').teamTurn).toBe(false);
+      } finally {
+        persistence.close();
+      }
     });
 
     it('derives Team guidance at dequeue time for a legacy v55 queued payload', () => {
