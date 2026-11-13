@@ -161,6 +161,73 @@ it('keeps captured unconfirmed sessions without canceling later commands', async
   }
 });
 
+describe('stopping a Task’s desktop-control runs (when the Task is archived)', () => {
+  /** Whether the process with this id is still there. */
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  };
+
+  it('stops the Task’s desktop-control processes and leaves its other commands and other Tasks’', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-archive-'));
+    roots.push(workspace);
+    // A process that runs until it is stopped (a long `wait`, a dev server).
+    const spec = await prepareExecutionSpec({
+      workspacePath: workspace,
+      executable: process.execPath,
+      argv: ['-e', 'setInterval(() => undefined, 1000)'],
+    });
+    const sessions = new ManagedCommandSessions(new CommandRunner());
+    const owner = { taskId: 'task-1', turnId: 'turn-1' };
+    const otherOwner = { taskId: 'task-2', turnId: 'turn-2' };
+    const pids: number[] = [];
+    const start = (on: typeof owner, desktopControl: boolean) => {
+      let pid = 0;
+      return sessions
+        .start(spec, on, {
+          desktopControl,
+          onStarted: (started) => {
+            pid = started.pid;
+            pids.push(pid);
+          },
+        })
+        .then((snapshot) => ({ snapshot, pid }));
+    };
+    try {
+      const desktop = await start(owner, true);
+      const build = await start(owner, false);
+      const otherDesktop = await start(otherOwner, true);
+      expect([desktop, build, otherDesktop].map(({ snapshot }) => snapshot.state)).toEqual([
+        'running',
+        'running',
+        'running',
+      ]);
+      expect(alive(desktop.pid)).toBe(true);
+
+      await sessions.terminateTaskDesktopControl('task-1');
+      expect(sessions.poll(desktop.snapshot.sessionId, owner)).toMatchObject({
+        state: 'canceled',
+        result: { canceled: true },
+      });
+      // Resolved only once its process had ended: none is left behind.
+      expect(alive(desktop.pid)).toBe(false);
+      expect(sessions.poll(build.snapshot.sessionId, owner).state).toBe('running');
+      expect(sessions.poll(otherDesktop.snapshot.sessionId, otherOwner).state).toBe('running');
+      expect(alive(build.pid)).toBe(true);
+      expect(alive(otherDesktop.pid)).toBe(true);
+      // Again, with nothing left to stop.
+      await expect(sessions.terminateTaskDesktopControl('task-1')).resolves.toBeUndefined();
+    } finally {
+      await sessions.dispose();
+    }
+    for (const pid of pids) expect(alive(pid)).toBe(false);
+  });
+});
+
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'ManagedCommandSessions',
   () => {

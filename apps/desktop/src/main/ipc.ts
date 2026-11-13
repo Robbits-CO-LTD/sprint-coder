@@ -3129,9 +3129,7 @@ export class IpcRouter {
           IPC_CHANNELS.tasksSetArchived,
           () => this.persistence.setArchived(input.taskId, input.archived),
         ).value;
-        // An archived Task's desktop-control session (and its cursors) ends; a later run of the
-        // Task starts a new one.
-        if (input.archived) void endDesktopControlSession(input.taskId);
+        if (input.archived) void this.endArchivedTaskDesktopControl(input.taskId);
         return result;
       },
     );
@@ -4108,6 +4106,17 @@ export class IpcRouter {
       },
     );
     this.window.webContents.once('destroyed', () => this.closeAllPorts());
+  }
+
+  /**
+   * An archived Task's desktop-control runs stop, those gone on in the background included, as a
+   * canceled Turn's do, and then its desktop-control session (and its cursors) ends; a later run of
+   * the Task starts a new one. The Task's other commands, its Turn and its Team are left as they are.
+   */
+  private async endArchivedTaskDesktopControl(taskId: string): Promise<void> {
+    await endDesktopControlSession(taskId, () =>
+      this.managedCodingHarness.stopTaskDesktopControl(taskId),
+    );
   }
 
   private async policyEpochChanged(taskId: string, policyEpoch: number): Promise<void> {

@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolBroker, type ManagedToolLifecycleEvent } from './tool-broker';
-import { ToolRegistry, type Capability } from '@sprint-coder/domain';
+import {
+  ToolRegistry,
+  transitionBackgroundActivity,
+  type BackgroundActivityState,
+  type Capability,
+} from '@sprint-coder/domain';
 import {
   COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
@@ -22,10 +27,12 @@ import * as commandRunnerModule from './command-runner';
 import * as desktopControlModule from './desktop-control';
 import {
   configureDesktopControlTeamCursors,
+  endDesktopControlSession,
   endDesktopControlSessions,
   markDesktopControlWorker,
   resetDesktopControlSessions,
 } from './desktop-control-session';
+import { desktopControlQueueState } from './desktop-control-queue';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -1053,6 +1060,215 @@ describe('desktop control Workspace roots', () => {
       await sessions.dispose();
     }
   });
+
+  it.each([
+    ['on', true],
+    ['off', false],
+  ] as const)(
+    'stops the Task’s desktop-control runs gone on in the background when the Task is archived (cursors %s), and leaves its other commands',
+    async (_name, cursors) => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-desktop-archive-'));
+      roots.push(workspace);
+      const registry = new ToolRegistry();
+      registry.register(MANAGED_EXEC_COMMAND_TOOL);
+      const { boundary, commandRows } = createCommandBoundary(workspace);
+      // The background activities as persistence keeps them, with the same transitions.
+      const activities = new Map<string, BackgroundActivityState>();
+      const persistence = boundary.persistence as unknown as Record<string, unknown>;
+      persistence['createBackgroundActivity'] = ({ id }: { id: string }) => {
+        activities.set(id, 'registered');
+        return {} as never;
+      };
+      persistence['transitionBackgroundActivity'] = (
+        id: string,
+        state: BackgroundActivityState,
+      ) => {
+        activities.set(id, transitionBackgroundActivity(activities.get(id)!, state));
+        return {} as never;
+      };
+      persistence['completeBackgroundActivity'] = ({
+        activityId,
+        outcome,
+      }: {
+        activityId: string;
+        outcome: 'completed' | 'failed';
+      }) => {
+        if (activities.get(activityId) !== 'running')
+          throw new Error('Background activity is not running');
+        activities.set(activityId, outcome);
+        return {} as never;
+      };
+      // What `setArchived` does to the Task's activities before Main stops anything
+      // (`quarantineStaleBackgroundInTransaction`).
+      const quarantine = () => {
+        for (const [id, state] of activities)
+          if (state === 'registered' || state === 'running') activities.set(id, 'canceled');
+      };
+      const order: string[] = [];
+      const signals = new Map<string, AbortSignal>();
+      const runner = new CommandRunner({ sandboxed: true });
+      const run = vi.spyOn(runner, 'run').mockImplementation(async (spec, options = {}) => {
+        const own = spec.argv[0] === 'session' || spec.argv[0] === 'cursor-overlay';
+        if (own) {
+          order.push(spec.argv.slice(0, 2).join(' '));
+          const text = JSON.stringify({ ok: true, data: { session_id: 'run-archive' } });
+          await options.onBatch?.([{ seq: 0, stream: 'stdout', text, byteLength: text.length }]);
+          return {
+            executionId: 'own',
+            exitCode: 0,
+            signal: null,
+            canceled: false,
+            termination: 'natural' as const,
+            durationMs: 1,
+            outputBytes: 0,
+            truncated: false,
+          };
+        }
+        options.beforeSpawn?.();
+        options.onStarted?.({
+          executionId: spec.argv.join(' '),
+          pid: 1,
+          startedAt: Date.now(),
+          processStartIdentity: 'identity',
+          executionImageDigest: 'a'.repeat(64),
+          executionImageIdentity: 'identity',
+        });
+        // A long `wait` (or a build): it ends only when it is stopped.
+        signals.set(spec.argv.join(' '), options.signal!);
+        await new Promise<void>((resolve) =>
+          options.signal!.addEventListener('abort', () => resolve(), { once: true }),
+        );
+        order.push(`stopped ${spec.argv.join(' ')}`);
+        return {
+          executionId: spec.argv.join(' '),
+          exitCode: null,
+          signal: null,
+          canceled: true,
+          termination: 'forced' as const,
+          durationMs: 1,
+          outputBytes: 0,
+          truncated: false,
+        };
+      });
+      const sessions = new ManagedCommandSessions(runner);
+      const events: ManagedToolLifecycleEvent[] = [];
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        () => ({
+          decision: 'allow',
+          reason: 'test',
+          beforeExecute: () => true,
+          approvalDecision: 'allow_once',
+        }),
+        (event) => void events.push(event),
+      );
+      // A run goes on in the background after 50 ms, as the Leader's does after 10 seconds.
+      registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions, 50);
+      const owner = {
+        taskId: `task-desktop-archive-${_name}`,
+        turnId: `turn-desktop-archive-${_name}`,
+        workspaceId: 'workspace-desktop-archive',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'codex');
+      let desktopNow = true;
+      const desktop = vi
+        .spyOn(desktopControlModule, 'isDesktopControlExecutable')
+        .mockImplementation(() => desktopNow);
+      const dispatch = (callId: string, argv: string[]) =>
+        broker.dispatch({
+          ...owner,
+          callId,
+          providerName: 'exec_command',
+          input: { executable: process.execPath, argv, purpose: 'archive' },
+        }) as Promise<Record<string, unknown>>;
+      const stateOf = (callId: string) =>
+        events.filter((event) => event.callId === callId).map(({ state }) => state);
+      try {
+        configureDesktopControlTeamCursors(cursors);
+        const long = await dispatch('desktop-long', [
+          'wait',
+          '--element',
+          '@s1:e9',
+          '--predicate',
+          'actionable',
+          '--timeout',
+          '120000',
+        ]);
+        expect(long).toMatchObject({ state: 'running' });
+        expect(stateOf('desktop-long').at(-1)).toBe('backgrounded');
+        desktopNow = false;
+        const build = await dispatch('build', ['-e', 'build']);
+        expect(build).toMatchObject({ state: 'running' });
+        desktopNow = true;
+        // With the cursors on, another run of the Task waits for its turn behind the long one.
+        const waiting = cursors
+          ? dispatch('desktop-waiting', ['click', '@s1:e1']).then(
+              () => 'started',
+              (error: unknown) => (error as Error).message,
+            )
+          : undefined;
+        if (cursors)
+          await vi.waitFor(() =>
+            expect(desktopControlQueueState(owner.taskId)).toEqual({ busy: true, waiting: 1 }),
+          );
+
+        // The Task is archived: persistence first, then Main (`endArchivedTaskDesktopControl`).
+        quarantine();
+        await endDesktopControlSession(owner.taskId, () =>
+          sessions.terminateTaskDesktopControl(owner.taskId),
+        );
+
+        // The background desktop-control run was stopped, as a canceled Turn's is.
+        expect(
+          signals.get('wait --element @s1:e9 --predicate actionable --timeout 120000')?.aborted,
+        ).toBe(true);
+        const longSession = long['sessionId'] as string;
+        expect(sessions.poll(longSession, owner).state).toBe('canceled');
+        // The waiting run never started.
+        if (waiting !== undefined) {
+          await expect(waiting).resolves.toContain('session が終わったため');
+          expect(signals.has('click @s1:e1')).toBe(false);
+        }
+        // The session ended only after the stopped run had ended.
+        expect(order).toEqual(
+          cursors
+            ? [
+                'session gc',
+                'session start',
+                'cursor-overlay enable',
+                'stopped wait --element @s1:e9 --predicate actionable --timeout 120000',
+                'session end',
+              ]
+            : ['stopped wait --element @s1:e9 --predicate actionable --timeout 120000'],
+        );
+        // Recorded once, as canceled, and the call ends canceled, not failed.
+        await vi.waitFor(() => expect(stateOf('desktop-long').at(-1)).toBe('canceled'));
+        expect(stateOf('desktop-long').filter((state) => state === 'canceled')).toHaveLength(1);
+        const completed = vi
+          .mocked(boundary.persistence.completeCommand)
+          .mock.calls.filter(([{ state }]) => state === 'canceled');
+        expect(completed).toHaveLength(1);
+        expect([...commandRows.values()].filter(({ state }) => state === 'canceled')).toHaveLength(
+          1,
+        );
+        expect(activities.get(longSession)).toBe('canceled');
+        // The Task's other command goes on, as before.
+        const buildSession = build['sessionId'] as string;
+        expect(sessions.poll(buildSession, owner).state).toBe('running');
+        expect(signals.get('-e build')?.aborted).toBe(false);
+        sessions.terminate(buildSession, owner);
+        await sessions.wait(buildSession, owner);
+      } finally {
+        desktop.mockRestore();
+        resetDesktopControlSessions();
+        run.mockRestore();
+        await broker.dispose();
+        await sessions.dispose();
+      }
+    },
+  );
 
   it('bounds the wait for a Worker’s desktop-control run by the timeouts it names', () => {
     expect(desktopControlWorkerWaitMs(['click', '@s1:e1'])).toBe(60_000);
