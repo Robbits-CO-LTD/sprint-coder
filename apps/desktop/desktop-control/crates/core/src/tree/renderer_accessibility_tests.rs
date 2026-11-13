@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::adapter::{ActionOps, InputOps, ObservationOps, SystemOps};
 use std::sync::{
@@ -397,4 +398,163 @@ fn the_credit_for_switch_time_stays_inside_an_inherited_deadline() {
         parent.remaining(),
         "the resumed walk outlives the deadline the command inherited"
     );
+}
+
+/// Records the settle each walk was sent, answering three thin walks of
+/// `nodes` before a tree.
+struct SettleRecorder {
+    nodes: [u64; 3],
+    seen: std::sync::Mutex<Vec<Option<crate::locator::live_locator::SettleProgress>>>,
+}
+
+impl ObservationOps for SettleRecorder {
+    fn observe_tree(
+        &self,
+        root: ObservationRoot<'_>,
+        request: &ObservationRequest,
+    ) -> Result<ObservedTree, crate::AdapterError> {
+        let mut seen = self.seen.lock().unwrap();
+        seen.push(request.observation_mode.settle);
+        if let Some(nodes) = self.nodes.get(seen.len() - 1) {
+            let mut error = crate::AdapterError::renderer_accessibility_activation_required("thin");
+            if let Some(details) = error
+                .details
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                details.insert("nodes_observed".into(), serde_json::json!(nodes));
+            }
+            return Err(error);
+        }
+        crate::adapter::observed_tree(
+            &root,
+            crate::AccessibilityNode {
+                ref_id: None,
+                role: "window".into(),
+                identity: Default::default(),
+                presentation: Default::default(),
+                children_count: None,
+                subtree_truncated: false,
+                children: Vec::new(),
+            },
+        )
+    }
+}
+
+impl ActionOps for SettleRecorder {}
+impl InputOps for SettleRecorder {}
+impl SystemOps for SettleRecorder {
+    fn acquire_interaction_lease(
+        &self,
+        deadline: crate::Deadline,
+    ) -> Result<crate::InteractionLease, crate::AdapterError> {
+        crate::InteractionLease::guarded(deadline, ())
+    }
+
+    fn activate_renderer_accessibility(
+        &self,
+        _process: crate::ProcessIdentity,
+        _lease: &crate::InteractionLease,
+    ) -> Result<(), crate::AdapterError> {
+        Ok(())
+    }
+}
+
+/// The settle belongs to one observation: the walk before activation carries
+/// none, each walk after it carries the activation time and the size of the
+/// walk before it (the walk before activation not counted), and a new
+/// observation starts without one even when its request carried one.
+#[test]
+fn the_settle_is_scoped_to_one_observation_and_tracks_its_own_walks() {
+    let adapter = SettleRecorder {
+        nodes: [19, 25, 25],
+        seen: std::sync::Mutex::new(Vec::new()),
+    };
+    let window = renderer_window();
+    let mut request = snapshot_request(crate::Deadline::after(60_000).unwrap());
+    request.observation_mode.settle = Some(crate::locator::live_locator::SettleProgress {
+        activated_at: std::time::Instant::now(),
+        previous_thin_nodes: Some(25),
+        stable_since: None,
+    });
+
+    observe_tree(&adapter, ObservationRoot::Window(&window), &request, None)
+        .expect("the fourth walk answers");
+
+    let seen = adapter.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(
+        seen[0], None,
+        "a caller's settle never reaches the first walk"
+    );
+    let after = seen[1].expect("the walk after activation carries the settle");
+    assert_eq!(
+        after.previous_thin_nodes, None,
+        "the pre-activation walk is not counted"
+    );
+    assert_eq!(seen[2].unwrap().previous_thin_nodes, Some(25));
+    assert_eq!(seen[3].unwrap().previous_thin_nodes, Some(25));
+    assert_eq!(seen[2].unwrap().activated_at, after.activated_at);
+    assert_eq!(seen[3].unwrap().activated_at, after.activated_at);
+    assert_eq!(
+        after.stable_since, None,
+        "no size has been seen after activation"
+    );
+    let first_seen = seen[2]
+        .unwrap()
+        .stable_since
+        .expect("the first size after activation starts the span");
+    assert_eq!(
+        seen[3].unwrap().stable_since,
+        Some(first_seen),
+        "an unchanged size keeps its start"
+    );
+}
+
+#[test]
+fn a_thin_walk_without_a_size_leaves_nothing_to_compare_with() {
+    let progress = crate::locator::live_locator::SettleProgress {
+        activated_at: std::time::Instant::now(),
+        previous_thin_nodes: Some(25),
+        stable_since: Some(std::time::Instant::now()),
+    };
+    let error = crate::AdapterError::new(crate::ErrorCode::ActionNotSupported, "thin");
+    let next = settle_after_walk(progress, &error, std::time::Instant::now());
+    assert_eq!(next.previous_thin_nodes, None);
+    assert_eq!(next.stable_since, None);
+}
+
+fn thin_error(nodes: u64) -> crate::AdapterError {
+    let mut error = crate::AdapterError::renderer_accessibility_activation_required("thin");
+    if let Some(details) = error
+        .details
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        details.insert("nodes_observed".into(), serde_json::json!(nodes));
+    }
+    error
+}
+
+/// The span a size held starts at the end of the first walk that saw it, is
+/// kept while the size stays, and starts over at the end of the walk that saw
+/// a new size.
+#[test]
+fn the_span_a_size_held_restarts_when_the_size_changes() {
+    let start = std::time::Instant::now();
+    let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+    let progress = crate::locator::live_locator::SettleProgress {
+        activated_at: start,
+        previous_thin_nodes: None,
+        stable_since: None,
+    };
+
+    let first = settle_after_walk(progress, &thin_error(20), at(205));
+    assert_eq!(first.stable_since, Some(at(205)));
+    let same = settle_after_walk(first, &thin_error(20), at(415));
+    assert_eq!(same.stable_since, Some(at(205)));
+    let changed = settle_after_walk(same, &thin_error(25), at(625));
+    assert_eq!(changed.stable_since, Some(at(625)));
+    assert_eq!(changed.previous_thin_nodes, Some(25));
+    assert_eq!(changed.activated_at, start);
 }

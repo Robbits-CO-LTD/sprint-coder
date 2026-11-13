@@ -11,7 +11,6 @@ use std::time::Duration;
 #[cfg(test)]
 use self::launch_attach::matching_processes;
 use self::launch_attach::prepare;
-use super::app_ops::ProcessRow;
 use super::launch_path::{
     child_environment_block, image_file_name, launch_identifier, validate_launch_options,
 };
@@ -595,13 +594,6 @@ fn to_wide_str(value: &str) -> Result<Vec<u16>, AdapterError> {
     let mut wide: Vec<u16> = value.encode_utf16().collect();
     wide.push(0);
     Ok(wide)
-}
-
-fn ambiguous_apps(matches: &[ProcessRow]) -> AdapterError {
-    AdapterError::ambiguous_process_target(
-        "More than one application instance matches the launch target",
-        &matches.iter().map(|row| row.pid).collect::<Vec<_>>(),
-    )
 }
 
 fn before_launch(error: AdapterError) -> AdapterError {

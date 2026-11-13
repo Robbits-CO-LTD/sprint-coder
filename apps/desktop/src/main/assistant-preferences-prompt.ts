@@ -1,6 +1,17 @@
 import { assistantPreferencesSchema, type AssistantPreferences } from '@sprint-coder/contracts';
 
 /**
+ * 返事の仕方の fragment の id の接頭辞。足す側（Leader の文脈を組む persistence）と、
+ * 除く側（Worker へ文脈を引き継ぐ所）がこの 1 つを共有する。
+ */
+export const ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX = 'settings:assistant-preferences:';
+
+/** 返事の仕方は利用者への返事のためのもので、Leader が読む Worker の報告には効かせない。 */
+export function isAssistantPreferencesFragment({ id }: { id: string }): boolean {
+  return id.startsWith(ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX);
+}
+
+/**
  * 呼び名は利用者が自由に入れる文字列なので、指示として働かないように整える。
  * 改行・制御文字・書式文字（双方向の上書きなど）は空白に置き換え、tag を作れる `<` `>` は落とす。
  */

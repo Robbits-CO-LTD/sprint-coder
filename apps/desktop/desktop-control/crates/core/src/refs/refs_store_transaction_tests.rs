@@ -36,6 +36,7 @@ fn entry(name: &str, root_ref: Option<&str>) -> crate::RefEntry {
             source_window_bounds_hash: None,
             source_surface: crate::SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: RefScope {
             root_ref: root_ref.map(str::to_string),

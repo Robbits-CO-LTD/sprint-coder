@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::{
     AppError, PlatformAdapter,
     locator::live_locator::{ObservationRequest, ObservationRoot, ObservedTree},
@@ -24,16 +25,27 @@ pub(crate) fn observe_tree(
     lease: Option<&crate::InteractionLease>,
 ) -> Result<ObservedTree, AppError> {
     let mut request = *request;
-    let mut activated = false;
+    // The settle belongs to this observation alone: whatever a caller's
+    // request carried, it starts unactivated.
+    request.observation_mode.settle = None;
     let mut retry_delay = INITIAL_ACTIVATION_RETRY;
     loop {
         match adapter.observe_tree(root, &request) {
             Ok(tree) => return Ok(tree),
             Err(error) if error.requires_renderer_accessibility_activation() => {
-                if !activated {
-                    request.deadline = activate(adapter, root, request.deadline, lease)?;
-                    activated = true;
-                }
+                request.observation_mode.settle = Some(match request.observation_mode.settle {
+                    None => {
+                        request.deadline = activate(adapter, root, request.deadline, lease)?;
+                        crate::locator::live_locator::SettleProgress {
+                            activated_at: std::time::Instant::now(),
+                            previous_thin_nodes: None,
+                            stable_since: None,
+                        }
+                    }
+                    Some(progress) => {
+                        settle_after_walk(progress, &error, std::time::Instant::now())
+                    }
+                });
                 let remaining = request.deadline.remaining();
                 if remaining.is_zero() {
                     return Err(request.deadline.timeout_error().into());
@@ -43,6 +55,35 @@ pub(crate) fn observe_tree(
             }
             Err(error) => return Err(AppError::Adapter(error)),
         }
+    }
+}
+
+/// The settle after one more thin walk past the activation, which ended at
+/// `walk_ended`: the walk's size, as the adapter reported it, becomes the one
+/// the next walk is compared with. When the size is the one the walks before
+/// it had, the time that size was first seen stands; a new size is first seen
+/// at the end of this walk (the latest it can have appeared, so the span it
+/// held is never overstated). A walk that reported no size leaves nothing to
+/// compare with.
+pub(crate) fn settle_after_walk(
+    progress: crate::locator::live_locator::SettleProgress,
+    error: &crate::AdapterError,
+    walk_ended: std::time::Instant,
+) -> crate::locator::live_locator::SettleProgress {
+    let nodes = error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("nodes_observed"))
+        .and_then(serde_json::Value::as_u64);
+    let stable_since = match (nodes, progress.previous_thin_nodes) {
+        (Some(nodes), Some(previous)) if nodes == previous => progress.stable_since,
+        (Some(_), _) => Some(walk_ended),
+        (None, _) => None,
+    };
+    crate::locator::live_locator::SettleProgress {
+        previous_thin_nodes: nodes,
+        stable_since,
+        ..progress
     }
 }
 

@@ -165,7 +165,7 @@ impl Process {
         unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }
     }
 
-    fn created(&self) -> Option<u64> {
+    pub(super) fn created(&self) -> Option<u64> {
         self.lifetime().map(|(created, _)| created)
     }
 
@@ -200,7 +200,7 @@ impl Drop for Process {
 /// that cannot be taken reads as no processes: the launch then finds no
 /// descendant and reports no window rather than failing a launch that started.
 #[cfg(target_os = "windows")]
-fn parent_rows() -> Vec<(ProcessId, ProcessId)> {
+pub(super) fn parent_rows() -> Vec<(ProcessId, ProcessId)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -240,7 +240,7 @@ impl Process {
         false
     }
 
-    fn created(&self) -> Option<u64> {
+    pub(super) fn created(&self) -> Option<u64> {
         None
     }
 
@@ -250,7 +250,7 @@ impl Process {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn parent_rows() -> Vec<(ProcessId, ProcessId)> {
+pub(super) fn parent_rows() -> Vec<(ProcessId, ProcessId)> {
     Vec::new()
 }
 

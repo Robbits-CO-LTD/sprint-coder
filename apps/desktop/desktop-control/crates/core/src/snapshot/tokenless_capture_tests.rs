@@ -222,6 +222,43 @@ fn a_cut_short_read_of_a_window_with_a_view_presents_the_visible_elements() {
     );
 }
 
+static WHOLE_READ_GIVEN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn cut_short_noting_budget(
+    request: &ObservationRequest,
+    tree: AccessibilityNode,
+) -> Result<AccessibilityNode, AdapterError> {
+    let given = u64::try_from(request.deadline.remaining().as_millis()).unwrap_or(u64::MAX);
+    WHOLE_READ_GIVEN_MS.store(given, Ordering::SeqCst);
+    cut_short(request, tree)
+}
+
+/// A long `--timeout-ms` does not stretch the whole read before the switch to
+/// the visible elements: under 20 s it is given the cap, not 15 s, and the
+/// switch and its proof are the ones a default snapshot makes.
+#[test]
+fn a_long_deadline_gives_the_whole_read_no_more_than_the_cap() {
+    let _guard = HomeGuard::new();
+    let adapter = CaptureAdapter::new(anchored_window());
+    adapter.fault_whole_read(cut_short_noting_budget);
+    adapter.serve_view();
+
+    let captured = snapshot_within(&adapter, 20_000);
+    let given = WHOLE_READ_GIVEN_MS.load(Ordering::SeqCst);
+    assert!(given > 0, "the whole read ran");
+    assert!(
+        u128::from(given) <= super::window_capture::WHOLE_READ_CAP.as_millis(),
+        "the whole read was given {given} ms"
+    );
+    assert!(captured.visible_scope);
+    assert!(captured.identity_unproven.is_none());
+    assert!(
+        entries(&captured.refmap)
+            .iter()
+            .all(|entry| !entry.identity.unique_at_capture && entry.identity.ancestors.is_empty())
+    );
+}
+
 #[test]
 fn a_deadline_shorter_than_the_default_never_falls_back_to_the_view() {
     let _guard = HomeGuard::new();

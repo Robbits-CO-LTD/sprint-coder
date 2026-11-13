@@ -44,6 +44,19 @@ afterEach(async () => {
 const input = (testId: string) =>
   container.querySelector<HTMLInputElement>(`[data-testid="${testId}"] input`)!;
 
+const callNameField = () =>
+  container.querySelector<HTMLInputElement>('[data-testid="settings-assistant-call-name"]')!;
+
+/** Types into the field as a user would: it has focus, and React sees an input event. */
+async function type(field: HTMLInputElement, value: string): Promise<void> {
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+  await act(async () => {
+    field.focus();
+    setValue.call(field, value);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 async function renderLoaded(): Promise<void> {
   await act(async () => root.render(<AssistantPreferencesSettings active />));
 }
@@ -103,6 +116,69 @@ describe('返事の仕方', () => {
       field.blur();
     });
     expect(setAssistantPreferences).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a call name typed while another save is pending, and saves it on blur', async () => {
+    await renderLoaded();
+    const field = callNameField();
+    let finishSave!: () => void;
+    setAssistantPreferences.mockImplementationOnce(
+      (preferences: AssistantPreferences) =>
+        new Promise((resolve) => {
+          finishSave = () => resolve({ configured: true, preferences });
+        }),
+    );
+    await act(async () => input('settings-assistant-tone-crisp').click());
+    await type(field, '山田さん');
+    await act(async () => finishSave());
+    expect(field.value).toBe('山田さん');
+    // The pending choice was sent with the last saved name, not the half-typed one.
+    expect(setAssistantPreferences).toHaveBeenLastCalledWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      tone: 'crisp',
+    });
+
+    await act(async () => field.blur());
+    expect(setAssistantPreferences).toHaveBeenCalledTimes(2);
+    expect(setAssistantPreferences).toHaveBeenLastCalledWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      tone: 'crisp',
+      callName: '山田さん',
+    });
+  });
+
+  it('does not send an unfinished call name with another change', async () => {
+    await renderLoaded();
+    const field = callNameField();
+    await type(field, '山田さん');
+    await act(async () => input('settings-assistant-emoji').click());
+    expect(setAssistantPreferences).toHaveBeenLastCalledWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      emoji: true,
+    });
+    expect(field.value).toBe('山田さん');
+  });
+
+  it('keeps a call name being typed when a pending save fails', async () => {
+    await renderLoaded();
+    const field = callNameField();
+    let failSave!: () => void;
+    setAssistantPreferences.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failSave = () => reject(new Error('fixture failure'));
+        }),
+    );
+    await act(async () => input('settings-assistant-length-short').click());
+    await type(field, '山田さん');
+    await act(async () => failSave());
+    expect(input('settings-assistant-length-balanced').checked).toBe(true);
+    expect(field.value).toBe('山田さん');
+    await act(async () => field.blur());
+    expect(setAssistantPreferences).toHaveBeenLastCalledWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      callName: '山田さん',
+    });
   });
 
   it('returns to the last stored value when a save fails', async () => {

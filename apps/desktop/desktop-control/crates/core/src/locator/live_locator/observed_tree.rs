@@ -17,6 +17,10 @@ pub struct ObservedTree {
     /// ObservationMode::visible_only): every count over this tree then covers
     /// that view, never the whole window.
     pub(crate) visible_scope: bool,
+    /// The node count of a small tree the adapter took for the window's whole
+    /// tree only once it stopped changing after a renderer settle (see
+    /// ObservationMode::settled_thin_nodes). `None` for every other read.
+    pub(crate) settled_thin_nodes: Option<u64>,
 }
 
 impl ObservedTree {
@@ -37,6 +41,7 @@ impl ObservedTree {
             structurally_complete,
             logical_depths: Vec::new(),
             visible_scope: false,
+            settled_thin_nodes: None,
         };
         for root in roots {
             let index = tree.append(root, RefPath::new(), 0)?;
@@ -57,6 +62,45 @@ impl ObservedTree {
 
     pub(crate) fn is_visible_scope(&self) -> bool {
         self.visible_scope
+    }
+
+    /// Marks a small tree, `nodes` nodes, that the adapter returned as the
+    /// window's whole tree after a renderer settle. Only the adapter that
+    /// settled it may call this.
+    pub fn mark_settled_thin_tree(&mut self, nodes: u64) {
+        self.settled_thin_nodes = Some(nodes);
+    }
+
+    pub fn settled_thin_nodes(&self) -> Option<u64> {
+        self.settled_thin_nodes
+    }
+
+    /// Whether a document in this tree holds published content: a descendant
+    /// that is not an unnamed group. A Chromium renderer that has not built
+    /// its tree yet shows its documents empty or holding unnamed groups alone
+    /// (the Electron test window's shell: a document with no children under
+    /// the render widget, and one holding a single empty group), so a tree
+    /// without such a descendant is never taken for a small page. A role or
+    /// name that could not be read does not count as content.
+    pub fn has_document_content(&self) -> bool {
+        self.nodes
+            .iter()
+            .filter(|node| is_role(node, "document"))
+            .any(|document| self.holds_content(document))
+    }
+
+    fn holds_content(&self, node: &ObservedNode) -> bool {
+        node.children.iter().any(|child| {
+            self.nodes.get(*child as usize).is_some_and(|child| {
+                let named = child
+                    .evidence
+                    .name
+                    .known()
+                    .is_some_and(|name| !name.trim().is_empty());
+                let readable = child.evidence.role.known().is_some();
+                (readable && (named || !is_role(child, "group"))) || self.holds_content(child)
+            })
+        })
     }
 
     pub fn is_complete(&self) -> bool {
@@ -305,4 +349,12 @@ impl ObservedTree {
         };
         Ok((projected, child_indices))
     }
+}
+
+/// Whether a node's role reads as `role` (compared without regard to case).
+fn is_role(node: &ObservedNode, role: &str) -> bool {
+    node.evidence
+        .role
+        .known()
+        .is_some_and(|known| known.eq_ignore_ascii_case(role))
 }

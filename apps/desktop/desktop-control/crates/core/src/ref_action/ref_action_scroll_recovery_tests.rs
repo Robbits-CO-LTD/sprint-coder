@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use crate::adapter::{ActionOps, InputOps, NativeHandle, ObservationOps, SystemOps};
 use crate::ref_action::*;
 use crate::{
@@ -123,6 +124,7 @@ fn entry() -> RefEntry {
         source_window_bounds_hash: None,
         source_surface: SnapshotSurface::Window,
         renderer_accessibility_forced: false,
+        settled_thin_nodes: None,
     };
     entry
 }

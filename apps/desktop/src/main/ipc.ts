@@ -154,6 +154,7 @@ import {
   teamConcurrencySettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
   teamModelSelectionGuidanceSetInputSchema,
+  teamUsageModeStateSchema,
   teamModelRestrictionSetInputSchema,
   teamModelSettingsSchema,
   teamBlueprintSchema,
@@ -828,6 +829,42 @@ export function teamGuidance(
   return sections.join('\n\n');
 }
 
+/**
+ * Whether a Turn the user did not ask Team for may still be offered Team because of the
+ * 「Team の使い方」 setting. Only a real CLI Leader (codex・claude・grok) qualifies, and only when
+ * everything an offered Turn needs is in place: the Leader MCP, its bridge, and the verified
+ * built-in Team Skill. Anything missing leaves the Turn an ordinary one instead of failing it.
+ * The API Leader is never offered: it has no Team tools (even a requested Team Turn gets none), so
+ * handing it the Skill would only make it talk about Team it cannot run.
+ */
+export function teamUsageOfferAvailable(
+  input: Readonly<{
+    runtimeKind: RuntimeKind;
+    modelSelection: ModelSelection;
+    leaderMcpEnabled: boolean;
+    teamSkillReady: boolean;
+    teamMcpBridgeReady: boolean;
+  }>,
+): boolean {
+  if (!input.leaderMcpEnabled || !input.teamSkillReady || !input.teamMcpBridgeReady) return false;
+  // Mirrors startSelectedRuntime: a non-built-in Connection runs as the API Leader. Asked inside the
+  // Turn's start transaction, so a selection this cannot read is answered "no", never thrown.
+  let builtin: ReturnType<typeof builtinRuntimeForModelSelection>;
+  try {
+    builtin = builtinRuntimeForModelSelection(input.modelSelection);
+  } catch {
+    return false;
+  }
+  if (builtin === null && input.modelSelection.connectionId !== null) return false;
+  if (
+    isRetiredManagedLocal(input.modelSelection.connectionId, input.modelSelection.requestedProvider)
+  )
+    return false;
+  return (
+    input.runtimeKind === 'codex' || input.runtimeKind === 'claude' || input.runtimeKind === 'grok'
+  );
+}
+
 export function leaderMcpCapabilities(teamTurn: boolean): TeamMcpToolCapabilities {
   return {
     role: 'leader',
@@ -1281,6 +1318,14 @@ export class IpcRouter {
     );
     this.persistence.setAutoSkillProvider?.((runtime) =>
       this.skillSettings.pinnedAutoCandidates(runtime),
+    );
+    this.persistence.setTeamUsageOfferProvider?.((runtime) =>
+      teamUsageOfferAvailable({
+        ...runtime,
+        leaderMcpEnabled: process.env['SPRINT_CODER_LEADER_MCP'] !== '0',
+        teamSkillReady: this.teamSkillReady,
+        teamMcpBridgeReady: this.teamMcpBridge.socketPath !== null,
+      }),
     );
     const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
     // 「確認する」では Worker の書き込みも反映の前に、親の Turn（Leader の Turn、Graph Mission では
@@ -2296,6 +2341,21 @@ export class IpcRouter {
           IPC_CHANNELS.settingsSetTeamModelSelectionGuidance,
           () => this.persistence.setTeamModelSelectionGuidance(input.guidance),
         ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetTeamUsageMode,
+      emptyPayloadSchema,
+      teamUsageModeStateSchema,
+      () => ({ mode: this.persistence.getTeamUsageMode() }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetTeamUsageMode,
+      teamUsageModeStateSchema,
+      teamUsageModeStateSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamUsageMode, () => ({
+          mode: this.persistence.setTeamUsageMode(input.mode),
+        })).value,
     );
     this.handle(
       IPC_CHANNELS.settingsGetSprintCoderPrePrompt,
@@ -5243,7 +5303,7 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
-    this.turnLogCategoryByTurn.set(started.turnId, started.teamTurn ? 'team' : 'chat');
+    this.turnLogCategoryByTurn.set(started.turnId, turnLogCategory(started));
     this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
     this.turnLogRuntimeByTurn.set(started.turnId, {
       runtime: started.runtimeKind,
@@ -5259,10 +5319,7 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
-    this.turnLogCategoryByTurn.set(
-      transition.started.turnId,
-      transition.started.teamTurn ? 'team' : 'chat',
-    );
+    this.turnLogCategoryByTurn.set(transition.started.turnId, turnLogCategory(transition.started));
     this.turnLogStartedAtByTurn.set(transition.started.turnId, Date.now());
     this.turnLogRuntimeByTurn.set(transition.started.turnId, {
       runtime: transition.started.runtimeKind,
@@ -5399,13 +5456,18 @@ export class IpcRouter {
     });
     let kind = started.runtimeKind;
     this.turnRuntimes.set(started.turnId, kind);
-    // Leader MCP is enabled by default: a real Codex/Claude Leader drives team_* tools itself
-    // over the MCP bridge instead of the deterministic mock scenario. Team tools are offered on
-    // every real-runtime turn so the model itself senses
-    // when a request warrants a team (the guidance says to hire only when genuinely beneficial);
-    // hiring auto-promotes the task and the renderer auto-opens the canvas, so "the AI decided a
-    // team is needed" becomes visible without any keyword or button.
+    // Leader MCP is enabled by default: a real Codex/Claude/Grok Leader drives team_* tools itself
+    // over the MCP bridge instead of the deterministic mock scenario. Team tools reach the Leader
+    // only on a Team Turn (`started.teamTurn`, sealed with the context): one the user asked Team
+    // for, or — with 「Team の使い方」 set to おまかせ／積極的に — one merely offered Team
+    // (`started.teamUsageOffer`), where the Leader decides itself whether to hire. Hiring
+    // auto-promotes the task and the renderer auto-opens the canvas.
+    //
+    // Only a requested Team Turn is *required* to use Team: it fails closed without the Skill or
+    // the MCP, falls back to the mock Leader without Leader MCP, and may demand Workers. An offered
+    // Turn does none of that and simply continues as an ordinary Turn.
     const teamTurn = started.teamTurn;
+    const teamRequested = teamTurn && started.teamUsageOffer === undefined;
     const skillCreatorTurn = started.skills.some(
       ({ selection }) =>
         selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
@@ -5415,7 +5477,7 @@ export class IpcRouter {
       process.env['SPRINT_CODER_LEADER_MCP'] !== '0' &&
       kind !== 'mock' &&
       (teamTurn || skillCreatorTurn || memoryTurn);
-    if (teamTurn && wantsLeaderMcp && !this.teamSkillReady) {
+    if (teamRequested && wantsLeaderMcp && !this.teamSkillReady) {
       this.handleRuntimeFailure(
         kind === 'claude' || kind === 'grok' ? kind : 'codex',
         taskId,
@@ -5435,7 +5497,7 @@ export class IpcRouter {
         skillCreatorTurn,
         memoryTurn,
       });
-      if (teamMcp === undefined && (teamTurn || skillCreatorTurn)) {
+      if (teamMcp === undefined && (teamRequested || skillCreatorTurn)) {
         this.handleRuntimeFailure(
           kind === 'claude' || kind === 'grok' ? kind : 'codex',
           taskId,
@@ -5448,9 +5510,9 @@ export class IpcRouter {
         );
         return;
       }
-      if (teamTurn && requiresTeamWorkersInput(started.text))
+      if (teamRequested && requiresTeamWorkersInput(started.text))
         this.teamRequiredTurns.add(started.turnId);
-    } else if (kind !== 'mock' && teamTurn) {
+    } else if (kind !== 'mock' && teamRequested) {
       // Team intent without Leader MCP always runs the leader orchestration
       // (hire→dispatch→reports→synthesis): the production adapters are no-tools by default, so a
       // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
@@ -5504,13 +5566,19 @@ export class IpcRouter {
       );
     }
     if (kind === 'mock') {
-      this.mockRuntime.start(taskId, started.turnId, started.text, started.teamTurn);
+      this.mockRuntime.start(taskId, started.turnId, started.text, teamRequested);
       return;
     }
     const workspacePath = turnWorkspace;
     const workspaceId =
       started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest;
-    const context = this.prepareContext(taskId, started.turnId, teamTurn && wantsLeaderMcp);
+    // The sealed Skill is what the Runtime will acknowledge, so an offered Turn expects it even in
+    // the rare case its MCP could not be registered after sealing.
+    const context = this.prepareContext(
+      taskId,
+      started.turnId,
+      (teamTurn && wantsLeaderMcp) || started.teamUsageOffer !== undefined,
+    );
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
     // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
@@ -9768,6 +9836,11 @@ function runtimeProtocolError(): PublicError {
     userMessage: 'Runtime Hostから無効なイベントを受信しました。',
     retryable: false,
   };
+}
+
+/** A Turn merely offered Team by 「Team の使い方」 logs as chat; only an asked-for Team logs as team. */
+function turnLogCategory(started: StartedTurn): 'chat' | 'team' {
+  return started.teamTurn && started.teamUsageOffer === undefined ? 'team' : 'chat';
 }
 
 function shouldSealBuiltinTeamSkill(text: string, skills: readonly PersistedTurnSkill[]): boolean {
