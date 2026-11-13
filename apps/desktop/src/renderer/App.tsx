@@ -37,9 +37,11 @@ import type { TeamViewPreference } from './lib/team-view-preference';
 import {
   SETUP_REPLAY_EVENT,
   readSetupComplete,
+  setSetupShowing,
   shouldShowSetupWizard,
 } from './lib/setup-preference';
 import { SetupReplayDialog, SetupWizard } from './components/SetupWizard';
+import { focusAfterSetupReplay } from './lib/setup-focus';
 import { unlockSoundEffects } from './lib/ui-sound';
 
 export default function App() {
@@ -144,11 +146,8 @@ export default function App() {
   const [setupReplayOpen, setSetupReplayOpen] = useState(false);
   const closeSetupReplay = useCallback(() => {
     setSetupReplayOpen(false);
-    requestAnimationFrame(() =>
-      document
-        .querySelector<HTMLElement>('[data-testid="sidebar-settings-button"]')
-        ?.focus({ preventScroll: true }),
-    );
+    // Back to the button that led here; if it is gone or hidden (inert), to the next sensible place.
+    requestAnimationFrame(() => focusAfterSetupReplay());
   }, []);
 
   useEffect(() => {
@@ -310,6 +309,12 @@ export default function App() {
     window.addEventListener(SETUP_REPLAY_EVENT, onReplay);
     return () => window.removeEventListener(SETUP_REPLAY_EVENT, onReplay);
   }, [showSetupWizard]);
+
+  // Settings offers "セットアップをもう一度" only while no Setup is on screen.
+  useEffect(() => {
+    setSetupShowing(showSetupWizard || setupReplayOpen);
+  }, [setupReplayOpen, showSetupWizard]);
+  useEffect(() => () => setSetupShowing(false), []);
 
   const requestEnterTeam = useCallback(() => {
     if (exiting) {

@@ -153,25 +153,25 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
   const typed = animate ? typedNow : story.request;
   const typing = typed !== story.request;
   return (
-    <div className="sw" data-phase={animate && !running ? 0 : phase}>
-      <span className="sw-ghost sw-ghost--a" />
-      <span className="sw-ghost sw-ghost--b" />
-      <div className="sw-window">
-        <div className="sw-bar">
+    <div className="setup-sw" data-phase={animate && !running ? 0 : phase}>
+      <span className="setup-sw-ghost setup-sw-ghost--a" />
+      <span className="setup-sw-ghost setup-sw-ghost--b" />
+      <div className="setup-sw-window">
+        <div className="setup-sw-bar">
           <i />
           <i />
           <i />
         </div>
-        <div className="sw-prompt">
-          <span className="sw-you">あなた</span>
-          <span className="sw-typed">
+        <div className="setup-sw-prompt">
+          <span className="setup-sw-you">あなた</span>
+          <span className="setup-sw-typed">
             {typed}
-            <i className={`sw-caret${typing ? ' is-typing' : ''}`} />
+            <i className={`setup-sw-caret${typing ? ' is-typing' : ''}`} />
           </span>
         </div>
-        <div className="sw-code">
+        <div className="setup-sw-code">
           {CODE_LINES.map((tokens, line) => (
-            <span key={line} className="sw-line" style={{ '--i': line } as CSSProperties}>
+            <span key={line} className="setup-sw-line" style={{ '--i': line } as CSSProperties}>
               {tokens.map((width, token) => (
                 <i key={token} style={{ width: `${width}%` }} data-t={(line + token) % 4} />
               ))}
@@ -181,7 +181,7 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
         {WELCOME_CURSORS.map((cursor, index) => (
           <span
             key={cursor.who}
-            className="sw-cursor"
+            className="setup-sw-cursor"
             style={
               {
                 '--x0': `${cursor.from[0]}cqw`,
@@ -193,7 +193,7 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
               } as CSSProperties
             }
           >
-            <i className="sw-spark" />
+            <i className="setup-sw-spark" />
             <Pointer who={cursor.who} />
             <b style={{ background: `var(--setup-${cursor.who})` }}>
               {index === 0 ? 'AI' : '仲間'}
@@ -201,24 +201,24 @@ function WelcomeScene({ animate, held }: { animate: boolean; held: boolean }) {
           </span>
         ))}
       </div>
-      <div className={`sw-result sw-result--${story.result}`}>
-        <span className="sw-result-tag">できあがり</span>
+      <div className={`setup-sw-result setup-sw-result--${story.result}`}>
+        <span className="setup-sw-result-tag">できあがり</span>
         {story.result === 'login' && (
-          <span className="sw-login">
+          <span className="setup-sw-login">
             <i />
             <i />
             <b />
           </span>
         )}
         {story.result === 'chart' && (
-          <span className="sw-chart">
+          <span className="setup-sw-chart">
             {[46, 72, 58, 90, 66].map((height, index) => (
               <i key={index} style={{ '--h': `${height}%`, '--i': index } as CSSProperties} />
             ))}
           </span>
         )}
         {story.result === 'fixed' && (
-          <span className="sw-fixed">
+          <span className="setup-sw-fixed">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M5 12.5 10 17 19 7.5" pathLength={1} />
             </svg>
@@ -239,11 +239,11 @@ const AI_NODES = [
 
 function ScanScene({ runtime }: { runtime: SetupStageProps['runtime'] }) {
   return (
-    <div className="ss">
-      <span className="ss-ring ss-ring--1" />
-      <span className="ss-ring ss-ring--2" />
-      <span className="ss-sweep" />
-      <span className="ss-core">
+    <div className="setup-ss">
+      <span className="setup-ss-ring setup-ss-ring--1" />
+      <span className="setup-ss-ring setup-ss-ring--2" />
+      <span className="setup-ss-sweep" />
+      <span className="setup-ss-core">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="3.5" y="4.5" width="17" height="11.5" rx="2" />
           <path d="M8.5 19.5h7M12 16v3.5" />
@@ -252,7 +252,7 @@ function ScanScene({ runtime }: { runtime: SetupStageProps['runtime'] }) {
       {AI_NODES.map((node, index) => (
         <span
           key={node.key}
-          className={`ss-node ss-node--${runtime[node.key]}`}
+          className={`setup-ss-node setup-ss-node--${runtime[node.key]}`}
           style={{ '--i': index } as CSSProperties}
         >
           <i />
@@ -281,27 +281,23 @@ function ReplyScene({
     optionLabel(DEPTH_OPTIONS, preferences.depth),
   ];
   return (
-    <div className="sr">
-      <p className="sr-title">返事の見本</p>
-      <div className="sr-chat">
-        <p className="sr-bubble sr-bubble--you">{SETUP_PREVIEW_QUESTION}</p>
-        <div className="sr-answer">
-          <span className="sr-avatar" aria-hidden="true">
+    <div className="setup-sr">
+      <p className="setup-sr-title">返事の見本</p>
+      <div className="setup-sr-chat">
+        <p className="setup-sr-bubble setup-sr-bubble--you">{SETUP_PREVIEW_QUESTION}</p>
+        <div className="setup-sr-answer">
+          <span className="setup-sr-avatar" aria-hidden="true">
             <i />
           </span>
-          <p className="sr-bubble sr-bubble--ai" data-testid="setup-preview-reply">
+          <p className="setup-sr-bubble setup-sr-bubble--ai" data-testid="setup-preview-reply">
             <span aria-hidden="true">
               {typed}
-              <i className={`sr-caret${typing ? ' is-typing' : ''}`} />
-            </span>
-            {/* Read once, whole, instead of character by character. */}
-            <span className="setup-visually-hidden" aria-live="polite">
-              {reply}
+              <i className={`setup-sr-caret${typing ? ' is-typing' : ''}`} />
             </span>
           </p>
         </div>
       </div>
-      <p className="sr-chips" aria-hidden="true">
+      <p className="setup-sr-chips" aria-hidden="true">
         {chips.map((chip) => (
           <span key={chip}>{chip}</span>
         ))}
@@ -360,18 +356,18 @@ function TeamScene({ mode, animate }: { mode: TeamUsageMode; animate: boolean })
   const { cycle } = usePhaseCycle(TEAM_CYCLE, animate);
   const runs = TEAM_RUNS[mode];
   return (
-    <div className="st" data-mode={mode}>
-      <span className="st-ghost" />
-      <div className="st-board" key={`${mode}-${cycle}`}>
+    <div className="setup-st" data-mode={mode}>
+      <span className="setup-st-ghost" />
+      <div className="setup-st-board" key={`${mode}-${cycle}`}>
         {mode === 'auto' && (
-          <span className="st-big" style={{ '--at': ms(0.3) } as CSSProperties}>
+          <span className="setup-st-big" style={{ '--at': ms(0.3) } as CSSProperties}>
             大きな作業が来た！
           </span>
         )}
         {runs.map((run, index) => (
           <div
             key={index}
-            className={`st-row${run.join ? ' is-join' : ''}${mode === 'auto' && index > 0 ? ' is-big' : ''}`}
+            className={`setup-st-row${run.join ? ' is-join' : ''}${mode === 'auto' && index > 0 ? ' is-big' : ''}`}
             style={
               {
                 '--start': ms(run.start),
@@ -380,16 +376,16 @@ function TeamScene({ mode, animate }: { mode: TeamUsageMode; animate: boolean })
               } as CSSProperties
             }
           >
-            <span className="st-label">{run.label}</span>
-            <span className="st-track">
-              <span className="st-fill">
-                <span className="st-cursor">
+            <span className="setup-st-label">{run.label}</span>
+            <span className="setup-st-track">
+              <span className="setup-st-fill">
+                <span className="setup-st-cursor">
                   <Pointer who={run.who} />
                   <b>{run.who === 'leader' ? 'AI' : '仲間'}</b>
                 </span>
               </span>
             </span>
-            <span className="st-done">
+            <span className="setup-st-done">
               <svg viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M3.5 8.4 6.6 11.4 12.5 4.8" />
               </svg>
@@ -397,7 +393,7 @@ function TeamScene({ mode, animate }: { mode: TeamUsageMode; animate: boolean })
           </div>
         ))}
       </div>
-      <p className="st-caption" key={`caption-${mode}`}>
+      <p className="setup-st-caption" key={`caption-${mode}`}>
         {TEAM_CAPTION[mode]}
       </p>
     </div>
@@ -446,20 +442,20 @@ function DetailsScene({
   chips.push(soundEnabled ? '効果音あり' : '効果音なし');
   chips.push(accessLabel);
   return (
-    <div className="sd">
-      <div className="sd-card">
-        <span className="sd-avatar" aria-hidden="true">
+    <div className="setup-sd">
+      <div className="setup-sd-card">
+        <span className="setup-sd-avatar" aria-hidden="true">
           {initial ? <b key={initial}>{initial}</b> : <i />}
         </span>
-        <p className="sd-greeting" key={greeting}>
+        <p className="setup-sd-greeting" key={greeting}>
           {greeting}
         </p>
-        <p className="sd-chips">
+        <p className="setup-sd-chips">
           {chips.map((chip) => (
             <span key={chip}>{chip}</span>
           ))}
         </p>
-        <span className={`sd-sound${soundEnabled ? ' is-on' : ''}`} aria-hidden="true">
+        <span className={`setup-sd-sound${soundEnabled ? ' is-on' : ''}`} aria-hidden="true">
           <i />
           <i />
           <i />
@@ -474,17 +470,17 @@ function DetailsScene({
 
 function WorkspaceScene({ folderLabel }: { folderLabel: string | null }) {
   return (
-    <div className={`sf${folderLabel ? ' is-picked' : ''}`}>
-      <span className="sf-folder">
-        <span className="sf-back" />
-        <span className="sf-files">
+    <div className={`setup-sf${folderLabel ? ' is-picked' : ''}`}>
+      <span className="setup-sf-folder">
+        <span className="setup-sf-back" />
+        <span className="setup-sf-files">
           {[0, 1, 2].map((index) => (
             <i key={index} style={{ '--i': index } as CSSProperties} />
           ))}
         </span>
-        <span className="sf-front" />
+        <span className="setup-sf-front" />
       </span>
-      <p className="sf-label">{folderLabel ?? 'まだ選んでいません'}</p>
+      <p className="setup-sf-label">{folderLabel ?? 'まだ選んでいません'}</p>
     </div>
   );
 }
@@ -493,12 +489,12 @@ function WorkspaceScene({ folderLabel }: { folderLabel: string | null }) {
 
 function DoneScene() {
   return (
-    <div className="sk">
-      <span className="sk-rays" />
-      <span className="sk-wave sk-wave--1" />
-      <span className="sk-wave sk-wave--2" />
-      <span className="sk-wave sk-wave--3" />
-      <span className="sk-ring">
+    <div className="setup-sk">
+      <span className="setup-sk-rays" />
+      <span className="setup-sk-wave setup-sk-wave--1" />
+      <span className="setup-sk-wave setup-sk-wave--2" />
+      <span className="setup-sk-wave setup-sk-wave--3" />
+      <span className="setup-sk-ring">
         <svg viewBox="0 0 64 64" aria-hidden="true">
           <circle cx="32" cy="32" r="29" pathLength={1} />
           <path d="M19 33.5 28 42 45.5 23" pathLength={1} />

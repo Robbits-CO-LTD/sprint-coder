@@ -79,11 +79,28 @@ export function soundCueForEvent(event: SoundEvent): CueName | null {
   return null;
 }
 
-/** Plays one interface cue (the Setup's choices and steps). Silent while sound effects are off. */
-export function playInterfaceCue(cue: CueName): void {
-  if (!readSoundEffectPreferences().enabled) return;
+let previewPlayer: UISFXPlayer | null = null;
+
+/** Plays one interface cue (the Setup's choices and steps). `enabled` is what the screen shows
+ * for sound effects right now — the Setup's draft, which may not be stored yet — and defaults to
+ * the stored setting. Silent when it is off. */
+export function playInterfaceCue(
+  cue: CueName,
+  enabled: boolean = readSoundEffectPreferences().enabled,
+): void {
+  if (!enabled) return;
   try {
-    soundPlayer().play(cue);
+    if (readSoundEffectPreferences().enabled) {
+      soundPlayer().play(cue);
+      return;
+    }
+    // Switched on in the Setup but not stored yet: a separate player that stores nothing.
+    previewPlayer ??= createUISFX({
+      pack: 'minimal',
+      enabled: true,
+      volume: readSoundEffectPreferences().volume,
+    });
+    previewPlayer.play(cue);
   } catch {
     // Supplementary feedback only.
   }

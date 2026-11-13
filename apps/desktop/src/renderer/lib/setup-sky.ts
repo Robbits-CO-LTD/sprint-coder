@@ -71,6 +71,8 @@ const TAU = Math.PI * 2;
 const MAX_SPECKS = 170;
 /** Matches the Team board's loop (SetupAnimation's TEAM_CYCLE), so the big job lands on both. */
 const AUTO_CYCLE_MS = 5200;
+/** At most this many pixels behind the canvas (about 2560×1600). */
+const MAX_CANVAS_PIXELS = 4_200_000;
 
 function contextOf(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
   try {
@@ -90,6 +92,7 @@ export class SetupSky {
   private frame = 0;
   private last = 0;
   private running = false;
+  private sized = false;
   private destroyed = false;
   private specks: Speck[] = [];
   private targetCount = 90;
@@ -109,6 +112,7 @@ export class SetupSky {
   private warpDir = 1;
   private intro: { start: number; word: string } | null = null;
   private implodeAt = 0;
+  private observer: ResizeObserver | null = null;
   private readonly onResize = () => this.resize();
   private readonly onVisibility = () => {
     if (document.hidden) this.stop();
@@ -119,7 +123,14 @@ export class SetupSky {
     this.canvas = canvas;
     this.animate = options.animate;
     this.ctx = contextOf(canvas);
-    window.addEventListener('resize', this.onResize);
+    // Follow the size of the box the canvas sits in (a dialog that opens later, a window that is
+    // resized). Where there is no ResizeObserver, the window's resize stands in.
+    if (typeof ResizeObserver === 'function') {
+      this.observer = new ResizeObserver(this.onResize);
+      this.observer.observe(canvas.parentElement ?? canvas);
+    } else {
+      window.addEventListener('resize', this.onResize);
+    }
     if (this.animate) document.addEventListener('visibilitychange', this.onVisibility);
     this.resize();
     this.seed();
@@ -135,6 +146,8 @@ export class SetupSky {
   destroy(): void {
     this.destroyed = true;
     this.stop();
+    this.observer?.disconnect();
+    this.observer = null;
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.specks = [];
@@ -284,6 +297,15 @@ export class SetupSky {
     this.implodeAt = performance.now();
   }
 
+  /** The hand-off did not happen (the first Task could not be made): the sky comes back. */
+  recover(): void {
+    this.implodeAt = 0;
+    for (const speck of this.specks) {
+      speck.x = Math.random() * this.width;
+      speck.y = Math.random() * this.height;
+    }
+  }
+
   // ---------- loop ----------
 
   private start(): void {
@@ -301,24 +323,53 @@ export class SetupSky {
 
   private readonly tick = (now: number) => {
     if (!this.running) return;
-    const dt = Math.min(48, now - this.last) / 16.67;
-    this.last = now;
-    this.step(now, dt);
-    this.draw(now);
+    try {
+      const dt = Math.min(48, now - this.last) / 16.67;
+      this.last = now;
+      this.step(now, dt);
+      this.draw(now);
+    } catch {
+      // A drawing failure must not leave a half-running loop: stop, and keep the last picture.
+      this.running = false;
+      return;
+    }
     this.frame = requestAnimationFrame(this.tick);
   };
 
   private resize(): void {
-    const box = this.canvas.getBoundingClientRect();
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.width = Math.max(1, box.width || window.innerWidth);
-    this.height = Math.max(1, box.height || window.innerHeight);
-    this.canvas.width = Math.round(this.width * this.dpr);
-    this.canvas.height = Math.round(this.height * this.dpr);
-    if (!this.animate) {
-      this.seed();
-      this.drawStill();
+    const box = (this.canvas.parentElement ?? this.canvas).getBoundingClientRect();
+    const width = box.width;
+    const height = box.height;
+    // Not laid out yet (a dialog not open), or nonsense: draw nothing until there is a size.
+    if (!(width > 0) || !(height > 0) || !Number.isFinite(width) || !Number.isFinite(height)) {
+      this.sized = false;
+      return;
     }
+    // Keep the specks where they were, in proportion — a resize must not reshuffle the picture.
+    if (this.sized && this.width > 0 && this.height > 0) {
+      const sx = width / this.width;
+      const sy = height / this.height;
+      for (const speck of this.specks) {
+        speck.x *= sx;
+        speck.y *= sy;
+      }
+    }
+    this.width = width;
+    this.height = height;
+    // Cap the pixels behind the canvas: a huge window gets a lower resolution, not hundreds of MB.
+    const cap = Math.sqrt(MAX_CANVAS_PIXELS / (width * height));
+    this.dpr = Math.max(0.25, Math.min(2, window.devicePixelRatio || 1, cap));
+    this.canvas.width = Math.max(1, Math.round(width * this.dpr));
+    this.canvas.height = Math.max(1, Math.round(height * this.dpr));
+    const firstSize = !this.sized;
+    this.sized = true;
+    if (firstSize && this.specks.length > 0) this.seed();
+    if (!this.animate) this.drawStill();
+  }
+
+  /** The canvas's backing size, for tests. */
+  get backingSize(): { width: number; height: number } {
+    return { width: this.canvas.width, height: this.canvas.height };
   }
 
   private seed(): void {
@@ -515,7 +566,7 @@ export class SetupSky {
 
   private draw(now: number): void {
     const ctx = this.ctx;
-    if (ctx === null) return;
+    if (ctx === null || !this.sized) return;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
     ctx.globalCompositeOperation = 'lighter';

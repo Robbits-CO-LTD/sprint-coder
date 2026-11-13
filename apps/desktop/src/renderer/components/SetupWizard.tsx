@@ -29,7 +29,6 @@ import {
   saveTeamUsageMode,
   setupSettingsSupport,
   type AssistantPreferences,
-  type SetupSaveOutcome,
   type TeamUsageMode,
 } from '../lib/setup-settings';
 import {
@@ -59,6 +58,7 @@ import {
   unlockSoundEffects,
 } from '../lib/ui-sound';
 import { useMediaQuery } from '../lib/useMediaQuery';
+import { setupPreviewReply } from '../lib/setup-preview';
 import { SetupSky, type SkyTheme } from '../lib/setup-sky';
 import type { CueName } from 'uisfx';
 import { ArrowLeft, ArrowRight, Check, Folder, Settings, X } from './icons';
@@ -68,8 +68,20 @@ import { SetupChoiceGroup, SetupSwitch, SetupTeamCards } from './SetupControls';
 type PickedFolder = { path: string; label: string };
 type Readiness = 'ready' | 'authentication_required' | 'unavailable';
 type PreferenceStep = 'reply' | 'team' | 'details';
-/** What happened to a preference step: chosen and stored, or left as it was. */
-type Decision = 'saved' | 'skipped' | 'failed';
+/** Whether a stored value has been read. Until it has, nothing stands in for it on screen. */
+type Known = 'loading' | 'ready' | 'failed' | 'unsupported';
+
+/** The last values known to be stored, and whether each has been read. */
+type Baseline = {
+  preferences: AssistantPreferences;
+  assistant: Known;
+  /** Main has stored the reply preferences at least once (before that, nothing is added). */
+  configured: boolean;
+  teamMode: TeamUsageMode;
+  team: Known;
+  soundEnabled: boolean;
+  accessDefault: AccessPresetDefault;
+};
 
 export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
@@ -189,16 +201,18 @@ type SummaryItem =
   | 'accessDefault'
   | 'tone'
   | 'length'
-  | 'depth';
+  | 'depth'
+  | 'teamMode';
 
-/** The fields each step owns, to tell whether leaving by "戻る" changed anything. */
-function replyFields(p: AssistantPreferences): string {
-  return `${p.tone}|${p.length}|${p.depth}`;
-}
-function detailFields(p: AssistantPreferences): string {
-  return `${p.language}|${p.confirm}|${p.callName.trim()}|${p.emoji}|${p.suggestNextSteps}|${p.planFirst}`;
-}
-
+const REPLY_KEYS: readonly (keyof AssistantPreferences)[] = ['tone', 'length', 'depth'];
+const DETAIL_KEYS: readonly (keyof AssistantPreferences)[] = [
+  'language',
+  'confirm',
+  'callName',
+  'emoji',
+  'suggestNextSteps',
+  'planFirst',
+];
 export function SetupWizard({
   mode = 'first-run',
   onOpenSettings,
@@ -225,41 +239,56 @@ export function SetupWizard({
   const [direction, setDirection] = useState<'forward' | 'back'>('forward');
   const step = steps[Math.min(index, steps.length - 1)]!;
 
-  // Drafts on screen, and the values last stored (what "戻る" compares against and "あとで決める"
-  // returns to).
+  // ---------- What is on screen, and what is stored ----------
+  //
+  // The screen shows drafts; `stored` is the last value known to be stored (the baseline). An item
+  // counts as "changed in this Setup" only while its draft differs from the baseline — never as a
+  // history of clicks — so putting a choice back, or "あとで決める", removes the change by itself.
+  // Only changed items are ever written; every other item keeps whatever is stored at that moment
+  // (Settings, opened from the AI step, may have changed it meanwhile). A baseline that has not
+  // been read is a state of its own ("loading" / "failed"): it is never stood in for by a default.
   const [preferences, setPreferences] = useState<AssistantPreferences>(
     DEFAULT_ASSISTANT_PREFERENCES,
   );
   const [teamMode, setTeamMode] = useState<TeamUsageMode>(DEFAULT_TEAM_USAGE_MODE);
   const [soundEnabled, setSoundEnabled] = useState(() => readSoundEffectPreferences().enabled);
+  // Sounds in the Setup follow the switch on screen (the draft), not only what is stored.
+  const soundDraft = useRef(soundEnabled);
+  useEffect(() => {
+    soundDraft.current = soundEnabled;
+  }, [soundEnabled]);
+  const cue = useCallback((name: CueName) => playInterfaceCue(name, soundDraft.current), []);
   const [accessDefault, setAccessDefault] = useState<AccessPresetDefault>(readAccessPresetDefault);
   const [lastAccess] = useState(readLastAccessPreset);
-  const stored = useRef({
+  const initialBaseline = (): Baseline => ({
     preferences: DEFAULT_ASSISTANT_PREFERENCES,
-    teamMode: DEFAULT_TEAM_USAGE_MODE as TeamUsageMode,
-    soundEnabled,
-    accessDefault,
+    assistant: support.assistant ? 'loading' : 'unsupported',
+    configured: false,
+    teamMode: DEFAULT_TEAM_USAGE_MODE,
+    team: support.team ? 'loading' : 'unsupported',
+    soundEnabled: readSoundEffectPreferences().enabled,
+    accessDefault: readAccessPresetDefault(),
   });
-  // The same values, for drawing: the summary shows what was confirmed stored, not the screen.
-  const [confirmed, setConfirmed] = useState({
-    preferences: DEFAULT_ASSISTANT_PREFERENCES,
-    teamMode: DEFAULT_TEAM_USAGE_MODE as TeamUsageMode,
-    soundEnabled,
-    accessDefault,
-  });
-  const remember = useCallback((patch: Partial<typeof stored.current>) => {
+  const [initial] = useState(initialBaseline);
+  const stored = useRef<Baseline>(initial);
+  // The same values, for drawing: the summary shows what is stored, never the drafts.
+  const [confirmed, setConfirmed] = useState<Baseline>(initial);
+  const remember = useCallback((patch: Partial<Baseline>) => {
     stored.current = { ...stored.current, ...patch };
     setConfirmed(stored.current);
   }, []);
-  // "Changed in this Setup" is never a history of clicks: it is the unsaved difference — an item
-  // whose value on screen differs from the last value known to be stored (`stored`). Only those
-  // are written over what is stored; every other item keeps whatever is stored at the moment of
-  // saving (Settings, opened from the AI step, may have changed it meanwhile). Putting a choice
-  // back, or "あとで決める", removes the difference by itself.
-  // Items this Setup changed and saved, for the summary.
+  // For the summary: items this Setup changed and stored, and items whose save failed.
   const [savedChanges, setSavedChanges] = useState<ReadonlySet<SummaryItem>>(() => new Set());
-  const [decisions, setDecisions] = useState<Partial<Record<PreferenceStep, Decision>>>({});
-  const [failed, setFailed] = useState<ReadonlySet<'assistant' | 'team'>>(() => new Set());
+  const [failedItems, setFailedItems] = useState<ReadonlySet<SummaryItem>>(() => new Set());
+  const noteSaved = useCallback((items: readonly SummaryItem[]) => {
+    if (items.length === 0) return;
+    setSavedChanges((current) => new Set([...current, ...items]));
+    setFailedItems((current) => new Set([...current].filter((item) => !items.includes(item))));
+  }, []);
+  const noteFailed = useCallback((items: readonly SummaryItem[]) => {
+    if (items.length === 0) return;
+    setFailedItems((current) => new Set([...current, ...items]));
+  }, []);
 
   const [folder, setFolder] = useState<PickedFolder | null>(null);
   // The Project is made only by "最初の Task を始める"; going back and forth never makes another.
@@ -276,14 +305,15 @@ export function SetupWizard({
     };
   }, []);
 
-  /** Takes in what Main has stored. An item still equal to the old baseline follows the new value
-   * on screen; an item that differs (changed here, not yet saved) keeps the screen's value. The new
-   * value then becomes the baseline. */
+  /** Takes in a newly read stored value: a draft still equal to the old baseline follows it; a
+   * draft that differs (changed here, not saved) stays. The new value becomes the baseline. */
   const adoptPreferences = useCallback(
-    (latest: AssistantPreferences) => {
+    (latest: AssistantPreferences, configured: boolean) => {
       const base = stored.current.preferences;
-      remember({ preferences: latest });
+      const wasKnown = stored.current.assistant === 'ready';
+      remember({ preferences: latest, assistant: 'ready', configured });
       setPreferences((current) => {
+        if (!wasKnown) return { ...latest }; // nothing could be chosen before it was known
         const next = { ...latest };
         for (const key of changedKeys(current, base)) {
           (next as Record<string, unknown>)[key] = current[key];
@@ -293,38 +323,70 @@ export function SetupWizard({
     },
     [remember],
   );
+  const adoptTeam = useCallback(
+    (mode: TeamUsageMode) => {
+      const base = stored.current.teamMode;
+      const wasKnown = stored.current.team === 'ready';
+      remember({ teamMode: mode, team: 'ready' });
+      setTeamMode((current) => (!wasKnown || current === base ? mode : current));
+    },
+    [remember],
+  );
+  /** The two settings kept on this PC (Settings can change them too). */
+  const adoptLocal = useCallback(() => {
+    const sound = readSoundEffectPreferences().enabled;
+    const access = readAccessPresetDefault();
+    const base = stored.current;
+    remember({ soundEnabled: sound, accessDefault: access });
+    setSoundEnabled((current) => (current === base.soundEnabled ? sound : current));
+    setAccessDefault((current) => (current === base.accessDefault ? access : current));
+  }, [remember]);
 
   // Reads and saves are numbered: a save bumps the number when it starts and when it ends, and a
   // read that started under an older number is dropped — it may hold what was stored before the
-  // save. No read starts while a save is under way; one runs once the save is over instead.
+  // save. A dropped read is always made again once no save is under way.
   const generation = useRef(0);
   const saving = useRef(0);
   const readAfterSave = useRef(false);
 
-  /** Reads what is stored now (at the start, and whenever the person may have changed it outside
-   * the Setup). A read that fails, or that a save overtook, changes nothing. */
-  const refreshStored = useCallback(async () => {
-    if (saving.current > 0) {
-      readAfterSave.current = true;
+  /** Reads what is stored now: at the start, on the Team step, back from Settings, and when the
+   * window comes back to the front. A read that fails leaves a known baseline as it was, and marks
+   * an unknown one "failed". */
+  const refreshStored = useCallback(async (): Promise<void> => {
+    // A read that a save overtook is made again: at once if the save is over, else after it.
+    for (;;) {
+      if (!live.current) return;
+      if (saving.current > 0) {
+        readAfterSave.current = true;
+        return;
+      }
+      const started = generation.current;
+      const overtaken = () => generation.current !== started;
+      adoptLocal();
+      if (support.assistant) {
+        const latest = await loadAssistantPreferences();
+        if (!live.current) return;
+        if (overtaken()) continue;
+        if (latest) adoptPreferences(latest.preferences, latest.configured);
+        else if (stored.current.assistant !== 'ready') remember({ assistant: 'failed' });
+      }
+      if (support.team) {
+        const mode = await loadTeamUsageMode();
+        if (!live.current) return;
+        if (overtaken()) continue;
+        if (mode !== null) adoptTeam(mode);
+        else if (stored.current.team !== 'ready') remember({ team: 'failed' });
+      }
       return;
     }
-    const started = generation.current;
-    const current = () => live.current && generation.current === started;
-    if (support.assistant) {
-      const latest = await loadAssistantPreferences();
-      if (!current()) return;
-      if (latest) adoptPreferences(latest.preferences);
-    }
-    if (support.team) {
-      const mode = await loadTeamUsageMode();
-      if (!current()) return;
-      if (mode !== null) {
-        const base = stored.current.teamMode;
-        remember({ teamMode: mode });
-        setTeamMode((current) => (current === base ? mode : current));
-      }
-    }
-  }, [adoptPreferences, remember, support]);
+  }, [adoptLocal, adoptPreferences, adoptTeam, remember, support]);
+
+  /** "もう一度読み込む" after a failed read. */
+  const retryRead = useCallback(() => {
+    if (stored.current.assistant === 'failed') remember({ assistant: 'loading' });
+    if (stored.current.team === 'failed') remember({ team: 'loading' });
+    void refreshStored();
+  }, [refreshStored, remember]);
 
   /** Wraps one save so that reads cannot land on top of it (see `generation`). */
   const whileSaving = useCallback(
@@ -370,6 +432,10 @@ export function SetupWizard({
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
+    // The Team step always shows what is stored right now.
+    if (step === 'team') void refreshStored();
+    // refreshStored is stable for a given bridge; only the step decides.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
   const updatePreferences = useCallback((patch: Partial<AssistantPreferences>) => {
@@ -382,7 +448,9 @@ export function SetupWizard({
   const skyRef = useRef<SetupSky | null>(null);
   const lastPress = useRef<{ x: number; y: number; at: number } | null>(null);
   // The opening plays once per Setup, with motion only; any click or key ends it at once.
-  const [intro, setIntro] = useState<'playing' | 'done'>(() => (animate ? 'playing' : 'done'));
+  const [introState, setIntro] = useState<'playing' | 'done'>(() => (animate ? 'playing' : 'done'));
+  // Switching motion off part-way ends the opening at once.
+  const intro: 'playing' | 'done' = animate ? introState : 'done';
   const endIntro = useCallback(() => {
     setIntro('done');
     skyRef.current?.finishIntro();
@@ -422,7 +490,8 @@ export function SetupWizard({
     // On the welcome, the swarm crosses the whole window, one lane in each band.
     else if (step === 'welcome') sky.setTeam('proactive', 0.5, 0.19);
     else sky.setTeam(null);
-  }, [preferences, step, teamMode]);
+    // A sky made again (motion switched on or off) must get the current look too.
+  }, [animate, preferences, step, teamMode]);
 
   /** Where a choice was made: the last press if it was just now, else the focused control. */
   const choicePoint = useCallback((): { x: number; y: number } => {
@@ -441,8 +510,8 @@ export function SetupWizard({
   // window from where it was made, and a burst of sparks on the stage.
   const [burst, setBurst] = useState(0);
   const respond = useCallback(
-    (cue: CueName) => {
-      playInterfaceCue(cue);
+    (name: CueName, sound = soundDraft.current) => {
+      playInterfaceCue(name, sound);
       const point = choicePoint();
       skyRef.current?.ripple(point.x, point.y);
       setBurst((current) => current + 1);
@@ -458,113 +527,109 @@ export function SetupWizard({
     [respond],
   );
 
-  const noteOutcome = useCallback((key: 'assistant' | 'team', outcome: SetupSaveOutcome) => {
-    if (outcome === 'unsupported') return;
-    setFailed((current) => {
-      const next = new Set(current);
-      if (outcome === 'failed') next.add(key);
-      else next.delete(key);
-      return next;
-    });
-  }, []);
-
-  /** Stores what this step changed — and only that. A step left exactly as it was found stores
-   * nothing, so someone who never chooses anything keeps today's behaviour (`configured: false`). */
-  const persist = useCallback(
-    async (id: PreferenceStep): Promise<boolean> => {
-      const saved = stored.current;
-      if (id === 'reply' || id === 'details') {
-        const localChanged =
-          id === 'details' &&
-          (soundEnabled !== saved.soundEnabled || accessDefault !== saved.accessDefault);
-        const assistantChanged =
-          support.assistant &&
-          (id === 'reply'
-            ? replyFields(preferences) !== replyFields(saved.preferences)
-            : detailFields(preferences) !== detailFields(saved.preferences));
-        if (!localChanged && !assistantChanged) return false;
-        if (localChanged) {
-          const localItems: SummaryItem[] = [];
-          if (accessDefault !== saved.accessDefault) {
-            writeAccessPresetDefault(accessDefault);
-            localItems.push('accessDefault');
-          }
-          if (soundEnabled !== saved.soundEnabled) localItems.push('soundEnabled');
-          if (soundEnabled !== readSoundEffectPreferences().enabled) {
-            setSoundEffectsEnabled(soundEnabled);
-          }
-          remember({ soundEnabled, accessDefault });
-          setSavedChanges((current) => new Set([...current, ...localItems]));
-          if (soundEnabled) void unlockSoundEffects();
-        }
-        if (assistantChanged) {
-          // Read what is stored right now and lay only the person's own changes over it, so an
-          // item changed elsewhere (Settings) meanwhile is not put back to an old value.
-          // The unsaved difference, measured against the baseline this screen was built on.
-          const changed = changedKeys(preferences, stored.current.preferences);
-          const latest = await loadAssistantPreferences();
-          const snapshot: AssistantPreferences = {
-            ...(latest?.preferences ?? stored.current.preferences),
-          };
-          for (const key of changed) (snapshot as Record<string, unknown>)[key] = preferences[key];
-          snapshot.callName = clampCallName(snapshot.callName.trim());
-          const result = await saveAssistantPreferences(snapshot);
-          noteOutcome('assistant', result.outcome);
-          if (result.outcome === 'saved' && result.preferences) {
-            // What Main kept (it cleans the call name) is the new baseline, and the screen shows
-            // it: no difference is left, so a later change in Settings to the same item is
-            // followed, not overwritten.
-            remember({ preferences: result.preferences });
-            if (live.current) setPreferences(result.preferences);
-            setSavedChanges((current) => new Set([...current, ...changed]));
-            // An earlier step whose save failed went out again inside this one.
-            setDecisions((current) => ({
-              ...current,
-              ...(current.reply === 'failed' ? { reply: 'saved' as const } : {}),
-              ...(current.details === 'failed' ? { details: 'saved' as const } : {}),
-              [id]: 'saved',
-            }));
-            return true;
-          }
-          if (result.outcome === 'failed') {
-            setDecisions((current) => ({ ...current, [id]: 'failed' }));
-            return false;
-          }
-        }
-      } else {
-        if (teamMode === saved.teamMode) return false;
-        const result = await saveTeamUsageMode(teamMode);
-        noteOutcome('team', result.outcome);
-        if (result.outcome === 'failed') {
-          setDecisions((current) => ({ ...current, team: 'failed' }));
-          return false;
-        }
-        if (result.outcome === 'saved' && result.mode) {
-          remember({ teamMode: result.mode });
-          if (live.current) setTeamMode(result.mode);
-        }
+  /** The changes on this step, measured against what is known to be stored. Nothing counts as a
+   * change while the baseline is unknown (the choices are not offered then). */
+  const changesOn = useCallback(
+    (
+      id: PreferenceStep,
+    ): {
+      assistant: (keyof AssistantPreferences)[];
+      local: SummaryItem[];
+      team: boolean;
+    } => {
+      const base = stored.current;
+      const assistant =
+        base.assistant === 'ready'
+          ? changedKeys(preferences, base.preferences).filter((key) =>
+              (id === 'reply' ? REPLY_KEYS : id === 'details' ? DETAIL_KEYS : []).includes(key),
+            )
+          : [];
+      const local: SummaryItem[] = [];
+      if (id === 'details') {
+        if (soundEnabled !== base.soundEnabled) local.push('soundEnabled');
+        if (accessDefault !== base.accessDefault) local.push('accessDefault');
       }
-      setDecisions((current) => ({ ...current, [id]: 'saved' }));
-      return true;
-    },
-    [accessDefault, noteOutcome, preferences, remember, soundEnabled, support.assistant, teamMode],
-  );
-
-  const changedSinceStored = useCallback(
-    (id: PreferenceStep): boolean => {
-      const saved = stored.current;
-      if (id === 'reply') return replyFields(preferences) !== replyFields(saved.preferences);
-      if (id === 'team') return teamMode !== saved.teamMode;
-      return (
-        detailFields(preferences) !== detailFields(saved.preferences) ||
-        soundEnabled !== saved.soundEnabled ||
-        accessDefault !== saved.accessDefault
-      );
+      const team = id === 'team' && base.team === 'ready' && teamMode !== base.teamMode;
+      return { assistant, local, team };
     },
     [accessDefault, preferences, soundEnabled, teamMode],
   );
 
-  /** "あとで決める": nothing is stored, and the step's draft returns to what is stored. */
+  /** Stores what this step changed, and only that: each item is written only when its draft
+   * differs from the baseline, over whatever is stored at that moment. */
+  const persist = useCallback(
+    async (id: PreferenceStep): Promise<void> => {
+      const { assistant, local, team } = changesOn(id);
+      if (local.length > 0) {
+        if (local.includes('accessDefault')) writeAccessPresetDefault(accessDefault);
+        if (local.includes('soundEnabled')) {
+          setSoundEffectsEnabled(soundEnabled);
+          if (soundEnabled) void unlockSoundEffects();
+        }
+        remember({
+          soundEnabled: readSoundEffectPreferences().enabled,
+          accessDefault: readAccessPresetDefault(),
+        });
+        noteSaved(local);
+      }
+      if (assistant.length > 0) {
+        // Lay only the changed items over what is stored right now. If that cannot be read, the
+        // last value read stands in; if nothing was ever read, nothing is written.
+        const latest = await loadAssistantPreferences();
+        const base = latest?.preferences ?? stored.current.preferences;
+        if (latest === null && stored.current.assistant !== 'ready') {
+          noteFailed(assistant);
+        } else {
+          const snapshot: AssistantPreferences = { ...base };
+          for (const key of assistant)
+            (snapshot as Record<string, unknown>)[key] = preferences[key];
+          snapshot.callName = clampCallName(snapshot.callName.trim());
+          const result = await saveAssistantPreferences(snapshot);
+          if (result.outcome === 'saved' && result.preferences) {
+            // What Main kept (it cleans the call name) is the new baseline and what is shown.
+            remember({ preferences: result.preferences, assistant: 'ready', configured: true });
+            if (live.current) setPreferences(result.preferences);
+            noteSaved(assistant);
+          } else if (result.outcome === 'failed') {
+            noteFailed(assistant);
+          }
+        }
+      }
+      if (team) {
+        // Compare with what is stored right now; if that cannot be read, do not guess.
+        const latest = await loadTeamUsageMode();
+        if (latest === null) {
+          noteFailed(['teamMode']);
+          return;
+        }
+        if (latest === teamMode) {
+          adoptTeam(latest);
+          return;
+        }
+        const result = await saveTeamUsageMode(teamMode);
+        if (result.outcome === 'saved' && result.mode) {
+          remember({ teamMode: result.mode, team: 'ready' });
+          if (live.current) setTeamMode(result.mode);
+          noteSaved(['teamMode']);
+        } else if (result.outcome === 'failed') {
+          noteFailed(['teamMode']);
+        }
+      }
+    },
+    [
+      accessDefault,
+      adoptTeam,
+      changesOn,
+      noteFailed,
+      noteSaved,
+      preferences,
+      remember,
+      soundEnabled,
+      teamMode,
+    ],
+  );
+
+  /** "あとで決める": nothing is stored, and the step's drafts return to what is stored. */
   const revert = useCallback((id: PreferenceStep) => {
     const saved = stored.current;
     if (id === 'reply') {
@@ -586,9 +651,6 @@ export function SetupWizard({
       setSoundEnabled(saved.soundEnabled);
       setAccessDefault(saved.accessDefault);
     }
-    setDecisions((current) =>
-      current[id] === 'saved' ? current : { ...current, [id]: 'skipped' },
-    );
   }, []);
 
   const moveTo = useCallback(
@@ -607,21 +669,24 @@ export function SetupWizard({
       if (SETUP_PREFERENCE_STEPS.has(step)) {
         const id = step as PreferenceStep;
         if (how === 'skip') revert(id);
-        // "続ける" and "戻る" both store the step only when something on it differs from what is
+        // "続ける" and "戻る" store the step only when something on it differs from what is
         // stored; passing through untouched (or changing a choice and putting it back) stores nothing.
-        else if (changedSinceStored(id)) {
-          setBusy(true);
-          try {
-            await whileSaving(() => persist(id));
-          } finally {
-            setBusy(false);
+        else {
+          const changes = changesOn(id);
+          if (changes.assistant.length + changes.local.length > 0 || changes.team) {
+            setBusy(true);
+            try {
+              await whileSaving(() => persist(id));
+            } finally {
+              setBusy(false);
+            }
           }
         }
       }
-      playInterfaceCue(how === 'back' ? 'back' : 'forward');
+      cue(how === 'back' ? 'back' : 'forward');
       moveTo(how === 'back' ? index - 1 : index + 1);
     },
-    [busy, changedSinceStored, index, moveTo, persist, revert, step, whileSaving],
+    [busy, changesOn, cue, index, moveTo, persist, revert, step, whileSaving],
   );
 
   const chooseFolder = useCallback(async () => {
@@ -637,13 +702,13 @@ export function SetupWizard({
 
   /** The step only remembers the folder; the Project is made by "最初の Task を始める". */
   const continueFromWorkspace = useCallback(() => {
-    playInterfaceCue('forward');
+    cue('forward');
     moveTo(index + 1);
-  }, [index, moveTo]);
+  }, [cue, index, moveTo]);
 
   const finish = useCallback(async () => {
     if (replay) {
-      playInterfaceCue('success');
+      cue('success');
       onClose?.();
       return;
     }
@@ -669,14 +734,22 @@ export function SetupWizard({
       }
       // The stage is drawn into the app: everything rushes inwards while the Task is made, and the
       // app's own entrance (Sidebar, then Chat) picks up from there.
-      playInterfaceCue('success');
+      cue('success');
       setLeaving(true);
       skyRef.current?.implode();
       // The Setup disappears the moment the first Task exists, so the hand-off plays first.
       if (animate) await new Promise((resolve) => window.setTimeout(resolve, LEAVE_MS));
       const task = await createTask(projectId);
       if (task === null) {
+        // The hand-off did not happen: the board and the sky come back, and the focus goes to the
+        // message rather than falling to the page.
         setLeaving(false);
+        skyRef.current?.recover();
+        requestAnimationFrame(() =>
+          rootRef.current
+            ?.querySelector<HTMLElement>('.setup-error, [data-testid="setup-finish"]')
+            ?.focus({ preventScroll: true }),
+        );
         setError('最初の Task を作れませんでした。もう一度お試しください。');
         return;
       }
@@ -684,30 +757,31 @@ export function SetupWizard({
     } finally {
       setBusy(false);
     }
-  }, [animate, createProject, createTask, folder, onClose, replay]);
+  }, [animate, createProject, createTask, cue, folder, onClose, replay]);
 
   // Celebrate on arrival, once.
   useEffect(() => {
     if (step !== 'done') return;
-    playInterfaceCue('reward');
+    cue('reward');
     skyRef.current?.celebrate();
-  }, [step]);
+  }, [cue, step]);
 
   const primary = useCallback(() => {
     if (step === 'welcome') {
       if (intro === 'playing') endIntro();
-      playInterfaceCue('start');
+      cue('start');
       moveTo(index + 1);
     } else if (step === 'workspace') continueFromWorkspace();
     else if (step === 'done') void finish();
     else void leave('continue');
-  }, [continueFromWorkspace, endIntro, finish, index, intro, leave, moveTo, step]);
+  }, [continueFromWorkspace, cue, endIntro, finish, index, intro, leave, moveTo, step]);
 
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLElement>) => {
       if (event.key === 'Escape' && replay && onClose) {
+        // Also stops the dialog's own Escape. While a step is being saved, Escape waits.
         event.preventDefault();
-        onClose();
+        if (!busy) onClose();
         return;
       }
       // Enter on a choice, a switch or the name field goes forward, like a form would.
@@ -744,34 +818,61 @@ export function SetupWizard({
   const position = index + 1;
   const remaining = steps.length - position;
   const isPreferenceStep = SETUP_PREFERENCE_STEPS.has(step);
-  const leftAs = replay ? '今のまま' : 'おすすめのまま';
   const saved = confirmed;
-  const summaryValue = (decision: Decision | undefined, value: string): string =>
-    decision === 'saved' ? value : decision === 'failed' ? '保存できませんでした' : leftAs;
-  // Every item this Setup changed and saved on the "細かい好み" step, from the stored values.
+  // The summary always says what is stored now, with a small mark for what this Setup did to it.
+  const NOT_READ = '今の設定を読み込めませんでした';
+  const NOT_YET = 'まだ決めていません（今までどおり）';
+  const rowNote = (items: readonly SummaryItem[]): SummaryNote => {
+    if (items.some((item) => failedItems.has(item)))
+      return { text: '保存できませんでした', tone: 'failed' };
+    if (items.some((item) => savedChanges.has(item)))
+      return { text: '変更しました', tone: 'changed' };
+    return { text: '変更なし', tone: 'same' };
+  };
+  const mark = (item: SummaryItem, text: string) =>
+    failedItems.has(item)
+      ? `${text}（保存できませんでした）`
+      : savedChanges.has(item)
+        ? `${text}（変更しました）`
+        : text;
+  const replySummary =
+    saved.assistant !== 'ready'
+      ? NOT_READ
+      : !saved.configured
+        ? NOT_YET
+        : `${optionLabel(TONE_OPTIONS, saved.preferences.tone)}・${optionLabel(LENGTH_OPTIONS, saved.preferences.length)}・${optionLabel(DEPTH_OPTIONS, saved.preferences.depth)}`;
+  const teamSummary =
+    saved.team === 'ready' ? optionLabel(TEAM_USAGE_OPTIONS, saved.teamMode) : NOT_READ;
   const onOff = (title: string, on: boolean) => `${title}: ${on ? 'オン' : 'オフ'}`;
   const detailSummary: string[] = [];
-  const has = (item: SummaryItem) => savedChanges.has(item);
-  if (has('language'))
-    detailSummary.push(
-      `${choiceTitle('language')}: ${optionLabel(LANGUAGE_OPTIONS, saved.preferences.language)}`,
-    );
-  if (has('confirm'))
-    detailSummary.push(
-      `${choiceTitle('confirm')}: ${optionLabel(CONFIRM_OPTIONS, saved.preferences.confirm)}`,
-    );
-  if (has('callName'))
-    detailSummary.push(
-      saved.preferences.callName ? `呼び名「${saved.preferences.callName}」` : '呼び名なし',
-    );
-  if (has('emoji')) detailSummary.push(onOff(toggleTitle('emoji'), saved.preferences.emoji));
-  if (has('suggestNextSteps'))
-    detailSummary.push(onOff(toggleTitle('suggestNextSteps'), saved.preferences.suggestNextSteps));
-  if (has('planFirst'))
-    detailSummary.push(onOff(toggleTitle('planFirst'), saved.preferences.planFirst));
-  if (has('soundEnabled')) detailSummary.push(onOff('効果音', saved.soundEnabled));
-  if (has('accessDefault'))
-    detailSummary.push(`新しいタスクの安全設定: ${accessDisplay(saved.accessDefault)}`);
+  if (support.assistant) {
+    if (saved.assistant !== 'ready') detailSummary.push(`返事の項目: ${NOT_READ}`);
+    else if (!saved.configured) detailSummary.push(`返事の項目: ${NOT_YET}`);
+    else {
+      const p = saved.preferences;
+      detailSummary.push(
+        mark(
+          'language',
+          `${choiceTitle('language')}: ${optionLabel(LANGUAGE_OPTIONS, p.language)}`,
+        ),
+        mark('confirm', `${choiceTitle('confirm')}: ${optionLabel(CONFIRM_OPTIONS, p.confirm)}`),
+        mark('callName', p.callName ? `呼び名「${p.callName}」` : '呼び名なし'),
+        mark('emoji', onOff(toggleTitle('emoji'), p.emoji)),
+        mark('suggestNextSteps', onOff(toggleTitle('suggestNextSteps'), p.suggestNextSteps)),
+        mark('planFirst', onOff(toggleTitle('planFirst'), p.planFirst)),
+      );
+    }
+    // A reply item whose save failed is marked even while it is not readable.
+    for (const item of DETAIL_KEYS) {
+      if (failedItems.has(item) && (saved.assistant !== 'ready' || !saved.configured)) {
+        detailSummary.push(`${SUMMARY_ITEM_TITLE[item]}（保存できませんでした）`);
+      }
+    }
+  }
+  detailSummary.push(
+    mark('soundEnabled', onOff('効果音', saved.soundEnabled)),
+    mark('accessDefault', `新しいタスクの安全設定: ${accessDisplay(saved.accessDefault)}`),
+  );
   const palette = {
     '--setup-leader': DESKTOP_CONTROL_LEADER_ACCENT,
     '--setup-worker-1': desktopControlWorkerAccent(0),
@@ -824,7 +925,8 @@ export function SetupWizard({
         <canvas ref={canvasRef} className="setup-sky" data-testid="setup-sky" />
       </div>
 
-      <div className="setup-visual">
+      {/* Decoration only: everything it shows is also said on the board. */}
+      <div className="setup-visual" aria-hidden="true">
         <SetupStage
           step={step}
           animate={animate}
@@ -844,6 +946,13 @@ export function SetupWizard({
         </p>
         {step === 'done' && animate && <SetupConfetti />}
       </div>
+
+      {/* If making the first Task takes a while, say so: never a screen with nothing on it. */}
+      {leaving && (
+        <p className="setup-leaving-note" role="status" data-testid="setup-leaving-note">
+          最初の Task を準備しています…
+        </p>
+      )}
 
       <section className="setup-content">
         <header
@@ -880,6 +989,8 @@ export function SetupWizard({
               data-testid="setup-close"
               aria-label="セットアップを閉じる"
               onClick={onClose}
+              // Not while a step is being saved: it closes once the save is over.
+              disabled={busy}
             >
               <X size={16} />
             </button>
@@ -974,38 +1085,50 @@ export function SetupWizard({
               <>
                 {heading('返事の仕方を選ぶ')}
                 <p className="setup-lead">選ぶたびに、左の見本がその場で書き変わります。</p>
-                <div className="setup-groups">
-                  <SetupChoiceGroup
-                    legend={choiceTitle('tone')}
-                    options={TONE_OPTIONS}
-                    value={preferences.tone}
-                    testId="setup-tone"
-                    onChange={(tone) => {
-                      updatePreferences({ tone });
-                      respond('select');
-                    }}
-                  />
-                  <SetupChoiceGroup
-                    legend={choiceTitle('length')}
-                    options={LENGTH_OPTIONS}
-                    value={preferences.length}
-                    testId="setup-length"
-                    onChange={(length) => {
-                      updatePreferences({ length });
-                      respond('select');
-                    }}
-                  />
-                  <SetupChoiceGroup
-                    legend={choiceTitle('depth')}
-                    options={DEPTH_OPTIONS}
-                    value={preferences.depth}
-                    testId="setup-depth"
-                    onChange={(depth) => {
-                      updatePreferences({ depth });
-                      respond('select');
-                    }}
-                  />
-                </div>
+                {/* The sample reply, read once and whole (the stage itself is hidden from reading). */}
+                <p
+                  className="setup-visually-hidden"
+                  aria-live="polite"
+                  data-testid="setup-preview-live"
+                >
+                  {setupPreviewReply(preferences)}
+                </p>
+                {saved.assistant !== 'ready' ? (
+                  <ReadingNotice state={saved.assistant} onRetry={retryRead} />
+                ) : (
+                  <div className="setup-groups">
+                    <SetupChoiceGroup
+                      legend={choiceTitle('tone')}
+                      options={TONE_OPTIONS}
+                      value={preferences.tone}
+                      testId="setup-tone"
+                      onChange={(tone) => {
+                        updatePreferences({ tone });
+                        respond('select');
+                      }}
+                    />
+                    <SetupChoiceGroup
+                      legend={choiceTitle('length')}
+                      options={LENGTH_OPTIONS}
+                      value={preferences.length}
+                      testId="setup-length"
+                      onChange={(length) => {
+                        updatePreferences({ length });
+                        respond('select');
+                      }}
+                    />
+                    <SetupChoiceGroup
+                      legend={choiceTitle('depth')}
+                      options={DEPTH_OPTIONS}
+                      value={preferences.depth}
+                      testId="setup-depth"
+                      onChange={(depth) => {
+                        updatePreferences({ depth });
+                        respond('select');
+                      }}
+                    />
+                  </div>
+                )}
               </>
             )}
 
@@ -1015,12 +1138,16 @@ export function SetupWizard({
                 <p className="setup-lead">
                   大きな作業は、AI が仲間を呼んで手分けできます。どのくらい頼るかを選びましょう。
                 </p>
-                <SetupTeamCards
-                  options={TEAM_USAGE_OPTIONS}
-                  value={teamMode}
-                  onChange={chooseTeamMode}
-                  animate={animate}
-                />
+                {saved.team !== 'ready' ? (
+                  <ReadingNotice state={saved.team} onRetry={retryRead} />
+                ) : (
+                  <SetupTeamCards
+                    options={TEAM_USAGE_OPTIONS}
+                    value={teamMode}
+                    onChange={chooseTeamMode}
+                    animate={animate}
+                  />
+                )}
                 <p className="setup-note">{TEAM_USAGE_COST_NOTE}</p>
               </>
             )}
@@ -1030,7 +1157,12 @@ export function SetupWizard({
                 {heading('細かい好み')}
                 <p className="setup-lead">気になる所だけ変えれば大丈夫です。</p>
                 <div className="setup-detail-grid">
-                  {support.assistant && (
+                  {support.assistant && saved.assistant !== 'ready' && (
+                    <section className="setup-panel setup-panel--wide">
+                      <ReadingNotice state={saved.assistant} onRetry={retryRead} />
+                    </section>
+                  )}
+                  {support.assistant && saved.assistant === 'ready' && (
                     <section className="setup-panel" aria-labelledby="setup-panel-talk">
                       <h2 id="setup-panel-talk">話し方</h2>
                       <SetupChoiceGroup
@@ -1073,7 +1205,7 @@ export function SetupWizard({
                       />
                     </section>
                   )}
-                  {support.assistant && (
+                  {support.assistant && saved.assistant === 'ready' && (
                     <section className="setup-panel" aria-labelledby="setup-panel-work">
                       <h2 id="setup-panel-work">作業のしかた</h2>
                       <SetupChoiceGroup
@@ -1118,7 +1250,8 @@ export function SetupWizard({
                       testId="setup-sound"
                       onChange={(enabled) => {
                         setSoundEnabled(enabled);
-                        respond(enabled ? 'check' : 'uncheck');
+                        // Heard only when it is switched on, never at the moment it is switched off.
+                        respond('check', enabled);
                       }}
                     />
                     <SetupChoiceGroup
@@ -1174,37 +1307,30 @@ export function SetupWizard({
                     : 'あとは、やりたいことをそのまま書くだけ。'}
                   選んだ内容は、あとで設定から変えられます。
                 </p>
-                {/* Built from what Main confirmed it stored, never from what is on screen. */}
+                {/* What is stored now — Main's values and this PC's — never the drafts on screen. */}
                 <ul className="setup-summary" data-testid="setup-summary">
                   <SummaryRow index={0} label="AI" value="確認しました" />
                   {support.assistant && (
                     <SummaryRow
                       index={1}
                       label="返事の仕方"
-                      value={summaryValue(
-                        decisions.reply,
-                        `${optionLabel(TONE_OPTIONS, saved.preferences.tone)}・${optionLabel(LENGTH_OPTIONS, saved.preferences.length)}・${optionLabel(DEPTH_OPTIONS, saved.preferences.depth)}`,
-                      )}
+                      value={replySummary}
+                      note={rowNote(REPLY_KEYS)}
                     />
                   )}
                   {support.team && (
                     <SummaryRow
                       index={2}
                       label="Team"
-                      value={summaryValue(
-                        decisions.team,
-                        optionLabel(TEAM_USAGE_OPTIONS, saved.teamMode),
-                      )}
+                      value={teamSummary}
+                      note={rowNote(['teamMode'])}
                     />
                   )}
                   <SummaryRow
                     index={3}
                     label="細かい好み"
-                    value={
-                      decisions.details === 'saved' && detailSummary.length > 0
-                        ? detailSummary
-                        : summaryValue(decisions.details, '')
-                    }
+                    value={detailSummary}
+                    note={rowNote([...DETAIL_KEYS, 'soundEnabled', 'accessDefault'])}
                   />
                   {!replay && (
                     <SummaryRow
@@ -1213,8 +1339,8 @@ export function SetupWizard({
                       value={folder ? folder.label : 'あとで設定'}
                     />
                   )}
-                </ul>
-                {failed.size > 0 && (
+                </ul>{' '}
+                {failedItems.size > 0 && (
                   <p className="setup-warning" role="status" data-testid="setup-save-warning">
                     保存できなかった設定があります。設定の画面から変えられます。
                   </p>
@@ -1223,7 +1349,7 @@ export function SetupWizard({
             )}
 
             {error && (
-              <p className="setup-error" role="alert">
+              <p className="setup-error" role="alert" tabIndex={-1}>
                 {error}
               </p>
             )}
@@ -1264,8 +1390,8 @@ export function SetupWizard({
                     onClick={() => void leave('skip')}
                     disabled={busy}
                   >
-                    {replay ? '今のままにする' : 'あとで決める'}
-                    <small>{replay ? '変えずに進む' : 'おすすめの設定で進む'}</small>
+                    あとで決める
+                    <small>今の設定のまま進む</small>
                   </button>
                 )}
                 <button
@@ -1291,14 +1417,47 @@ export function SetupWizard({
   );
 }
 
+type SummaryNote = { text: string; tone: 'changed' | 'same' | 'failed' };
+
+/** Shown in place of choices whose stored value has not been read: never a guessed default. */
+function ReadingNotice({ state, onRetry }: { state: Known; onRetry: () => void }) {
+  if (state === 'failed') {
+    return (
+      <div className="setup-reading" role="status" data-testid="setup-reading-failed">
+        <p>今の設定を読み込めませんでした。読み込めるまで、ここは選べません。</p>
+        <button type="button" className="setup-secondary" onClick={onRetry}>
+          もう一度読み込む
+        </button>
+      </div>
+    );
+  }
+  return (
+    <p className="setup-reading" role="status" data-testid="setup-reading">
+      今の設定を読み込んでいます…
+    </p>
+  );
+}
+
+/** Names for a reply item that has to be reported without its value. */
+const SUMMARY_ITEM_TITLE: Readonly<Record<string, string>> = {
+  language: '返事の言語',
+  confirm: '進め方',
+  callName: '呼び名',
+  emoji: '絵文字',
+  suggestNextSteps: '次の一手の提案',
+  planFirst: '作業の前に進め方を見せる',
+};
+
 function SummaryRow({
   index,
   label,
   value,
+  note,
 }: {
   index: number;
   label: string;
   value: string | readonly string[];
+  note?: SummaryNote;
 }) {
   return (
     <li style={{ '--i': index } as CSSProperties}>
@@ -1306,20 +1465,26 @@ function SummaryRow({
         <path d="M3.5 8.4 6.6 11.4 12.5 4.8" pathLength={1} />
       </svg>
       <span>{label}</span>
-      {typeof value === 'string' ? (
-        <strong>{value}</strong>
-      ) : (
-        // Several items wrap onto as many lines as they need instead of one long run.
-        <strong className="setup-summary-items">
-          {value.map((item) => (
-            <span key={item}>{item}</span>
-          ))}
-        </strong>
-      )}
+      <span className="setup-summary-value">
+        {typeof value === 'string' ? (
+          <strong>{value}</strong>
+        ) : (
+          // Several items wrap onto as many lines as they need instead of one long run.
+          <strong className="setup-summary-items">
+            {value.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </strong>
+        )}
+        {note && (
+          <em className={`setup-summary-note is-${note.tone}`} data-tone={note.tone}>
+            {note.text}
+          </em>
+        )}
+      </span>
     </li>
   );
 }
-
 /** The replay form, opened from Settings: a modal over the app (so focus stays inside, and the
  * workspace underneath is untouched), closed by ×, Escape, or "完了". */
 export function SetupReplayDialog({
@@ -1338,6 +1503,8 @@ export function SetupReplayDialog({
     } else {
       dialog.setAttribute('open', '');
     }
+    // The dialog's own first focus would land on ×: the heading is where the Setup begins.
+    dialog.querySelector<HTMLElement>('#setup-title')?.focus({ preventScroll: true });
     return () => {
       if (typeof dialog.close === 'function' && dialog.open) dialog.close();
     };

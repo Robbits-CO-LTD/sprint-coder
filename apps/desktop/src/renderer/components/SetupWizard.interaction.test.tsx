@@ -5,6 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_ASSISTANT_PREFERENCES, type AssistantPreferences } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { SETUP_COMPLETE_KEY } from '../lib/setup-preference';
+import { SetupSky } from '../lib/setup-sky';
+import type * as UiSound from '../lib/ui-sound';
+
+const playCue = vi.hoisted(() => vi.fn());
+vi.mock('../lib/ui-sound', async (importOriginal) => ({
+  ...(await importOriginal<typeof UiSound>()),
+  playInterfaceCue: playCue,
+}));
 import { SetupWizard } from './SetupWizard';
 
 type Bridge = Record<string, unknown>;
@@ -154,13 +162,13 @@ describe('SetupWizard', () => {
     await render();
     await press('setup-start');
     await press('setup-next'); // ai -> reply
-    const before = q('[data-testid="setup-preview-reply"]')?.textContent;
+    const before = q('[data-testid="setup-preview-live"]')?.textContent;
     await choose('setup-tone-casual');
     await choose('setup-length-short');
     await choose('setup-depth-beginner');
     expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
     // The whole sample (read by screen readers) changes immediately.
-    expect(q('[data-testid="setup-preview-reply"] [aria-live]')?.textContent).not.toBe(before);
+    expect(q('[data-testid="setup-preview-live"]')?.textContent).not.toBe(before);
     await press('setup-next');
     expect(settings.setAssistantPreferences).toHaveBeenCalledExactlyOnceWith({
       ...DEFAULT_ASSISTANT_PREFERENCES,
@@ -211,7 +219,8 @@ describe('SetupWizard', () => {
     );
     await press('setup-next'); // workspace -> done
     const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
-    expect(summary).toContain('おすすめのまま');
+    // The summary says what is stored: the skipped reply style is the stored one, unchanged.
+    expect(summary).toContain('返事の仕方ていねい・ふつう・理由も変更なし');
     expect(summary).toContain('呼び名「ゆう」'); // what Main kept
     expect(q('[data-testid="setup-save-warning"]')).toBeNull();
   });
@@ -257,7 +266,8 @@ describe('SetupWizard', () => {
     expect(localStorage.getItem('sprint-coder:default-access-preset')).toBeNull();
     expect(localStorage.getItem('sprint-coder:sound-effects')).toBeNull();
     const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
-    expect(summary).toContain('おすすめのまま');
+    expect(summary).toContain('返事の仕方まだ決めていません（今までどおり）変更なし');
+    expect(summary).toContain('Team言った時だけ変更なし');
   });
 
   it('a change on the app-only part of the details stores that part alone', async () => {
@@ -382,7 +392,7 @@ describe('SetupWizard', () => {
     expect(q('[data-testid="setup-summary"]')?.textContent).toContain('きびきび');
   });
 
-  it('after a failed first Task, a different folder makes its own Project and the Task goes there', async () => {
+  it('after a failed first Task, a different folder makes its own Project and the Task goes there (intended: the empty one stays, as no Project can be removed)', async () => {
     installBridge({});
     pickProjectFolders
       .mockResolvedValueOnce({ canceled: false, folders: [{ path: 'C:/work/a', label: 'a' }] })
@@ -461,7 +471,9 @@ describe('SetupWizard', () => {
       expect(summary).toContain(text);
     }
     // Not changed here, so not listed.
-    expect(summary).not.toContain('返事の言語');
+    // Not changed here: shown with its stored value, without the mark.
+    expect(summary).toContain('返事の言語: 相手に合わせる');
+    expect(summary).not.toContain('相手に合わせる（変更しました）');
   });
 
   it('says what "前回選択した設定" means, on a first launch and after a choice', async () => {
@@ -483,6 +495,206 @@ describe('SetupWizard', () => {
     expect(q('[data-testid="setup-access"]')?.textContent).toContain(
       '今は「安全時は自動」を引き継ぐ',
     );
+  });
+
+  describe('what is stored, and only that', () => {
+    const goTo = async (target: string) => {
+      await press('setup-start');
+      for (let i = 0; i < 8 && step() !== target; i += 1) await press('setup-next');
+      expect(step()).toBe(target);
+    };
+
+    it('the Team step shows no choice until the stored mode is read, then the right one; "言った時だけ" is then really stored', async () => {
+      const settings = fullBridge(undefined, 'proactive');
+      settings.getTeamUsageMode
+        .mockRejectedValueOnce(new Error('busy'))
+        .mockRejectedValueOnce(new Error('busy'));
+      await render();
+      await goTo('team');
+      expect(q('[data-testid="setup-reading-failed"]')?.textContent).toContain(
+        '今の設定を読み込めませんでした',
+      );
+      expect(q('[data-testid="setup-team-explicit"]')).toBeNull();
+      const retry = [...container.querySelectorAll<HTMLButtonElement>('button')].find((b) =>
+        b.textContent?.includes('もう一度読み込む'),
+      )!;
+      await act(async () => retry.click());
+      await flush();
+      expect(q<HTMLInputElement>('[data-testid="setup-team-proactive"]')?.checked).toBe(true);
+      await choose('setup-team-explicit');
+      await press('setup-next');
+      expect(settings.setTeamUsageMode).toHaveBeenCalledExactlyOnceWith({ mode: 'explicit' });
+    });
+
+    it('a read that a save overtook is made again after it', async () => {
+      const settings = fullBridge();
+      const current = { ...DEFAULT_ASSISTANT_PREFERENCES, tone: 'crisp' as const };
+      const held: (() => void)[] = [];
+      settings.getAssistantPreferences.mockImplementation(() => {
+        const answer = { configured: true, preferences: { ...current } };
+        if (held.length < 2) return new Promise((resolve) => held.push(() => resolve(answer)));
+        return Promise.resolve(answer);
+      });
+      await render();
+      await goTo('details');
+      // Only this PC's part is offered while the reply settings are being read.
+      expect(q('[data-testid="setup-reading"]')).not.toBeNull();
+      await choose('setup-sound');
+      await press('setup-next'); // a save: the two reads still waiting are now out of date
+      for (const answer of held) await act(async () => answer());
+      await flush();
+      await flush();
+      expect(settings.getAssistantPreferences.mock.calls.length).toBeGreaterThanOrEqual(3);
+      await press('setup-next');
+      expect(q('[data-testid="setup-summary"]')?.textContent).toContain('きびきび・ふつう・理由も');
+    });
+
+    it('"あとで決める" keeps what is stored, and the summary says so with the value', async () => {
+      fullBridge(undefined, 'proactive');
+      await render();
+      await goTo('team');
+      expect(q('[data-testid="setup-skip"]')?.textContent).toBe('あとで決める今の設定のまま進む');
+      await choose('setup-team-explicit');
+      await press('setup-skip');
+      for (let i = 0; i < 3 && step() !== 'done'; i += 1) await press('setup-next');
+      expect(q('[data-testid="setup-summary"]')?.textContent).toContain('Team積極的に変更なし');
+    });
+
+    it('when only the reply part of the details fails, this PC’s part is shown as stored, the failure only on its items', async () => {
+      const settings = fullBridge();
+      settings.setAssistantPreferences.mockRejectedValue(new Error('disk'));
+      await render();
+      await goTo('details');
+      await choose('setup-emoji');
+      await choose('setup-access-full');
+      await press('setup-next');
+      await press('setup-next');
+      let summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+      expect(summary).toContain('新しいタスクの安全設定: フルアクセス（変更しました）');
+      expect(summary).toContain('返事の項目: まだ決めていません（今までどおり）');
+      expect(summary).toContain('絵文字（保存できませんでした）');
+      expect(q('[data-testid="setup-save-warning"]')).not.toBeNull();
+      // Going back and skipping keeps both the record of the failure and the stored values.
+      await press('setup-back');
+      await press('setup-back');
+      await press('setup-skip');
+      await press('setup-next');
+      summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+      expect(summary).toContain('フルアクセス（変更しました）');
+      expect(summary).toContain('絵文字（保存できませんでした）');
+    });
+
+    it('sound and the safety default changed in Settings meanwhile are followed, and not written back', async () => {
+      fullBridge();
+      await render();
+      await press('setup-start');
+      // In Settings: sound on, full access.
+      localStorage.setItem(
+        'sprint-coder:sound-effects',
+        JSON.stringify({ enabled: true, volume: 0.2 }),
+      );
+      localStorage.setItem('sprint-coder:default-access-preset', 'full');
+      await act(async () => window.dispatchEvent(new Event('focus')));
+      await flush();
+      for (let i = 0; i < 4 && step() !== 'details'; i += 1) await press('setup-next');
+      expect(q<HTMLInputElement>('[data-testid="setup-sound"]')?.checked).toBe(true);
+      expect(q<HTMLInputElement>('[data-testid="setup-access-full"]')?.checked).toBe(true);
+      await choose('setup-access-ask');
+      await press('setup-next');
+      expect(JSON.parse(localStorage.getItem('sprint-coder:sound-effects') ?? '{}').enabled).toBe(
+        true,
+      );
+      expect(localStorage.getItem('sprint-coder:default-access-preset')).toBe('ask');
+    });
+
+    it('while a save is waiting, × and Escape do nothing; afterwards they close', async () => {
+      const settings = fullBridge();
+      let finishSave: () => void = () => {};
+      settings.setTeamUsageMode.mockImplementation(
+        (input: { mode: string }) => new Promise((resolve) => (finishSave = () => resolve(input))),
+      );
+      const onClose = vi.fn();
+      await render({ mode: 'replay', onClose });
+      await goTo('team');
+      await choose('setup-team-auto');
+      await act(async () => q<HTMLButtonElement>('[data-testid="setup-next"]')!.click());
+      expect(q<HTMLButtonElement>('[data-testid="setup-close"]')?.disabled).toBe(true);
+      await act(async () => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      });
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => finishSave());
+      await flush();
+      await press('setup-close');
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('reply settings that cannot be read are never written over with defaults', async () => {
+      const settings = fullBridge();
+      settings.getAssistantPreferences.mockRejectedValue(new Error('busy'));
+      await render();
+      await goTo('reply');
+      expect(q('[data-testid="setup-reading-failed"]')).not.toBeNull();
+      expect(q('[data-testid="setup-tone-polite"]')).toBeNull();
+      for (let i = 0; i < 6 && step() !== 'done'; i += 1) await press('setup-next');
+      expect(settings.setAssistantPreferences).not.toHaveBeenCalled();
+      expect(q('[data-testid="setup-summary"]')?.textContent).toContain(
+        '返事の仕方今の設定を読み込めませんでした',
+      );
+    });
+  });
+
+  describe('motion, sound and the drawing surface', () => {
+    it('switching motion off part-way gives the new still sky the current look and Team', async () => {
+      let reduced = false;
+      const listeners = new Set<() => void>();
+      vi.stubGlobal(
+        'matchMedia',
+        vi.fn((query: string) => ({
+          get matches() {
+            return reduced && query.includes('prefers-reduced-motion');
+          },
+          media: query,
+          addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+          removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+        })),
+      );
+      const setTheme = vi.spyOn(SetupSky.prototype, 'setTheme');
+      const setTeam = vi.spyOn(SetupSky.prototype, 'setTeam');
+      fullBridge(undefined, 'proactive');
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'team'; i += 1) await press('setup-next');
+      setTheme.mockClear();
+      setTeam.mockClear();
+      reduced = true;
+      await act(async () => {
+        for (const listener of listeners) listener();
+      });
+      expect(q('[data-testid="setup-wizard"]')?.dataset.motion).toBe('reduced');
+      expect(q('[data-testid="setup-wizard"]')?.dataset.intro).toBe('done');
+      expect(setTheme).toHaveBeenCalled();
+      expect(setTeam).toHaveBeenLastCalledWith('proactive', 0.86, 0.045);
+    });
+
+    it('sounds follow the switch on screen: heard when switched on, silent when switched off', async () => {
+      fullBridge();
+      await render();
+      await press('setup-start');
+      for (let i = 0; i < 4 && step() !== 'details'; i += 1) await press('setup-next');
+      playCue.mockClear();
+      await choose('setup-sound'); // on (not stored yet)
+      expect(playCue).toHaveBeenLastCalledWith('check', true);
+      await choose('setup-access-ask');
+      expect(playCue).toHaveBeenLastCalledWith('select', true);
+      playCue.mockClear();
+      await choose('setup-sound'); // off
+      expect(playCue.mock.calls.every(([, enabled]) => enabled === false)).toBe(true);
+      await choose('setup-access-auto');
+      expect(playCue).toHaveBeenLastCalledWith('select', false);
+    });
   });
 
   it('works without the new settings bridge: no reply or Team step, nothing reported', async () => {
@@ -544,6 +756,7 @@ describe('SetupWizard', () => {
       folders: [{ path: 'C:/work/app', label: 'app' }],
     });
     createTask.mockResolvedValueOnce(null);
+    const recover = vi.spyOn(SetupSky.prototype, 'recover');
     await render();
     await press('setup-start');
     await press('setup-next');
@@ -553,6 +766,9 @@ describe('SetupWizard', () => {
     await press('setup-finish');
     await waitForHandOff();
     expect(container.textContent).toContain('最初の Task を作れませんでした');
+    // The hand-off is undone: the board and the sky come back.
+    expect(q('[data-testid="setup-wizard"]')?.classList.contains('is-leaving')).toBe(false);
+    expect(recover).toHaveBeenCalled();
     await press('setup-finish');
     await waitForHandOff();
     expect(createProject).toHaveBeenCalledTimes(1);
@@ -659,7 +875,7 @@ describe('SetupWizard', () => {
     await press('setup-next');
     expect(q<HTMLInputElement>('[data-testid="setup-tone-casual"]')?.checked).toBe(true);
     expect(q<HTMLInputElement>('[data-testid="setup-length-detailed"]')?.checked).toBe(true);
-    expect(q('[data-testid="setup-skip"]')?.textContent).toContain('今のままにする');
+    expect(q('[data-testid="setup-skip"]')?.textContent).toBe('あとで決める今の設定のまま進む');
     await press('setup-next');
     expect(q<HTMLInputElement>('[data-testid="setup-team-auto"]')?.checked).toBe(true);
     // Escape closes from anywhere.
@@ -707,7 +923,7 @@ describe('SetupWizard', () => {
     await press('setup-next');
     const reply = q('[data-testid="setup-preview-reply"]')!;
     expect(reply.querySelector('[aria-hidden="true"]')?.textContent).toBe(
-      reply.querySelector('[aria-live]')?.textContent,
+      q('[data-testid="setup-preview-live"]')?.textContent,
     );
     for (let i = 0; i < 4; i += 1) await press('setup-next');
     expect(step()).toBe('done');
@@ -740,7 +956,7 @@ describe('SetupWizard', () => {
     });
     const reply = q('[data-testid="setup-preview-reply"]')!;
     expect(reply.querySelector('[aria-hidden="true"]')?.textContent).toBe(
-      reply.querySelector('[aria-live]')?.textContent,
+      q('[data-testid="setup-preview-live"]')?.textContent,
     );
     for (let i = 0; i < 4; i += 1) await press('setup-next');
     expect(q('[data-testid="setup-confetti"]')).not.toBeNull();

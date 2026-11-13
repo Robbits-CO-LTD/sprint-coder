@@ -139,4 +139,58 @@ describe('SetupSky', () => {
       sky.destroy();
     });
   });
+
+  describe('the drawing surface', () => {
+    const boxed = (width: number, height: number) => {
+      const parent = document.createElement('div');
+      const canvas = document.createElement('canvas');
+      parent.append(canvas);
+      vi.spyOn(parent, 'getBoundingClientRect').mockReturnValue({
+        width,
+        height,
+        top: 0,
+        left: 0,
+        right: width,
+        bottom: height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+      return canvas;
+    };
+
+    it('caps the pixels behind a huge window by lowering the resolution', () => {
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+      const sky = new SetupSky(boxed(7680, 4320), { animate: false });
+      const { width, height } = sky.backingSize;
+      expect(width * height).toBeLessThanOrEqual(4_300_000);
+      expect(width / height).toBeCloseTo(7680 / 4320, 1);
+      sky.destroy();
+    });
+
+    it('draws nothing while its box has no size (a dialog not open yet)', () => {
+      const ctx = fakeContext();
+      const drawImage = vi.fn();
+      (ctx as unknown as Record<string, unknown>).drawImage = drawImage;
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx);
+      const sky = new SetupSky(boxed(0, 0), { animate: false });
+      sky.setTeam('proactive');
+      expect(drawImage).not.toHaveBeenCalled();
+      sky.destroy();
+    });
+
+    it('a drawing error stops the loop instead of leaving it half running', () => {
+      vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+      const ctx = fakeContext();
+      (ctx as unknown as Record<string, unknown>).clearRect = () => {
+        throw new Error('lost');
+      };
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx);
+      const sky = new SetupSky(boxed(800, 600), { animate: true });
+      vi.advanceTimersByTime(100);
+      expect(sky.isRunning).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      sky.destroy();
+    });
+  });
 });
