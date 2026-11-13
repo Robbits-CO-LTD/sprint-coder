@@ -465,6 +465,34 @@ describe('what an offered Leader is given', () => {
       expect(guidance).toContain('あなたが Team を使うと決めた時にだけ当てはまる');
       expect(guidance).toContain('`team_get_status` など）を呼ぶこともしない');
     }
+    // 積極的に: small independent deliverables are still split, and the guidance says it takes
+    // precedence over the Skill's 「# 判断」 for that decision (the Skill itself is not rewritten).
+    const proactive = teamUsageGuidance('proactive');
+    expect(proactive).toContain('2 つ以上なら、1 つずつが小さくても');
+    expect(proactive).toContain('その成果物を自分で作らない');
+    expect(proactive).toContain('質問・相談・説明と、1 つの成果物で済む依頼だけ');
+    expect(proactive).toContain('Team を使わない理由を利用者に 1 文で伝える');
+    expect(proactive).toContain('上限は Team の設定に従う');
+    expect(proactive).toContain('この発言では、この案内を優先する');
+    expect(proactive).not.toContain('ごく小さな修正');
+    // おまかせ: still "when in doubt, don't", with a size-based (not time-based) point where it does
+    // use Team, and the trivial cases spelled out — so it differs from both 言った時だけ and 積極的に.
+    const auto = teamUsageGuidance('auto');
+    expect(auto).toContain('迷ったら使わない');
+    expect(auto).toContain('独立した成果物が 3 つ以上あり');
+    expect(auto).toContain('1 つのファイル全体・1 つの画面・1 つの機能・1 つの調べもの');
+    expect(auto).not.toContain('数分以上');
+    expect(auto).toContain('成果物が 1〜2 つの依頼');
+    expect(auto).toContain('1 つずつが数行で済むごく小さなもの');
+    expect(auto).not.toContain('2 つ以上なら');
+    for (const guidance of [auto, proactive]) {
+      expect(guidance).toContain('この発言の依頼の一部として扱う');
+      expect(guidance).toContain('Team を使わない理由を利用者に 1 文で伝える');
+      expect(guidance).toContain('この発言では、この案内を優先する');
+      // Offered Teams must not strand the user on a non-Git Workspace.
+      expect(guidance).toContain('Git の repo でないために失敗した時は');
+    }
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('単発実行');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
       '質問・相談: Teamの実状態を調べるためにMCPを使うが、Workerは採用しない。',
     );
