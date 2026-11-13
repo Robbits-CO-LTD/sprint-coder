@@ -36,9 +36,10 @@ use super::walk::walker_source::{walk_uia_subtree_for, walk_uia_visible_subtree}
 ///    long as the deadline still has room for another walk of the shape
 ///    just measured; only once that room runs out does a still-thin tree
 ///    return the plain guidance error core's loop treats as final. A thin
-///    tree that keeps its size across walks for [`THIN_TREE_SETTLE`] after the
-///    settle is the window's whole tree (a genuinely small page) and is
-///    returned as observed, whatever the deadline still holds. The
+///    tree whose documents hold content and that keeps its size across walks
+///    for [`THIN_TREE_SETTLE`] after this observation's settle is the window's
+///    whole tree (a genuinely small page) and is returned as observed,
+///    whatever the deadline still holds. The
 ///    "settle already ran" state is scoped per process, so a batch or
 ///    session observing several processes through one adapter gives every
 ///    process its own settle rather than the first process's activation
@@ -137,19 +138,28 @@ fn finish_observation(
             return Ok(walk.outcome.tree);
         }
         let nodes = walk.outcome.stats.traversal.nodes_visited;
+        let content = walk.outcome.tree.has_document_content();
         let settled = |mut tree: ObservedTree| {
             tree.mark_settled_thin_tree(nodes);
             Ok(tree)
         };
-        if is_recorded_settled_tree(request.observation_mode.settled_thin_nodes, nodes) {
+        if content && is_recorded_settled_tree(request.observation_mode.settled_thin_nodes, nodes) {
+            return settled(walk.outcome.tree);
+        }
+        if thin_tree_settled(
+            request.observation_mode.settle.map(|settle| ThinWalk {
+                since_activation: settle.activated_at.elapsed(),
+                previous_nodes: settle.previous_thin_nodes,
+            }),
+            nodes,
+            content,
+        ) {
             return settled(walk.outcome.tree);
         }
         let process = root_process_identity(root);
-        let history = adapter.record_thin_walk(&process, nodes);
-        if history.is_some_and(|history| thin_tree_settled(history, nodes)) {
-            return settled(walk.outcome.tree);
-        }
-        if history.is_none() || has_room_for_another_walk(request.deadline, walk.walk_duration) {
+        if !adapter.renderer_activation_attempted(&process)
+            || has_room_for_another_walk(request.deadline, walk.walk_duration)
+        {
             return Err(chromium::activation_required(&walk.outcome.stats));
         }
         return Err(still_thin_after_settle());
@@ -157,27 +167,44 @@ fn finish_observation(
     Ok(walk.outcome.tree)
 }
 
-/// How long after the settle a thin tree that stopped changing is taken for
-/// the window's whole tree. A small page (25 elements in a test window) walks
-/// under the shell ceiling forever, so without this the settle loop re-walked
-/// it until the deadline ran out (38 walks under a 20 s snapshot, every one 25
-/// nodes) and the read was never complete. The renderer's build was measured
-/// landing 0.25 to 0.6 s after the first walk of a cold window, and a build
-/// that lands changes the walk's size, which keeps the loop going.
-pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_secs(1);
+/// How long after this observation's settle a thin tree with published
+/// content that stopped changing is taken for the window's whole tree. A small
+/// page (25 elements in a test window) walks under the shell ceiling forever,
+/// so without this the settle loop re-walked it until the deadline ran out (38
+/// walks under a 20 s snapshot, every one 25 nodes) and the read was never
+/// complete. A shell never passes, whatever the time: its documents hold no
+/// content ([`ObservedTree::has_document_content`]). The span only covers a
+/// renderer that published part of a page: such a walk changes size before the
+/// next, which keeps the loop going. It is shorter than a default read's share
+/// and fixed, not a share of the deadline.
+pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_millis(400);
 
-/// Whether a thin walk of a process whose settle ran is its settled tree: the
-/// settle ran at least [`THIN_TREE_SETTLE`] ago and the walk before it, also
-/// after the settle, had the same size.
-fn thin_tree_settled(history: crate::adapter::ThinWalkHistory, nodes: u64) -> bool {
-    history.since_activation >= THIN_TREE_SETTLE && history.previous_nodes == Some(nodes)
+/// One thin walk past this observation's settle: the time since the
+/// observation activated the renderer, and the size of its walk before this
+/// one (`None` for the first).
+#[derive(Clone, Copy, Debug)]
+struct ThinWalk {
+    since_activation: Duration,
+    previous_nodes: Option<u64>,
+}
+
+/// Whether a thin walk is the window's whole tree: its documents hold
+/// published content, this observation settled the renderer at least
+/// [`THIN_TREE_SETTLE`] ago, and its walk before this one, also past the
+/// settle, had the same size. Anything else waits.
+fn thin_tree_settled(walk: Option<ThinWalk>, nodes: u64, content: bool) -> bool {
+    content
+        && walk.is_some_and(|walk| {
+            walk.since_activation >= THIN_TREE_SETTLE && walk.previous_nodes == Some(nodes)
+        })
 }
 
 /// Whether a thin walk is the settled small tree a capture of this same
 /// process recorded (core hands the count over only for the capture's own
-/// process generation): it must come back at exactly that count. A renderer
-/// that dropped its tree back to the shell walks at the shell's count (19 on a
-/// cold Electron test page) and is settled as usual.
+/// process generation): it must come back at exactly that count, and with
+/// published content (checked by the caller). A renderer that dropped its tree
+/// back to the shell walks at the shell's count (19 on a cold Electron test
+/// window, against 25 settled) and holds no content, and is settled as usual.
 fn is_recorded_settled_tree(recorded: Option<u64>, nodes: u64) -> bool {
     recorded == Some(nodes)
 }

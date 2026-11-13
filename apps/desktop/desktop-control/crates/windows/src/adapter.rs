@@ -6,9 +6,8 @@ use agent_desktop_core::{
     ProcessIdentity, Rect, RefEntry, SnapshotSurface, SurfaceInfo, TreeOptions, WindowFilter,
     WindowInfo,
 };
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
 
 /// The Windows adapter.
 ///
@@ -22,76 +21,29 @@ use std::time::{Duration, Instant};
 /// reused across a batch or an FFI session, so one process settling must
 /// never suppress another process's activation.
 pub struct WindowsAdapter {
-    renderer_activation_attempted: Mutex<HashMap<ProcessIdentity, RendererSettle>>,
-}
-
-/// When the Chromium settle ran for one process, and the size of the last
-/// thin (shell-sized) walk of it seen since, so a later walk can tell a tree
-/// that stopped changing from a build still landing.
-#[derive(Clone, Copy)]
-struct RendererSettle {
-    activated_at: Instant,
-    last_thin_nodes: Option<u64>,
-}
-
-/// What a thin walk of a settled process is measured against: the time since
-/// the settle ran, and the size of the thin walk before this one (`None` for
-/// the first one).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ThinWalkHistory {
-    pub(crate) since_activation: Duration,
-    pub(crate) previous_nodes: Option<u64>,
+    renderer_activation_attempted: Mutex<HashSet<ProcessIdentity>>,
 }
 
 impl WindowsAdapter {
     pub fn new() -> Self {
         Self {
-            renderer_activation_attempted: Mutex::new(HashMap::new()),
+            renderer_activation_attempted: Mutex::new(HashSet::new()),
         }
     }
 
     /// Records that the Chromium settle has run for `process`, scoped to its
     /// generation (the process-instance token) so a recycled pid never
-    /// inherits another process's settle state. A second settle of the same
-    /// process keeps the first one's time.
+    /// inherits another process's settle state.
     pub(crate) fn note_renderer_activation_attempted(&self, process: ProcessIdentity) {
-        self.note_renderer_activation_at(process, Instant::now());
+        self.activation_set().insert(process);
     }
 
-    pub(crate) fn note_renderer_activation_at(&self, process: ProcessIdentity, at: Instant) {
-        self.activation_set()
-            .entry(process)
-            .or_insert(RendererSettle {
-                activated_at: at,
-                last_thin_nodes: None,
-            });
-    }
-
-    /// Whether the Chromium settle has already run for `process`. The
-    /// observation reads it through [`Self::record_thin_walk`].
-    #[cfg(test)]
+    /// Whether the Chromium settle has already run for `process`.
     pub(crate) fn renderer_activation_attempted(&self, process: &ProcessIdentity) -> bool {
-        self.activation_set().contains_key(process)
+        self.activation_set().contains(process)
     }
 
-    /// Records a thin walk of `process` of `nodes` nodes and returns what it is
-    /// measured against, or `None` when the settle has not run for it.
-    pub(crate) fn record_thin_walk(
-        &self,
-        process: &ProcessIdentity,
-        nodes: u64,
-    ) -> Option<ThinWalkHistory> {
-        let mut set = self.activation_set();
-        let settle = set.get_mut(process)?;
-        let history = ThinWalkHistory {
-            since_activation: settle.activated_at.elapsed(),
-            previous_nodes: settle.last_thin_nodes,
-        };
-        settle.last_thin_nodes = Some(nodes);
-        Some(history)
-    }
-
-    fn activation_set(&self) -> MutexGuard<'_, HashMap<ProcessIdentity, RendererSettle>> {
+    fn activation_set(&self) -> MutexGuard<'_, HashSet<ProcessIdentity>> {
         self.renderer_activation_attempted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -49,6 +49,19 @@ pub struct ObservationMode {
     /// adapter need not wait out a renderer settle for it; any other count is
     /// settled as usual.
     pub settled_thin_nodes: Option<u64>,
+    /// How far the renderer settle of this one observation has come: set by
+    /// the observation loop once it has activated the renderer, for the walks
+    /// that follow within the same call only. `None` before activation and on
+    /// every new observation, so nothing one read saw carries into another.
+    pub settle: Option<SettleProgress>,
+}
+
+/// The settle of one observation: when the loop activated the renderer, and
+/// the size of the last thin walk it saw after that (`None` until one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettleProgress {
+    pub activated_at: std::time::Instant,
+    pub previous_thin_nodes: Option<u64>,
 }
 
 impl ObservationRequest {
@@ -97,6 +110,7 @@ impl ObservationRequest {
                 identity_only: false,
                 visible_only: false,
                 settled_thin_nodes: None,
+                settle: None,
             },
         }
     }
