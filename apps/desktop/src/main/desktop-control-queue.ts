@@ -26,8 +26,9 @@ import { secureLogger } from './secure-logger';
  * background after its call returned, and still holds the turn). When the Task's session ends
  * (the Task is archived, Sprint Coder quits), the runs still waiting do not start.
  *
- * In its turn, a run the executable reports as not delivered (`DESKTOP_CONTROL_RETRY` below) runs
- * once more with the same sealed argv, which its card allowed.
+ * In its turn, a run the executable reports as not delivered because a lock it waited for was held
+ * until its time ran out (`desktopControlReportsUndelivered` below) runs once more with the same
+ * sealed argv, which its card allowed. A `wait`, or a read that ran out of time on its own, does not.
  */
 
 export type DesktopControlCommandRun = (
@@ -277,14 +278,21 @@ function endedByItself(result: CommandResult): boolean {
 
 /**
  * Whether what the executable printed is its own answer that the operation did not reach the
- * desktop because it ran out of time first, and may be run again: one JSON envelope with
- * `ok: false`, `error.code: "TIMEOUT"` and `error.disposition` `{ delivery: "not_delivered",
- * retry: "safe" }` (`crates/core/src/response/output.rs`, `actions/delivery_semantics.rs`). The
- * executable answers so only when it knows nothing was sent: a lock or deadline that ran out before
- * the command began (`pre_dispatch_error` in `src/main.rs`: the session's `refstore.lock` as the
- * run starts, among others) or a read (`dispatch/disposition.rs`). A timed-out operation that may
- * have been sent is answered `unknown` or `delivered_*` (a ref action that ran out of time waiting
- * for the interaction lease is answered `unknown` as well), and does not run again; nor
+ * desktop because it waited for a lock another run held until its time ran out, and may be run
+ * again: one JSON envelope with `ok: false`, `error.code: "TIMEOUT"`, `error.details.kind:
+ * "lock_timeout"` (`crates/core/src/storage/file_lock.rs`: the session's `refstore.lock` and the
+ * other state locks; `crates/windows/src/system/interaction_lease`: the interaction lease) and
+ * `error.disposition` `{ delivery: "not_delivered", retry: "safe" }`
+ * (`crates/core/src/response/output.rs`, `actions/delivery_semantics.rs`). The executable answers
+ * `not_delivered` only when it knows nothing was sent: a lock or deadline that ran out before the
+ * command began (`pre_dispatch_error` in `src/main.rs`) or a read (`dispatch/disposition.rs`).
+ *
+ * A read that ran out of time doing its own work is `not_delivered` too, but is not run again: a
+ * `wait` that ended with its condition unmet (`details.kind: "wait_timeout"`) or a read past its
+ * deadline (`"deadline"`) would only wait as long once more, holding the Task's order and hiding
+ * the first answer. A `wait` is never run again, whatever its answer says. A timed-out operation
+ * that may have been sent is answered `unknown` or `delivered_*` (a ref action that ran out of time
+ * waiting for the interaction lease is answered `unknown` as well), and does not run again; nor
  * does any other failure (`STALE_REF` and the like would only be refused again).
  */
 export function desktopControlReportsUndelivered(stdout: string): boolean {
@@ -295,10 +303,17 @@ export function desktopControlReportsUndelivered(stdout: string): boolean {
     return false;
   }
   if (typeof output !== 'object' || output === null) return false;
-  const { ok, error } = output as { ok?: unknown; error?: unknown };
-  if (ok !== false || typeof error !== 'object' || error === null) return false;
-  const { code, disposition } = error as { code?: unknown; disposition?: unknown };
+  const { ok, command, error } = output as { ok?: unknown; command?: unknown; error?: unknown };
+  if (ok !== false || command === 'wait' || typeof error !== 'object' || error === null)
+    return false;
+  const { code, details, disposition } = error as {
+    code?: unknown;
+    details?: unknown;
+    disposition?: unknown;
+  };
   if (code !== 'TIMEOUT' || typeof disposition !== 'object' || disposition === null) return false;
+  if (typeof details !== 'object' || details === null) return false;
+  if ((details as { kind?: unknown }).kind !== 'lock_timeout') return false;
   const { delivery, retry } = disposition as { delivery?: unknown; retry?: unknown };
   return delivery === 'not_delivered' && retry === 'safe';
 }

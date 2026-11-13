@@ -33,6 +33,7 @@ import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   DESKTOP_CONTROL_WORKERS_DEFAULT,
   desktopControlTeamCursors,
+  desktopControlWorkerToolOffered,
   markDesktopControlWorker,
 } from './desktop-control-session';
 import { maskTeamHiringMarkdown } from './team-hiring-markdown';
@@ -799,6 +800,14 @@ function desktopControlHireResult(
       desktopControl: false,
       desktopControlNote: 'この種類の Worker は、デスクトップ操作を実行できません。',
     };
+  // The Worker's command tool comes from the Leader's own catalog, which has none without the
+  // command sandbox; marked anyway, the Worker would be told to use a tool it was not given.
+  if (!desktopControlWorkerToolOffered())
+    return {
+      desktopControl: false,
+      desktopControlNote:
+        'この環境では Worker にデスクトップ操作の道具を渡せません（コマンドの sandbox が使えないため）。この Worker にはデスクトップ操作を任せられません。',
+    };
   const marked = markDesktopControlWorker(
     taskId,
     worker.id,
@@ -1522,6 +1531,8 @@ export const WORKER_DESKTOP_CONTROL_PROMPT = `
 - --session と --agent-id は付けません（Sprint Coder が入れます。付けると拒否されます）。
 - 文字の入力は、type より set-value を優先します。
 - TIMEOUT になったら、同じ操作を繰り返さず、少し待ってから snapshot を取り直します。
+- 結果の disposition.delivery が delivered_unverified なら、操作は届いています（結果を自動では確かめていないだけで、失敗ではありません）。止まらずに -i なしの snapshot（文字や状態も出ます）で結果を確かめます。-i は操作できる部品を探す時だけ使います。
+- delivered_verified は届いて確かめ済み、not_delivered は何も送っていない、delivery_uncertain・unknown は届いたか分からない、です。届いた・分からない操作は、確かめる前に繰り返しません（2 回届きます）。
 - 割り当てられたアプリ／窓だけを操作し、ほかの Worker の窓には触りません。
 `;
 export const LEADER_DESKTOP_CONTROL_GUIDANCE = `デスクトップ操作をWorkerに任せる場合は、team_hire_workerでagentKind: "worker"とdesktopControl: trueを指定します。そのWorkerはデスクトップ操作の実行ファイルだけを実行できます。Worker 1人に1つのアプリ／窓を割り当て、同時にデスクトップ操作を任せるのは${DESKTOP_CONTROL_WORKERS_DEFAULT}人までにします。結果のdesktopControlがfalseなら、そのWorkerには任せられません。`;

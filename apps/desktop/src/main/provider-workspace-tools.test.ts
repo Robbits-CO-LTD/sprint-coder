@@ -504,8 +504,11 @@ describe('Provider workspace read tools', () => {
     expect(unavailable.entries.map(({ providerName }) => providerName)).not.toContain(
       'exec_command',
     );
+    // What the Team's hire asks before marking a Worker for desktop control: the same judgment.
+    expect(commandTools.commandToolsOffered()).toBe(false);
     commandTools.finishTurn(context.taskId, 'turn-command-unavailable');
     commandTools.setCommandSandboxAvailable(true);
+    expect(commandTools.commandToolsOffered()).toBe(true);
     const available = commandTools.startTurn(
       { ...context, turnId: 'turn-command-available' },
       'codex',

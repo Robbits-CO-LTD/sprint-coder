@@ -318,6 +318,7 @@ import { configureDesktopControlStateRoot } from './desktop-control';
 import {
   DESKTOP_CONTROL_TEAM_CURSORS_AT_START,
   configureDesktopControlTeamCursors,
+  configureDesktopControlWorkerTool,
   desktopControlTeamCursors,
   desktopControlWorker,
   endDesktopControlSession,
@@ -1661,6 +1662,9 @@ export class IpcRouter {
       },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
+    // A Worker marked for desktop control gets the command tool only from this harness's catalog,
+    // so the hire marks one only when the harness offers that tool (not without the sandbox).
+    configureDesktopControlWorkerTool(() => this.managedCodingHarness.commandToolsOffered());
     this.mockRuntime = new MockRuntimeAdapter(
       persistence,
       (event) => this.publish(event),

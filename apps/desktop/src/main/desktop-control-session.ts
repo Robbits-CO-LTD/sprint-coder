@@ -107,6 +107,7 @@ export const DESKTOP_CONTROL_TEAM_CURSORS_AT_START =
   process.env['SPRINT_CODER_DESKTOP_TEAM_CURSORS'] === '1';
 
 let teamCursors = false;
+let workerToolOffered: () => boolean = () => false;
 let collected: Promise<void> | null = null;
 const sessions = new Map<string, TaskSession>();
 const desktopWorkers = new Map<string, Map<string, DesktopControlWorker>>();
@@ -118,6 +119,20 @@ export function configureDesktopControlTeamCursors(enabled: boolean): void {
 
 export function desktopControlTeamCursors(): boolean {
   return teamCursors;
+}
+
+/**
+ * Given once by Main: whether a marked Worker's Turn can be given the command tool at all, as the
+ * managed harness itself decides it (`ManagedCodingHarness.commandToolsOffered`: not without the
+ * command sandbox). The Leader's hire marks no Worker while it says no, so a Worker is never told
+ * to use a tool it does not have. Until Main gives it, no Worker can be given the tool.
+ */
+export function configureDesktopControlWorkerTool(offered: () => boolean): void {
+  workerToolOffered = offered;
+}
+
+export function desktopControlWorkerToolOffered(): boolean {
+  return workerToolOffered();
 }
 
 /**
@@ -354,6 +369,7 @@ function errorText(error: unknown): string {
 /** For tests: forgets every session and the opt-in. */
 export function resetDesktopControlSessions(): void {
   teamCursors = false;
+  workerToolOffered = () => false;
   collected = null;
   sessions.clear();
   desktopWorkers.clear();

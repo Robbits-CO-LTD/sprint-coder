@@ -38,7 +38,13 @@ import { ManagedCommandSessions } from './managed-command-sessions';
 import { providerWorkspaceToolFailure } from './provider-tool-result';
 
 /** The executable's answers, as `crates/core/src/response/output.rs` prints them. */
-function envelope(code: string, delivery: string, retry: string, command = 'click'): string {
+function envelope(
+  code: string,
+  delivery: string,
+  retry: string,
+  command = 'click',
+  details: Record<string, unknown> = { kind: 'lock_timeout', purpose: 'ref store lock' },
+): string {
   return `${JSON.stringify({
     version: '2.6',
     ok: false,
@@ -46,12 +52,19 @@ function envelope(code: string, delivery: string, retry: string, command = 'clic
     error: {
       code,
       message: 'Operation exceeded its deadline',
-      details: { kind: 'lock_timeout', purpose: 'ref store lock' },
+      details,
       disposition: { delivery, retry },
     },
   })}\n`;
 }
+/** A run that waited for a lock another run held until its time ran out: nothing was sent. */
 const UNDELIVERED = envelope('TIMEOUT', 'not_delivered', 'safe');
+/** A `wait` whose condition was not met in its own time (`commands/wait_timeout.rs`). */
+const WAIT_TIMED_OUT = envelope('TIMEOUT', 'not_delivered', 'safe', 'wait', {
+  kind: 'wait_timeout',
+  predicate: 'text',
+  timeout_ms: 150_000,
+});
 const DONE = `${JSON.stringify({ version: '2.6', ok: true, command: 'click', data: {} })}\n`;
 
 const natural: CommandResult = {
@@ -219,6 +232,26 @@ describe('the Task’s desktop-control order', () => {
     ['delivery uncertain', envelope('TIMEOUT', 'delivery_uncertain', 'unsafe'), {}],
     ['delivered', envelope('TIMEOUT', 'delivered_unverified', 'unsafe'), {}],
     ['another failure that was not delivered', envelope('STALE_REF', 'not_delivered', 'safe'), {}],
+    ['a wait that timed out on its own', WAIT_TIMED_OUT, {}],
+    [
+      'a wait that timed out waiting for a lock',
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'wait'),
+      {},
+    ],
+    [
+      'a read past its own deadline',
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'snapshot', {
+        kind: 'deadline',
+        timeout_ms: 5000,
+        elapsed_ms: 5001,
+      }),
+      {},
+    ],
+    [
+      'a timeout that names no lock',
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'snapshot', {}),
+      {},
+    ],
     ['an answer that is not JSON', 'agent-desktop: failed to write response\n', {}],
     ['two answers', `${UNDELIVERED}${UNDELIVERED}`, {}],
     ['no answer', '', {}],
@@ -239,6 +272,27 @@ describe('the Task’s desktop-control order', () => {
     expect(run).toHaveBeenCalledTimes(1);
     // Its output reaches the caller as it was printed.
     expect(consumer.stdout()).toBe(stdout);
+  });
+
+  it('gives a long wait’s own TIMEOUT as it is, after one run, and frees the turn', async () => {
+    const { run, pending } = fakeRun();
+    const queued = queuedDesktopControlRun('task-1', run);
+    const consumer = hooks();
+    const waited = queued(
+      spec(['wait', '--text', 'done', '--timeout', '150000']),
+      consumer.options,
+    );
+    const next = queued(spec(['click', 'next']), hooks().options);
+    await settle();
+    pending[0]!.finish(WAIT_TIMED_OUT, { exitCode: 1, durationMs: 150_000 });
+    await expect(waited).resolves.toMatchObject({ exitCode: 1 });
+    expect(consumer.stdout()).toBe(WAIT_TIMED_OUT);
+    await vi.advanceTimersByTimeAsync(DESKTOP_CONTROL_RETRY_DELAY_MS * 10);
+    // The next run of the Task, not the wait again, has the turn.
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(pending[1]!.spec.argv[1]).toBe('next');
+    pending[1]!.finish(DONE);
+    await next;
   });
 
   it('does not run again when the answer was more than it holds back', async () => {
@@ -411,10 +465,26 @@ describe('the Task’s desktop-control order', () => {
 });
 
 describe('the executable’s answer that an operation was not delivered', () => {
-  it('reads only a TIMEOUT with delivery not_delivered and retry safe', () => {
+  it('reads only a lock’s TIMEOUT with delivery not_delivered and retry safe', () => {
     expect(desktopControlReportsUndelivered(UNDELIVERED)).toBe(true);
     expect(desktopControlReportsUndelivered(UNDELIVERED.trim())).toBe(true);
+    // The interaction lease's own lock answers the same kind (`interaction_lease/mod.rs`).
+    expect(
+      desktopControlReportsUndelivered(
+        envelope('TIMEOUT', 'not_delivered', 'safe', 'snapshot', {
+          kind: 'lock_timeout',
+          path: 'interaction.lock',
+          contention_count: 3,
+        }),
+      ),
+    ).toBe(true);
     for (const stdout of [
+      WAIT_TIMED_OUT,
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'wait'),
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'click', { kind: 'deadline' }),
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'click', { kind: 'wait_timeout' }),
+      envelope('TIMEOUT', 'not_delivered', 'safe', 'click', {}),
+      UNDELIVERED.replace(',"details":{"kind":"lock_timeout","purpose":"ref store lock"}', ''),
       envelope('TIMEOUT', 'not_delivered', 'unsafe'),
       envelope('TIMEOUT', 'unknown', 'unknown'),
       envelope('TIMEOUT', 'delivered_verified', 'unsafe'),

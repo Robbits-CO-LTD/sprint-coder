@@ -709,7 +709,7 @@ export class ManagedCodingHarness {
       ...(mockFixture === 'command' && this.commandSandboxAvailable
         ? [COMMAND_RUNNER_TOOL.toolId]
         : []),
-      ...(this.commandSandboxAvailable && this.deps.command !== undefined
+      ...(this.commandToolsOffered()
         ? [
             MANAGED_EXEC_COMMAND_TOOL.toolId,
             POLL_COMMAND_TOOL.toolId,
@@ -755,6 +755,15 @@ export class ManagedCodingHarness {
 
   setCommandSandboxAvailable(available: boolean): void {
     this.commandSandboxAvailable = available;
+  }
+
+  /**
+   * Whether a Turn's catalog gets the command tools (`exec_command` and its session tools): only
+   * with the command sandbox. A Team Worker's catalog is cut from its Leader's, so a Worker marked
+   * for desktop control gets `exec_command` only when this says so (the hire asks the same).
+   */
+  commandToolsOffered(): boolean {
+    return this.commandSandboxAvailable && this.deps.command !== undefined;
   }
 
   async policyEpochChanged(taskId: string): Promise<void> {
