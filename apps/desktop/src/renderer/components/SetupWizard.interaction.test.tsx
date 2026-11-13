@@ -658,6 +658,18 @@ describe('SetupWizard', () => {
       );
       expect(row?.querySelector('.setup-summary-note')?.textContent).toBe('保存できませんでした');
       expect(q('[data-testid="setup-save-warning"]')).not.toBeNull();
+      // The person's change is still on screen, and once reading works again it goes out laid
+      // over what Settings stored meanwhile.
+      await press('setup-back'); // done -> workspace
+      await press('setup-back'); // workspace -> details
+      expect(step()).toBe('details');
+      expect(q<HTMLInputElement>('[data-testid="setup-emoji"]')?.checked).toBe(true);
+      readable = true;
+      await press('setup-next');
+      expect(settings.setAssistantPreferences).toHaveBeenCalledTimes(1);
+      expect(settings.setAssistantPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({ emoji: true, language: 'en' }),
+      );
     });
 
     it('answers arriving out of order: an older read never undoes a newer one', async () => {
