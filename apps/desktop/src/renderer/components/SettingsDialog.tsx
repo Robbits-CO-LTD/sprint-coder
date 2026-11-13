@@ -13,6 +13,7 @@ import {
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
+import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { useTaskBoundary } from './TaskBoundary';
 import {
   TEAM_CONCURRENCY_DEFAULT,
@@ -68,7 +69,7 @@ import {
 // controls, laid out as a ~900px two-pane workspace with a section list on the left. The flag-off
 // body keeps the established single-column layout, so the flag remains a usable fallback.
 
-type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
+type SettingsSection = 'models' | 'replies' | 'team' | 'skills' | 'advanced';
 type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
@@ -91,6 +92,12 @@ export const SETTINGS_SECTIONS: readonly {
     label: 'モデルと接続',
     description: 'モデル・Effort・API',
     eyebrow: 'Models & Connections',
+  },
+  {
+    id: 'replies',
+    label: '返事の仕方',
+    description: '言葉づかい・長さ・進め方',
+    eyebrow: 'Replies',
   },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
@@ -242,6 +249,7 @@ export function LegacyBody({
           <CliDetectionGroup />
           <UpdateHealthGroup />
           <SprintCoderPrePromptSetting active={open} />
+          <AssistantPreferencesSettings active={open} />
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
@@ -294,7 +302,7 @@ export function WorkspaceBody({
       <header className="settings-header">
         <div>
           <h2 id="settings-dialog-title">設定</h2>
-          <p>モデル、接続、Team、Skill、CLIの診断を管理します。</p>
+          <p>モデル、接続、返事の仕方、Team、Skill、CLIの診断を管理します。</p>
         </div>
         <CloseButton onClose={onClose} />
       </header>
@@ -336,6 +344,10 @@ export function WorkspaceBody({
               <AccessDefaultGroup />
               {/* Unmounting clears the renderer-local plaintext credential state. */}
               {open && <ProviderSettingsSection active={open} />}
+            </WorkspacePage>
+
+            <WorkspacePage {...page('replies')} active={current === 'replies'}>
+              <AssistantPreferencesSettings active={open} />
             </WorkspacePage>
 
             <WorkspacePage {...page('team')} active={current === 'team'}>

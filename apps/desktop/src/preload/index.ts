@@ -92,6 +92,9 @@ import {
   runtimeSettingsSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
+  assistantPreferencesStateSchema,
+  assistantPreferencesSetInputSchema,
+  assistantPreferencesSetResultSchema,
   skillActivationPolicyInputSchema,
   skillCatalogSchema,
   skillCatalogItemSchema,
@@ -935,6 +938,20 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.settingsSetSprintCoderPrePrompt,
         sprintCoderPrePromptSetInputSchema,
         z.undefined(),
+        input,
+      ),
+    getAssistantPreferences: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetAssistantPreferences,
+        emptyPayloadSchema,
+        assistantPreferencesStateSchema,
+        {},
+      ),
+    setAssistantPreferences: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetAssistantPreferences,
+        assistantPreferencesSetInputSchema,
+        assistantPreferencesSetResultSchema,
         input,
       ),
     getTeamModelSettings: () =>

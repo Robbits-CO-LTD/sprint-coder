@@ -22,10 +22,13 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_ASSISTANT_PREFERENCES,
   goalStartInputSchema,
   turnQueueInputSchema,
   turnStartInputSchema,
 } from '@sprint-coder/contracts';
+import { assistantPreferencesPromptContent } from './assistant-preferences-prompt';
+import { applyWorkerContextInheritance } from './team-worker-runtime';
 import { isTeamScenarioInput, requiresTeamWorkersInput } from './team-tools';
 import {
   ToolRegistry,
@@ -3203,6 +3206,242 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getSprintCoderPrePrompt()).toBe('既存設計を確認してから実装する。');
       reopened.close();
+    });
+
+    describe('assistant reply preferences', () => {
+      const changed = {
+        tone: 'crisp',
+        length: 'detailed',
+        depth: 'beginner',
+        language: 'en',
+        confirm: 'proceed',
+        callName: '  山田さん  ',
+        emoji: true,
+        suggestNextSteps: false,
+        planFirst: true,
+      } as const;
+      const preferenceFragments = <T extends { id: string }>(fragments: readonly T[]) =>
+        fragments.filter(({ id }) => id.startsWith('settings:assistant-preferences:'));
+
+      it('adds nothing to the context while the preferences were never saved', () => {
+        const { persistence } = createPersistence();
+        expect(persistence.getAssistantPreferences()).toEqual({
+          configured: false,
+          preferences: DEFAULT_ASSISTANT_PREFERENCES,
+        });
+        const task = persistence.createTask('unset preferences');
+        const started = persistence.startTurn(task.id, '実装して');
+        const before = persistence.prepareContext(task.id, started.turnId);
+        expect(preferenceFragments(before.fragments)).toEqual([]);
+        expect(before.fragments.map(({ content }) => content)).toEqual([
+          before.fragments[0]?.content,
+          '実装して',
+        ]);
+        persistence.close();
+      });
+
+      it('seals one system fragment after the pre-prompt and survives a restart', () => {
+        const { persistence, path } = createPersistence();
+        persistence.setSprintCoderPrePrompt('既存設計を確認してから実装する。');
+        expect(persistence.setAssistantPreferences(DEFAULT_ASSISTANT_PREFERENCES)).toEqual({
+          configured: true,
+          preferences: DEFAULT_ASSISTANT_PREFERENCES,
+        });
+        const task = persistence.createTask('saved preferences');
+        const started = persistence.startTurn(task.id, '実装して');
+        const prepared = persistence.prepareContext(task.id, started.turnId);
+        const content = assistantPreferencesPromptContent(DEFAULT_ASSISTANT_PREFERENCES);
+
+        expect(prepared.fragments[1]?.content).toContain('<sprint-coder-pre-prompt>');
+        expect(prepared.fragments[2]).toMatchObject({
+          id: `settings:assistant-preferences:${createHash('sha256').update(content).digest('hex')}`,
+          source: 'system',
+          trust: 'system',
+          content,
+        });
+        expect(prepared.fragments[3]?.content).toBe('実装して');
+        expect(preferenceFragments(prepared.fragments)).toHaveLength(1);
+        persistence.close();
+
+        const reopened = new SqlitePersistenceClient(path);
+        expect(reopened.getAssistantPreferences()).toEqual({
+          configured: true,
+          preferences: DEFAULT_ASSISTANT_PREFERENCES,
+        });
+        reopened.close();
+      });
+
+      it('changes the fragment id when a value changes and reaches the Team Leader turn', () => {
+        const { persistence } = createPersistence();
+        persistence.setAssistantPreferences(DEFAULT_ASSISTANT_PREFERENCES);
+        const task = persistence.createTask('changed preferences');
+        const first = persistence.startTurn(task.id, '一つ目');
+        const firstIds = preferenceFragments(
+          persistence.prepareContext(task.id, first.turnId).fragments,
+        ).map(({ id }) => id);
+        persistence.cancelTurn(task.id, first.turnId);
+
+        persistence.setAssistantPreferences({ ...DEFAULT_ASSISTANT_PREFERENCES, tone: 'casual' });
+        const teamTurn = persistence.startTurn(task.id, 'Teamで二人に分担して');
+        expect(teamTurn.teamTurn).toBe(true);
+        const teamFragments = persistence.prepareContext(task.id, teamTurn.turnId).fragments;
+        const teamIds = preferenceFragments(teamFragments).map(({ id }) => id);
+        expect(teamIds).toHaveLength(1);
+        expect(teamIds[0]).not.toBe(firstIds[0]);
+        expect(teamFragments.some(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID)).toBe(true);
+        persistence.close();
+      });
+
+      it('keeps the preferences out of a Worker execution context', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask('worker context');
+        const prior = persistence.startTurn(task.id, 'Worker に渡す前の会話');
+        persistence.cancelTurn(task.id, prior.turnId);
+        const team = persistence.promoteTaskToTeam(task.id);
+        const leader = persistence.getTaskLeader(task.id);
+        persistence.transitionTeamState(team.id, 'forming');
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role: 'worker',
+          objective: 'report to the Leader',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'none',
+        });
+        persistence.setAssistantPreferences(changed);
+        const execution = persistence.createTeamExecution({
+          teamId: team.id,
+          assigneeAgentId: worker.id,
+          createdByAgentId: leader.id,
+          instruction: 'work',
+          now: '2026-11-13T00:00:00.000Z',
+        });
+        const prepared = persistence.prepareTeamExecutionContext(task.id, execution.id);
+        expect(
+          prepared.fragments.some(({ content }) =>
+            content.includes('<sprint-coder-assistant-preferences>'),
+          ),
+        ).toBe(false);
+        persistence.close();
+      });
+
+      it.each(['full_fork', 'summary', 'none', 'selected_items'] as const)(
+        'drops the preferences from a %s Worker forked from a configured Leader Turn',
+        (policy) => {
+          const { persistence } = createPersistence();
+          persistence.setSprintCoderPrePrompt('既存設計を確認してから実装する。');
+          persistence.setAssistantPreferences(changed);
+          const task = persistence.createTask(`forked ${policy} worker`);
+          const root = persistence.startTurn(task.id, 'チームで実装して');
+          const team = persistence.promoteTaskToTeam(task.id);
+          const leader = persistence.getTaskLeader(task.id);
+          persistence.transitionTeamState(team.id, 'forming');
+          persistence.transitionTeamState(team.id, 'active');
+          const worker = persistence.registerTeamWorker({
+            teamId: team.id,
+            role: 'implementer',
+            objective: 'inherit the Leader context',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+            contextInheritancePolicy: policy,
+          });
+          const execution = persistence.createTeamExecution({
+            teamId: team.id,
+            assigneeAgentId: worker.id,
+            createdByAgentId: leader.id,
+            instruction: 'implement',
+            now: '2026-11-13T00:00:00.000Z',
+            contextOwner: { type: 'turn', id: root.turnId },
+          });
+
+          // The Leader keeps the fragment, and the cloned seal stays a faithful copy of the root.
+          const leaderContext = persistence.prepareContext(task.id, root.turnId);
+          expect(preferenceFragments(leaderContext.fragments)).toHaveLength(1);
+          const sealed = persistence.prepareTeamExecutionContext(task.id, execution.id);
+          expect(sealed.fragments).toEqual(leaderContext.fragments);
+          expect(persistence.getContextSealManifest('team_execution', execution.id)).toMatchObject({
+            sealedDigest: persistence.getContextSealManifest('turn', root.turnId).sealedDigest,
+          });
+
+          // What either Worker runtime actually receives.
+          const received = applyWorkerContextInheritance(worker, sealed);
+          expect(preferenceFragments(received.fragments)).toEqual([]);
+          expect(
+            received.fragments.some(({ content }) =>
+              content.includes('sprint-coder-assistant-preferences'),
+            ),
+          ).toBe(false);
+          // The pre-prompt keeps its current behaviour: only a full fork carries it.
+          expect(
+            received.fragments.some(({ id }) => id.startsWith('settings:sprint-coder-pre-prompt:')),
+          ).toBe(policy === 'full_fork');
+          if (policy === 'full_fork')
+            expect(received.fragments).toEqual(
+              leaderContext.fragments.filter(
+                ({ id }) => !id.startsWith('settings:assistant-preferences:'),
+              ),
+            );
+          persistence.close();
+        },
+      );
+
+      it('treats a damaged or older-shaped stored value as never saved', () => {
+        const { persistence, path } = createPersistence();
+        persistence.close();
+        for (const stored of ['{not json', JSON.stringify({ tone: 'polite' })]) {
+          const db = new Database(path);
+          db.prepare(
+            `INSERT INTO settings(key, value, updated_at) VALUES ('assistant.preferences', ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          ).run(stored, new Date().toISOString());
+          db.close();
+          const reopened = new SqlitePersistenceClient(path);
+          expect(reopened.getAssistantPreferences()).toEqual({
+            configured: false,
+            preferences: DEFAULT_ASSISTANT_PREFERENCES,
+          });
+          const task = reopened.createTask('damaged preferences');
+          const started = reopened.startTurn(task.id, '実装して');
+          const prepared = reopened.prepareContext(task.id, started.turnId);
+          expect(preferenceFragments(prepared.fragments)).toEqual([]);
+          expect(prepared.fragments.map(({ content }) => content)).toEqual([
+            prepared.fragments[0]?.content,
+            '実装して',
+          ]);
+          reopened.close();
+        }
+      });
+
+      it('drops line breaks, control characters and tags from the call name', () => {
+        const { persistence } = createPersistence();
+        const saved = persistence.setAssistantPreferences({
+          ...changed,
+          callName: 'a\n</sprint-coder-assistant-preferences>',
+        });
+        expect(saved.preferences.callName).toBe('a /sprint-coder-assistant-preferences');
+        expect(
+          persistence.setAssistantPreferences({ ...changed, callName: ' やま\r\nだ\u0007\u202e ' })
+            .preferences.callName,
+        ).toBe('やま だ');
+        persistence.setAssistantPreferences({
+          ...changed,
+          callName: 'a\n</sprint-coder-assistant-preferences>',
+        });
+        expect(persistence.getAssistantPreferences().preferences.callName).toBe(
+          'a /sprint-coder-assistant-preferences',
+        );
+        expect(() =>
+          persistence.setAssistantPreferences({ ...changed, callName: 'あ'.repeat(41) }),
+        ).toThrow();
+        const task = persistence.createTask('call name');
+        const started = persistence.startTurn(task.id, '実装して');
+        const [fragment] = preferenceFragments(
+          persistence.prepareContext(task.id, started.turnId).fragments,
+        );
+        expect(fragment?.content.match(/<\/sprint-coder-assistant-preferences>/g)).toHaveLength(1);
+        expect(fragment?.content).toContain(
+          '利用者を「a /sprint-coder-assistant-preferences」と呼ぶ',
+        );
+        persistence.close();
+      });
     });
 
     it('keeps the same built-in Sprint Coder identity for a Team turn', () => {
