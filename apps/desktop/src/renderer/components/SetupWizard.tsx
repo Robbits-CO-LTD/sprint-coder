@@ -608,9 +608,23 @@ export function SetupWizard({
           snapshot.callName = clampCallName(snapshot.callName.trim());
           const result = await saveAssistantPreferences(snapshot);
           if (result.outcome === 'saved' && result.preferences) {
-            // What Main kept (it cleans the call name) is the new baseline and what is shown.
-            remember({ preferences: result.preferences, assistant: 'ready', configured: true });
-            if (live.current) setPreferences(result.preferences);
+            // What Main kept (it cleans the call name) is the new baseline, and what the items
+            // just saved show. An item changed on another step and not stored yet (its own save
+            // failed) stays a draft, so going back to that step can still store it.
+            const before = stored.current.preferences;
+            const kept = result.preferences;
+            remember({ preferences: kept, assistant: 'ready', configured: true });
+            if (live.current) {
+              setPreferences((current) => {
+                const next = { ...kept };
+                for (const key of changedKeys(current, before)) {
+                  if (!assistant.includes(key)) {
+                    (next as Record<string, unknown>)[key] = current[key];
+                  }
+                }
+                return next;
+              });
+            }
             noteSaved(assistant);
           } else if (result.outcome === 'failed') {
             noteFailed(assistant);

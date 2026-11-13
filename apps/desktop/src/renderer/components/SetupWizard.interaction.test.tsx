@@ -1015,6 +1015,49 @@ describe('SetupWizard', () => {
     expect(summary).not.toContain('積極的に');
   });
 
+  it('a save that works on a later step keeps the choice whose own save failed, so it can be stored on a second try', async () => {
+    const settings = fullBridge();
+    let current: AssistantPreferences = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    let configured = false;
+    let failNext = true; // the first save (the reply step) fails; later ones work
+    settings.getAssistantPreferences.mockImplementation(async () => ({
+      configured,
+      preferences: { ...current },
+    }));
+    settings.setAssistantPreferences.mockImplementation(async (input: AssistantPreferences) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('disk');
+      }
+      current = { ...input };
+      configured = true;
+      return { configured: true, preferences: { ...current } };
+    });
+    await render();
+    await press('setup-start'); // welcome -> ai
+    await press('setup-next'); // ai -> reply
+    await choose('setup-tone-crisp');
+    await press('setup-next'); // reply -> team: this save fails
+    await press('setup-next'); // team -> details
+    await choose('setup-emoji');
+    await press('setup-next'); // details -> workspace: this save works, with the stored tone
+    expect(settings.setAssistantPreferences).toHaveBeenLastCalledWith(
+      expect.objectContaining({ emoji: true, tone: 'polite' }),
+    );
+    await press('setup-back'); // -> details
+    await press('setup-back'); // -> team
+    await press('setup-back'); // -> reply
+    expect(step()).toBe('reply');
+    // The choice that could not be stored is still the one on screen...
+    expect(q<HTMLInputElement>('[data-testid="setup-tone-crisp"]')?.checked).toBe(true);
+    await press('setup-next');
+    // ...and leaving the step again stores it, over what was stored meanwhile.
+    expect(settings.setAssistantPreferences).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tone: 'crisp', emoji: true }),
+    );
+    expect(current.tone).toBe('crisp');
+  });
+
   it('replay: opens on the stored choices, has no Workspace or first Task, and closes', async () => {
     fullBridge({ tone: 'casual', length: 'detailed' }, 'auto');
     const onClose = vi.fn();
