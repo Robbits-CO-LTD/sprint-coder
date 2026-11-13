@@ -15,6 +15,7 @@ import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSectio
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { AssistantPreferencesSettings } from './AssistantPreferencesSettings';
 import { TeamUsageModeSetting } from './TeamUsageModeSetting';
+import { SetupReplayGroup } from './SetupReplayGroup';
 import { useTaskBoundary } from './TaskBoundary';
 import {
   TEAM_CONCURRENCY_DEFAULT,
@@ -265,6 +266,7 @@ export function LegacyBody({
       )}
       <SoundEffectsGroup />
       <LicenseGroup />
+      {supported && <SetupReplayGroup />}
     </div>
   );
 }
@@ -377,6 +379,7 @@ export function WorkspaceBody({
               <DiagnosticsGroup />
               <SoundEffectsGroup />
               <LicenseGroup />
+              <SetupReplayGroup />
             </WorkspacePage>
           </div>
         </>

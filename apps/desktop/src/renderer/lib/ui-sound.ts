@@ -79,6 +79,16 @@ export function soundCueForEvent(event: SoundEvent): CueName | null {
   return null;
 }
 
+/** Plays one interface cue (the Setup's choices and steps). Silent while sound effects are off. */
+export function playInterfaceCue(cue: CueName): void {
+  if (!readSoundEffectPreferences().enabled) return;
+  try {
+    soundPlayer().play(cue);
+  } catch {
+    // Supplementary feedback only.
+  }
+}
+
 export function playSoundForEvent(event: SoundEvent): void {
   const cue = soundCueForEvent(event);
   if (cue === null || !readSoundEffectPreferences().enabled) return;
