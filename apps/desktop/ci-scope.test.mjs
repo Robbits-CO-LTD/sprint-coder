@@ -49,6 +49,16 @@ describe('CI change boundaries', () => {
       windowsRust: true,
       specs: expect.arrayContaining(['src/main/sandbox-runner.test.ts']),
     });
+    expect(
+      classifyChanges(changes('apps/desktop/resources/sandbox-node-pipe-guard.cjs')),
+    ).toMatchObject({
+      platforms: expect.arrayContaining(['windows']),
+      native: true,
+      specs: expect.arrayContaining([
+        'src/main/sandbox-node-pipe-guard.test.ts',
+        'src/main/sandbox-node-pipe-guard.integration.test.ts',
+      ]),
+    });
     expect(classifyChanges(changes('apps/desktop/native-safe-fs/binding.gyp')).specs).toContain(
       'src/main/native-safe-fs.test.ts',
     );

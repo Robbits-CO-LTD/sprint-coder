@@ -21,7 +21,12 @@ const CI_SPEC = [
   'forge.config.test.ts',
 ];
 const WINDOWS_SPEC = ['src/main/desktop-control.test.ts'];
-const SANDBOX_SPEC = ['src/main/sandbox-runner.test.ts', 'src/main/command-runner.test.ts'];
+const SANDBOX_SPEC = [
+  'src/main/sandbox-runner.test.ts',
+  'src/main/command-runner.test.ts',
+  'src/main/sandbox-node-pipe-guard.test.ts',
+  'src/main/sandbox-node-pipe-guard.integration.test.ts',
+];
 const FILE_SPEC = ['src/main/native-safe-fs.test.ts', 'src/main/path-guard.test.ts'];
 const DB_SPEC = ['src/main/persistence.test.ts', 'src/main/ipc.test.ts'];
 const SHARED_SPEC = ['src/main/ipc.test.ts', 'src/main/permission-broker.test.ts'];
