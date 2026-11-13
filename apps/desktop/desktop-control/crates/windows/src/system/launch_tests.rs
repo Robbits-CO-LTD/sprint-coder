@@ -21,18 +21,12 @@ fn zero_wait_never_polls_after_first_observation() {
 
 #[test]
 fn ambiguous_launch_target_suggestion_names_pids_instead_of_a_ref_retry() {
-    let matches = vec![
-        ProcessRow {
-            pid: ProcessId::from(111),
-            name: "Cursor.exe".into(),
-        },
-        ProcessRow {
-            pid: ProcessId::from(222),
-            name: "Cursor.exe".into(),
-        },
+    let instances = vec![
+        (ProcessId::from(111), Some("Main".to_string())),
+        (ProcessId::from(222), None),
     ];
 
-    let error = ambiguous_apps(&matches);
+    let error = launch_attach::ambiguous_instances(&instances);
 
     assert_eq!(error.code, ErrorCode::AmbiguousTarget);
     let suggestion = error
@@ -54,19 +48,13 @@ fn ambiguous_launch_target_suggestion_names_pids_instead_of_a_ref_retry() {
 /// candidate pids travel in `details` so the caller can pick one by pid.
 #[test]
 fn shared_ambiguous_target_pins_the_windows_envelope() {
-    let matches = vec![
-        ProcessRow {
-            pid: ProcessId::from(10),
-            name: "Cursor.exe".into(),
-        },
-        ProcessRow {
-            pid: ProcessId::from(11),
-            name: "Cursor.exe".into(),
-        },
+    let instances = vec![
+        (ProcessId::from(10), Some("Main".to_string())),
+        (ProcessId::from(11), None),
     ];
 
     let wire = serde_json::to_value(ErrorPayload::from_app_error(&AppError::from(
-        ambiguous_apps(&matches),
+        launch_attach::ambiguous_instances(&instances),
     )))
     .expect("ErrorPayload serializes");
 
@@ -78,6 +66,10 @@ fn shared_ambiguous_target_pins_the_windows_envelope() {
     assert_eq!(
         wire["details"]["candidate_pids"],
         serde_json::json!([10, 11])
+    );
+    assert_eq!(
+        wire["details"]["instances"],
+        serde_json::json!([{ "pid": 10, "title": "Main" }, { "pid": 11, "title": null }])
     );
 }
 
