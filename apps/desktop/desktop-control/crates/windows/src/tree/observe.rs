@@ -185,6 +185,13 @@ fn finish_observation(
 /// It is measured between walks (from the end of the first walk at the size to
 /// the start of the latest), which can only understate how long the size held.
 /// It is fixed, not a share of the deadline.
+///
+/// This is a measured rule of thumb, not a guarantee: a renderer that
+/// published part of a page, held that size for the whole span, and published
+/// the rest afterwards is taken for complete. A page whose second half arrives
+/// while the settle is still running is caught by the size change (or, before
+/// any content, by the content check), which is what the two-step test pages
+/// showed.
 pub(crate) const THIN_TREE_SETTLE: Duration = Duration::from_millis(500);
 
 /// One thin walk past this observation's settle: how long its size has held
