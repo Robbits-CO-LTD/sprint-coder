@@ -1,12 +1,59 @@
 // Added by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 
+/// A process with no window of its own (a helper, or a root whose window
+/// does not matter to the count).
 fn candidate(pid: u32, parent: Option<u32>, created: Option<u64>) -> Candidate {
+    with_window(pid, parent, created, Some(false))
+}
+
+fn with_window(
+    pid: u32,
+    parent: Option<u32>,
+    created: Option<u64>,
+    has_window: Option<bool>,
+) -> Candidate {
     Candidate {
         pid: ProcessId::from(pid),
         parent: parent.map(ProcessId::from),
         created,
+        has_window,
     }
+}
+
+#[test]
+fn a_child_with_a_window_of_its_own_is_an_instance_of_its_own() {
+    // Instance A (100, with its window) started B (300) from the same
+    // executable as a "new window"; B shows a window of its own.
+    let candidates = [
+        with_window(100, Some(4), Some(1_000), Some(true)),
+        candidate(101, Some(100), Some(1_100)),
+        candidate(102, Some(100), Some(1_150)),
+        candidate(103, Some(100), Some(1_180)),
+        with_window(300, Some(100), Some(2_000), Some(true)),
+    ];
+    assert_eq!(instance_roots(&candidates), pids(&[100, 300]));
+}
+
+#[test]
+fn helpers_below_a_child_instance_are_counted_inside_that_child() {
+    let candidates = [
+        with_window(100, Some(4), Some(1_000), Some(true)),
+        with_window(300, Some(100), Some(2_000), Some(true)),
+        candidate(301, Some(300), Some(2_100)),
+        candidate(302, Some(300), Some(2_200)),
+    ];
+    assert_eq!(instance_roots(&candidates), pids(&[100, 300]));
+}
+
+#[test]
+fn a_child_whose_windows_could_not_be_read_is_an_instance_of_its_own() {
+    let candidates = [
+        with_window(100, Some(4), Some(1_000), None),
+        with_window(101, Some(100), Some(1_100), None),
+        with_window(102, Some(100), Some(1_200), None),
+    ];
+    assert_eq!(instance_roots(&candidates), pids(&[100, 101, 102]));
 }
 
 fn pids(values: &[u32]) -> Vec<ProcessId> {
@@ -18,7 +65,7 @@ fn one_electron_app_with_three_helpers_is_one_instance() {
     // The browser process (started by the shell, pid 4) and its GPU,
     // renderer and utility processes, all from the same executable.
     let candidates = [
-        candidate(1324, Some(4), Some(1_000)),
+        with_window(1324, Some(4), Some(1_000), Some(true)),
         candidate(58064, Some(1324), Some(1_200)),
         candidate(33872, Some(1324), Some(1_300)),
         candidate(23344, Some(1324), Some(1_400)),

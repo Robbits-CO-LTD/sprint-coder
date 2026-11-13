@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use agent_desktop_core::{
-    AdapterError, Deadline, ErrorCode, ProcessId, WindowFilter,
+    AdapterError, Deadline, ErrorCode, ProcessId, WindowFilter, WindowInfo,
     system::launch_options::LaunchOptions, system::launch_result::LaunchResult,
 };
 
@@ -68,18 +68,40 @@ pub(super) fn prepare(
     // process that was matched.
     let parents: HashMap<ProcessId, ProcessId> =
         super::launch_handoff::parent_rows().into_iter().collect();
-    let candidates: Vec<Candidate> = exact_matches
+    let live: Vec<(ProcessId, Option<u64>)> = exact_matches
         .iter()
         .filter(|(_, process)| !process.as_ref().is_some_and(Process::has_exited))
-        .map(|(pid, process)| Candidate {
-            pid: *pid,
-            parent: parents.get(pid).copied(),
-            created: process.as_ref().and_then(Process::created),
+        .map(|(pid, process)| (*pid, process.as_ref().and_then(Process::created)))
+        .collect();
+    // Only several processes need telling apart, and only then is the window
+    // inventory read (the one a launch that attaches reads its window from):
+    // a failed read leaves every window unknown (`None`).
+    let filter = WindowFilter {
+        focused_only: false,
+        app: None,
+    };
+    let windows = if live.len() > 1 {
+        super::list_windows_live(&filter, deadline).ok()
+    } else {
+        None
+    };
+    let candidates: Vec<Candidate> = live
+        .iter()
+        .map(|&(pid, created)| Candidate {
+            pid,
+            parent: parents.get(&pid).copied(),
+            created,
+            has_window: windows
+                .as_ref()
+                .map(|windows| windows.iter().any(|window| window.pid == pid)),
         })
         .collect();
     let roots = instance_roots(&candidates);
     if roots.len() > 1 {
-        return Err(ambiguous_instances(&with_titles(&roots, deadline)));
+        return Err(ambiguous_instances(&with_titles(
+            &roots,
+            windows.as_deref().unwrap_or_default(),
+        )));
     }
     if let Some(&root) = roots.first() {
         let token = process_identity::token_for_pid(root)?.ok_or_else(|| {
@@ -108,13 +130,17 @@ pub(super) fn prepare(
 }
 
 /// One running process of the launch target's executable, as the instance
-/// count reads it: its parent pid from ToolHelp and its creation time in
-/// `FILETIME` ticks, either unknown when it could not be read.
+/// count reads it: its parent pid from ToolHelp, its creation time in
+/// `FILETIME` ticks, and whether it owns a window of its own (one the window
+/// inventory lists for its pid, the same kind of window a launch that attaches
+/// returns: visible, top-level, not a tool window), each unknown when it could
+/// not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Candidate {
     pub(super) pid: ProcessId,
     pub(super) parent: Option<ProcessId>,
     pub(super) created: Option<u64>,
+    pub(super) has_window: Option<bool>,
 }
 
 /// The running instances among `candidates`, each named by the pid at the
@@ -123,25 +149,31 @@ pub(super) struct Candidate {
 /// One Chromium or Electron app runs its GPU, renderer and utility processes
 /// from its own executable, so counting processes made one app look like
 /// several instances and every second launch failed as ambiguous. A candidate
-/// is counted inside another candidate's instance only when its parent pid is
-/// that candidate's and it was created strictly after that candidate. Every
-/// candidate is held open while this is read, so a parent that is a candidate
-/// has held its pid from its own creation until now; a process created after
-/// it with that parent pid can only be its child. A parent pid reused by a
-/// process created later than the child, an unknown time, or a parent that is
-/// not a candidate (another executable, or one that already exited) leaves the
+/// is counted inside another candidate's instance only when it owns no window
+/// of its own, its parent pid is that candidate's, and it was created strictly
+/// after that candidate. Every candidate is held open while this is read, so a
+/// parent that is a candidate has held its pid from its own creation until
+/// now; a process created after it with that parent pid can only be its child.
+/// A child with a window of its own may be an instance the parent started (a
+/// "new window" that runs as its own process), which the caller must choose
+/// between, so it counts as an instance; helpers below it are counted inside
+/// it. A window that could not be read, a parent pid reused by a process
+/// created later than the child, an unknown time, or a parent that is not a
+/// candidate (another executable, or one that already exited) leaves the
 /// candidate counted as an instance of its own, so doubt makes the launch
 /// refuse as ambiguous rather than attach to the wrong instance.
 pub(super) fn instance_roots(candidates: &[Candidate]) -> Vec<ProcessId> {
     candidates
         .iter()
-        .filter(|candidate| !is_child_of_a_candidate(candidate, candidates))
+        .filter(|candidate| !is_helper_of_a_candidate(candidate, candidates))
         .map(|candidate| candidate.pid)
         .collect()
 }
 
-fn is_child_of_a_candidate(child: &Candidate, candidates: &[Candidate]) -> bool {
-    let (Some(parent), Some(child_created)) = (child.parent, child.created) else {
+fn is_helper_of_a_candidate(child: &Candidate, candidates: &[Candidate]) -> bool {
+    let (Some(parent), Some(child_created), Some(false)) =
+        (child.parent, child.created, child.has_window)
+    else {
         return false;
     };
     parent != child.pid
@@ -153,15 +185,9 @@ fn is_child_of_a_candidate(child: &Candidate, candidates: &[Candidate]) -> bool 
         })
 }
 
-/// Each instance's root pid with the title of its first window, when one can
-/// be read in time. A title is only a hint for the caller; a failed read
-/// leaves it out.
-fn with_titles(roots: &[ProcessId], deadline: Deadline) -> Vec<(ProcessId, Option<String>)> {
-    let filter = WindowFilter {
-        focused_only: false,
-        app: None,
-    };
-    let windows = super::list_windows_live(&filter, deadline).unwrap_or_default();
+/// Each instance's root pid with the title of its first window in `windows`.
+/// A title is only a hint for the caller; with no window read it is left out.
+fn with_titles(roots: &[ProcessId], windows: &[WindowInfo]) -> Vec<(ProcessId, Option<String>)> {
     roots
         .iter()
         .map(|&pid| {
