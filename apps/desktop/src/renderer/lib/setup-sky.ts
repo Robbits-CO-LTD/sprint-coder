@@ -196,14 +196,30 @@ export class SetupSky {
     this.teamMode = mode;
     this.teamSince = now;
     const wanted = mode === null ? [] : this.cometPlan(mode);
-    // Keep the ones still wanted (by label + lane), send the rest away, bring the new ones in.
+    // Keep a cursor only if the new plan has the very same one — same lane, colour and role (a
+    // teammate who comes and goes with the big job is not one who is always there). Cursors already
+    // on their way out never count, so a quick back-and-forth brings fresh ones in.
     for (const comet of this.comets) {
-      const keep = wanted.findIndex((w) => w.label === comet.label && w.lane === comet.lane);
+      if (comet.leaving) continue;
+      const keep = wanted.findIndex(
+        (w) =>
+          w.label === comet.label &&
+          w.lane === comet.lane &&
+          w.color === comet.color &&
+          w.helper === comet.helper,
+      );
       if (keep === -1) comet.leaving = true;
       else wanted.splice(keep, 1);
     }
     for (const plan of wanted) this.comets.push(this.makeComet(plan));
     if (!this.animate) this.drawStill();
+  }
+
+  /** The Team cursors that are staying (not on their way out), for checking the picture in tests. */
+  activeTeam(): readonly { label: string; lane: number; helper: boolean }[] {
+    return this.comets
+      .filter((comet) => !comet.leaving)
+      .map(({ label, lane, helper }) => ({ label, lane, helper }));
   }
 
   /** Confetti thrown up from both bottom corners. */

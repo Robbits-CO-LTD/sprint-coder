@@ -339,12 +339,135 @@ describe('SetupWizard', () => {
     await press('setup-folder');
     expect(q('[data-testid="setup-next"]')?.textContent).toContain('続ける');
     await press('setup-next');
+    // Going back and forth between the folder and the end makes nothing yet.
+    for (let i = 0; i < 3; i += 1) {
+      await press('setup-back');
+      expect(step()).toBe('workspace');
+      await press('setup-next');
+      expect(step()).toBe('done');
+    }
+    expect(createProject).not.toHaveBeenCalled();
+    expect(q('[data-testid="setup-summary"]')?.textContent).toContain('app');
+    await press('setup-finish');
+    await waitForHandOff();
     expect(createProject).toHaveBeenCalledExactlyOnceWith('app', [
       { path: 'C:/work/app', label: 'app', role: 'primary' },
     ]);
+    expect(createTask).toHaveBeenCalledExactlyOnceWith('project-1');
+  });
+
+  it('makes the Project once even when the first Task has to be retried', async () => {
+    installBridge({});
+    pickProjectFolders.mockResolvedValue({
+      canceled: false,
+      folders: [{ path: 'C:/work/app', label: 'app' }],
+    });
+    createTask.mockResolvedValueOnce(null);
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-folder');
+    await press('setup-next');
     await press('setup-finish');
     await waitForHandOff();
-    expect(createTask).toHaveBeenCalledExactlyOnceWith('project-1');
+    expect(container.textContent).toContain('最初の Task を作れませんでした');
+    await press('setup-finish');
+    await waitForHandOff();
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(createTask).toHaveBeenNthCalledWith(2, 'project-1');
+  });
+
+  it('a save lays only the items changed here over what is stored now (Settings may have changed others)', async () => {
+    const settings = fullBridge();
+    let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    settings.getAssistantPreferences.mockImplementation(async () => ({
+      configured: true,
+      preferences: current,
+    }));
+    await render();
+    await press('setup-start');
+    // Meanwhile, in Settings: another language and a call name.
+    current = { ...current, language: 'en', callName: 'ゆう' };
+    await press('setup-next'); // ai -> reply
+    await choose('setup-tone-crisp');
+    await press('setup-next');
+    expect(settings.setAssistantPreferences).toHaveBeenCalledExactlyOnceWith({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      tone: 'crisp',
+      language: 'en',
+      callName: 'ゆう',
+    });
+  });
+
+  it('back from Settings, the items not touched here show what Settings stored', async () => {
+    const settings = fullBridge();
+    let current = { ...DEFAULT_ASSISTANT_PREFERENCES };
+    settings.getAssistantPreferences.mockImplementation(async () => ({
+      configured: true,
+      preferences: current,
+    }));
+    const onOpenSettings = vi.fn();
+    await render({ onOpenSettings });
+    await press('setup-start');
+    expect(step()).toBe('ai');
+    const opener = [...container.querySelectorAll<HTMLButtonElement>('button')].find((b) =>
+      b.textContent?.includes('接続を設定'),
+    )!;
+    await act(async () => opener.click());
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    current = { ...current, language: 'en' };
+    // Settings closes and gives the focus back to the button inside the Setup.
+    await act(async () => opener.focus());
+    await flush();
+    await press('setup-next'); // reply
+    await press('setup-next'); // team
+    await press('setup-next'); // details
+    expect(q<HTMLInputElement>('[data-testid="setup-language-en"]')?.checked).toBe(true);
+  });
+
+  it('while a step is being saved, its choices are locked; the summary shows what was stored', async () => {
+    const settings = fullBridge();
+    let finishSave: (value: { mode: string }) => void = () => {};
+    settings.setTeamUsageMode.mockImplementation(
+      () => new Promise<{ mode: string }>((resolve) => (finishSave = resolve)),
+    );
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    expect(step()).toBe('team');
+    await choose('setup-team-auto');
+    await act(async () => q<HTMLButtonElement>('[data-testid="setup-next"]')!.click());
+    // Waiting: the step is locked, and trying to change the choice changes nothing.
+    expect(q<HTMLFieldSetElement>('[data-testid="setup-step-team"]')?.disabled).toBe(true);
+    expect(q<HTMLButtonElement>('[data-testid="setup-back"]')?.disabled).toBe(true);
+    expect(q<HTMLButtonElement>('[data-testid="setup-skip"]')?.disabled).toBe(true);
+    await choose('setup-team-explicit');
+    expect(q<HTMLInputElement>('[data-testid="setup-team-auto"]')?.checked).toBe(true);
+    await act(async () => finishSave({ mode: 'auto' }));
+    await flush();
+    expect(settings.setTeamUsageMode).toHaveBeenCalledExactlyOnceWith({ mode: 'auto' });
+    expect(step()).toBe('details');
+    await press('setup-next');
+    await press('setup-next');
+    expect(q('[data-testid="setup-summary"]')?.textContent).toContain('おまかせ');
+  });
+
+  it('a failed save is shown as not stored, not as the choice', async () => {
+    const settings = fullBridge();
+    settings.setTeamUsageMode.mockRejectedValue(new Error('disk'));
+    await render();
+    await press('setup-start');
+    await press('setup-next');
+    await press('setup-next');
+    await choose('setup-team-proactive');
+    await press('setup-next');
+    await press('setup-next');
+    await press('setup-next');
+    const summary = q('[data-testid="setup-summary"]')?.textContent ?? '';
+    expect(summary).toContain('保存できませんでした');
+    expect(summary).not.toContain('積極的に');
   });
 
   it('replay: opens on the stored choices, has no Workspace or first Task, and closes', async () => {

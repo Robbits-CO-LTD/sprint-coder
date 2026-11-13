@@ -1698,11 +1698,27 @@ body {
 }
 
 .setup-step {
+  min-width: 0;
   width: min(100%, 640px);
   margin: auto 0;
   padding: 24px 0 20px;
+  border: 0;
   container-type: inline-size;
   perspective: 900px;
+}
+
+/* While a step is being saved its controls are locked (the fieldset is disabled); this shows it. */
+.setup-step:disabled {
+  cursor: progress;
+}
+
+.setup-step:disabled .setup-choice,
+.setup-step:disabled .setup-team-card,
+.setup-step:disabled .setup-switch,
+.setup-step:disabled .setup-field {
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity var(--t-quick) var(--ease-ui);
 }
 
 /* The step's parts arrive one after another, from the side the user is moving towards. */

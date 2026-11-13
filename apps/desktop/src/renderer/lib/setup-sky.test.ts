@@ -93,4 +93,50 @@ describe('SetupSky', () => {
     sky.setTeam('proactive');
     sky.destroy();
   });
+
+  describe('Team cursors follow the chosen way of working', () => {
+    const roles = (sky: SetupSky) =>
+      sky
+        .activeTeam()
+        .map((c) => `${c.label}${c.lane}${c.helper ? 'h' : ''}`)
+        .sort();
+    const make = () => {
+      vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => fakeContext());
+      return new SetupSky(document.createElement('canvas'), { animate: true });
+    };
+
+    it('おまかせ -> 積極的に: four teammates who stay, none of them only for the big job', () => {
+      const sky = make();
+      sky.setTeam('auto');
+      vi.advanceTimersByTime(500);
+      sky.setTeam('proactive');
+      expect(roles(sky)).toEqual(['AI0', '仲間-1', '仲間-2', '仲間1', '仲間2']);
+      sky.destroy();
+    });
+
+    it('積極的に -> おまかせ: two teammates who come only with the big job', () => {
+      const sky = make();
+      sky.setTeam('proactive');
+      vi.advanceTimersByTime(500);
+      sky.setTeam('auto');
+      expect(roles(sky)).toEqual(['AI0', '仲間-1h', '仲間1h']);
+      sky.destroy();
+    });
+
+    it('a quick back-and-forth does not lose the teammates', () => {
+      const sky = make();
+      sky.setTeam('auto');
+      sky.setTeam('proactive');
+      sky.setTeam('auto');
+      expect(roles(sky)).toEqual(['AI0', '仲間-1h', '仲間1h']);
+      sky.setTeam('explicit');
+      expect(roles(sky)).toEqual(['AI0']);
+      sky.setTeam('proactive');
+      sky.setTeam('explicit');
+      sky.setTeam('proactive');
+      expect(roles(sky)).toEqual(['AI0', '仲間-1', '仲間-2', '仲間1', '仲間2']);
+      sky.destroy();
+    });
+  });
 });

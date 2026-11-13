@@ -87,11 +87,11 @@ function normalizePreferences(value: unknown): AssistantPreferences {
   };
 }
 
-export async function loadAssistantPreferences(): Promise<AssistantPreferencesState> {
+/** What Main has stored right now, or `null` when it cannot be read (no bridge, or an error). A
+ * caller that cannot read must not guess: it keeps the last value it knew. */
+export async function loadAssistantPreferences(): Promise<AssistantPreferencesState | null> {
   const get = bridge()?.getAssistantPreferences;
-  if (typeof get !== 'function') {
-    return { configured: false, preferences: { ...DEFAULT_ASSISTANT_PREFERENCES } };
-  }
+  if (typeof get !== 'function') return null;
   try {
     const state = await get();
     return {
@@ -99,7 +99,7 @@ export async function loadAssistantPreferences(): Promise<AssistantPreferencesSt
       preferences: normalizePreferences(state?.preferences),
     };
   } catch {
-    return { configured: false, preferences: { ...DEFAULT_ASSISTANT_PREFERENCES } };
+    return null;
   }
 }
 
@@ -122,24 +122,28 @@ export async function saveAssistantPreferences(
   }
 }
 
-export async function loadTeamUsageMode(): Promise<TeamUsageMode> {
+/** The stored Team mode, or `null` when it cannot be read. */
+export async function loadTeamUsageMode(): Promise<TeamUsageMode | null> {
   const get = bridge()?.getTeamUsageMode;
-  if (typeof get !== 'function') return DEFAULT_TEAM_USAGE_MODE;
+  if (typeof get !== 'function') return null;
   try {
     const state = await get();
     return TEAM_MODES.has(state?.mode) ? state.mode : DEFAULT_TEAM_USAGE_MODE;
   } catch {
-    return DEFAULT_TEAM_USAGE_MODE;
+    return null;
   }
 }
 
-export async function saveTeamUsageMode(mode: TeamUsageMode): Promise<SetupSaveOutcome> {
+/** On success, `mode` is what Main stored. */
+export async function saveTeamUsageMode(
+  mode: TeamUsageMode,
+): Promise<{ outcome: SetupSaveOutcome; mode?: TeamUsageMode }> {
   const set = bridge()?.setTeamUsageMode;
-  if (typeof set !== 'function') return 'unsupported';
+  if (typeof set !== 'function') return { outcome: 'unsupported' };
   try {
-    await set({ mode });
-    return 'saved';
+    const state = await set({ mode });
+    return { outcome: 'saved', mode: TEAM_MODES.has(state?.mode) ? state.mode : mode };
   } catch {
-    return 'failed';
+    return { outcome: 'failed' };
   }
 }
