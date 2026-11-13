@@ -1359,9 +1359,18 @@ export function registerTeamTools(
   // provider-workspace-tools wiring that supplies it is the single place that knows that.
   const longPollFor = (context: ToolExecutionContext): boolean =>
     options.modelSelectionRequired?.(context) === true;
+  // The tools that only read or wait on the Team's own state (never the Workspace) claim only
+  // that. The default claim is a read of the whole Workspace, so every write of it under this
+  // Turn's gate, the Team Workers' calls included, waited out the whole ~60 s of a wait.
+  const observesTeamOnly = {
+    resourceClaims: (_input: unknown, context: ToolExecutionContext) => [
+      { key: `team-observe:${context.taskId}`, mode: 'read' as const },
+    ],
+  };
   broker.registerImplementation({
     toolId: TEAM_LIST_MODELS_TOOL.toolId,
     implementationKind: 'built-in',
+    ...observesTeamOnly,
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_list_models', input, {
         ...(options.listModelCandidates === undefined
@@ -1433,6 +1442,7 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_GET_STATUS_TOOL.toolId,
     implementationKind: 'built-in',
+    ...observesTeamOnly,
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_get_status', input),
   });
@@ -1446,6 +1456,7 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_WAIT_EVENTS_TOOL.toolId,
     implementationKind: 'built-in',
+    ...observesTeamOnly,
     execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_events', input, {
         longPoll: longPollFor(context),
@@ -1466,6 +1477,7 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_WAIT_REPORTS_TOOL.toolId,
     implementationKind: 'built-in',
+    ...observesTeamOnly,
     execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_reports', input, {
         longPoll: longPollFor(context),

@@ -686,7 +686,18 @@ export function registerCommandRunnerTool(
         createdAt: new Date().toISOString(),
       });
       commandIds.set(spec, persisted.id);
-      resourceKeys.set(spec, `workspace:${workspace.digest}`);
+      // With the Task's cursors on, a desktop-control run takes its turn in Main's order for the
+      // Task's session (`desktop-control-queue.ts`), which bounds the wait and says so to the agent.
+      // It writes no Workspace file (it starts in its own folder, a screenshot path or a launch in
+      // a Workspace root is refused), so it claims only itself here. A Workspace-wide write would
+      // line every Worker's run up behind the Leader's long `team_wait_*` and behind each other,
+      // out of that order's sight. Without the opt-in, and for every other command, as before.
+      resourceKeys.set(
+        spec,
+        desktopControl && desktopControlTeamCursors()
+          ? `desktop-control-run:${persisted.id}`
+          : `workspace:${workspace.digest}`,
+      );
       if (desktopControl) desktopControlRoots.set(spec, roots);
       if (desktopControl && desktopControlTeamCursors())
         desktopControlOwnSpecs.set(spec, prepareSpec);
