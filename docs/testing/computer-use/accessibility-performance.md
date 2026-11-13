@@ -101,6 +101,17 @@
 - 合格条件: 退出durationはreduced<1ms、normal>50ms、reducedは直ちにTeamが消える。
 - 証拠・制約: 退出時のMutationObserver相当の補助記録。退出後の要素不存在をduration0と解釈しない。
 
+<a id="a11y-reduced-motion-05"></a>
+
+## a11y-reduced-motion-05
+
+新規ケース: 初回Setupの演出（粒・走るカーソル・紙吹雪・始まりの演出）が、動きを減らす設定で止まる
+
+- 前提: reduced/normalを別profile（未使用）。
+- 操作: 各設定で初回起動し、各段を「続ける」「あとで決める」で最後まで進む（「最初の Task を始める」は押さなくてよい）。
+- 合格条件: reducedでは`[data-testid=setup-wizard]`が`data-motion="reduced"`・`data-intro="done"`で始まり、背景のcanvasは1枚の静止画（20frame採取で画素が変わらない）。段の切り替えは短いfadeのみ。見本の返事は即座に全文、Teamの絵は完成形、完了に紙吹雪なし。各段の文字と選択肢はnormalと同じ。normalでは始まりの演出・粒・カーソルが動く。
+- 証拠・制約: 両条件の各段の画面、canvasの20frame比較。
+
 <a id="a11y-zoom-01"></a>
 
 ## a11y-zoom-01

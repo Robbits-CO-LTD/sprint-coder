@@ -34,8 +34,14 @@ import {
   writeStoredTeamViewPreference,
 } from './lib/team-view-preference';
 import type { TeamViewPreference } from './lib/team-view-preference';
-import { readSetupComplete, shouldShowSetupWizard } from './lib/setup-preference';
-import { SetupWizard } from './components/SetupWizard';
+import {
+  SETUP_REPLAY_EVENT,
+  readSetupComplete,
+  setSetupShowing,
+  shouldShowSetupWizard,
+} from './lib/setup-preference';
+import { SetupReplayDialog, SetupWizard } from './components/SetupWizard';
+import { focusAfterFirstSetup, focusAfterSetupReplay } from './lib/setup-focus';
 import { unlockSoundEffects } from './lib/ui-sound';
 
 export default function App() {
@@ -135,6 +141,14 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  // "セットアップをもう一度" (Settings > 詳細): Settings closes and the Setup runs over the app in
+  // its replay form. The workspace underneath stays mounted (and inert) so closing returns to it.
+  const [setupReplayOpen, setSetupReplayOpen] = useState(false);
+  const closeSetupReplay = useCallback(() => {
+    setSetupReplayOpen(false);
+    // Back to the button that led here; if it is gone or hidden (inert), to the next sensible place.
+    requestAnimationFrame(() => focusAfterSetupReplay());
+  }, []);
 
   useEffect(() => {
     window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openProviderSettings);
@@ -282,9 +296,37 @@ export default function App() {
     if (!setupWasVisibleRef.current) return;
     setupWasVisibleRef.current = false;
     setSetupReveal(true);
-    const timer = window.setTimeout(() => setSetupReveal(false), 1_250);
-    return () => window.clearTimeout(timer);
+    // The Setup took the focus with it: it goes to the Composer, so the first Task can be written
+    // at once. Tried on the next frame (the Composer only), and again once the reveal is over (then
+    // with the fallbacks of setup-focus); either time only if the focus is still nowhere.
+    const frame = requestAnimationFrame(() =>
+      focusAfterFirstSetup(document, { composerOnly: true }),
+    );
+    const timer = window.setTimeout(() => {
+      setSetupReveal(false);
+      focusAfterFirstSetup();
+    }, 1_250);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
   }, [showSetupWizard]);
+
+  useEffect(() => {
+    const onReplay = () => {
+      setSettingsOpen(false);
+      // During the first-run Setup (reachable through "接続を設定"), the Setup is already showing.
+      if (!showSetupWizard) setSetupReplayOpen(true);
+    };
+    window.addEventListener(SETUP_REPLAY_EVENT, onReplay);
+    return () => window.removeEventListener(SETUP_REPLAY_EVENT, onReplay);
+  }, [showSetupWizard]);
+
+  // Settings offers "セットアップをもう一度" only while no Setup is on screen.
+  useEffect(() => {
+    setSetupShowing(showSetupWizard || setupReplayOpen);
+  }, [setupReplayOpen, showSetupWizard]);
+  useEffect(() => () => setSetupShowing(false), []);
 
   const requestEnterTeam = useCallback(() => {
     if (exiting) {
@@ -513,6 +555,9 @@ export default function App() {
           {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
           layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
           across the Chat<->Team morph. */}
+          {setupReplayOpen && (
+            <SetupReplayDialog onClose={closeSetupReplay} onOpenSettings={openSettings} />
+          )}
           <SettingsDialog
             open={settingsOpen}
             onClose={closeSettings}

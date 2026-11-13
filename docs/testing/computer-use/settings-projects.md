@@ -9,9 +9,20 @@
 旧ケース: `tests/e2e/setup-wizard.spec.ts` — first launch moves through setup once and lands in a usable Task
 
 - 前提: 未使用の隔離profile。
-- 操作: 初回起動→「セットアップを始める」→AI確認→続ける→作業場所「あとで設定」→「最初のTaskを始める」。同profileで再起動。
-- 合格条件: 歓迎見出しとSVG、Codex/Claude Code確認、作業場所、準備完了が順に表示。wizard中sidebarなし。最初のTaskでsidebarとComposerが使え、reveal演出は終了する。再起動時wizardは出ない。
-- 証拠・制約: 歓迎/準備完了/通常画面、再起動画面。
+- 操作: 初回起動（始まりの演出は約3.4秒。clickかkeyで即終了）→「セットアップを始める」→AI確認→続ける→返事の仕方・Teamの使い方・細かい好みをそれぞれ「あとで決める」→作業場所「あとで設定」→「最初の Task を始める」。同profileで再起動。
+- 合格条件: 歓迎見出しとSVG、Codex/Claude Code確認、返事の仕方（選ぶと見本の返事が書き換わる）、Teamの使い方（3枚、「おまかせ」におすすめ、利用枠の注意1行）、細かい好み、作業場所、準備完了（選んだ内容のまとめ）が順に表示。進み具合の分母はSetupの途中で変わらない。wizard中sidebarなし。「あとで決める」で進んだ設定は保存されない（`assistant.preferences`・`team.usage-mode`がsettingsに無い）。最初のTaskでsidebarとComposerが使え、reveal演出は終了する。再起動時wizardは出ない。
+- 証拠・制約: 歓迎/返事の仕方/Team/準備完了/通常画面、再起動画面、settingsの照合。AIへの送信はしない。
+
+<a id="setup-wizard-02"></a>
+
+## setup-wizard-02
+
+新規ケース: Settings「詳細」の最後の「セットアップをもう一度」
+
+- 前提: setup-wizard-01を終えたprofile。
+- 操作: sidebarの設定→「詳細」→「セットアップをもう一度」→返事の仕方で1つ選んで続ける→Escape。もう一度開いて最後まで進み「完了」。
+- 合格条件: Settingsが閉じてSetupがtitle barの下の窓いっぱいに出る（focusは見出し）。今の設定が選ばれた状態で始まる。作業場所の段と「最初の Task を始める」は出ない（分母は作業場所の分だけ少ない）。Escapeか×で閉じ、続けるで出た段の保存は残る。閉じた後、設定ボタンへfocusが戻り、Taskは増えない。
+- 証拠・制約: Settingsの行、もう一度の各画面、閉じた後の画面、settingsの照合。
 
 <a id="settings-dialog-01"></a>
 

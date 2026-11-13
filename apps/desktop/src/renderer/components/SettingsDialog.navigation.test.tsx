@@ -4,6 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { LOCAL_PROVIDER_PROFILES } from '../../main/bundled-provider-profiles';
 import { useAppStore } from '../store/appStore';
+import { writeAccessPresetDefault } from '../lib/access-preset-preference';
+import { setSoundEffectsEnabled } from '../lib/ui-sound';
 import { SettingsDialog } from './SettingsDialog';
 import { ADD_TOGGLE_ID, LIST_ERROR } from './ProviderSettingsSection';
 
@@ -130,5 +132,28 @@ it.each([true, false])(
       expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
       expect(scrollIntoView.mock.contexts[0]).toBe(add);
     } else expect(scrollIntoView).not.toHaveBeenCalled();
+  },
+);
+
+it.each([false, true])(
+  'shows the safety default and sound as stored now each time it opens, also after the Setup changed them (workspace=%s)',
+  async (workspace) => {
+    localStorage.clear();
+    useAppStore.setState({ settingsWorkspaceV2: workspace });
+    const select = () =>
+      container.querySelector<HTMLSelectElement>('[data-testid="settings-access-default"]')!;
+    const sound = () =>
+      container.querySelector<HTMLInputElement>('[data-testid="settings-sound-effects-enabled"]')!;
+    await act(async () => root.render(<SettingsDialog open onClose={() => {}} />));
+    expect(select().value).toBe('last');
+    expect(sound().checked).toBe(false);
+    await act(async () => root.render(<SettingsDialog open={false} onClose={() => {}} />));
+    // Meanwhile, the Setup (which writes the same storage) changes both.
+    writeAccessPresetDefault('full');
+    setSoundEffectsEnabled(true);
+    await act(async () => root.render(<SettingsDialog open onClose={() => {}} />));
+    expect(select().value).toBe('full');
+    expect(sound().checked).toBe(true);
+    localStorage.clear();
   },
 );
