@@ -89,6 +89,24 @@ fn another_process_generation_or_pid_hands_over_nothing() {
     );
 }
 
+/// The record holds for the window it was taken on: another window of the
+/// same process generation, or an entry with no window id (resolved through
+/// any window of its process), never gets the count.
+#[test]
+fn another_window_of_the_same_process_or_no_window_id_hands_over_nothing() {
+    let entry = entry(7, Some("gen-1"), Some(25));
+    let mut other = window(7, Some("gen-1"));
+    other.id = "w-2".into();
+    assert_eq!(recorded_settled_thin_nodes(&entry, &other), None);
+
+    let mut unwindowed = entry.clone();
+    unwindowed.source.source_window_id = None;
+    assert_eq!(
+        recorded_settled_thin_nodes(&unwindowed, &window(7, Some("gen-1"))),
+        None
+    );
+}
+
 #[test]
 fn a_missing_instance_token_on_either_side_hands_over_nothing() {
     assert_eq!(

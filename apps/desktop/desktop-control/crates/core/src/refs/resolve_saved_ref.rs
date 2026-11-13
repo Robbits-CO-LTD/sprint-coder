@@ -310,15 +310,20 @@ pub(crate) fn observe_whole_window(
 }
 
 /// The settled small-tree count a resolution may hand the adapter: the one
-/// the capture recorded, only when the live window belongs to the very process
-/// generation the ref was captured from (both instance tokens present and
-/// equal, and the same pid). A missing token, another generation, or no record
-/// leaves the adapter to settle the renderer as for any first read.
+/// the capture recorded, only for the very window it was recorded on (a
+/// recorded window id equal to the live one) of the very process generation
+/// (both instance tokens present and equal, and the same pid). An entry with
+/// no window id resolves through any window of its process
+/// ([`recorded_window`]'s fallback), so it never hands a count over. A missing
+/// id or token, another window or generation, or no record leaves the adapter
+/// to settle the renderer as for any first read.
 pub(crate) fn recorded_settled_thin_nodes(entry: &RefEntry, window: &WindowInfo) -> Option<u64> {
     let recorded = entry.source.settled_thin_nodes?;
+    let recorded_window = entry.source.source_window_id.as_deref()?;
     let live = window.process_instance.as_deref()?;
     let saved = entry.process.process_instance.as_deref()?;
-    (window.pid == entry.process.pid && live == saved).then_some(recorded)
+    (window.id == recorded_window && window.pid == entry.process.pid && live == saved)
+        .then_some(recorded)
 }
 
 /// [`observe_whole_window`] over the elements the window shows only
