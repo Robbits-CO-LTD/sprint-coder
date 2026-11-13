@@ -118,7 +118,10 @@ pub use session::interaction_lease::{
 };
 pub use session::process_lease_guard::ProcessLeaseGuard;
 pub use session::session_affinity::SessionAffinity;
-pub use snapshot::menu_bar::{MenuBarKind, NativeMenuBar, NativeMenuItem, menu_item_name};
+pub use snapshot::menu_bar::{
+    MenuBarKind, NativeMenuBar, NativeMenuItem, every_item_unnamed as every_menu_item_unnamed,
+    menu_item_name,
+};
 pub use snapshot::snapshot_surface::SnapshotSurface;
 pub use storage::file_lock::FileLock;
 pub use storage::private_file_ops::{

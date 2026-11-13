@@ -65,6 +65,13 @@ fn a_window_without_a_menu_bar_is_refused_before_anything_is_sent() {
         agent_desktop_core::DeliverySemantics::not_delivered()
     );
     assert_eq!(error.details.unwrap()["kind"], "no_standard_menu_bar");
+    // A Qt window (VLC, for one): the guidance says its menus cannot be run
+    // from behind it, and never points at the menubar surface or a ref.
+    let suggestion = error.suggestion.unwrap_or_default();
+    assert!(suggestion.contains("cannot be listed, opened or run from behind the window"));
+    assert!(suggestion.contains("brings the window to the front"));
+    assert!(!suggestion.contains("--surface menubar"));
+    assert!(!suggestion.contains("ref"));
 }
 
 /// Reads the menu bar of a hidden window this test process creates: the read
@@ -172,6 +179,118 @@ mod live {
         assert_eq!(nested[0].text.as_deref(), Some("子 A(&A)"));
         assert!(items[4].owner_drawn);
         assert_eq!(items[4].text, None);
+    }
+
+    /// A hidden window whose bar is the Tcl/Tk shape - text items opening
+    /// menus whose items the application draws - next to a plain menu, and
+    /// a menu of items with the identifiers wxWidgets gives (negative, kept
+    /// in 16 bits) and one such identifier kept in 32 bits.
+    fn window_with_drawn_and_wide_menus() -> HiddenWindow {
+        // SAFETY: plain menu and window creation on this thread.
+        unsafe {
+            let bar = CreateMenu();
+            let drawn = CreatePopupMenu();
+            // The value an owner-drawn item carries is the application's own
+            // data, never read as text.
+            AppendMenuW(drawn, MF_OWNERDRAW, 5001, 0x1234 as *const u16);
+            AppendMenuW(drawn, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(drawn, MF_OWNERDRAW, 5002, 0x1236 as *const u16);
+            AppendMenuW(bar, MF_POPUP, drawn as usize, wide("Repository").as_ptr());
+            let wide_ids = CreatePopupMenu();
+            AppendMenuW(
+                wide_ids,
+                MF_STRING,
+                usize::from(-31000i16 as u16),
+                wide("負の ID(&A)").as_ptr(),
+            );
+            AppendMenuW(
+                wide_ids,
+                MF_STRING,
+                -31001i32 as u32 as usize,
+                wide("32 bit(&E)").as_ptr(),
+            );
+            AppendMenuW(
+                bar,
+                MF_POPUP,
+                wide_ids as usize,
+                wide("ヘルプ(&H)").as_ptr(),
+            );
+            let handle = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide("menu bar kind test").as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                std::ptr::null_mut(),
+                bar,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!handle.is_null(), "the hidden test window is created");
+            HiddenWindow(handle)
+        }
+    }
+
+    fn top_item_entry(window: &HiddenWindow, name: &str) -> RefEntry {
+        serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(),
+            "role": "menuitem",
+            "name": name,
+            "bounds_hash": null,
+            "available_actions": ["click"],
+            "source_app": "test",
+            "source_window_id": format!("w-{}", window.0 as usize),
+        }))
+        .unwrap()
+    }
+
+    /// A failed click on a top item of a Tcl/Tk-shaped bar is told its menu is
+    /// drawn by the application, not that it can be run from the menubar
+    /// surface; a plain menu's top item still is.
+    #[test]
+    fn a_top_item_whose_menu_the_application_draws_is_told_apart() {
+        let window = window_with_drawn_and_wide_menus();
+        assert_eq!(
+            menu_bar_kind(&top_item_entry(&window, "Repository")),
+            MenuBarKind::DrawnItems
+        );
+        assert_eq!(
+            menu_bar_kind(&top_item_entry(&window, "ヘルプ(H)")),
+            MenuBarKind::StandardItem
+        );
+        assert_eq!(
+            menu_bar_kind(&top_item_entry(&window, "どこにも無い")),
+            MenuBarKind::Unknown
+        );
+        let plain = window_with_menu(true);
+        assert_eq!(
+            menu_bar_kind(&top_item_entry(&plain, "ファイル(F)")),
+            MenuBarKind::StandardItem,
+            "a menu with one item drawn by the application and others readable"
+        );
+        let bare = window_with_menu(false);
+        assert_eq!(
+            menu_bar_kind(&top_item_entry(&bare, "ファイル(F)")),
+            MenuBarKind::NotStandard
+        );
+    }
+
+    /// The identifier wxWidgets gives an item (-31000) is read as the 16-bit
+    /// value the menu holds; the same identifier kept in 32 bits is read as
+    /// it is, so the capture can tell the two apart.
+    #[test]
+    fn an_identifier_from_0x8000_is_read_as_the_menu_holds_it() {
+        let window = window_with_drawn_and_wide_menus();
+        let bar = read_menu_bar(&info(&window), Deadline::after(2_000).unwrap()).unwrap();
+        let drawn = bar.items[0].submenu.as_ref().unwrap();
+        assert!(agent_desktop_core::every_menu_item_unnamed(drawn));
+        let help = bar.items[1].submenu.as_ref().unwrap();
+        assert_eq!(help[0].command_id, 0x86E8);
+        assert_eq!(help[0].command_id as u16 as i16, -31000);
+        assert_eq!(help[1].command_id, 0xFFFF_86E7);
     }
 
     #[test]

@@ -233,6 +233,40 @@ fn the_last_item_must_still_send_the_recorded_command() {
     );
 }
 
+/// wxWidgets gives menu items negative identifiers and keeps them in 16 bits
+/// (-31000 is 0x86E8): such an item is run by that value, which a command
+/// carries as it is, and never matched by the same identifier kept in 32 bits
+/// (0xFFFF86E8), which a command cannot carry and which gets no ref.
+#[test]
+fn an_identifier_from_0x8000_is_matched_as_it_is_and_never_by_its_32_bit_form() {
+    let mut proof = proof();
+    proof.command_id = 0x86E8;
+    assert_eq!(
+        confirm_leaf(&item("上書き保存(&S)", 0x86E8), &proof),
+        Ok(())
+    );
+    assert_eq!(
+        confirm_leaf(&item("上書き保存(&S)", 0xFFFF_86E8), &proof),
+        Err(MenuMismatch::CommandChanged)
+    );
+    for id in [0x8000, 0x86E8, 0xFFFF] {
+        let narrow = item("負の ID(&W)", id);
+        assert_eq!(
+            unrunnable_reason(&narrow, std::slice::from_ref(&narrow), &[]),
+            None,
+            "{id:#x}"
+        );
+    }
+    for id in [0x1_0000, 0xFFFF_86E8] {
+        let wide = item("負の ID(&W)", id);
+        let reason = unrunnable_reason(&wide, std::slice::from_ref(&wide), &[]).unwrap();
+        assert!(
+            reason.contains("wider than the 16 bits"),
+            "{id:#x}: {reason}"
+        );
+    }
+}
+
 #[test]
 fn a_menu_proof_stands_alone() {
     assert_eq!(proof_of(&menu_entry()), Proof::InMenu);

@@ -257,8 +257,19 @@ pub(crate) fn unrunnable_reason(
     if path.iter().any(|(ancestor, _)| ancestor.disabled) {
         return Some("Its menu is disabled, so this item cannot be run.");
     }
-    if item.command_id == 0 || item.command_id > 0xFFFF {
+    if item.command_id == 0 {
         return Some("This item sends no command, so it cannot be run by ref.");
+    }
+    // A command carries 16 bits. An identifier of 0x8000 to 0xFFFF (the
+    // negative identifiers wxWidgets gives, cut to 16 bits) is sent as it is
+    // and reads back the same; a wider one (such a negative identifier kept
+    // in 32 bits) would reach the window as its low 16 bits, which may be
+    // another item's identifier, so it is not run.
+    if item.command_id > 0xFFFF {
+        return Some(
+            "Its command identifier is wider than the 16 bits a menu command carries, so the \
+             window could take the command for another item; it cannot be run by ref.",
+        );
     }
     if let Err(reason) = reports_by_position(item, path) {
         return Some(reason);

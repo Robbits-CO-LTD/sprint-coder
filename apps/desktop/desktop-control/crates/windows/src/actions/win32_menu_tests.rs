@@ -559,6 +559,56 @@ mod live {
         assert!(handled.contains(&(WM_BUSY, 0)), "the window was kept busy");
     }
 
+    /// wxWidgets gives menu items negative identifiers and keeps them in 16
+    /// bits in the menu (-31000 is 0x86E8), and reads a command back as a
+    /// signed 16-bit value. Such an item is handed exactly that value, so the
+    /// window reads -31000 again; a ref recording the 16-bit value is never
+    /// run against an item holding the same identifier kept in 32 bits, and a
+    /// ref recording a 32-bit identifier is never run at all.
+    #[test]
+    fn an_identifier_from_0x8000_reaches_the_window_as_the_same_signed_value() {
+        /// The Help menu of `remote`, with 負の ID holding `negative` and
+        /// ID 0xFFFF holding 0xFFFF appended.
+        fn add_items(remote: &Remote, negative: usize) {
+            // SAFETY: changes this test's own menu.
+            unsafe {
+                let help = GetSubMenu(GetMenu(remote.handle()), 1);
+                AppendMenuW(help, MF_STRING, negative, wide("負の ID(&W)").as_ptr());
+                AppendMenuW(help, MF_STRING, 0xFFFF, wide("ID 0xFFFF(&F)").as_ptr());
+            }
+        }
+        let remote = Remote::new(true);
+        let window = remote.info();
+        add_items(&remote, usize::from(-31000i16 as u16));
+        let negative = entry(&window, &[("ヘルプ(H)", 1), ("負の ID(W)", 1)], 0x86E8);
+        run(&window, &negative).unwrap();
+        let top = entry(&window, &[("ヘルプ(H)", 1), ("ID 0xFFFF(F)", 2)], 0xFFFF);
+        run(&window, &top).unwrap();
+        let commands = remote.commands(2);
+        assert_eq!(commands, vec![0x86E8, 0xFFFF]);
+        assert_eq!(
+            commands[0] >> 16,
+            0,
+            "the high word says the command came from a menu"
+        );
+        assert_eq!(commands[0] as u16 as i16, -31000);
+        assert_eq!(commands[1] as u16 as i16, -1);
+
+        // The same name holds -31000 kept in 32 bits: not the recorded item,
+        // and a ref recording that identifier is not run either.
+        let widened = Remote::new(true);
+        let window = widened.info();
+        add_items(&widened, -31000i32 as u32 as usize);
+        let negative = entry(&window, &[("ヘルプ(H)", 1), ("負の ID(W)", 1)], 0x86E8);
+        refused(&widened, &negative, "command_changed");
+        let wide_ref = entry(
+            &window,
+            &[("ヘルプ(H)", 1), ("負の ID(W)", 1)],
+            -31000i32 as u32,
+        );
+        refused(&widened, &wide_ref, "command_changed");
+    }
+
     #[test]
     fn a_moved_item_that_reads_the_same_is_run_and_never_its_new_neighbour() {
         let remote = Remote::new(true);
