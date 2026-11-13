@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 pub mod actions;
 pub mod automation;
 pub mod chromium;
@@ -14,6 +15,7 @@ pub(crate) mod surface_inventory;
 pub mod surfaces;
 pub(crate) mod text_insertion;
 pub(crate) mod text_selection;
+pub(crate) mod text_value;
 pub mod walk;
 
 #[cfg(test)]

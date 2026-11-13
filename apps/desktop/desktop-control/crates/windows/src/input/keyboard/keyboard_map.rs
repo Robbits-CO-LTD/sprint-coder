@@ -9,11 +9,22 @@
 //! forward-delete key, mapped onto Windows' own two distinct keys
 //! (`VK_BACK`/`VK_DELETE`) rather than collapsing them.
 //!
-//! Single-character names (`a`-`z`, `0`-`9`) resolve through `VkKeyScanW`
-//! so the physical key pressed matches the active keyboard layout, falling
-//! back to the fixed ASCII-derived virtual-key code (numerically identical
-//! to `VkKeyScanW`'s answer on a US layout) when the layout has no key that
-//! produces the requested character at all.
+//! Single-character names (`a`-`z`, `0`-`9`) and the symbol names resolve
+//! through the keyboard layout of the thread that will receive the key, so the
+//! physical key pressed matches *that* layout, falling back to the fixed
+//! ASCII-derived virtual-key code (numerically identical to the answer on a
+//! US layout) when the layout has no key that produces the requested
+//! character at all.
+//!
+//! The receiving layout matters because Windows can keep a separate input
+//! language per application: a key looked up in this process's own layout
+//! (`VkKeyScanW`) and then delivered to an application using another one
+//! types a different character without any error (`=` on a US layout is the
+//! key that types `^` on a Japanese one). [`focused_layout`] reads the layout
+//! of the thread holding the keyboard focus, which is where `SendInput` puts
+//! the key, and [`resolve_key_in`] looks the key up in it (`VkKeyScanExW`).
+//! When that layout cannot be read the lookup uses this thread's own layout,
+//! the behaviour before. Nothing here loads, activates or changes a layout.
 
 use agent_desktop_core::{AdapterError, ErrorCode};
 
@@ -74,9 +85,9 @@ const _: () = {
 };
 
 /// A key name resolved to the virtual key that produces it, together with
-/// the modifiers the *active layout* requires to produce it.
+/// the modifiers the layout it was looked up in requires to produce it.
 ///
-/// The layout half is what `VkKeyScanW` reports in its high byte and what
+/// The layout half is what `VkKeyScanExW` reports in its high byte and what
 /// a caller cannot know: on AZERTY the digit row needs Shift, so pressing
 /// the bare virtual key for `5` yields the unshifted glyph instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,17 +128,59 @@ const LAYOUT_SHIFT: u8 = 0x01;
 const LAYOUT_CONTROL: u8 = 0x02;
 const LAYOUT_ALT: u8 = 0x04;
 
+/// The keyboard layout a key is looked up in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyboardLayout {
+    /// This thread's own active layout (`VkKeyScanW`): the fallback when the
+    /// receiving thread's layout could not be read.
+    Caller,
+    /// A layout handle (`HKL`) read from the receiving thread
+    /// (`VkKeyScanExW`).
+    Handle(isize),
+}
+
+impl KeyboardLayout {
+    /// A layout handle of zero is the answer `GetKeyboardLayout` gives for a
+    /// thread it could not read, so it falls back to the caller's layout
+    /// rather than asking `VkKeyScanExW` about a layout that does not exist.
+    pub(crate) fn from_handle(handle: isize) -> Self {
+        if handle == 0 {
+            Self::Caller
+        } else {
+            Self::Handle(handle)
+        }
+    }
+}
+
+/// [`resolve_key_in`] against this thread's own layout.
+#[cfg(test)]
 pub(crate) fn resolve_key(key: &str) -> Result<ResolvedKey, AdapterError> {
+    resolve_key_in(key, KeyboardLayout::Caller)
+}
+
+/// Resolves a key name in `layout`. A pure lookup: the same name and layout
+/// always give the same key, and nothing about any thread's layout changes.
+pub(crate) fn resolve_key_in(
+    key: &str,
+    layout: KeyboardLayout,
+) -> Result<ResolvedKey, AdapterError> {
     if let Some(vk) = named_key_vk(key) {
         return Ok(ResolvedKey::bare(vk));
     }
-    if let Some(resolved) = character_key(key) {
+    if let Some(resolved) = character_key(key, layout) {
         return Ok(resolved);
     }
     if let Some(symbol) = symbol_character(key) {
-        return resolve_symbol(key, symbol);
+        return resolve_symbol(key, symbol, layout);
     }
     Err(unknown_key_error(key))
+}
+
+/// The layout of the thread that holds the keyboard focus right now, which
+/// is the thread `SendInput` delivers a key to. [`KeyboardLayout::Caller`]
+/// when there is no focus window or its layout could not be read.
+pub(crate) fn focused_layout() -> KeyboardLayout {
+    imp::focused_thread_layout().map_or(KeyboardLayout::Caller, KeyboardLayout::from_handle)
 }
 
 /// The punctuation a key name or a single-character key produces. `+` joins
@@ -149,18 +202,22 @@ fn symbol_character(key: &str) -> Option<char> {
     Some(symbol)
 }
 
-/// A symbol is pressed as the key the active layout produces it with, Shift
-/// included (on a Japanese layout `+` is Shift+`;`). There is no fixed
-/// virtual key to fall back to: the ASCII value of a symbol is an unrelated
-/// virtual key (`+` would be `VK_EXECUTE`), so a layout with no key for the
-/// symbol refuses the key instead of pressing another one.
-fn resolve_symbol(key: &str, symbol: char) -> Result<ResolvedKey, AdapterError> {
-    imp::vk_key_scan(symbol)
+/// A symbol is pressed as the key `layout` produces it with, Shift included
+/// (on a Japanese layout `+` is Shift+`;`). There is no fixed virtual key to
+/// fall back to: the ASCII value of a symbol is an unrelated virtual key (`+`
+/// would be `VK_EXECUTE`), so a layout with no key for the symbol refuses the
+/// key instead of pressing another one.
+fn resolve_symbol(
+    key: &str,
+    symbol: char,
+    layout: KeyboardLayout,
+) -> Result<ResolvedKey, AdapterError> {
+    imp::vk_key_scan(symbol, layout)
         .map(resolved_from_scan)
         .ok_or_else(|| {
             AdapterError::new(
                 ErrorCode::InvalidArgs,
-                format!("Key '{key}' has no key on the active keyboard layout"),
+                format!("Key '{key}' has no key on the target's keyboard layout"),
             )
         })
 }
@@ -202,7 +259,7 @@ fn named_key_vk(key: &str) -> Option<u16> {
     Some(vk)
 }
 
-fn character_key(key: &str) -> Option<ResolvedKey> {
+fn character_key(key: &str, layout: KeyboardLayout) -> Option<ResolvedKey> {
     let mut chars = key.chars();
     let character = chars.next()?;
     if chars.next().is_some() {
@@ -211,11 +268,11 @@ fn character_key(key: &str) -> Option<ResolvedKey> {
     if !(character.is_ascii_lowercase() || character.is_ascii_digit()) {
         return None;
     }
-    Some(resolve_character(character))
+    Some(resolve_character(character, layout))
 }
 
-pub(crate) fn resolve_character(character: char) -> ResolvedKey {
-    match imp::vk_key_scan(character) {
+pub(crate) fn resolve_character(character: char, layout: KeyboardLayout) -> ResolvedKey {
+    match imp::vk_key_scan(character, layout) {
         Some(scan) => resolved_from_scan(scan),
         None => ResolvedKey::bare(fallback_ascii_vk(character)),
     }
@@ -249,21 +306,63 @@ fn unknown_key_error(key: &str) -> AdapterError {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+    use super::KeyboardLayout;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, VkKeyScanExW, VkKeyScanW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GUITHREADINFO, GetGUIThreadInfo, GetWindowThreadProcessId,
+    };
 
-    pub(super) fn vk_key_scan(character: char) -> Option<i16> {
+    pub(super) fn vk_key_scan(character: char, layout: KeyboardLayout) -> Option<i16> {
         let code_unit = character as u16;
-        let result = unsafe { VkKeyScanW(code_unit) };
+        let result = match layout {
+            KeyboardLayout::Caller => unsafe { VkKeyScanW(code_unit) },
+            KeyboardLayout::Handle(handle) => unsafe {
+                VkKeyScanExW(code_unit, handle as *mut core::ffi::c_void)
+            },
+        };
         if result == -1 {
             return None;
         }
         Some(result)
     }
+
+    /// The layout handle of the foreground thread's focus window (its active
+    /// window when nothing inside it has focus). Read-only: it asks which
+    /// layout that thread uses and changes nothing.
+    pub(super) fn focused_thread_layout() -> Option<isize> {
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetGUIThreadInfo(0, &mut info) } == 0 {
+            return None;
+        }
+        let window = if !info.hwndFocus.is_null() {
+            info.hwndFocus
+        } else if !info.hwndActive.is_null() {
+            info.hwndActive
+        } else {
+            return None;
+        };
+        let thread = unsafe { GetWindowThreadProcessId(window, std::ptr::null_mut()) };
+        if thread == 0 {
+            return None;
+        }
+        Some(unsafe { GetKeyboardLayout(thread) } as isize)
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
-    pub(super) fn vk_key_scan(_character: char) -> Option<i16> {
+    use super::KeyboardLayout;
+
+    pub(super) fn vk_key_scan(_character: char, _layout: KeyboardLayout) -> Option<i16> {
+        None
+    }
+
+    pub(super) fn focused_thread_layout() -> Option<isize> {
         None
     }
 }
