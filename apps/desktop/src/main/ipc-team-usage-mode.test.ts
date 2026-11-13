@@ -600,3 +600,52 @@ describe('the Workspace check before a Turn may be offered Team (issue #1241)', 
     await expect(broken.refreshTeamOfferWorkspace('task-1')).resolves.toBeUndefined();
   });
 });
+
+describe('stops cancel a hire still checking the Workspace (issue #1241)', () => {
+  type Handler = (input: Record<string, unknown>, event: unknown, envelope: unknown) => unknown;
+  type StopProbe = {
+    register(): void;
+    cancelRuntime(taskId: string, turnId: string): Promise<boolean>;
+  };
+
+  it('revokes pending hires when the Task is archived, not when it is restored', () => {
+    const router = Object.create(IpcRouter.prototype) as StopProbe;
+    const handlers = new Map<string, Handler>();
+    const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
+      handlers.set(channel, handler);
+    const revokePendingHires = vi.fn();
+    Object.assign(router, {
+      handle: register,
+      handleMutation: register,
+      window: { webContents: { once: vi.fn() } },
+      runMutation: vi.fn(() => ({ executed: true, value: { id: 'task-1' } })),
+      teamCoordinator: { revokePendingHires },
+      endArchivedTaskDesktopControl: vi.fn(async () => undefined),
+    });
+    router.register();
+    const setArchived = handlers.get(IPC_CHANNELS.tasksSetArchived)!;
+    setArchived({ taskId: 'task-1', archived: false }, {}, { operationId: 'op-1' });
+    expect(revokePendingHires).not.toHaveBeenCalled();
+    setArchived({ taskId: 'task-1', archived: true }, {}, { operationId: 'op-2' });
+    expect(revokePendingHires).toHaveBeenCalledWith('task-1');
+  });
+
+  it('revokes pending hires first when the Leader Turn is stopped', async () => {
+    const router = Object.create(IpcRouter.prototype) as StopProbe;
+    const order: string[] = [];
+    Object.assign(router, {
+      teamCoordinator: {
+        revokePendingHires: vi.fn((taskId: string) => order.push(`revoke:${taskId}`)),
+      },
+      canceledRuntimeTurns: {
+        add: (turnId: string) => {
+          order.push(`cancel:${turnId}`);
+          // The rest of the stop is not under test here.
+          throw new Error('stop here');
+        },
+      },
+    });
+    await expect(router.cancelRuntime('task-1', 'turn-1')).rejects.toThrow('stop here');
+    expect(order).toEqual(['revoke:task-1', 'cancel:turn-1']);
+  });
+});

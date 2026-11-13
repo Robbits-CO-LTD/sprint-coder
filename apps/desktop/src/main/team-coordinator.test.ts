@@ -61,6 +61,7 @@ import { graphMissionContextDigest, graphMissionContextFor } from './graph-missi
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { executeTeamTool, teamToolError } from './team-tools';
 import {
+  TeamHireRevokedError,
   TeamWorkspaceRepositoryError,
   teamWorkspaceRepositoryMessage,
 } from './team-workspace-repository';
@@ -12719,6 +12720,111 @@ if (runsWithElectronAbi)
         ).toBe(0);
         const writer = await hire(coordinator, task.id, true);
         expect(writer.writeCapable).toBe(true);
+        persistence.close();
+      });
+
+      /**
+       * A Workspace check that does not answer until released, so a stop can land while a hire
+       * waits on it outside the Team's queue.
+       */
+      function heldCheck(worktreesRoot: string) {
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const waiting = new Promise<void>((resolve) => (entered = resolve));
+        let holding = false;
+        class HeldCheckManager extends WorkerWorktreeManager {
+          override async requireCleanRepositorySet(
+            ...args: Parameters<WorkerWorktreeManager['requireCleanRepositorySet']>
+          ) {
+            if (holding) {
+              entered();
+              await gate;
+            }
+            return super.requireCleanRepositorySet(...args);
+          }
+        }
+        return {
+          manager: new HeldCheckManager({ worktreesRoot }),
+          hold: () => (holding = true),
+          release,
+          waiting,
+        };
+      }
+
+      it('lets Stop all win over a hire still checking the Workspace: no Worker, no reopened Team', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('stop during the check');
+        const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const held = heldCheck(worktreesRoot);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          new TestWorkerRuntime(),
+          held.manager,
+        );
+        await hire(coordinator, task.id, true);
+        const workersBefore = coordinator.get(task.id)!.workers.length;
+
+        held.hold();
+        const pending = hire(coordinator, task.id, true).catch((error: unknown) => error);
+        await held.waiting;
+        const stopped = await coordinator.stopAll(task.id);
+        held.release();
+
+        const refused = await pending;
+        expect(refused).toBeInstanceOf(TeamHireRevokedError);
+        expect(teamToolError(refused)).toMatchObject({ ok: false, code: 'hire_revoked' });
+        const after = coordinator.get(task.id)!;
+        expect(after.workers).toHaveLength(workersBefore);
+        expect(after.team.state).toBe(stopped.team.state);
+        expect(after.team.state).not.toBe('active');
+        persistence.close();
+      });
+
+      it.each(['the Leader Turn stopped', 'the Task archived'])(
+        'cancels a first hire still checking the Workspace when %s',
+        async () => {
+          const persistence = createPersistence();
+          const task = persistence.createTask('first hire, then stop');
+          const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+          const held = heldCheck(worktreesRoot);
+          const coordinator = coordinatorWithWorktrees(
+            persistence,
+            new TestWorkerRuntime(),
+            held.manager,
+          );
+
+          held.hold();
+          const pending = hire(coordinator, task.id, true).catch((error: unknown) => error);
+          await held.waiting;
+          // What Main does on stopping the Leader's Turn and on archiving the Task.
+          coordinator.revokePendingHires(task.id);
+          held.release();
+
+          expect(await pending).toBeInstanceOf(TeamHireRevokedError);
+          expect(persistence.getTeamByTask(task.id)).toBeNull();
+          persistence.close();
+        },
+      );
+
+      it('hires as before when nothing stops while the Workspace is checked', async () => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('no stop');
+        const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const held = heldCheck(worktreesRoot);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          new TestWorkerRuntime(),
+          held.manager,
+        );
+
+        held.hold();
+        const pending = hire(coordinator, task.id, true);
+        await held.waiting;
+        held.release();
+        const worker = await pending;
+        expect(worker.writeCapable).toBe(true);
+        expect(coordinator.get(task.id)!.workers.map(({ id }) => id)).toContain(worker.id);
         persistence.close();
       });
     });

@@ -731,6 +731,7 @@ describe('Turn cancellation boundary', () => {
         releaseTurnAttachmentCustody: async () => undefined,
         quarantinedRuntimeKinds: runtimeKinds,
         quarantinedRuntimeTasks: tasks,
+        teamCoordinator: { revokePendingHires: () => undefined },
       });
       const cancel = Reflect.get(IpcRouter.prototype, 'cancelRuntime') as (
         taskId: string,

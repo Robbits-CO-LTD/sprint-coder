@@ -3243,7 +3243,11 @@ export class IpcRouter {
           IPC_CHANNELS.tasksSetArchived,
           () => this.persistence.setArchived(input.taskId, input.archived),
         ).value;
-        if (input.archived) void this.endArchivedTaskDesktopControl(input.taskId);
+        if (input.archived) {
+          // A hire still checking the Workspace must not create a Worker in an archived Task.
+          this.teamCoordinator.revokePendingHires(input.taskId);
+          void this.endArchivedTaskDesktopControl(input.taskId);
+        }
         return result;
       },
     );
@@ -7404,6 +7408,9 @@ export class IpcRouter {
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<boolean> {
+    // Stopping the Leader also cancels a hire it started that is still checking the Workspace
+    // outside the Team's queue; otherwise that hire would create a Worker after the stop.
+    this.teamCoordinator.revokePendingHires(taskId);
     this.canceledRuntimeTurns.add(turnId);
     const kind = this.turnRuntimes.get(turnId);
     const stopped = await runBestEffortCancellation(

@@ -54,6 +54,22 @@ export function teamWorkspaceRepositoryMessage(code: TeamWorkspaceRepositoryProb
 }
 
 /**
+ * 雇用が Workspace の確かめ（Team の列の外）を待つ間に、停止（全員停止・Leader の Turn の停止・
+ * Task の archive）が先に通った時の断り。停止の後に Worker を作ったり、Team を active に戻したり
+ * しない。
+ */
+export class TeamHireRevokedError extends Error {
+  readonly code = 'hire_revoked';
+
+  constructor() {
+    super(
+      'Team が停止されたので、待っていた Worker の雇用を取り消しました。続ける時は、もう一度頼んでください。',
+    );
+    this.name = 'TeamHireRevokedError';
+  }
+}
+
+/**
  * 割り当ての時の確かめ（`requireCleanRepositorySet`）の失敗を、決まった理由に読み替える。Git は
  * `LC_ALL=C` で動く（safe-git）ので、英語の文で見分ける。読み替えられない失敗（作業フォルダーが
  * 見つからない、など）は null を返し、呼ぶ側が元の失敗をそのまま投げる。

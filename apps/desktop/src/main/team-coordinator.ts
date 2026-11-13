@@ -93,6 +93,7 @@ import {
 } from './worker-worktree';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import {
+  TeamHireRevokedError,
   TeamWorkspaceRepositoryError,
   workspaceRepositoryProblemOf,
 } from './team-workspace-repository';
@@ -502,6 +503,8 @@ const DESKTOP_MARK_ENDED_STATES: ReadonlySet<string> = new Set(['done', 'failed'
 export const TEAM_PROGRESS_PUBLISH_INTERVAL_MS = 250;
 
 export class TeamCoordinator {
+  /** Moved by every stop, so a hire that waited outside the queue can tell it was overtaken. */
+  private readonly hireRevisions = new Map<string, number>();
   /** The last Workspace refusal of a writing Worker per Task (issue #1241). */
   private readonly workspaceRefusals = new Map<
     string,
@@ -1218,6 +1221,11 @@ export class TeamCoordinator {
     // #1241). A read-only Worker never needs a worktree, so it is hired as before, matching
     // assignment, which checks only workspace-write work. Without Worker worktree support there is
     // no Workspace check to share (Main always has it); assignment refuses as before.
+    //
+    // The check runs Git outside the Team's queue, so a stop is never held behind it. A stop that
+    // lands while it runs must still win: the hire notes the Task's hire revision first and, once in
+    // the queue, refuses if a stop (Stop all, the Leader's Turn stopped, the Task archived) moved it.
+    const revision = this.hireRevision(input.taskId);
     if (input.writeCapable && this.worktreeManager !== undefined)
       await this.requireWorkspaceWriteReady(input.taskId).catch((error: unknown) => {
         if (error instanceof TeamWorkspaceRepositoryError)
@@ -1225,6 +1233,7 @@ export class TeamCoordinator {
         throw error;
       });
     return this.enqueue(input.taskId, async () => {
+      if (this.hireRevision(input.taskId) !== revision) throw new TeamHireRevokedError();
       let team = this.persistence.getTeamByTask(input.taskId);
       if (team === null) {
         team = this.persistence.promoteTaskToTeam(input.taskId);
@@ -5055,6 +5064,8 @@ export class TeamCoordinator {
   }
 
   async stopAll(taskId: string): Promise<TeamDetail> {
+    // Before queueing: a hire still checking the Workspace outside the queue must not run after it.
+    this.revokePendingHires(taskId);
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
       if (team === null) throw new Error('Team not found');
@@ -6303,15 +6314,6 @@ export class TeamCoordinator {
   }
 
   /**
-   * Whether a workspace-write assignment would pass right now in this Task's Workspace (issue
-   * #1241): the very check assignment runs — a Workspace exists, every root is in a Git repository
-   * with a commit, not nested, with no uncommitted change and no Git operation in progress. Hiring a
-   * writing Worker and offering Team on a Turn the user did not ask Team for both ask this, so
-   * neither leaves the user with a Team whose every assignment fails. Rejects with a
-   * `TeamWorkspaceRepositoryError` (a fixed message the Leader can pass on, one per cause) when the
-   * cause is known, otherwise with the original error.
-   */
-  /**
    * The Workspace reason a writing Worker was last refused in this Task, if that happened at or
    * after `since` (an ISO time, the Turn's start): a requested Team Turn that ends with no Worker
    * reports this instead of the generic "no Worker was created" (issue #1241).
@@ -6321,6 +6323,31 @@ export class TeamCoordinator {
     return refusal !== undefined && refusal.at >= since ? refusal.error : null;
   }
 
+  private hireRevision(taskId: string): number {
+    return this.hireRevisions.get(taskId) ?? 0;
+  }
+
+  /**
+   * Cancels every hire of this Task that has not yet entered the Team's queue: such a hire refuses
+   * with `TeamHireRevokedError` instead of creating a Worker or reopening the Team. A hire checks
+   * the Workspace outside the queue (issue #1241), so without this a stop that came in meanwhile
+   * would run first and the hire after it. Stop all calls it itself; Main calls it when the Leader's
+   * Turn is stopped and when the Task is archived. Hires already in the queue are ordered before the
+   * stop and are stopped by it, as before.
+   */
+  revokePendingHires(taskId: string): void {
+    this.hireRevisions.set(taskId, this.hireRevision(taskId) + 1);
+  }
+
+  /**
+   * Whether a workspace-write assignment would pass right now in this Task's Workspace (issue
+   * #1241): the very check assignment runs — a Workspace exists, every root is in a Git repository
+   * with a commit, not nested, with no uncommitted change and no Git operation in progress. Hiring a
+   * writing Worker and offering Team on a Turn the user did not ask Team for both ask this, so
+   * neither leaves the user with a Team whose every assignment fails. Rejects with a
+   * `TeamWorkspaceRepositoryError` (a fixed message the Leader can pass on, one per cause) when the
+   * cause is known, otherwise with the original error.
+   */
   async requireWorkspaceWriteReady(
     taskId: string,
     options: Readonly<{ timeoutMs?: number }> = {},
