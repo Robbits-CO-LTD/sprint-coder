@@ -133,6 +133,7 @@ export type TeamResultReadSource = Readonly<{
   integratedHead: string;
 }>;
 import { WORKER_ACTIVITY_LOG_LIMIT, workerActivityEntry } from './worker-activity-log';
+import { desktopControlTeamCursors, desktopControlWorker } from './desktop-control-session';
 import {
   allCriteriaDone,
   confirmWorkerReport,
@@ -486,6 +487,8 @@ const leafWorkerCeiling = Object.freeze({
 const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 30 * 60_000;
 const WORKER_HEARTBEAT_TIMEOUT_MS = 60_000;
 const WORKER_IDLE_TIMEOUT_MS = 15 * 60_000;
+/** A Worker in one of these is no longer at work, and its desktop-control mark is not shown. */
+const DESKTOP_MARK_ENDED_STATES: ReadonlySet<string> = new Set(['done', 'failed', 'stopped']);
 /**
  * The shortest gap between two Team publishes caused by Worker progress (issue #863). Every
  * publish carries the whole Team detail, so one publish per streamed line flooded the screen with
@@ -755,6 +758,22 @@ export class TeamCoordinator {
   get(taskId: string): TeamDetail | null {
     const team = this.persistence.getTeamByTask(taskId);
     return team === null ? null : this.detail(team.id);
+  }
+
+  /**
+   * The Leader marked a Worker of the Task for desktop control (`markDesktopControlWorker`), which
+   * may also have dropped the marks of Workers no longer at work: publishes the Team, so the Team
+   * view shows each Worker's cursor color now. Nothing is published while the opt-in is off, when
+   * no Worker carries a mark.
+   */
+  notifyDesktopControlMarked(taskId: string): void {
+    if (!desktopControlTeamCursors()) return;
+    try {
+      const team = this.persistence.getTeamByTask(taskId);
+      if (team !== null) this.emit(taskId, team.id);
+    } catch {
+      // Best effort: the next publish of the Team carries the mark anyway.
+    }
   }
 
   /**
@@ -7303,6 +7322,12 @@ export class TeamCoordinator {
   }
 
   private workerSummary(agent: AgentRecord): WorkerSummary {
+    // Only the cursor's label and color reach the Renderer, only while the opt-in is on, and only
+    // for a Worker still at work: a finished Worker's color may go to the next Worker marked.
+    const desktop =
+      agent.kind === 'worker' && !DESKTOP_MARK_ENDED_STATES.has(agent.state)
+        ? desktopControlWorker(agent.taskId, agent.id)
+        : undefined;
     return workerSummarySchema.parse({
       id: agent.id,
       teamId: agent.teamId,
@@ -7325,6 +7350,9 @@ export class TeamCoordinator {
       liveOutput: this.transientWorkerActivity.get(agent.id)?.liveOutput ?? '',
       reasoningActive: this.transientWorkerActivity.get(agent.id)?.reasoningActive ?? false,
       ...(agent.kind === 'worker' ? { activityLog: [...this.workerActivityLog(agent.id)] } : {}),
+      ...(desktop === undefined
+        ? {}
+        : { desktopControl: { label: desktop.label, colorIndex: desktop.colorIndex } }),
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       usage:

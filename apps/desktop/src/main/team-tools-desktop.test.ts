@@ -65,6 +65,7 @@ function team() {
     hireWorker: vi.fn(async (input: HireInput) => hired(input)),
     hireWorkerAs: vi.fn(async (input: HireInput) => hired(input)),
     get: () => ({ team: { state: state.team }, workers }),
+    notifyDesktopControlMarked: vi.fn(),
   } as unknown as TeamCoordinator;
   return Object.assign(coordinator, { workers, state });
 }
@@ -96,6 +97,7 @@ describe('the Leader’s desktop mark on a hire', () => {
       ok: false,
     });
     expect(desktopControlWorker('task-1', 'agent-1')).toBeUndefined();
+    expect(coordinator.notifyDesktopControlMarked).not.toHaveBeenCalled();
   });
 
   it('marks up to three leaf Workers the Leader hires, and says why not otherwise', async () => {
@@ -112,6 +114,9 @@ describe('the Leader’s desktop mark on a hire', () => {
       label: '確認係',
       colorIndex: 2,
     });
+    // Each mark publishes the Team, so the Team view shows the Worker's cursor color at once.
+    expect(coordinator.notifyDesktopControlMarked).toHaveBeenCalledTimes(3);
+    expect(coordinator.notifyDesktopControlMarked).toHaveBeenCalledWith('task-1');
     await expect(hire(coordinator, { desktopControl: true })).resolves.toMatchObject({
       desktopControl: false,
       desktopControlNote: expect.stringContaining('同時に 3 人まで'),

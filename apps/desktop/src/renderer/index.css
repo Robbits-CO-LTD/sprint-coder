@@ -2832,6 +2832,36 @@ body.is-resizing-sidebar iframe {
   color: var(--text-secondary);
   font-size: 12px;
 }
+.approval-card__requester {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* The color of an agent's desktop cursor (team cursors), drawn with Main's palette as is. It always
+   sits beside the words naming the same agent; the ring keeps the darker colors visible on the
+   dark surfaces. */
+.desktop-cursor-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow:
+    0 0 0 1px var(--bg-elevated),
+    0 0 0 2px var(--text-muted);
+}
+.worker-desktop-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
 .approval-card__risk {
   margin-left: auto;
   padding: 2px 8px;

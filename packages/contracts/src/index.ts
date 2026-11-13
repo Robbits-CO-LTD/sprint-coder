@@ -476,6 +476,27 @@ export const workerActivityEntrySchema = z
   .strict();
 export type WorkerActivityEntry = z.infer<typeof workerActivityEntrySchema>;
 
+/**
+ * The most characters (code points) a desktop-control cursor's label holds; Main cuts a longer role
+ * to it. One code point is at most two UTF-16 units, which is how the schema below counts.
+ */
+export const DESKTOP_CONTROL_LABEL_MAX = 24;
+
+/**
+ * A Team Worker's desktop-control mark, as its cursor names it (its role) and colors it (the place
+ * of its color in `DESKTOP_CONTROL_WORKER_ACCENTS`).
+ */
+export const desktopControlMarkSchema = z
+  .object({
+    label: z
+      .string()
+      .min(1)
+      .max(DESKTOP_CONTROL_LABEL_MAX * 2),
+    colorIndex: z.number().int().min(0).max(31),
+  })
+  .strict();
+export type DesktopControlMark = z.infer<typeof desktopControlMarkSchema>;
+
 export const workerSummarySchema = z
   .object({
     id: idSchema,
@@ -500,6 +521,11 @@ export const workerSummarySchema = z
     reasoningActive: z.boolean(),
     /** The newest steps of the Worker's work log, oldest first. Optional for older producers. */
     activityLog: z.array(workerActivityEntrySchema).max(40).optional(),
+    /**
+     * The Worker's desktop-control cursor, while the Leader has it marked for desktop control and
+     * the hidden team-cursors opt-in is on. Absent otherwise, and for older producers.
+     */
+    desktopControl: desktopControlMarkSchema.optional(),
     usage: teamUsageTotalsSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -2158,6 +2184,32 @@ export type DesktopActionStep = z.infer<typeof desktopActionStepSchema>;
 
 export const DESKTOP_ACTION_MAX_STEPS = 20;
 
+/**
+ * The colors of the desktop-control cursors of a Task's Team (the hidden team-cursors opt-in), the
+ * one place they live: Main draws each cursor with them, and the approval card and the Team view
+ * mark the same agent with the same color. The Leader's is blue; a Worker's is its place
+ * (`colorIndex`) in the Worker palette, in the order the Workers were marked. No Worker color is
+ * close to the Leader's blue. Changing one changes the cursor and the screen together.
+ */
+export const DESKTOP_CONTROL_LEADER_ACCENT = '#2563EB';
+/** The Leader's cursor label, and how the approval card names the Leader as the one who asked. */
+export const DESKTOP_CONTROL_LEADER_LABEL = 'Leader';
+export const DESKTOP_CONTROL_WORKER_ACCENTS: readonly string[] = Object.freeze([
+  '#16A34A',
+  '#EA580C',
+  '#9333EA',
+  '#DB2777',
+  '#0D9488',
+  '#CA8A04',
+  '#DC2626',
+  '#92400E',
+]);
+/** The Worker cursor color at `colorIndex` (wrapping past the end of the palette). */
+export function desktopControlWorkerAccent(colorIndex: number): string {
+  const count = DESKTOP_CONTROL_WORKER_ACCENTS.length;
+  return DESKTOP_CONTROL_WORKER_ACCENTS[((Math.trunc(colorIndex) % count) + count) % count]!;
+}
+
 export const desktopApprovalActionSchema = desktopActionStepSchema
   .extend({
     /** The operations of a batch, in order, up to the bound; `stepsOmitted` counts the rest. */
@@ -2174,15 +2226,13 @@ export const desktopApprovalActionSchema = desktopActionStepSchema
       .strict()
       .optional(),
     /**
-     * The Team Worker that asked for this run, as its cursor names it (its role) and colors it (the
-     * place of its accent in Main's palette). Absent for the Leader's own runs.
+     * Who asked for this run, as its cursor names and colors it: a Team Worker (its role, and the
+     * place of its color in `DESKTOP_CONTROL_WORKER_ACCENTS`), or the Leader (`{ leader: true }`)
+     * when the run draws the Leader's cursor. Absent when the run draws no Team cursor (the hidden
+     * team-cursors opt-in is off, or the run only prints).
      */
     requester: z
-      .object({
-        label: z.string().min(1).max(40),
-        colorIndex: z.number().int().min(0).max(31),
-      })
-      .strict()
+      .union([desktopControlMarkSchema, z.object({ leader: z.literal(true) }).strict()])
       .optional(),
     notes: z.array(z.string().min(1).max(200)).max(6),
     /** Whether the card opens its details: something could not be confirmed or shown in full. */

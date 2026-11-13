@@ -2,6 +2,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { Monitor, TriangleAlert } from './icons';
 import type { ApprovalDecision, ApprovalSummary } from '../types/sprint-coder';
 import { desktopModeLabel, desktopTargetText, desktopTextLabel } from '../lib/desktop-action';
+import { DESKTOP_CONTROL_LEADER_LABEL } from '@sprint-coder/contracts';
+import { DesktopCursorSwatch, desktopCursorColor } from './DesktopCursorSwatch';
 
 type ApprovalCardProps = {
   approval: ApprovalSummary;
@@ -234,13 +236,18 @@ function DesktopControlApprovalCard({
           <strong id={headingId}>{action.title}</strong>
           <div className="approval-card__tool">デスクトップ操作</div>
           {action.requester === undefined ? null : (
-            // The Team Worker that asked, named as its cursor is.
+            // Who asked, named and colored as its cursor on the desktop is.
             <div
-              className="approval-card__tool"
+              className="approval-card__tool approval-card__requester"
               data-testid="desktop-approval-requester"
-              data-requester-color={action.requester.colorIndex}
+              data-requester-color={
+                'leader' in action.requester ? 'leader' : action.requester.colorIndex
+              }
             >
-              依頼した Worker: {action.requester.label}
+              <DesktopCursorSwatch color={desktopCursorColor(action.requester)} />
+              {'leader' in action.requester
+                ? `${DESKTOP_CONTROL_LEADER_LABEL} の依頼`
+                : `依頼した Worker: ${action.requester.label}`}
             </div>
           )}
         </div>

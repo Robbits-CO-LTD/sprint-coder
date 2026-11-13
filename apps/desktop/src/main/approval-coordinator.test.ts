@@ -284,7 +284,7 @@ function createHarness(input?: {
     taskId: string,
     turnId: string,
     callId: string,
-  ) => Readonly<{ label: string; colorIndex: number }> | undefined;
+  ) => Readonly<{ label: string; colorIndex: number }> | 'leader' | undefined;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -2744,7 +2744,8 @@ describe('ApprovalCoordinator desktop control card', () => {
     });
 
     it('with the Task’s cursors on, names parts and grants the app only from Main’s own session of the Task', async () => {
-      const harness = createHarness();
+      // Every call here is the Leader's, by Main's binding of the call.
+      const harness = createHarness({ desktopControlWorkerFor: () => 'leader' });
       configureDesktopControlTeamCursors(true);
       try {
         await withAppGrantState(async (prepare) => {
@@ -2775,6 +2776,8 @@ describe('ApprovalCoordinator desktop control card', () => {
           expect(desktopActionOf(unnamed)).toMatchObject({
             target: { resolved: false },
             allowTaskGrant: false,
+            // The run will draw the Leader's cursor, so its card names the Leader.
+            requester: { leader: true },
           });
           expect(desktopActionOf(unnamed)).not.toHaveProperty('appGrant');
           harness.coordinator.resolve(resolveCommand(unnamed, 'deny'));
@@ -2791,6 +2794,7 @@ describe('ApprovalCoordinator desktop control card', () => {
           expect(desktopActionOf(approval)).toMatchObject({
             target: { resolved: true, app: 'mspaint.exe', name: 'Session OK' },
             appGrant: { app: 'mspaint.exe' },
+            requester: { leader: true },
           });
           harness.coordinator.resolve({
             ...resolveCommand(approval, 'allow_task'),
@@ -2824,7 +2828,7 @@ describe('ApprovalCoordinator desktop control card', () => {
       // Calls whose id starts with `w1:` are the Worker's, by Main's binding of the call.
       const harness = createHarness({
         desktopControlWorkerFor: (_taskId, _turnId, callId) =>
-          callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : undefined,
+          callId.startsWith('w1:') ? { label: '確認係', colorIndex: 1 } : 'leader',
       });
       await withAppGrantState(async (prepare) => {
         // The Worker's card names it; the Leader's does not.
@@ -2864,6 +2868,7 @@ describe('ApprovalCoordinator desktop control card', () => {
           request(await prepare(['type', '@scharmap:e2', 'ABC']), 'leader-type'),
         );
         await viWaitFor(() => harness.published.length === 3);
+        // With the Task's cursors off, the Leader draws no cursor, and its card is as it was.
         expect(desktopActionOf(harness.published[2]!)).not.toHaveProperty('requester');
         harness.coordinator.resolve(resolveCommand(harness.published[2]!, 'deny'));
         await expect(leader).resolves.toMatchObject({ decision: 'deny' });

@@ -1568,7 +1568,7 @@ export class IpcRouter {
       },
       desktopControlWorkerFor: (taskId, turnId, callId) => {
         const caller = this.managedWorkerOf(turnId, callId);
-        return caller === undefined ? undefined : desktopControlWorker(taskId, caller.workerId);
+        return caller === undefined ? 'leader' : desktopControlWorker(taskId, caller.workerId);
       },
     });
     this.permissionBroker = new PermissionBroker(persistence, {
