@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 #[cfg(test)]
 use crate::AccessibilityNode;
 #[cfg(test)]
@@ -64,6 +65,13 @@ pub fn execute(
 /// app. Applied at this boundary rather than in the shared constructor,
 /// which every other command reaches and whose wording is asserted on
 /// elsewhere.
+///
+/// A search that stopped at a fixed read limit (`locator_budget_limit`: a
+/// container with more children than a search reads, such as a list of tens of
+/// thousands of rows) ends the same way under any deadline, so it is not told
+/// to raise `--timeout-ms`. Either way, a window too large to search whole is
+/// pointed at `snapshot`, which reads the elements shown on screen of such a
+/// Chromium-hosted window.
 fn name_the_traversal_remedy(error: AppError) -> AppError {
     let AppError::Adapter(adapter_error) = error else {
         return error;
@@ -71,10 +79,23 @@ fn name_the_traversal_remedy(error: AppError) -> AppError {
     if adapter_error.code != crate::ErrorCode::Timeout {
         return AppError::Adapter(adapter_error);
     }
-    AppError::Adapter(adapter_error.with_suggestion(
-        "The search ran out of budget before it could answer. Raise --timeout-ms, or narrow the search with --root, --surface, or a more specific role and name.",
-    ))
+    let read_limit = adapter_error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("locator_budget_limit");
+    let suggestion = if read_limit {
+        FIND_READ_LIMIT_SUGGESTION
+    } else {
+        FIND_TIMEOUT_SUGGESTION
+    };
+    AppError::Adapter(adapter_error.with_suggestion(suggestion))
 }
+
+const FIND_TIMEOUT_SUGGESTION: &str = "The search ran out of budget before it could answer. Raise --timeout-ms, or narrow the search with --root, --surface, or a more specific role and name. A window with thousands of elements, such as a long list, may not be searched whole in any useful time: run snapshot instead, which reads only the elements shown on screen of such a window when it is Chromium-hosted (Electron, WebView2), and use a ref from it.";
+
+const FIND_READ_LIMIT_SUGGESTION: &str = "The search stopped at a limit on how much it reads (a container with more children than a search reads, such as a very long list), so a larger --timeout-ms does not help. Narrow the search with --root at a container outside that list, or run snapshot instead, which reads only the elements shown on screen of such a window when it is Chromium-hosted (Electron, WebView2), and use a ref from it.";
 
 pub fn parse_state_flag(raw: &str) -> Result<StatePredicate, AppError> {
     let (token, expected) = match raw.split_once('=') {

@@ -56,6 +56,31 @@ pub fn build(
     let (window, capture) = window_capture::first_surface_owner(windows, |window| {
         window_capture::capture_window(adapter, opts, window, deadline)
     })?;
+    let result = allocate_capture(opts, window, capture)?;
+    if result.visible_scope || !result.refmap.exceeds_size_limit() {
+        return Ok(result);
+    }
+    // The record of this capture is too large to save, so none of its refs
+    // could be used: read the visible elements instead. When the window is
+    // not read that way, or that read cannot finish, the capture stays as it
+    // was and fails to save as before.
+    let Some(visible) = window_capture::capture_visible(adapter, opts, &result.window, deadline)
+    else {
+        return Ok(result);
+    };
+    let narrowed = allocate_capture(opts, result.window.clone(), visible)?;
+    if narrowed.refmap.exceeds_size_limit() {
+        return Ok(result);
+    }
+    Ok(narrowed)
+}
+
+/// Allocates the refs of one window capture and builds the snapshot of it.
+fn allocate_capture(
+    opts: &TreeOptions,
+    window: WindowInfo,
+    capture: window_capture::WindowCapture,
+) -> Result<SnapshotResult, AppError> {
     let identity_unproven = capture.identity_unproven.clone();
     let visible_scope = capture.visible_scope;
     let (raw_tree, complete, nodes_observed, observed) = capture.into_parts()?;
@@ -395,6 +420,10 @@ mod tokenless_capture_support;
 #[cfg(test)]
 #[path = "tokenless_capture_tests.rs"]
 mod tokenless_capture_tests;
+
+#[cfg(test)]
+#[path = "oversized_capture_tests.rs"]
+mod oversized_capture_tests;
 
 #[cfg(test)]
 #[path = "tokenless_drill_tests.rs"]

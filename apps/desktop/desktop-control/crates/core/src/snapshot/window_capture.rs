@@ -140,7 +140,7 @@ pub(crate) fn capture_window(
 /// default snapshot gives it (3/4 of 3 s). A whole read that is still running
 /// past this is on a window too large to prove whole in a useful time (a
 /// Chromium page of 1,000 rows reads whole in about 2.5 s; one of 2,000 rows
-/// takes about 5 s and then fails, its record over 1 MB), so a long
+/// takes about 5 s, and its record is over 1 MB, too large to keep), so a long
 /// `--timeout-ms` would only delay the switch to the visible elements by the
 /// same factor (15 s under a 20 s deadline).
 pub(crate) const WHOLE_READ_CAP: std::time::Duration =
@@ -172,6 +172,33 @@ fn view_fallback_allowed(
 ) -> bool {
     let default = std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
     deadline.span() >= default && whole_read_budget >= default / 2
+}
+
+/// A capture of the window's visible elements alone, taken in place of a
+/// capture whose record is too large to keep (over
+/// [`crate::refs::MAX_REFMAP_BYTES`]): such a capture cannot be saved, so no
+/// ref of it could be used, and the visible elements are the narrowest view
+/// that still proves its refs. `None` when the adapter does not read this
+/// window that way, or the read did not complete in `deadline`; the caller then
+/// keeps the capture it had, which fails to save as before.
+///
+/// Its refs carry the proof of any other view of the visible elements
+/// (`proven_in_view`), so they act only while the view stays as it is.
+pub(crate) fn capture_visible(
+    adapter: &dyn PlatformAdapter,
+    opts: &TreeOptions,
+    window: &WindowInfo,
+    deadline: crate::Deadline,
+) -> Option<WindowCapture> {
+    match visible_window(adapter, opts, window, deadline) {
+        VisibleRead::Proven(observed) => Some(WindowCapture {
+            observed,
+            presentation_depth: Some(ObservationRequest::snapshot_logical_depth(opts)),
+            identity_unproven: None,
+            visible_scope: true,
+        }),
+        VisibleRead::Unsupported | VisibleRead::Failed => None,
+    }
 }
 
 /// How a read of the window's visible elements ended.

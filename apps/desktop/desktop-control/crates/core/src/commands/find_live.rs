@@ -178,6 +178,17 @@ fn require_complete(resolution: &LocatorResolution) -> Result<(), AppError> {
 }
 
 fn persist_refmap(context: &CommandContext, refmap: &RefMap) -> Result<String, AppError> {
+    // Only a raised `--limit` (or 0, for all) can select this many matches,
+    // so it is said as a problem with the request, with what to pass instead.
+    if refmap.exceeds_size_limit() {
+        return Err(AppError::invalid_input_with_suggestion(
+            format!(
+                "The {} matches are too many to record as refs (the record is limited to 1 MB)",
+                refmap.len()
+            ),
+            "Pass a smaller --limit (the default is 50), narrow the query with --role, --name, or --root, or pass --count to count the matches without refs",
+        ));
+    }
     let store = RefStore::for_session(context.session_id())?;
     let snapshot_id = store.save_new_snapshot(refmap)?;
     trace_artifacts::copy_refmap_if_full(context, &store, &snapshot_id, refmap)?;
@@ -308,6 +319,32 @@ mod tests {
                 limit,
             },
         }
+    }
+
+    /// Matches too many to record (a raised `--limit` on a long list) are
+    /// refused as a request to narrow, before anything is written, rather
+    /// than as an internal failure of the write.
+    #[test]
+    fn matches_too_many_to_record_ask_for_a_smaller_limit() {
+        let _guard = crate::refs::refs_test_support::HomeGuard::new();
+        let mut refmap = RefMap::new();
+        let name = "x".repeat(2048);
+        for _ in 0..600 {
+            refmap.allocate(crate::refs::tests::entry("button", Some(&name)));
+        }
+        let error = persist_refmap(&CommandContext::default(), &refmap)
+            .expect_err("the record is too large");
+        assert_eq!(error.code(), "INVALID_ARGS");
+        assert!(error.to_string().contains("600 matches"), "got: {error}");
+        assert!(
+            error.suggestion().unwrap_or_default().contains("--limit"),
+            "got: {:?}",
+            error.suggestion()
+        );
+        assert!(
+            RefStore::new().unwrap().load_latest().is_err(),
+            "nothing was saved"
+        );
     }
 
     /// The budget is the caller's to set. Without this, find is fixed at five

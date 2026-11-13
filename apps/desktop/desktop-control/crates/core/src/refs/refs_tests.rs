@@ -1,7 +1,7 @@
 // Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use super::*;
 use crate::refs::refs_test_support::HomeGuard;
-pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
+pub(crate) fn entry(role: &str, name: Option<&str>) -> RefEntry {
     RefEntry {
         process: crate::RefProcess {
             pid: crate::ProcessId::new(1),
