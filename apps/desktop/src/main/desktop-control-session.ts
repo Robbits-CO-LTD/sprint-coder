@@ -26,8 +26,9 @@ import { secureLogger } from './secure-logger';
  * id as variables (`desktopControlEnvironment`), and the agent may not choose either
  * (`desktopControlSessionArgvRefusal`). The Leader runs as agent `leader`; a Team Worker the
  * Leader marked for desktop control (`markDesktopControlWorker`) runs as its own agent, with its
- * role and an accent of its own on its cursor. The session ends when the Task is archived (and the
- * Task's marks are forgotten) and when Sprint Coder quits; the cursors'
+ * role and an accent of its own on its cursor. The session ends when the Task is archived (after
+ * the Task's desktop-control runs are stopped, and the Task's marks are forgotten) and when Sprint
+ * Coder quits; the cursors'
  * renderer also ends by itself when Main exits.
  *
  * A session keeps its snapshots below its own folder, so the approval card and the app-wide Task
@@ -321,15 +322,34 @@ export function desktopControlSessionReadScope(
 /**
  * Ends the Task's session, if it has one, and forgets which of its Workers were marked for desktop
  * control (when the Task is archived), so no mark outlives the Task's session.
+ *
+ * Given `stopRuns` (the Task's archive stops the Task's desktop-control runs, those gone on in the
+ * background included), the runs still waiting are refused first, so none of them starts in the
+ * turn a stopped run frees; then the running ones are stopped, and the session is ended only once
+ * their processes have ended, so no run of it is still acting, or still drawing its cursor, when
+ * the session's cursors are taken down. It is called whether or not the Task has a session (team
+ * cursors off, a run of the Task is still a desktop-control run), and a run that could not be
+ * confirmed stopped does not keep the session from ending.
  */
-export async function endDesktopControlSession(taskId: string): Promise<void> {
+export async function endDesktopControlSession(
+  taskId: string,
+  stopRuns?: () => Promise<void>,
+): Promise<void> {
   // The runs still waiting for their turn in it do not start (`desktop-control-queue.ts`).
   endDesktopControlQueue(taskId);
   desktopWorkers.delete(taskId);
   const entry = sessions.get(taskId);
-  if (entry === undefined) return;
-  sessions.delete(taskId);
-  await endSession(entry);
+  // A run of the Task from now on starts a new session, never this one.
+  if (entry !== undefined) sessions.delete(taskId);
+  if (stopRuns !== undefined)
+    try {
+      await stopRuns();
+    } catch (error) {
+      secureLogger.warn('Desktop control runs of the Task were not confirmed stopped', {
+        error: errorText(error),
+      });
+    }
+  if (entry !== undefined) await endSession(entry);
 }
 
 /** Ends every Task's session, waiting a few seconds at most (when Sprint Coder quits). */

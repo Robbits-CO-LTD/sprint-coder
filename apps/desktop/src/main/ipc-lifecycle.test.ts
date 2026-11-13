@@ -28,6 +28,16 @@ vi.mock('electron', () => ({
   globalShortcut: {},
 }));
 
+it('stops an archived Task’s desktop-control runs through the managed harness, as a canceled Turn’s', async () => {
+  const router = Object.create(IpcRouter.prototype) as {
+    endArchivedTaskDesktopControl(taskId: string): Promise<void>;
+  };
+  const stopTaskDesktopControl = vi.fn(() => Promise.resolve());
+  Object.assign(router, { managedCodingHarness: { stopTaskDesktopControl } });
+  await router.endArchivedTaskDesktopControl('task-archived');
+  expect(stopTaskDesktopControl).toHaveBeenCalledExactlyOnceWith('task-archived');
+});
+
 it('broadcasts terminal activity to the window even without a Task event port', () => {
   const send = vi.fn();
   const invalidate = vi.fn();

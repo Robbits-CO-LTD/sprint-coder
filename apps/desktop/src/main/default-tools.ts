@@ -53,6 +53,7 @@ import {
 } from './managed-command-stdin';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
+import { secureLogger } from './secure-logger';
 
 export const MOCK_ECHO_TOOL = createToolDefinition({
   toolId: createToolId({ provider: 'builtin', namespace: 'mock', name: 'echo', version: '1' }),
@@ -887,13 +888,18 @@ export function registerCommandRunnerTool(
         // the agent as that (`providerWorkspaceToolFailure`), so its own error is kept here.
         let notRun: DesktopControlQueueError | undefined;
         try {
+          // A run of the desktop-control executable is stopped when the Task is archived
+          // (`terminateTaskDesktopControl`), whether or not it runs in the Task's session.
+          const sessionHooks = desktopControlRoots.has(spec)
+            ? { ...hooks, desktopControl: true }
+            : hooks;
           started = await sessions.start(
             spec,
             owner,
             desktopSession === undefined
-              ? hooks
+              ? sessionHooks
               : {
-                  ...hooks,
+                  ...sessionHooks,
                   wrapRun: (run) => {
                     const queued = queuedDesktopControlRun(_context.taskId, run);
                     return (runSpec, options) =>
@@ -950,11 +956,7 @@ export function registerCommandRunnerTool(
               : completePersistedCommand(command.persistence, commandId, snapshot.result);
           command.publish(persisted.event);
           if (snapshot.state === 'canceled')
-            command.persistence.transitionBackgroundActivity(
-              sessionId,
-              'canceled',
-              new Date().toISOString(),
-            );
+            cancelBackgroundActivity(command.persistence, sessionId);
           else
             command.persistence.completeBackgroundActivity({
               activityId: sessionId,
@@ -1131,6 +1133,27 @@ export function registerManagedCommandControlTools(
       return { terminated };
     },
   });
+}
+
+/**
+ * Records a stopped background run's activity as canceled. The Task's archive (and a permission
+ * change) cancels the Task's activities in persistence before it stops their runs
+ * (`quarantineStaleBackgroundInTransaction`), so the activity of a run stopped that way is already
+ * canceled; it stays as it is, and the run's end is not recorded over it a second time.
+ */
+function cancelBackgroundActivity(
+  persistence: CommandToolBoundary['persistence'],
+  activityId: string,
+): void {
+  try {
+    persistence.transitionBackgroundActivity(activityId, 'canceled', new Date().toISOString());
+  } catch (error) {
+    secureLogger.info(
+      'Background activity of a stopped command had already ended',
+      { error: error instanceof Error ? error.message : String(error) },
+      { event: 'managed_command.background_activity_already_ended' },
+    );
+  }
 }
 
 const MAX_COMMAND_TOOL_OUTPUT_BYTES = 64 * 1024;

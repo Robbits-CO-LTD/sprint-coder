@@ -48,6 +48,8 @@ type Session = {
   completion: Promise<void>;
   taskId: string;
   turnId: string;
+  /** A run of the shipped desktop-control executable (`terminateTaskDesktopControl`). */
+  desktopControl: boolean;
 };
 
 export class ManagedCommandSessions {
@@ -78,6 +80,11 @@ export class ManagedCommandSessions {
        * how the runner's run of this session's process is to be made. Absent, the runner runs it.
        */
       wrapRun?: (run: ManagedCommandRun) => ManagedCommandRun;
+      /**
+       * Set for a run of the shipped desktop-control executable, which the Task's archive stops
+       * (`terminateTaskDesktopControl`), in the foreground or gone on in the background.
+       */
+      desktopControl?: boolean;
     } = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
@@ -103,6 +110,7 @@ export class ManagedCommandSessions {
       completion: Promise.resolve(),
       taskId: owner.taskId,
       turnId: owner.turnId,
+      desktopControl: hooks.desktopControl === true,
     };
     this.sessions.set(session.id, session);
     const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
@@ -300,20 +308,45 @@ export class ManagedCommandSessions {
   }
 
   beginTaskTermination(taskId: string): () => Promise<void> {
+    return this.beginTermination(
+      (session) => session.taskId === taskId,
+      'Managed command permission epoch changed',
+      'Managed command Task cancellation could not be confirmed',
+    );
+  }
+
+  /**
+   * Stops the Task's runs of the desktop-control executable, in the foreground or gone on in the
+   * background, as `terminateTurn` stops a Turn's, and resolves once their processes have ended
+   * (when the Task is archived). The Task's other commands are left as they are.
+   */
+  async terminateTaskDesktopControl(taskId: string): Promise<void> {
+    await this.beginTermination(
+      (session) => session.taskId === taskId && session.desktopControl,
+      'Managed command Task archived',
+      'Managed command desktop-control cancellation could not be confirmed',
+    )();
+  }
+
+  private beginTermination(
+    selects: (session: Session) => boolean,
+    reason: string,
+    unconfirmed: string,
+  ): () => Promise<void> {
     const owned = [...this.sessions.values()].filter(
       (session) =>
-        session.taskId === taskId &&
+        selects(session) &&
         (session.state === 'starting' ||
           session.state === 'running' ||
           session.terminationUnconfirmed),
     );
     for (const session of owned)
       if (session.state === 'starting' || session.state === 'running')
-        session.controller.abort(new Error('Managed command permission epoch changed'));
+        session.controller.abort(new Error(reason));
     return async () => {
       await Promise.allSettled(owned.map(({ completion }) => completion));
       if (owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed))
-        throw new Error('Managed command Task cancellation could not be confirmed');
+        throw new Error(unconfirmed);
     };
   }
 

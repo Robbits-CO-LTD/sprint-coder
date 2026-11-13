@@ -268,6 +268,46 @@ describe('the Task’s desktop-control session', () => {
     expect(two.run).toHaveBeenLastCalledWith(['session', 'end', 'run-b']);
     expect(desktopControlSessionReadScope('task-2', ['click', '@s1:e1'])).toBeNull();
   });
+
+  it('ends an archived Task’s session only after its runs were stopped, with or without a session', async () => {
+    configureDesktopControlTeamCursors(true);
+    const { run } = ownRuns('run-a');
+    await ensureDesktopControlSession('task-1', run);
+    const order: string[] = [];
+    run.mockImplementation(async (argv) => {
+      order.push(argv.join(' '));
+      return '{"ok":true}';
+    });
+    let stopped = (): void => undefined;
+    const ending = endDesktopControlSession(
+      'task-1',
+      () =>
+        new Promise<void>((resolve) => {
+          order.push('stopping');
+          // The Task's session is no longer the one its runs read from.
+          expect(desktopControlSessionReadScope('task-1', ['click', '@s1:e1'])).toBeNull();
+          stopped = () => {
+            order.push('stopped');
+            resolve();
+          };
+        }),
+    );
+    await Promise.resolve();
+    expect(order).toEqual(['stopping']);
+    stopped();
+    await ending;
+    expect(order).toEqual(['stopping', 'stopped', 'session end run-a']);
+    // A stop that could not be confirmed does not keep the session from ending.
+    const second = ownRuns('run-b');
+    await ensureDesktopControlSession('task-1', second.run);
+    await endDesktopControlSession('task-1', () => Promise.reject(new Error('unconfirmed')));
+    expect(second.run).toHaveBeenLastCalledWith(['session', 'end', 'run-b']);
+    // Without a session (team cursors off), the runs are still stopped.
+    configureDesktopControlTeamCursors(false);
+    const stop = vi.fn(() => Promise.resolve());
+    await endDesktopControlSession('task-3', stop);
+    expect(stop).toHaveBeenCalledOnce();
+  });
 });
 
 describe('the Team Workers marked for desktop control', () => {
