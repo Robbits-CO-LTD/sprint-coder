@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { classifyChanges, verifyRequiredJobs } from '../../ci-scope.mjs';
+import { classifyChanges, scopeOutputs, verifyRequiredJobs } from '../../ci-scope.mjs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   clearDependencyToolCaches,
@@ -375,8 +375,9 @@ describe('CI scope wiring', () => {
     ]) {
       for (const enabled of ['', 'false'])
         expect(route(output, enabled, 'pull_request', repository)).toEqual([fallback]);
-      for (const eventName of ['push', 'workflow_dispatch', 'pull_request'])
+      for (const eventName of ['push', 'workflow_dispatch'])
         expect(route(output, 'true', eventName, repository)).toEqual(labels);
+      expect(route(output, 'true', 'pull_request', repository)).toEqual([fallback]);
       expect(route(output, 'true', 'pull_request', 'outside/fork')).toEqual([fallback]);
       expect(route(output, 'true', 'pull_request', undefined)).toEqual([fallback]);
       expect(route(output, 'true', 'pull_request', repository, 'dependabot[bot]')).toEqual([
@@ -415,17 +416,25 @@ describe('CI scope wiring', () => {
       expect(workflow.jobs[job].steps.indexOf(preflight)).toBe(1);
     }
     const matrix = workflow.jobs.quality.strategy.matrix.include;
-    const qualityRows = (runner) =>
+    const qualityRows = (runner, full = true) =>
       runInNewContext(matrix.slice(3, -2), {
         fromJSON: JSON.parse,
         contains: (value, token) => value.includes(token),
-        needs: { classify: { outputs: { common_runner: JSON.stringify(runner) } } },
+        needs: {
+          classify: {
+            outputs: { common_runner: JSON.stringify(runner), full_matrix: String(full) },
+          },
+        },
       });
     expect(qualityRows(labels)).toEqual([{ label: 'shared', command: 'shared' }]);
     expect(qualityRows(['ubuntu-latest'])).toEqual([
       { label: 'typecheck', command: 'typecheck' },
       { label: 'lint', command: 'lint' },
       { label: 'format', command: 'format:check' },
+    ]);
+    expect(qualityRows(['ubuntu-latest'], false)).toEqual([
+      { label: 'typecheck', command: 'typecheck' },
+      { label: 'lint', command: 'lint' },
     ]);
     const shared = workflow.jobs.quality.steps.find(
       (step) => step.if === "matrix.command == 'shared'",
@@ -439,37 +448,70 @@ describe('CI scope wiring', () => {
     ['website/index.html', ['classify', 'website', 'required']],
     [
       'apps/desktop/src/renderer/lib/format.ts',
-      ['classify', 'quality', 'renderer-tests', 'required'],
+      ['classify', 'quality', 'platform-tests', 'required'],
     ],
     [
       'apps/desktop/src/renderer/components/RunCard.tsx',
-      ['classify', 'quality', 'renderer-tests', 'required'],
+      ['classify', 'quality', 'platform-tests', 'required'],
     ],
-  ])('selects only the planned workflow jobs for %s', (path, expected) => {
-    const scope = classifyChanges([{ path, status: 'M' }]);
-    const outputs = {
-      mode: scope.mode,
-      full_matrix: String(scope.fullMatrix),
-      website_required: String(scope.websiteRequired),
-    };
-    const selected = Object.entries(workflow.jobs)
-      .filter(([, job]) => {
-        if (!job.if) return true;
-        let expression = job.if.replaceAll('always()', 'true');
-        for (const [key, value] of Object.entries(outputs))
-          expression = expression.replaceAll(
-            `needs.classify.outputs.${key}`,
-            JSON.stringify(value),
-          );
-        return runInNewContext(expression, {}, { timeout: 100 });
-      })
-      .map(([id]) => id);
-    expect(new Set(selected)).toEqual(new Set(expected));
-    const results = Object.fromEntries(
-      workflow.jobs.required.needs.map((id) => [id, selected.includes(id) ? 'success' : 'skipped']),
-    );
-    expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
-  });
+    ['apps/desktop/src/main/persistence.ts', ['classify', 'quality', 'platform-tests', 'required']],
+    [
+      'apps/desktop/forge.config.ts',
+      [
+        'classify',
+        'quality',
+        'package-tests',
+        'platform-tests',
+        'package-linux',
+        'package-macos',
+        'package-windows-build',
+        'package-windows',
+        'required',
+      ],
+    ],
+    [
+      'README.md',
+      [
+        'classify',
+        'quality',
+        'package-tests',
+        'sandbox-rust-windows',
+        'test-macos',
+        'platform-tests',
+        'electron-bridges',
+        'renderer-tests',
+        'website',
+        'required',
+      ],
+      'push',
+    ],
+  ])(
+    'selects only the planned workflow jobs for %s',
+    (path, expected, eventName = 'pull_request') => {
+      const scope = classifyChanges([{ path, status: 'M' }], { eventName });
+      const outputs = scopeOutputs(scope);
+      const selected = Object.entries(workflow.jobs)
+        .filter(([, job]) => {
+          if (!job.if) return true;
+          let expression = job.if.replaceAll('always()', 'true');
+          for (const [key, value] of Object.entries(outputs))
+            expression = expression.replaceAll(
+              `needs.classify.outputs.${key}`,
+              JSON.stringify(value),
+            );
+          return runInNewContext(expression, {}, { timeout: 100 });
+        })
+        .map(([id]) => id);
+      expect(new Set(selected)).toEqual(new Set(expected));
+      const results = Object.fromEntries(
+        workflow.jobs.required.needs.map((id) => [
+          id,
+          selected.includes(id) ? 'success' : 'skipped',
+        ]),
+      );
+      expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
+    },
+  );
 
   it('waits for every job and rejects failures of required package and website checks', () => {
     expect([...workflow.jobs.required.needs].sort()).toEqual(
@@ -477,7 +519,9 @@ describe('CI scope wiring', () => {
         .filter((id) => id !== 'required')
         .sort(),
     );
-    const scope = classifyChanges([], { eventName: 'workflow_dispatch' });
+    const scope = classifyChanges([{ path: 'apps/desktop/forge.config.ts', status: 'M' }], {
+      eventName: 'push',
+    });
     const results = Object.fromEntries(workflow.jobs.required.needs.map((id) => [id, 'success']));
     for (const job of ['package-windows-build', 'website']) {
       for (const value of ['failure', 'cancelled', 'skipped', undefined])
@@ -609,7 +653,12 @@ describe('full CI partition contract', () => {
     expect(run.status).toBe(0);
     expect(classifier.run).toBe('node ci-scope.mjs classify');
     expect(readFileSync(output, 'utf8')).toContain('full_matrix=true');
-    const entries = workflow.jobs['platform-tests'].strategy.matrix.include;
+    expect(workflow.jobs['platform-tests'].strategy.matrix).toBe(
+      '${{ fromJSON(needs.classify.outputs.platform_matrix) }}',
+    );
+    const entries = JSON.parse(
+      scopeOutputs(classifyChanges([], { eventName: 'workflow_dispatch' })).platform_matrix,
+    ).include;
     expect(entries.filter((entry) => entry.label === 'Linux').map((entry) => entry.shard)).toEqual([
       '1/3',
       '2/3',
@@ -625,10 +674,13 @@ describe('full CI partition contract', () => {
     );
     expect(cargoSteps).toHaveLength(1);
     expect(cargoSteps[0].job).toBe('platform-tests');
-    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows' && matrix.shard == '1/5'");
+    expect(cargoSteps[0].step.if).toContain("matrix.shard == '1/5'");
+    expect(cargoSteps[0].step.if).toContain(
+      "needs.classify.outputs.windows_rust_required == 'true' && matrix.shard == 'related'",
+    );
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const rust = workflow.jobs['sandbox-rust-windows'];
-    expect(rust.if).toBe("needs.classify.outputs.full_matrix == 'true'");
+    expect(rust.if).toBe("needs.classify.outputs.windows_rust_required == 'true'");
     const build = rust.steps.find((step) => step.run?.includes('cargo build --release'));
     expect(build.run).toContain('cargo test --no-run --locked');
     expect(build.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
@@ -692,12 +744,7 @@ describe('full CI partition contract', () => {
     const scope = classifyChanges([], { eventName: 'push' });
     const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
     expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
-    for (const dependency of [
-      'sandbox-rust-windows',
-      'test-macos',
-      'package-macos',
-      'electron-bridges',
-    ]) {
+    for (const dependency of ['sandbox-rust-windows', 'test-macos', 'electron-bridges']) {
       expect(required.needs).toContain(dependency);
       for (const status of ['failure', 'cancelled', 'skipped', ''])
         expect(() => verifyRequiredJobs(scope, { ...successful, [dependency]: status })).toThrow();

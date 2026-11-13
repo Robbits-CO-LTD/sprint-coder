@@ -420,11 +420,11 @@ describe('release artifacts', () => {
     expect(ciWorkflow).toContain('npx electron-forge package --platform=win32 --arch=x64');
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
-    expect(macPackageJob).toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(macPackageJob).toContain("if: needs.classify.outputs.distribution_required == 'true'");
     expect(requiredJob).toContain('package-macos,');
     expect(requiredJob).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
     expect(requiredJob).toContain('run: node ci-scope.mjs gate');
-    expect(ciWorkflow).toContain('Select checks from the complete pull request');
+    expect(ciWorkflow).toContain('Select checks from the complete change set');
     expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE');
     expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_CODING_LIVE');
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');

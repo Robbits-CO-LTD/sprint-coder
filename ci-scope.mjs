@@ -1,41 +1,44 @@
-import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** @typedef {{path: string, status: string}} Change Git name-status entries; only A/M may be narrowed. */
-/** @typedef {{mode: 'docs' | 'renderer' | 'website' | 'full', fullMatrix: boolean, websiteRequired: boolean, reason: string}} Scope */
-
-const RENDERER = 'apps/desktop/src/renderer/';
-const DISPLAY_LIBS = new Set([
-  'format',
-  'stages',
-  'turn-progress',
-  'sidebar-preference',
-  'worker-thread',
-]);
-// These components present state or call their owner's callbacks; they do not issue IPC commands.
-// Adding a component requires reviewing its effects before widening this initial fast path.
-const DISPLAY_COMPONENTS = new Set([
-  'RunCard.tsx',
-  'icons.tsx',
-  'SidebarResizer.tsx',
-  'WorkStep.tsx',
-]);
-const FULL_JOBS = [
+const DESKTOP = 'apps/desktop/';
+const RENDERER = `${DESKTOP}src/renderer/`;
+const PLATFORM_ROWS = {
+  linux: { os: 'ubuntu-latest', label: 'Linux' },
+  macos: { os: 'macos-latest', label: 'macOS' },
+  windows: { os: 'windows-2022', label: 'Windows' },
+};
+const PLATFORMS = Object.keys(PLATFORM_ROWS);
+const CI_SPEC = [
+  'ci-scope.test.mjs',
+  'ci-cache.test.mjs',
+  'workflow-security.test.ts',
+  'ci-test-sequencer.test.ts',
+  'ci-renderer-tests.test.mjs',
+  'forge.config.test.ts',
+];
+const WINDOWS_SPEC = ['src/main/desktop-control.test.ts'];
+const SANDBOX_SPEC = ['src/main/sandbox-runner.test.ts', 'src/main/command-runner.test.ts'];
+const FILE_SPEC = ['src/main/native-safe-fs.test.ts', 'src/main/path-guard.test.ts'];
+const DB_SPEC = ['src/main/persistence.test.ts', 'src/main/ipc.test.ts'];
+const SHARED_SPEC = ['src/main/ipc.test.ts', 'src/main/permission-broker.test.ts'];
+const PACKAGE_JOBS = ['package-linux', 'package-macos', 'package-windows-build', 'package-windows'];
+const KNOWN_JOBS = new Set([
+  'classify',
   'quality',
+  'renderer-tests',
   'package-tests',
   'sandbox-rust-windows',
   'test-macos',
   'platform-tests',
   'electron-bridges',
-  'package-linux',
-  'package-windows-build',
-  'package-windows',
-  'package-macos',
-  'renderer-tests',
-];
-const KNOWN_JOBS = new Set(['classify', ...FULL_JOBS, 'website']);
+  'website',
+  ...PACKAGE_JOBS,
+]);
+
 function safePath(path) {
   return (
     typeof path === 'string' &&
@@ -55,19 +58,82 @@ function docsPath(path) {
   );
 }
 
-function rendererPath(path) {
-  if (path === `${RENDERER}index.css`) return true;
-  if (!path.startsWith(RENDERER)) return false;
-  const local = path.slice(RENDERER.length);
-  if (local.startsWith('lib/')) {
-    const match = /^lib\/([a-z-]+)(?:\.test)?\.ts$/u.exec(local);
-    return match !== null && DISPLAY_LIBS.has(match[1]);
-  }
-  if (!local.startsWith('components/')) return false;
-  const component = local.slice('components/'.length);
-  if (DISPLAY_COMPONENTS.has(component)) return true;
-  const test = /^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)*\.test\.tsx?$/u.exec(component);
-  return test !== null && DISPLAY_COMPONENTS.has(`${test[1]}.tsx`);
+function distributionPath(path) {
+  return (
+    /^(?:package(?:-lock)?\.json|\.nvmrc|build-(?:better-sqlite3|native-safe-fs|sandbox-runner|desktop-control)\.mjs|native-build-environment\.mjs|ci-(?:windows-package|install-electron)\.mjs)$/u.test(
+      path,
+    ) ||
+    /^\.github\/(?:workflows\/release[^/]*\.ya?ml|actions\/(?:install-deps|install-electron|prepare-sandbox|prepare-desktop-control)\/)/u.test(
+      path,
+    ) ||
+    /^apps\/desktop\/(?:package\.json|forge\.config\.ts|vite\..+\.config\.ts|entitlements\..+\.plist|windows-wizard-installer\.ts|installer\/|assets\/(?:sprint-coder-icon|dmg-background)|scripts\/(?:ensure-inno-setup|verify-unsigned-windows-release|create-macos-update-manifest|generate-dmg-background)|src\/main\/(?:auto-update|update-install-mutation-gate)\.)/u.test(
+      path,
+    ) ||
+    /^packages\/(?:contracts|domain)\/package\.json$/u.test(path)
+  );
+}
+
+function boundaryPath(path) {
+  if (path.startsWith('packages/')) return true;
+  const local = path.slice(DESKTOP.length);
+  return (
+    path.startsWith(DESKTOP) &&
+    (/^src\/(?:preload\/|renderer\/(?:store|types)\/)/u.test(local) ||
+      /^src\/runtime-host\/.*(?:auth|protocol|sandbox|permission|worktree|workspace|secret|approval|path-guard)/u.test(
+        local,
+      ) ||
+      /^src\/main\/(?:index\.|ipc[.-]|team-(?:coordinator|tools|worker-runtime)|provider-(?:egress|endpoint-policy|workspace-tools)|.*(?:persist|auth|permission|secret|approval|access-confirmation|workspace|write-scope|path-guard|mutation|file-publication|safe-git|worktree|edit-saga|command-runner|process-tree|sandbox|native|windows-))/u.test(
+        local,
+      ))
+  );
+}
+
+function windowsNativePath(path) {
+  return /^(?:build-desktop-control\.mjs|\.github\/actions\/prepare-desktop-control\/|apps\/desktop\/(?:desktop-control\/|src\/main\/desktop-control))/u.test(
+    path,
+  );
+}
+
+function sandboxPath(path) {
+  return /^(?:apps\/desktop\/(?:sandbox-runner\/|resources\/sandbox|src\/main\/sandbox)|build-sandbox-runner\.mjs|\.github\/actions\/prepare-sandbox\/)/u.test(
+    path,
+  );
+}
+
+function fileBoundaryPath(path) {
+  return /^(?:apps\/desktop\/(?:native-safe-fs\/|src\/main\/(?:native|path-guard|workspace|edit-saga|write-scope))|build-native-safe-fs\.mjs)/u.test(
+    path,
+  );
+}
+
+function ordinaryDesktopPath(path) {
+  return /^apps\/desktop\/src\/[^\s]+\.(?:[cm]?ts|tsx|css)$/u.test(path);
+}
+
+function ciPath(path) {
+  return /^\.github\/|^(?:ci-|native-build-environment\.mjs)|^apps\/desktop\/(?:ci-|vitest\.config|workflow-security)/u.test(
+    path,
+  );
+}
+
+function boundarySpecs(desktop, broad, distribution) {
+  // Some specs consume executables, workflow YAML or configuration through files, so Vitest's
+  // import graph cannot discover those relationships.
+  const paths = desktop.map(({ path }) => path);
+  return [
+    ...new Set([
+      ...(paths.some(ciPath) || broad ? CI_SPEC : []),
+      ...(paths.some(windowsNativePath) ? WINDOWS_SPEC : []),
+      ...(paths.some(sandboxPath) ? SANDBOX_SPEC : []),
+      ...(paths.some(fileBoundaryPath) ? FILE_SPEC : []),
+      ...(paths.some((path) => /\/(?:.*persist|ipc[.-]|preload\/)/u.test(path)) ? DB_SPEC : []),
+      ...(paths.some(boundaryPath) || (broad && !paths.every(ciPath)) ? SHARED_SPEC : []),
+      ...(paths.some((path) => path.startsWith(RENDERER) && path.endsWith('.css'))
+        ? ['src/renderer/components/RunCard.test.tsx']
+        : []),
+      ...(distribution ? ['forge.config.test.ts', 'release-beta-workflow.test.ts'] : []),
+    ]),
+  ];
 }
 
 function websiteCheckPath(path) {
@@ -89,11 +155,8 @@ function websiteCheckPath(path) {
 }
 
 /**
- * Classifies the complete PR diff, never only its latest commit. Unknown paths and statuses widen
- * the scope; UI acceptance is performed separately with Computer Use.
- * @param {Change[]} changes
+ * @param {Change[]} changes The complete PR or push diff.
  * @param {{eventName?: string}} [options]
- * @returns {Scope}
  */
 export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
   if (!Array.isArray(changes)) throw new Error('Changes must be an array');
@@ -107,44 +170,54 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
     )
       throw new Error('Each change requires a safe repository path and a Git status');
   }
-  let hasRenderer = false;
-  let hasWebsite = false;
-  let full = eventName !== 'pull_request' || changes.length === 0;
-  let websiteRequired = full;
-  let reason =
-    eventName !== 'pull_request'
-      ? 'Only pull_request events may narrow CI'
-      : changes.length === 0
-        ? 'An empty diff does not justify skipping validation'
-        : 'Documentation-only changes';
-  for (const { path, status } of changes) {
-    if (websiteCheckPath(path)) websiteRequired = true;
-    if (!['A', 'M'].includes(status)) {
-      full = true;
-      reason = 'Deletion, rename, or an unfamiliar Git status requires full validation';
-    } else if (docsPath(path)) {
-      continue;
-    } else if (path.startsWith('website/')) {
-      hasWebsite = true;
-    } else if (rendererPath(path)) {
-      hasRenderer = true;
-    } else {
-      full = true;
-      reason = 'Changes cross the reviewed documentation and display-only boundaries';
-    }
-  }
-  if (hasWebsite && hasRenderer) {
-    full = true;
-    reason = 'Website and desktop changes require full validation';
-  }
-  const mode = full ? 'full' : hasWebsite ? 'website' : hasRenderer ? 'renderer' : 'docs';
-  if (mode === 'renderer') reason = 'Reviewed renderer display paths';
-  if (mode === 'website') reason = 'Standalone website changes';
+
+  const full = eventName !== 'pull_request';
+  const distribution = changes.some(({ path }) => distributionPath(path));
+  const websiteRequired = full || changes.some(({ path }) => websiteCheckPath(path));
+  const desktop = changes.filter(
+    ({ path, status }) =>
+      !['A', 'M'].includes(status) || (!docsPath(path) && !path.startsWith('website/')),
+  );
+  const mode = full
+    ? 'full'
+    : desktop.length || changes.length === 0
+      ? 'pr'
+      : websiteRequired
+        ? 'website'
+        : 'docs';
+  const broad =
+    desktop.length === 0 ||
+    desktop.some(
+      ({ path, status }) =>
+        !['A', 'M'].includes(status) ||
+        (!ordinaryDesktopPath(path) && !windowsNativePath(path) && !path.startsWith('packages/')),
+    );
+  const allRelatedPlatforms =
+    broad || desktop.some(({ path }) => boundaryPath(path) || sandboxPath(path));
+  const windows = desktop.some(({ path }) => windowsNativePath(path));
+  const windowsOnly = desktop.length > 0 && desktop.every(({ path }) => windowsNativePath(path));
+  const platforms =
+    full || (mode === 'pr' && allRelatedPlatforms)
+      ? [...PLATFORMS]
+      : mode === 'pr'
+        ? [...(windowsOnly ? [] : ['linux']), ...(windows ? ['windows'] : [])]
+        : [];
+  const rendererOnly = desktop.length > 0 && desktop.every(({ path }) => path.startsWith(RENDERER));
   return {
     mode,
-    fullMatrix: mode === 'full',
+    shared:
+      full ||
+      (mode === 'pr' && (broad || desktop.some(({ path }) => path.startsWith('packages/')))),
+    platforms,
+    native: full || (mode === 'pr' && (!rendererOnly || allRelatedPlatforms)),
+    windowsRust:
+      full ||
+      (mode === 'pr' &&
+        (desktop.some(({ path }) => sandboxPath(path)) ||
+          (broad && desktop.some(({ path }) => ciPath(path))))),
+    distribution,
     websiteRequired,
-    reason,
+    specs: mode === 'pr' ? boundarySpecs(desktop, broad, distribution) : [],
   };
 }
 
@@ -152,31 +225,84 @@ function validateScope(scope) {
   if (
     scope === null ||
     typeof scope !== 'object' ||
-    !['docs', 'renderer', 'website', 'full'].includes(scope.mode) ||
-    scope.fullMatrix !== (scope.mode === 'full') ||
-    typeof scope.websiteRequired !== 'boolean' ||
-    (scope.mode === 'website' && scope.websiteRequired !== true) ||
-    (['docs', 'renderer'].includes(scope.mode) && scope.websiteRequired !== false) ||
-    typeof scope.reason !== 'string'
+    !['docs', 'website', 'pr', 'full'].includes(scope.mode) ||
+    !['native', 'shared', 'windowsRust', 'distribution', 'websiteRequired'].every(
+      (key) => typeof scope[key] === 'boolean',
+    ) ||
+    !Array.isArray(scope.specs) ||
+    !scope.specs.every((spec) => safePath(spec) && /\.test\.(?:mjs|ts|tsx)$/u.test(spec)) ||
+    !Array.isArray(scope.platforms) ||
+    scope.platforms.some((platform) => !PLATFORMS.includes(platform)) ||
+    new Set(scope.platforms).size !== scope.platforms.length ||
+    (scope.mode === 'full' &&
+      (scope.platforms.length !== PLATFORMS.length ||
+        !scope.native ||
+        !scope.shared ||
+        !scope.windowsRust ||
+        !scope.websiteRequired)) ||
+    (scope.mode === 'pr' && scope.platforms.length === 0) ||
+    (['docs', 'website'].includes(scope.mode) &&
+      (scope.platforms.length !== 0 ||
+        scope.native ||
+        scope.shared ||
+        scope.windowsRust ||
+        scope.distribution ||
+        scope.websiteRequired !== (scope.mode === 'website')))
   )
     throw new Error('Invalid CI scope');
 }
 
+/** Derive workflow outputs and the required gate from the same selection. */
+export function scopeOutputs(scope) {
+  validateScope(scope);
+  const full = scope.mode === 'full';
+  const platformRows = full
+    ? [
+        ['linux', 3],
+        ['windows', 5],
+      ].flatMap(([platform, count]) =>
+        Array.from({ length: count }, (_, i) => ({
+          ...PLATFORM_ROWS[platform],
+          shard: `${i + 1}/${count}`,
+        })),
+      )
+    : scope.platforms.map((platform) => ({ ...PLATFORM_ROWS[platform], shard: 'related' }));
+  return {
+    mode: scope.mode,
+    quality_required: String(full || scope.mode === 'pr'),
+    native_required: String(scope.native),
+    boundary_specs: JSON.stringify(scope.specs),
+    shared_required: String(scope.shared),
+    windows_rust_required: String(scope.windowsRust),
+    full_matrix: String(full),
+    platform_required: String(platformRows.length > 0),
+    platform_matrix: JSON.stringify({ include: platformRows }),
+    distribution_required: String(scope.distribution),
+    website_required: String(scope.websiteRequired),
+    scope_json: JSON.stringify(scope),
+  };
+}
+
 /**
- * @param {Scope} scope
+ * @param {ReturnType<typeof classifyChanges>} scope
  * @param {Record<string, string>} results GitHub needs results keyed by job ID, not display name.
  * @returns {{required: string[]}}
  */
 export function verifyRequiredJobs(scope, results) {
-  validateScope(scope);
+  const output = scopeOutputs(scope);
   if (results === null || typeof results !== 'object' || Array.isArray(results))
     throw new Error('Job results must be an object');
   const required = new Set(['classify']);
-  if (scope.mode === 'full') for (const job of FULL_JOBS) required.add(job);
-  else if (scope.mode === 'renderer') {
-    required.add('quality');
+  if (output.quality_required === 'true') required.add('quality');
+  if (scope.shared) required.add('package-tests');
+  if (scope.windowsRust) required.add('sandbox-rust-windows');
+  if (output.platform_required === 'true') required.add('platform-tests');
+  if (scope.mode === 'full') {
     required.add('renderer-tests');
+    required.add('test-macos');
+    required.add('electron-bridges');
   }
+  if (scope.distribution) for (const job of PACKAGE_JOBS) required.add(job);
   if (scope.websiteRequired) required.add('website');
   const failures = [];
   for (const job of required) {
@@ -204,17 +330,9 @@ export function parseNameStatus(output) {
   return changes;
 }
 
-function pullRequestChanges(eventPath) {
-  if (!eventPath) throw new Error('GITHUB_EVENT_PATH is required for a pull_request event');
-  const event = JSON.parse(readFileSync(eventPath, 'utf8'));
-  const base = event.pull_request?.base?.sha;
-  const head = event.pull_request?.head?.sha;
-  if (![base, head].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/u.test(sha)))
-    throw new Error('Pull request base/head SHAs are missing or invalid');
-  const git = (args) =>
-    execFileSync('git', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trimEnd();
-  const mergeBase = git(['merge-base', base, head]);
-  if (!/^[a-f0-9]{40,64}$/u.test(mergeBase)) throw new Error('Git returned an invalid merge base');
+const GIT_SHA = /^[a-f0-9]{40,64}$/u;
+
+function diffChanges(base, head) {
   // Keep NUL delimiters intact: trimEnd() would remove whitespace belonging to a final filename.
   const diff = execFileSync(
     'git',
@@ -225,30 +343,103 @@ function pullRequestChanges(eventPath) {
       '--name-status',
       '-z',
       '--no-renames',
-      mergeBase,
+      base,
       head,
       '--',
     ],
     { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
   );
-  return { changes: parseNameStatus(diff), base, head, mergeBase };
+  return parseNameStatus(diff);
+}
+
+function eventChanges(eventName, eventPath) {
+  if (eventName !== 'pull_request' && eventName !== 'push') return { changes: [] };
+  if (!eventPath) throw new Error(`GITHUB_EVENT_PATH is required for a ${eventName} event`);
+  const event = JSON.parse(readFileSync(eventPath, 'utf8'));
+  const pr = eventName === 'pull_request';
+  const comparisonBase = pr ? event.pull_request?.base?.sha : event.before;
+  let base = comparisonBase;
+  const head = pr ? event.pull_request?.head?.sha : event.after;
+  if (![base, head].every((sha) => typeof sha === 'string' && GIT_SHA.test(sha)))
+    throw new Error(`Invalid ${eventName} base/head SHAs`);
+  if (pr) {
+    base = execFileSync('git', ['merge-base', base, head], { encoding: 'utf8' }).trim();
+    if (!GIT_SHA.test(base)) throw new Error('Git returned an invalid merge base');
+  } else if (/^0+$/u.test(base)) {
+    // A newly created main has no prior tree. Compare all tracked files.
+    base = execFileSync('git', ['hash-object', '-t', 'tree', '-w', '--stdin'], {
+      encoding: 'utf8',
+      input: '',
+    }).trim();
+  } else {
+    // A force push can leave the old tip outside checked-out history.
+    try {
+      execFileSync('git', ['cat-file', '-e', `${base}^{commit}`], { stdio: 'ignore' });
+    } catch {
+      execFileSync('git', ['fetch', '--no-tags', 'origin', base], { stdio: 'inherit' });
+    }
+  }
+  return { changes: diffChanges(base, head), base, head, comparisonBase };
+}
+
+function runRelatedTests() {
+  const base = process.env.CI_COMPARISON_BASE ?? '';
+  if (!GIT_SHA.test(base)) throw new Error('A valid PR base SHA is required for related tests');
+  const explicit = JSON.parse(process.env.CI_BOUNDARY_SPECS ?? '[]');
+  if (!Array.isArray(explicit) || !explicit.every(safePath))
+    throw new Error('Invalid CI boundary specs');
+  const desktop = resolve(dirname(fileURLToPath(import.meta.url)), DESKTOP);
+  const vitest = resolve(desktop, '../../node_modules/vitest/vitest.mjs');
+  for (const spec of explicit) {
+    if (!existsSync(resolve(desktop, spec)))
+      throw new Error(`Required boundary spec did not resolve: ${spec}`);
+  }
+  const selected = new Set(explicit);
+  const collected = JSON.parse(
+    execFileSync(process.execPath, [vitest, 'list', '--filesOnly', '--json', '--changed', base], {
+      cwd: desktop,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    }),
+  );
+  for (const { file } of collected) {
+    if (typeof file !== 'string' || !isAbsolute(file))
+      throw new Error('Unexpected related test path');
+    const local = relative(desktop, file).replaceAll('\\', '/');
+    if (!safePath(local)) throw new Error('Related test is outside the desktop workspace');
+    selected.add(local);
+  }
+  if (!selected.size) {
+    console.log('No desktop tests match the PR diff or explicit boundary checks.');
+    return;
+  }
+  console.log(`Running ${selected.size} related desktop test files`);
+  // Windows process command lines have a 32K-character limit.
+  const files = [...selected];
+  for (let offset = 0; offset < files.length; offset += 100) {
+    const result = spawnSync(
+      process.execPath,
+      [vitest, 'run', '--allowOnly=false', ...files.slice(offset, offset + 100)],
+      { cwd: desktop, stdio: 'inherit' },
+    );
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      process.exitCode = result.status ?? 1;
+      return;
+    }
+  }
 }
 
 function main() {
   if (process.argv[2] === 'classify') {
     const eventName = process.env.GITHUB_EVENT_NAME;
     if (!eventName) throw new Error('GITHUB_EVENT_NAME is required');
-    const input =
-      eventName === 'pull_request'
-        ? pullRequestChanges(process.env.GITHUB_EVENT_PATH)
-        : { changes: [] };
+    const input = eventChanges(eventName, process.env.GITHUB_EVENT_PATH);
     const scope = classifyChanges(input.changes, { eventName });
     const output = {
-      mode: scope.mode,
-      full_matrix: String(scope.fullMatrix),
-      website_required: String(scope.websiteRequired),
-      scope_json: JSON.stringify(scope),
-      reason: scope.reason,
+      ...scopeOutputs(scope),
+      comparison_base: input.comparisonBase ?? '',
+      diff_base: input.base ?? '',
     };
     if (process.env.GITHUB_OUTPUT)
       appendFileSync(
@@ -260,12 +451,14 @@ function main() {
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
-        `CI scope: **${scope.mode}**\n\n${scope.reason}\n\n` +
+        `CI scope: **${scope.mode}**\n\nSelected platforms: ${scope.platforms.join(', ') || 'none'}\n\n` +
           `Tested SHA: ${/^[a-f0-9]{40,64}$/u.test(process.env.GITHUB_SHA ?? '') ? process.env.GITHUB_SHA : 'not provided'}\n\n` +
-          `PR base: ${input.base ?? 'not applicable'}\n\n` +
-          `PR head: ${input.head ?? 'not applicable'}\n`,
+          `Comparison base: ${input.base ?? 'not applicable'}\n\n` +
+          `Diff head: ${input.head ?? 'not applicable'}\n`,
       );
     process.stdout.write(`${JSON.stringify(scope)}\n`);
+  } else if (process.argv[2] === 'related') {
+    runRelatedTests();
   } else if (process.argv[2] === 'gate') {
     const scope = JSON.parse(process.env.CI_SCOPE_JSON ?? 'null');
     const needs = JSON.parse(process.env.CI_JOB_RESULTS_JSON ?? 'null');
@@ -279,7 +472,7 @@ function main() {
     );
     const verified = verifyRequiredJobs(scope, results);
     process.stdout.write(`Required CI passed: ${verified.required.join(', ')}\n`);
-  } else throw new Error('Usage: node ci-scope.mjs classify|gate');
+  } else throw new Error('Usage: node ci-scope.mjs classify|gate|related');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
