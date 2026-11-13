@@ -30,6 +30,16 @@ const SANDBOX_SPEC = [
 const FILE_SPEC = ['src/main/native-safe-fs.test.ts', 'src/main/path-guard.test.ts'];
 const DB_SPEC = ['src/main/persistence.test.ts', 'src/main/ipc.test.ts'];
 const SHARED_SPEC = ['src/main/ipc.test.ts', 'src/main/permission-broker.test.ts'];
+// These suites rerun their cases inside Electron in four groups (src/main/electron-test-shards.ts).
+const ELECTRON_BRIDGE_SPECS = [
+  'src/main/team-coordinator.test.ts',
+  'src/main/graph-mission-persistence.test.ts',
+];
+const ELECTRON_BRIDGE_GROUPS = 4;
+// A wide PR can select nearly the whole suite. Windows runs it with one worker (vitest.config.ts),
+// which needs about 30 minutes, so only that platform is split; each shard takes one bridge group.
+const RELATED_SHARDS = { linux: 1, macos: 1, windows: 4 };
+const RELATED_BATCH = 100;
 const PACKAGE_JOBS = ['package-linux', 'package-macos', 'package-windows-build', 'package-windows'];
 const KNOWN_JOBS = new Set([
   'classify',
@@ -119,6 +129,18 @@ function ordinaryDesktopPath(path) {
 function ciPath(path) {
   return /^\.github\/|^(?:ci-|native-build-environment\.mjs)|^apps\/desktop\/(?:ci-|vitest\.config|workflow-security)/u.test(
     path,
+  );
+}
+
+// Inputs that Vitest's import graph cannot widen: the related run selects only their dedicated
+// boundary specs. The Vitest configuration is excluded because changing it reruns every file.
+function lightRelatedPath(path) {
+  return (
+    (ciPath(path) && !path.startsWith(`${DESKTOP}vitest.config`)) ||
+    windowsNativePath(path) ||
+    /^(?:apps\/desktop\/(?:sandbox-runner|native-safe-fs)\/|build-(?:sandbox-runner|native-safe-fs)\.mjs$)/u.test(
+      path,
+    )
   );
 }
 
@@ -223,6 +245,12 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
           (broad && desktop.some(({ path }) => ciPath(path))))),
     distribution,
     websiteRequired,
+    // Boundary and dependency changes reach most of the suite through imports or Vitest's
+    // rerun triggers; CI-only and native-source changes select only their boundary specs.
+    splitRelated:
+      mode === 'pr' &&
+      allRelatedPlatforms &&
+      desktop.some(({ path, status }) => !['A', 'M'].includes(status) || !lightRelatedPath(path)),
     specs: mode === 'pr' ? boundarySpecs(desktop, broad, distribution) : [],
   };
 }
@@ -232,9 +260,10 @@ function validateScope(scope) {
     scope === null ||
     typeof scope !== 'object' ||
     !['docs', 'website', 'pr', 'full'].includes(scope.mode) ||
-    !['native', 'shared', 'windowsRust', 'distribution', 'websiteRequired'].every(
+    !['native', 'shared', 'windowsRust', 'distribution', 'websiteRequired', 'splitRelated'].every(
       (key) => typeof scope[key] === 'boolean',
     ) ||
+    (scope.mode !== 'pr' && scope.splitRelated) ||
     !Array.isArray(scope.specs) ||
     !scope.specs.every((spec) => safePath(spec) && /\.test\.(?:mjs|ts|tsx)$/u.test(spec)) ||
     !Array.isArray(scope.platforms) ||
@@ -272,7 +301,13 @@ export function scopeOutputs(scope) {
           shard: `${i + 1}/${count}`,
         })),
       )
-    : scope.platforms.map((platform) => ({ ...PLATFORM_ROWS[platform], shard: 'related' }));
+    : scope.platforms.flatMap((platform) => {
+        const count = scope.splitRelated ? RELATED_SHARDS[platform] : 1;
+        return Array.from({ length: count }, (_, i) => ({
+          ...PLATFORM_ROWS[platform],
+          shard: count === 1 ? 'related' : `related ${i + 1}/${count}`,
+        }));
+      });
   return {
     mode: scope.mode,
     quality_required: String(full || scope.mode === 'pr'),
@@ -391,6 +426,8 @@ function eventChanges(eventName, eventPath) {
 function runRelatedTests() {
   const base = process.env.CI_COMPARISON_BASE ?? '';
   if (!GIT_SHA.test(base)) throw new Error('A valid PR base SHA is required for related tests');
+  const shard = process.env.CI_RELATED_SHARD || 'related';
+  parseRelatedShard(shard);
   const explicit = JSON.parse(process.env.CI_BOUNDARY_SPECS ?? '[]');
   if (!Array.isArray(explicit) || !explicit.every(safePath))
     throw new Error('Invalid CI boundary specs');
@@ -419,21 +456,79 @@ function runRelatedTests() {
     console.log('No desktop tests match the PR diff or explicit boundary checks.');
     return;
   }
-  console.log(`Running ${selected.size} related desktop test files`);
-  // Windows process command lines have a 32K-character limit.
-  const files = [...selected];
-  for (let offset = 0; offset < files.length; offset += 100) {
-    const result = spawnSync(
-      process.execPath,
-      [vitest, 'run', '--allowOnly=false', ...files.slice(offset, offset + 100)],
-      { cwd: desktop, stdio: 'inherit' },
-    );
+  const runs = relatedTestRuns([...selected], shard);
+  console.log(`Running ${selected.size} related desktop test files (${shard})`);
+  for (const run of runs) {
+    const result = spawnSync(process.execPath, [vitest, ...run.args], {
+      cwd: desktop,
+      env: { ...process.env, ...run.env },
+      stdio: 'inherit',
+    });
     if (result.error) throw result.error;
     if (result.status !== 0) {
       process.exitCode = result.status ?? 1;
       return;
     }
   }
+}
+
+/** @returns {{index: number, count: number}} */
+export function parseRelatedShard(value) {
+  const match = /^related(?: ([1-9][0-9]?)\/([1-9][0-9]?))?$/u.exec(value ?? '');
+  const index = Number(match?.[1] ?? 1);
+  const count = Number(match?.[2] ?? 1);
+  if (!match || index > count) throw new Error('Invalid related test shard');
+  return { index, count };
+}
+
+/**
+ * Vitest invocations for one related shard. Every shard receives the same selection, so the
+ * shards together run each selected file, and each Electron bridge group, exactly once.
+ * @param {string[]} files
+ * @param {string} shard `related` or `related <index>/<count>` from the platform matrix.
+ * @returns {{args: string[], env: Record<string, string>}[]}
+ */
+export function relatedTestRuns(files, shard) {
+  const { index, count } = parseRelatedShard(shard);
+  if (!Array.isArray(files) || !files.every(safePath) || new Set(files).size !== files.length)
+    throw new Error('Invalid related test files');
+  const runs = [];
+  // Windows process command lines have a 32K-character limit.
+  const batches = (list, options) => {
+    for (let offset = 0; offset < list.length; offset += RELATED_BATCH)
+      runs.push({
+        args: [
+          'run',
+          '--allowOnly=false',
+          ...options,
+          ...list.slice(offset, offset + RELATED_BATCH),
+        ],
+        env: {},
+      });
+  };
+  if (count === 1) {
+    batches(files, []);
+    return runs;
+  }
+  // Sort so that every shard builds identical batches whatever order Vitest listed them in.
+  const sorted = [...files].sort();
+  batches(
+    sorted.filter((file) => !ELECTRON_BRIDGE_SPECS.includes(file)),
+    [
+      `--shard=${index}/${count}`,
+      // A batch can have fewer files than shards; the other shards run those files.
+      '--passWithNoTests',
+      ...ELECTRON_BRIDGE_SPECS.flatMap((spec) => ['--exclude', spec]),
+    ],
+  );
+  for (const file of sorted.filter((entry) => ELECTRON_BRIDGE_SPECS.includes(entry))) {
+    for (let group = index - 1; group < ELECTRON_BRIDGE_GROUPS; group += count)
+      runs.push({
+        args: ['run', '--allowOnly=false', file],
+        env: { SPRINT_CODER_ELECTRON_BRIDGE_SHARD: String(group) },
+      });
+  }
+  return runs;
 }
 
 function main() {
