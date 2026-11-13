@@ -1,3 +1,4 @@
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -15,6 +16,14 @@ pub struct RefSource {
     /// forced, so resolution reads it the same way and counts the same evidence.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub renderer_accessibility_forced: bool,
+    /// The node count of the window's whole tree when the capture took a small
+    /// tree for it only after it stopped changing past a Chromium renderer
+    /// settle. A resolution in the same process whose walk comes back at
+    /// exactly this count reads that settled tree again and need not wait out
+    /// the settle. Absent (and ignored by a build that does not know it) for
+    /// every other capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_thin_nodes: Option<u64>,
 }
 
 impl RefSource {

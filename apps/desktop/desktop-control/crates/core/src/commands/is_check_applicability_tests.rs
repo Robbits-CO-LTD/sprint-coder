@@ -37,6 +37,7 @@ fn action_availability_makes_toggle_and_expand_applicable() {
             source_window_bounds_hash: None,
             source_surface: crate::adapter::SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,

@@ -35,13 +35,20 @@ import {
   type GraphStepInterruption,
 } from './graph-resource';
 import {
+  DEFAULT_ASSISTANT_PREFERENCES,
   graphGenerationSchema,
   graphMissionPlanSchema,
   teamMissionCheckpointSchema,
+  type AssistantPreferences,
   type GraphDocument,
   type GraphGeneration,
   type WorkerActivityEntry,
 } from '@sprint-coder/contracts';
+import {
+  ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX,
+  assistantPreferencesPromptContent,
+  normalizeAssistantPreferences,
+} from './assistant-preferences-prompt';
 import {
   parseStoredGraphDocument,
   validateGraphDocumentWrite,
@@ -1127,6 +1134,7 @@ type CommandRow = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  desktop_action_json?: string | null;
 };
 type EditSagaRow = {
   commit_sequence: number | null;
@@ -4708,6 +4716,13 @@ const migrations = [
       CHECK (persistent_identity_digest IS NULL OR
         (length(persistent_identity_digest) = 64 AND persistent_identity_digest NOT GLOB '*[^a-f0-9]*'));`,
   },
+  {
+    // What a desktop-control run did, with the parts it named, as read when it started (display
+    // only; see `beginCommand`).
+    version: 107,
+    checksum: 'commands-v107-desktop-action-display',
+    sql: `ALTER TABLE command_runs ADD COLUMN desktop_action_json TEXT;`,
+  },
 ];
 
 /** The newest 200 denials and the newest 200 other Auto decisions of a Task, oldest first
@@ -5917,6 +5932,11 @@ export interface PersistenceClient {
   setTeamUsageMode(mode: TeamUsageMode): TeamUsageMode;
   getSprintCoderPrePrompt(): string;
   setSprintCoderPrePrompt(prompt: string): void;
+  getAssistantPreferences(): { configured: boolean; preferences: AssistantPreferences };
+  setAssistantPreferences(input: AssistantPreferences): {
+    configured: true;
+    preferences: AssistantPreferences;
+  };
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -6014,7 +6034,7 @@ export interface PersistenceClient {
     processStartTime: string;
     startedAt: string;
   }): { command: CommandSummary; event: TurnEvent };
-  beginCommand(commandId: string): CommandSummary;
+  beginCommand(commandId: string, desktopAction?: DesktopApprovalAction): CommandSummary;
   appendCommandOutput(input: {
     commandId: string;
     seq: number;
@@ -15683,6 +15703,37 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(normalized, new Date().toISOString());
   }
 
+  getAssistantPreferences(): { configured: boolean; preferences: AssistantPreferences } {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'assistant.preferences'")
+      .get() as { value: string } | undefined;
+    const unset = { configured: false, preferences: { ...DEFAULT_ASSISTANT_PREFERENCES } };
+    if (row === undefined) return unset;
+    try {
+      return {
+        configured: true,
+        preferences: normalizeAssistantPreferences(JSON.parse(row.value)),
+      };
+    } catch {
+      // A damaged or older-shaped value counts as never saved, so nothing reaches the AI.
+      return unset;
+    }
+  }
+
+  setAssistantPreferences(input: AssistantPreferences): {
+    configured: true;
+    preferences: AssistantPreferences;
+  } {
+    const preferences = normalizeAssistantPreferences(input);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('assistant.preferences', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(JSON.stringify(preferences), new Date().toISOString());
+    return { configured: true, preferences };
+  }
+
   getTeamModelRestriction(): TeamModelRestriction {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'team.model-restriction'")
@@ -16929,11 +16980,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  beginCommand(commandId: string): CommandSummary {
+  /**
+   * Marks the run as starting. A desktop-control run may bring what it does, with the parts it
+   * names as read when it starts, for its timeline row (display only): a run allowed without a
+   * card (the app-wide Task grant) has no card that names them.
+   */
+  beginCommand(commandId: string, desktopAction?: DesktopApprovalAction): CommandSummary {
+    const display =
+      desktopAction === undefined
+        ? undefined
+        : desktopApprovalActionSchema.safeParse(desktopAction);
     return this.db.transaction(() => {
       const updated = this.db
-        .prepare("UPDATE command_runs SET state = 'starting' WHERE id = ? AND state = 'prepared'")
-        .run(commandId);
+        .prepare(
+          `UPDATE command_runs SET state = 'starting',
+             desktop_action_json = COALESCE(?, desktop_action_json)
+           WHERE id = ? AND state = 'prepared'`,
+        )
+        .run(display?.success === true ? JSON.stringify(display.data) : null, commandId);
       if (updated.changes !== 1) throw new Error('Command is not prepared');
       return this.getCommand(commandId);
     })();
@@ -20495,6 +20559,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
             createdAt: new Date().toISOString(),
             messageId: null,
           };
+    const preferencesFragment = this.assistantPreferencesFragment(taskId);
+    const settingsFragments = [
+      ...(prePromptFragment === null ? [] : [prePromptFragment]),
+      ...(preferencesFragment === null ? [] : [preferencesFragment]),
+    ];
     const skillFragments: ContextFragment[] = this.getTurnSkills(taskId, turnId).map((skill) => {
       const trust = skill.selection.ref.source === 'builtin' ? 'system' : 'user';
       const id = `skill:${sha256(
@@ -20541,14 +20610,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
       taskId,
       turnId,
       reservedTokens +
-        (prePromptFragment?.tokenEstimate ?? 0) +
+        settingsFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0) +
         skillFragments.reduce((total, fragment) => total + fragment.tokenEstimate, 0),
     );
-    if (skillFragments.length === 0 && prePromptFragment === null) return prepared;
+    if (skillFragments.length === 0 && settingsFragments.length === 0) return prepared;
     const [systemFragment, ...remainingFragments] = prepared.fragments;
     const fragments = [
       ...(systemFragment === undefined ? [] : [systemFragment]),
-      ...(prePromptFragment === null ? [] : [prePromptFragment]),
+      ...settingsFragments,
       ...remainingFragments,
       ...skillFragments,
     ];
@@ -20559,6 +20628,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ...prepared.usageEvents,
         this.recordContextUsage(taskId, turnId, aggregateContextUsage(fragments)),
       ],
+    };
+  }
+
+  /**
+   * The user's reply-style preferences as one system fragment, or null while they were never
+   * saved (the context then stays byte-for-byte what it was before the setting existed).
+   * Only Leader turns carry it: the Team execution snapshot below is a Worker's context, and a
+   * Worker's report is read by the Leader rather than by the user. A Worker forked from a Leader
+   * Turn still clones this fragment into its seal (the seal stays a faithful copy), and
+   * `applyWorkerContextInheritance` drops it before either Worker runtime sees the context.
+   */
+  private assistantPreferencesFragment(taskId: string): ContextFragment | null {
+    const state = this.getAssistantPreferences();
+    if (!state.configured) return null;
+    const content = assistantPreferencesPromptContent(state.preferences);
+    return {
+      id: `${ASSISTANT_PREFERENCES_FRAGMENT_ID_PREFIX}${sha256(content)}`,
+      taskId,
+      source: 'system',
+      trust: 'system',
+      tokenEstimate: estimateTokens(content),
+      content,
+      createdAt: new Date().toISOString(),
+      messageId: null,
     };
   }
 
@@ -23482,7 +23575,7 @@ function toCommandSummary(row: CommandRow): CommandSummary {
     cwd: spec.cwdIdentity.canonicalPath,
     envDelta: { ...spec.envDelta },
     purpose: row.purpose,
-    ...commandDesktopAction(spec),
+    ...commandDesktopAction(spec, row.desktop_action_json),
     risk: row.risk,
     state: row.state,
     pid: row.pid,
@@ -23498,15 +23591,31 @@ function toCommandSummary(row: CommandRow): CommandSummary {
 
 /**
  * What a desktop-control command did, for its timeline row: only for the shipped binary, and
- * without reading any snapshot (the part names are on its approval card, when it had one).
+ * without reading any snapshot. The part names are the ones recorded as the run started
+ * (`beginCommand`), or on its approval card, when it had one.
  */
-function commandDesktopAction(spec: ExecutionSpec): { desktopAction?: DesktopApprovalAction } {
+function commandDesktopAction(
+  spec: ExecutionSpec,
+  recorded: string | null | undefined,
+): { desktopAction?: DesktopApprovalAction } {
   try {
-    return isShippedDesktopControlPath(spec.absoluteExecutable)
-      ? { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) }
-      : {};
+    if (!isShippedDesktopControlPath(spec.absoluteExecutable)) return {};
+    const parsed =
+      typeof recorded === 'string'
+        ? desktopApprovalActionSchema.safeParse(parseRecordedJson(recorded))
+        : null;
+    if (parsed?.success === true) return { desktopAction: parsed.data };
+    return { desktopAction: desktopControlApprovalAction(spec.argv, { names: false }) };
   } catch {
     return {};
+  }
+}
+
+function parseRecordedJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
   }
 }
 

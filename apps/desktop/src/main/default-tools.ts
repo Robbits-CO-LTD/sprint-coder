@@ -22,6 +22,7 @@ import {
   type DesktopControlSessionVariables,
 } from './desktop-control';
 import {
+  desktopControlSessionReadScope,
   desktopControlTeamCursors,
   desktopControlWorker,
   ensureDesktopControlSession,
@@ -39,10 +40,13 @@ import {
   type CommandOutputChunk,
   type CommandResult,
 } from './command-runner';
-import { rememberDesktopControlWindows } from './desktop-control-display';
+import {
+  desktopControlApprovalAction,
+  rememberDesktopControlWindows,
+} from './desktop-control-display';
 import { readWindowsExecutableFileVersion } from './windows-pe-version';
 import type { PersistenceClient } from './persistence';
-import type { TurnEvent } from '@sprint-coder/contracts';
+import type { DesktopApprovalAction, TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
 import type { ManagedCommandSessions } from './managed-command-sessions';
 import {
@@ -837,7 +841,10 @@ export function registerCommandRunnerTool(
           : { desktopControlExpectedWindowOwner: control.desktopControlExpectedWindowOwner }),
         ...(desktopSession === undefined ? {} : { desktopControlSession: desktopSession }),
         beforeSpawn: () => {
-          command.persistence.beginCommand(commandId);
+          command.persistence.beginCommand(
+            commandId,
+            roots === undefined ? undefined : desktopControlRunAction(_context.taskId, spec.argv),
+          );
           // Recorded as the run starts, whether or not it then succeeds: a desktop operation
           // whose outcome is unknown is the one most dangerous to repeat.
           const mode = caller === undefined ? null : desktopControlArgvMode(spec.argv);
@@ -1192,6 +1199,30 @@ export function commandToolTruncated(
   outputBufferTruncated: boolean,
 ): boolean {
   return runnerTruncated || outputBufferTruncated;
+}
+
+/**
+ * What an allowed desktop-control run does, with the parts it names read from the same records its
+ * card and the app-wide Task grant read (`desktopControlSessionReadScope`), for its timeline row
+ * only: a run the app-wide grant allowed has no card that names them. Read as the run starts, so
+ * before the run itself can change those records. Nothing decides on it; a run that only prints
+ * names no part, and one whose parts cannot be read is shown as not confirmed, as before.
+ */
+export function desktopControlRunAction(
+  taskId: string,
+  argv: readonly string[],
+): DesktopApprovalAction | undefined {
+  try {
+    if (desktopControlArgvIsInert(argv)) return undefined;
+    const readScope = desktopControlSessionReadScope(taskId, argv);
+    return desktopControlApprovalAction(
+      argv,
+      readScope === null ? { taskId, names: false } : { taskId, ...readScope },
+    );
+  } catch {
+    // Never in the way of the run: its row is then described without the names, as before.
+    return undefined;
+  }
 }
 
 function completePersistedCommand(

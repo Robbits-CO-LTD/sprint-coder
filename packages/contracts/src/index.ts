@@ -3413,6 +3413,40 @@ export const sprintCoderPrePromptSchema = z
   .strict();
 export type SprintCoderPrePrompt = z.infer<typeof sprintCoderPrePromptSchema>;
 export const sprintCoderPrePromptSetInputSchema = sprintCoderPrePromptSchema;
+/** How the assistant should phrase its replies to the user. Applied to Leader replies only. */
+export const assistantPreferencesSchema = z
+  .object({
+    tone: z.enum(['polite', 'casual', 'crisp']),
+    length: z.enum(['short', 'balanced', 'detailed']),
+    depth: z.enum(['conclusion', 'reasoned', 'beginner']),
+    language: z.enum(['auto', 'ja', 'en']),
+    confirm: z.enum(['ask', 'balanced', 'proceed']),
+    callName: z.string().max(40),
+    emoji: z.boolean(),
+    suggestNextSteps: z.boolean(),
+    planFirst: z.boolean(),
+  })
+  .strict();
+export type AssistantPreferences = z.infer<typeof assistantPreferencesSchema>;
+export const DEFAULT_ASSISTANT_PREFERENCES: AssistantPreferences = {
+  tone: 'polite',
+  length: 'balanced',
+  depth: 'reasoned',
+  language: 'auto',
+  confirm: 'balanced',
+  callName: '',
+  emoji: false,
+  suggestNextSteps: true,
+  planFirst: false,
+};
+export const assistantPreferencesStateSchema = z
+  .object({ configured: z.boolean(), preferences: assistantPreferencesSchema })
+  .strict();
+export type AssistantPreferencesState = z.infer<typeof assistantPreferencesStateSchema>;
+export const assistantPreferencesSetInputSchema = assistantPreferencesSchema;
+export const assistantPreferencesSetResultSchema = z
+  .object({ configured: z.literal(true), preferences: assistantPreferencesSchema })
+  .strict();
 export const teamModelIdentitySchema = z
   .object({
     connectionId: connectionIdSchema,
@@ -4787,6 +4821,10 @@ export interface SprintCoderApi {
     setTeamUsageMode(input: { mode: TeamUsageMode }): Promise<{ mode: TeamUsageMode }>;
     getSprintCoderPrePrompt(): Promise<SprintCoderPrePrompt>;
     setSprintCoderPrePrompt(input: SprintCoderPrePrompt): Promise<void>;
+    getAssistantPreferences(): Promise<{ configured: boolean; preferences: AssistantPreferences }>;
+    setAssistantPreferences(
+      input: AssistantPreferences,
+    ): Promise<{ configured: true; preferences: AssistantPreferences }>;
     getTeamModelSettings(): Promise<TeamModelSettings>;
     setTeamModelRestriction(input: TeamModelRestriction): Promise<void>;
     getDefaultTeamPolicy(): Promise<TeamPolicy>;
@@ -5011,6 +5049,8 @@ export const IPC_CHANNELS = {
   settingsSetTeamUsageMode: 'sprint-coder:settings:set-team-usage-mode',
   settingsGetSprintCoderPrePrompt: 'sprint-coder:settings:get-sprint-coder-pre-prompt',
   settingsSetSprintCoderPrePrompt: 'sprint-coder:settings:set-sprint-coder-pre-prompt',
+  settingsGetAssistantPreferences: 'sprint-coder:settings:get-assistant-preferences',
+  settingsSetAssistantPreferences: 'sprint-coder:settings:set-assistant-preferences',
   settingsGetTeamModelSettings: 'sprint-coder:settings:get-team-model-settings',
   settingsSetTeamModelRestriction: 'sprint-coder:settings:set-team-model-restriction',
   settingsGetDefaultTeamPolicy: 'sprint-coder:settings:get-default-team-policy',

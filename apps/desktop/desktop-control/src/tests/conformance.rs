@@ -197,6 +197,7 @@ fn entry(bounds: Rect) -> RefEntry {
             source_window_bounds_hash: None,
             source_surface: SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: RefScope {
             root_ref: None,

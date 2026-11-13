@@ -145,6 +145,9 @@ import {
   runtimeSettingsSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
+  assistantPreferencesStateSchema,
+  assistantPreferencesSetInputSchema,
+  assistantPreferencesSetResultSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
   teamConcurrencySettingsSchema,
@@ -2367,6 +2370,21 @@ export class IpcRouter {
       (input, event, envelope) =>
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetSprintCoderPrePrompt, () =>
           this.persistence.setSprintCoderPrePrompt(input.prompt),
+        ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetAssistantPreferences,
+      emptyPayloadSchema,
+      assistantPreferencesStateSchema,
+      () => this.persistence.getAssistantPreferences(),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetAssistantPreferences,
+      assistantPreferencesSetInputSchema,
+      assistantPreferencesSetResultSchema,
+      (input, event, envelope) =>
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetAssistantPreferences, () =>
+          this.persistence.setAssistantPreferences(input),
         ).value,
     );
     this.handle(

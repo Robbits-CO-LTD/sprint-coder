@@ -270,6 +270,7 @@ fn blank_secure_entry(fixture: &HostedFixture) -> RefEntry {
             source_window_bounds_hash: None,
             source_surface: agent_desktop_core::SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: agent_desktop_core::RefScope {
             root_ref: None,

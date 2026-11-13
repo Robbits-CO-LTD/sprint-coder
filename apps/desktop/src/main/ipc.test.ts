@@ -70,6 +70,7 @@ import {
   runtimeModelSetInputSchema,
   runtimeSetInputSchema,
   sprintCoderPrePromptSetInputSchema,
+  assistantPreferencesSetInputSchema,
   skillDraftCreateInputSchema,
   skillDraftIdInputSchema,
   skillDraftInstallInputSchema,
@@ -112,7 +113,9 @@ import {
   type EffectiveWorkspaceSet,
   type CodexModelOption,
   type ProviderModel,
+  DEFAULT_ASSISTANT_PREFERENCES,
 } from '@sprint-coder/contracts';
+import { assistantPreferencesPromptContent } from './assistant-preferences-prompt';
 import {
   clampCodexEffort,
   confirmFullAccessOnce,
@@ -8267,6 +8270,8 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.settingsSetTeamUsageMode]: teamUsageModeStateSchema,
   [IPC_CHANNELS.settingsGetSprintCoderPrePrompt]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetSprintCoderPrePrompt]: sprintCoderPrePromptSetInputSchema,
+  [IPC_CHANNELS.settingsGetAssistantPreferences]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetAssistantPreferences]: assistantPreferencesSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamModelSettings]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelRestriction]: teamModelRestrictionSetInputSchema,
   [IPC_CHANNELS.settingsGetDefaultTeamPolicy]: emptyPayloadSchema,
@@ -9258,5 +9263,43 @@ describe('CLI runtime deltas and the anchored assistant message', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(appendDelta).toHaveBeenCalledWith('task-cli', 'turn-cli', 'cli-message', 'a');
+  });
+});
+
+describe('assistant reply preferences on the API provider path', () => {
+  it('delivers the preferences fragment to the provider as a system message', () => {
+    const content = assistantPreferencesPromptContent({
+      ...DEFAULT_ASSISTANT_PREFERENCES,
+      tone: 'crisp',
+    });
+    const messages = providerMessagesFromContext(
+      [
+        {
+          id: 'settings:assistant-preferences:digest',
+          taskId: 'task-preferences',
+          source: 'system',
+          trust: 'system',
+          tokenEstimate: 1,
+          content,
+          createdAt: '2026-11-13T00:00:00.000Z',
+          messageId: null,
+        },
+        {
+          id: 'current',
+          taskId: 'task-preferences',
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: '実装して',
+          createdAt: '2026-11-13T00:00:01.000Z',
+          messageId: 'message-current',
+        },
+      ],
+      'message-current',
+    );
+    expect(messages).toEqual([
+      { role: 'system', content },
+      { role: 'user', content: '実装して' },
+    ]);
   });
 });

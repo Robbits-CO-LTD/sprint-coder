@@ -166,6 +166,7 @@ fn element_root_derives_surface_with_relative_depth_budgets() {
             source_window_bounds_hash: None,
             source_surface: crate::SnapshotSurface::Menu,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DESKTOP_CONTROL_EXPECTED_WINDOW_OWNER_VARIABLE,
+  DESKTOP_CONTROL_SKILL_REFERENCES,
   DESKTOP_CONTROL_HOST_PID_VARIABLE,
   DESKTOP_CONTROL_RENDERER_IMAGE_VARIABLE,
   desktopControlArgvIsInert,
@@ -736,6 +737,14 @@ describe('desktop-control runs that touch no other app', () => {
     [['help', 'launch']],
     [['help', 'skills', 'get']],
     [['skills', 'get', 'jev']],
+    // A guide's reference, by its name or by its path as the guides write it.
+    [['skills', 'get', 'agent-desktop-windows']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/troubleshooting.md']],
+    [['skills', 'get', 'windows', 'shell-and-overlay']],
+    [['skills', 'get', 'platform', 'references/permissions-and-elevation.md']],
+    [['skills', 'get', 'desktop', 'references/workflows.md']],
+    [['skills', 'get', 'agent-desktop-linux', 'references/troubleshooting.md']],
     [['launch', '--help']],
     [['snapshot', '--help']],
     [['select', '--help']],
@@ -774,8 +783,41 @@ describe('desktop-control runs that touch no other app', () => {
     // Positionals are closed in code, not left to how the binary answers them.
     [['skills', 'get', 'desktop', '../x']],
     [['skills', 'get', 'C:\\Windows\\win.ini']],
-    [['skills', 'get', 'desktop', 'references/workflows.md']],
     [['skills', 'get', 'desktop', 'a', 'b']],
+    // A reference only by its exact name or path, among the ones that skill carries.
+    [['skills', 'get', 'desktop', 'references/../SKILL.md']],
+    [['skills', 'get', 'desktop', 'references/../../agent-desktop-windows/SKILL.md']],
+    [['skills', 'get', 'agent-desktop-windows', '../references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', '/references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', './references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references\\chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references//chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'C:\\references\\chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'C:references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', '\\\\server\\share\\x.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md:x']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.txt']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron']],
+    [['skills', 'get', 'agent-desktop-windows', 'chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/Chromium-and-Electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'References/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md ']],
+    [['skills', 'get', 'agent-desktop-windows', ' references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium and electron.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/unknown.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'unknown']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/workflows.md']],
+    [['skills', 'get', 'desktop', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'jev', 'references/workflows.md']],
+    [['skills', 'get', 'Agent-Desktop-Windows', 'references/chromium-and-electron.md']],
+    [['skills', 'get', 'agent-desktop-unknown', 'references/troubleshooting.md']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', 'x']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', '--full']],
+    [['skills', 'get', 'agent-desktop-windows', '--full', 'troubleshooting']],
+    [['skills', 'get', 'agent-desktop-windows', 'references/chromium-and-electron.md', '-h']],
+    [['skills', 'get', '--session', 's1', 'windows', 'references/troubleshooting.md']],
+    [['skills', 'get', 'windows', '--', 'references/troubleshooting.md']],
     [['skills', 'get', 'unknown']],
     [['skills', 'get', 'Desktop']],
     [['skills', 'get', 'desktop', 'with space']],
@@ -799,6 +841,52 @@ describe('desktop-control runs that touch no other app', () => {
     [['trace']],
   ])('%j keeps the card', (argv) => {
     expect(desktopControlArgvIsInert(argv)).toBe(false);
+  });
+
+  it('knows each bundled guide by the references the binary carries for it', () => {
+    const skills = join(__dirname, '..', '..', 'desktop-control', 'skills');
+    const embedded = readFileSync(
+      join(skills, '..', 'crates', 'core', 'src', 'commands', 'skills.rs'),
+      'utf8',
+    );
+    const guides = readdirSync(skills, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map(({ name }) => name);
+    expect(guides.sort()).toEqual(
+      [
+        'agent-desktop',
+        'agent-desktop-ffi',
+        'agent-desktop-linux',
+        'agent-desktop-macos',
+        'agent-desktop-windows',
+        'jev-desktop',
+      ].sort(),
+    );
+    for (const guide of guides) {
+      const folder = join(skills, guide, 'references');
+      const files = existsSync(folder) ? readdirSync(folder) : [];
+      for (const file of files) expect(embedded).toContain(`skills/${guide}/references/${file}"`);
+      const names = files.map((file) => file.replace(/\.md$/u, '')).sort();
+      expect([...(DESKTOP_CONTROL_SKILL_REFERENCES.get(guide) ?? ['missing'])].sort()).toEqual(
+        names,
+      );
+      // The short name (`windows`) carries the same ones as the full name.
+      const alias =
+        guide === 'jev-desktop' ? 'jev' : guide.replace(/^agent-/u, '').replace(/^desktop-/u, '');
+      expect([...(DESKTOP_CONTROL_SKILL_REFERENCES.get(alias) ?? ['missing'])].sort()).toEqual(
+        names,
+      );
+      for (const name of names) {
+        expect(desktopControlArgvIsInert(['skills', 'get', guide, `references/${name}.md`])).toBe(
+          true,
+        );
+        expect(desktopControlArgvIsInert(['skills', 'get', alias, name])).toBe(true);
+      }
+    }
+    expect([...DESKTOP_CONTROL_SKILL_REFERENCES.get('platform')!]).toEqual([
+      ...DESKTOP_CONTROL_SKILL_REFERENCES.get('agent-desktop-windows')!,
+    ]);
+    expect(DESKTOP_CONTROL_SKILL_REFERENCES.size).toBe(guides.length * 2 + 1);
   });
 });
 

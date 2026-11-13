@@ -43,6 +43,28 @@ pub struct ObservationMode {
     /// honours this marks the tree it returns (`ObservedTree::mark_visible_scope`);
     /// one that cannot read this way must fail rather than return a whole tree.
     pub visible_only: bool,
+    /// The node count of the small tree a capture of this same process took
+    /// for the window's whole tree once it settled (`RefSource::settled_thin_nodes`).
+    /// A walk that comes back at exactly this count is that tree again, so an
+    /// adapter need not wait out a renderer settle for it; any other count is
+    /// settled as usual.
+    pub settled_thin_nodes: Option<u64>,
+    /// How far the renderer settle of this one observation has come: set by
+    /// the observation loop once it has activated the renderer, for the walks
+    /// that follow within the same call only. `None` before activation and on
+    /// every new observation, so nothing one read saw carries into another.
+    pub settle: Option<SettleProgress>,
+}
+
+/// The settle of one observation: when the loop activated the renderer, the
+/// size of the last thin walk it saw after that (`None` until one), and when
+/// the walks first saw that size without a change since (the end of the first
+/// walk at that size; `None` with no size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettleProgress {
+    pub activated_at: std::time::Instant,
+    pub previous_thin_nodes: Option<u64>,
+    pub stable_since: Option<std::time::Instant>,
 }
 
 impl ObservationRequest {
@@ -90,6 +112,8 @@ impl ObservationRequest {
                 force_renderer_accessibility: options.force_renderer_accessibility,
                 identity_only: false,
                 visible_only: false,
+                settled_thin_nodes: None,
+                settle: None,
             },
         }
     }

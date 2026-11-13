@@ -83,6 +83,7 @@ pub fn run_from_ref_with_context(
         observed,
     } = capture;
     let visible_scope = observed.is_visible_scope();
+    let settled_thin_nodes = observed.settled_thin_nodes();
     let capture_proof =
         crate::refs::ref_capture_proof::CaptureProof::new(&observed).rooted_at(&path_prefix);
 
@@ -119,6 +120,9 @@ pub fn run_from_ref_with_context(
         |current| {
             current.remove_by_root_ref(&local_root_ref);
             let mut tree = ref_alloc::allocate_refs(raw_tree, current, &config)?;
+            if let Some(nodes) = settled_thin_nodes {
+                current.record_settled_thin_tree(nodes, Some(&local_root_ref));
+            }
             crate::snapshot::hints::add_structural_hints(&mut tree);
             Ok(tree)
         },

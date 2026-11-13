@@ -139,6 +139,17 @@ impl RefMap {
         self.inner.retain(|ref_id, _| !removed.contains(ref_id));
     }
 
+    /// Records, on every entry a capture rooted at `root` allocated (`None`
+    /// for a window capture), that the capture's observation was a small tree
+    /// of `nodes` nodes taken for the whole window after a renderer settle.
+    pub(crate) fn record_settled_thin_tree(&mut self, nodes: u64, root: Option<&str>) {
+        for entry in self.inner.values_mut() {
+            if entry.scope.root_ref.as_deref() == root {
+                entry.source.settled_thin_nodes = Some(nodes);
+            }
+        }
+    }
+
     pub fn validate(&self) -> Result<(), AppError> {
         let mut max_id = 0_u32;
         for (ref_id, entry) in &self.inner {

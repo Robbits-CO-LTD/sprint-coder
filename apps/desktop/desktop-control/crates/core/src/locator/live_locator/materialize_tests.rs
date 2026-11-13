@@ -359,6 +359,7 @@ fn source_entry() -> RefEntry {
             source_window_bounds_hash: None,
             source_surface: SnapshotSurface::Menu,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,
