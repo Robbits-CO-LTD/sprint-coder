@@ -200,11 +200,20 @@ fn thin_tree_settled(walk: Option<ThinWalk>, nodes: u64, content: bool) -> bool 
 }
 
 /// Whether a thin walk is the settled small tree a capture of this same
-/// process recorded (core hands the count over only for the capture's own
-/// process generation): it must come back at exactly that count, and with
-/// published content (checked by the caller). A renderer that dropped its tree
-/// back to the shell walks at the shell's count (19 on a cold Electron test
-/// window, against 25 settled) and holds no content, and is settled as usual.
+/// window recorded (core hands the count over only when the ref's recorded
+/// window id is the window being observed, in the capture's own process
+/// generation; a ref without a window id, or another window of the process,
+/// gets nothing): it must come back at exactly that count, and with published
+/// content (checked by the caller). A renderer that dropped its tree back to
+/// the shell walks at the shell's count (19 on a cold Electron test window,
+/// against 25 settled) and holds no content, and is settled as usual.
+///
+/// Accepted limits: a window that navigated to another page which happens to
+/// have the same count and content skips the settle wait too, and a count
+/// recorded from a partly published page that stood still past the settle is
+/// trusted again by later resolves of that capture's refs. Neither weakens a
+/// ref's proof: the resolve still has to find the recorded part exactly once
+/// in the tree it read, and the landing is matched by RuntimeId.
 fn is_recorded_settled_tree(recorded: Option<u64>, nodes: u64) -> bool {
     recorded == Some(nodes)
 }
