@@ -742,6 +742,19 @@ describe('SetupWizard', () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
+    it('the replay dialog: when the browser closes it on its own, the app is told', async () => {
+      fullBridge();
+      const onClose = vi.fn();
+      await act(async () => {
+        root.render(<SetupReplayDialog onClose={onClose} onOpenSettings={() => {}} />);
+      });
+      await flush();
+      // Chromium closes a dialog on a second Escape in a row whatever `cancel` did.
+      const dialog = q<HTMLDialogElement>('[data-testid="setup-replay-dialog"]')!;
+      await act(async () => dialog.dispatchEvent(new Event('close')));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
     it('reply settings that cannot be read are never written over with defaults', async () => {
       const settings = fullBridge();
       settings.getAssistantPreferences.mockRejectedValue(new Error('busy'));

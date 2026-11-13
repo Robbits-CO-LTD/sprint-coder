@@ -1574,6 +1574,10 @@ export function SetupReplayDialog({
         event.preventDefault();
         if (!busy.current) onClose();
       }}
+      // The browser can close the dialog whatever `cancel` did (Chromium does on a second Escape
+      // in a row with nothing pressed in between). Follow it, so the app never keeps a closed
+      // replay mounted and "セットアップをもう一度" switched off.
+      onClose={onClose}
     >
       <SetupWizard
         mode="replay"
