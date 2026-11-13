@@ -468,6 +468,17 @@ const WORKER_DESKTOP_WAIT_MARGIN_MS = 15_000;
  * own waits, so this is only reached by a run that hangs.
  */
 export function desktopControlWorkerWaitMs(argv: readonly string[]): number {
+  return Math.min(
+    WORKER_DESKTOP_WAIT_MAX_MS,
+    Math.max(
+      WORKER_DESKTOP_WAIT_MIN_MS,
+      longestDesktopControlTimeoutMs(argv) + WORKER_DESKTOP_WAIT_MARGIN_MS,
+    ),
+  );
+}
+
+/** The longest timeout these desktop-control arguments give the executable, in ms (0 for none). */
+function longestDesktopControlTimeoutMs(argv: readonly string[]): number {
   const read = readDesktopControlCommand(argv);
   const given: number[] = [];
   for (const name of ['--timeout-ms', '--timeout'])
@@ -475,11 +486,19 @@ export function desktopControlWorkerWaitMs(argv: readonly string[]): number {
   if (read?.command === 'batch')
     for (const { args } of readBatchEntries(read.positionals) ?? [])
       for (const key of ['timeout_ms', 'timeout', 'ms']) given.push(Number(args[key]));
-  const longest = Math.max(0, ...given.filter((value) => Number.isFinite(value) && value > 0));
-  return Math.min(
-    WORKER_DESKTOP_WAIT_MAX_MS,
-    Math.max(WORKER_DESKTOP_WAIT_MIN_MS, longest + WORKER_DESKTOP_WAIT_MARGIN_MS),
-  );
+  return Math.max(0, ...given.filter((value) => Number.isFinite(value) && value > 0));
+}
+
+/**
+ * Why a Team Worker's desktop-control run may not wait as long as its arguments ask, or `null`.
+ * Past the bound Main stops the run with its outcome unknown, so a run that asks to wait longer
+ * than the bound leaves room for (285 s) is refused before its card, never approved and cut short.
+ */
+export function desktopControlWorkerWaitRefusal(argv: readonly string[]): string | null {
+  const allowed = WORKER_DESKTOP_WAIT_MAX_MS - WORKER_DESKTOP_WAIT_MARGIN_MS;
+  return longestDesktopControlTimeoutMs(argv) > allowed
+    ? `Team の Worker のデスクトップ操作が待てるのは ${allowed / 1000} 秒まで（--timeout-ms・--timeout・batch の timeout などを ${allowed} 以下にする）。`
+    : null;
 }
 
 /**
@@ -619,6 +638,9 @@ export function registerCommandRunnerTool(
             'EXECUTION_SPEC_INVALID',
             'Team の Worker は、デスクトップ操作を background では実行できません。',
           );
+        const waitRefusal = desktopControlWorkerWaitRefusal(spec.argv);
+        if (waitRefusal !== null)
+          throw new CommandRunnerError('EXECUTION_SPEC_INVALID', waitRefusal);
       }
       let desktopControlRefusal = desktopControl
         ? (desktopControlArgvRefusal(spec.argv, roots) ??
