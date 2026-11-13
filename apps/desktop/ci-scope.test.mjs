@@ -68,6 +68,10 @@ describe('CI change boundaries', () => {
     '.github/workflows/release-beta.yml',
     'apps/desktop/forge.config.ts',
     'apps/desktop/installer/windows-wizard.iss',
+    'apps/desktop/windows-sandbox-artifacts.ts',
+    'apps/desktop/src/main/desktop-control-build.ts',
+    'apps/desktop/vendor/archify/index.js',
+    'docs/licenses/unicode-license.txt',
     'apps/desktop/src/main/auto-update.ts',
     'apps/desktop/scripts/ensure-inno-setup.ps1',
   ])('checks packages on both PR and main changes to %s, including deletion', (path) => {
