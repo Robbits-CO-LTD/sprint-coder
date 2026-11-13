@@ -269,6 +269,7 @@ import {
   type ProjectContextItem,
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { BUILTIN_SKILL_CREATOR_ID } from './skill-creator-builtin';
 import {
   TEAM_USAGE_OFFER_FRAGMENT_PREFIX,
   teamUsageGuidance,
@@ -21168,9 +21169,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
         (this.latestTurnRequestedBuiltinTeamSkill(taskId) ||
           this.getTeamByTask(taskId) !== null)) ||
       this.taskHasHiringTeam(taskId);
-    const teamUsageOffer = teamRequested
-      ? null
-      : this.teamUsageOfferFor({ runtimeKind, modelSelection });
+    // A Turn that uses the Leader MCP for another purpose and says not to use Team (skill-creator:
+    // 「team_*ツールは使用しません」) is never offered Team. Decided here, with the seal, so dispatch
+    // reads the same answer. A Project Turn's memory tool is not such a purpose: it sits beside the
+    // Team tools on an ordinary Turn, as it does on a requested Team Turn.
+    const skillCreatorTurn = parsedSkills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === BUILTIN_SKILL_CREATOR_ID,
+    );
+    const teamUsageOffer =
+      teamRequested || skillCreatorTurn
+        ? null
+        : this.teamUsageOfferFor({ runtimeKind, modelSelection });
     const shouldSealBuiltinTeamSkill = teamRequested || teamUsageOffer !== null;
     const skillCatalogContent = this.skillCatalogContextProvider?.(
       parsedSkills.map(({ selection }) => selection),
@@ -21361,6 +21371,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * Whether the Task's latest Turn was a Team Turn the user asked for. A Turn that carried the
    * built-in Team Skill only because of the 「Team の使い方」 setting (its seal also holds the
    * offer fragment) does not count: a bare 「続けて」 after it must not turn into a required Team.
+   * That holds only while the offered Leader hired nobody: once it hired a Worker,
+   * `taskHasHiringTeam` makes every later Turn of the Task a requested Team Turn (whatever the
+   * wording or the setting), so the Leader can keep managing the Workers it hired.
    */
   private latestTurnRequestedBuiltinTeamSkill(taskId: string): boolean {
     const row = this.db

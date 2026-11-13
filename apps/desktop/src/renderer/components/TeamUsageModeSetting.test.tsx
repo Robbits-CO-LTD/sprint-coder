@@ -57,6 +57,66 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe('TeamUsageModeSetting ordering', () => {
+  it('saves once when the choices are pressed in quick succession', async () => {
+    const pending = deferred<{ mode: TeamUsageMode }>();
+    const setTeamUsageMode = vi.fn(() => pending.promise);
+    bridge({
+      getTeamUsageMode: vi.fn().mockResolvedValue({ mode: 'explicit' }),
+      setTeamUsageMode,
+    });
+    const container = await mount();
+    await act(async () => {
+      radio(container, 'proactive').click();
+      radio(container, 'auto').click();
+      radio(container, 'explicit').click();
+    });
+    expect(setTeamUsageMode).toHaveBeenCalledTimes(1);
+    expect(setTeamUsageMode).toHaveBeenCalledWith({ mode: 'proactive' });
+    // While the first save is in flight, every choice waits.
+    for (const { value } of TEAM_USAGE_OPTIONS) expect(radio(container, value).disabled).toBe(true);
+    await act(async () => pending.resolve({ mode: 'proactive' }));
+    await flush();
+    expect(checkedModes(container)).toEqual(['proactive']);
+    expect(radio(container, 'auto').disabled).toBe(false);
+  });
+
+  it('ignores a slow earlier read that arrives after a newer one', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    const first = deferred<{ mode: TeamUsageMode }>();
+    const second = deferred<{ mode: TeamUsageMode }>();
+    const getTeamUsageMode = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    bridge({ getTeamUsageMode, setTeamUsageMode: vi.fn() });
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    mounted = { root, container };
+    await act(async () => root.render(<TeamUsageModeSetting active />));
+    await flush();
+    // The dialog closes and opens again before the first read answers.
+    await act(async () => root.render(<TeamUsageModeSetting active={false} />));
+    await act(async () => root.render(<TeamUsageModeSetting active />));
+    await flush();
+    expect(getTeamUsageMode).toHaveBeenCalledTimes(2);
+    await act(async () => second.resolve({ mode: 'auto' }));
+    await flush();
+    await act(async () => first.resolve({ mode: 'proactive' }));
+    await flush();
+    expect(checkedModes(container)).toEqual(['auto']);
+  });
+});
+
 describe('TeamUsageModeSetting', () => {
   it.each([false, true])(
     'shows the three choices in plain words and the saved one (strict=%s)',

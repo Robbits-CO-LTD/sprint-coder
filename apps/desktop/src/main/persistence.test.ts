@@ -29,7 +29,11 @@ import {
 } from '@sprint-coder/contracts';
 import { assistantPreferencesPromptContent } from './assistant-preferences-prompt';
 import { applyWorkerContextInheritance } from './team-worker-runtime';
-import { isTeamScenarioInput, requiresTeamWorkersInput } from './team-tools';
+import {
+  isExistingTeamFollowupInput,
+  isTeamScenarioInput,
+  requiresTeamWorkersInput,
+} from './team-tools';
 import {
   ToolRegistry,
   createExecutionSpec,
@@ -3343,6 +3347,173 @@ if (runsWithElectronAbi)
         persistence.completeTurn(task.id, after.turnId, 'failed');
         persistence.setTeamUsageMode('explicit');
         expect(persistence.startTurn(task.id, '画面を作り直して').teamTurn).toBe(false);
+        persistence.close();
+      });
+
+      it('leaves the Turn ordinary when asking Main whether Team can be offered throws', () => {
+        const { persistence } = createPersistence();
+        persistence.setTeamUsageMode('auto');
+        persistence.setTeamUsageOfferProvider(() => {
+          throw new Error('offer check failed');
+        });
+        const task = persistence.createTask('offer throws');
+        const started = persistence.startTurn(task.id, '画面を作り直して');
+        expect(started.teamTurn).toBe(false);
+        expect(started).not.toHaveProperty('teamUsageOffer');
+        const prepared = persistence.prepareContext(task.id, started.turnId);
+        expect(teamSkillCount(prepared)).toBe(0);
+        expect(offerFragments(prepared)).toEqual([]);
+        persistence.close();
+      });
+
+      it.each(['auto', 'proactive'] as const)(
+        'never offers Team on a skill-creator Turn at %s',
+        (mode) => {
+          const { persistence } = createPersistence();
+          const offer = vi.fn(() => true);
+          persistence.setTeamUsageOfferProvider(offer);
+          persistence.setTeamUsageMode(mode);
+          const task = persistence.createTask('skill creator');
+          const skillCreator = {
+            selection: {
+              kind: 'chat' as const,
+              ref: { source: 'builtin' as const, skillId: 'skill-creator', digest: 'c'.repeat(64) },
+            },
+            name: 'skill-creator',
+            description: 'Create a Skill',
+            content: '---\nname: skill-creator\ndescription: Create a Skill\n---\n\nCREATOR_BODY',
+            packagePath: '/tmp/sprint-coder-skill-creator',
+          };
+          const started = persistence.startTurn(task.id, '議事録をまとめるSkillを作って', [
+            skillCreator,
+          ]);
+          expect(started.teamTurn).toBe(false);
+          expect(started).not.toHaveProperty('teamUsageOffer');
+          expect(offer).not.toHaveBeenCalled();
+          const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(teamSkillCount(prepared)).toBe(0);
+          expect(offerFragments(prepared)).toEqual([]);
+          persistence.close();
+        },
+      );
+
+      it.each(['full_fork', 'summary', 'none', 'selected_items'] as const)(
+        'drops the guidance from a %s Worker hired on an offered Leader Turn',
+        (policy) => {
+          const { persistence } = createPersistence();
+          persistence.setTeamUsageOfferProvider(() => true);
+          persistence.setTeamUsageMode('proactive');
+          const task = persistence.createTask(`offered ${policy} worker`);
+          const root = persistence.startTurn(task.id, '認証まわりを直してテストも足して');
+          expect(root.teamUsageOffer).toBe('proactive');
+          const team = persistence.promoteTaskToTeam(task.id);
+          const leader = persistence.getTaskLeader(task.id);
+          persistence.transitionTeamState(team.id, 'forming');
+          persistence.transitionTeamState(team.id, 'active');
+          const worker = persistence.registerTeamWorker({
+            teamId: team.id,
+            role: 'implementer',
+            objective: 'inherit the Leader context',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+            contextInheritancePolicy: policy,
+          });
+          const execution = persistence.createTeamExecution({
+            teamId: team.id,
+            assigneeAgentId: worker.id,
+            createdByAgentId: leader.id,
+            instruction: 'implement',
+            now: '2026-11-13T00:00:00.000Z',
+            contextOwner: { type: 'turn', id: root.turnId },
+          });
+
+          // The Leader keeps the guidance, and the cloned seal stays a faithful copy of the root.
+          const leaderContext = persistence.prepareContext(task.id, root.turnId);
+          expect(offerFragments(leaderContext)).toHaveLength(1);
+          const sealed = persistence.prepareTeamExecutionContext(task.id, execution.id);
+          expect(sealed.fragments).toEqual(leaderContext.fragments);
+          expect(persistence.getContextSealManifest('team_execution', execution.id)).toMatchObject({
+            sealedDigest: persistence.getContextSealManifest('turn', root.turnId).sealedDigest,
+          });
+
+          // What either Worker runtime actually receives.
+          const received = applyWorkerContextInheritance(worker, sealed);
+          expect(offerFragments(received)).toEqual([]);
+          expect(
+            received.fragments.some(({ content }) => content.includes('# Team の使い方')),
+          ).toBe(false);
+          // The built-in Team Skill still reaches a full fork, as it always has.
+          expect(teamSkillCount(received)).toBe(policy === 'full_fork' ? 1 : 0);
+          if (policy === 'full_fork')
+            expect(received.fragments).toEqual(
+              leaderContext.fragments.filter(
+                ({ id }) => !id.startsWith(TEAM_USAGE_OFFER_FRAGMENT_PREFIX),
+              ),
+            );
+          persistence.close();
+        },
+      );
+
+      it('keeps every later Turn a requested Team Turn once the offered Leader hired a Worker', () => {
+        const { persistence } = createPersistence();
+        persistence.setTeamUsageOfferProvider(() => true);
+        persistence.setTeamUsageMode('auto');
+        const task = persistence.createTask('offered then hired');
+        const offered = persistence.startTurn(task.id, '認証まわりを直してテストも足して');
+        expect(offered.teamUsageOffer).toBe('auto');
+        // The Leader decided to hire on the offered Turn.
+        const team = persistence.promoteTaskToTeam(task.id);
+        persistence.transitionTeamState(team.id, 'forming');
+        persistence.transitionTeamState(team.id, 'active');
+        persistence.registerTeamWorker({
+          teamId: team.id,
+          role: 'implementer',
+          objective: 'fix auth',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          contextInheritancePolicy: 'summary',
+        });
+        persistence.completeTurn(task.id, offered.turnId, 'failed');
+
+        const expectRequested = (text: string) => {
+          const started = persistence.startTurn(task.id, text);
+          expect(started.teamTurn, text).toBe(true);
+          expect(started, text).not.toHaveProperty('teamUsageOffer');
+          const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(teamSkillCount(prepared), text).toBe(1);
+          expect(offerFragments(prepared), text).toEqual([]);
+          persistence.completeTurn(task.id, started.turnId, 'failed');
+        };
+        expectRequested('続けて');
+        expectRequested('いまどこまで進んでいますか？');
+        // Turning the setting back does not drop the Team the Leader already runs.
+        persistence.setTeamUsageMode('explicit');
+        expectRequested('続けて');
+        expectRequested('いまどこまで進んでいますか？');
+        persistence.close();
+      });
+
+      it('treats a follow-up to Team members after an offered Turn by whether a Team exists', () => {
+        const { persistence } = createPersistence();
+        persistence.setTeamUsageOfferProvider(() => true);
+        persistence.setTeamUsageMode('auto');
+        const followup = '担当に挨拶して';
+        expect(isExistingTeamFollowupInput(followup)).toBe(true);
+        expect(isTeamScenarioInput(followup)).toBe(false);
+        const task = persistence.createTask('member follow-up');
+        const offered = persistence.startTurn(task.id, '画面を作り直して');
+        expect(offered.teamUsageOffer).toBe('auto');
+        persistence.completeTurn(task.id, offered.turnId, 'failed');
+
+        // No Team was formed: the offered Turn does not count as a Team the user asked for.
+        const withoutTeam = persistence.startTurn(task.id, followup);
+        expect(withoutTeam.teamTurn).toBe(true);
+        expect(withoutTeam.teamUsageOffer).toBe('auto');
+        persistence.completeTurn(task.id, withoutTeam.turnId, 'failed');
+
+        // With a Team record for the Task, the same words address that Team, as before.
+        persistence.promoteTaskToTeam(task.id);
+        const withTeam = persistence.startTurn(task.id, followup);
+        expect(withTeam.teamTurn).toBe(true);
+        expect(withTeam).not.toHaveProperty('teamUsageOffer');
         persistence.close();
       });
     });

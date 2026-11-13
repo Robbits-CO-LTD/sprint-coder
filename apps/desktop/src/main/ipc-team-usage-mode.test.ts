@@ -222,11 +222,44 @@ describe('Team usage mode in dispatch', () => {
     expect(h.grok.start).toHaveBeenCalledTimes(1);
   });
 
-  it('runs an offered Turn as an ordinary one when the Team Skill cannot be verified', async () => {
+  // Not offered at all when the Skill is unverified at sealing (see teamUsageOfferAvailable); this is
+  // the narrow case of the check changing after the seal, where the sealed tools are kept.
+  it('does not fail an already offered Turn when the Team Skill check turns false, and keeps its Team tools', async () => {
     const h = createHarness({ teamSkillReady: false });
     await h.router.startSelectedRuntime(offered('auto'));
     expect(h.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(h.registerLeaderMcp).toHaveBeenCalledWith('turn-1', 'task-1', {
+      teamTurn: true,
+      skillCreatorTurn: false,
+      memoryTurn: false,
+    });
     expect(h.grok.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a skill-creator Turn (never offered by the seal) without Team tools', async () => {
+    const h = createHarness();
+    await h.router.startSelectedRuntime(
+      startedTurn({
+        skills: [
+          {
+            selection: {
+              kind: 'chat',
+              ref: { source: 'builtin', skillId: 'skill-creator', digest: 'c'.repeat(64) },
+            },
+            name: 'skill-creator',
+            description: 'Create a Skill',
+            content: 'CREATOR_BODY',
+            packagePath: '/tmp/sprint-coder-skill-creator',
+          },
+        ],
+      }),
+    );
+    expect(h.registerLeaderMcp).toHaveBeenCalledWith('turn-1', 'task-1', {
+      teamTurn: false,
+      skillCreatorTurn: true,
+      memoryTurn: false,
+    });
+    expect(h.prepareContext).toHaveBeenCalledWith('task-1', 'turn-1', false);
   });
 
   it('fails a requested Team Turn when the Team Skill cannot be verified, as before', async () => {
@@ -401,6 +434,13 @@ describe('what an offered Leader is given', () => {
       skillCreatorTurn: false,
       memoryTurn: true,
     });
+    const skillCreatorMcp = router.registerLeaderMcp('turn-3', 'task-1', {
+      teamTurn: false,
+      skillCreatorTurn: true,
+      memoryTurn: false,
+    });
+    expect(skillCreatorMcp?.toolNames).toEqual(['skill_draft_create']);
+    expect(skillCreatorMcp?.guidance).toContain('team_*ツールは使用しません');
     expect(offeredMcp?.toolNames).toContain('team_hire_worker');
     expect(offeredMcp?.toolNames).toContain('team_assign_tasks');
     expect(offeredMcp?.guidance).toContain(BUILTIN_TEAM_SKILL_CONTENT);
@@ -418,6 +458,12 @@ describe('what an offered Leader is given', () => {
       expect(guidance).toMatch(/必要な最小|必要以上に雇わない/);
       expect(guidance).toContain('1 文で伝えてから雇う');
       expect(guidance).toContain('利用枠');
+      // Right even when the Team tools did not reach this Turn: the Skill's fail-closed report and
+      // its "inspect Team state on questions" rule apply only once the Leader decides to use Team.
+      expect(guidance).toContain('Team の道具（`team_*`）が使えるなら');
+      expect(guidance).toContain('利用不能の報告もせずに、普通に対応する');
+      expect(guidance).toContain('あなたが Team を使うと決めた時にだけ当てはまる');
+      expect(guidance).toContain('`team_get_status` など）を呼ぶこともしない');
     }
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
       '質問・相談: Teamの実状態を調べるためにMCPを使うが、Workerは採用しない。',
