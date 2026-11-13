@@ -83,6 +83,11 @@ import { structuredPatchDigest, type PreparedStructuredPatch } from './structure
 import { nextGraphDocument } from './graph-document';
 import { GraphRenderService } from './graph-render';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import {
+  TEAM_USAGE_OFFER_FRAGMENT_PREFIX,
+  teamUsageGuidance,
+  teamUsageOfferFragmentId,
+} from './team-usage-mode';
 import { modelSelectionForRuntime } from './connection-identity';
 import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
 import { buildProviderFailureDiagnostic } from './provider-failure-diagnostic';
@@ -3166,6 +3171,177 @@ if (runsWithElectronAbi)
         'APIを使う前に確認する。ClaudeはClaude CLIを優先する。',
       );
       reopened.close();
+    });
+
+    it('persists the Team usage mode, reading unset and broken values as explicit', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamUsageMode()).toBe('explicit');
+      expect(persistence.setTeamUsageMode('proactive')).toBe('proactive');
+      expect(() => persistence.setTeamUsageMode('always' as never)).toThrow();
+      expect(persistence.getTeamUsageMode()).toBe('proactive');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamUsageMode()).toBe('proactive');
+      reopened.setTeamUsageMode('auto');
+      expect(reopened.getTeamUsageMode()).toBe('auto');
+      reopened.close();
+
+      for (const broken of ['', 'AUTO', '"auto"', 'always']) {
+        const db = new Database(path);
+        db.prepare("UPDATE settings SET value = ? WHERE key = 'team.usage-mode'").run(broken);
+        db.close();
+        const corrupted = new SqlitePersistenceClient(path);
+        expect(corrupted.getTeamUsageMode(), broken).toBe('explicit');
+        corrupted.close();
+      }
+    });
+
+    describe('Team usage mode on a Turn the user did not ask Team for', () => {
+      const teamSkillCount = (prepared: { fragments: readonly { id: string }[] }) =>
+        prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID).length;
+      const offerFragments = (prepared: {
+        fragments: readonly { id: string; content: string }[];
+      }) => prepared.fragments.filter(({ id }) => id.startsWith(TEAM_USAGE_OFFER_FRAGMENT_PREFIX));
+
+      it('changes nothing at explicit, and never asks Main whether Team could be offered', () => {
+        const { persistence } = createPersistence();
+        const offer = vi.fn(() => true);
+        persistence.setTeamUsageOfferProvider(offer);
+        const task = persistence.createTask('explicit');
+        const started = persistence.startTurn(task.id, 'このファイルを直して');
+        expect(started.teamTurn).toBe(false);
+        expect(started).not.toHaveProperty('teamUsageOffer');
+        const prepared = persistence.prepareContext(task.id, started.turnId);
+        expect(teamSkillCount(prepared)).toBe(0);
+        expect(offerFragments(prepared)).toEqual([]);
+        expect(offer).not.toHaveBeenCalled();
+        persistence.close();
+      });
+
+      it.each(['auto', 'proactive'] as const)(
+        'offers the Team Skill and the %s guidance once, sealed with the Turn',
+        (mode) => {
+          const { persistence } = createPersistence();
+          const offer = vi.fn(() => true);
+          persistence.setTeamUsageOfferProvider(offer);
+          persistence.setTeamUsageMode(mode);
+          const task = persistence.createTask(mode);
+          const started = persistence.startTurn(task.id, '認証まわりを直してテストも足して');
+          expect(started.teamTurn).toBe(true);
+          expect(started.teamUsageOffer).toBe(mode);
+          expect(offer).toHaveBeenCalledWith({
+            runtimeKind: started.runtimeKind,
+            modelSelection: started.modelSelection,
+          });
+          const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(teamSkillCount(prepared)).toBe(1);
+          expect(offerFragments(prepared)).toEqual([
+            expect.objectContaining({
+              id: teamUsageOfferFragmentId(mode),
+              content: teamUsageGuidance(mode),
+            }),
+          ]);
+          // The guidance is read right after the Skill it qualifies.
+          const ids = prepared.fragments.map(({ id }) => id);
+          expect(ids.indexOf(teamUsageOfferFragmentId(mode))).toBe(
+            ids.indexOf(BUILTIN_TEAM_SKILL_FRAGMENT_ID) + 1,
+          );
+          expect(persistence.prepareContext(task.id, started.turnId)).toEqual(prepared);
+          persistence.close();
+        },
+      );
+
+      it('gives the two levels different guidance', () => {
+        expect(teamUsageGuidance('auto')).not.toBe(teamUsageGuidance('proactive'));
+        expect(teamUsageOfferFragmentId('auto')).not.toBe(teamUsageOfferFragmentId('proactive'));
+        expect(teamUsageGuidance('auto')).toContain('迷ったら使わない');
+        expect(teamUsageGuidance('proactive')).toContain('積極的に');
+      });
+
+      it('leaves the Turn ordinary when Main says this runtime cannot carry Team', () => {
+        const { persistence } = createPersistence();
+        persistence.setTeamUsageMode('proactive');
+        const task = persistence.createTask('not offered');
+        // No provider wired at all: nothing is offered.
+        const unwired = persistence.startTurn(task.id, '画面を作り直して');
+        expect(unwired.teamTurn).toBe(false);
+        persistence.completeTurn(task.id, unwired.turnId, 'failed');
+        persistence.setTeamUsageOfferProvider(() => false);
+        const refused = persistence.startTurn(task.id, '画面を作り直して');
+        expect(refused.teamTurn).toBe(false);
+        expect(refused).not.toHaveProperty('teamUsageOffer');
+        const prepared = persistence.prepareContext(task.id, refused.turnId);
+        expect(teamSkillCount(prepared)).toBe(0);
+        expect(offerFragments(prepared)).toEqual([]);
+        persistence.close();
+      });
+
+      it('keeps a Turn that asks for Team exactly as before, without the guidance', () => {
+        const { persistence } = createPersistence();
+        const offer = vi.fn(() => true);
+        persistence.setTeamUsageOfferProvider(offer);
+        persistence.setTeamUsageMode('auto');
+        const task = persistence.createTask('asked');
+        const started = persistence.startTurn(task.id, 'チームで進めて');
+        expect(started.teamTurn).toBe(true);
+        expect(started).not.toHaveProperty('teamUsageOffer');
+        expect(offer).not.toHaveBeenCalled();
+        const prepared = persistence.prepareContext(task.id, started.turnId);
+        expect(teamSkillCount(prepared)).toBe(1);
+        expect(offerFragments(prepared)).toEqual([]);
+        persistence.close();
+      });
+
+      it('does not let a bare go-ahead after an offered Turn become an asked-for Team', () => {
+        const { persistence } = createPersistence();
+        let available = true;
+        persistence.setTeamUsageOfferProvider(() => available);
+        persistence.setTeamUsageMode('auto');
+        const task = persistence.createTask('go-ahead');
+        const offered = persistence.startTurn(task.id, '調べてから直して');
+        expect(offered.teamUsageOffer).toBe('auto');
+        persistence.completeTurn(task.id, offered.turnId, 'failed');
+
+        // Still offered (not asked for) while the setting allows it…
+        const next = persistence.startTurn(task.id, '続けて');
+        expect(next.teamTurn).toBe(true);
+        expect(next.teamUsageOffer).toBe('auto');
+        persistence.completeTurn(task.id, next.turnId, 'failed');
+
+        // …and an ordinary Turn once it cannot be offered, instead of a required Team.
+        available = false;
+        const blocked = persistence.startTurn(task.id, '続けて');
+        expect(blocked.teamTurn).toBe(false);
+        persistence.completeTurn(task.id, blocked.turnId, 'failed');
+
+        // A go-ahead after a Team the user did ask for still continues that Team.
+        const asked = persistence.startTurn(task.id, 'チームで進めて');
+        expect(asked).not.toHaveProperty('teamUsageOffer');
+        persistence.completeTurn(task.id, asked.turnId, 'failed');
+        const continued = persistence.startTurn(task.id, '続けて');
+        expect(continued.teamTurn).toBe(true);
+        expect(continued).not.toHaveProperty('teamUsageOffer');
+        persistence.close();
+      });
+
+      it('reads the setting when each Turn starts, so a change applies from the next Turn', () => {
+        const { persistence } = createPersistence();
+        persistence.setTeamUsageOfferProvider(() => true);
+        const task = persistence.createTask('next turn');
+        const before = persistence.startTurn(task.id, '画面を作り直して');
+        expect(before.teamTurn).toBe(false);
+        persistence.setTeamUsageMode('proactive');
+        // The running Turn's seal does not change.
+        expect(teamSkillCount(persistence.prepareContext(task.id, before.turnId))).toBe(0);
+        persistence.completeTurn(task.id, before.turnId, 'failed');
+        const after = persistence.startTurn(task.id, '画面を作り直して');
+        expect(after.teamUsageOffer).toBe('proactive');
+        persistence.completeTurn(task.id, after.turnId, 'failed');
+        persistence.setTeamUsageMode('explicit');
+        expect(persistence.startTurn(task.id, '画面を作り直して').teamTurn).toBe(false);
+        persistence.close();
+      });
     });
 
     it('persists the Sprint Coder pre-prompt and seals it before conversation history', () => {

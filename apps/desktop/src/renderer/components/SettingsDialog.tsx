@@ -13,6 +13,7 @@ import {
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
+import { TeamUsageModeSetting } from './TeamUsageModeSetting';
 import { useTaskBoundary } from './TaskBoundary';
 import {
   TEAM_CONCURRENCY_DEFAULT,
@@ -242,6 +243,7 @@ export function LegacyBody({
           <CliDetectionGroup />
           <UpdateHealthGroup />
           <SprintCoderPrePromptSetting active={open} />
+          <TeamUsageModeSetting active={open} />
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
@@ -339,6 +341,7 @@ export function WorkspaceBody({
             </WorkspacePage>
 
             <WorkspacePage {...page('team')} active={current === 'team'}>
+              <TeamUsageModeSetting active={open} />
               <TeamDefaultPolicySetting active={open} />
               <TeamConcurrencySetting active={open} />
               <TeamModelRestrictionSetting active={open} />

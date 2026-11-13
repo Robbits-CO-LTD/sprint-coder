@@ -39,6 +39,8 @@ function stubBridge(): void {
         setTeamConcurrency: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
         setTeamModelSelectionGuidance: () => Promise.resolve(),
+        getTeamUsageMode: () => Promise.resolve({ mode: 'explicit' }),
+        setTeamUsageMode: (input: { mode: string }) => Promise.resolve(input),
         getSprintCoderPrePrompt: () => Promise.resolve({ prompt: '' }),
         setSprintCoderPrePrompt: () => Promise.resolve(),
         getTeamModelSettings: () =>
@@ -102,6 +104,12 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-team-models"');
     expect(html).toContain('data-testid="settings-team-model-guidance"');
     expect(html).toContain('覚えておいてほしいこと');
+    // 「Team の使い方」 opens the Team page, before every other Team setting.
+    const teamPage = html.slice(html.indexOf('data-testid="settings-page-team"'));
+    expect(teamPage.indexOf('data-testid="settings-team-usage-mode"')).toBeGreaterThan(0);
+    expect(teamPage.indexOf('data-testid="settings-team-usage-mode"')).toBeLessThan(
+      teamPage.indexOf('data-testid="settings-team-defaults"'),
+    );
     expect(html).toContain('data-testid="settings-sprint-coder-pre-prompt"');
     expect(html).toContain('Sprint Coderの事前プロンプト');
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
