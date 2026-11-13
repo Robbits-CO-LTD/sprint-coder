@@ -75,6 +75,10 @@ pub struct NativeMenuBar {
 pub enum MenuBarKind {
     /// The item is one of the window's standard menu bar items.
     StandardItem,
+    /// The item is one of the window's standard menu bar items, but the
+    /// application draws every item of the menu it opens itself (Tcl/Tk
+    /// does), so none of them can be read or run from behind the window.
+    DrawnItems,
     /// The window has no standard menu bar: its menus are drawn by the
     /// application itself.
     NotStandard,
@@ -91,7 +95,18 @@ const MENU_BAR_DEPTH_HINT: &str = "Some submenus were cut at the depth limit, so
 const OWNER_DRAWN_HINT: &str =
     "The application draws this item itself, so its name cannot be read.";
 
+const DRAWN_MENU_HINT: &str = "The application draws every item of this menu itself (Tcl/Tk menus are drawn this way), so their names cannot be read and none of them can be run from behind the window. Look for a button or toolbar of the window that does the same (snapshot of the window); otherwise running them needs an operation that brings the window to the front.";
+
+const DRAWN_MENUS_BAR_HINT: &str = "Some menus here are drawn by the application itself (their hint says so): their items have no name and no ref, and cannot be run from behind the window.";
+
 const UNREAD_HINT: &str = "This submenu was not read: the read reached its limit first.";
+
+/// Whether a menu has items and none of them shows a readable name: the
+/// application draws them all itself, so nothing in it can be matched by name.
+pub fn every_item_unnamed(items: &[NativeMenuItem]) -> bool {
+    let mut shown = items.iter().filter(|item| !item.separator).peekable();
+    shown.peek().is_some() && shown.all(|item| ref_menu::item_name(item).is_none())
+}
 
 /// The item's name as a menu shows it: the text before the tab that starts
 /// its shortcut, with each `&` access-key marker removed and `&&` kept as one
@@ -213,6 +228,8 @@ fn item_node<'b>(
         hints.push(OWNER_DRAWN_HINT.to_owned());
     } else if item.submenu_unread {
         hints.push(UNREAD_HINT.to_owned());
+    } else if item.submenu.as_deref().is_some_and(every_item_unnamed) {
+        hints.push(DRAWN_MENU_HINT.to_owned());
     } else if let Some(shortcut) = &shortcut {
         hints.push(format!("Shortcut: {shortcut}."));
     }
@@ -399,17 +416,31 @@ pub(crate) fn capture(
     }
 }
 
+/// Whether the presented tree holds a menu whose items the application draws
+/// itself (the hint `item_node` gives the item that opens it).
+fn has_drawn_menu(node: &AccessibilityNode) -> bool {
+    node.presentation
+        .hint
+        .as_deref()
+        .is_some_and(|hint| hint.contains(DRAWN_MENU_HINT))
+        || node.children.iter().any(has_drawn_menu)
+}
+
 pub(crate) fn present(result: &super::SnapshotResult, window_disabled: bool) -> Value {
     let mut body = match crate::commands::snapshot::format_snapshot_fields(result, None, None) {
         Ok(body) => body,
         Err(_) => json!({}),
     };
     body["surface"] = json!("menubar");
-    body["menu_hint"] = json!(MENU_BAR_HINT);
+    let mut menu_hint = MENU_BAR_HINT.to_owned();
+    if has_drawn_menu(&result.tree) {
+        menu_hint = format!("{DRAWN_MENUS_BAR_HINT} {menu_hint}");
+    }
     if window_disabled {
         body["window_disabled"] = json!(true);
-        body["menu_hint"] = json!(format!("{MENU_BAR_DISABLED_HINT} {MENU_BAR_HINT}"));
+        menu_hint = format!("{MENU_BAR_DISABLED_HINT} {menu_hint}");
     }
+    body["menu_hint"] = json!(menu_hint);
     if body.get("depth_hint").is_some() {
         body["depth_hint"] = json!(MENU_BAR_DEPTH_HINT);
     }
@@ -419,7 +450,8 @@ pub(crate) fn present(result: &super::SnapshotResult, window_disabled: bool) -> 
 /// The guidance added to a click or an expand that failed on a menu item of
 /// the window's accessibility tree: when the item is one of the window's
 /// standard menu bar items, that its items can be read and run without
-/// opening it; when the window has no standard menu bar, that this menu
+/// opening it - unless the application draws every item of its menu itself,
+/// when they cannot; when the window has no standard menu bar, that this menu
 /// cannot be opened from behind the window. The error's code, message and
 /// delivery are kept as they are.
 pub(crate) fn annotate_action_error(
@@ -457,6 +489,10 @@ pub(crate) fn annotate_action_error(
                 "This is an item of the window's standard menu bar, which opens only while the window is in front. Its items can be read and run without opening it: snapshot --surface menubar --window-id {}, then click the item's ref.",
                 entry.source.source_window_id.as_deref().unwrap_or("<id>")
             ),
+        ),
+        MenuBarKind::DrawnItems => (
+            "owner_drawn",
+            "This is an item of the window's standard menu bar, which opens only while the window is in front, and the application draws the items of this menu itself, so their names cannot be read and they cannot be run from behind the window (snapshot --surface menubar lists them without a name or a ref). Look for a button or toolbar of the window that does the same (snapshot of the window); otherwise running them needs an operation that brings the window to the front.".to_owned(),
         ),
         MenuBarKind::NotStandard => (
             "not_standard",

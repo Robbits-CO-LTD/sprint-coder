@@ -90,9 +90,10 @@ pub(crate) fn no_menu_bar_error() -> AdapterError {
     )
     .with_suggestion(
         "Its menus, if it has any, are drawn by the application itself (Qt and other toolkits \
-         draw their own), so they cannot be read or opened from behind the window. Read them \
-         with snapshot of the window; opening them needs an operation that brings the window \
-         to the front.",
+         draw their own), so their items cannot be listed, opened or run from behind the window. \
+         A snapshot of the window shows only what the window shows now (such as the top items \
+         of its menu bar); opening a menu needs an operation that brings the window to the \
+         front.",
     )
     .with_details(serde_json::json!({ "kind": "no_standard_menu_bar" }))
     .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered())
@@ -297,14 +298,37 @@ mod live {
         };
         // SAFETY: as in `read_menu`.
         let count = usize::try_from(unsafe { GetMenuItemCount(bar) }).unwrap_or(0);
-        let texts: Vec<Option<String>> = (0..count.min(MAX_ITEMS_PER_MENU))
+        let top: Vec<(RawItem, HMENU)> = (0..count.min(MAX_ITEMS_PER_MENU))
             .filter_map(|position| read_raw(bar, position as u32))
-            .map(|(raw, _)| raw.text)
             .collect();
-        if names_top_item(&texts, name) {
-            MenuBarKind::StandardItem
+        let texts: Vec<Option<String>> = top.iter().map(|(raw, _)| raw.text.clone()).collect();
+        if !names_top_item(&texts, name) {
+            return MenuBarKind::Unknown;
+        }
+        // The menus the named top items open, read one level, quietly: when
+        // the application draws every item of them itself (Tcl/Tk does), none
+        // can be read or run from the menubar surface.
+        let mut drawn = top
+            .iter()
+            .filter(|(raw, _)| {
+                raw.text
+                    .as_deref()
+                    .is_some_and(|text| agent_desktop_core::menu_item_name(text) == name.trim())
+            })
+            .map(|(_, submenu)| *submenu)
+            .filter(|submenu| !submenu.is_null())
+            .map(|submenu| {
+                read_level(submenu).is_some_and(|items| {
+                    let items: Vec<NativeMenuItem> =
+                        items.into_iter().map(|(item, _)| item).collect();
+                    agent_desktop_core::every_menu_item_unnamed(&items)
+                })
+            })
+            .peekable();
+        if drawn.peek().is_some() && drawn.all(|all_drawn| all_drawn) {
+            MenuBarKind::DrawnItems
         } else {
-            MenuBarKind::Unknown
+            MenuBarKind::StandardItem
         }
     }
 }

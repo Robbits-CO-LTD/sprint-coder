@@ -147,7 +147,16 @@ observation, actions and capture there fail or return nothing.
   it only when the menu opens reports `delivered_unverified`. Only `click` (without `--headed`) takes such a ref:
   every other command refuses it with `ACTION_NOT_SUPPORTED`,
   `details.kind: "menu_item_ref"`. An item the app draws itself has no name
-  and says so in `hint`. A window whose menus the toolkit draws (Qt, such as VLC) has no
+  and says so in `hint`. When the app draws every item of a menu itself
+  (Tcl/Tk apps such as Git GUI: the bar's items are text, the items below
+  them are not), the item opening that menu says so in its `hint`, the
+  envelope's `menu_hint` starts by saying so, and a failed `expand` or
+  `click` on that bar item carries `details.menu_bar: "owner_drawn"`: none of
+  those items can be read or run from behind the window, so use a button or
+  toolbar of the window that does the same, or an operation that brings the
+  window to the front. An item whose command identifier is wider than 16 bits
+  gets no ref (identifiers from 0x8000 to 0xFFFF, such as the negative ones
+  wxWidgets gives, do). A window whose menus the toolkit draws (Qt, such as VLC) has no
   standard menu bar: `snapshot --surface menubar` returns `ELEMENT_NOT_FOUND`
   (`details.kind: "no_standard_menu_bar"`), a failed `expand` or `click` on
   its menu items carries `details.menu_bar: "not_standard"`, and opening

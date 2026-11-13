@@ -263,7 +263,7 @@ fn an_item_without_a_command_under_a_disabled_menu_or_reported_by_position_gets_
     assert!(refmap.is_empty());
     let hint = |node: &AccessibilityNode| node.presentation.hint.clone().unwrap_or_default();
     assert!(hint(&tree.children[0].children[0]).contains("sends no command"));
-    assert!(hint(&tree.children[0].children[1]).contains("sends no command"));
+    assert!(hint(&tree.children[0].children[1]).contains("wider than the 16 bits"));
     assert!(hint(&tree.children[1].children[0]).contains("menu is disabled"));
     // Its menu reports by position, the bar above it by command.
     assert!(hint(&tree.children[2].children[0]).contains("different ways"));
@@ -348,6 +348,101 @@ fn an_item_drawn_by_the_application_says_its_name_cannot_be_read() {
     let drawn = &tree.children[1].children[1];
     assert_eq!(drawn.identity.name, None);
     assert_eq!(drawn.presentation.hint.as_deref(), Some(OWNER_DRAWN_HINT));
+}
+
+fn drawn(id: u32) -> NativeMenuItem {
+    NativeMenuItem {
+        text: None,
+        owner_drawn: true,
+        command_id: id,
+        ..NativeMenuItem::default()
+    }
+}
+
+/// A Tcl/Tk menu: the bar's items are text, every item below them is drawn
+/// by the application. The item opening such a menu says that nothing in it
+/// can be run from behind the window, and so does the envelope; a menu with
+/// one readable item, or with no item at all, says nothing of the kind.
+#[test]
+fn a_menu_the_application_draws_throughout_says_none_of_it_can_be_run() {
+    let bar = NativeMenuBar {
+        items: vec![
+            submenu("Repository", vec![drawn(5001), separator(), drawn(5002)]),
+            submenu("Mixed", vec![drawn(5003), item("Readable", 5004)]),
+            submenu("Empty", vec![separator()]),
+        ],
+        complete: true,
+        window_disabled: false,
+    };
+    let (tree, refmap) = with_refs(&bar, 10);
+    assert_eq!(refmap.len(), 1, "only the readable item gets a ref");
+    let hint = |node: &AccessibilityNode| node.presentation.hint.clone().unwrap_or_default();
+    assert_eq!(hint(&tree.children[0]), DRAWN_MENU_HINT);
+    assert!(DRAWN_MENU_HINT.contains("none of them can be run from behind the window"));
+    assert!(!DRAWN_MENU_HINT.contains("click <ref>"));
+    assert!(
+        tree.children[0]
+            .children
+            .iter()
+            .all(|child| child.ref_id.is_none())
+    );
+    assert_eq!(hint(&tree.children[1]), "");
+    assert_eq!(hint(&tree.children[2]), "");
+    let body = present(&capture(&window(), &bar, 10), false);
+    let menu_hint = body["menu_hint"].as_str().unwrap_or_default();
+    assert!(menu_hint.starts_with(DRAWN_MENUS_BAR_HINT), "{menu_hint}");
+    // Cut at the depth limit, the item still says so.
+    let (tree, _) = with_refs(&bar, 1);
+    assert_eq!(hint(&tree.children[0]), DRAWN_MENU_HINT);
+    // A bar with no such menu keeps the plain envelope hint.
+    assert_eq!(
+        present(&capture(&window(), &sample_bar(), 10), false)["menu_hint"],
+        MENU_BAR_HINT
+    );
+    assert!(every_item_unnamed(&[drawn(1)]));
+    assert!(!every_item_unnamed(&[]));
+    assert!(!every_item_unnamed(&[separator()]));
+    assert!(!every_item_unnamed(&[drawn(1), item("x", 2)]));
+}
+
+/// The identifiers wxWidgets gives menu items are negative and kept in 16
+/// bits (-31000 is 0x86E8): such an item gets a ref recording that value as
+/// it is. The same identifier kept in 32 bits gets none, and says why.
+#[test]
+fn an_item_with_an_identifier_from_0x8000_gets_a_ref_recording_it_as_it_is() {
+    let bar = NativeMenuBar {
+        items: vec![submenu(
+            "ヘルプ(&H)",
+            vec![
+                item("負の ID -31000(&A)", 0x86E8),
+                item("ID 0xFFFF(&F)", 0xFFFF),
+                item("32 bit に広げた(&E)", 0xFFFF_86E7),
+            ],
+        )],
+        complete: true,
+        window_disabled: false,
+    };
+    let (tree, refmap) = with_refs(&bar, 10);
+    let help = &tree.children[0];
+    let recorded = |node: &AccessibilityNode| {
+        entry_of(&refmap, node)
+            .identity
+            .in_menu
+            .as_ref()
+            .unwrap()
+            .command_id
+    };
+    assert_eq!(recorded(&help.children[0]), 0x86E8);
+    assert_eq!(recorded(&help.children[1]), 0xFFFF);
+    assert!(help.children[2].ref_id.is_none());
+    assert!(
+        help.children[2]
+            .presentation
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("wider than the 16 bits")
+    );
 }
 
 #[test]
@@ -522,6 +617,26 @@ fn a_standard_menu_bar_item_points_at_reading_and_running_it_from_the_menubar_su
     assert_eq!(error.details.unwrap()["menu_bar"], "standard");
 }
 
+/// An item of the bar whose menu the application draws throughout (Tcl/Tk):
+/// the guidance never points at running its items from the menubar surface.
+#[test]
+fn a_menu_bar_item_whose_menu_is_drawn_throughout_says_it_cannot_be_run_from_behind() {
+    let error = annotate_action_error(
+        &Kind(MenuBarKind::DrawnItems),
+        &menu_entry(),
+        &Action::Expand,
+        denied(),
+    );
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    assert_eq!(error.disposition, crate::DeliverySemantics::not_delivered());
+    let suggestion = error.suggestion.unwrap_or_default();
+    assert!(suggestion.starts_with("Allow the cursor to move. "));
+    assert!(suggestion.contains("cannot be run from behind the window"));
+    assert!(suggestion.contains("brings the window to the front"));
+    assert!(!suggestion.contains("then click the item's ref"));
+    assert_eq!(error.details.unwrap()["menu_bar"], "owner_drawn");
+}
+
 #[test]
 fn a_menu_of_a_window_without_a_standard_menu_bar_says_it_needs_the_front() {
     let error = AdapterError::new(ErrorCode::ActionNotSupported, "expand is not available");
@@ -533,12 +648,12 @@ fn a_menu_of_a_window_without_a_standard_menu_bar_says_it_needs_the_front() {
     );
     assert_eq!(error.code, ErrorCode::ActionNotSupported);
     assert_eq!(error.message, "expand is not available");
-    assert!(
-        error
-            .suggestion
-            .unwrap_or_default()
-            .contains("not a standard Windows menu")
-    );
+    let suggestion = error.suggestion.unwrap_or_default();
+    assert!(suggestion.contains("not a standard Windows menu"));
+    // A Qt window (VLC, for one): never pointed at the menubar surface.
+    assert!(suggestion.contains("cannot be opened or run from behind the window"));
+    assert!(suggestion.contains("brings the window to the front"));
+    assert!(!suggestion.contains("--surface menubar"));
     assert_eq!(error.details.unwrap()["menu_bar"], "not_standard");
 }
 

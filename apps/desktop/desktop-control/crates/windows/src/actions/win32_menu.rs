@@ -413,9 +413,12 @@ mod imp {
             .as_ref()
             .ok_or_else(|| agent_desktop_core::menu_ref_refused(entry))?;
         // `WM_COMMAND` carries a 16-bit identifier; a larger one is not a command
-        // this message can send (a capture gives such an item no ref). The same
-        // bound holds for a menu that reports by position, whose command is
-        // matched but not sent.
+        // this message can send (a capture gives such an item no ref): it would
+        // reach the window as its low 16 bits, which may be another item's. An
+        // identifier from 0x8000 to 0xFFFF - the negative ones wxWidgets gives,
+        // kept in 16 bits in the menu - is sent as it is, high word zero, and
+        // reads back as the same signed value. The same bound holds for a menu
+        // that reports by position, whose command is matched but not sent.
         if proof.command_id == 0 || proof.command_id > 0xFFFF {
             return Err(menu_mismatch_error(entry, MenuMismatch::CommandChanged));
         }
