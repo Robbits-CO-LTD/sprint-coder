@@ -347,6 +347,8 @@ function renderDesktopControl(command: string): string[] {
     `- アプリを起動する時は ${cli} launch <アプリ名> を使う（--activate は付けない）。アプリの実行ファイルを直接実行しない。アプリ名には、Windows の標準のフォルダーにある名前（calc・charmap など）か、スタートメニューに出ているアプリの名前をそのまま渡す（Sprint Coder が実行ファイルの絶対パスに引き直す）。スタートメニューやアプリのフォルダーを自分で探さない。`,
     '- launch に渡せるのはアプリ名（または Workspace の外の絶対パス）と --no-attach・--timeout だけで、--arg・--env・--cwd、端末・shell・設定の道具、mcp・open-system-surface・clipboard-get・trace、--trace・--screenshot・--stdin・--force、help に無い option は拒否される。ファイルはアプリの中の操作で開く。',
     '- 見る（snapshot）→ 操作する → もう一度見て確かめる、を繰り返す。ref はその snapshot の中だけで有効。',
+    '- 結果の disposition.delivery: delivered_verified は届いて結果も確かめ済み。delivered_unverified は届いたが結果を自動では確かめていないだけで、失敗ではない（止まらずに画面を読み直して確かめる。Worker への指示でも失敗や成否不明として扱わせない）。not_delivered は何も送っていない。delivery_uncertain・unknown は届いたか分からない。届いた・分からない操作は、確かめる前に繰り返さない（2 回届く）。',
+    '- 結果を確かめる時は -i なしの snapshot を使う（文字や状態も出る）。-i は操作できる部品を探す時だけ。',
     '- 操作は裏だけで行い、利用者のマウス・キーボード・前面の窓を使わない。文字は set-value、選択は select、メニューは expand か click で入れる。前面を使う操作（--headed、focus-window、restore、maximize、press、type、focus など）は利用者がはっきり頼んだ時だけ使う。裏の操作が失敗しても前面の操作で取り返さず、できなかったと報告する。最小化した窓は操作できない（restore は前面を使う）。',
     '- 同じアプリの窓が複数ある時は list-windows で id を調べて --window-id を付け、利用者が元から開いていた窓には触らない。',
     '- launch の結果の attached が true なら、既に動いていたアプリにつながっただけで、何も起動していない（ブラウザーなど、新しく起動しても動いているアプリに引き渡して終わるアプリも同じ）。その窓は利用者が元から開いていた窓として扱う。new_instance が true の時だけ、結果の window はこの launch で起動した窓。自分用に別に起動したい時は --no-attach を付ける。',
