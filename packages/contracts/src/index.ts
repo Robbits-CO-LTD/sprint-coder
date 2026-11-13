@@ -3398,6 +3398,14 @@ export const teamModelSelectionGuidanceSchema = z
   .strict();
 export type TeamModelSelectionGuidance = z.infer<typeof teamModelSelectionGuidanceSchema>;
 export const teamModelSelectionGuidanceSetInputSchema = teamModelSelectionGuidanceSchema;
+/** How freely the Leader may use Team on its own judgment. `explicit` (the default) keeps Team
+ * tools for turns where the user asked for Team; `auto` and `proactive` also offer them on
+ * other real-runtime turns, leaving the decision to the Leader. Takes effect from the next turn. */
+export const teamUsageModeSchema = z.enum(['explicit', 'auto', 'proactive']);
+export type TeamUsageMode = z.infer<typeof teamUsageModeSchema>;
+export const DEFAULT_TEAM_USAGE_MODE: TeamUsageMode = 'explicit';
+export const teamUsageModeStateSchema = z.object({ mode: teamUsageModeSchema }).strict();
+export type TeamUsageModeState = z.infer<typeof teamUsageModeStateSchema>;
 export const sprintCoderPrePromptSchema = z
   .object({
     prompt: z.string().max(8000),
@@ -4808,6 +4816,9 @@ export interface SprintCoderApi {
     setTeamConcurrency(input: TeamConcurrencySettings): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
     setTeamModelSelectionGuidance(input: TeamModelSelectionGuidance): Promise<void>;
+    /** Unset or unreadable values read back as `explicit`. */
+    getTeamUsageMode(): Promise<{ mode: TeamUsageMode }>;
+    setTeamUsageMode(input: { mode: TeamUsageMode }): Promise<{ mode: TeamUsageMode }>;
     getSprintCoderPrePrompt(): Promise<SprintCoderPrePrompt>;
     setSprintCoderPrePrompt(input: SprintCoderPrePrompt): Promise<void>;
     getAssistantPreferences(): Promise<{ configured: boolean; preferences: AssistantPreferences }>;
@@ -5034,6 +5045,8 @@ export const IPC_CHANNELS = {
   settingsSetTeamConcurrency: 'sprint-coder:settings:set-team-concurrency',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',
   settingsSetTeamModelSelectionGuidance: 'sprint-coder:settings:set-team-model-selection-guidance',
+  settingsGetTeamUsageMode: 'sprint-coder:settings:get-team-usage-mode',
+  settingsSetTeamUsageMode: 'sprint-coder:settings:set-team-usage-mode',
   settingsGetSprintCoderPrePrompt: 'sprint-coder:settings:get-sprint-coder-pre-prompt',
   settingsSetSprintCoderPrePrompt: 'sprint-coder:settings:set-sprint-coder-pre-prompt',
   settingsGetAssistantPreferences: 'sprint-coder:settings:get-assistant-preferences',

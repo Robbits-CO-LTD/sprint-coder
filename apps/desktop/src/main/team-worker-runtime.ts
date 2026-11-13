@@ -1,5 +1,6 @@
 import { modelSelectionForRuntime } from './connection-identity';
 import { isAssistantPreferencesFragment } from './assistant-preferences-prompt';
+import { isTeamUsageOfferFragment } from './team-usage-mode';
 import { randomUUID } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import type {
@@ -1097,22 +1098,28 @@ export function reserveTeamWorkerContext(context: PreparedContext): PreparedCont
   return { ...context, fragments };
 }
 
+/** Sealed for the Leader alone: the reply style (for what the Leader tells the user) and the
+ * 「Team の使い方」 guidance (whether the Leader itself may decide to hire). */
+function isLeaderOnlyFragment(fragment: { id: string }): boolean {
+  return isAssistantPreferencesFragment(fragment) || isTeamUsageOfferFragment(fragment);
+}
+
 /**
  * The one place a sealed context becomes a Worker's context, for the CLI and the API Worker alike.
- * The user's reply-style preferences are dropped first: they shape what the Leader says to the
- * user, while a Worker's report is read by the Leader. The seal itself is left untouched, so its
- * digest and fragment rows still describe exactly what was sealed.
+ * The Leader-only fragments are dropped first: the user's reply-style preferences shape what the
+ * Leader says to the user, while a Worker's report is read by the Leader; and the 「Team の使い方」
+ * guidance lets the Leader decide on Team by itself, which must not widen a Worker's own hiring.
+ * The seal itself is left untouched, so its digest and fragment rows still describe exactly what
+ * was sealed.
  */
 export function applyWorkerContextInheritance(
   worker: AgentRecord,
   sealedContext: PreparedContext,
 ): PreparedContext {
-  const sealed = sealedContext.fragments.some(isAssistantPreferencesFragment)
+  const sealed = sealedContext.fragments.some(isLeaderOnlyFragment)
     ? {
         ...sealedContext,
-        fragments: sealedContext.fragments.filter(
-          (fragment) => !isAssistantPreferencesFragment(fragment),
-        ),
+        fragments: sealedContext.fragments.filter((fragment) => !isLeaderOnlyFragment(fragment)),
       }
     : sealedContext;
   if (

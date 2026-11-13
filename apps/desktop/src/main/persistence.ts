@@ -169,6 +169,9 @@ import {
   type TeamExecutionIsolation,
   type WorkerReport,
   type TeamModelRestriction,
+  DEFAULT_TEAM_USAGE_MODE,
+  teamUsageModeSchema,
+  type TeamUsageMode,
   type TeamUsageTotals,
   type TurnEvent,
   type TurnSnapshot,
@@ -266,6 +269,14 @@ import {
   type ProjectContextItem,
 } from './context-ledger';
 import { BUILTIN_TEAM_SKILL_CONTENT, BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
+import { BUILTIN_SKILL_CREATOR_ID } from './skill-creator-builtin';
+import {
+  TEAM_USAGE_OFFER_FRAGMENT_PREFIX,
+  teamUsageGuidance,
+  teamUsageOfferFragmentId,
+  type OfferedTeamUsageMode,
+  type TeamUsageOfferRuntime,
+} from './team-usage-mode';
 import { readProjectReference } from './project-reference-file';
 import {
   isExistingTeamFollowupInput,
@@ -4942,8 +4953,13 @@ export type StartedTurn = {
   modelSelection: ModelSelection;
   skills: PersistedTurnSkill[];
   autoSkills: PersistedTurnSkill[];
-  /** Computed once with context sealing and reused by dispatch so Team routing cannot diverge. */
+  /** Computed once with context sealing and reused by dispatch so Team routing cannot diverge.
+   * True when the Turn carries the Team tools and the built-in Team Skill. */
   teamTurn: boolean;
+  /** Present only when `teamTurn` is true because of the 「Team の使い方」 setting, not because
+   * the user asked for Team: the Leader is offered Team and decides itself. Such a Turn never
+   * requires a Worker, never falls back to the mock Leader, and never fails for want of Team. */
+  teamUsageOffer?: OfferedTeamUsageMode;
   event: TurnEvent;
   sealId: string;
   contextUsageEvents: TurnEvent[];
@@ -5373,6 +5389,8 @@ export interface PersistenceClient {
   setAutoSkillProvider?(
     provider: (runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
+  /** Asked only when 「Team の使い方」 is not `explicit`: may this Turn's runtime be offered Team? */
+  setTeamUsageOfferProvider?(provider: (runtime: TeamUsageOfferRuntime) => boolean): void;
   setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
   openGraphWorkspaceObservation?(
     root: Parameters<SealedPostImageObserver>[0],
@@ -5911,6 +5929,8 @@ export interface PersistenceClient {
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
+  getTeamUsageMode(): TeamUsageMode;
+  setTeamUsageMode(mode: TeamUsageMode): TeamUsageMode;
   getSprintCoderPrePrompt(): string;
   setSprintCoderPrePrompt(prompt: string): void;
   getAssistantPreferences(): { configured: boolean; preferences: AssistantPreferences };
@@ -7003,6 +7023,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private autoSkillProvider:
     ((runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[]) | null =
     null;
+  private teamUsageOfferProvider: ((runtime: TeamUsageOfferRuntime) => boolean) | null = null;
   private sealedPostImageObserver: SealedPostImageObserver | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
@@ -7064,6 +7085,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     provider: (runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[],
   ): void {
     this.autoSkillProvider = provider;
+  }
+
+  /** Main decides whether the Turn's runtime can carry Team (a real CLI Leader with the Team MCP
+   * and a verified built-in Team Skill). Unset, no Turn is offered Team by the setting. */
+  setTeamUsageOfferProvider(provider: (runtime: TeamUsageOfferRuntime) => boolean): void {
+    this.teamUsageOfferProvider = provider;
   }
 
   /**
@@ -15639,6 +15666,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(normalized, new Date().toISOString());
   }
 
+  /** Unset or unreadable values read back as the default (`explicit`: Team only when asked). */
+  getTeamUsageMode(): TeamUsageMode {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.usage-mode'")
+      .get() as { value: string } | undefined;
+    const parsed = teamUsageModeSchema.safeParse(row?.value);
+    return parsed.success ? parsed.data : DEFAULT_TEAM_USAGE_MODE;
+  }
+
+  setTeamUsageMode(mode: TeamUsageMode): TeamUsageMode {
+    const parsed = teamUsageModeSchema.parse(mode);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.usage-mode', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(parsed, new Date().toISOString());
+    return parsed;
+  }
+
   getSprintCoderPrePrompt(): string {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'prompt.sprint-coder-pre-prompt'")
@@ -20496,6 +20543,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string,
     includeBuiltinTeamSkill = false,
     reservedTokens = 0,
+    teamUsageOffer: OfferedTeamUsageMode | null = null,
   ): PreparedContext {
     const prePrompt = this.getSprintCoderPrePrompt();
     const prePromptContent = sprintCoderPrePromptContent(prePrompt);
@@ -20544,6 +20592,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
         createdAt: new Date().toISOString(),
         messageId: null,
       });
+      // Right after the Skill, so the Leader reads the Skill as available rather than required.
+      if (teamUsageOffer !== null) {
+        const guidance = teamUsageGuidance(teamUsageOffer);
+        skillFragments.push({
+          id: teamUsageOfferFragmentId(teamUsageOffer),
+          taskId,
+          source: 'system',
+          trust: 'system',
+          tokenEstimate: estimateTokens(guidance),
+          content: guidance,
+          createdAt: new Date().toISOString(),
+          messageId: null,
+        });
+      }
     }
     const prepared = this.contextLedger.prepare(
       taskId,
@@ -21098,14 +21160,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
       attachmentCapability,
       selection,
     );
-    const shouldSealBuiltinTeamSkill =
+    const teamRequested =
       includeBuiltinTeamSkill ||
       isTeamScenarioInput(text) ||
       parsedSkills.some(({ selection }) => selection.kind === 'team') ||
-      (isTeamContinuationInput(text) && this.latestTurnIncludedBuiltinTeamSkill(taskId)) ||
+      (isTeamContinuationInput(text) && this.latestTurnRequestedBuiltinTeamSkill(taskId)) ||
       (isExistingTeamFollowupInput(text) &&
-        (this.latestTurnIncludedBuiltinTeamSkill(taskId) || this.getTeamByTask(taskId) !== null)) ||
+        (this.latestTurnRequestedBuiltinTeamSkill(taskId) ||
+          this.getTeamByTask(taskId) !== null)) ||
       this.taskHasHiringTeam(taskId);
+    // A Turn that uses the Leader MCP for another purpose and says not to use Team (skill-creator:
+    // 「team_*ツールは使用しません」) is never offered Team. Decided here, with the seal, so dispatch
+    // reads the same answer. A Project Turn's memory tool is not such a purpose: it sits beside the
+    // Team tools on an ordinary Turn, as it does on a requested Team Turn.
+    const skillCreatorTurn = parsedSkills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === BUILTIN_SKILL_CREATOR_ID,
+    );
+    const teamUsageOffer =
+      teamRequested || skillCreatorTurn
+        ? null
+        : this.teamUsageOfferFor({ runtimeKind, modelSelection });
+    const shouldSealBuiltinTeamSkill = teamRequested || teamUsageOffer !== null;
     const skillCatalogContent = this.skillCatalogContextProvider?.(
       parsedSkills.map(({ selection }) => selection),
       shouldSealBuiltinTeamSkill,
@@ -21198,6 +21274,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       turnId,
       shouldSealBuiltinTeamSkill,
       catalogTokenEstimate,
+      teamUsageOffer,
     );
     if (skillCatalogContent !== undefined) {
       const existingTokens = prepared.fragments.reduce(
@@ -21228,6 +21305,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       skills: parsedSkills,
       autoSkills,
       teamTurn: shouldSealBuiltinTeamSkill,
+      ...(teamUsageOffer === null ? {} : { teamUsageOffer }),
       event,
       sealId: seal.sealId,
       contextUsageEvents: prepared.usageEvents,
@@ -21289,24 +21367,48 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row !== undefined;
   }
 
-  private latestTurnIncludedBuiltinTeamSkill(taskId: string): boolean {
+  /**
+   * Whether the Task's latest Turn was a Team Turn the user asked for. A Turn that carried the
+   * built-in Team Skill only because of the 「Team の使い方」 setting (its seal also holds the
+   * offer fragment) does not count: a bare 「続けて」 after it must not turn into a required Team.
+   * That holds only while the offered Leader hired nobody: once it hired a Worker,
+   * `taskHasHiringTeam` makes every later Turn of the Task a requested Team Turn (whatever the
+   * wording or the setting), so the Leader can keep managing the Workers it hired.
+   */
+  private latestTurnRequestedBuiltinTeamSkill(taskId: string): boolean {
     const row = this.db
       .prepare(
-        `SELECT 1 AS present
-         FROM context_seals seal
-         JOIN context_seal_fragments fragment ON fragment.seal_id = seal.id
-         WHERE seal.id = (
+        `SELECT
+           MAX(fragment.fragment_id = ?) AS team_skill,
+           MAX(substr(fragment.fragment_id, 1, ?) = ?) AS usage_offer
+         FROM context_seal_fragments fragment
+         WHERE fragment.seal_id = (
            SELECT latest.id
            FROM context_seals latest
            WHERE latest.owner_type = 'turn' AND latest.task_id = ?
            ORDER BY latest.created_at DESC, latest.rowid DESC
            LIMIT 1
-         )
-           AND fragment.fragment_id = ?
-         LIMIT 1`,
+         )`,
       )
-      .get(taskId, BUILTIN_TEAM_SKILL_FRAGMENT_ID) as { present: number } | undefined;
-    return row !== undefined;
+      .get(
+        BUILTIN_TEAM_SKILL_FRAGMENT_ID,
+        TEAM_USAGE_OFFER_FRAGMENT_PREFIX.length,
+        TEAM_USAGE_OFFER_FRAGMENT_PREFIX,
+        taskId,
+      ) as { team_skill: number | null; usage_offer: number | null } | undefined;
+    return row?.team_skill === 1 && row.usage_offer !== 1;
+  }
+
+  /** The 「Team の使い方」 level to offer on a Turn the user did not ask Team for, or null. */
+  private teamUsageOfferFor(runtime: TeamUsageOfferRuntime): OfferedTeamUsageMode | null {
+    const mode = this.getTeamUsageMode();
+    if (mode === 'explicit') return null;
+    try {
+      return this.teamUsageOfferProvider?.(runtime) === true ? mode : null;
+    } catch {
+      // Offering is optional: a failed check leaves the Turn an ordinary one, never a failed start.
+      return null;
+    }
   }
 
   /**
