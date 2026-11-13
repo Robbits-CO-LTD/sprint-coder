@@ -35,6 +35,7 @@ pub(super) fn entry(role: &str, name: Option<&str>) -> RefEntry {
             source_window_bounds_hash: None,
             source_surface: crate::adapter::SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,
@@ -276,6 +277,7 @@ fn test_save_load_roundtrip_with_home_override() {
             source_window_bounds_hash: None,
             source_surface: crate::adapter::SnapshotSurface::Window,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,

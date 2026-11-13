@@ -76,7 +76,7 @@ pub(crate) use materialize::ref_entry as materialize_ref_entry;
 pub(crate) use materialize::selects_tokenless_entry;
 pub use observation_budget::ObservationBudget;
 pub(crate) use observation_completeness::ObservationCompleteness;
-pub use observation_request::{ObservationMode, ObservationRequest};
+pub use observation_request::{ObservationMode, ObservationRequest, SettleProgress};
 pub use observation_root::ObservationRoot;
 pub use observation_source::ObservationSource;
 pub use observed_node::ObservedNode;

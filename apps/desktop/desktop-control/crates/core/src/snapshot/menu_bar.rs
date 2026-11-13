@@ -341,6 +341,7 @@ fn allocate(
             source_window_bounds_hash: window.bounds.as_ref().and_then(crate::Rect::bounds_hash),
             source_surface: crate::SnapshotSurface::Menubar,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref: None,

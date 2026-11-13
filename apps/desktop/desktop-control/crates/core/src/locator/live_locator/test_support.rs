@@ -79,6 +79,7 @@ pub(crate) fn tree(
         structurally_complete,
         logical_depths,
         visible_scope: false,
+        settled_thin_nodes: None,
     }
 }
 

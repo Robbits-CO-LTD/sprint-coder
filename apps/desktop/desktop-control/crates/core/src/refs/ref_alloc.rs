@@ -57,6 +57,7 @@ pub(crate) fn ref_entry_from_node(
             source_window_bounds_hash: source.window_bounds_hash,
             source_surface: source.surface,
             renderer_accessibility_forced: false,
+            settled_thin_nodes: None,
         },
         scope: crate::RefScope {
             root_ref,

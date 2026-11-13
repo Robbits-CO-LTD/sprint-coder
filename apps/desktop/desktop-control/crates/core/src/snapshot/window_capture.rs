@@ -57,7 +57,7 @@ pub(crate) fn capture_window(
     let shallow = depth < crate::refs::resolve_saved_ref::WHOLE_WINDOW_DEPTH;
     let mut unproven = None;
     if shallow && !adapter.retains_element_tokens() {
-        let budget = deadline.remaining() * 3 / 4;
+        let budget = whole_read_budget(deadline.remaining());
         let attempt = deadline.capped(budget);
         match whole_window(adapter, opts, window, attempt) {
             Ok(observed) => {
@@ -134,6 +134,23 @@ pub(crate) fn capture_window(
         identity_unproven: Some(unproven),
         visible_scope: false,
     })
+}
+
+/// The most a whole-window read is given, whatever the deadline: twice what a
+/// default snapshot gives it (3/4 of 3 s). A whole read that is still running
+/// past this is on a window too large to prove whole in a useful time (a
+/// Chromium page of 1,000 rows reads whole in about 2.5 s; one of 2,000 rows
+/// takes about 5 s and then fails, its record over 1 MB), so a long
+/// `--timeout-ms` would only delay the switch to the visible elements by the
+/// same factor (15 s under a 20 s deadline).
+pub(crate) const WHOLE_READ_CAP: std::time::Duration =
+    std::time::Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS * 3 / 4 * 2);
+
+/// The time the whole-window read is given out of `remaining`: three quarters
+/// of it, leaving the rest for the read that answers when it cannot finish,
+/// and never more than [`WHOLE_READ_CAP`].
+pub(crate) fn whole_read_budget(remaining: std::time::Duration) -> std::time::Duration {
+    (remaining * 3 / 4).min(WHOLE_READ_CAP)
 }
 
 /// Whether a capture may fall back to the window's visible elements: only when

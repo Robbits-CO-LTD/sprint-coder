@@ -301,6 +301,7 @@ mod tests {
                     source_window_bounds_hash: None,
                     source_surface: SnapshotSurface::Window,
                     renderer_accessibility_forced: false,
+                    settled_thin_nodes: None,
                 },
                 scope: agent_desktop_core::RefScope {
                     root_ref: None,

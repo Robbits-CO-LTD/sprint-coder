@@ -1,4 +1,45 @@
-use super::needs_whole_window;
+// Changed by Sprint Coder; see VENDORED.md in apps/desktop/desktop-control.
+use super::{WHOLE_READ_CAP, needs_whole_window, whole_read_budget};
+use std::time::Duration;
+
+/// The default snapshot keeps the share it always had: three quarters.
+#[test]
+fn a_default_deadline_gives_the_whole_read_three_quarters() {
+    let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
+    assert_eq!(whole_read_budget(default), default * 3 / 4);
+    assert_eq!(
+        whole_read_budget(Duration::from_millis(4_000)),
+        Duration::from_millis(3_000)
+    );
+}
+
+/// A long deadline does not stretch the whole read: 10 s and 20 s both stop
+/// at the same cap, so the switch to the visible elements comes no later.
+#[test]
+fn a_long_deadline_caps_the_whole_read_independently_of_its_length() {
+    assert_eq!(WHOLE_READ_CAP, Duration::from_millis(4_500));
+    assert_eq!(
+        whole_read_budget(Duration::from_millis(10_000)),
+        WHOLE_READ_CAP
+    );
+    assert_eq!(
+        whole_read_budget(Duration::from_millis(20_000)),
+        WHOLE_READ_CAP
+    );
+    assert_eq!(
+        whole_read_budget(Duration::from_secs(3_600)),
+        WHOLE_READ_CAP
+    );
+}
+
+/// The cap never starves the fallback gate: a capped read still had more than
+/// the half of a default deadline `view_fallback_allowed` asks of it.
+#[test]
+fn the_cap_leaves_the_view_fallback_reachable() {
+    let default = Duration::from_millis(crate::snapshot::DEFAULT_SNAPSHOT_TIMEOUT_MS);
+    assert!(WHOLE_READ_CAP >= default / 2);
+    assert!(WHOLE_READ_CAP >= whole_read_budget(default));
+}
 use crate::locator::live_locator::{ObservationRoot, ObservedTree};
 use crate::{AccessibilityNode, WindowInfo};
 
